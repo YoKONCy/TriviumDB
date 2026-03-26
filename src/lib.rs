@@ -6,6 +6,8 @@ pub mod index;
 pub mod node;
 #[cfg(feature = "python")]
 pub mod python;
+#[cfg(feature = "nodejs")]
+pub mod nodejs;
 pub mod query;
 pub mod storage;
 

@@ -11,6 +11,9 @@ pub trait VectorType:
 
     /// 返回类型的零值（用于逻辑删除时清空底座）
     fn zero() -> Self;
+
+    /// 将单个元素转换为 f32（用于 HNSW 索引等需要统一浮点表示的场景）
+    fn to_f32(self) -> f32;
 }
 
 // ════════ f32：普通高精度向量（余弦相似度） ════════
@@ -34,6 +37,9 @@ impl VectorType for f32 {
 
     #[inline]
     fn zero() -> Self { 0.0 }
+
+    #[inline]
+    fn to_f32(self) -> f32 { self }
 }
 
 // ════════ f16：半精度压缩向量（省 50% 内存） ════════
@@ -58,6 +64,9 @@ impl VectorType for f16 {
 
     #[inline]
     fn zero() -> Self { f16::from_f32(0.0) }
+
+    #[inline]
+    fn to_f32(self) -> f32 { half::f16::to_f32(self) }
 }
 
 // ════════ u64：二进制哈希向量（如 SimHash / PEDSA ChaosFingerprint） ════════
@@ -75,4 +84,7 @@ impl VectorType for u64 {
 
     #[inline]
     fn zero() -> Self { 0 }
+
+    #[inline]
+    fn to_f32(self) -> f32 { self as f32 }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "triviumdb"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 
 [lib]
@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 default = []
 hnsw = ["dep:instant-distance"]
 python = ["dep:pyo3"]
+nodejs = ["dep:napi", "dep:napi-derive"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -20,12 +21,17 @@ rayon = "1.10"
 memmap2 = "0.9"
 instant-distance = { version = "0.6", optional = true }
 pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
+napi = { version = "2", features = ["napi8", "serde-json"], optional = true }
+napi-derive = { version = "2", optional = true }
 half = { version = "2.7.1", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1.25.0", features = ["derive"] }
 crc32fast = "1.5.0"
 fs2 = "0.4.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[build-dependencies]
+napi-build = "2"
 
 [dev-dependencies]
 criterion = "0.5"

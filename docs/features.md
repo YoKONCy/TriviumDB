@@ -1,0 +1,318 @@
+# TriviumDB 支持特性详解
+
+> 深入剖析 TriviumDB 的架构设计、核心能力与技术实现细节。
+
+---
+
+## 目录
+
+- [架构总览](#架构总览)
+- [三位一体数据模型](#三位一体数据模型)
+- [存储引擎](#存储引擎)
+- [向量索引策略](#向量索引策略)
+- [图谱扩散检索](#图谱扩散检索)
+- [类 MongoDB 过滤引擎](#类-mongodb-过滤引擎)
+- [类 Cypher 查询语言](#类-cypher-查询语言)
+- [崩溃恢复机制](#崩溃恢复机制)
+- [并发安全模型](#并发安全模型)
+- [Python 绑定架构](#python-绑定架构)
+
+---
+
+## 架构总览
+
+TriviumDB 采用分层架构，各层职责明确：
+
+```
+┌──────────────────────────────────────────────────┐
+│                  用户 API 层                      │
+│          Python (PyO3)  /  Rust pub API           │
+├──────────────────────────────────────────────────┤
+│                数据库核心层 (Database)             │
+│     事务 · WAL 编排 · 内存预算 · Compaction 调度   │
+├──────────┬──────────┬────────────────────────────┤
+│ 向量索引层 │ 图谱遍历层 │     过滤/查询引擎          │
+│ BruteForce│ Spreading│  MongoDB Filter / Cypher   │
+│   HNSW   │Activation│   Lexer→Parser→Executor    │
+├──────────┴──────────┴────────────────────────────┤
+│              内存工作区 (MemTable)                 │
+│       SoA 向量池 + HashMap Payload + 邻接表        │
+├──────────────────────────────────────────────────┤
+│              持久化层 (Storage)                    │
+│    .tdb 文件格式 (mmap) + WAL (Append-Only)       │
+└──────────────────────────────────────────────────┘
+```
+
+---
+
+## 三位一体数据模型
+
+每个节点在内部同时持有三种数据，共享全局唯一的 `u64` 主键：
+
+| 数据层 | 存储位置 | 内容 | 用途 |
+|--------|----------|------|------|
+| **向量层** (Vector) | 连续 `Vec<T>` 数组 (SoA) | `f32 × dim` 浮点数组 | 语义相似度检索 |
+| **元数据层** (Payload) | `HashMap<u64, JSON>` | 任意 JSON Key-Value | 条件过滤、业务数据 |
+| **图谱层** (Graph) | `HashMap<u64, Vec<Edge>>` | 有向带权边邻接表 | 关系遍历、扩散激活 |
+
+### 为什么选择 SoA 而不是 AoS？
+
+**AoS (Array of Structures)**：每个节点的 `{vector, payload, edges}` 紧挨存放。
+- ❌ 向量检索时 CPU 缓存被无用的 payload 数据污染
+- ❌ 无法对向量数组做 SIMD 批量计算
+
+**SoA (Structure of Arrays)**：所有向量连续存入一个大数组，payload 和 edges 各自独立存储。
+- ✅ 向量检索时 CPU L1/L2 缓存命中率极高
+- ✅ rayon 并行 + SIMD 友好
+- ✅ mmap 映射时可直接 zero-copy 加载向量块
+
+---
+
+## 存储引擎
+
+### .tdb 单文件格式
+
+所有数据打包进一个 `.tdb` 二进制文件，内部由四个连续的块组成：
+
+```
+┌────────────────────────┐ offset 0
+│       File Header       │ 50 字节
+│  MAGIC + VERSION + dim  │
+│  next_id + node_count   │
+│  各 block 的 offset     │
+├────────────────────────┤ payload_offset
+│     Payload Block       │ [node_id(8B) + json_len(4B) + json_data] × N
+├────────────────────────┤ vector_offset
+│      Vector Block       │ 连续 f32 数组（可 mmap 零拷贝加载）
+├────────────────────────┤ edge_offset
+│       Edge Block        │ [src(8B) + dst(8B) + label_len(2B) + label + weight(4B)] × M
+└────────────────────────┘
+```
+
+### 安全写入流程
+
+```
+内存数据 → 写入 .tdb.tmp → fsync 落盘 → 原子 rename 替换 .tdb → 清除 WAL
+```
+
+无论在哪一步崩溃，都不会损坏已有数据：
+- 步骤 1-2 崩溃：`.tmp` 残留但旧 `.tdb` 完好 → 重启用旧数据 + WAL 回放
+- 步骤 3 崩溃：新 `.tdb` 已就绪 + WAL 仍在 → 重启回放幂等数据
+- 全部完成：干净状态
+
+### Write-Ahead Log (WAL)
+
+所有写操作（insert / delete / link / unlink / update）在生效前先追加写入 WAL 文件。
+
+- **Append-Only**：仅顺序追加，绝不随机写入，SSD 友好
+- **CRC32 校验**：每条记录都附带 CRC32，回放时自动跳过损坏条目
+- **三种同步模式**：Full（fsync）/ Normal（flush）/ Off（无）
+
+### mmap 零拷贝加载
+
+`.tdb` 文件中的 Vector Block 连续存放，加载时通过 `memmap2` 直接映射到内存地址空间。操作系统的虚拟内存管理器按需加载页面，实现微秒级冷启动。
+
+---
+
+## 向量索引策略
+
+通过 Cargo Features 在编译期选择索引后端：
+
+### BruteForce（默认）
+
+- **精确度**：100% 精确召回，零误差
+- **并行化**：rayon `par_chunks` 多核线性加速
+- **原理**：对整个 SoA 向量池做并行余弦相似度扫描
+- **适用规模**：< 10 万节点
+
+```rust
+// 内部实现伪码
+flat_vectors
+    .par_chunks(dim)                    // rayon 并行切块
+    .enumerate()
+    .map(|(idx, vec)| cosine_sim(query, vec))
+    .top_k(k)                          // 取最高分前 K 个
+```
+
+### HNSW（可选，Feature-gated）
+
+- **精确度**：近似搜索，可能遗漏少量结果
+- **时间复杂度**：O(log N)，亚毫秒级响应
+- **适用规模**：10 万 ~ 千万节点
+- **启用方式**：`cargo build --features hnsw`
+
+```toml
+# Cargo.toml
+[features]
+hnsw = ["dep:instant-distance"]
+```
+
+| 对比 | BruteForce | HNSW |
+|------|-----------|------|
+| 召回率 | 100% | ~95%+ |
+| 延迟 | 随节点数线性增长 | 亚毫秒级稳定 |
+| 内存开销 | 仅原始向量 | 额外图索引结构 |
+| 动态插入 | 零开销 | 需维护图结构 |
+
+---
+
+## 图谱扩散检索
+
+TriviumDB 的核心创新——**Spreading Activation（扩散激活）**：
+
+### 工作流程
+
+1. **向量锚定**：用查询向量从 SoA 向量池中找出 Top-K 最相似的初始锚点
+2. **图谱扩散**：从锚点出发，沿邻接表进行 N 跳广度优先遍历
+3. **热度传播**：锚点的相似度得分按边权重衰减传播给邻居节点
+4. **去重排序**：合并锚点和扩散节点，按最终得分排序返回
+
+### 扩散深度与行为
+
+| `expand_depth` | 行为 |
+|----------------|------|
+| `0` | 纯向量检索，不进行图谱扩散 |
+| `1` | 返回锚点 + 锚点的直接邻居 |
+| `2` | 返回锚点 + 1 跳邻居 + 2 跳邻居 |
+| `N` | 返回 N 跳以内的所有关联节点 |
+
+### 典型应用场景
+
+```python
+# AI Agent 记忆系统：用户说了"咖啡"
+# 1. 向量检索找到最相似的记忆"昨天去了星巴克"
+# 2. 沿图谱扩散，发现关联的人物"小红"和地点"三里屯"
+results = db.search(
+    query_vector=encode("咖啡"),
+    top_k=3,
+    expand_depth=2,  # 关键！扩散 2 跳
+    min_score=0.4
+)
+# 结果：["昨天去了星巴克(0.92)", "小红(0.71)", "三里屯(0.65)"]
+```
+
+---
+
+## 类 MongoDB 过滤引擎
+
+内置的过滤引擎支持对节点 Payload（JSON）进行复杂条件查询，语法风格接近 MongoDB。
+
+### 过滤器类型体系 (Rust)
+
+```rust
+pub enum Filter {
+    Eq(String, Value),           // 字段等于值
+    Ne(String, Value),           // 字段不等于值
+    Gt(String, f64),             // 字段大于
+    Gte(String, f64),            // 字段大于等于
+    Lt(String, f64),             // 字段小于
+    Lte(String, f64),            // 字段小于等于
+    In(String, Vec<Value>),      // 字段值在列表中
+    And(Vec<Filter>),            // 逻辑与
+    Or(Vec<Filter>),             // 逻辑或
+}
+```
+
+### 执行原理
+
+过滤器对 MemTable 中所有活跃节点进行全量扫描，逐条匹配 Payload JSON 中的字段值。适合中小规模数据集的灵活查询。
+
+---
+
+## 类 Cypher 查询语言
+
+TriviumDB 内置了一套完整的图谱查询语言引擎，由四个模块组成：
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| **词法分析器** | `query/lexer.rs` | 将查询字符串切分为 Token 流 |
+| **语法分析器** | `query/parser.rs` | 递归下降解析，生成 AST |
+| **抽象语法树** | `query/ast.rs` | 定义 Query / Pattern / Condition 等结构 |
+| **执行器** | `query/executor.rs` | 在 MemTable 上执行 AST，返回匹配绑定 |
+
+### 支持的语法元素
+
+| 元素 | 语法 | 示例 |
+|------|------|------|
+| 节点匹配 | `(变量名)` | `(a)` |
+| 节点+属性 | `(变量名 {key: value})` | `(a {id: 42})` |
+| 有向边 | `-[:标签]->` | `-[:knows]->` |
+| 通配边 | `-[]->` | 匹配任意标签 |
+| WHERE 条件 | `WHERE 表达式 AND/OR 表达式` | `WHERE a.age > 18` |
+| RETURN | `RETURN 变量名列表` | `RETURN a, b` |
+| 比较运算符 | `==`, `!=`, `>`, `>=`, `<`, `<=` | `b.score >= 0.8` |
+
+---
+
+## 崩溃恢复机制
+
+TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
+
+### 恢复流程（数据库 open 时自动执行）
+
+```
+1. 检查 WAL 文件是否存在
+2. 如果存在 → 逐条读取 WAL 记录
+3. 对每条记录进行 CRC32 校验
+4. 校验通过 → 回放到 MemTable（幂等操作）
+5. 校验失败 → 跳过该条记录（日志警告）
+6. 全部回放完成 → 正常进入服务状态
+```
+
+### WAL 记录类型
+
+| 类型 | 内容 |
+|------|------|
+| `Insert` | id + vector + payload |
+| `Delete` | id |
+| `Link` | src + dst + label + weight |
+| `Unlink` | src + dst |
+| `UpdatePayload` | id + new_payload |
+| `UpdateVector` | id + new_vector |
+
+---
+
+## 并发安全模型
+
+- **进程级**：通过 `fs2::FileExt` 文件锁确保同一时刻只有一个进程打开数据库
+- **线程级**：`MemTable` 和 `WAL` 各自被 `Arc<Mutex<>>` 保护
+- **锁中毒恢复**：如果持锁线程 panic，不会导致整个进程死锁，而是自动恢复（`lock_or_recover`）
+
+```rust
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("Mutex was poisoned, recovering...");
+        poisoned.into_inner()
+    })
+}
+```
+
+---
+
+## Python 绑定架构
+
+### 多后端动态分发
+
+Python 侧的 `TriviumDB` 类内部通过 `DbBackend` 枚举封装三种泛型特化：
+
+```rust
+enum DbBackend {
+    F32(Database<f32>),
+    F16(Database<half::f16>),
+    U64(Database<u64>),
+}
+```
+
+通过 `dispatch!` 宏实现统一的方法分发，Python 用户无需关心底层类型差异。
+
+### dtype 选择指南
+
+| dtype | 单维度字节 | 精度 | 适用场景 |
+|-------|-----------|------|----------|
+| `f32` | 4 B | 完整精度 | 通用 embedding（推荐默认值） |
+| `f16` | 2 B | 半精度 | 大规模数据集，内存减半，精度损失极小 |
+| `u64` | 8 B | 整数 | SimHash 等二值化/离散化向量 |
+
+### 数据转换
+
+Python 侧的 `dict` 与 Rust 侧的 `serde_json::Value` 通过 `pyobject_to_json` / `json_to_pyobject` 双向无损转换。支持的 Python 类型：`None` / `bool` / `int` / `float` / `str` / `list` / `dict`。

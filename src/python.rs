@@ -59,6 +59,24 @@ pub mod python {
         pub num_edges: usize,
     }
 
+    /// Python 侧的 Cypher 查询单行结果
+    /// 每一行是一个变量名 -> 节点视图的映射
+    /// 例如: MATCH (a)-[:knows]->(b) RETURN a, b
+    /// 则 row.get("a") 和 row.get("b") 各返回对应的节点
+    #[pyclass(name = "QueryRow")]
+    pub struct PyQueryRow {
+        /// 变量名 -> (id, payload_dict)
+        #[pyo3(get)]
+        pub row: PyObject,
+    }
+
+    #[pymethods]
+    impl PyQueryRow {
+        fn __repr__(&self, py: Python<'_>) -> String {
+            format!("QueryRow({:?})", self.row.bind(py).repr().map(|r| r.to_string()).unwrap_or_default())
+        }
+    }
+
     // ════════ 辅助转换 ════════
 
     fn json_to_pyobject(py: Python<'_>, val: &serde_json::Value) -> PyObject {
@@ -383,6 +401,50 @@ pub mod python {
             dispatch!(self, db => db.dim())
         }
 
+        /// 获取所有活跃节点的 ID 列表
+        fn all_node_ids(&self) -> Vec<u64> {
+            dispatch!(self, db => db.all_node_ids())
+        }
+
+        /// 重建 HNSW 向量索引（仅在 hnsw feature 启用时有效）
+        fn rebuild_index(&mut self) {
+            dispatch!(self, mut db => db.rebuild_index());
+        }
+
+        /// 维度迁移：将当前数据库的所有节点和边迁移到一个新维度的数据库。
+        ///
+        /// 向量会被置零（因为维度变了），需要后续调用 update_vector 按节点 ID 逐个更新。
+        ///
+        /// 返回需要更新向量的节点 ID 列表。
+        ///
+        /// 示例：
+        /// ```python
+        /// ids = old_db.migrate("new.tdb", new_dim=1536)
+        /// new_db = triviumdb.TriviumDB("new.tdb", dim=1536)
+        /// for nid in ids:
+        ///     new_vec = new_model.encode(payloads[nid]["text"]).tolist()
+        ///     new_db.update_vector(new_vec, nid)
+        /// ```
+        fn migrate(&self, new_path: &str, new_dim: usize) -> PyResult<Vec<u64>> {
+            match &self.inner {
+                DbBackend::F32(db) => {
+                    let (_new_db, ids) = db.migrate_to(new_path, new_dim)
+                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    Ok(ids)
+                }
+                DbBackend::F16(db) => {
+                    let (_new_db, ids) = db.migrate_to(new_path, new_dim)
+                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    Ok(ids)
+                }
+                DbBackend::U64(db) => {
+                    let (_new_db, ids) = db.migrate_to(new_path, new_dim)
+                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    Ok(ids)
+                }
+            }
+        }
+
         #[pyo3(signature = (interval_secs=30))]
         fn enable_auto_compaction(&mut self, interval_secs: u64) {
             dispatch!(self, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(interval_secs)));
@@ -522,6 +584,101 @@ pub mod python {
             }
         }
 
+        /// 执行类 Cypher 图谱查询语句
+        ///
+        /// 示例：
+        /// ```python
+        /// rows = db.query("MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b")
+        /// for row in rows:
+        ///     node = row.row["b"]   # {"id": ..., "payload": {...}}
+        ///     print(node)
+        /// ```
+        fn query(&self, py: Python<'_>, cypher: &str) -> PyResult<Vec<PyQueryRow>> {
+            // 将三种后端的查询结果都统一转成 Python 可消费的格式
+            fn convert_rows<T: crate::VectorType>(
+                py: Python<'_>,
+                rows: Vec<std::collections::HashMap<String, crate::node::NodeView<T>>>,
+            ) -> PyResult<Vec<PyQueryRow>>
+            where
+                T: Into<f64> + Copy,
+            {
+                let mut result = Vec::with_capacity(rows.len());
+                for row in rows {
+                    // 每行结果转成 Python dict: {str: {"id": int, "payload": dict, "num_edges": int}}
+                    let py_row = PyDict::new(py);
+                    for (var_name, node) in &row {
+                        let node_dict = PyDict::new(py);
+                        let _ = node_dict.set_item("id", node.id);
+                        let _ = node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
+                        let _ = node_dict.set_item("num_edges", node.edges.len());
+                        let _ = py_row.set_item(var_name, node_dict);
+                    }
+                    result.push(PyQueryRow {
+                        row: py_row.into_any().unbind(),
+                    });
+                }
+                Ok(result)
+            }
+
+            match &self.inner {
+                DbBackend::F32(db) => {
+                    let rows = db.query(cypher)
+                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    // f32 直接转 f64 满足 Into<f64> bound
+                    let result = {
+                        let mut out = Vec::with_capacity(rows.len());
+                        for row in rows {
+                            let py_row = PyDict::new(py);
+                            for (var_name, node) in &row {
+                                let node_dict = PyDict::new(py);
+                                let _ = node_dict.set_item("id", node.id);
+                                let _ = node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
+                                let _ = node_dict.set_item("num_edges", node.edges.len());
+                                let _ = py_row.set_item(var_name, node_dict);
+                            }
+                            out.push(PyQueryRow { row: py_row.into_any().unbind() });
+                        }
+                        out
+                    };
+                    Ok(result)
+                }
+                DbBackend::F16(db) => {
+                    let rows = db.query(cypher)
+                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    let mut out = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let py_row = PyDict::new(py);
+                        for (var_name, node) in &row {
+                            let node_dict = PyDict::new(py);
+                            let _ = node_dict.set_item("id", node.id);
+                            let _ = node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
+                            let _ = node_dict.set_item("num_edges", node.edges.len());
+                            let _ = py_row.set_item(var_name, node_dict);
+                        }
+                        out.push(PyQueryRow { row: py_row.into_any().unbind() });
+                    }
+                    Ok(out)
+                }
+                DbBackend::U64(db) => {
+                    let rows = db.query(cypher)
+                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    let mut out = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let py_row = PyDict::new(py);
+                        for (var_name, node) in &row {
+                            let node_dict = PyDict::new(py);
+                            let _ = node_dict.set_item("id", node.id);
+                            let _ = node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
+                            let _ = node_dict.set_item("num_edges", node.edges.len());
+                            let _ = py_row.set_item(var_name, node_dict);
+                        }
+                        out.push(PyQueryRow { row: py_row.into_any().unbind() });
+                    }
+                    Ok(out)
+                }
+            }
+        }
+
         fn filter_where(&self, py: Python<'_>, condition: &Bound<'_, PyDict>) -> PyResult<Vec<PyNodeView>> {
             let filter = dict_to_filter(py, condition)?;
             let mut result_list = Vec::new();
@@ -575,6 +732,7 @@ pub mod python {
         m.add_class::<PyTriviumDB>()?;
         m.add_class::<PySearchHit>()?;
         m.add_class::<PyNodeView>()?;
+        m.add_class::<PyQueryRow>()?;
         m.add_function(wrap_pyfunction!(init_logger, m)?)?;
         Ok(())
     }

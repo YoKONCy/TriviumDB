@@ -1,0 +1,133 @@
+name: Publish to PyPI
+
+# 触发条件：当推送形如 vX.Y.Z 的 tag 时触发
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  # 第一阶段：编译各个平台的二进制 Wheels
+  build-wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # 矩阵构建：覆盖 Windows, Ubuntu(Linux), Mac
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      
+      # 借助 maturin-action 会自动利用 GitHub 服务器跨平台编译！
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          # 我们只需要 python 的 feature
+          # (sdist 参数负责连源码一起打包，我们只让 linux 机子去打 1 份源码包就好)
+          command: build
+          args: --release --features python -o dist ${{ matrix.os == 'ubuntu-latest' && '--sdist' || '' }}
+          # 开启 zig 将支持更好的 Linux 下的交叉编译兼容性
+          rust-toolchain: stable
+      
+      # 把编译好的所有轮子暂时上传保存到当前流水线任务的缓存中
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist
+
+  # 第二阶段：下载刚刚所有机器编好的包，统合后发往 PyPI
+  release:
+    name: Release to PyPI
+    runs-on: ubuntu-latest
+    needs: build-wheels
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+          
+      # 使用 pypa 官方 Action 发包
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  # 第三阶段：准备 npm 跨平台包并分发
+  build-node:
+    name: Build Node addon on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          
+      - name: Install dependencies
+        run: npm install
+        
+      - name: Build node module
+        # 使用 napi-rs 自带的 CLI 构建各平台原生包
+        run: npx napi build --platform --release --features nodejs
+        
+      # 将编出的 .node 暂存
+      - name: Upload node binding
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.os }}
+          path: "*.node"
+
+  release-npm:
+    name: Release to NPM
+    runs-on: ubuntu-latest
+    needs: build-node
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+
+      # 把三个系统编好的 .node 全部下回当前目录
+      - name: Download all bindings
+        uses: actions/download-artifact@v4
+        with:
+          path: .
+          pattern: node-*
+          merge-multiple: true
+
+      # 在发包前编写一个万能入口文件 index.js 自动加载对应平台的二进制
+      - name: Generate JS Loader
+        run: |
+          cat << 'EOF' > index.js
+          const { platform, arch } = process;
+          let nativeBinding = null;
+          try {
+            if (platform === 'win32') { nativeBinding = require('./triviumdb.win32-x64-msvc.node'); }
+            else if (platform === 'darwin' && arch === 'arm64') { nativeBinding = require('./triviumdb.darwin-arm64.node'); }
+            else if (platform === 'darwin') { nativeBinding = require('./triviumdb.darwin-x64.node'); }
+            else if (platform === 'linux' && arch === 'arm64') { nativeBinding = require('./triviumdb.linux-arm64-gnu.node'); }
+            else { nativeBinding = require('./triviumdb.linux-x64-gnu.node'); }
+          } catch (e) {
+            console.error(`TriviumDB failed to load native binding for ${platform} ${arch}`, e);
+            throw e;
+          }
+          module.exports = nativeBinding;
+          EOF
+
+      - name: Publish to NPM
+        # NODE_AUTH_TOKEN 环境变量会被 registry-url 自动读取以使用 npm token
+        run: |
+          npm install
+          npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

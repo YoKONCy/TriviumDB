@@ -1,0 +1,38 @@
+{
+  "name": "triviumdb",
+  "version": "0.3.0",
+  "description": "AI-native embedded database: Vector + Graph + Relational in one file",
+  "main": "index.js",
+  "types": "triviumdb.d.ts",
+  "files": [
+    "*.node",
+    "index.js",
+    "triviumdb.d.ts"
+  ],
+  "napi": {
+    "binaryName": "triviumdb"
+  },
+  "scripts": {
+    "build": "napi build --platform --release --features nodejs",
+    "build:debug": "napi build --platform --features nodejs",
+    "prepublishOnly": "napi build --platform --release --features nodejs"
+  },
+  "keywords": [
+    "database",
+    "vector",
+    "graph",
+    "embedding",
+    "ai",
+    "sqlite",
+    "rust"
+  ],
+  "author": "YoKONCy",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YoKONCy/TriviumDB"
+  }
+}

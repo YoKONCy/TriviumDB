@@ -18,6 +18,16 @@ dist/
 *.tdb
 *.tdb.wal
 
+# ══════ Node.js & napi-rs ══════
+node_modules/
+npm-debug.log
+*.node
+index.d.ts
+index.js
+yarn-error.log
+test.js
+package-lock.json
+
 # ══════ IDE / 编辑器 ══════
 .idea/
 .vscode/

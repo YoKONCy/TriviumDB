@@ -48,6 +48,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// - `SyncMode::Normal` — flush 到 OS，平衡模式（默认）
     /// - `SyncMode::Off`    — 不主动 flush，最快（仅测试用）
     pub fn open_with_sync(path: &str, dim: usize, sync_mode: SyncMode) -> Result<Self> {
+        // ═══ 自动递归创建上层目录 ═══
+        if let Some(parent_dir) = std::path::Path::new(path).parent() {
+            if !parent_dir.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent_dir)?;
+            }
+        }
+
         // ═══ 文件锁：防止多进程并发写同一个数据库 ═══
         let lock_path = format!("{}.lock", path);
         let lock_file = std::fs::OpenOptions::new()
@@ -392,6 +399,85 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         lock_or_recover(&self.memtable).dim()
     }
 
+    /// 获取所有活跃节点的 ID 列表
+    pub fn all_node_ids(&self) -> Vec<NodeId> {
+        lock_or_recover(&self.memtable).all_node_ids()
+    }
+
+    /// 重建 HNSW 向量索引
+    ///
+    /// 仅在启用 `hnsw` feature 时有效。BruteForce 模式下调用此方法为 no-op。
+    /// 通常在批量插入完成后调用一次，以构建高效的近似搜索索引。
+    pub fn rebuild_index(&mut self) {
+        #[cfg(feature = "hnsw")]
+        {
+            let mt = lock_or_recover(&self.memtable);
+            // 将泛型向量池转换为 f32 给 HNSW 使用
+            let flat = mt.flat_vectors();
+            let f32_vecs: Vec<f32> = flat.iter().map(|v| v.to_f32()).collect();
+            self.hnsw_index.rebuild(&f32_vecs, |idx| mt.get_id_by_index(idx));
+            tracing::info!("HNSW 索引重建完成，共 {} 个节点", mt.node_count());
+        }
+        #[cfg(not(feature = "hnsw"))]
+        {
+            tracing::debug!("未启用 HNSW feature，rebuild_index 为 no-op");
+        }
+    }
+
+    /// 维度迁移：从当前数据库导出所有节点和边到一个新维度的数据库。
+    ///
+    /// 向量数据需要外部重新生成（因为维度变了，旧向量无法直接复用）。
+    /// 此方法会：
+    ///   1. 以 placeholder 零向量创建新库中的所有节点（保留原 ID 和 Payload）
+    ///   2. 复制所有图谱边关系
+    ///   3. 返回新数据库实例，用户随后需要调用 update_vector 逐个更新向量
+    ///
+    /// # 返回
+    /// `(new_db, node_ids)` — 新数据库实例和需要更新向量的节点 ID 列表
+    pub fn migrate_to(
+        &self,
+        new_path: &str,
+        new_dim: usize,
+    ) -> Result<(Database<T>, Vec<NodeId>)>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let mt = lock_or_recover(&self.memtable);
+        let mut node_ids = mt.all_node_ids();
+        node_ids.sort();
+
+        // 创建新库
+        let mut new_db = Database::<T>::open(new_path, new_dim)?;
+
+        // 迁移所有节点（使用零向量占位，保留 ID 和 Payload）
+        let zero_vec = vec![T::zero(); new_dim];
+        for &nid in &node_ids {
+            if let Some(payload) = mt.get_payload(nid) {
+                new_db.insert_with_id(nid, &zero_vec, payload.clone())?;
+            }
+        }
+
+        // 迁移所有边
+        for &nid in &node_ids {
+            if let Some(edges) = mt.get_edges(nid) {
+                for edge in edges {
+                    // 只迁移目标节点也存在的边
+                    if mt.get_payload(edge.target_id).is_some() {
+                        new_db.link(nid, edge.target_id, &edge.label, edge.weight)?;
+                    }
+                }
+            }
+        }
+
+        new_db.flush()?;
+        tracing::info!(
+            "维度迁移完成: {} → {}，共迁移 {} 个节点",
+            mt.dim(), new_dim, node_ids.len()
+        );
+
+        Ok((new_db, node_ids))
+    }
+
     /// 开启一个轻量级事务
     ///
     /// 事务期间所有写操作仅缓冲在内存中，调用 commit() 后原子性写入。
@@ -414,15 +500,19 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         }
     }
 
-    // 暂时注掉了类型检测复杂的 query 解析，为了快速跑通主干（如果需要也可开启）
-    /*
-    pub fn query(&self, cypher: &str) -> Result<Vec<std::collections::HashMap<String, crate::node::Node<T>>>> {
+    /// 执行类 Cypher 图谱查询语句，返回匹配到的变量绑定集合。
+    ///
+    /// 语法示例：
+    /// ```text
+    /// MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b
+    /// MATCH (a {id: 1})-[]->(b) RETURN b
+    /// ```
+    pub fn query(&self, cypher: &str) -> Result<Vec<std::collections::HashMap<String, crate::node::NodeView<T>>>> {
         let ast = crate::query::parser::parse(cypher)
-            .map_err(|e| crate::error::TriviumError::Generic(format!("Query parse error: {}", e)))?;
+            .map_err(|e| crate::error::TriviumError::Generic(format!("查询语句解析失败: {}", e)))?;
         let mt = lock_or_recover(&self.memtable);
         Ok(crate::query::executor::execute(&ast, &mt))
     }
-    */
 }
 
 fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<T>) {
