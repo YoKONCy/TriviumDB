@@ -1,0 +1,38 @@
+name: Benchmark & CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test_and_bench:
+    name: Run Tests and Benchmarks
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        
+      - name: Run Tests
+        run: cargo test --all-features
+        
+      - name: Run Benchmarks (Performance Regression Check)
+        run: cargo bench --workspace
+        
+      - name: Upload Benchmark Results (Criterion)
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: target/criterion/

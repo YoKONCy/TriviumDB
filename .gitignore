@@ -1,0 +1,35 @@
+# ══════ Rust ══════
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# ══════ Python ══════
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+*.so
+*.pyd
+*.dll
+
+# ══════ TriviumDB 运行产物 ══════
+*.tdb
+*.tdb.wal
+
+# ══════ IDE / 编辑器 ══════
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ══════ 构建日志 / 临时文件 ══════
+*.log
+*.tmp
+
+# ══════ 系统文件 ══════
+.DS_Store
+Thumbs.db
+desktop.ini
