@@ -19,30 +19,43 @@
 
 ## 快速集成
 
-### Python 环境搭建
+TriviumDB 核心使用极致性能的 Rust 编写，但官方已经为各类平台环境预先编译并发布了底层扩展包。**无需在本地配置和折腾任何编译工具链！**
+
+### Node.js / TypeScript 环境搭建
+
+NPM 包内部自带 `triviumdb.d.ts` 提供全量的 TS 类型注解，支持主流全栈框架。
 
 ```bash
-# 1. 安装 Rust 工具链（如果还没有）
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# 推荐使用 NPM 或者 PNPM 一键提包：
+npm install triviumdb
 
-# 2. 安装 maturin 构建工具
-pip install maturin
+# 验证安装
+node -e "console.log(require('triviumdb').TriviumDB.name)"
+```
 
-# 3. 在 TriviumDB 项目目录下编译安装
-cd TriviumDB && maturin develop --features python
+### Python 环境搭建
 
-# 4. 验证安装
+直接通过 PyPI 拉取原生交叉编译后的 Wheel 包。
+
+```bash
+# 推荐使用超快速的 uv (支持 3.9 ~ 3.12)
+uv pip install triviumdb
+
+# 或者传统 pip
+pip install triviumdb
+
+# 验证安装
 python -c "import triviumdb; print('OK')"
 ```
 
-### Rust 项目集成
+### Rust 项目集成（原生模式）
 
 ```toml
 # Cargo.toml
 [dependencies]
-triviumdb = { path = "../TriviumDB" }
-# 或启用 HNSW 索引
-# triviumdb = { path = "../TriviumDB", features = ["hnsw"] }
+triviumdb = "0.3.0"  # 或者填本地路径 path = "../TriviumDB"
+# 启用 HNSW 索引
+# triviumdb = { version = "0.3.0", features = ["hnsw"] }
 ```
 
 ### 30 秒入门模板

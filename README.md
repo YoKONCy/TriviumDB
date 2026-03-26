@@ -88,13 +88,32 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 ## 快速上手
 
 ### 安装
+> 💡 TriviumDB 核心使用 Rust 编写，但我们已经在云端为您提前交叉编译了所有平台的二进制，**无需在本地安装任何编译环境即可秒速安装！**
 
+### 🐍 Python 用户
+
+推荐使用超快的 [uv](https://github.com/astral-sh/uv) （只需毫秒级）：
 ```bash
-# Python（需要 Rust 工具链）
-pip install maturin
-cd TriviumDB && maturin develop --features python
+uv pip install triviumdb
+```
+或者使用传统 pip：
+```bash
+pip install triviumdb
+```
 
-# Rust
+### 🌐 Node.js / 前端用户
+
+跨平台包已自带 `*.node` 预编译拓展，并含有完整的 TypeScript 补全：
+```bash
+npm install triviumdb
+# 或者
+pnpm add triviumdb
+```
+
+### 🦀 Rust 原生用户
+
+直接把我们当成 Library 依赖：
+```bash
 cargo add triviumdb
 ```
 
