@@ -1,5 +1,16 @@
 <div align="center">
 
+![TriviumDB Banner](./banner.jpg)
+
+<br/>
+
+<!-- 动态打字效果 Slogan -->
+<a href="https://github.com/YoKONCy/TriviumDB">
+  <img src="https://readme-typing-svg.demolab.com?font=Noto+Serif+SC&weight=600&size=24&duration=4000&pause=1000&color=1E90FF&center=true&vCenter=true&multiline=true&repeat=false&width=800&height=70&lines=三位一体的+AI+原生嵌入式数据库;向量+×+图谱+×+关系型;为+Agent+打造的高性能记忆核心" alt="Slogan" />
+</a>
+
+<br/>
+
 # TriviumDB
 
 **向量 × 图谱 × 关系型 —— 三位一体的 AI 原生嵌入式数据库**
@@ -32,36 +43,64 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 
 ---
 
+<div align="center">
+
+<!-- 动态分隔线 -->
+<img src="https://user-images.githubusercontent.com/73097560/115834477-dbab4500-a447-11eb-908a-139a6edaec5c.gif" width="100%">
+
+<br/>
+
+  <img src="https://count.getloli.com/get/@TriviumDB?theme=rule34" alt="TriviumDB Count" />
+</div>
+
+<br/>
+
 ## 为什么需要 TriviumDB？
 
 ### 当前 AI 应用的「三库割裂」困境
 
 几乎所有的 AI 应用（Agent / RAG / 推荐系统）都同时需要三种数据能力，但市面上没有一个引擎能同时原生支持它们：
 
-```
-┌──────────────────── 现状：三套系统缝合 ────────────────────┐
-│                                                            │
-│   PostgreSQL / SQLite      ← 存文本、属性、时间戳          │
-│   Qdrant / Milvus / Pinecone  ← 存向量，独立进程/服务      │
-│   Neo4j / NetworkX         ← 存图谱关系，又一套运行时       │
-│                                                            │
-│   痛点：                                                   │
-│   ① 三套 ID 空间，需手写胶水代码保持同步                    │
-│   ② 删一条记录 → 要操作三个地方，任何一步失败就不一致       │
-│   ③ 「先向量检索，再沿关系扩散」需要跨库 JOIN，延迟爆炸     │
-│   ④ 部署一个 Agent 却要装三套数据库运行时                   │
-│   ⑤ 想把数据发给别人 → 要导出三份文件再合并                 │
-│                                                            │
-├──────────────────── TriviumDB：一库统一 ──────────────────┤
-│                                                            │
-│   单一引擎 · 单一文件 · 单一 ID 空间                       │
-│                                                            │
-│   insert() → 向量 + 元数据 + 图谱就绪（原子写入）          │
-│   search() → 向量锚定 + 图谱扩散    （一次调用）           │
-│   begin_tx() → 纯内存储干跑验证，零开销安全回滚        │
-│   flush()  → 随心切换单文件（Rom）或 零拷贝（Mmap）极速启动 │
-│                                                            │
-└────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef old fill:#ffebee,stroke:#ff5252,stroke-width:2px,color:#000;
+    classDef new fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#000;
+    classDef app fill:#e3f2fd,stroke:#2196f3,stroke-width:2px,color:#000;
+    classDef warning fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000;
+
+    subgraph 现状 ["❌ 现状：三库系统缝合"]
+        direction TB
+        App1((Agent App)):::app
+        DB1[(SQL DB<br/>文本/属性)]:::old
+        DB2[(Vector DB<br/>稠密向量)]:::old
+        DB3[(Graph DB<br/>知识图谱)]:::old
+        
+        App1 <-.网路 / 跨库 JOIN.-> DB1
+        App1 <-.RPC / 独立服务.-> DB2
+        App1 <-.另一套重运行时.-> DB3
+    end
+
+    subgraph 痛点 ["⚠️ 核心痛点"]
+        direction TB
+        P1[1. 三组独立的 ID 空间，需手写胶水代码同步]:::warning
+        P2[2. 删一条记录要操作三个库，极易数据不一致]:::warning
+        P3[3. 先向量检索再图扩散需跨库聚合，延迟爆炸]:::warning
+        P4[4. 部署笨重，分享模型状态需打包三份独立文件]:::warning
+    end
+
+    现状 --> 痛点
+
+    subgraph 解决 ["✨ TriviumDB：一库横扫"]
+        direction TB
+        App2((Agent App)):::app
+        TV[(TriviumDB<br/>单一引擎 / 单一文件 / 单一 ID 空间)]:::new
+        
+        App2 ==`insert()` 向量+元数据+图谱原子写入==> TV
+        TV ==`search()` 向量锚定 + 图谱扩散一次返回==> App2
+        TV -.`flush()` Mmap零拷贝极速热启动.-> TV
+    end
+
+    痛点 --> 解决
 ```
 
 ### 一个具体的例子
@@ -302,6 +341,17 @@ TriviumDB/
 ## 许可证
 
 Apache-2.0
-作者：[YoKONCy](https://github.com/YoKONCy)
 
----
+**创造者**: [YoKONCy](https://github.com/YoKONCy)
+
+<br/>
+
+## 🌟 Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=YoKONCy/TriviumDB&type=Date)](https://star-history.com/#YoKONCy/TriviumDB&Date)
+
+<br/>
+
+<div align="center">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=1E90FF&height=50&section=footer" width="100%"/>
+</div>

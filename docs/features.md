@@ -24,27 +24,66 @@
 
 TriviumDB 采用分层架构，各层职责明确：
 
-```
-┌──────────────────────────────────────────────────┐
-│                  用户 API 层                      │
-│          Python (PyO3)  /  Rust pub API           │
-├──────────────────────────────────────────────────┤
-│                数据库核心层 (Database)             │
-│     事务 · WAL 编排 · 内存预算 · Compaction 调度   │
-├──────────┬──────────┬────────────────────────────┤
-│ 向量索引层 │ 图谱遍历层 │     过滤/查询引擎          │
-│ BruteForce│ Spreading│  MongoDB Filter / Cypher   │
-│   HNSW   │Activation│   Lexer→Parser→Executor    │
-├──────────┴──────────┴────────────────────────────┤
-│          认知管线层 (cognitive.rs)           │
-│     FISTA 残差寻隐 / DPP 多样性采样 / NMF        │
-├──────────┴──────────┴────────────────────────────┤
-│              内存工作区 (MemTable)                 │
-│       SoA 向量池 + HashMap Payload + 邻接表        │
-├──────────────────────────────────────────────────┤
-│              持久化层 (Storage)                    │
-│    .tdb 文件格式 (mmap) + WAL (Append-Only)       │
-└──────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef layer fill:#fafafa,stroke:#e0e0e0,stroke-width:2px,color:#333;
+    classDef module fill:#e3f2fd,stroke:#2196f3,stroke-width:1px,color:#000;
+    classDef math fill:#f3e5f5,stroke:#9c27b0,stroke-width:1px,color:#000;
+    classDef storage fill:#e8f5e9,stroke:#4caf50,stroke-width:1px,color:#000;
+
+    subgraph Layer1 ["🌐 用户 API 层"]
+        direction LR
+        API1[Python binding]:::module
+        API2[Node.js binding]:::module
+        API3[Rust pub API]:::module
+    end
+    Layer1:::layer
+
+    subgraph Layer2 ["⚙️ 数据库核心层 (Database)"]
+        direction LR
+        C1[事务控制 Dry-Run]:::module
+        C2[WAL 编排]:::module
+        C3[内存预算 & Compaction调度]:::module
+    end
+    Layer2:::layer
+
+    subgraph Layer3 ["🚀 引擎与执行层"]
+        direction LR
+        E1["向量索引\n(BruteForce / HNSW)"]:::module
+        E2["图谱遍历\n(Spreading Activation)"]:::module
+        E3["查询解析\n(Mongo Filter / Cypher)"]:::module
+    end
+    Layer3:::layer
+
+    subgraph Layer4 ["🧠 认知管线层 (cognitive.rs)"]
+        direction LR
+        M1[FISTA 残差寻隐]:::math
+        M2[DPP 多样性采样]:::math
+        M3[NMF 语义矩阵分解]:::math
+    end
+    Layer4:::layer
+
+    subgraph Layer5 ["🗂️ 内存工作区 (MemTable)"]
+        direction LR
+        M_VEC["SoA 向量池\n(基础层 mmap + 增量层 Vec)"]:::module
+        M_PAY["HashMap\n(Payload 元数据)"]:::module
+        M_EDGE["图谱邻接表\n(Edges 边集)"]:::module
+    end
+    Layer5:::layer
+
+    subgraph Layer6 ["💾 持久化层 (Storage)"]
+        direction LR
+        S1[".tdb 聚合数据 / 元数据"]:::storage
+        S2[".vec 分离 mmap 向量文件"]:::storage
+        S3["WAL 追加顺序日志"]:::storage
+    end
+    Layer6:::layer
+
+    Layer1 ---> Layer2
+    Layer2 ---> Layer3
+    Layer3 ---> Layer4
+    Layer4 ---> Layer5
+    Layer5 ---> Layer6
 ```
 
 ---
