@@ -1,7 +1,14 @@
 [package]
 name = "triviumdb"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
+authors = ["YoKONCy <2752026184@qq.com>"]
+description = "A high-performance memory-mmap hybrid search engine built for AI, combining dense vector, sparse text, graph relations, and JSON metadata."
+repository = "https://github.com/YoKONCy/TriviumDB"
+license = "MIT OR Apache-2.0"
+keywords = ["vector-database", "graph-database", "hybrid-search", "rag", "mmap"]
+categories = ["database", "data-structures", "algorithms"]
+readme = "README.md"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -35,6 +42,7 @@ crc32fast = "1.5.0"
 fs2 = "0.4.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+aho-corasick = "1.1.4"
 
 [build-dependencies]
 napi-build = "2"

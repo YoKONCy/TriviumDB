@@ -157,6 +157,7 @@ fn bench_cognitive_pipeline(c: &mut Criterion) {
         fista_threshold: 0.2, // 容易触发残差查询
         enable_dpp: true, // 启用多样性采样
         dpp_quality_weight: 1.0,
+        ..Default::default()
     };
 
     let db_read = Database::open(db_path, dim).unwrap();

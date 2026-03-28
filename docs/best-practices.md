@@ -56,9 +56,9 @@ python -c "import triviumdb; print('OK')"
 ```toml
 # Cargo.toml
 [dependencies]
-triviumdb = "0.4.1"  # 或者填本地路径 path = "../TriviumDB"
+triviumdb = "0.4.2"  # 或者填本地路径 path = "../TriviumDB"
 # 启用 HNSW 索引
-# triviumdb = { version = "0.4.1", features = ["hnsw"] }
+# triviumdb = { version = "0.4.2", features = ["hnsw"] }
 ```
 
 ### 30 秒入门模板
@@ -441,6 +441,35 @@ for node in old_nodes:
     db.delete(node.id)
 
 db.flush()  # 落盘
+```
+
+### 模式五：终极管线（双路混合锚定 + 图扩散 + 认知强化管线）
+
+这是 TriviumDB 解决复杂 AI 幻觉和深层逻辑发掘的“杀手锏”级用法。它在一个 O(1) 的上层接口调用中，同时榨干了底层所有的特性引擎：
+1. **双路锚定**：文本稀疏索引精确锁定专有名词（保证不偏题）；稠密向量锁定深层语义（保证能泛化）。
+2. **图谱扩散**：从锚点出发，沿实体与事件的图结构发生 N 跳化学反应式传播。
+3. **数学强化 (认知管线)**：利用 FISTA 稀疏残差算子找寻未被直接提及的潜台词，利用 DPP (行列式点过程) 矩阵推导进行多角度的极度多样化采样。
+
+```python
+# 假设我们正在为一个高级 AI 提取上下文
+results = db.search_advanced(
+    query_vector=encode("昨天那个红色头发的女孩是不是又在生气？"),
+    top_k=8,
+    expand_depth=2,                 # 第一步图游走深度（必须开启）
+    
+    # 启用文本/向量双路混合召回 (防幻觉关键)
+    enable_text_hybrid_search=True,
+    custom_query_text="红色头发 女孩 生气", 
+    hybrid_alpha=0.6,               # 60%看总体向量语义，40%看倒排词频匹配
+    
+    # 启用数学强化认知
+    enable_advanced_pipeline=True,
+    enable_sparse_residual=True,    # FISTA 影子查询发现隐藏潜台词
+    fista_threshold=0.2,            
+    enable_dpp=True,                # DPP 矩阵多样性脱水
+)
+
+# 打印出的命中结果不仅包含最精准的记录，还因为残差与图扩散，包含了极其发散但逻辑自洽的深层原因！
 ```
 
 ---

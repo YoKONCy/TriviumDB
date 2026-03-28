@@ -8,6 +8,8 @@ pub fn expand_graph<T: crate::VectorType>(
     seeds: Vec<SearchHit>,
     max_depth: usize,
     teleport_alpha: f32, // PPR 阻尼因子/回家概率
+    enable_inverse_inhibition: bool, // 是否启用的入度惩罚
+    lateral_inhibition_threshold: usize, // 侧向截断阈值，若是 0 则无限制
 ) -> Vec<SearchHit> {
     if max_depth == 0 {
         return seeds;
@@ -39,8 +41,21 @@ pub fn expand_graph<T: crate::VectorType>(
                 }
 
                 for edge in edges {
-                    // 发散传播的能量片段 (源节点释放能量 × 边权重)
-                    let transmitted = spread_energy * edge.weight;
+                    // 反向抑制：基于目标节点的入度构建阻力
+                    let inhibition_factor = if enable_inverse_inhibition {
+                        let in_degree = db.get_in_degree(edge.target_id).max(1) as f32;
+                        1.0 / (1.0 + in_degree.log10())
+                    } else {
+                        1.0
+                    };
+
+                    // 发散传播的能量片段 
+                    let transmitted = if edge.label == "inhibition" {
+                        // 负面边不仅不贡献，还会扣除能量
+                        -(spread_energy * edge.weight * inhibition_factor)
+                    } else {
+                        spread_energy * edge.weight * inhibition_factor
+                    };
                     
                     // 1. 将收到的片段累加到下一轮发射台
                     *next_tier.entry(edge.target_id).or_insert(0.0) += transmitted;
@@ -51,8 +66,17 @@ pub fn expand_graph<T: crate::VectorType>(
             }
         }
 
-        // 阈值守护（The Gatekeeper）：截断被强抑制或自然衰减掉的节点，不让它进入下一轮传播队列
+        // 阈值守护（The Gatekeeper）：截断被强抑制或自然衰减掉的节点
         next_tier.retain(|_, energy| *energy > propagation_threshold);
+
+        // ===== 侧向抑制 (Lateral Inhibition / Top-K Cutoff) =====
+        if lateral_inhibition_threshold > 0 && next_tier.len() > lateral_inhibition_threshold {
+            let mut sorted_tier: Vec<(NodeId, f32)> = next_tier.into_iter().collect();
+            // 在 Rust 中对于 f32 使用 partial_cmp 排降序
+            sorted_tier.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            sorted_tier.truncate(lateral_inhibition_threshold);
+            next_tier = sorted_tier.into_iter().collect();
+        }
 
         if next_tier.is_empty() {
             break; // 能量完全衰竭，提前终止图谱漫游

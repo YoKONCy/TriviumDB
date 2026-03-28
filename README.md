@@ -34,8 +34,8 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 我们的目标是成为 **AI 应用领域的 SQLite**：
 
 - 🗃️ **Rom/Mmap 双引擎切换** —— 既支持单文件 `*.tdb` 复制走人，也支持分离 `.vec` 向量文件按需 mmap 零拷贝加载
-- 🔗 **节点即一切** —— 每个节点天然同时拥有向量、元数据和图关系，ID 全局唯一，绝不错位
-- 🧠 **为 AI 而生** —— 支持"先向量锚定、再沿图谱扩散"的混合检索范式，内置九层认知管线（FISTA / DPP / PPR）
+- 🔗 **节点即一切** —— 每个节点天然同时拥有限定长度的稠密向量、稀疏文本倒排词频、元数据和图关系，ID 全局唯一，绝不错位
+- 🧠 **为 AI 而生** —— 可选启用“AC自动机+BM25稀疏文本”与“Dense Vector稠密向量”的**多路召回**来触发图谱扩散检索，并内置多层认知管线（FISTA / DPP / PPR）
 - 🛡️ **四层物理防弹衣** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，断电断存不毁库
 - 🐍 **Python / Node.js 原生** —— `pip install` 或 `npm install` 后直接使用，类 MongoDB 查询语法
 - ⚡ **多核并行** —— rayon 并行向量扫描 + mmap 零拷贝加载 + 可选 HNSW 索引
@@ -95,8 +95,8 @@ flowchart TD
         App2((Agent App)):::app
         TV[(TriviumDB<br/>单一引擎 / 单一文件 / 单一 ID 空间)]:::new
         
-        App2 ==`insert()` 向量+元数据+图谱原子写入==> TV
-        TV ==`search()` 向量锚定 + 图谱扩散一次返回==> App2
+        App2 ==`insert()` 向量+文本+元数据+图关系原子写入==> TV
+        TV ==`search_hybrid()` 双路混合归一锚定+图谱扩散一次返回==> App2
         TV -.`flush()` Mmap零拷贝极速热启动.-> TV
     end
 

@@ -2,6 +2,8 @@ use crate::error::{Result, TriviumError};
 use crate::node::{Edge, NodeId};
 use crate::storage::vec_pool::VecPool;
 use crate::VectorType;
+use crate::index::bq::BqSignature;
+use crate::index::text::TextIndex;
 use std::collections::HashMap;
 
 /// 内存工作区，扮演类似 LSM Tree 中 MemTable 的角色。
@@ -18,12 +20,21 @@ pub struct MemTable<T: VectorType> {
     // 委托给 VecPool，底层为 mmap 基础层 + Vec 增量层
     // 基础层由 OS PageCache 按需加载，启动零拷贝
     vec_pool: VecPool<T>,
+    
+    // 量化签名池 (LSH / Binary Quantization) 初筛选
+    bq_signatures: Vec<BqSignature>,
+
+    // 附设文本倒排引擎 (完全可选，纯碎占用独立内存不干扰底座)
+    text_index: TextIndex,
 
     // 2. 元数据映射（关系型负载）—— 保持纯内存
     payloads: HashMap<NodeId, serde_json::Value>,
 
     // 3. 图谱邻接表 —— 保持纯内存
     edges: HashMap<NodeId, Vec<Edge>>,
+    
+    // 入度统计表：用于快速查询目标节点的被连接数（支持图谱反向抑制算法）
+    in_degrees: HashMap<NodeId, usize>,
 
     // 映射表：内部索引 (0, 1, 2...) 到 NodeId
     // 用于在 vectors 数组里定位数据位置
@@ -37,8 +48,11 @@ impl<T: VectorType> MemTable<T> {
             dim,
             next_id: 1, // 从 1 开始，保留 0 作为特殊标记
             vec_pool: VecPool::new(dim),
+            bq_signatures: Vec::new(),
+            text_index: TextIndex::new(),
             payloads: HashMap::new(),
             edges: HashMap::new(),
+            in_degrees: HashMap::new(),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
         }
@@ -57,8 +71,11 @@ impl<T: VectorType> MemTable<T> {
             dim,
             next_id,
             vec_pool,
+            bq_signatures: Vec::new(),
+            text_index: TextIndex::new(),
             payloads: HashMap::new(),
             edges: HashMap::new(),
+            in_degrees: HashMap::new(),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
         }
@@ -177,6 +194,10 @@ impl<T: VectorType> MemTable<T> {
 
         let edge = Edge { target_id: dst, label, weight };
         self.edges.entry(src).or_default().push(edge);
+        
+        // 增加目标节点的入度计数
+        *self.in_degrees.entry(dst).or_insert(0) += 1;
+        
         Ok(())
     }
 
@@ -188,6 +209,33 @@ impl<T: VectorType> MemTable<T> {
     #[inline]
     pub fn ensure_vectors_cache(&mut self) {
         self.vec_pool.ensure_cache();
+        
+        let total = self.vec_pool.total_count();
+        if self.bq_signatures.len() != total {
+            self.rebuild_bq_signatures(total);
+        }
+    }
+    
+    fn rebuild_bq_signatures(&mut self, total: usize) {
+        let dim = self.dim();
+        let flat = self.vec_pool.flat_vectors();
+        
+        // 我们利用 flat_vectors 来并行 / 串行提取 1-bit BQ 特征
+        let mut new_bq = Vec::with_capacity(total);
+        for chunk in flat.chunks(dim) {
+            new_bq.push(BqSignature::from_vector(chunk));
+        }
+        
+        // 兜底以防向量池维度异常不对齐
+        while new_bq.len() < total {
+            new_bq.push(BqSignature::empty());
+        }
+        self.bq_signatures = new_bq;
+    }
+    
+    /// 获取 BQ 量化初筛签名
+    pub fn get_bq_signature(&self, index: usize) -> Option<BqSignature> {
+        self.bq_signatures.get(index).copied()
     }
 
     /// 暴露底层向量数组供检索层消费（只需 &self）
@@ -231,10 +279,20 @@ impl<T: VectorType> MemTable<T> {
         self.payloads.remove(&id);
 
         // 3. 图谱层：删除出边 + 清理其他节点指向该节点的入边
-        self.edges.remove(&id);
+        if let Some(outgoing_edges) = self.edges.remove(&id) {
+            // 清理这些出边目标节点的入度计数
+            for edge in outgoing_edges {
+                if let Some(in_deg) = self.in_degrees.get_mut(&edge.target_id) {
+                    *in_deg = in_deg.saturating_sub(1);
+                }
+            }
+        }
+        
         for edge_list in self.edges.values_mut() {
             edge_list.retain(|e| e.target_id != id);
+            // 这里就不需要在外层大循环里再去减 self.in_degrees[&id] 了，直接在下面把这个 id 从 in_degrees 中移除即可
         }
+        self.in_degrees.remove(&id);
 
         Ok(())
     }
@@ -242,11 +300,22 @@ impl<T: VectorType> MemTable<T> {
     /// 断开两个节点之间的指定边
     pub fn unlink(&mut self, src: NodeId, dst: NodeId) -> Result<()> {
         if let Some(edge_list) = self.edges.get_mut(&src) {
+            let initial_len = edge_list.len();
             edge_list.retain(|e| e.target_id != dst);
+            if edge_list.len() < initial_len {
+                let removed_count = initial_len - edge_list.len();
+                if let Some(in_deg) = self.in_degrees.get_mut(&dst) {
+                    *in_deg = in_deg.saturating_sub(removed_count);
+                }
+            }
             Ok(())
         } else {
             Err(TriviumError::NodeNotFound(src))
         }
+    }
+
+    pub fn get_all_ids(&self) -> Vec<NodeId> {
+        self.payloads.keys().copied().collect()
     }
 
     /// 更新节点的元数据（Payload），不影响向量和图谱
@@ -287,6 +356,11 @@ impl<T: VectorType> MemTable<T> {
     /// 当前活跃节点数量
     pub fn node_count(&self) -> usize {
         self.payloads.len()
+    }
+    
+    /// 获取节点的入度数（若不存在则返回0）
+    pub fn get_in_degree(&self, id: NodeId) -> usize {
+        self.in_degrees.get(&id).copied().unwrap_or(0)
     }
 
     /// 某节点是否存在
@@ -329,5 +403,27 @@ impl<T: VectorType> MemTable<T> {
         let index_bytes = self.indices_to_ids.len() * std::mem::size_of::<NodeId>()
             + self.ids_to_indices.len() * (std::mem::size_of::<NodeId>() + std::mem::size_of::<usize>());
         vec_bytes + payload_bytes + edge_bytes + index_bytes
+    }
+
+    // --- 文本引擎接口 ---
+    
+    pub fn index_keyword(&mut self, id: NodeId, keyword: &str) {
+        if self.contains(id) {
+            self.text_index.add_keyword(id, keyword);
+        }
+    }
+    
+    pub fn index_text(&mut self, id: NodeId, text: &str) {
+        if self.contains(id) {
+            self.text_index.add_text(id, text);
+        }
+    }
+    
+    pub fn build_text_index(&mut self) {
+        self.text_index.build();
+    }
+    
+    pub fn text_engine(&self) -> &TextIndex {
+        &self.text_index
     }
 }

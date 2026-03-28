@@ -56,6 +56,9 @@ pub mod nodejs {
         pub fista_threshold: Option<f64>,
         pub enable_dpp: Option<bool>,
         pub dpp_quality_weight: Option<f64>,
+        pub enable_text_hybrid_search: Option<bool>,
+        pub text_boost: Option<f64>,
+        pub custom_query_text: Option<String>,
     }
 
     /// 节点完整视图
@@ -382,20 +385,25 @@ pub mod nodejs {
                 fista_threshold: cfg.fista_threshold.unwrap_or(0.3) as f32,
                 enable_dpp: cfg.enable_dpp.unwrap_or(false),
                 dpp_quality_weight: cfg.dpp_quality_weight.unwrap_or(1.0) as f32,
+                enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
+                text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
+                ..Default::default()
             };
+
+            let q_text = cfg.custom_query_text.as_deref();
 
             let hits = match &self.inner {
                 DbBackend::F32(db) => {
                     let v: Vec<f32> = query_vector.iter().map(|&x| x as f32).collect();
-                    db.search_advanced(&v, &core_config)
+                    db.search_hybrid(q_text, Some(&v), &core_config)
                 }
                 DbBackend::F16(db) => {
                     let v: Vec<half::f16> = query_vector.iter().map(|&x| half::f16::from_f64(x)).collect();
-                    db.search_advanced(&v, &core_config)
+                    db.search_hybrid(q_text, Some(&v), &core_config)
                 }
                 DbBackend::U64(db) => {
                     let v: Vec<u64> = query_vector.iter().map(|&x| x as u64).collect();
-                    db.search_advanced(&v, &core_config)
+                    db.search_hybrid(q_text, Some(&v), &core_config)
                 }
             }.map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
@@ -404,6 +412,77 @@ pub mod nodejs {
                 score: h.score as f64,
                 payload: h.payload,
             }).collect())
+        }
+
+        /// 混合检索增强入口：带图扩散的双路检索
+        #[napi]
+        pub fn search_hybrid(
+            &self,
+            query_vector: Vec<f64>,
+            query_text: String,
+            top_k: Option<u32>,
+            expand_depth: Option<u32>,
+            min_score: Option<f64>,
+            hybrid_alpha: Option<f64>,
+        ) -> napi::Result<Vec<JsSearchHit>> {
+            let top_k       = top_k.unwrap_or(5) as usize;
+            let expand_depth = expand_depth.unwrap_or(2) as usize;
+            let min_score   = min_score.unwrap_or(0.1) as f32;
+            let alpha = hybrid_alpha.unwrap_or(0.7) as f32;
+            // 简单的启发式权重换算
+            let boost = (1.0 - alpha).max(0.1) * 3.0;
+
+            let core_config = crate::database::SearchConfig {
+                top_k,
+                expand_depth,
+                min_score,
+                enable_text_hybrid_search: true,
+                text_boost: boost,
+                ..Default::default()
+            };
+
+            let hits = match &self.inner {
+                DbBackend::F32(db) => {
+                    let v: Vec<f32> = query_vector.iter().map(|&x| x as f32).collect();
+                    db.search_hybrid(Some(&query_text), Some(&v), &core_config)
+                }
+                DbBackend::F16(db) => {
+                    let v: Vec<half::f16> = query_vector.iter().map(|&x| half::f16::from_f64(x)).collect();
+                    db.search_hybrid(Some(&query_text), Some(&v), &core_config)
+                }
+                DbBackend::U64(db) => {
+                    let v: Vec<u64> = query_vector.iter().map(|&x| x as u64).collect();
+                    db.search_hybrid(Some(&query_text), Some(&v), &core_config)
+                }
+            }.map_err(|e| napi::Error::from_reason(e.to_string()))?;
+
+            Ok(hits.into_iter().map(|h| JsSearchHit {
+                id: h.id as f64,
+                score: h.score as f64,
+                payload: h.payload,
+            }).collect())
+        }
+
+        // ── 文本索引 ──
+
+        /// 对节点建立用于双路召回的长文本 BM25 索引
+        #[napi]
+        pub fn index_text(&mut self, id: f64, text: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.index_text(id as u64, &text))
+                .map_err(|e| napi::Error::from_reason(e.to_string()))
+        }
+
+        /// 对节点建立用于精确命中的 AC自动机 高级关键词索引
+        #[napi]
+        pub fn index_keyword(&mut self, id: f64, keyword: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.index_keyword(id as u64, &keyword))
+                .map_err(|e| napi::Error::from_reason(e.to_string()))
+        }
+
+        /// 在批量插入或重启后必须调用，用于重编译自动机与词频
+        #[napi]
+        pub fn build_text_index(&mut self) {
+            dispatch!(self, mut db => db.build_text_index());
         }
 
         // ── 元数据过滤 ──

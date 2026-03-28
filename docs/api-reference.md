@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.4.1  
+> **版本**: v0.4.2  
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -262,11 +262,29 @@ let ids = db.neighbors(1, 2);
 
 ---
 
-## 向量检索
+## 搜索与召回
 
-### search — 混合检索
+### search_hybrid — 双路混合认知检索 (强推)
 
-TriviumDB 的核心能力：**先用向量相似度找到锚点，再沿图谱关系向外扩散**。
+TriviumDB 核心杀手锏：引入稀疏文本表示（BM25/AC自动机）与稠密向量（Dense Vector）构成双路融合召回锚定，再在第二阶段进行图谱激活扩散。这极大弥补了纯向量检索容易导致的专有名词幻觉（Hallucination）。
+
+**Python：**
+```python
+results = db.search_hybrid(
+    query_vector=[0.10, -0.48, 0.80, ...], 
+    query_text="Rust 内存安全",
+    top_k=5,
+    expand_depth=2,
+    min_score=0.1,
+    hybrid_alpha=0.7  # 0.7 偏向量，0.3 偏精确文本
+)
+for hit in results:
+    print(f"[{hit.id}] score={hit.score:.3f} | {hit.payload}")
+```
+
+### search — 纯向量图扩散检索 (基础)
+
+TriviumDB 的基础检索能力（退化态）：**先用核心稠密向量相似度找到锚点，再沿图谱关系向外扩散**。
 
 **Python：**
 ```python
@@ -386,6 +404,9 @@ let results = db.search_advanced(&query_vec, &config)?;
 | `fista_threshold` | `f32` | `0.3` | 残差范数超过此值时触发影子查询 |
 | `enable_dpp` | `bool` | `false` | 启用 DPP 多样性采样 |
 | `dpp_quality_weight` | `f32` | `1.0` | DPP 质量权重幂次 |
+| `enable_text_hybrid_search`| `bool`| `false`| 是否开启 BM25/AC 双路混合搜索 |
+| `hybrid_alpha` | `f32` | `0.7` | 混合检索中向量权重 (0~1)，(1-alpha) 为稀疏文本权重 |
+| `custom_query_text` | `str`| `None` | (可选) 手动传入用于文本匹配的原始文本 |
 
 > 💡 所有参数均内置安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]。传入越界值不会崩溃，而是被静默钳平。
 
@@ -571,6 +592,32 @@ print(f"当前内存占用: {usage_bytes / 1024 / 1024:.1f} MB")
 ```
 
 ---
+
+## 文本索引与稀疏检索
+
+### index_text — 建立全文稀疏索引
+对指定节点的长文本内容提取 BM25 特征，用于后续的混合检索召回。需在节点 insert 后调用。
+
+**Python：**
+```python
+db.index_text(id=42, text="Rust 在嵌入式领域取得突破")
+```
+
+### index_keyword — 建立精确关键词索引
+建立基于 AC 自动机 (Aho-Corasick) 的精确词汇匹配索引，极速锁定特征锚点。
+
+**Python：**
+```python
+db.index_keyword(id=42, keyword="Rust")
+```
+
+### build_text_index — 编译倒排字典树
+在数据初始化批量调用完毕后，**必须调用此方法**完成底层 AC 自动机的编译与全局文本 IDF 频率汇算。之后方可进行 `search_hybrid` 混合检索。
+
+**Python：**
+```python
+db.build_text_index()
+```
 
 ## 索引维护
 

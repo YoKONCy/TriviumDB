@@ -59,6 +59,24 @@ pub struct SearchConfig {
     // L9: DPP
     pub enable_dpp: bool,
     pub dpp_quality_weight: f32,
+    
+    // --- 高级认知选项 (完全 Opt-in) ---
+    /// 启用时，将使用 `1.0 / (1.0 + log10(in_degree))` 对泛化扩散节点施加反向惩罚
+    pub enable_inverse_inhibition: bool,
+    /// 当 > 0 时，作为侧向抑制起保护作用，自动截断扩散网络 (如传入 5000)
+    pub lateral_inhibition_threshold: usize,
+    /// 是否启用 L1 Binary Quantization 两段式初筛管线 (极速混沌轨道)
+    pub enable_bq_coarse_search: bool,
+    /// BQ 粗筛候选集占总数据量的比例
+    pub bq_candidate_ratio: f32,
+    
+    // --- 混合倒排与文本检索 (Hybrid Search) ---
+    /// 启用文本混合查询时，决定文本匹配的分数提权倍率 (Boost)
+    pub text_boost: f32,
+    /// 开启基于 AC 自动机的强制文本召回锚点机制 (等价于 PEDSA第一阶段)
+    pub enable_text_hybrid_search: bool,
+    pub bm25_k1: f32,
+    pub bm25_b: f32,
 }
 
 impl Default for SearchConfig {
@@ -74,6 +92,14 @@ impl Default for SearchConfig {
             fista_threshold: 0.30,
             enable_dpp: false,
             dpp_quality_weight: 1.0,
+            enable_inverse_inhibition: false,
+            lateral_inhibition_threshold: 0,
+            enable_bq_coarse_search: false,
+            bq_candidate_ratio: 0.1,
+            text_boost: 1.5,
+            enable_text_hybrid_search: false,
+            bm25_k1: 1.2,
+            bm25_b: 0.75,
         }
     }
 }
@@ -333,6 +359,39 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     // ════════ 读操作 ════════
 
+    pub fn index_keyword(&mut self, id: NodeId, keyword: &str) -> Result<()> {
+        let mut mt = lock_or_recover(&self.memtable);
+        mt.index_keyword(id, keyword);
+        Ok(())
+    }
+
+    pub fn index_text(&mut self, id: NodeId, text: &str) -> Result<()> {
+        let mut mt = lock_or_recover(&self.memtable);
+        mt.index_text(id, text);
+        Ok(())
+    }
+
+    pub fn build_text_index(&mut self) -> Result<()> {
+        let mut mt = lock_or_recover(&self.memtable);
+        mt.build_text_index();
+        Ok(())
+    }
+
+    pub fn get_payload(&self, id: NodeId) -> Option<serde_json::Value> {
+        let mt = lock_or_recover(&self.memtable);
+        mt.get_payload(id).cloned()
+    }
+
+    pub fn get_edges(&self, id: NodeId) -> Vec<crate::node::Edge> {
+        let mt = lock_or_recover(&self.memtable);
+        mt.get_edges(id).map(|e| e.to_vec()).unwrap_or_default()
+    }
+
+    pub fn get_all_ids(&self) -> Vec<NodeId> {
+        let mt = lock_or_recover(&self.memtable);
+        mt.get_all_ids() // 需要在 memtable.rs 补充
+    }
+
     pub fn search(
         &self,
         query_vector: &[T],
@@ -340,38 +399,48 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         expand_depth: usize,
         min_score: f32,
     ) -> Result<Vec<SearchHit>> {
-        // 向下兼容的转发封装
         let config = SearchConfig {
             top_k,
             expand_depth,
             min_score,
-            enable_advanced_pipeline: false, // Legacy search is pure and raw
+            enable_advanced_pipeline: false,
             ..Default::default()
         };
-        self.search_advanced(query_vector, &config)
+        self.search_hybrid(None, Some(query_vector), &config)
     }
 
-    /// 全能认知检索核心引擎 (Advanced Pipeline)
-    /// 包含最密集的数学约束、动态管线打断重排机制
     pub fn search_advanced(
         &self,
         query_vector: &[T],
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_hybrid(None, Some(query_vector), config)
+    }
+
+    /// 全能混合检索核心引擎 (Hybrid Advanced Pipeline)
+    /// 包含文本稀疏索引 + 稠密连续向量空间 + 图谱数学约束的真正完全体检索引擎
+    pub fn search_hybrid(
+        &self,
+        query_text: Option<&str>,
+        query_vector: Option<&[T]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchHit>> {
         let mut mt = lock_or_recover(&self.memtable);
 
         // --- 0. 容错与防御式编程 (Sanity Checks) ---
         let dim = mt.dim();
-        if query_vector.len() != dim {
-            return Err(crate::error::TriviumError::DimensionMismatch {
-                expected: dim,
-                got: query_vector.len(),
-            });
-        }
-        for item in query_vector {
-            let f = item.to_f32();
-            if f.is_nan() || f.is_infinite() {
-                return Err(crate::error::TriviumError::Generic("Query vector contains NaN or Infinity".to_string()));
+        if let Some(qv) = query_vector {
+            if qv.len() != dim {
+                return Err(crate::error::TriviumError::DimensionMismatch {
+                    expected: dim,
+                    got: qv.len(),
+                });
+            }
+            for item in qv {
+                let f = item.to_f32();
+                if f.is_nan() || f.is_infinite() {
+                    return Err(crate::error::TriviumError::Generic("Query vector contains NaN or Infinity".to_string()));
+                }
             }
         }
 
@@ -382,63 +451,152 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         safe_cfg.teleport_alpha = safe_cfg.teleport_alpha.clamp(0.0, 1.0); // 必须在 0 - 1 的概率之间
         safe_cfg.dpp_quality_weight = safe_cfg.dpp_quality_weight.clamp(0.0, 10.0); // 幂次太高会导致 float 溢出
         safe_cfg.fista_threshold = safe_cfg.fista_threshold.clamp(0.0, f32::MAX);
+        safe_cfg.bq_candidate_ratio = safe_cfg.bq_candidate_ratio.clamp(0.0, 1.0);
 
         let config = &safe_cfg; // 复用下文变量名
 
-        // --- L1 & L2 向量初排 / NMF ---
-        let mut anchor_hits: Vec<SearchHit> = {
+        // --- L1 & L2 混合检索 (文本 + 向量初排 / NMF) ---
+        let mut anchor_hits: Vec<SearchHit> = Vec::new();
+        let mut seed_map: std::collections::HashMap<NodeId, f32> = std::collections::HashMap::new();
+
+        // 1. 如果有文本且开启文本引擎
+        if config.enable_text_hybrid_search {
+            if let Some(txt) = query_text {
+                let text_engine = mt.text_engine();
+                // 1.1 精准 AC 命中
+                let ac_hits = text_engine.search_ac(txt);
+                for (id, score) in ac_hits {
+                    *seed_map.entry(id).or_insert(0.0) += score * config.text_boost; // 高优先权权重
+                }
+                
+                // 1.2 大段 BM25 兜底
+                let bm25_hits = text_engine.search_bm25(txt, config.bm25_k1, config.bm25_b);
+                for (id, score) in bm25_hits {
+                    // Normalize the score somewhat
+                    let normalized_score = (score / 10.0).clamp(0.0, 1.0) * config.text_boost;
+                    *seed_map.entry(id).or_insert(0.0) += normalized_score;
+                }
+            }
+        }
+
+        // 2. 如果存在向量查询，进入数学多层筛选管线
+        if let Some(query_vector) = query_vector {
             #[cfg(not(feature = "hnsw"))]
-            {
+            let vector_hits: Vec<SearchHit> = {
                 let dim = mt.dim();
                 mt.ensure_vectors_cache();
-                brute_force::search(
-                    query_vector, mt.flat_vectors(), dim, config.top_k, config.min_score,
-                    |idx| mt.get_id_by_index(idx),
-                )
-            }
-            #[cfg(feature = "hnsw")]
-            {
-                self.hnsw_index.search(query_vector, config.top_k, config.min_score)
-            }
-        };
-
-        if config.enable_advanced_pipeline {
-            if config.enable_sparse_residual && !anchor_hits.is_empty() {
-                // --- L4 FISTA Sparse Residual ---
-                let entity_vecs: Vec<Vec<f32>> = anchor_hits.iter()
-                    .filter_map(|hit| mt.get_vector(hit.id).map(|v| v.iter().map(|&x| x.to_f32()).collect()))
-                    .collect();
-                let q_f32: Vec<f32> = query_vector.iter().map(|&x| x.to_f32()).collect();
+                let vectors = mt.flat_vectors();
                 
-                let (_, residual, residual_norm) = crate::cognitive::fista_solve(&q_f32, &entity_vecs, config.fista_lambda, 80);
-                
-                // --- L5 Shadow Query ---
-                if residual_norm > config.fista_threshold {
-                    tracing::debug!("FISTA Residual magnitude high ({} > {}). Triggering Shadow Query.", residual_norm, config.fista_threshold);
-                    let r_orig: Vec<T> = residual.iter().map(|&x| T::from_f32(x)).collect();
-                    let shadow_hits: Vec<SearchHit> = {
-                        #[cfg(not(feature = "hnsw"))]
-                        {
-                            let dim = mt.dim();
-                            brute_force::search(
-                                &r_orig, mt.flat_vectors(), dim, config.top_k, config.min_score,
-                                |idx| mt.get_id_by_index(idx),
-                            )
-                        }
-                        #[cfg(feature = "hnsw")]
-                        {
-                            self.hnsw_index.search(&r_orig, config.top_k, config.min_score)
-                        }
-                    };
+                if config.enable_bq_coarse_search {
+                    // --- BQ 混沌检索分支: L1 1-bit Hamming 粗排 ---
+                    let q_bq = crate::index::bq::BqSignature::from_vector(query_vector);
+                    let m_count = mt.node_count(); // 实际节点数
+                    let candidate_cnt = (((m_count as f32) * config.bq_candidate_ratio).ceil() as usize)
+                        .max(config.top_k); // 至少要粗筛出 top_k 个
+                        
+                    let mut bq_scores: Vec<(usize, u32)> = (0..m_count)
+                        .filter_map(|i| mt.get_bq_signature(i).map(|sig| (i, sig.hamming_distance(&q_bq))))
+                        .collect();
+                        
+                    // Hamming 距离越小越好（非严格 Top-K 可以不用完全排序，这里为保证精度采用完全排序后截断）
+                    bq_scores.sort_unstable_by_key(|&(_, dist)| dist);
+                    bq_scores.truncate(candidate_cnt);
                     
-                    // 合并影子结果 (去重)
-                    for sh in shadow_hits {
-                        if !anchor_hits.iter().any(|h| h.id == sh.id) {
-                            anchor_hits.push(sh);
+                    // --- BQ 混沌检索分支: L2 f32/f16 Cosine 精排 ---
+                    // 这里重用 brute_force 的单次距离点积（由于已经在 cache 里了，直接对这些 index 切片）
+                    let mut refined = Vec::with_capacity(candidate_cnt);
+                    for (i, _dist) in bq_scores {
+                        let offset = i * dim;
+                        // 这里有个隐患如果 offset 越界。因为 m_count 包含了被删除节点空洞。
+                        // 但底层 vec_pool 其实能容纳所有的内部 index。
+                        if offset + dim <= vectors.len() {
+                            let score = T::similarity(query_vector, &vectors[offset..offset + dim]);
+                            if score >= config.min_score {
+                                refined.push(SearchHit {
+                                    id: mt.get_id_by_index(i),
+                                    score,
+                                    payload: serde_json::Value::Null, // 暂时置空，最后统一组装 payload
+                                });
+                            }
+                        }
+                    }
+                    refined.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                    refined.truncate(config.top_k);
+                    
+                    // 补充 Payload
+                    for hit in &mut refined {
+                        if let Some(p) = mt.get_payload(hit.id) {
+                            hit.payload = p.clone();
+                        }
+                    }
+                    refined
+                } else {
+                    // 原生基础全局爆搜
+                    brute_force::search(
+                        query_vector, vectors, dim, config.top_k, config.min_score,
+                        |idx| mt.get_id_by_index(idx),
+                    )
+                }
+            };
+            #[cfg(feature = "hnsw")]
+            let vector_hits: Vec<SearchHit> = {
+                self.hnsw_index.search(query_vector, config.top_k, config.min_score)
+            };
+
+            for hit in vector_hits {
+                *seed_map.entry(hit.id).or_insert(0.0) += hit.score;
+            }
+
+            if config.enable_advanced_pipeline {
+                if config.enable_sparse_residual && !seed_map.is_empty() {
+                    // --- L4 FISTA Sparse Residual ---
+                    let entity_vecs: Vec<Vec<f32>> = seed_map.keys()
+                        .filter_map(|&id| mt.get_vector(id).map(|v| v.iter().map(|&x| x.to_f32()).collect()))
+                        .collect();
+                    let q_f32: Vec<f32> = query_vector.iter().map(|&x| x.to_f32()).collect();
+                    
+                    let (_, residual, residual_norm) = crate::cognitive::fista_solve(&q_f32, &entity_vecs, config.fista_lambda, 80);
+                    
+                    // --- L5 Shadow Query ---
+                    if residual_norm > config.fista_threshold {
+                        tracing::debug!("FISTA Residual magnitude high ({} > {}). Triggering Shadow Query.", residual_norm, config.fista_threshold);
+                        let r_orig: Vec<T> = residual.iter().map(|&x| T::from_f32(x)).collect();
+                        let shadow_hits: Vec<SearchHit> = {
+                            #[cfg(not(feature = "hnsw"))]
+                            {
+                                let dim = mt.dim();
+                                brute_force::search(
+                                    &r_orig, mt.flat_vectors(), dim, config.top_k, config.min_score,
+                                    |idx| mt.get_id_by_index(idx),
+                                )
+                            }
+                            #[cfg(feature = "hnsw")]
+                            {
+                                self.hnsw_index.search(&r_orig, config.top_k, config.min_score)
+                            }
+                        };
+                        
+                        for sh in shadow_hits {
+                            *seed_map.entry(sh.id).or_insert(0.0) += sh.score * 0.8; // 影子抑制衰减
                         }
                     }
                 }
             }
+        }
+
+        // 将混合融合收集的所有 seed_map 对象转换为 `anchor_hits` 进入后处理
+        for (id, score) in seed_map {
+            if score >= config.min_score {
+                let payload = mt.get_payload(id).cloned().unwrap_or(serde_json::Value::Null);
+                anchor_hits.push(SearchHit { id, score, payload });
+            }
+        }
+        anchor_hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        anchor_hits.truncate(config.top_k.max(15)); // 不要在此处把图种子提前卡死
+
+        // 没搜到任何东西直接短路返回
+        if anchor_hits.is_empty() {
+            return Ok(vec![]);
         }
 
         if anchor_hits.is_empty() {
@@ -454,7 +612,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         }
 
         // --- L6 & L7: PPR 结合内向原生边漫游 ---
-        let mut expanded = crate::graph::traversal::expand_graph(&mt, seeds, config.expand_depth, config.teleport_alpha);
+        let mut expanded = crate::graph::traversal::expand_graph(
+            &mt, 
+            seeds, 
+            config.expand_depth, 
+            config.teleport_alpha,
+            config.enable_inverse_inhibition,
+            config.lateral_inhibition_threshold,
+        );
         
         // L8 (时间衰减与多维重排) 已被设计哲学剥离：不应在此侵入 JSON 业务字段，交由上层 Agent 侧处理。
 

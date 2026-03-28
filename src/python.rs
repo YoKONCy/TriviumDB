@@ -353,7 +353,10 @@ pub mod python {
             fista_lambda=0.1,
             fista_threshold=0.3,
             enable_dpp=false,
-            dpp_quality_weight=1.0
+            dpp_quality_weight=1.0,
+            enable_text_hybrid_search=false,
+            text_boost=1.5,
+            custom_query_text=None
         ))]
         fn search_advanced(
             &self,
@@ -369,6 +372,9 @@ pub mod python {
             fista_threshold: f32,
             enable_dpp: bool,
             dpp_quality_weight: f32,
+            enable_text_hybrid_search: bool,
+            text_boost: f32,
+            custom_query_text: Option<String>,
         ) -> PyResult<Vec<PySearchHit>> {
             let config = crate::database::SearchConfig {
                 top_k,
@@ -381,24 +387,73 @@ pub mod python {
                 fista_threshold,
                 enable_dpp,
                 dpp_quality_weight,
+                enable_text_hybrid_search,
+                text_boost,
+                ..Default::default()
             };
+
+            let q_text = custom_query_text.as_deref();
 
             let results = match &self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
-                    db.search_advanced(&vec, &config)
+                    db.search_hybrid(q_text, Some(&vec), &config)
                 }
                 DbBackend::F16(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
-                    db.search_advanced(&vec16, &config)
+                    db.search_hybrid(q_text, Some(&vec16), &config)
                 }
                 DbBackend::U64(db) => {
                     let vec: Vec<u64> = query_vector.extract()?;
-                    db.search_advanced(&vec, &config)
+                    db.search_hybrid(q_text, Some(&vec), &config)
                 }
             }.map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
+            Ok(results.into_iter().map(|h| PySearchHit {
+                id: h.id,
+                score: h.score,
+                payload: json_to_pyobject(py, &h.payload),
+            }).collect())
+        }
+        
+        #[pyo3(signature = (query_vector, query_text, top_k=5, expand_depth=2, min_score=0.1, hybrid_alpha=0.7))]
+        fn search_hybrid(
+            &self,
+            py: Python<'_>,
+            query_vector: Bound<'_, PyAny>,
+            query_text: &str,
+            top_k: usize,
+            expand_depth: usize,
+            min_score: f32,
+            hybrid_alpha: f32,
+        ) -> PyResult<Vec<PySearchHit>> {
+            // hybrid_alpha 越大，向量分数占比越高。
+            // TriviumDB 底层使用 text_boost = (1.0 - alpha) * 2.5 作为启发式倍率
+            let boost = (1.0 - hybrid_alpha).max(0.1) * 3.0;
+            let config = crate::database::SearchConfig {
+                top_k,
+                expand_depth,
+                min_score,
+                enable_text_hybrid_search: true,
+                text_boost: boost,
+                ..Default::default()
+            };
+            let results = match &self.inner {
+                DbBackend::F32(db) => {
+                    let vec: Vec<f32> = query_vector.extract()?;
+                    db.search_hybrid(Some(query_text), Some(&vec), &config)
+                }
+                DbBackend::F16(db) => {
+                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                    db.search_hybrid(Some(query_text), Some(&vec16), &config)
+                }
+                DbBackend::U64(db) => {
+                    let vec: Vec<u64> = query_vector.extract()?;
+                    db.search_hybrid(Some(query_text), Some(&vec), &config)
+                }
+            }.map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             Ok(results.into_iter().map(|h| PySearchHit {
                 id: h.id,
                 score: h.score,
@@ -438,6 +493,20 @@ pub mod python {
                     db.update_vector(id, &vec).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
                 }
             }
+        }
+
+        fn index_text(&mut self, id: u64, text: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.index_text(id, text))
+                .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        }
+
+        fn index_keyword(&mut self, id: u64, keyword: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.index_keyword(id, keyword))
+                .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        }
+
+        fn build_text_index(&mut self) {
+            dispatch!(self, mut db => db.build_text_index());
         }
 
         fn get(&self, py: Python<'_>, id: u64) -> PyResult<Option<PyNodeView>> {
