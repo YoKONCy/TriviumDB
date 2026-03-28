@@ -6,7 +6,7 @@
 
 <!-- 动态打字效果 Slogan -->
 <a href="https://github.com/YoKONCy/TriviumDB">
-  <img src="https://readme-typing-svg.demolab.com?font=Noto+Serif+SC&weight=600&size=24&duration=4000&pause=1000&color=1E90FF&center=true&vCenter=true&multiline=true&repeat=false&width=800&height=70&lines=三位一体的+AI+原生嵌入式数据库;向量+×+图谱+×+关系型;为+Agent+打造的高性能记忆核心" alt="Slogan" />
+  <img src="https://readme-typing-svg.demolab.com?font=Noto+Serif+SC&weight=600&size=24&duration=4000&pause=1000&color=1E90FF&center=true&vCenter=true&multiline=true&repeat=false&width=800&height=70&lines=%E4%B8%89%E4%BD%8D%E4%B8%80%E4%BD%93%E7%9A%84+AI+%E5%8E%9F%E7%94%9F%E5%B5%8C%E5%85%A5%E5%BC%8F%E6%95%B0%E6%8D%AE%E5%BA%93;%E5%90%91%E9%87%8F+%C3%97+%E5%9B%BE%E8%B0%B1+%C3%97+%E5%85%B3%E7%B3%BB%E5%9E%8B;%E4%B8%BA+Agent+%E6%89%93%E9%80%A0%E7%9A%84%E9%AB%98%E6%80%A7%E8%83%BD%E8%AE%B0%E5%BF%86%E6%A0%B8%E5%BF%83" alt="Slogan" />
 </a>
 
 <br/>
