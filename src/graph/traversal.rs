@@ -7,8 +7,8 @@ pub fn expand_graph<T: crate::VectorType>(
     db: &MemTable<T>,
     seeds: Vec<SearchHit>,
     max_depth: usize,
-    teleport_alpha: f32, // PPR 阻尼因子/回家概率
-    enable_inverse_inhibition: bool, // 是否启用的入度惩罚
+    teleport_alpha: f32,                 // PPR 阻尼因子/回家概率
+    enable_inverse_inhibition: bool,     // 是否启用的入度惩罚
     lateral_inhibition_threshold: usize, // 侧向截断阈值，若是 0 则无限制
 ) -> Vec<SearchHit> {
     if max_depth == 0 {
@@ -17,7 +17,7 @@ pub fn expand_graph<T: crate::VectorType>(
 
     // `total_activation` 用于沉淀所有节点最终累积到的能量总和
     let mut total_activation = HashMap::<NodeId, f32>::new();
-    
+
     // `current_tier` 用于保存当前轮次正在向外辐射边界节点的增量能量
     let mut current_tier = HashMap::<NodeId, f32>::new();
 
@@ -25,7 +25,7 @@ pub fn expand_graph<T: crate::VectorType>(
         total_activation.insert(seed.id, seed.score);
         current_tier.insert(seed.id, seed.score);
     }
-    
+
     // 传播阈值：被强抑制的节点（得分 <= 0.0）会严格切断物理传播路径
     let propagation_threshold = 0.0;
 
@@ -49,17 +49,17 @@ pub fn expand_graph<T: crate::VectorType>(
                         1.0
                     };
 
-                    // 发散传播的能量片段 
+                    // 发散传播的能量片段
                     let transmitted = if edge.label == "inhibition" {
                         // 负面边不仅不贡献，还会扣除能量
                         -(spread_energy * edge.weight * inhibition_factor)
                     } else {
                         spread_energy * edge.weight * inhibition_factor
                     };
-                    
+
                     // 1. 将收到的片段累加到下一轮发射台
                     *next_tier.entry(edge.target_id).or_insert(0.0) += transmitted;
-                    
+
                     // 2. 将收到的片段沉淀到该节点的最终总得分池里
                     *total_activation.entry(edge.target_id).or_insert(0.0) += transmitted;
                 }
@@ -97,6 +97,10 @@ pub fn expand_graph<T: crate::VectorType>(
     }
 
     // 依总能量从高到低排序返回
-    expanded_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    expanded_results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     expanded_results
 }

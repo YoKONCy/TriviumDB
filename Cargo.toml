@@ -1,6 +1,6 @@
 [package]
 name = "triviumdb"
-version = "0.4.2"
+version = "0.4.4"
 edition = "2024"
 authors = ["YoKONCy <2752026184@qq.com>"]
 description = "A high-performance memory-mmap hybrid search engine built for AI, combining dense vector, sparse text, graph relations, and JSON metadata."

@@ -10,7 +10,6 @@
 ///   CompareExpr := Expr CompOp Expr
 ///   Expr        := Ident '.' Ident | Literal
 ///   ReturnList  := Ident (',' Ident)*
-
 use super::ast::*;
 use super::lexer::Token;
 
@@ -73,13 +72,25 @@ impl Parser {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
 
-        // 第一个节点
+        // 第一个节点（允许匿名，用于纯起点匹配场景）
         nodes.push(self.parse_node_pattern()?);
 
         // 后续的 边->节点 对
         while self.peek() == &Token::Dash {
             edges.push(self.parse_edge_pattern()?);
-            nodes.push(self.parse_node_pattern()?);
+            let next_node = self.parse_node_pattern()?;
+            // 路径中间/末尾的节点必须有变量名，否则执行器无法追踪遍历状态
+            if next_node.var.is_none() {
+                return Err(
+                    "路径中间或末尾的节点必须指定变量名（如 (b)），不支持匿名中间节点".to_string(),
+                );
+            }
+            nodes.push(next_node);
+        }
+
+        // 如果路径有边，起始节点也必须有变量名（执行器需要它来获取当前节点 ID）
+        if !edges.is_empty() && nodes[0].var.is_none() {
+            return Err("包含边的路径中，起始节点也必须指定变量名（如 (a)）".to_string());
         }
 
         Ok(Pattern { nodes, edges })
@@ -188,7 +199,9 @@ impl Parser {
                     self.advance(); // .
                     let field = match self.advance() {
                         Token::Ident(f) => f,
-                        other => return Err(format!("Expected field name after '.', got {:?}", other)),
+                        other => {
+                            return Err(format!("Expected field name after '.', got {:?}", other));
+                        }
                     };
                     Ok(Expr::Property { var: ident, field })
                 } else {

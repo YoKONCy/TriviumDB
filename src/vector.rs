@@ -3,7 +3,16 @@ use std::fmt::Debug;
 
 /// 定义通用向量类型的 Trait，支持多种引擎底层数据 (f32 / f16 / u64)
 pub trait VectorType:
-    Sized + Copy + Default + PartialEq + Debug + Send + Sync + bytemuck::Zeroable + bytemuck::Pod + 'static
+    Sized
+    + Copy
+    + Default
+    + PartialEq
+    + Debug
+    + Send
+    + Sync
+    + bytemuck::Zeroable
+    + bytemuck::Pod
+    + 'static
 {
     /// 计算两个等长特征切片之间的“相似度”得分。
     /// 返回值越大，表示越相近。
@@ -78,26 +87,26 @@ unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
             let offset = i * 8;
             let va = _mm256_loadu_ps(a.as_ptr().add(offset));
             let vb = _mm256_loadu_ps(b.as_ptr().add(offset));
-            v_dot = _mm256_fmadd_ps(va, vb, v_dot);  // dot += a * b
-            v_na = _mm256_fmadd_ps(va, va, v_na);     // na  += a * a
-            v_nb = _mm256_fmadd_ps(vb, vb, v_nb);     // nb  += b * b
+            v_dot = _mm256_fmadd_ps(va, vb, v_dot); // dot += a * b
+            v_na = _mm256_fmadd_ps(va, va, v_na); // na  += a * a
+            v_nb = _mm256_fmadd_ps(vb, vb, v_nb); // nb  += b * b
         }
 
         // 水平归约：256-bit → 128-bit → 标量
         let h_dot = _mm256_extractf128_ps(v_dot, 1);
-        let h_na  = _mm256_extractf128_ps(v_na, 1);
-        let h_nb  = _mm256_extractf128_ps(v_nb, 1);
+        let h_na = _mm256_extractf128_ps(v_na, 1);
+        let h_nb = _mm256_extractf128_ps(v_nb, 1);
         let l_dot = _mm256_castps256_ps128(v_dot);
-        let l_na  = _mm256_castps256_ps128(v_na);
-        let l_nb  = _mm256_castps256_ps128(v_nb);
+        let l_na = _mm256_castps256_ps128(v_na);
+        let l_nb = _mm256_castps256_ps128(v_nb);
         let s_dot = _mm_add_ps(l_dot, h_dot);
-        let s_na  = _mm_add_ps(l_na, h_na);
-        let s_nb  = _mm_add_ps(l_nb, h_nb);
+        let s_na = _mm_add_ps(l_na, h_na);
+        let s_nb = _mm_add_ps(l_nb, h_nb);
         // 128-bit 内部水平加：[a,b,c,d] → hadd → [a+b,c+d,...] → hadd → [a+b+c+d,...]
         let s_dot = _mm_add_ps(_mm_hadd_ps(s_dot, s_dot), _mm_setzero_ps());
         let s_dot = _mm_hadd_ps(s_dot, s_dot);
-        let s_na  = _mm_hadd_ps(_mm_hadd_ps(s_na, s_na), _mm_hadd_ps(s_na, s_na));
-        let s_nb  = _mm_hadd_ps(_mm_hadd_ps(s_nb, s_nb), _mm_hadd_ps(s_nb, s_nb));
+        let s_na = _mm_hadd_ps(_mm_hadd_ps(s_na, s_na), _mm_hadd_ps(s_na, s_na));
+        let s_nb = _mm_hadd_ps(_mm_hadd_ps(s_nb, s_nb), _mm_hadd_ps(s_nb, s_nb));
 
         let mut dot = _mm_cvtss_f32(s_dot);
         let mut norm_a = _mm_cvtss_f32(s_na);
@@ -139,13 +148,19 @@ impl VectorType for f32 {
     }
 
     #[inline]
-    fn zero() -> Self { 0.0 }
+    fn zero() -> Self {
+        0.0
+    }
 
     #[inline]
-    fn to_f32(self) -> f32 { self }
+    fn to_f32(self) -> f32 {
+        self
+    }
 
     #[inline]
-    fn from_f32(v: f32) -> Self { v }
+    fn from_f32(v: f32) -> Self {
+        v
+    }
 }
 
 // ════════ f16：半精度压缩向量（省 50% 内存） ════════
@@ -159,13 +174,19 @@ impl VectorType for f16 {
     }
 
     #[inline]
-    fn zero() -> Self { f16::from_f32(0.0) }
+    fn zero() -> Self {
+        f16::from_f32(0.0)
+    }
 
     #[inline]
-    fn to_f32(self) -> f32 { half::f16::to_f32(self) }
+    fn to_f32(self) -> f32 {
+        half::f16::to_f32(self)
+    }
 
     #[inline]
-    fn from_f32(v: f32) -> Self { half::f16::from_f32(v) }
+    fn from_f32(v: f32) -> Self {
+        half::f16::from_f32(v)
+    }
 }
 
 // ════════ u64：二进制哈希向量（如 SimHash 或其他指纹） ════════
@@ -182,11 +203,17 @@ impl VectorType for u64 {
     }
 
     #[inline]
-    fn zero() -> Self { 0 }
+    fn zero() -> Self {
+        0
+    }
 
     #[inline]
-    fn to_f32(self) -> f32 { self as f32 }
+    fn to_f32(self) -> f32 {
+        self as f32
+    }
 
     #[inline]
-    fn from_f32(v: f32) -> Self { v as u64 }
+    fn from_f32(v: f32) -> Self {
+        v as u64
+    }
 }

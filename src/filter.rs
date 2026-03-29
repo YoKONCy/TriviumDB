@@ -62,9 +62,7 @@ impl Filter {
                     false
                 }
             }
-            Filter::Exists(key, exists) => {
-                payload.get(key).is_some() == *exists
-            }
+            Filter::Exists(key, exists) => payload.get(key).is_some() == *exists,
             Filter::Nin(key, values) => {
                 if let Some(field_val) = payload.get(key) {
                     !values.contains(field_val)
@@ -72,14 +70,14 @@ impl Filter {
                     true
                 }
             }
-            Filter::Size(key, size) => {
-                payload.get(key).and_then(|v| v.as_array()).map_or(false, |arr| arr.len() == *size)
-            }
-            Filter::All(key, values) => {
-                payload.get(key).and_then(|v| v.as_array()).map_or(false, |arr| {
-                    values.iter().all(|val| arr.contains(val))
-                })
-            }
+            Filter::Size(key, size) => payload
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map_or(false, |arr| arr.len() == *size),
+            Filter::All(key, values) => payload
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map_or(false, |arr| values.iter().all(|val| arr.contains(val))),
             Filter::TypeMatch(key, type_str) => {
                 if let Some(v) = payload.get(key) {
                     let actual_type = match v {

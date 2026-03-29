@@ -1,8 +1,8 @@
 #[cfg(feature = "python")]
 pub mod python {
+    use crate::database::Database as GenericDatabase;
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyList};
-    use crate::database::Database as GenericDatabase;
 
     enum DbBackend {
         F32(GenericDatabase<f32>),
@@ -73,7 +73,14 @@ pub mod python {
     #[pymethods]
     impl PyQueryRow {
         fn __repr__(&self, py: Python<'_>) -> String {
-            format!("QueryRow({:?})", self.row.bind(py).repr().map(|r| r.to_string()).unwrap_or_default())
+            format!(
+                "QueryRow({:?})",
+                self.row
+                    .bind(py)
+                    .repr()
+                    .map(|r| r.to_string())
+                    .unwrap_or_default()
+            )
         }
     }
 
@@ -82,12 +89,22 @@ pub mod python {
     fn json_to_pyobject(py: Python<'_>, val: &serde_json::Value) -> PyObject {
         match val {
             serde_json::Value::Null => py.None(),
-            serde_json::Value::Bool(b) => (*b).into_pyobject(py).unwrap().to_owned().into_any().unbind(),
+            serde_json::Value::Bool(b) => (*b)
+                .into_pyobject(py)
+                .unwrap()
+                .to_owned()
+                .into_any()
+                .unbind(),
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     i.into_pyobject(py).unwrap().into_any().unbind()
                 } else {
-                    n.as_f64().unwrap_or(0.0).into_pyobject(py).unwrap().into_any().unbind()
+                    n.as_f64()
+                        .unwrap_or(0.0)
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any()
+                        .unbind()
                 }
             }
             serde_json::Value::String(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
@@ -125,7 +142,8 @@ pub mod python {
             }
             serde_json::Value::Object(map)
         } else if let Ok(list) = obj.downcast::<PyList>() {
-            let arr: Vec<serde_json::Value> = list.iter()
+            let arr: Vec<serde_json::Value> = list
+                .iter()
                 .map(|item| pyobject_to_json(py, &item))
                 .collect();
             serde_json::Value::Array(arr)
@@ -140,23 +158,29 @@ pub mod python {
         let mut filters = Vec::new();
         for (k, v) in dict.iter() {
             let key = k.extract::<String>()?;
-            
+
             if key == "$and" {
                 if let Ok(list) = v.downcast::<PyList>() {
-                    let sub_filters = list.iter().map(|item| {
-                        let sub_dict = item.downcast::<PyDict>()?;
-                        dict_to_filter(py, sub_dict)
-                    }).collect::<PyResult<Vec<_>>>()?;
+                    let sub_filters = list
+                        .iter()
+                        .map(|item| {
+                            let sub_dict = item.downcast::<PyDict>()?;
+                            dict_to_filter(py, sub_dict)
+                        })
+                        .collect::<PyResult<Vec<_>>>()?;
                     filters.push(Filter::And(sub_filters));
                 }
                 continue;
             }
             if key == "$or" {
                 if let Ok(list) = v.downcast::<PyList>() {
-                    let sub_filters = list.iter().map(|item| {
-                        let sub_dict = item.downcast::<PyDict>()?;
-                        dict_to_filter(py, sub_dict)
-                    }).collect::<PyResult<Vec<_>>>()?;
+                    let sub_filters = list
+                        .iter()
+                        .map(|item| {
+                            let sub_dict = item.downcast::<PyDict>()?;
+                            dict_to_filter(py, sub_dict)
+                        })
+                        .collect::<PyResult<Vec<_>>>()?;
                     filters.push(Filter::Or(sub_filters));
                 }
                 continue;
@@ -166,63 +190,90 @@ pub mod python {
                 for (op_k, op_v) in op_dict.iter() {
                     let op_str = op_k.extract::<String>()?;
                     let val = pyobject_to_json(py, &op_v);
-                    
+
                     let filter_op = match op_str.as_str() {
                         "$eq" => Filter::Eq(key.clone(), val),
                         "$ne" => Filter::Ne(key.clone(), val),
                         "$gt" => {
-                            let n = val.as_f64().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("$gt requires a number"))?;
+                            let n = val.as_f64().ok_or_else(|| {
+                                pyo3::exceptions::PyValueError::new_err("$gt requires a number")
+                            })?;
                             Filter::Gt(key.clone(), n)
                         }
                         "$gte" => {
-                            let n = val.as_f64().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("$gte requires a number"))?;
+                            let n = val.as_f64().ok_or_else(|| {
+                                pyo3::exceptions::PyValueError::new_err("$gte requires a number")
+                            })?;
                             Filter::Gte(key.clone(), n)
                         }
                         "$lt" => {
-                            let n = val.as_f64().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("$lt requires a number"))?;
+                            let n = val.as_f64().ok_or_else(|| {
+                                pyo3::exceptions::PyValueError::new_err("$lt requires a number")
+                            })?;
                             Filter::Lt(key.clone(), n)
                         }
                         "$lte" => {
-                            let n = val.as_f64().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("$lte requires a number"))?;
+                            let n = val.as_f64().ok_or_else(|| {
+                                pyo3::exceptions::PyValueError::new_err("$lte requires a number")
+                            })?;
                             Filter::Lte(key.clone(), n)
                         }
                         "$in" => {
                             if let serde_json::Value::Array(arr) = val {
                                 Filter::In(key.clone(), arr)
                             } else {
-                                return Err(pyo3::exceptions::PyValueError::new_err("$in requires a list"));
+                                return Err(pyo3::exceptions::PyValueError::new_err(
+                                    "$in requires a list",
+                                ));
                             }
                         }
                         "$exists" => {
                             if let serde_json::Value::Bool(b) = val {
                                 Filter::Exists(key.clone(), b)
                             } else {
-                                return Err(pyo3::exceptions::PyValueError::new_err("$exists requires a boolean"));
+                                return Err(pyo3::exceptions::PyValueError::new_err(
+                                    "$exists requires a boolean",
+                                ));
                             }
                         }
                         "$nin" => {
                             if let serde_json::Value::Array(arr) = val {
                                 Filter::Nin(key.clone(), arr)
                             } else {
-                                return Err(pyo3::exceptions::PyValueError::new_err("$nin requires a list"));
+                                return Err(pyo3::exceptions::PyValueError::new_err(
+                                    "$nin requires a list",
+                                ));
                             }
                         }
                         "$size" => {
-                            let s = val.as_u64().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("$size requires a non-negative integer"))?;
+                            let s = val.as_u64().ok_or_else(|| {
+                                pyo3::exceptions::PyValueError::new_err(
+                                    "$size requires a non-negative integer",
+                                )
+                            })?;
                             Filter::Size(key.clone(), s as usize)
                         }
                         "$all" => {
                             if let serde_json::Value::Array(arr) = val {
                                 Filter::All(key.clone(), arr)
                             } else {
-                                return Err(pyo3::exceptions::PyValueError::new_err("$all requires a list"));
+                                return Err(pyo3::exceptions::PyValueError::new_err(
+                                    "$all requires a list",
+                                ));
                             }
                         }
                         "$type" => {
-                            let t = val.as_str().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("$type requires a string"))?;
+                            let t = val.as_str().ok_or_else(|| {
+                                pyo3::exceptions::PyValueError::new_err("$type requires a string")
+                            })?;
                             Filter::TypeMatch(key.clone(), t.to_string())
                         }
-                        _ => return Err(pyo3::exceptions::PyValueError::new_err(format!("Unsupported operator: {}", op_str))),
+                        _ => {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "Unsupported operator: {}",
+                                op_str
+                            )));
+                        }
                     };
                     filters.push(filter_op);
                 }
@@ -231,7 +282,7 @@ pub mod python {
                 filters.push(Filter::Eq(key, val));
             }
         }
-        
+
         if filters.is_empty() {
             Ok(Filter::Eq("none".into(), serde_json::Value::Null))
         } else if filters.len() == 1 {
@@ -247,7 +298,7 @@ pub mod python {
             "normal" => Ok(crate::storage::wal::SyncMode::Normal),
             "off" => Ok(crate::storage::wal::SyncMode::Off),
             _ => Err(pyo3::exceptions::PyValueError::new_err(
-                "Unsupported sync_mode. Use 'full', 'normal', or 'off'"
+                "Unsupported sync_mode. Use 'full', 'normal', or 'off'",
             )),
         }
     }
@@ -259,12 +310,37 @@ pub mod python {
         fn new(path: &str, dim: usize, dtype: &str, sync_mode: &str) -> PyResult<Self> {
             let sm = parse_sync_mode(sync_mode)?;
             let inner = match dtype {
-                "f32" => DbBackend::F32(GenericDatabase::<f32>::open_with_sync(path, dim, sm).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?),
-                "f16" => DbBackend::F16(GenericDatabase::<half::f16>::open_with_sync(path, dim, sm).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?),
-                "u64" => DbBackend::U64(GenericDatabase::<u64>::open_with_sync(path, dim, sm).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?),
-                _ => return Err(pyo3::exceptions::PyValueError::new_err("Unsupported dtype. Use 'f32', 'f16', or 'u64'")),
+                "f32" => DbBackend::F32(
+                    GenericDatabase::<f32>::open_with_sync(path, dim, sm).map_err(
+                        |e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        },
+                    )?,
+                ),
+                "f16" => DbBackend::F16(
+                    GenericDatabase::<half::f16>::open_with_sync(path, dim, sm).map_err(
+                        |e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        },
+                    )?,
+                ),
+                "u64" => DbBackend::U64(
+                    GenericDatabase::<u64>::open_with_sync(path, dim, sm).map_err(
+                        |e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        },
+                    )?,
+                ),
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "Unsupported dtype. Use 'f32', 'f16', or 'u64'",
+                    ));
+                }
             };
-            Ok(Self { inner, dtype: dtype.to_string() })
+            Ok(Self {
+                inner,
+                dtype: dtype.to_string(),
+            })
         }
 
         /// 运行时切换 WAL 同步模式: "full" / "normal" / "off"
@@ -274,51 +350,91 @@ pub mod python {
             Ok(())
         }
 
-        fn insert(&mut self, py: Python<'_>, vector: Bound<'_, PyAny>, payload: &Bound<'_, PyAny>) -> PyResult<u64> {
+        fn insert(
+            &mut self,
+            py: Python<'_>,
+            vector: Bound<'_, PyAny>,
+            payload: &Bound<'_, PyAny>,
+        ) -> PyResult<u64> {
             let json = pyobject_to_json(py, payload);
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = vector.extract()?;
-                    db.insert(&vec, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                    db.insert(&vec, json)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })
                 }
                 DbBackend::F16(db) => {
                     let vec: Vec<f32> = vector.extract()?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
-                    db.insert(&vec16, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                    db.insert(&vec16, json)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })
                 }
                 DbBackend::U64(db) => {
                     let vec: Vec<u64> = vector.extract()?;
-                    db.insert(&vec, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                    db.insert(&vec, json)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })
                 }
             }
         }
 
-        fn insert_with_id(&mut self, py: Python<'_>, id: u64, vector: Bound<'_, PyAny>, payload: &Bound<'_, PyAny>) -> PyResult<()> {
+        fn insert_with_id(
+            &mut self,
+            py: Python<'_>,
+            id: u64,
+            vector: Bound<'_, PyAny>,
+            payload: &Bound<'_, PyAny>,
+        ) -> PyResult<()> {
             let json = pyobject_to_json(py, payload);
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = vector.extract()?;
-                    db.insert_with_id(id, &vec, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                    db.insert_with_id(id, &vec, json)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })
                 }
                 DbBackend::F16(db) => {
                     let vec: Vec<f32> = vector.extract()?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
-                    db.insert_with_id(id, &vec16, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                    db.insert_with_id(id, &vec16, json)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })
                 }
                 DbBackend::U64(db) => {
                     let vec: Vec<u64> = vector.extract()?;
-                    db.insert_with_id(id, &vec, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                    db.insert_with_id(id, &vec, json)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })
                 }
             }
         }
 
         #[pyo3(signature = (src, dst, label="related", weight=1.0))]
         fn link(&mut self, src: u64, dst: u64, label: &str, weight: f32) -> PyResult<()> {
-            dispatch!(self, mut db => db.link(src, dst, label, weight)).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            dispatch!(self, mut db => db.link(src, dst, label, weight)).map_err(
+                |e: crate::error::TriviumError| {
+                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                },
+            )
         }
 
         #[pyo3(signature = (query_vector, top_k=5, expand_depth=0, min_score=0.5))]
-        fn search(&self, py: Python<'_>, query_vector: Bound<'_, PyAny>, top_k: usize, expand_depth: usize, min_score: f32) -> PyResult<Vec<PySearchHit>> {
+        fn search(
+            &self,
+            py: Python<'_>,
+            query_vector: Bound<'_, PyAny>,
+            top_k: usize,
+            expand_depth: usize,
+            min_score: f32,
+        ) -> PyResult<Vec<PySearchHit>> {
             let results = match &self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
@@ -333,13 +449,19 @@ pub mod python {
                     let vec: Vec<u64> = query_vector.extract()?;
                     db.search(&vec, top_k, expand_depth, min_score)
                 }
-            }.map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            }
+            .map_err(|e: crate::error::TriviumError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })?;
 
-            Ok(results.into_iter().map(|h| PySearchHit {
-                id: h.id,
-                score: h.score,
-                payload: json_to_pyobject(py, &h.payload),
-            }).collect())
+            Ok(results
+                .into_iter()
+                .map(|h| PySearchHit {
+                    id: h.id,
+                    score: h.score,
+                    payload: json_to_pyobject(py, &h.payload),
+                })
+                .collect())
         }
 
         #[pyo3(signature = (
@@ -408,15 +530,21 @@ pub mod python {
                     let vec: Vec<u64> = query_vector.extract()?;
                     db.search_hybrid(q_text, Some(&vec), &config)
                 }
-            }.map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            }
+            .map_err(|e: crate::error::TriviumError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })?;
 
-            Ok(results.into_iter().map(|h| PySearchHit {
-                id: h.id,
-                score: h.score,
-                payload: json_to_pyobject(py, &h.payload),
-            }).collect())
+            Ok(results
+                .into_iter()
+                .map(|h| PySearchHit {
+                    id: h.id,
+                    score: h.score,
+                    payload: json_to_pyobject(py, &h.payload),
+                })
+                .collect())
         }
-        
+
         #[pyo3(signature = (query_vector, query_text, top_k=5, expand_depth=2, min_score=0.1, hybrid_alpha=0.7))]
         fn search_hybrid(
             &self,
@@ -453,56 +581,89 @@ pub mod python {
                     let vec: Vec<u64> = query_vector.extract()?;
                     db.search_hybrid(Some(query_text), Some(&vec), &config)
                 }
-            }.map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            Ok(results.into_iter().map(|h| PySearchHit {
-                id: h.id,
-                score: h.score,
-                payload: json_to_pyobject(py, &h.payload),
-            }).collect())
+            }
+            .map_err(|e: crate::error::TriviumError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })?;
+            Ok(results
+                .into_iter()
+                .map(|h| PySearchHit {
+                    id: h.id,
+                    score: h.score,
+                    payload: json_to_pyobject(py, &h.payload),
+                })
+                .collect())
         }
 
         fn delete(&mut self, id: u64) -> PyResult<()> {
-            dispatch!(self, mut db => db.delete(id))
-                .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            dispatch!(self, mut db => db.delete(id)).map_err(|e: crate::error::TriviumError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })
         }
 
         fn unlink(&mut self, src: u64, dst: u64) -> PyResult<()> {
-            dispatch!(self, mut db => db.unlink(src, dst))
-                .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            dispatch!(self, mut db => db.unlink(src, dst)).map_err(
+                |e: crate::error::TriviumError| {
+                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                },
+            )
         }
 
-        fn update_payload(&mut self, py: Python<'_>, id: u64, payload: &Bound<'_, PyAny>) -> PyResult<()> {
+        fn update_payload(
+            &mut self,
+            py: Python<'_>,
+            id: u64,
+            payload: &Bound<'_, PyAny>,
+        ) -> PyResult<()> {
             let json = pyobject_to_json(py, payload);
-            dispatch!(self, mut db => db.update_payload(id, json))
-                .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            dispatch!(self, mut db => db.update_payload(id, json)).map_err(
+                |e: crate::error::TriviumError| {
+                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                },
+            )
         }
 
         fn update_vector(&mut self, vector: Bound<'_, PyAny>, id: u64) -> PyResult<()> {
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = vector.extract()?;
-                    db.update_vector(id, &vec).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                    db.update_vector(id, &vec)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })
                 }
                 DbBackend::F16(db) => {
                     let vec: Vec<f32> = vector.extract()?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
-                    db.update_vector(id, &vec16).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                    db.update_vector(id, &vec16)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })
                 }
                 DbBackend::U64(db) => {
                     let vec: Vec<u64> = vector.extract()?;
-                    db.update_vector(id, &vec).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                    db.update_vector(id, &vec)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })
                 }
             }
         }
 
         fn index_text(&mut self, id: u64, text: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.index_text(id, text))
-                .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            dispatch!(self, mut db => db.index_text(id, text)).map_err(
+                |e: crate::error::TriviumError| {
+                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                },
+            )
         }
 
         fn index_keyword(&mut self, id: u64, keyword: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.index_keyword(id, keyword))
-                .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            dispatch!(self, mut db => db.index_keyword(id, keyword)).map_err(
+                |e: crate::error::TriviumError| {
+                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                },
+            )
         }
 
         fn build_text_index(&mut self) {
@@ -518,7 +679,7 @@ pub mod python {
                             vector: n.vector.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
                             num_edges: n.edges.len(),
-                        }))
+                        }));
                     }
                 }
                 DbBackend::F16(db) => {
@@ -529,7 +690,7 @@ pub mod python {
                             vector: f32_vec.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
                             num_edges: n.edges.len(),
-                        }))
+                        }));
                     }
                 }
                 DbBackend::U64(db) => {
@@ -539,7 +700,7 @@ pub mod python {
                             vector: n.vector.into_pyobject(py).unwrap().into_any().unbind(),
                             payload: json_to_pyobject(py, &n.payload),
                             num_edges: n.edges.len(),
-                        }))
+                        }));
                     }
                 }
             }
@@ -556,7 +717,9 @@ pub mod python {
         }
 
         fn flush(&mut self) -> PyResult<()> {
-            dispatch!(self, mut db => db.flush()).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            dispatch!(self, mut db => db.flush()).map_err(|e: crate::error::TriviumError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })
         }
 
         fn dim(&self) -> usize {
@@ -590,18 +753,27 @@ pub mod python {
         fn migrate(&self, new_path: &str, new_dim: usize) -> PyResult<Vec<u64>> {
             match &self.inner {
                 DbBackend::F32(db) => {
-                    let (_new_db, ids) = db.migrate_to(new_path, new_dim)
-                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    let (_new_db, ids) = db.migrate_to(new_path, new_dim).map_err(
+                        |e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        },
+                    )?;
                     Ok(ids)
                 }
                 DbBackend::F16(db) => {
-                    let (_new_db, ids) = db.migrate_to(new_path, new_dim)
-                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    let (_new_db, ids) = db.migrate_to(new_path, new_dim).map_err(
+                        |e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        },
+                    )?;
                     Ok(ids)
                 }
                 DbBackend::U64(db) => {
-                    let (_new_db, ids) = db.migrate_to(new_path, new_dim)
-                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    let (_new_db, ids) = db.migrate_to(new_path, new_dim).map_err(
+                        |e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        },
+                    )?;
                     Ok(ids)
                 }
             }
@@ -638,7 +810,12 @@ pub mod python {
         }
 
         fn __repr__(&self) -> String {
-            format!("TriviumDB(dtype={}, nodes={}, dim={})", self.dtype, self.node_count(), self.dim())
+            format!(
+                "TriviumDB(dtype={}, nodes={}, dim={})",
+                self.dtype,
+                self.node_count(),
+                self.dim()
+            )
         }
 
         fn __enter__(slf: Py<Self>) -> Py<Self> {
@@ -663,7 +840,9 @@ pub mod python {
             payloads: &Bound<'_, PyList>,
         ) -> PyResult<Vec<u64>> {
             if vectors.len() != payloads.len() {
-                return Err(pyo3::exceptions::PyValueError::new_err("vectors and payloads must have the same length"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "vectors and payloads must have the same length",
+                ));
             }
             match &mut self.inner {
                 DbBackend::F32(db) => {
@@ -672,7 +851,11 @@ pub mod python {
                         let vec_obj = vectors.get_item(i)?;
                         let vec: Vec<f32> = vec_obj.extract()?;
                         let json = pyobject_to_json(py, &payload_obj);
-                        let id = db.insert(&vec, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                        let id =
+                            db.insert(&vec, json)
+                                .map_err(|e: crate::error::TriviumError| {
+                                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                                })?;
                         ids.push(id);
                     }
                     Ok(ids)
@@ -682,9 +865,14 @@ pub mod python {
                     for (i, payload_obj) in payloads.iter().enumerate() {
                         let vec_obj = vectors.get_item(i)?;
                         let vec: Vec<f32> = vec_obj.extract()?;
-                        let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                        let vec16: Vec<half::f16> =
+                            vec.into_iter().map(half::f16::from_f32).collect();
                         let json = pyobject_to_json(py, &payload_obj);
-                        let id = db.insert(&vec16, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                        let id =
+                            db.insert(&vec16, json)
+                                .map_err(|e: crate::error::TriviumError| {
+                                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                                })?;
                         ids.push(id);
                     }
                     Ok(ids)
@@ -695,7 +883,11 @@ pub mod python {
                         let vec_obj = vectors.get_item(i)?;
                         let vec: Vec<u64> = vec_obj.extract()?;
                         let json = pyobject_to_json(py, &payload_obj);
-                        let id = db.insert(&vec, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                        let id =
+                            db.insert(&vec, json)
+                                .map_err(|e: crate::error::TriviumError| {
+                                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                                })?;
                         ids.push(id);
                     }
                     Ok(ids)
@@ -711,16 +903,22 @@ pub mod python {
             payloads: &Bound<'_, PyList>,
         ) -> PyResult<()> {
             if vectors.len() != payloads.len() || ids.len() != vectors.len() {
-                return Err(pyo3::exceptions::PyValueError::new_err("ids, vectors and payloads must have the same length"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "ids, vectors and payloads must have the same length",
+                ));
             }
-            
+
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     for (i, payload_obj) in payloads.iter().enumerate() {
                         let vec_obj = vectors.get_item(i)?;
                         let vec: Vec<f32> = vec_obj.extract()?;
                         let json = pyobject_to_json(py, &payload_obj);
-                        db.insert_with_id(ids[i], &vec, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                        db.insert_with_id(ids[i], &vec, json).map_err(
+                            |e: crate::error::TriviumError| {
+                                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                            },
+                        )?;
                     }
                     Ok(())
                 }
@@ -728,9 +926,14 @@ pub mod python {
                     for (i, payload_obj) in payloads.iter().enumerate() {
                         let vec_obj = vectors.get_item(i)?;
                         let vec: Vec<f32> = vec_obj.extract()?;
-                        let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                        let vec16: Vec<half::f16> =
+                            vec.into_iter().map(half::f16::from_f32).collect();
                         let json = pyobject_to_json(py, &payload_obj);
-                        db.insert_with_id(ids[i], &vec16, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                        db.insert_with_id(ids[i], &vec16, json).map_err(
+                            |e: crate::error::TriviumError| {
+                                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                            },
+                        )?;
                     }
                     Ok(())
                 }
@@ -739,7 +942,11 @@ pub mod python {
                         let vec_obj = vectors.get_item(i)?;
                         let vec: Vec<u64> = vec_obj.extract()?;
                         let json = pyobject_to_json(py, &payload_obj);
-                        db.insert_with_id(ids[i], &vec, json).map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                        db.insert_with_id(ids[i], &vec, json).map_err(
+                            |e: crate::error::TriviumError| {
+                                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                            },
+                        )?;
                     }
                     Ok(())
                 }
@@ -785,8 +992,9 @@ pub mod python {
 
             match &self.inner {
                 DbBackend::F32(db) => {
-                    let rows = db.query(cypher)
-                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    let rows = db.query(cypher).map_err(|e: crate::error::TriviumError| {
+                        pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                    })?;
                     // f32 直接转 f64 满足 Into<f64> bound
                     let result = {
                         let mut out = Vec::with_capacity(rows.len());
@@ -795,54 +1003,69 @@ pub mod python {
                             for (var_name, node) in &row {
                                 let node_dict = PyDict::new(py);
                                 let _ = node_dict.set_item("id", node.id);
-                                let _ = node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
+                                let _ = node_dict
+                                    .set_item("payload", json_to_pyobject(py, &node.payload));
                                 let _ = node_dict.set_item("num_edges", node.edges.len());
                                 let _ = py_row.set_item(var_name, node_dict);
                             }
-                            out.push(PyQueryRow { row: py_row.into_any().unbind() });
+                            out.push(PyQueryRow {
+                                row: py_row.into_any().unbind(),
+                            });
                         }
                         out
                     };
                     Ok(result)
                 }
                 DbBackend::F16(db) => {
-                    let rows = db.query(cypher)
-                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    let rows = db.query(cypher).map_err(|e: crate::error::TriviumError| {
+                        pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                    })?;
                     let mut out = Vec::with_capacity(rows.len());
                     for row in rows {
                         let py_row = PyDict::new(py);
                         for (var_name, node) in &row {
                             let node_dict = PyDict::new(py);
                             let _ = node_dict.set_item("id", node.id);
-                            let _ = node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
+                            let _ =
+                                node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
                             let _ = node_dict.set_item("num_edges", node.edges.len());
                             let _ = py_row.set_item(var_name, node_dict);
                         }
-                        out.push(PyQueryRow { row: py_row.into_any().unbind() });
+                        out.push(PyQueryRow {
+                            row: py_row.into_any().unbind(),
+                        });
                     }
                     Ok(out)
                 }
                 DbBackend::U64(db) => {
-                    let rows = db.query(cypher)
-                        .map_err(|e: crate::error::TriviumError| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    let rows = db.query(cypher).map_err(|e: crate::error::TriviumError| {
+                        pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                    })?;
                     let mut out = Vec::with_capacity(rows.len());
                     for row in rows {
                         let py_row = PyDict::new(py);
                         for (var_name, node) in &row {
                             let node_dict = PyDict::new(py);
                             let _ = node_dict.set_item("id", node.id);
-                            let _ = node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
+                            let _ =
+                                node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
                             let _ = node_dict.set_item("num_edges", node.edges.len());
                             let _ = py_row.set_item(var_name, node_dict);
                         }
-                        out.push(PyQueryRow { row: py_row.into_any().unbind() });
+                        out.push(PyQueryRow {
+                            row: py_row.into_any().unbind(),
+                        });
                     }
                     Ok(out)
                 }
             }
         }
 
-        fn filter_where(&self, py: Python<'_>, condition: &Bound<'_, PyDict>) -> PyResult<Vec<PyNodeView>> {
+        fn filter_where(
+            &self,
+            py: Python<'_>,
+            condition: &Bound<'_, PyDict>,
+        ) -> PyResult<Vec<PyNodeView>> {
             let filter = dict_to_filter(py, condition)?;
             let mut result_list = Vec::new();
             match &self.inner {
@@ -884,9 +1107,11 @@ pub mod python {
 
     #[pyfunction]
     pub fn init_logger() {
-        use tracing_subscriber::{fmt, EnvFilter};
+        use tracing_subscriber::{EnvFilter, fmt};
         let _ = fmt()
-            .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
+            .with_env_filter(
+                EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()),
+            )
             .try_init();
     }
 

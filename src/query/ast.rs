@@ -48,11 +48,7 @@ pub struct EdgePattern {
 /// WHERE 子句条件
 #[derive(Debug, Clone)]
 pub enum Condition {
-    Compare {
-        left: Expr,
-        op: CompOp,
-        right: Expr,
-    },
+    Compare { left: Expr, op: CompOp, right: Expr },
     And(Box<Condition>, Box<Condition>),
     Or(Box<Condition>, Box<Condition>),
 }

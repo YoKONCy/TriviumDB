@@ -14,7 +14,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let id3 = db.insert(&[0.0, 0.0, 1.0, 0.0], json!({"name": "Charlie", "age": 22}))?;
         db.link(id1, id2, "friend", 0.9)?;
         db.link(id2, id3, "colleague", 0.7)?;
-        println!("  Inserted {} nodes, flushing to {}", db.node_count(), db_path);
+        println!(
+            "  Inserted {} nodes, flushing to {}",
+            db.node_count(),
+            db_path
+        );
         db.flush()?;
         println!("  Flush complete! File created.");
     } // db dropped here - simulating app exit
@@ -29,8 +33,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Verify all nodes survived
         for id in 1..=3u64 {
             if let Some(node) = db.get(id) {
-                println!("  Node[{}]: payload={}, edges={}, vec={:?}",
-                    node.id, node.payload, node.edges.len(), node.vector);
+                println!(
+                    "  Node[{}]: payload={}, edges={}, vec={:?}",
+                    node.id,
+                    node.payload,
+                    node.edges.len(),
+                    node.vector
+                );
             }
         }
 
@@ -45,7 +54,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("\n  Search for vector near Alice [0.9, 0.1, 0, 0], expand=1:");
         let results = db.search(&[0.9, 0.1, 0.0, 0.0], 1, 1, 0.5)?;
         for hit in &results {
-            println!("    [ID:{}] score={:.4} | {}", hit.id, hit.score, hit.payload);
+            println!(
+                "    [ID:{}] score={:.4} | {}",
+                hit.id, hit.score, hit.payload
+            );
         }
     }
 

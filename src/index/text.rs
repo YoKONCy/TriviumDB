@@ -1,9 +1,9 @@
+use crate::node::NodeId;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use std::collections::HashMap;
-use crate::node::NodeId;
 
 /// 综合文本搜索引擎：AC自动机 (精准关键词触发) + BM25 (大段落兜底打分)
-/// 
+///
 /// 作为一个可选项，它与稠密向量搜索（Dense）形成完全互补，
 /// 构成了 TriviumDB 的 混合检索（Hybrid Search）闭环机制。
 #[derive(Default)]
@@ -43,22 +43,27 @@ impl TextIndex {
     /// 注册一个高权重短元特征汇聚点（精准提取并置信度极高）
     pub fn add_keyword(&mut self, id: NodeId, keyword: &str) {
         let kw = keyword.to_lowercase();
-        self.keyword_to_nodes.entry(kw.clone()).or_default().push(id);
+        self.keyword_to_nodes
+            .entry(kw.clone())
+            .or_default()
+            .push(id);
     }
 
     /// 注册一段长文本，建立 BM25 2-Gram 倒排
     pub fn add_text(&mut self, id: NodeId, text: &str) {
         let text_lower = text.to_lowercase();
         let chars: Vec<char> = text_lower.chars().collect();
-        if chars.is_empty() { return; }
-        
+        if chars.is_empty() {
+            return;
+        }
+
         // 我们通过 2-Gram 滑动窗口进行纯净的稀疏表征
         let tokens: Vec<String> = if chars.len() > 1 {
             chars.windows(2).map(|w| w.iter().collect()).collect()
         } else {
             vec![text_lower]
         };
-        
+
         let mut local_tf = HashMap::new();
         for token in &tokens {
             *local_tf.entry(token.clone()).or_insert(0) += 1;
@@ -68,9 +73,7 @@ impl TextIndex {
         self.doc_lengths.insert(id, dl);
 
         for (token, tf) in local_tf {
-            self.bm25_tf.entry(token)
-                .or_default()
-                .insert(id, tf);
+            self.bm25_tf.entry(token).or_default().insert(id, tf);
         }
     }
 
@@ -82,7 +85,7 @@ impl TextIndex {
         if !keys.is_empty() {
             if let Ok(ac) = AhoCorasickBuilder::new()
                 .match_kind(MatchKind::LeftmostLongest)
-                .build(&keys) 
+                .build(&keys)
             {
                 self.ac_matcher = Some(ac);
                 self.keywords = keys;
@@ -100,11 +103,15 @@ impl TextIndex {
     /// 执行 BM25 检索，返回命中节点的原始相似度得分
     pub fn search_bm25(&self, query: &str, k1: f32, b: f32) -> HashMap<NodeId, f32> {
         let mut results = HashMap::new();
-        if self.total_docs == 0 { return results; }
+        if self.total_docs == 0 {
+            return results;
+        }
 
         let query_lower = query.to_lowercase();
         let chars: Vec<char> = query_lower.chars().collect();
-        if chars.is_empty() { return results; }
+        if chars.is_empty() {
+            return results;
+        }
 
         // 查询向量化
         let tokens: Vec<String> = if chars.len() > 1 {
@@ -126,12 +133,13 @@ impl TextIndex {
                 let df = docs.len() as f32;
                 // IDF 平滑 (BM25 标准)
                 let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-                
+
                 for (&id, &tf) in docs {
                     let dl = *self.doc_lengths.get(&id).unwrap_or(&0) as f32;
                     let tf_f32 = tf as f32;
                     // Okapi BM25 打分公式
-                    let tf_norm = (tf_f32 * (k1 + 1.0)) / (tf_f32 + k1 * (1.0 - b + b * dl / avg_dl));
+                    let tf_norm =
+                        (tf_f32 * (k1 + 1.0)) / (tf_f32 + k1 * (1.0 - b + b * dl / avg_dl));
                     *results.entry(id).or_insert(0.0) += idf * tf_norm;
                 }
             }

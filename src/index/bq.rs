@@ -1,5 +1,5 @@
-use bytemuck::{Pod, Zeroable};
 use crate::VectorType;
+use bytemuck::{Pod, Zeroable};
 
 /// 512-bit (64-byte) 二进制量化指纹 (Binary Quantization Fingerprint)
 ///
@@ -38,7 +38,8 @@ impl BqSignature {
     /// 执行位掩码比较 (Hamming 距离)，结果越小说明两个签名在这 512 个空间切分下越接近
     #[inline]
     pub fn hamming_distance(&self, other: &Self) -> u32 {
-        self.data.iter()
+        self.data
+            .iter()
             .zip(other.data.iter())
             .map(|(a, b)| (a ^ b).count_ones())
             .sum()

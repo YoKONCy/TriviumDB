@@ -172,12 +172,12 @@ pub fn fista_solve(
 // ============================================================================
 
 /// 贪心 DPP: 增量 Cholesky 分解行列式采样算法
-/// 
+///
 /// 目的是在 `candidates` 中选取不重复的 `k` 个样本。兼顾个体的得分 `scores`，
 /// 以及它们在向量空间彼此之间的多样性（互相距离越远越好）。
 pub fn dpp_greedy(
-    vecs: &[Vec<f32>],  // (N, d)
-    scores: &[f32],     // (N,)
+    vecs: &[Vec<f32>], // (N, d)
+    scores: &[f32],    // (N,)
     k: usize,
     quality_weight: f32,
 ) -> Vec<usize> {
@@ -270,13 +270,13 @@ pub fn dpp_greedy(
 // ============================================================================
 
 /// NMF 乘法更新算法: V ≈ W × H
-/// 
+///
 /// 将大量实体嵌入矩阵分解，提炼出隐特征。
 /// * V: (m, d), W: (m, k), H: (k, d)
-/// 
+///
 /// 返回: (W, H) 行优先平坦组合
 pub fn nmf_multiplicative_update(
-    v_flat: &[f32], 
+    v_flat: &[f32],
     m: usize,
     d: usize,
     k: usize,
@@ -411,11 +411,11 @@ pub fn nmf_multiplicative_update(
 }
 
 /// NMF 查询深度分析：评估原意图中的不均衡性与新领域
-/// 
+///
 /// 返回: (semantic_depth, topic_coverage, novelty, top_topics_distribution)
 pub fn nmf_analyze_query(
-    query: &[f32],     // (d,)
-    h_flat: &[f32],    // (k, d)
+    query: &[f32],  // (d,)
+    h_flat: &[f32], // (k, d)
     k: usize,
     d: usize,
 ) -> (f32, usize, f32, Vec<f32>) {
@@ -473,10 +473,7 @@ mod tests {
 
     #[test]
     fn test_fista_basic() {
-        let entities = vec![
-            vec![1.0, 0.0, 0.0, 0.0],
-            vec![0.0, 1.0, 0.0, 0.0],
-        ];
+        let entities = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
         let query = vec![0.8, 0.6, 0.0, 0.0];
 
         let (alpha, _residual, norm) = fista_solve(&query, &entities, 0.01, 100);
@@ -489,9 +486,9 @@ mod tests {
     #[test]
     fn test_dpp_diversity() {
         let vecs = vec![
-            vec![1.0, 0.0],   // Dir 1
-            vec![0.99, 0.1],  // Similar to Dir 1
-            vec![0.0, 1.0],   // Dir 2
+            vec![1.0, 0.0],  // Dir 1
+            vec![0.99, 0.1], // Similar to Dir 1
+            vec![0.0, 1.0],  // Dir 2
         ];
         // Element 1 is objectively the best, but elements 0 and 1 are too similar.
         let scores = vec![1.0, 0.9, 0.8];
@@ -504,11 +501,7 @@ mod tests {
 
     #[test]
     fn test_nmf() {
-        let v = vec![
-            1.0, 0.0, 0.5, 0.0,
-            0.0, 1.0, 0.0, 0.5,
-            0.5, 0.5, 0.5, 0.5,
-        ];
+        let v = vec![1.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.5];
         let (w, h) = nmf_multiplicative_update(&v, 3, 4, 2, 100, 1e-3);
         assert_eq!(w.len(), 3 * 2);
         assert_eq!(h.len(), 2 * 4);

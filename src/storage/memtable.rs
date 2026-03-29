@@ -1,9 +1,9 @@
-use crate::error::{Result, TriviumError};
-use crate::node::{Edge, NodeId};
-use crate::storage::vec_pool::VecPool;
 use crate::VectorType;
+use crate::error::{Result, TriviumError};
 use crate::index::bq::BqSignature;
 use crate::index::text::TextIndex;
+use crate::node::{Edge, NodeId};
+use crate::storage::vec_pool::VecPool;
 use std::collections::HashMap;
 
 /// 内存工作区，扮演类似 LSM Tree 中 MemTable 的角色。
@@ -20,9 +20,10 @@ pub struct MemTable<T: VectorType> {
     // 委托给 VecPool，底层为 mmap 基础层 + Vec 增量层
     // 基础层由 OS PageCache 按需加载，启动零拷贝
     vec_pool: VecPool<T>,
-    
+
     // 量化签名池 (LSH / Binary Quantization) 初筛选
     bq_signatures: Vec<BqSignature>,
+    bq_dirty: bool, // delete / update_vector 后标记需要重建
 
     // 附设文本倒排引擎 (完全可选，纯碎占用独立内存不干扰底座)
     text_index: TextIndex,
@@ -32,7 +33,7 @@ pub struct MemTable<T: VectorType> {
 
     // 3. 图谱邻接表 —— 保持纯内存
     edges: HashMap<NodeId, Vec<Edge>>,
-    
+
     // 入度统计表：用于快速查询目标节点的被连接数（支持图谱反向抑制算法）
     in_degrees: HashMap<NodeId, usize>,
 
@@ -49,6 +50,7 @@ impl<T: VectorType> MemTable<T> {
             next_id: 1, // 从 1 开始，保留 0 作为特殊标记
             vec_pool: VecPool::new(dim),
             bq_signatures: Vec::new(),
+            bq_dirty: false,
             text_index: TextIndex::new(),
             payloads: HashMap::new(),
             edges: HashMap::new(),
@@ -72,6 +74,7 @@ impl<T: VectorType> MemTable<T> {
             next_id,
             vec_pool,
             bq_signatures: Vec::new(),
+            bq_dirty: false,
             text_index: TextIndex::new(),
             payloads: HashMap::new(),
             edges: HashMap::new(),
@@ -86,6 +89,14 @@ impl<T: VectorType> MemTable<T> {
         self.next_id
     }
 
+    /// 将 next_id 推进到至少 candidate 值（WAL 回放时防止 ID 复用）
+    #[inline]
+    pub fn advance_next_id(&mut self, candidate: NodeId) {
+        if candidate > self.next_id {
+            self.next_id = candidate;
+        }
+    }
+
     /// 暴露 VecPool 的可变引用（供 flush 时持久化向量池）
     pub fn vec_pool_mut(&mut self) -> &mut VecPool<T> {
         &mut self.vec_pool
@@ -97,7 +108,12 @@ impl<T: VectorType> MemTable<T> {
     }
 
     /// 带指定 ID 的插入（从文件重建时使用，不自增 ID）
-    pub fn raw_insert(&mut self, id: NodeId, vector: &[T], payload: serde_json::Value) -> Result<()> {
+    pub fn raw_insert(
+        &mut self,
+        id: NodeId,
+        vector: &[T],
+        payload: serde_json::Value,
+    ) -> Result<()> {
         if vector.len() != self.dim {
             return Err(TriviumError::DimensionMismatch {
                 expected: self.dim,
@@ -157,7 +173,12 @@ impl<T: VectorType> MemTable<T> {
 
     /// 使用外部指定的 ID 插入节点（例如从外部知识库导入数据）。
     /// 如果 ID 已存在会返回错误，并且会自动更新内部的 next_id 以免未来冲突。
-    pub fn insert_with_id(&mut self, id: NodeId, vector: &[T], payload: serde_json::Value) -> Result<()> {
+    pub fn insert_with_id(
+        &mut self,
+        id: NodeId,
+        vector: &[T],
+        payload: serde_json::Value,
+    ) -> Result<()> {
         if self.payloads.contains_key(&id) {
             return Err(TriviumError::Generic(format!("Node {} already exists", id)));
         }
@@ -192,12 +213,16 @@ impl<T: VectorType> MemTable<T> {
             return Err(TriviumError::NodeNotFound(dst));
         }
 
-        let edge = Edge { target_id: dst, label, weight };
+        let edge = Edge {
+            target_id: dst,
+            label,
+            weight,
+        };
         self.edges.entry(src).or_default().push(edge);
-        
+
         // 增加目标节点的入度计数
         *self.in_degrees.entry(dst).or_insert(0) += 1;
-        
+
         Ok(())
     }
 
@@ -209,30 +234,31 @@ impl<T: VectorType> MemTable<T> {
     #[inline]
     pub fn ensure_vectors_cache(&mut self) {
         self.vec_pool.ensure_cache();
-        
+
         let total = self.vec_pool.total_count();
-        if self.bq_signatures.len() != total {
+        if self.bq_signatures.len() != total || self.bq_dirty {
             self.rebuild_bq_signatures(total);
+            self.bq_dirty = false;
         }
     }
-    
+
     fn rebuild_bq_signatures(&mut self, total: usize) {
         let dim = self.dim();
         let flat = self.vec_pool.flat_vectors();
-        
+
         // 我们利用 flat_vectors 来并行 / 串行提取 1-bit BQ 特征
         let mut new_bq = Vec::with_capacity(total);
         for chunk in flat.chunks(dim) {
             new_bq.push(BqSignature::from_vector(chunk));
         }
-        
+
         // 兜底以防向量池维度异常不对齐
         while new_bq.len() < total {
             new_bq.push(BqSignature::empty());
         }
         self.bq_signatures = new_bq;
     }
-    
+
     /// 获取 BQ 量化初筛签名
     pub fn get_bq_signature(&self, index: usize) -> Option<BqSignature> {
         self.bq_signatures.get(index).copied()
@@ -287,12 +313,15 @@ impl<T: VectorType> MemTable<T> {
                 }
             }
         }
-        
+
         for edge_list in self.edges.values_mut() {
             edge_list.retain(|e| e.target_id != id);
             // 这里就不需要在外层大循环里再去减 self.in_degrees[&id] 了，直接在下面把这个 id 从 in_degrees 中移除即可
         }
         self.in_degrees.remove(&id);
+
+        // BQ 签名已过期，标记需要重建
+        self.bq_dirty = true;
 
         Ok(())
     }
@@ -337,9 +366,15 @@ impl<T: VectorType> MemTable<T> {
                 got: vector.len(),
             });
         }
+        // 必须同时检查 payload 存在性：delete() 会移除 payload 但保留 ids_to_indices，
+        // 仅检查索引表会让 tombstone 节点被错误更新
+        if !self.payloads.contains_key(&id) {
+            return Err(TriviumError::NodeNotFound(id));
+        }
         match self.ids_to_indices.get(&id) {
             Some(&idx) => {
                 self.vec_pool.update(idx, vector);
+                self.bq_dirty = true; // 向量变了，BQ 签名需要重建
                 Ok(())
             }
             None => Err(TriviumError::NodeNotFound(id)),
@@ -348,16 +383,22 @@ impl<T: VectorType> MemTable<T> {
 
     /// 按 ID 获取节点的原生向量（返回切片引用）
     pub fn get_vector(&self, id: NodeId) -> Option<&[T]> {
-        self.ids_to_indices.get(&id).and_then(|&idx| {
-            self.vec_pool.get(idx)
-        })
+        self.ids_to_indices
+            .get(&id)
+            .and_then(|&idx| self.vec_pool.get(idx))
     }
 
     /// 当前活跃节点数量
     pub fn node_count(&self) -> usize {
         self.payloads.len()
     }
-    
+
+    /// 内部槽位总数（含 tombstone 空洞），用于 BQ 签名遍历
+    #[inline]
+    pub fn internal_slot_count(&self) -> usize {
+        self.indices_to_ids.len()
+    }
+
     /// 获取节点的入度数（若不存在则返回0）
     pub fn get_in_degree(&self, id: NodeId) -> usize {
         self.in_degrees.get(&id).copied().unwrap_or(0)
@@ -394,36 +435,63 @@ impl<T: VectorType> MemTable<T> {
     /// 只计算增量层和合并缓存的实际堆分配。
     pub fn estimated_memory_bytes(&self) -> usize {
         let vec_bytes = self.vec_pool.heap_memory_bytes();
-        let payload_bytes: usize = self.payloads.values()
-            .map(|v| v.to_string().len())
-            .sum();
-        let edge_bytes: usize = self.edges.values()
+        let payload_bytes: usize = self.payloads.values().map(|v| v.to_string().len()).sum();
+        let edge_bytes: usize = self
+            .edges
+            .values()
             .map(|es| es.len() * std::mem::size_of::<Edge>())
             .sum();
         let index_bytes = self.indices_to_ids.len() * std::mem::size_of::<NodeId>()
-            + self.ids_to_indices.len() * (std::mem::size_of::<NodeId>() + std::mem::size_of::<usize>());
+            + self.ids_to_indices.len()
+                * (std::mem::size_of::<NodeId>() + std::mem::size_of::<usize>());
         vec_bytes + payload_bytes + edge_bytes + index_bytes
     }
 
     // --- 文本引擎接口 ---
-    
+
     pub fn index_keyword(&mut self, id: NodeId, keyword: &str) {
         if self.contains(id) {
             self.text_index.add_keyword(id, keyword);
         }
     }
-    
+
     pub fn index_text(&mut self, id: NodeId, text: &str) {
         if self.contains(id) {
             self.text_index.add_text(id, text);
         }
     }
-    
+
     pub fn build_text_index(&mut self) {
         self.text_index.build();
     }
-    
+
     pub fn text_engine(&self) -> &TextIndex {
         &self.text_index
+    }
+
+    /// 从已有的 payload 自动重建 TextIndex（供重启加载后调用）
+    ///
+    /// 遍历所有活跃节点的 payload JSON，将字符串字段值注入 BM25 倒排索引。
+    /// 这使得文本混合检索在重启后自动恢复，无需额外持久化文件。
+    pub fn rebuild_text_index_from_payloads(&mut self) {
+        self.text_index.clear();
+        for (&id, payload) in &self.payloads {
+            if let serde_json::Value::Object(map) = payload {
+                for (_key, value) in map {
+                    if let serde_json::Value::String(text) = value {
+                        if !text.is_empty() {
+                            self.text_index.add_text(id, text);
+                        }
+                    }
+                }
+            }
+        }
+        self.text_index.build();
+        if self.payloads.len() > 0 {
+            tracing::info!(
+                "TextIndex 从 {} 个节点的 payload 自动重建完成",
+                self.payloads.len()
+            );
+        }
     }
 }

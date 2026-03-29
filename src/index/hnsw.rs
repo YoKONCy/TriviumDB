@@ -1,5 +1,5 @@
-use crate::node::{NodeId, SearchHit};
 use crate::VectorType;
+use crate::node::{NodeId, SearchHit};
 use instant_distance::{Builder, Point, Search};
 
 /// 泛型向量点：持有任意 VectorType 的向量数据

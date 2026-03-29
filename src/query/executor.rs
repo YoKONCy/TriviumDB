@@ -6,11 +6,10 @@
 /// 3. 每一层的节点都绑定到对应的变量名
 /// 4. 最终对所有"完整路径"应用 WHERE 过滤
 /// 5. 提取 RETURN 变量对应的节点返回
-
 use super::ast::*;
+use crate::VectorType;
 use crate::node::Node;
 use crate::storage::memtable::MemTable;
-use crate::VectorType;
 use std::collections::HashMap;
 
 /// 单条查询结果：变量名 → 节点快照
@@ -96,15 +95,18 @@ pub fn execute<T: VectorType>(query: &Query, memtable: &MemTable<T>) -> QueryRes
 
     // 步骤 4：仅保留 RETURN 中请求的变量
     let return_vars = &query.return_vars;
-    bindings_set.iter().map(|binding: &HashMap<String, Node<T>>| {
-        let mut filtered: HashMap<String, Node<T>> = HashMap::new();
-        for var in return_vars {
-            if let Some(node) = binding.get(var) {
-                filtered.insert(var.clone(), node.clone());
+    bindings_set
+        .iter()
+        .map(|binding: &HashMap<String, Node<T>>| {
+            let mut filtered: HashMap<String, Node<T>> = HashMap::new();
+            for var in return_vars {
+                if let Some(node) = binding.get(var) {
+                    filtered.insert(var.clone(), node.clone());
+                }
             }
-        }
-        filtered
-    }).collect()
+            filtered
+        })
+        .collect()
 }
 
 fn find_candidates<T: VectorType>(node_pat: &NodePattern, memtable: &MemTable<T>) -> Vec<Node<T>> {
@@ -114,7 +116,11 @@ fn find_candidates<T: VectorType>(node_pat: &NodePattern, memtable: &MemTable<T>
     // 如果用户的 Cypher 包含确切的 ID，例如：MATCH (a {id: 42})
     // 我们直接进入 O(1) 的 HashMap get，而不需要全表扫描！
     let exact_id = node_pat.props.iter().find(|p| p.key == "id").and_then(|p| {
-        if let LitValue::Int(tid) = &p.value { Some(*tid as u64) } else { None }
+        if let LitValue::Int(tid) = &p.value {
+            Some(*tid as u64)
+        } else {
+            None
+        }
     });
 
     if let Some(id) = exact_id {
@@ -145,7 +151,10 @@ fn find_candidates<T: VectorType>(node_pat: &NodePattern, memtable: &MemTable<T>
 fn build_node<T: VectorType>(id: u64, memtable: &MemTable<T>) -> Option<Node<T>> {
     let vector = memtable.get_vector(id)?;
     let payload = memtable.get_payload(id)?;
-    let edges = memtable.get_edges(id).map(|e| e.to_vec()).unwrap_or_default();
+    let edges = memtable
+        .get_edges(id)
+        .map(|e| e.to_vec())
+        .unwrap_or_default();
     Some(Node {
         id,
         vector: vector.to_vec(),
@@ -196,12 +205,8 @@ fn eval_condition<T: VectorType>(cond: &Condition, binding: &HashMap<String, Nod
             let rval = eval_expr(right, binding);
             compare_values(&lval, op, &rval)
         }
-        Condition::And(a, b) => {
-            eval_condition(a, binding) && eval_condition(b, binding)
-        }
-        Condition::Or(a, b) => {
-            eval_condition(a, binding) || eval_condition(b, binding)
-        }
+        Condition::And(a, b) => eval_condition(a, binding) && eval_condition(b, binding),
+        Condition::Or(a, b) => eval_condition(a, binding) || eval_condition(b, binding),
     }
 }
 
@@ -262,13 +267,11 @@ fn compare_values(lhs: &RuntimeValue, op: &CompOp, rhs: &RuntimeValue) -> bool {
         (RuntimeValue::Int(a), RuntimeValue::Float(b)) => cmp_f64(*a as f64, op, *b),
         (RuntimeValue::Float(a), RuntimeValue::Int(b)) => cmp_f64(*a, op, *b as f64),
         (RuntimeValue::Str(a), RuntimeValue::Str(b)) => cmp_ord(a, op, b),
-        (RuntimeValue::Bool(a), RuntimeValue::Bool(b)) => {
-            match op {
-                CompOp::Eq => a == b,
-                CompOp::Ne => a != b,
-                _ => false,
-            }
-        }
+        (RuntimeValue::Bool(a), RuntimeValue::Bool(b)) => match op {
+            CompOp::Eq => a == b,
+            CompOp::Ne => a != b,
+            _ => false,
+        },
         _ => false,
     }
 }

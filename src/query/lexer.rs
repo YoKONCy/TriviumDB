@@ -18,25 +18,25 @@ pub enum Token {
     BoolLit(bool),
 
     // 符号
-    LParen,    // (
-    RParen,    // )
-    LBracket,  // [
-    RBracket,  // ]
-    LBrace,    // {
-    RBrace,    // }
-    Colon,     // :
-    Dot,       // .
-    Comma,     // ,
-    Arrow,     // ->
-    Dash,      // -
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
+    LBrace,   // {
+    RBrace,   // }
+    Colon,    // :
+    Dot,      // .
+    Comma,    // ,
+    Arrow,    // ->
+    Dash,     // -
 
     // 运算符
-    Eq,        // ==
-    Ne,        // !=
-    Gte,       // >=
-    Lte,       // <=
-    Gt,        // >
-    Lt,        // <
+    Eq,  // ==
+    Ne,  // !=
+    Gte, // >=
+    Lte, // <=
+    Gt,  // >
+    Lt,  // <
 
     Eof,
 }
@@ -87,15 +87,42 @@ impl Lexer {
                 }
                 Some(ch) => {
                     let tok = match ch {
-                        '(' => { self.advance(); Token::LParen }
-                        ')' => { self.advance(); Token::RParen }
-                        '[' => { self.advance(); Token::LBracket }
-                        ']' => { self.advance(); Token::RBracket }
-                        '{' => { self.advance(); Token::LBrace }
-                        '}' => { self.advance(); Token::RBrace }
-                        ':' => { self.advance(); Token::Colon }
-                        '.' => { self.advance(); Token::Dot }
-                        ',' => { self.advance(); Token::Comma }
+                        '(' => {
+                            self.advance();
+                            Token::LParen
+                        }
+                        ')' => {
+                            self.advance();
+                            Token::RParen
+                        }
+                        '[' => {
+                            self.advance();
+                            Token::LBracket
+                        }
+                        ']' => {
+                            self.advance();
+                            Token::RBracket
+                        }
+                        '{' => {
+                            self.advance();
+                            Token::LBrace
+                        }
+                        '}' => {
+                            self.advance();
+                            Token::RBrace
+                        }
+                        ':' => {
+                            self.advance();
+                            Token::Colon
+                        }
+                        '.' => {
+                            self.advance();
+                            Token::Dot
+                        }
+                        ',' => {
+                            self.advance();
+                            Token::Comma
+                        }
 
                         '-' => {
                             self.advance();
@@ -177,9 +204,13 @@ impl Lexer {
                                 }
                             }
                             if is_float {
-                                Token::FloatLit(num_str.parse().map_err(|e| format!("Bad float: {}", e))?)
+                                Token::FloatLit(
+                                    num_str.parse().map_err(|e| format!("Bad float: {}", e))?,
+                                )
                             } else {
-                                Token::IntLit(num_str.parse().map_err(|e| format!("Bad int: {}", e))?)
+                                Token::IntLit(
+                                    num_str.parse().map_err(|e| format!("Bad int: {}", e))?,
+                                )
                             }
                         }
 

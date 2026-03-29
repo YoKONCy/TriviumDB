@@ -1,9 +1,9 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BatchSize};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use rand::Rng;
-use triviumdb::Database;
-use triviumdb::database::SearchConfig;
 use serde_json::json;
 use std::fs;
+use triviumdb::Database;
+use triviumdb::database::SearchConfig;
 
 // 辅助方法：生成随机向量
 fn generate_vector(dim: usize) -> Vec<f32> {
@@ -29,9 +29,7 @@ fn bench_inserts(c: &mut Criterion) {
     c.bench_function("insert_with_wal", |b| {
         b.iter_batched(
             || generate_vector(dim),
-            |vec| {
-                db.insert(black_box(&vec), payload.clone()).unwrap()
-            },
+            |vec| db.insert(black_box(&vec), payload.clone()).unwrap(),
             BatchSize::SmallInput,
         )
     });
@@ -59,16 +57,14 @@ fn bench_search(c: &mut Criterion) {
     // 强制落盘，让搜索测试走 mmap（如果有相关逻辑）或者纯内存
     db.flush().unwrap();
     drop(db); // Windows 下必需释放文件系统锁，否则后续 open 会崩溃
-    
+
     // 打开只读模式测试读取
     let db_read = Database::open(db_path, dim).unwrap();
 
     let query = generate_vector(dim);
 
     c.bench_function(&format!("search_10k_dim{}", dim), |b| {
-        b.iter(|| {
-            db_read.search(black_box(&query), 10, 0, 0.0).unwrap()
-        })
+        b.iter(|| db_read.search(black_box(&query), 10, 0, 0.0).unwrap())
     });
 
     let _ = fs::remove_file(db_path);
@@ -87,10 +83,12 @@ fn bench_hybrid_search(c: &mut Criterion) {
     let data_size = 5000;
     let mut ids = Vec::with_capacity(data_size);
     for _ in 0..data_size {
-        let id = db.insert(&generate_vector(dim), json!({"tag": "base"})).unwrap();
+        let id = db
+            .insert(&generate_vector(dim), json!({"tag": "base"}))
+            .unwrap();
         ids.push(id);
     }
-    
+
     // 生成一些网络边以测试扩线能力
     let mut rng = rand::thread_rng();
     for i in 0..data_size {
@@ -128,13 +126,16 @@ fn bench_cognitive_pipeline(c: &mut Criterion) {
     db.disable_auto_compaction();
 
     let data_size = 5000;
-    println!("Pre-loading {} nodes for cognitive pipeline benchmark...", data_size);
+    println!(
+        "Pre-loading {} nodes for cognitive pipeline benchmark...",
+        data_size
+    );
     let dataset = generate_dataset(data_size, dim);
     let mut ids = Vec::with_capacity(data_size);
     for vec in &dataset {
         ids.push(db.insert(vec, json!({"cognitive": "bench"})).unwrap());
     }
-    
+
     // 生成关联网络以测试漫游
     let mut rng = rand::thread_rng();
     for _ in 0..(data_size * 2) {
@@ -155,7 +156,7 @@ fn bench_cognitive_pipeline(c: &mut Criterion) {
         enable_sparse_residual: true, // 启用 FISTA 影子查询
         fista_lambda: 0.1,
         fista_threshold: 0.2, // 容易触发残差查询
-        enable_dpp: true, // 启用多样性采样
+        enable_dpp: true,     // 启用多样性采样
         dpp_quality_weight: 1.0,
         ..Default::default()
     };
@@ -163,14 +164,18 @@ fn bench_cognitive_pipeline(c: &mut Criterion) {
     let db_read = Database::open(db_path, dim).unwrap();
 
     c.bench_function("cognitive_search_advanced", |b| {
-        b.iter(|| {
-            db_read.search_advanced(black_box(&query), &config).unwrap()
-        })
+        b.iter(|| db_read.search_advanced(black_box(&query), &config).unwrap())
     });
 
     let _ = fs::remove_file(db_path);
     let _ = fs::remove_file(format!("{}.wal", db_path));
 }
 
-criterion_group!(benches, bench_inserts, bench_search, bench_hybrid_search, bench_cognitive_pipeline);
+criterion_group!(
+    benches,
+    bench_inserts,
+    bench_search,
+    bench_hybrid_search,
+    bench_cognitive_pipeline
+);
 criterion_main!(benches);

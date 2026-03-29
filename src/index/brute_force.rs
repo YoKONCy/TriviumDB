@@ -1,5 +1,5 @@
-use crate::node::{NodeId, SearchHit};
 use crate::VectorType;
+use crate::node::{NodeId, SearchHit};
 use rayon::prelude::*;
 
 /// rayon 并行扫描 SoA 向量池。
@@ -36,7 +36,11 @@ pub fn search<T: VectorType>(
         })
         .collect();
 
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(top_k);
     hits
 }

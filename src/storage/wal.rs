@@ -6,14 +6,21 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// WAL 条目：记录每一次变更操作
+///
+/// 注意：payload 使用 String（JSON 字符串）而非 serde_json::Value，
+/// 因为 bincode 不支持 serde_json::Value 的 deserialize_any 方法。
 #[derive(Debug, Serialize, Deserialize)]
 pub enum WalEntry<T> {
-    TxBegin { tx_id: u64 },
-    TxCommit { tx_id: u64 },
+    TxBegin {
+        tx_id: u64,
+    },
+    TxCommit {
+        tx_id: u64,
+    },
     Insert {
         id: NodeId,
         vector: Vec<T>,
-        payload: serde_json::Value,
+        payload: String, // JSON 字符串
     },
     Link {
         src: NodeId,
@@ -30,7 +37,7 @@ pub enum WalEntry<T> {
     },
     UpdatePayload {
         id: NodeId,
-        payload: serde_json::Value,
+        payload: String, // JSON 字符串
     },
     UpdateVector {
         id: NodeId,
@@ -102,8 +109,7 @@ impl Wal {
     /// 写入后立即 fsync，保证即使 OS 崩溃数据也不丢失
     pub fn append<T: serde::Serialize>(&mut self, entry: &WalEntry<T>) -> Result<()> {
         if let Some(ref mut writer) = self.writer {
-            let data = bincode::serialize(entry)
-                .map_err(|e| TriviumError::Serialization(e))?;
+            let data = bincode::serialize(entry).map_err(|e| TriviumError::Serialization(e))?;
 
             // 计算 CRC32 校验和
             let checksum = crc32fast::hash(&data);
@@ -136,7 +142,11 @@ impl Wal {
     /// 批量追加一个事务的所有日志（附带事务边界）
     ///
     /// 会自动打上 TxBegin 和 TxCommit 封条，并且仅在整个 Batch 写入完毕后才做一次 fsync。
-    pub fn append_batch<T: serde::Serialize>(&mut self, tx_id: u64, entries: &[WalEntry<T>]) -> Result<()> {
+    pub fn append_batch<T: serde::Serialize>(
+        &mut self,
+        tx_id: u64,
+        entries: &[WalEntry<T>],
+    ) -> Result<()> {
         if let Some(ref mut writer) = self.writer {
             let mut write_single = |entry: &WalEntry<T>| -> Result<()> {
                 let data = bincode::serialize(entry).map_err(|e| TriviumError::Serialization(e))?;
@@ -150,12 +160,12 @@ impl Wal {
 
             // 1. 写 TxBegin
             write_single(&WalEntry::TxBegin { tx_id })?;
-            
+
             // 2. 写实体记录
             for e in entries {
                 write_single(e)?;
             }
-            
+
             // 3. 写 TxCommit（封条）
             write_single(&WalEntry::TxCommit { tx_id })?;
 
@@ -226,7 +236,9 @@ impl Wal {
                 // CRC 不匹配 → 数据损坏，停止回放
                 tracing::error!(
                     "WAL CRC mismatch at entry {}: stored={:#010x}, computed={:#010x}. Stopping recovery.",
-                    entries.len(), stored_crc, computed_crc
+                    entries.len(),
+                    stored_crc,
+                    computed_crc
                 );
                 break;
             }
@@ -235,7 +247,11 @@ impl Wal {
             match bincode::deserialize::<WalEntry<T>>(&data) {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
-                    tracing::error!("WAL Deserialize error at entry {}: {}. Stopping recovery.", entries.len(), e);
+                    tracing::error!(
+                        "WAL Deserialize error at entry {}: {}. Stopping recovery.",
+                        entries.len(),
+                        e
+                    );
                     break;
                 }
             }
@@ -272,9 +288,12 @@ impl Wal {
                 }
             }
         }
-        
+
         if in_tx && !pending_tx.is_empty() {
-            tracing::warn!("Discarded a partial transaction ({} operations) due to missing TxCommit (Power loss simulation).", pending_tx.len());
+            tracing::warn!(
+                "Discarded a partial transaction ({} operations) due to missing TxCommit (Power loss simulation).",
+                pending_tx.len()
+            );
         }
 
         Ok(committed)
@@ -297,6 +316,17 @@ impl Wal {
         self.writer = Some(BufWriter::new(file));
         self.sync_mode = mode;
         Ok(())
+    }
+
+    /// 显式 flush BufWriter 中缓冲的数据到磁盘
+    ///
+    /// 在 Database 的 Drop 中调用，确保已写入的 WAL 条目不会因为
+    /// BufWriter 的析构链（Arc<Mutex<Wal>>）而静默丢失。
+    pub fn flush_writer(&mut self) {
+        if let Some(ref mut writer) = self.writer {
+            let _ = writer.flush();
+            let _ = writer.get_ref().sync_all();
+        }
     }
 
     /// WAL 文件是否存在且非空（用于判断是否需要恢复）

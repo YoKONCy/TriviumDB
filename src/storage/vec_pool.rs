@@ -101,7 +101,11 @@ impl<T: VectorType> VecPool<T> {
     /// 增量层的向量数量
     #[inline]
     pub fn delta_count(&self) -> usize {
-        if self.dim == 0 { 0 } else { self.delta.len() / self.dim }
+        if self.dim == 0 {
+            0
+        } else {
+            self.delta.len() / self.dim
+        }
     }
 
     /// 基础层的向量数量
@@ -181,9 +185,7 @@ impl<T: VectorType> VecPool<T> {
                 let ptr = bytes.as_ptr();
                 if (ptr as usize) % std::mem::align_of::<T>() == 0 {
                     // 对齐情况：零拷贝直接引用
-                    unsafe {
-                        std::slice::from_raw_parts(ptr as *const T, self.dim)
-                    }
+                    unsafe { std::slice::from_raw_parts(ptr as *const T, self.dim) }
                 } else {
                     // 不对齐：回退到合并缓存
                     // 这种情况在实践中几乎不会发生（mmap 通常页对齐）
@@ -246,12 +248,12 @@ impl<T: VectorType> VecPool<T> {
     pub fn detach_mmap(&mut self) {
         if self.mmap.is_some() {
             self.ensure_cache(); // 触发全量读取并合并
-            
+
             // 剥离：深度全量复制给 delta
             let mut new_delta = Vec::with_capacity(self.merged.len());
             new_delta.extend_from_slice(&self.merged);
             self.delta = new_delta;
-            
+
             // 剥离内核映射句柄（释放文件锁）
             self.mmap = None;
             self.vec_path = None;
