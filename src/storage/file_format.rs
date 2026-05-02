@@ -110,6 +110,11 @@ fn flush_ok_path_from_db(db_path: &str) -> String {
     format!("{}.flush_ok", db_path)
 }
 
+/// QuIVer 索引文件路径（.tdb → .tdb.quiver）
+fn quiver_path_from_db(db_path: &str) -> String {
+    format!("{}.quiver", db_path)
+}
+
 pub fn save<T: VectorType>(
     memtable: &mut MemTable<T>,
     path: &str,
@@ -118,7 +123,23 @@ pub fn save<T: VectorType>(
     match mode {
         StorageMode::Mmap => save_mmap(memtable, path),
         StorageMode::Rom => save_rom(memtable, path),
+    }?;
+
+    // 顺便持久化 QuIVer 索引（如果已构建）
+    let quiver_path = quiver_path_from_db(path);
+    if let Some(quiver) = memtable.quiver() {
+        if let Err(e) = quiver.save_to_file(std::path::Path::new(&quiver_path)) {
+            tracing::warn!("QuIVer 索引持久化失败（不影响主数据）: {}", e);
+        }
+    } else {
+        // QuIVer 不存在时清理残留文件
+        let qp = std::path::Path::new(&quiver_path);
+        if qp.exists() {
+            std::fs::remove_file(qp).ok();
+        }
     }
+
+    Ok(())
 }
 
 /// Mmap 模式保存：分离向量到 .vec 文件，.tdb 纯元数据
@@ -441,6 +462,7 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
             )?;
             // 尝试从 BQ Block 恢复签名
             load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+            load_quiver_index(&mut mt, path);
             Ok(mt)
         } else {
             tracing::warn!(
@@ -460,6 +482,7 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
             ) {
                 Ok(mut mt) => {
                     load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+                    load_quiver_index(&mut mt, path);
                     Ok(mt)
                 }
                 Err(e) => {
@@ -474,6 +497,7 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
                         edge_limit_offset,
                     )?;
                     load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+                    load_quiver_index(&mut mt, path);
                     Ok(mt)
                 }
             }
@@ -492,6 +516,8 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
         )?;
         // 尝试从 BQ Block 恢复签名
         load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+        // 尝试加载 QuIVer 索引
+        load_quiver_index(&mut mt, path);
         Ok(mt)
     }
 }
@@ -725,4 +751,31 @@ fn load_bq_block<T: VectorType>(
 
     memtable.set_bq_signatures(sigs);
     tracing::info!("从 .tdb 恢复了 {} 个 BQ 签名（零拷贝加载）", bq_count);
+}
+
+/// 尝试从 .tdb.quiver 文件加载 QuIVer 索引
+///
+/// 如果文件不存在或加载失败，静默跳过（首次查询时惰性重建）。
+fn load_quiver_index<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) {
+    use crate::index::quiver::QuIVer;
+
+    let quiver_path = quiver_path_from_db(db_path);
+    let qp = std::path::Path::new(&quiver_path);
+    if !qp.exists() {
+        return;
+    }
+
+    match QuIVer::load_from_file(qp) {
+        Ok(quiver) => {
+            memtable.set_quiver_index(quiver);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "QuIVer 索引加载失败（将在首次查询时自动重建）: {}",
+                e
+            );
+            // 删除损坏的文件
+            std::fs::remove_file(qp).ok();
+        }
+    }
 }

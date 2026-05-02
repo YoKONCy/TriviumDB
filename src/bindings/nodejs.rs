@@ -59,8 +59,7 @@ pub mod nodejs {
         pub enable_refractory_fatigue: Option<bool>,
         pub enable_text_hybrid_search: Option<bool>,
         pub text_boost: Option<f64>,
-        pub bq_candidate_ratio: Option<f64>,
-        pub enable_bq_coarse_search: Option<bool>,
+        pub force_brute_force: Option<bool>,
         pub custom_query_text: Option<String>,
     }
 
@@ -237,8 +236,7 @@ pub mod nodejs {
                 custom_query_text: None,
                 enable_text_hybrid_search: None,
                 text_boost: None,
-                bq_candidate_ratio: None,
-                enable_bq_coarse_search: None,
+                force_brute_force: None,
             });
 
             let core_config = crate::database::SearchConfig {
@@ -255,8 +253,7 @@ pub mod nodejs {
                 enable_refractory_fatigue: cfg.enable_refractory_fatigue.unwrap_or(false),
                 enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
                 text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
-                bq_candidate_ratio: cfg.bq_candidate_ratio.unwrap_or(0.05) as f32,
-                enable_bq_coarse_search: cfg.enable_bq_coarse_search.unwrap_or(false),
+                force_brute_force: cfg.force_brute_force.unwrap_or(false),
                 ..Default::default()
             };
 
@@ -674,8 +671,7 @@ pub mod nodejs {
                 custom_query_text: None,
                 enable_text_hybrid_search: None,
                 text_boost: None,
-                bq_candidate_ratio: None,
-                enable_bq_coarse_search: None,
+                force_brute_force: None,
             });
 
             let core_config = crate::database::SearchConfig {
@@ -692,8 +688,7 @@ pub mod nodejs {
                 enable_refractory_fatigue: cfg.enable_refractory_fatigue.unwrap_or(false),
                 enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
                 text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
-                bq_candidate_ratio: cfg.bq_candidate_ratio.unwrap_or(0.05) as f32,
-                enable_bq_coarse_search: cfg.enable_bq_coarse_search.unwrap_or(false),
+                force_brute_force: cfg.force_brute_force.unwrap_or(false),
                 ..Default::default()
             };
 

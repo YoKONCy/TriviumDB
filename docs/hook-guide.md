@@ -55,7 +55,7 @@ TriviumDB v0.6.0 引入的 Hook 系统提供了 **6 个管线关键阶段的自�
       │
   ┌── 内置召回管线 ──────────┐
   │  L1 AC自动机 + BM25 文本  │
-  │  L2 BruteForce / BQ 向量  │
+  │  L2 BruteForce / QuIVer 向量 │
   │  L3 布隆特征预过滤        │
   │  L4 FISTA 残差寻隐        │
   │  L5 影子查询              │

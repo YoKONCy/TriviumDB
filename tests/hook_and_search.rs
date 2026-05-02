@@ -412,8 +412,6 @@ fn COV3_16_advanced_pipeline() {
         expand_depth: 2,
         min_score: 0.0,
         enable_advanced_pipeline: true,
-        enable_bq_coarse_search: true,
-        bq_candidate_ratio: 0.5,
         enable_dpp: true,
         dpp_quality_weight: 0.5,
         enable_text_hybrid_search: true,

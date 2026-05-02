@@ -1,6 +1,6 @@
 [package]
 name = "triviumdb"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["YoKONCy <2752026184@qq.com>"]
 description = "A high-performance memory-mmap hybrid search engine built for AI, combining dense vector, sparse text, graph relations, and JSON metadata."
@@ -18,6 +18,7 @@ default = []
 python = ["dep:pyo3"]
 nodejs = ["dep:napi", "dep:napi-derive"]
 cli = [] # 仅供终端工具使用
+usearch-bench = ["dep:usearch"]
 
 [[bin]]
 name = "triviumdb"
@@ -47,6 +48,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 aho-corasick = "1.1.4"
 libloading = "0.8"
+usearch = { version = "2.25.1", default-features = false, optional = true }
 
 [build-dependencies]
 napi-build = "2"
@@ -82,29 +84,23 @@ name = "bench_medium"
 harness = false
 
 [[bench]]
-name = "bench_lpi"
-harness = false
-
-[[bench]]
-name = "bench_ppi"
-harness = false
-
-[[bench]]
-name = "bench_dpp_graph"
-harness = false
-
-[[bench]]
-name = "bench_gru_router"
-harness = false
-
-[[bench]]
-name = "bench_gru_graph"
-harness = false
-
-[[bench]]
-name = "bench_bq_hnsw"
+name = "bench_quiver_ablation"
 harness = false
 
 [profile.release]
 lto = true
 codegen-units = 1
+
+[[bench]]
+name = "bench_cohere1m"
+harness = false
+
+[[bench]]
+name = "bench_random1m"
+harness = false
+
+[[bench]]
+name = "bench_usearch_cohere1m"
+harness = false
+required-features = ["usearch-bench"]
+

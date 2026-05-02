@@ -280,6 +280,27 @@ pub mod python {
             dispatch!(self, mut db => db.clear_hook());
         }
 
+        /// 注册一个 Python 原生 Hook 对象
+        ///
+        /// Python 类只需实现感兴趣的方法（鸭子类型，全部可选）：
+        /// - on_pre_search(self, query_vector, ctx) -> Optional[list[float]]
+        /// - on_post_recall(self, hits, ctx) -> Optional[list[dict]]
+        /// - on_rerank(self, hits, ctx) -> Optional[list[dict]]
+        /// - on_post_search(self, hits, ctx) -> Optional[list[dict]]
+        ///
+        /// 示例：
+        /// ```python
+        /// class MyHook:
+        ///     def on_post_recall(self, hits, ctx):
+        ///         return [h for h in hits if h["score"] > 0.5]
+        ///
+        /// db.set_hook(MyHook())
+        /// ```
+        fn set_hook(&mut self, hook: PyObject) {
+            let wrapper = PySearchHookWrapper { py_hook: hook };
+            dispatch!(self, mut db => db.set_hook(wrapper));
+        }
+
         /// 带 Hook 上下文的检索：返回 (hits, context)
         ///
         /// 除了返回检索结果外，同时返回 HookContext 对象，
@@ -500,10 +521,9 @@ pub mod python {
             enable_refractory_fatigue=false,
             enable_text_hybrid_search=false,
             text_boost=1.5,
-            bq_candidate_ratio=0.05,
             custom_query_text=None,
             payload_filter=None,
-            enable_bq_coarse_search=false
+            force_brute_force=false
         ))]
         fn search_advanced(
             &self,
@@ -522,10 +542,9 @@ pub mod python {
             enable_refractory_fatigue: bool,
             enable_text_hybrid_search: bool,
             text_boost: f32,
-            bq_candidate_ratio: f32,
             custom_query_text: Option<String>,
             payload_filter: Option<&Bound<'_, PyDict>>,
-            enable_bq_coarse_search: bool,
+            force_brute_force: bool,
         ) -> PyResult<Vec<PySearchHit>> {
             // 解析 payload_filter（类 MongoDB 语法的 dict -> Rust Filter）
             let rust_filter = match payload_filter {
@@ -547,8 +566,7 @@ pub mod python {
                 enable_refractory_fatigue,
                 enable_text_hybrid_search,
                 text_boost,
-                bq_candidate_ratio,
-                enable_bq_coarse_search,
+                force_brute_force,
                 payload_filter: rust_filter,
                 ..Default::default()
             };
@@ -1148,9 +1166,485 @@ pub mod python {
             Ok(dict.into_any().unbind())
         }
 
+        // ════════ Leiden 社区检测 ════════
+
+        /// Leiden 社区聚类
+        ///
+        /// 基于图谱边结构进行 Leiden/Louvain 近似社区发现。
+        /// 返回一个字典，包含:
+        /// - communities: list[list[int]] — 每个社区的节点 ID 列表
+        /// - centroids: dict[int, list[float]] — 社区质心向量（可选）
+        /// - num_clusters: int — 发现的社区总数
+        ///
+        /// 示例：
+        /// ```python
+        /// result = db.leiden_cluster(min_community_size=3, max_iterations=15)
+        /// for community in result["communities"]:
+        ///     print(f"社区: {community}")
+        /// ```
+        #[pyo3(signature = (min_community_size=3, max_iterations=15, compute_centroids=true))]
+        fn leiden_cluster(
+            &self,
+            py: Python<'_>,
+            min_community_size: usize,
+            max_iterations: usize,
+            compute_centroids: bool,
+        ) -> PyResult<PyObject> {
+            let result = dispatch!(self, db => db.leiden_cluster(
+                min_community_size,
+                Some(max_iterations),
+                Some(compute_centroids),
+            ))
+            .map_err(|e: crate::error::TriviumError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })?;
+
+            // 按社区分组: cluster_id -> [node_ids]
+            let mut clusters: std::collections::HashMap<u32, Vec<u64>> =
+                std::collections::HashMap::new();
+            for (&node_id, &cluster_id) in &result.node_to_cluster {
+                clusters.entry(cluster_id).or_default().push(node_id);
+            }
+
+            // 排序确保确定性输出
+            let mut sorted_keys: Vec<u32> = clusters.keys().copied().collect();
+            sorted_keys.sort_unstable();
+
+            let communities = PyList::new(
+                py,
+                sorted_keys.iter().map(|k| {
+                    let mut ids = clusters.get(k).cloned().unwrap_or_default();
+                    ids.sort_unstable();
+                    ids
+                }),
+            )?;
+
+            let centroids_dict = PyDict::new(py);
+            if compute_centroids {
+                for &k in &sorted_keys {
+                    if let Some(centroid) = result.centroids.get(&k) {
+                        let _ = centroids_dict.set_item(k, centroid.clone());
+                    }
+                }
+            }
+
+            let out = PyDict::new(py);
+            let _ = out.set_item("communities", communities);
+            let _ = out.set_item("centroids", centroids_dict);
+            let _ = out.set_item("num_clusters", result.num_clusters);
+            Ok(out.into_any().unbind())
+        }
+
+        // ════════ 事务 ════════
+
+        /// 开启一个轻量级事务，返回 PyTransaction 对象
+        ///
+        /// 支持上下文管理器风格：
+        /// ```python
+        /// with db.transaction() as tx:
+        ///     tx.insert([1.0, 0.0], {"name": "Alice"})
+        ///     tx.link(1, 2, label="knows")
+        ///     # 正常退出 → 自动 commit
+        ///     # 异常 → 自动 rollback
+        /// ```
+        fn transaction(slf: Py<Self>, py: Python<'_>) -> PyResult<PyTransaction> {
+            let dtype = slf.borrow(py).dtype.clone();
+            let builder = match dtype.as_str() {
+                "f32" => TxBuilderBackend::F32(crate::database::TxBuilder::new()),
+                "f16" => TxBuilderBackend::F16(crate::database::TxBuilder::new()),
+                "u64" => TxBuilderBackend::U64(crate::database::TxBuilder::new()),
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        format!("不支持的 dtype: {}", dtype),
+                    ));
+                }
+            };
+            Ok(PyTransaction {
+                db: slf,
+                builder: Some(builder),
+                finished: false,
+            })
+        }
+
         /// 显式关闭数据库（落盘后释放资源）
         fn close(&mut self) -> PyResult<()> {
             self.flush()
+        }
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  PyTransaction — 基于 Rust TxBuilder 的事务绑定
+    // ════════════════════════════════════════════════════════
+
+    /// 按 dtype 分发的 TxBuilder 后端
+    enum TxBuilderBackend {
+        F32(crate::database::TxBuilder<f32>),
+        F16(crate::database::TxBuilder<half::f16>),
+        U64(crate::database::TxBuilder<u64>),
+    }
+
+    /// Python 侧的轻量级事务对象
+    ///
+    /// 底层直接使用 Rust TxBuilder 收集操作，commit 时调用 Database::commit_tx。
+    /// 支持上下文管理器 (with 语句)。
+    #[pyclass(name = "Transaction")]
+    struct PyTransaction {
+        db: Py<PyTriviumDB>,
+        builder: Option<TxBuilderBackend>,
+        finished: bool,
+    }
+
+    /// 检查事务是否已结束的辅助宏
+    macro_rules! check_finished {
+        ($self:expr) => {
+            if $self.finished {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "事务已结束（已提交或已回滚），不能继续添加操作",
+                ));
+            }
+        };
+    }
+
+    #[pymethods]
+    impl PyTransaction {
+        /// 缓冲一个插入操作
+        fn insert(&mut self, py: Python<'_>, vector: Vec<f64>, payload: &Bound<'_, PyAny>) -> PyResult<()> {
+            check_finished!(self);
+            let json = pyobject_to_json(py, payload);
+            match self.builder.as_mut().expect("TxBuilder missing") {
+                TxBuilderBackend::F32(b) => {
+                    let v: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
+                    b.insert(&v, json);
+                }
+                TxBuilderBackend::F16(b) => {
+                    let v: Vec<half::f16> = vector.iter().map(|&x| half::f16::from_f32(x as f32)).collect();
+                    b.insert(&v, json);
+                }
+                TxBuilderBackend::U64(b) => {
+                    let v: Vec<u64> = vector.iter().map(|&x| x as u64).collect();
+                    b.insert(&v, json);
+                }
+            }
+            Ok(())
+        }
+
+        /// 缓冲一个带自定义 ID 的插入操作
+        fn insert_with_id(&mut self, py: Python<'_>, id: u64, vector: Vec<f64>, payload: &Bound<'_, PyAny>) -> PyResult<()> {
+            check_finished!(self);
+            let json = pyobject_to_json(py, payload);
+            match self.builder.as_mut().expect("TxBuilder missing") {
+                TxBuilderBackend::F32(b) => {
+                    let v: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
+                    b.insert_with_id(id, &v, json);
+                }
+                TxBuilderBackend::F16(b) => {
+                    let v: Vec<half::f16> = vector.iter().map(|&x| half::f16::from_f32(x as f32)).collect();
+                    b.insert_with_id(id, &v, json);
+                }
+                TxBuilderBackend::U64(b) => {
+                    let v: Vec<u64> = vector.iter().map(|&x| x as u64).collect();
+                    b.insert_with_id(id, &v, json);
+                }
+            }
+            Ok(())
+        }
+
+        /// 缓冲一个连边操作
+        #[pyo3(signature = (src, dst, label="related", weight=1.0))]
+        fn link(&mut self, src: u64, dst: u64, label: &str, weight: f32) -> PyResult<()> {
+            check_finished!(self);
+            match self.builder.as_mut().expect("TxBuilder missing") {
+                TxBuilderBackend::F32(b) => b.link(src, dst, label, weight),
+                TxBuilderBackend::F16(b) => b.link(src, dst, label, weight),
+                TxBuilderBackend::U64(b) => b.link(src, dst, label, weight),
+            }
+            Ok(())
+        }
+
+        /// 缓冲一个删除操作
+        fn delete(&mut self, id: u64) -> PyResult<()> {
+            check_finished!(self);
+            match self.builder.as_mut().expect("TxBuilder missing") {
+                TxBuilderBackend::F32(b) => b.delete(id),
+                TxBuilderBackend::F16(b) => b.delete(id),
+                TxBuilderBackend::U64(b) => b.delete(id),
+            }
+            Ok(())
+        }
+
+        /// 缓冲一个断边操作
+        fn unlink(&mut self, src: u64, dst: u64) -> PyResult<()> {
+            check_finished!(self);
+            match self.builder.as_mut().expect("TxBuilder missing") {
+                TxBuilderBackend::F32(b) => b.unlink(src, dst),
+                TxBuilderBackend::F16(b) => b.unlink(src, dst),
+                TxBuilderBackend::U64(b) => b.unlink(src, dst),
+            }
+            Ok(())
+        }
+
+        /// 缓冲一个更新 payload 操作
+        fn update_payload(&mut self, py: Python<'_>, id: u64, payload: &Bound<'_, PyAny>) -> PyResult<()> {
+            check_finished!(self);
+            let json = pyobject_to_json(py, payload);
+            match self.builder.as_mut().expect("TxBuilder missing") {
+                TxBuilderBackend::F32(b) => b.update_payload(id, json),
+                TxBuilderBackend::F16(b) => b.update_payload(id, json),
+                TxBuilderBackend::U64(b) => b.update_payload(id, json),
+            }
+            Ok(())
+        }
+
+        /// 缓冲一个更新向量操作
+        fn update_vector(&mut self, id: u64, vector: Vec<f64>) -> PyResult<()> {
+            check_finished!(self);
+            match self.builder.as_mut().expect("TxBuilder missing") {
+                TxBuilderBackend::F32(b) => {
+                    let v: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
+                    b.update_vector(id, &v);
+                }
+                TxBuilderBackend::F16(b) => {
+                    let v: Vec<half::f16> = vector.iter().map(|&x| half::f16::from_f32(x as f32)).collect();
+                    b.update_vector(id, &v);
+                }
+                TxBuilderBackend::U64(b) => {
+                    let v: Vec<u64> = vector.iter().map(|&x| x as u64).collect();
+                    b.update_vector(id, &v);
+                }
+            }
+            Ok(())
+        }
+
+        /// 当前事务中缓冲的操作数
+        fn pending_count(&self) -> usize {
+            match self.builder.as_ref() {
+                Some(TxBuilderBackend::F32(b)) => b.pending_count(),
+                Some(TxBuilderBackend::F16(b)) => b.pending_count(),
+                Some(TxBuilderBackend::U64(b)) => b.pending_count(),
+                None => 0,
+            }
+        }
+
+        /// 原子提交事务：Dry-Run 预检 + WAL-first 写入
+        fn commit(&mut self, py: Python<'_>) -> PyResult<Vec<u64>> {
+            if self.finished {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "事务已结束（已提交或已回滚），不能重复提交",
+                ));
+            }
+            self.finished = true;
+            let builder = self.builder.take().expect("TxBuilder missing");
+            let mut db_ref = self.db.borrow_mut(py);
+
+            match (&mut db_ref.inner, builder) {
+                (DbBackend::F32(db), TxBuilderBackend::F32(b)) => {
+                    db.commit_tx(b).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                }
+                (DbBackend::F16(db), TxBuilderBackend::F16(b)) => {
+                    db.commit_tx(b).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                }
+                (DbBackend::U64(db), TxBuilderBackend::U64(b)) => {
+                    db.commit_tx(b).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+                }
+                _ => Err(pyo3::exceptions::PyRuntimeError::new_err("dtype 不匹配")),
+            }
+        }
+
+        /// 回滚事务（丢弃所有缓冲操作）
+        fn rollback(&mut self) -> PyResult<()> {
+            if self.finished {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "事务已结束（已提交或已回滚），不能重复回滚",
+                ));
+            }
+            self.finished = true;
+            self.builder.take();
+            Ok(())
+        }
+
+        // 上下文管理器支持
+        fn __enter__(slf: Py<Self>) -> Py<Self> {
+            slf
+        }
+
+        #[pyo3(signature = (exc_type=None, _exc_val=None, _exc_tb=None))]
+        fn __exit__(
+            &mut self,
+            py: Python<'_>,
+            exc_type: Option<&Bound<'_, PyAny>>,
+            _exc_val: Option<&Bound<'_, PyAny>>,
+            _exc_tb: Option<&Bound<'_, PyAny>>,
+        ) -> PyResult<bool> {
+            if self.finished {
+                return Ok(false);
+            }
+            if exc_type.is_some() {
+                self.finished = true;
+                self.builder.take();
+            } else {
+                self.commit(py)?;
+            }
+            Ok(false)
+        }
+
+        fn __repr__(&self) -> String {
+            format!(
+                "Transaction(pending={}, finished={})",
+                self.pending_count(),
+                self.finished
+            )
+        }
+    }
+
+
+
+    // ════════════════════════════════════════════════════════
+    //  PySearchHookWrapper — Python 原生 Hook 支持
+    // ════════════════════════════════════════════════════════
+
+    /// 将 Python 对象包装为 Rust SearchHook trait 实现
+    ///
+    /// Python 类只需实现感兴趣的方法（鸭子类型）：
+    /// - on_pre_search(self, query_vector, config, ctx) -> None
+    /// - on_post_recall(self, hits, ctx) -> None
+    /// - on_rerank(self, hits, ctx) -> Optional[list]
+    /// - on_post_search(self, hits, ctx) -> None
+    struct PySearchHookWrapper {
+        py_hook: PyObject,
+    }
+
+    // SAFETY: PyObject 本身是 Send+Sync（它只是一个引用计数指针），
+    // 实际的 Python 调用在 with_gil 中执行，由 GIL 保证线程安全。
+    unsafe impl Send for PySearchHookWrapper {}
+    unsafe impl Sync for PySearchHookWrapper {}
+
+    impl PySearchHookWrapper {
+        /// 将 Rust Vec<SearchHit> 转换为 Python list[dict]
+        fn hits_to_py(py: Python<'_>, hits: &[crate::node::SearchHit]) -> PyObject {
+            let list = pyo3::types::PyList::new(
+                py,
+                hits.iter().map(|h| {
+                    let d = PyDict::new(py);
+                    let _ = d.set_item("id", h.id);
+                    let _ = d.set_item("score", h.score);
+                    let _ = d.set_item("payload", json_to_pyobject(py, &h.payload));
+                    d
+                }),
+            ).expect("创建 Python list 失败");
+            list.into_any().unbind()
+        }
+
+        /// 将 Python list[dict] 转换回 Rust Vec<SearchHit>
+        fn py_to_hits(py: Python<'_>, obj: &PyObject) -> Vec<crate::node::SearchHit> {
+            let mut hits = Vec::new();
+            if let Ok(list) = obj.bind(py).downcast::<pyo3::types::PyList>() {
+                for item in list.iter() {
+                    if let Ok(dict) = item.downcast::<PyDict>() {
+                        let id = dict.get_item("id").ok().flatten()
+                            .and_then(|v| v.extract::<u64>().ok()).unwrap_or(0);
+                        let score = dict.get_item("score").ok().flatten()
+                            .and_then(|v| v.extract::<f32>().ok()).unwrap_or(0.0);
+                        let payload = dict.get_item("payload").ok().flatten()
+                            .map(|v| pyobject_to_json(py, &v))
+                            .unwrap_or(serde_json::Value::Null);
+                        hits.push(crate::node::SearchHit { id, score, payload });
+                    }
+                }
+            }
+            hits
+        }
+    }
+
+    impl crate::hook::SearchHook for PySearchHookWrapper {
+        fn on_pre_search(
+            &self,
+            query_vector: &mut Vec<f32>,
+            _config: &mut crate::database::SearchConfig,
+            ctx: &mut crate::hook::HookContext,
+        ) {
+            pyo3::Python::with_gil(|py| {
+                let hook = self.py_hook.bind(py);
+                if let Ok(method) = hook.getattr("on_pre_search") {
+                    if let Ok(py_vec) = pyo3::types::PyList::new(py, query_vector.iter()) {
+                        let py_ctx = PyDict::new(py);
+                        let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
+                        let _ = py_ctx.set_item("abort", ctx.abort);
+
+                        if let Ok(result) = method.call1((&py_vec, &py_ctx)) {
+                            // 如果返回了新向量，替换之
+                            if let Ok(new_vec) = result.extract::<Vec<f32>>() {
+                                *query_vector = new_vec;
+                            }
+                            // 检查 ctx.abort 是否被修改
+                            if let Ok(Some(abort_val)) = py_ctx.get_item("abort") {
+                                if let Ok(ab) = abort_val.extract::<bool>() {
+                                    ctx.abort = ab;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        fn on_post_recall(&self, hits: &mut Vec<crate::node::SearchHit>, ctx: &mut crate::hook::HookContext) {
+            pyo3::Python::with_gil(|py| {
+                let hook = self.py_hook.bind(py);
+                if let Ok(method) = hook.getattr("on_post_recall") {
+                    let py_hits = Self::hits_to_py(py, hits);
+                    let py_ctx = PyDict::new(py);
+                    let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
+
+                    if let Ok(result) = method.call1((&py_hits, &py_ctx)) {
+                        // 如果返回了列表，替换 hits
+                        if !result.is_none() {
+                            let obj = result.unbind();
+                            *hits = Self::py_to_hits(py, &obj);
+                        }
+                    }
+                }
+            });
+        }
+
+        fn on_rerank(
+            &self,
+            hits: &mut Vec<crate::node::SearchHit>,
+            ctx: &mut crate::hook::HookContext,
+        ) -> Option<Vec<crate::node::SearchHit>> {
+            pyo3::Python::with_gil(|py| {
+                let hook = self.py_hook.bind(py);
+                if let Ok(method) = hook.getattr("on_rerank") {
+                    let py_hits = Self::hits_to_py(py, hits);
+                    let py_ctx = PyDict::new(py);
+                    let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
+
+                    if let Ok(result) = method.call1((&py_hits, &py_ctx)) {
+                        if !result.is_none() {
+                            let obj = result.unbind();
+                            return Some(Self::py_to_hits(py, &obj));
+                        }
+                    }
+                }
+                None
+            })
+        }
+
+        fn on_post_search(&self, hits: &mut Vec<crate::node::SearchHit>, ctx: &mut crate::hook::HookContext) {
+            pyo3::Python::with_gil(|py| {
+                let hook = self.py_hook.bind(py);
+                if let Ok(method) = hook.getattr("on_post_search") {
+                    let py_hits = Self::hits_to_py(py, hits);
+                    let py_ctx = PyDict::new(py);
+                    let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
+
+                    if let Ok(result) = method.call1((&py_hits, &py_ctx)) {
+                        if !result.is_none() {
+                            let obj = result.unbind();
+                            *hits = Self::py_to_hits(py, &obj);
+                        }
+                    }
+                }
+            });
         }
     }
 
@@ -1171,6 +1665,7 @@ pub mod python {
         m.add_class::<PyNodeView>()?;
         m.add_class::<PyQueryRow>()?;
         m.add_class::<PyHookContext>()?;
+        m.add_class::<PyTransaction>()?;
         m.add_function(wrap_pyfunction!(init_logger, m)?)?;
         Ok(())
     }

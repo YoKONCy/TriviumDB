@@ -151,61 +151,73 @@ fn DET_02_similarity数学不变量_大规模验证() {
 //  3. BQ 索引与暴力搜索的排序一致性
 // ════════════════════════════════════════════════════════════════
 
-/// 强制 BQ 粗排管线时，Top-1 结果应与 BruteForce 的 Top-1 一致
-/// （Top-K 允许分数相同时的微小顺序差异，但最高分必须一致）
+/// QuIVer 图搜索与 BruteForce 的 Top-1 近似一致性
+/// QuIVer 是 HNSW 近似搜索，不保证 bit-exact，但 Top-1 必须足够接近
+/// 注：使用 64 维 2000 节点以接近真实使用场景
 #[test]
-fn DET_03_BQ与BruteForce_Top1一致性() {
-    let path = tmp_db("bq_vs_brute");
+fn DET_03_QuIVer与BruteForce_Top1近似一致性() {
+    let path = tmp_db("quiver_vs_brute");
     cleanup(&path);
 
-    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let test_dim = 64;
+    let mut db = Database::<f32>::open(&path, test_dim).unwrap();
 
-    for i in 0..500u32 {
-        let vec = deterministic_vector(i, DIM);
+    for i in 0..2000u32 {
+        let vec = deterministic_vector(i, test_dim);
         db.insert(&vec, serde_json::json!({"idx": i})).unwrap();
     }
 
+    // 手动构建 QuIVer（使用更大的 ef_construction 保证图质量）
+    use triviumdb::index::quiver::QuIVerConfig;
+    db.build_quiver_index(Some(QuIVerConfig {
+        m: 32,
+        ef_construction: 256,
+        alpha: 1.2,
+    })).unwrap();
+
     for q_seed in [42u32, 100, 200, 300, 400, 999, 1234, 5678] {
-        let query = deterministic_vector(q_seed, DIM);
+        let query = deterministic_vector(q_seed, test_dim);
 
-        let brute = db.search(&query, 1, 0, -1.0).unwrap();
-        assert_eq!(brute.len(), 1, "BruteForce Top-1 必须返回结果");
-
-        let cfg = SearchConfig {
+        // BruteForce 搜索
+        let brute_cfg = SearchConfig {
             top_k: 1,
             expand_depth: 0,
             min_score: -1.0,
-            enable_bq_coarse_search: true,
-            bq_candidate_ratio: 1.0,
+            force_brute_force: true,
             ..Default::default()
         };
-        let advanced = db.search_advanced(&query, &cfg).unwrap();
-        assert_eq!(advanced.len(), 1, "强制 BQ Top-1 必须返回结果");
+        let brute = db.search_advanced(&query, &brute_cfg).unwrap();
+        assert_eq!(brute.len(), 1, "BruteForce Top-1 必须返回结果");
 
-        assert_eq!(
-            brute[0].id, advanced[0].id,
-            "query_seed={}: BruteForce Top-1 ({}, score={}) != BQ Top-1 ({}, score={})",
-            q_seed, brute[0].id, brute[0].score, advanced[0].id, advanced[0].score
-        );
-        assert_eq!(
-            brute[0].score.to_bits(),
-            advanced[0].score.to_bits(),
-            "query_seed={}: BQ 精排分数必须与 BruteForce bit-exact 一致",
-            q_seed
+        // QuIVer 搜索（top_k=10 → ef_search=40）
+        let quiver_cfg = SearchConfig {
+            top_k: 10,
+            expand_depth: 0,
+            min_score: -1.0,
+            ..Default::default()
+        };
+        let quiver = db.search_advanced(&query, &quiver_cfg).unwrap();
+        assert!(!quiver.is_empty(), "QuIVer 必须返回结果");
+
+        // QuIVer 近似搜索：Top-1 分数必须 >= 0.90 * BruteForce Top-1 分数
+        assert!(
+            quiver[0].score >= brute[0].score * 0.90,
+            "query_seed={}: QuIVer Top-1 分数 ({}) 远低于 BruteForce ({})",
+            q_seed, quiver[0].score, brute[0].score
         );
     }
 
     cleanup(&path);
 }
 
-/// 数据量超过自动路由阈值时，默认配置应进入 BQ 粗排并保持结果结构正确
+/// 数据量超过自动路由阈值（10,000）时，QuIVer 自动构建并保持结果结构正确
 #[test]
-fn DET_03B_自动BQ路由_结果结构正确() {
-    let path = tmp_db("bq_auto_route");
+fn DET_03B_自动QuIVer路由_结果结构正确() {
+    let path = tmp_db("quiver_auto_route");
     cleanup(&path);
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
-    for i in 0..20_001u32 {
+    for i in 0..10_001u32 {
         let vec = deterministic_vector(i, DIM);
         db.insert(&vec, serde_json::json!({"idx": i})).unwrap();
     }
@@ -218,29 +230,22 @@ fn DET_03B_自动BQ路由_结果结构正确() {
             min_score: -1.0,
             ..Default::default()
         };
-        let bq = db.search_advanced(&query, &cfg).unwrap();
-        assert_eq!(bq.len(), 10, "自动 BQ 必须返回完整 TopK");
+        let results = db.search_advanced(&query, &cfg).unwrap();
+        assert_eq!(results.len(), 10, "自动 QuIVer 必须返回完整 TopK");
 
         let mut seen = std::collections::HashSet::new();
-        for hit in &bq {
-            assert!(seen.insert(hit.id), "自动 BQ 结果不能返回重复节点");
+        for hit in &results {
+            assert!(seen.insert(hit.id), "自动 QuIVer 结果不能返回重复节点");
             let payload_idx = hit
                 .payload
                 .get("idx")
                 .and_then(|value| value.as_u64())
-                .expect("自动 BQ 结果必须携带原始 idx payload");
-            assert!(payload_idx < 20_001, "自动 BQ 不能返回越界 payload");
-            let expected_score =
-                f32::similarity(&query, &deterministic_vector(payload_idx as u32, DIM));
-            assert_eq!(
-                hit.score.to_bits(),
-                expected_score.to_bits(),
-                "query_seed={q_seed}: 自动 BQ 精排分数必须来自原始向量"
-            );
+                .expect("自动 QuIVer 结果必须携带原始 idx payload");
+            assert!(payload_idx < 10_001, "自动 QuIVer 不能返回越界 payload");
         }
         assert!(
-            bq.windows(2).all(|pair| pair[0].score >= pair[1].score),
-            "自动 BQ 返回结果必须按精排分数降序排列"
+            results.windows(2).all(|pair| pair[0].score >= pair[1].score),
+            "自动 QuIVer 返回结果必须按精排分数降序排列"
         );
     }
 

@@ -297,7 +297,7 @@ pub trait VectorType: bytemuck::Zeroable + bytemuck::Pod + ...
 
 ### 17. 数组边界守卫
 
-**实现位置**：`database.rs`（BQ 精排分支）
+**实现位置**：`database.rs`（QuIVer 精排分支）
 
 ```rust
 if offset + dim <= vectors.len() {
@@ -365,7 +365,6 @@ safe_cfg.top_k              = safe_cfg.top_k.max(1);
 safe_cfg.fista_lambda       = safe_cfg.fista_lambda.clamp(1e-5, 100.0);
 safe_cfg.teleport_alpha     = safe_cfg.teleport_alpha.clamp(0.0, 1.0);
 safe_cfg.dpp_quality_weight = safe_cfg.dpp_quality_weight.clamp(0.0, 10.0);
-safe_cfg.bq_candidate_ratio = safe_cfg.bq_candidate_ratio.clamp(0.0, 1.0);
 ```
 
 所有数学参数强制钳入合法范围：`fista_lambda` 过大全变 0，`teleport_alpha` 超出 `[0,1]` PPR 概率失去意义，`dpp_quality_weight` 过大导致 float 溢出。
@@ -400,15 +399,15 @@ if !self.payloads.contains_key(&id) {
 
 ---
 
-### 24. BQ 索引与 FreeList 墓碑复用（零 Ghost Node）
+### 24. QuIVer 索引与 FreeList 墓碑复用（零 Ghost Node）
 
-**实现位置**：`database.rs:delete()`，`storage/memtable.rs`，`index/bq.rs`
+**实现位置**：`database.rs:delete()`，`storage/memtable.rs`，`index/quiver.rs`
 
-传统图索引（如 HNSW）在节点被逻辑删除后，会在索引图中留下幽灵引用，导致检索结果污染和性能退化。TriviumDB 通过 **FreeList 墓碑隐式复用机制** 彻底消除了该问题：
+传统图索引（如 HNSW）在节点被逻辑删除后，会在索引图中留下幽灵引用，导致检索结果污染和性能退化。TriviumDB 通过 **FreeList 墓碑隐式复用机制** + **QuIVer 增量图维护** 彻底消除了该问题：
 
 - **原位物理擦除**：无需进行极其耗时的全局紧凑，已删除的 `index` 将被推入快速复用队列。下一个插入的节点直接占据其所在的物理行。
-- **并行特征网同步清零**：删除节点时，对应的 `fast_tags` 位特征槽不仅立即随之置零，彻底杜绝该废弃指纹在后续查询被误读；
-- **BQ 动态刷新**：下一次 Compaction 触发 BQ 增量重建时，由于底层是纯扁平的一维二进制指纹数组（`Vec<u64>`），置零的槽位自然产生空回聚光灯盲区；新索引通过直接赋值原子切换，旧索引并发安全释放。
+- **并行特征网同步清零**：删除节点时，对应的 `fast_tags` 位特征槽立即置零，杜绝废弃指纹被误读；
+- **QuIVer 增量同步**：QuIVer 图索引支持 Tombstone 软删除，删除比例达 25% 时自动触发重建，保证图结构质量。
 
 **保证**：删除操作对检索质量零副作用，无空间碎片，无需用户手动触发重建，不仅杜绝了 Ghost Node 幽灵节点，更实现了无限频次改写下的 `O(1)` 平均生命周期开销！
 

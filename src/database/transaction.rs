@@ -79,8 +79,8 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
 //  事务操作类型
 // ════════════════════════════════════════════════════════
 
-/// 事务操作类型（内部缓冲用）
-pub(crate) enum TxOp<T> {
+/// 事务操作类型
+pub enum TxOp<T> {
     Insert {
         vector: Vec<T>,
         payload: serde_json::Value,
@@ -200,12 +200,110 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
     ///   4. 再应用到 memtable（Infallible，干跑已排除所有异常）
     pub fn commit(mut self) -> Result<Vec<NodeId>> {
         let ops = std::mem::take(&mut self.ops);
+        self.committed = true;
+        self.db.commit_ops(ops)
+    }
+
+    /// 显式回滚（丢弃所有缓冲操作）
+    pub fn rollback(mut self) {
+        self.ops.clear();
+        self.committed = true;
+    }
+}
+
+impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Drop
+    for Transaction<'a, T>
+{
+    fn drop(&mut self) {
+        if !self.committed && !self.ops.is_empty() {
+            tracing::warn!(
+                "Transaction with {} pending ops was dropped without commit/rollback. Operations discarded.",
+                self.ops.len()
+            );
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════
+//  TxBuilder — 无生命周期的事务操作收集器（FFI 友好）
+// ════════════════════════════════════════════════════════
+
+/// 事务操作收集器 — 不绑定 Database 引用，可自由跨 FFI 边界
+///
+/// 解决 Rust `Transaction<'a, T>` 持有 `&'a mut Database` 导致
+/// 在 PyO3/napi-rs 等 FFI 绑定中无法暴露的结构性问题。
+///
+/// ```rust,ignore
+/// let mut builder = TxBuilder::new();
+/// builder.insert(&vec, payload);
+/// builder.link(1, 2, "knows", 1.0);
+/// let ids = db.commit_tx(builder)?;  // 原子提交
+/// ```
+pub struct TxBuilder<T> {
+    ops: Vec<TxOp<T>>,
+}
+
+impl<T: VectorType> TxBuilder<T> {
+    pub fn new() -> Self {
+        Self { ops: Vec::new() }
+    }
+
+    pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) {
+        self.ops.push(TxOp::Insert { vector: vector.to_vec(), payload });
+    }
+
+    pub fn insert_with_id(&mut self, id: NodeId, vector: &[T], payload: serde_json::Value) {
+        self.ops.push(TxOp::InsertWithId { id, vector: vector.to_vec(), payload });
+    }
+
+    pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) {
+        self.ops.push(TxOp::Link { src, dst, label: label.to_string(), weight });
+    }
+
+    pub fn delete(&mut self, id: NodeId) {
+        self.ops.push(TxOp::Delete { id });
+    }
+
+    pub fn unlink(&mut self, src: NodeId, dst: NodeId) {
+        self.ops.push(TxOp::Unlink { src, dst });
+    }
+
+    pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) {
+        self.ops.push(TxOp::UpdatePayload { id, payload });
+    }
+
+    pub fn update_vector(&mut self, id: NodeId, vector: &[T]) {
+        self.ops.push(TxOp::UpdateVector { id, vector: vector.to_vec() });
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.ops.len()
+    }
+
+    /// 消费 builder，返回内部操作列表
+    pub(crate) fn into_ops(self) -> Vec<TxOp<T>> {
+        self.ops
+    }
+}
+
+impl<T: VectorType> Default for TxBuilder<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ════════════════════════════════════════════════════════
+//  commit_ops — 共享的事务提交核心逻辑
+// ════════════════════════════════════════════════════════
+
+impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T> {
+    /// 原子提交一组事务操作（供 Transaction::commit 和 commit_tx 共用）
+    pub(crate) fn commit_ops(&mut self, ops: Vec<TxOp<T>>) -> Result<Vec<NodeId>> {
         if ops.is_empty() {
-            self.committed = true;
             return Ok(Vec::new());
         }
 
-        let mut mt = lock_or_recover(&self.db.memtable);
+        let mut mt = lock_or_recover(&self.memtable);
 
         // ════════ 第一阶段：预检前置 (Dry-Run) + 预分配 ID ════════
         let mut sim_next_id = mt.next_id_value();
@@ -403,7 +501,7 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
 
         // ════════ 第三阶段：先写 WAL（若失败则 memtable 完全未变） ════════
         {
-            let mut w = lock_or_recover(&self.db.wal);
+            let mut w = lock_or_recover(&self.wal);
             let tx_id = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -412,7 +510,10 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
         }
 
         // ════════ 第四阶段：应用到 memtable（Infallible Apply） ════════
-        for entry in wal_entries {
+        // 暂停 QuIVer 增量同步，避免事务中途的 QuIVer 状态需要回滚
+        mt.set_quiver_sync_paused(true);
+
+        for entry in &wal_entries {
             match entry {
                 WalEntry::Insert {
                     id,
@@ -420,8 +521,8 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                     payload,
                 } => {
                     let payload_val: serde_json::Value =
-                        serde_json::from_str(&payload).unwrap_or_default();
-                    let _ = mt.insert_with_id(id, &vector, payload_val);
+                        serde_json::from_str(payload).unwrap_or_default();
+                    let _ = mt.insert_with_id(*id, vector, payload_val);
                 }
                 WalEntry::Link {
                     src,
@@ -429,47 +530,47 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
                     label,
                     weight,
                 } => {
-                    let _ = mt.link(src, dst, label, weight);
+                    let _ = mt.link(*src, *dst, label.clone(), *weight);
                 }
                 WalEntry::Delete { id } => {
-                    let _ = mt.delete(id);
+                    let _ = mt.delete(*id);
                 }
                 WalEntry::Unlink { src, dst } => {
-                    let _ = mt.unlink(src, dst);
+                    let _ = mt.unlink(*src, *dst);
                 }
                 WalEntry::UpdatePayload { id, payload } => {
                     let payload_val: serde_json::Value =
-                        serde_json::from_str(&payload).unwrap_or_default();
-                    let _ = mt.update_payload(id, payload_val);
+                        serde_json::from_str(payload).unwrap_or_default();
+                    let _ = mt.update_payload(*id, payload_val);
                 }
                 WalEntry::UpdateVector { id, vector } => {
-                    let _ = mt.update_vector(id, &vector);
+                    let _ = mt.update_vector(*id, vector);
                 }
                 _ => {}
             }
         }
+
+        // 恢复 QuIVer 同步
+        mt.set_quiver_sync_paused(false);
+
+        // ════════ 第五阶段：QuIVer 增量同步（分离时间线） ════════
+        // Phase 4 已成功完成（Infallible），此处不需要回滚能力。
+        // 委托给 MemTable 方法处理，避免直接访问私有字段。
+        mt.quiver_sync_tx_entries(&wal_entries);
+
         drop(mt);
 
-        self.committed = true;
         Ok(generated_ids)
     }
 
-    /// 显式回滚（丢弃所有缓冲操作）
-    pub fn rollback(mut self) {
-        self.ops.clear();
-        self.committed = true;
-    }
-}
-
-impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Drop
-    for Transaction<'a, T>
-{
-    fn drop(&mut self) {
-        if !self.committed && !self.ops.is_empty() {
-            tracing::warn!(
-                "Transaction with {} pending ops was dropped without commit/rollback. Operations discarded.",
-                self.ops.len()
-            );
-        }
+    /// 通过 TxBuilder 原子提交事务（FFI 友好入口）
+    ///
+    /// ```rust,ignore
+    /// let mut builder = TxBuilder::new();
+    /// builder.insert(&[1.0, 0.0], json!({"name": "Alice"}));
+    /// let ids = db.commit_tx(builder)?;
+    /// ```
+    pub fn commit_tx(&mut self, builder: TxBuilder<T>) -> Result<Vec<NodeId>> {
+        self.commit_ops(builder.into_ops())
     }
 }

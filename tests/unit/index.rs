@@ -1,8 +1,7 @@
-//! 补齐 src/index/ 下 3 个模块的单元测试
+//! 补齐 src/index/ 下模块的单元测试
 //!
 //! 覆盖:
 //!   - bq.rs: BqSignature 量化 + hamming_distance
-//!   - int8.rs: Int8Pool 量化 + dot_score + 边界条件
 //!   - text.rs: TextIndex BM25 + AC 自动机
 //!   - brute_force.rs: 暴力搜索
 
@@ -73,71 +72,6 @@ fn bq_超长向量_超过2048维被截断() {
     assert_ne!(sig, BqSignature::empty());
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Int8 标量量化
-// ════════════════════════════════════════════════════════════════
-use triviumdb::index::int8::Int8Pool;
-
-#[test]
-fn int8_基本量化_和反向对齐() {
-    // 3 个 2 维向量
-    let flat = vec![0.0f32, 1.0, 0.5, 0.5, 1.0, 0.0];
-    let pool = Int8Pool::from_f32_vectors(&flat, 2);
-
-    assert_eq!(pool.count, 3);
-    assert_eq!(pool.dim, 2);
-    assert_eq!(pool.data.len(), 6);
-
-    // 量化后的值不应溢出到 i8 最小值
-    for &val in &pool.data {
-        assert_ne!(val, i8::MIN);
-    }
-}
-
-#[test]
-fn int8_dot_score_自身最高() {
-    let flat = vec![
-        1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
-    ];
-    let pool = Int8Pool::from_f32_vectors(&flat, 4);
-
-    let query_i8 = pool.quantize_query(&[1.0f32, 0.0, 0.0, 0.0]);
-
-    let score0 = pool.dot_score(0, &query_i8);
-    let score1 = pool.dot_score(1, &query_i8);
-    let score2 = pool.dot_score(2, &query_i8);
-
-    assert!(score0 > score1, "自身向量得分应最高");
-    assert!(score0 > score2, "自身向量得分应最高");
-}
-
-#[test]
-fn int8_空向量池() {
-    let pool = Int8Pool::from_f32_vectors(&[], 4);
-    assert_eq!(pool.count, 0);
-    assert!(!pool.is_valid_index(0));
-}
-
-#[test]
-fn int8_泛型构建_f16() {
-    let vec: Vec<half::f16> = vec![
-        half::f16::from_f32(1.0),
-        half::f16::from_f32(0.0),
-        half::f16::from_f32(0.5),
-        half::f16::from_f32(0.5),
-    ];
-    let pool = Int8Pool::from_generic_vectors(&vec, 2);
-    assert_eq!(pool.count, 2);
-}
-
-#[test]
-fn int8_is_valid_index() {
-    let flat = vec![1.0f32; 8]; // 2 个 4 维向量
-    let pool = Int8Pool::from_f32_vectors(&flat, 4);
-    assert!(pool.is_valid_index(0));
-    assert!(pool.is_valid_index(1));
-    assert!(!pool.is_valid_index(2));
-}
 
 // ════════════════════════════════════════════════════════════════
 //  TextIndex: BM25 + AC 自动机

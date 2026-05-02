@@ -80,7 +80,7 @@ tests/
 │   ├── tql_ast.rs               #   TQL AST 数据结构
 │   ├── cognitive.rs             #   认知管线 (FISTA, DPP)
 │   ├── core.rs                  #   核心工具函数
-│   └── index.rs                 #   BQ/BruteForce 索引
+│   └── index.rs                 #   QuIVer/BruteForce 索引
 │
 ├── proptest_core.rs             # L3: 核心数据结构属性测试
 ├── proptest_query.rs            # L3: TQL 解析器模糊测试
@@ -144,7 +144,7 @@ fuzz/
 | `Traversal` | `unit/traversal.rs` | PPR 扩散、侧向抑制、不应期疲劳、参数边界                       |
 | `TQL AST`   | `unit/tql_ast.rs`   | 语法树节点构造、枚举完整性                                     |
 | `Cognitive` | `unit/cognitive.rs` | FISTA 稀疏残差、DPP 多样性采样                                 |
-| `Index`     | `unit/index.rs`     | BQ 二值化、BruteForce 精确搜索                                 |
+| `Index`     | `unit/index.rs`     | QuIVer/BQ 二值化、BruteForce 精确搜索                                 |
 
 ### 事务测试示例
 

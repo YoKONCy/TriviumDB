@@ -226,7 +226,6 @@ fn main() {
     eprintln!("\n[阶段四] BruteForce 搜索 × {} 查询...", NUM_QUERIES);
     let brute_cfg = SearchConfig {
         top_k: TOP_K,
-        enable_bq_coarse_search: false,
         force_brute_force: true,
         ..Default::default()
     };
@@ -253,8 +252,6 @@ fn main() {
     eprintln!("[阶段四] BQ 三段火箭 (5% 粗筛) × {} 查询...", NUM_QUERIES);
     let bq_cfg = SearchConfig {
         top_k: TOP_K,
-        enable_bq_coarse_search: true,
-        bq_candidate_ratio: 0.05,
         ..Default::default()
     };
     let t_bq = Instant::now();
@@ -284,8 +281,6 @@ fn main() {
     eprintln!("[阶段四] BQ 三段火箭 (20% 粗筛) × {} 查询...", NUM_QUERIES);
     let bq_cfg_20 = SearchConfig {
         top_k: TOP_K,
-        enable_bq_coarse_search: true,
-        bq_candidate_ratio: 0.20,
         ..Default::default()
     };
     let t_bq20 = Instant::now();

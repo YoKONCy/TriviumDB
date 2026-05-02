@@ -61,12 +61,8 @@ pub struct SearchConfig {
     pub enable_inverse_inhibition: bool,
     /// 当 > 0 时，作为侧向抑制起保护作用，自动截断扩散网络 (如传入 5000)
     pub lateral_inhibition_threshold: usize,
-    /// 是否启用 L1 Binary Quantization 两段式初筛管线 (极速混沌轨道)
-    pub enable_bq_coarse_search: bool,
-    /// BQ 粗筛候选集占总数据量的比例
-    pub bq_candidate_ratio: f32,
-    /// 强制使用暴力搜索，禁用自动 BQ 路由（用于基准测试和需要精确结果的场景）
-    /// 当为 true 时，即使 node_count > 20,000 也不会自动切换到 BQ 管线
+    /// 强制使用暴力搜索，禁用 QuIVer 图索引（用于基准测试和需要精确结果的场景）
+    /// 当为 true 时，即使已构建 QuIVer 索引也不会使用
     pub force_brute_force: bool,
 
     // --- 混合倒排与文本检索 (Hybrid Search) ---
@@ -99,8 +95,6 @@ impl Default for SearchConfig {
             enable_refractory_fatigue: false,
             enable_inverse_inhibition: false,
             lateral_inhibition_threshold: 0,
-            enable_bq_coarse_search: false,
-            bq_candidate_ratio: 0.05,
             force_brute_force: false,
             text_boost: 1.5,
             enable_text_hybrid_search: false,

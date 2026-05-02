@@ -18,6 +18,7 @@ use crate::database::config::SearchConfig;
 use crate::error::Result;
 use crate::hook::{HookContext, SearchHook};
 use crate::index::brute_force;
+use crate::index::quiver::QuIVerSearchConfig;
 use crate::node::{NodeId, SearchHit};
 use crate::storage::memtable::MemTable;
 use std::sync::{Arc, Mutex};
@@ -67,7 +68,6 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     safe_cfg.teleport_alpha = safe_cfg.teleport_alpha.clamp(0.0, 1.0);
     safe_cfg.dpp_quality_weight = safe_cfg.dpp_quality_weight.clamp(0.0, 10.0);
     safe_cfg.fista_threshold = safe_cfg.fista_threshold.clamp(0.0, f32::MAX);
-    safe_cfg.bq_candidate_ratio = safe_cfg.bq_candidate_ratio.clamp(0.0, 1.0);
 
     // ═══════════════════════════════════════════════════════
     // 🔌 Hook #1: on_pre_search — 查询预处理
@@ -275,27 +275,12 @@ fn recall_vector<T: VectorType>(
     };
 
     // ═══════════════════════════════════════════════════════
-    // 动态引擎路由：基于数据规模的自适应多级管线
-    // 1. force_brute_force == true => 暴力全扫（无视数据量，用于基准测试）
-    // 2. N <= 20,000 => 暴力全扫 (AVX2 极限)
-    // 3. 20,000 < N <= 100,000 => BQ 双级管线
-    // 4. 100,000 < N => BQ 三级火箭
+    // 动态引擎路由：
+    // 1. QuIVer HNSW 图搜索（N >= 10,000 时由 ensure_vectors_cache 自动构建）
+    // 2. 暴力全扫（N < 10,000 或 force_brute_force）
     // ═══════════════════════════════════════════════════════
-    let total_nodes = mt.node_count();
-    let use_bq = !config.force_brute_force
-        && (config.enable_bq_coarse_search || total_nodes > 20_000);
-    let use_int8_rocket = total_nodes > 100_000;
-
-    let vector_hits: Vec<SearchHit> = if use_bq {
-        bq_pipeline(
-            mt,
-            config,
-            query_vector,
-            vectors,
-            dim,
-            use_int8_rocket,
-            &passes_filter,
-        )
+    let vector_hits: Vec<SearchHit> = if !config.force_brute_force && mt.quiver().is_some() {
+        quiver_pipeline(mt, config, query_vector, &passes_filter)
     } else {
         brute_force_pipeline(mt, config, query_vector, vectors, dim, &passes_filter)
     };
@@ -305,185 +290,7 @@ fn recall_vector<T: VectorType>(
     }
 }
 
-/// BQ 三级火箭管线（BQ 1-bit → 可选 Int8 → f32 精排）
-fn bq_pipeline<T: VectorType + Sync>(
-    mt: &MemTable<T>,
-    config: &SearchConfig,
-    query_vector: &[T],
-    vectors: &[T],
-    dim: usize,
-    use_int8_rocket: bool,
-    passes_filter: &(dyn Fn(NodeId) -> bool + Sync),
-) -> Vec<SearchHit> {
-    use std::collections::BinaryHeap;
-
-    let q_bq = crate::index::bq::BqSignature::from_vector(query_vector);
-    let slot_count = mt.internal_slot_count();
-    let candidate_cnt =
-        (((mt.node_count() as f32) * config.bq_candidate_ratio).ceil() as usize).max(config.top_k);
-
-    let bq_sigs = mt.bq_signatures_slice();
-    let id_map = mt.internal_indices();
-    let fast_tags = mt.fast_tags_slice();
-    let has_filter = config.payload_filter.is_some();
-    let bloom_mask = config
-        .payload_filter
-        .as_ref()
-        .map(|f| f.extract_must_have_mask())
-        .unwrap_or(0);
-
-    // Stage 1: BQ Hamming 粗排（堆优化 O(N log K)）
-    let mut heap: BinaryHeap<(u32, usize)> = BinaryHeap::with_capacity(candidate_cnt + 1);
-    let scan_len = slot_count.min(bq_sigs.len()).min(fast_tags.len());
-
-    for i in 0..scan_len {
-        let node_id = id_map[i];
-        if node_id == 0 {
-            continue;
-        }
-        if bloom_mask != 0 && (fast_tags[i] & bloom_mask) != bloom_mask {
-            continue;
-        }
-        if has_filter && !passes_filter(node_id) {
-            continue;
-        }
-        let dist = bq_sigs[i].hamming_distance(&q_bq);
-        if heap.len() < candidate_cnt {
-            heap.push((dist, i));
-        } else if let Some(&(worst_dist, _)) = heap.peek()
-            && dist < worst_dist
-        {
-            heap.pop();
-            heap.push((dist, i));
-        }
-    }
-
-    // 提取 BQ 粗排候选，按物理地址排序（缓存友好）
-    let mut bq_winners: Vec<usize> = heap.into_iter().map(|(_, idx)| idx).collect();
-    bq_winners.sort_unstable();
-
-    #[cfg(target_arch = "x86_64")]
-    use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
-
-    // ARM64 预取：使用通用的 __prefetch 内建
-    #[cfg(target_arch = "aarch64")]
-    #[inline(always)]
-    unsafe fn arm_prefetch(ptr: *const u8) {
-        // PLD (Prefetch for Load) to L1 cache
-        unsafe {
-            std::arch::asm!("prfm pldl1keep, [{ptr}]", ptr = in(reg) ptr, options(nostack, preserves_flags));
-        }
-    }
-
-    // Stage 2: 可选 Int8 量化中间层（三级火箭）
-    let int8_pool_ref = mt.int8_pool();
-    let final_candidates: Vec<usize> =
-        if let (true, Some(i8pool)) = (use_int8_rocket, int8_pool_ref) {
-            let query_i8 = i8pool.quantize_query(query_vector);
-            let int8_top_n = (config.top_k * 10).max(50);
-
-            let mut i8_heap: BinaryHeap<std::cmp::Reverse<(i32, usize)>> =
-                BinaryHeap::with_capacity(int8_top_n + 1);
-
-            for (iter_idx, &slot_idx) in bq_winners.iter().enumerate() {
-                if !i8pool.is_valid_index(slot_idx) {
-                    continue;
-                }
-                // Int8 数据预取
-                #[cfg(target_arch = "x86_64")]
-                if iter_idx + 2 < bq_winners.len() {
-                    let prefetch_idx = bq_winners[iter_idx + 2];
-                    if i8pool.is_valid_index(prefetch_idx) {
-                        let prefetch_offset = prefetch_idx * dim;
-                        unsafe {
-                            _mm_prefetch(i8pool.data.as_ptr().add(prefetch_offset), _MM_HINT_T0);
-                        }
-                    }
-                }
-                #[cfg(target_arch = "aarch64")]
-                if iter_idx + 2 < bq_winners.len() {
-                    let prefetch_idx = bq_winners[iter_idx + 2];
-                    if i8pool.is_valid_index(prefetch_idx) {
-                        let prefetch_offset = prefetch_idx * dim;
-                        unsafe {
-                            arm_prefetch(i8pool.data.as_ptr().add(prefetch_offset) as *const u8);
-                        }
-                    }
-                }
-
-                let i8_score = i8pool.dot_score(slot_idx, &query_i8);
-                if i8_heap.len() < int8_top_n {
-                    i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
-                } else if let Some(&std::cmp::Reverse((worst_score, _))) = i8_heap.peek()
-                    && i8_score > worst_score
-                {
-                    i8_heap.pop();
-                    i8_heap.push(std::cmp::Reverse((i8_score, slot_idx)));
-                }
-            }
-
-            let mut elites: Vec<usize> = i8_heap
-                .into_iter()
-                .map(|std::cmp::Reverse((_, idx))| idx)
-                .collect();
-            elites.sort_unstable();
-            elites
-        } else {
-            bq_winners
-        };
-
-    // Stage 3: f32 AVX2+FMA 终极精排
-    let mut refined = Vec::with_capacity(final_candidates.len());
-    for (iter_idx, &i) in final_candidates.iter().enumerate() {
-        let offset = i * dim;
-        if offset + dim <= vectors.len() {
-            // f32 向量预取
-            #[cfg(target_arch = "x86_64")]
-            if iter_idx + 1 < final_candidates.len() {
-                let next_offset = final_candidates[iter_idx + 1] * dim;
-                if next_offset + dim <= vectors.len() {
-                    unsafe {
-                        _mm_prefetch(vectors.as_ptr().add(next_offset) as *const i8, _MM_HINT_T0);
-                    }
-                }
-            }
-            #[cfg(target_arch = "aarch64")]
-            if iter_idx + 1 < final_candidates.len() {
-                let next_offset = final_candidates[iter_idx + 1] * dim;
-                if next_offset + dim <= vectors.len() {
-                    unsafe {
-                        arm_prefetch(vectors.as_ptr().add(next_offset) as *const u8);
-                    }
-                }
-            }
-
-            let score = T::similarity(query_vector, &vectors[offset..offset + dim]);
-            if score >= config.min_score {
-                refined.push(SearchHit {
-                    id: mt.get_id_by_index(i),
-                    score,
-                    payload: serde_json::Value::Null,
-                });
-            }
-        }
-    }
-    refined.sort_unstable_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    refined.truncate(config.top_k);
-
-    // 补充 Payload
-    for hit in &mut refined {
-        if let Some(p) = mt.get_payload(hit.id) {
-            hit.payload = p.clone();
-        }
-    }
-    refined
-}
-
-/// 暴力全扫管线（< 20K 节点时使用）
+/// 暴力全扫管线（N < 10,000 或 force_brute_force 时使用）
 fn brute_force_pipeline<T: VectorType + Sync>(
     mt: &MemTable<T>,
     config: &SearchConfig,
@@ -515,6 +322,57 @@ fn brute_force_pipeline<T: VectorType + Sync>(
             if passes_filter(id) { id } else { 0 }
         },
     )
+}
+
+/// QuIVer 管线：BQ-native HNSW 图搜索（替代三级火箭）
+///
+/// 冷热分离架构：
+/// - Hot 路径（O(log N)）：2-bit BQ 签名 beam search 遍历 HNSW 图
+/// - Cold 路径（O(ef)）：仅对候选集做 f32 cosine 精排
+/// - 相比三级火箭的 O(N) 全扫，大规模数据下速度提升显著
+fn quiver_pipeline<T: VectorType + Sync>(
+    mt: &MemTable<T>,
+    config: &SearchConfig,
+    query_vector: &[T],
+    passes_filter: &(dyn Fn(NodeId) -> bool + Sync),
+) -> Vec<SearchHit> {
+    let quiver = mt.quiver().unwrap();
+    let q_f32: Vec<f32> = query_vector.iter().map(|x| x.to_f32()).collect();
+
+    // 获取外部 flat 向量用于精排（MemTable 的向量缓存已由 ensure_vectors_cache 保证有效）
+    let flat = mt.flat_vectors();
+    let ext_vectors: Vec<f32> = flat.iter().map(|x| x.to_f32()).collect();
+
+    // ef_search 默认为 top_k * 4，保证足够的候选覆盖率
+    let ef_search = config.top_k.max(1) * 4;
+    let search_cfg = QuIVerSearchConfig {
+        top_k: config.top_k.max(1) * 2, // 多召回一些，给 filter 留余量
+        ef_search,
+    };
+
+    let raw_results = quiver.search(&q_f32, &ext_vectors, &search_cfg);
+
+    // 应用 payload 过滤 + min_score 阈值
+    let mut hits: Vec<SearchHit> = raw_results
+        .into_iter()
+        .filter(|&(id, score)| score >= config.min_score && passes_filter(id))
+        .map(|(id, score)| SearchHit {
+            id,
+            score,
+            payload: mt
+                .get_payload(id)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        })
+        .collect();
+
+    hits.sort_unstable_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    hits.truncate(config.top_k);
+    hits
 }
 
 /// L4 + L5: FISTA 残差搜索 + 影子查询

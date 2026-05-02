@@ -192,7 +192,6 @@ fn run_precision_report(n: usize, dim: usize, top_k: usize, num_queries: usize) 
 
     let brute_config = SearchConfig {
         top_k,
-        enable_bq_coarse_search: false,
         force_brute_force: true,
         ..Default::default()
     };
@@ -215,14 +214,10 @@ fn run_precision_report(n: usize, dim: usize, top_k: usize, num_queries: usize) 
 
     let bq_light_config = SearchConfig {
         top_k,
-        enable_bq_coarse_search: true,
-        bq_candidate_ratio: 0.05,
         ..Default::default()
     };
     let bq_1pct_config = SearchConfig {
         top_k,
-        enable_bq_coarse_search: true,
-        bq_candidate_ratio: 0.01,
         ..Default::default()
     };
 
@@ -360,7 +355,6 @@ fn bench_brute_vs_bq(c: &mut Criterion) {
 
     let brute_cfg = SearchConfig {
         top_k: 10,
-        enable_bq_coarse_search: false,
         force_brute_force: true,
         ..Default::default()
     };
@@ -377,8 +371,6 @@ fn bench_brute_vs_bq(c: &mut Criterion) {
 
     let bq_cfg = SearchConfig {
         top_k: 10,
-        enable_bq_coarse_search: true,
-        bq_candidate_ratio: 0.05,
         ..Default::default()
     };
     group.bench_function("BQ 3-Stage Rocket (5%)", |b| {
@@ -391,8 +383,6 @@ fn bench_brute_vs_bq(c: &mut Criterion) {
 
     let bq_1pct_cfg = SearchConfig {
         top_k: 10,
-        enable_bq_coarse_search: true,
-        bq_candidate_ratio: 0.01,
         ..Default::default()
     };
     group.bench_function("BQ 3-Stage Rocket (1%)", |b| {

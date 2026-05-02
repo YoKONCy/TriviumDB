@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.6.0  
+> **版本**: v0.7.0  
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -455,12 +455,11 @@ let results = db.search_advanced(&query_vec, &config)?;
 | `dpp_quality_weight` | `f32` | `1.0` | DPP 质量权重幂次 |
 | `enable_text_hybrid_search`| `bool`| `false`| 是否开启 BM25/AC 双路混合搜索 |
 | `text_boost` | `f32` | `1.5` | 文本混合查询分数提权倍率 |
-| `enable_bq_coarse_search` | `bool` | `false`| 是否开启 BQ 第一阶段二进制指纹粗筛 |
-| `bq_candidate_ratio` | `f32` | `0.05`| BQ 粗排后候选集占总数据量的比例 |
 | `hybrid_alpha` | `f32` | `0.7` | 混合检索中向量权重 (0~1)，(1-alpha) 为稀疏文本权重 |
 | `custom_query_text` | `str`| `None` | (可选) 手动传入用于文本匹配的原始文本 |
+| `force_brute_force` | `bool` | `false`| 强制使用暴力搜索，禁用 QuIVer 图索引（用于基准测试和需要精确结果的场景） |
 
-> 💡 所有参数均内置安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]，`bq_candidate_ratio` 在 [0.001, 1.0]。传入越界值不会崩溃，而是被静默钳平。
+> 💡 所有参数均内置安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]。传入越界值不会崩溃，而是被静默钳平。
 
 > 💡 当 `enable_advanced_pipeline = false` 时，`search_advanced` 的行为与 `search` 完全一致。
 
@@ -949,18 +948,18 @@ print(f"共 {len(ids)} 个节点")
 let ids = db.all_node_ids();     // Vec<NodeId>
 ```
 
-### BQ 自动索引说明
+### QuIVer 自动索引说明
 
-TriviumDB v0.6.0 起采用**全自动双引擎向量索引路由**，不再提供手动 `rebuild_index()` 接口：
+TriviumDB v0.7.0 起采用自研的 **QuIVer** SOTA 级 ANN 图索引，全自动双引擎向量索引路由，无需手动 `rebuild_index()` 接口：
 
 | 条件 | 检索引擎 | 召回行为 |
 |------|----------|----------|
-| < 2 万节点 或 Mmap 未就绪 | **BruteForce** | 100% 精确召回，零误差 |
-| ≥ 2 万节点 + Mmap 模式 + 索引就绪 | **BQ 三阶段火箭** | 二进制粗排 + f32 精排，Recall@10 > 97% |
+| < 1 万节点 或 QuIVer 未就绪 | **BruteForce** | 100% 精确召回，零误差 |
+| ≥ 1 万节点 + 索引就绪 | **QuIVer (BQ + Vamana)** | BQ 签名 + 图导航 + f32 精排，Recall@10 > 97% |
 
-BQ 索引在**后台 Compaction 线程**中自动构建，无需也无法手动触发。索引元数据持久化在 `.tdb` 文件的 BQ Metadata Block 中，重启后零延迟恢复。
+QuIVer 索引支持增量 Insert/Delete/Update，无需全量重建。索引以独立的 `.tdb.quiver` 文件持久化，重启后零延迟恢复。
 
-> 💡 如果你的业务对 100% 召回率有强需求（如金融/医疗），可以通过 `StorageMode::Rom` 模式强制使用 BruteForce（BQ 仅在 `Mmap` 模式下激活）。
+> 💡 如果你的业务对 100% 召回率有强需求（如金融/医疗），可以通过 `force_brute_force: true` 强制使用 BruteForce。
 
 ---
 

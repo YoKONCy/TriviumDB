@@ -551,11 +551,23 @@ fn bq_signatures_重建() {
 }
 
 #[test]
-fn int8_pool_重建() {
+fn quiver_手动构建和失效() {
+    use triviumdb::index::quiver::QuIVerConfig;
     let mut mt = make_mt();
-    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({})).unwrap();
-    mt.ensure_vectors_cache();
-    assert!(mt.int8_pool().is_some());
+    for i in 1..=5u64 {
+        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({})).unwrap();
+    }
+    assert!(mt.quiver().is_none(), "数据量不足时 QuIVer 不应自动构建");
+    mt.build_quiver(&QuIVerConfig::default());
+    assert!(mt.quiver().is_some(), "手动构建后 QuIVer 应存在");
+
+    // delete 使用 soft_delete（tombstone 标记），索引仍存在
+    mt.delete(1).unwrap();
+    assert!(mt.quiver().is_some(), "单次 delete 后 QuIVer 应仍存在（soft_delete）");
+
+    // 删除超过 25% 后索引失效（5 个节点中删除 2 个 = 40%）
+    mt.delete(2).unwrap();
+    assert!(mt.quiver().is_none(), "退化超过 25% 后 QuIVer 应自动失效");
 }
 
 #[test]

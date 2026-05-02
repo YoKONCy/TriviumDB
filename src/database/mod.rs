@@ -12,7 +12,7 @@ pub mod transaction;
 
 // 从子模块重导出公开类型，保持对外 API 不变
 pub use config::{Config, SearchConfig, StorageMode};
-pub use transaction::Transaction;
+pub use transaction::{Transaction, TxBuilder};
 
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
@@ -214,6 +214,35 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 获取当前 Hook 的引用（主要用于测试和调试）
     pub fn hook(&self) -> &dyn SearchHook {
         self.hook.as_ref()
+    }
+
+    // ════════════════════════════════════════════════════════
+    //  QuIVer 索引管理
+    // ════════════════════════════════════════════════════════
+
+    /// 构建 QuIVer BQ-native HNSW 图索引
+    ///
+    /// 从当前所有活跃数据构建 ANN 图索引，替代默认的三级火箭管线。
+    /// 构建后的搜索将自动使用 QuIVer 的 O(log N) 图搜索。
+    ///
+    /// **冷热分离**：
+    /// - Hot: 2-bit BQ 签名 + HNSW 图拓扑 (~2 bits/dim/node)
+    /// - Cold: f32 原始向量（仅精排阶段按需访问）
+    ///
+    /// **事务安全**: delete / update_vector 会使索引自动失效，管线回退到三级火箭。
+    ///
+    /// ```rust,ignore
+    /// use triviumdb::index::quiver::QuIVerConfig;
+    /// db.build_quiver_index(None); // 使用默认配置 (m=16, ef_c=128, α=1.2)
+    /// ```
+    pub fn build_quiver_index(
+        &mut self,
+        config: Option<crate::index::quiver::QuIVerConfig>,
+    ) -> Result<()> {
+        let cfg = config.unwrap_or_default();
+        let mut mt = lock_or_recover(&self.memtable);
+        mt.build_quiver(&cfg);
+        Ok(())
     }
 
     // ════════════════════════════════════════════════════════

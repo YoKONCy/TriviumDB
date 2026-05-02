@@ -50,7 +50,7 @@ flowchart TD
 
     subgraph Layer3 ["🚀 引擎与执行层"]
         direction LR
-        E1["向量索引\n(BruteForce / BQ)"]:::module
+        E1["向量索引\n(BruteForce / QuIVer)"]:::module
         E2["图谱遍历\n(Spreading Activation)"]:::module
         E3["查询解析\n(Mongo Filter / Cypher)"]:::module
     end
@@ -181,11 +181,13 @@ TriviumDB 提供两种互斥的存储模式（`StorageMode`），且**系统支�
 ├────────────────────────┤ edge_offset
 │       Edge Block        │ [src(8B) + dst(8B) + label_len(2B) + label + weight(4B)] × M
 ├────────────────────────┤ bq_offset
-│    BQ Metadata Block    │ BQ 参数头(16B) + 二进制指纹数组(u64[]) + 聚类质心（v3 新增）
+│    BQ Metadata Block    │ BQ 参数头(16B) + 二进制指纹数组(u64[])
 └────────────────────────┘
 ```
 
 > **BQ 元数据块** 通过 `bytemuck` 实现与磁盘的零拷贝读写（`#[repr(C)]` + `Pod/Zeroable`），重启时毫秒级恢复无需重算。
+>
+> 此外，QuIVer 图索引以独立的 `.tdb.quiver` 文件存储，采用 POD memcpy 极速序列化，重启后零开销恢复。
 
 ### 安全写入流程
 
@@ -229,7 +231,7 @@ TriviumDB 采用**全自动双引擎路由**，无需编译期 Feature 选择，
 - **精确度**：100% 精确召回，零误差
 - **并行化**：rayon `par_chunks` 多核线性加速
 - **原理**：对整个 SoA 向量池做并行余弦相似度扫描
-- **激活条件**：< 2 万节点，或 BQ 索引尚未构建完成
+- **激活条件**：< 1 万节点，或 QuIVer 索引尚未构建完成
 
 ```rust
 // 内部实现伪码
@@ -240,26 +242,30 @@ flat_vectors
     .top_k(k)                          // 取最高分前 K 个
 ```
 
-### BQ 三阶段火箭（冷区加速引擎，自动激活）
+### QuIVer ANN 图索引（冷区加速引擎，自动激活）
 
-TriviumDB 自研的 **Binary Quantization 三阶段火箭**近似索引：
+**QuIVer**（**Qu**antized **I**ndexed **Ve**ctor **R**etrieval）是 TriviumDB 自研的 SOTA 级近似最近邻（ANN）图索引，融合 **BQ 二进制量化**与 **Vamana 图导航**，冷热分离架构：
 
-- **精确度**：近似搜索，实测 Recall@10 在 20 万规模下达 99.5%（5% 精查），可通过 `bq_candidate_ratio` 参数调整速度/精度权衡
-- **激活条件**：Mmap 模式 + ≥ 2 万节点，后台 Compaction 自动构建
-- **三阶段搜索管线**：
-  1. **二进制指纹生成**：将 f32 向量按维度符号位压缩为 1-bit 二进制指纹（正数→1，负数→0），1536 维仅需 192 字节
-  2. **Hamming 距离粗排**：利用 CPU 原生 `Popcount` 硬件指令，对全量二进制指纹做超高速线性扫描，筛选出 Top-N% 候选集
-  3. **f32 余弦精排 (Re-rank)**：仅对通过粗排的候选集回源做精准 f32 余弦打分，取 Top-K
+- **精确度**：近似搜索，实测 Recall@10 在 20 万规模下达 99%+
+- **激活条件**：≥ 1 万节点时自动构建
+- **搜索流程**：
+  1. **BQ 签名比对**：利用 CPU 原生 `Popcount` 硬件指令，在 Vamana 图导航过程中快速计算 Hamming 距离
+  2. **Vamana 图导航**：沿着贪心最近邻路径在图中跳转，快速收敛到目标区域
+  3. **f32 余弦精排 (Re-rank)**：仅对候选集从 MemTable 按需读取 f32 原始向量做精准打分
 
-| 对比 | BruteForce | BQ 三阶段火箭 |
+**核心优势**：
+
+| 对比 | BruteForce | QuIVer |
 |------|-----------|------|
-| 召回率 | 100% | 97%~99.5%（随 `bq_candidate_ratio` 调整） |
-| 延迟 | 随节点数线性增长 | 粗排极快 + 精排仅算少量候选，大规模下巨大优势 |
-| 图维护开销 | 无 | **无**（纯扁平数组，无指针跳跃）|
-| 动态插入 | 零开销 | 零开销（后台异步重建） |
-| 删除代价 | 零开销 | **零开销**（不存在 Ghost Node 问题）|
-| 激活方式 | 默认 | 自动（2 万节点后台构建）|
-| 内存布局 | 连续 f32 数组 | 连续 u64 数组（压缩 32 倍），CPU 缓存极友好 |
+| 召回率 | 100% | 97%~99%+ |
+| 延迟 | 随节点数线性增长 | 图导航 O(log N)，大规模下数量级加速 |
+| 增量 Insert | 零开销 | ✅ 实时增量插入，无需重建 |
+| 增量 Delete | 零开销 | ✅ Tombstone 软删除，25% 退化自动重建 |
+| 增量 Update | 零开销 | ✅ soft_delete + incremental_insert |
+| 事务安全 | — | ✅ 分离时间线架构，零回滚开销 |
+| 持久化 | — | ✅ `.tdb.quiver` 独立文件，POD memcpy |
+| 内存布局 | 连续 f32 数组 | 冷热分离：BQ 签名(hot) + f32 向量(cold) |
+| 激活方式 | 默认 | 自动（1 万节点时构建）|
 
 ---
 
@@ -660,7 +666,7 @@ for stage, ms in ctx.timings.items():
 | `execute_pipeline()` | 管线总控 + 6 个 Hook 调用入口 |
 | `recall_text()` | L1: AC 自动机 + BM25 文本召回 |
 | `recall_vector()` | L2+L3: 向量稠密召回 + 自适应引擎路由 |
-| `bq_pipeline()` | BQ 三级火箭（1-bit → Int8 → f32） |
+| `quiver_pipeline()` | QuIVer ANN 图索引搜索（BQ + Vamana 图导航 + f32 精排） |
 | `brute_force_pipeline()` | 暴力全扫管线 |
 | `recall_residual()` | L4+L5: FISTA 残差 + 影子查询 |
 | `aggregate_seeds()` | seed_map 聚合 + 排序 |

@@ -16,7 +16,7 @@
 - [常见使用模式](#常见使用模式)
 - [避坑指南](#避坑指南)
 - [模型升级与维度迁移](#模型升级与维度迁移)
-- [BQ 索引策略与调优](#bq-索引策略与调优)
+- [QuIVer 索引策略与调优](#quiver-索引策略与调优)
 - [Hook 扩展系统最佳实践](#hook-扩展系统最佳实践)
 - [架构边界认知与规避策略](#架构边界认知与规避策略)
 
@@ -65,7 +65,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.6.0" 
+triviumdb = "0.7.0" 
 ```
 
 ### 30 秒入门模板
@@ -607,52 +607,40 @@ with triviumdb.TriviumDB("knowledge_v2.tdb", dim=NEW_DIM) as new_db:
 
 ---
 
-## BQ 索引策略与调优
+## QuIVer 索引策略与调优
 
-TriviumDB v0.6.0 起采用全自动双引擎 BQ（Binary Quantization）索引，开发者**无需也无法手动触发重建**。了解以下策略可以取得最佳检索效果。
+TriviumDB v0.7.0 起采用自研的 **QuIVer**（Quantized Indexed Vector Retrieval）SOTA 级 ANN 图索引，开发者**无需也无法手动触发重建**。了解以下策略可以取得最佳检索效果。
 
-### BQ 自动激活条件
+### QuIVer 自动激活条件
 
 | 条件 | 检索引擎 | 行为 |
 |------|----------|------|
-| Mmap 模式 + < 2 万节点 | **BruteForce** | 100% 精确召回 |
-| Mmap 模式 + ≥ 2 万节点 + 首次 Compaction 完成 | **BQ 三阶段火箭** | 二进制粗排 + 精排，Recall@10 > 97% |
-| Rom 模式（任意节点数） | **BruteForce** | 100% 精确召回 |
+| < 1 万节点 | **BruteForce** | 100% 精确召回 |
+| ≥ 1 万节点 + 首次构建完成 | **QuIVer (BQ + Vamana)** | BQ 签名 + 图导航 + f32 精排，Recall@10 > 97% |
 
-### 快速达到 BQ 激活
+### 快速达到 QuIVer 激活
 
 ```python
-# 1. 确保使用 Mmap 模式（Python 端默认也是 Mmap 模式）
+# 1. 打开数据库
 with triviumdb.TriviumDB("data.tdb", dim=1536) as db:
-    # 2. 导入 >= 2 万条数据
-    db.batch_insert(vectors_20k, payloads_20k)
-    # 3. flush 触发一次 Compaction——BQ 索引将在此期间在后台构建
+    # 2. 导入 >= 1 万条数据
+    db.batch_insert(vectors_10k, payloads_10k)
+    # 3. flush —— QuIVer 索引将在首次查询时自动构建
     db.flush()
-    # 4. 部署 auto_compaction 持续更新索引
-    db.enable_auto_compaction(interval_secs=60)
 ```
 
-### 高精度场景：强制绕过 BQ
+### 高精度场景：强制绕过 QuIVer
 
-如果业务对 100% 召回率有强要求（如金融风控、医疗诊断），可以用 Rom 模式强制走 BruteForce：
+如果业务对 100% 召回率有强要求（如金融风控、医疗诊断），可以用 `force_brute_force` 强制走 BruteForce：
 
 ```rust
-// Rom 模式不会构建 BQ，始终走 BruteForce 100% 精确检索
-let db = Database::<f32>::open_with_config("data.tdb", Config {
-    dim: 1536,
-    storage_mode: StorageMode::Rom,
+let config = SearchConfig {
+    top_k: 10,
+    force_brute_force: true,  // 强制 BruteForce 100% 精确检索
     ..Default::default()
-})?;
+};
+let results = db.search_hybrid(None, Some(&query_vec), &config)?;
 ```
-
-### BQ 精查率参数说明
-
-`bq_candidate_ratio` 参数控制 BQ 粗排后送入精排的候选比例，直接影响速度与精度的权衡：
-
-| `bq_candidate_ratio` | 候选池大小（20万时） | Recall@10 | QPS | 适用场景 |
-|-----------------------|-------------------|-----------|------|----------|
-| **0.05（5%）** | 10,000 | **99.50%** | 69.8 | **精准 RAG / AI 记忆（默认推荐）** |
-| 0.01（1%） | 2,000 | 89.32% | 174.6 | 游戏 NPC 联想 / 模糊推荐 |
 
 ---
 

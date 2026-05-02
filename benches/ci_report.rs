@@ -427,8 +427,6 @@ fn main() {
 
     let bq_config = SearchConfig {
         top_k: 10,
-        enable_bq_coarse_search: true,
-        bq_candidate_ratio: 0.2,
         ..Default::default()
     };
     let mut bq_pos = 0usize;

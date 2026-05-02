@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> **版本**: v0.6.0 (Phase 2a)  
+> **版本**: v0.7.0 (Phase 2a)  
 > **定位**: 统一查询 DSL — 融合文档过滤、图模式匹配、向量检索于一体  
 > **前置依赖**: 零外部依赖，纯 Rust 实现
 
@@ -362,7 +362,7 @@ RETURN *
 
 > 💡 `SEARCH` 的 WHERE 过滤在向量打分和 EXPAND 之后执行，作为最终的候选集筛选。
 
-> ⚠️ 当前 `SEARCH` 使用全量 brute-force 打分。对于大规模数据集，建议使用 `db.search_advanced()` 走 BQ 三阶段火箭加速管线。
+> ⚠️ 当前 `SEARCH` 使用全量 brute-force 打分。对于大规模数据集，建议使用 `db.search_advanced()` 走 QuIVer ANN 图索引加速管线。
 
 ---
 
@@ -583,7 +583,7 @@ ORDER BY → OFFSET → LIMIT → TqlResult<T>
 
 | 维度 | `db.search*()` 管线 | `db.tql("SEARCH ...")` |
 |------|---------------------|------------------------|
-| 向量索引 | BQ 三阶段火箭 + rayon 并行 | brute-force 全扫 |
+| 向量索引 | QuIVer ANN 图索引 + rayon 并行 | brute-force 全扫 |
 | 图扩散 | Spreading Activation（热度传播 + 边权衰减） | 简单 k-hop 邻居收集 |
 | 文本混合 | BM25 + AC 自动机双路召回 | 不支持 |
 | 认知管线 | FISTA / DPP / NMF | 不支持 |

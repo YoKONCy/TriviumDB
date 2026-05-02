@@ -16,6 +16,14 @@ on:
         options:
           - 'false'
           - 'true'
+      run_extreme:
+        description: '是否运行 50万节点/1000万边/1536维极限 benchmark'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
   schedule:
     # 每周六 UTC 05:00（北京时间 13:00）生成一次报告
     - cron: '0 5 * * 6'
@@ -152,3 +160,29 @@ jobs:
         with:
           name: large-scale-benchmark-report
           path: target/criterion/
+
+  extreme-graph-vector-report:
+    name: Extreme Graph Vector Report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 360
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_extreme == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-extreme-graph-vector
+
+      - name: 运行 50万节点/1000万边/1536维极限 benchmark 报告
+        run: cargo bench --bench bench_extreme_graph_vector
+
+      - name: 上传极限规模 benchmark 报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extreme-graph-vector-benchmark-report
+          path: target/bench-report/

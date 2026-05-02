@@ -2,7 +2,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
 use std::time::Instant;
-use triviumdb::index::bq_hnsw::{BqHnsw, BqHnswConfig, BqHnswSearchConfig, SelectMode};
+use triviumdb::index::quiver::{QuIVer, QuIVerConfig, QuIVerSearchConfig, SelectMode};
 
 fn gauss(rng: &mut StdRng) -> f32 {
     let u1 = rng.gen_range(1e-10f32..1.0);
@@ -98,8 +98,8 @@ fn run_bench(dim: usize, n: usize, clusters: usize, noise: f32) {
 
     for (label, mode) in [("Heuristic", SelectMode::Heuristic), ("BCM", SelectMode::BCM)] {
         eprintln!("\n  ── {} ──", label);
-        let config = BqHnswConfig { m: 16, ef_construction: 128, select_mode: mode };
-        let mut index = BqHnsw::new(dim, &config);
+        let config = QuIVerConfig { m: 16, ef_construction: 128, select_mode: mode };
+        let mut index = QuIVer::new(dim, &config);
         let mut lcg: u64 = 12345;
 
         let t0 = Instant::now();
@@ -114,7 +114,7 @@ fn run_bench(dim: usize, n: usize, clusters: usize, noise: f32) {
 
         eprintln!("  {:<8} {:>8} {:>8} {:>8}", "ef", "Recall", "QPS", "加速");
         for &ef in &ef_tests {
-            let cfg = BqHnswSearchConfig { top_k, ef_search: ef };
+            let cfg = QuIVerSearchConfig { top_k, ef_search: ef };
             let t0 = Instant::now();
             let mut tr = 0.0;
             for (qi, q) in queries.iter().enumerate() {

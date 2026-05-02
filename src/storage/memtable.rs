@@ -1,7 +1,7 @@
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
 use crate::index::bq::BqSignature;
-use crate::index::int8::Int8Pool;
+use crate::index::quiver::{QuIVer, QuIVerConfig};
 use crate::index::text::TextIndex;
 use crate::node::{Edge, NodeId};
 use crate::storage::vec_pool::VecPool;
@@ -109,9 +109,12 @@ pub struct MemTable<T: VectorType> {
     // 空闲索引回收槽：O(1) 回收墓碑位置，防止物理大数组无尽膨胀
     free_slots: Vec<usize>,
 
-    // 4. Int8 标量量化池（三级火箭 Stage 2 助推器）
-    //    惰性构建：仅当 BQ 检索路径启用时，跟随 BQ 签名池同步重建
-    int8_pool: Option<Int8Pool>,
+    // 4. QuIVer BQ-native HNSW 图索引（惰性构建，N >= 10,000 时自动触发）
+    //    冷热分离：QuIVer 内部 BQ sigs + 图拓扑 = hot，f32 向量 = cold
+    //    事务安全：事务 commit 期间暂停 QuIVer 同步，commit 后由事务层统一同步
+    quiver_index: Option<QuIVer>,
+    /// 事务同步暂停标记：为 true 时 insert/delete/update_vector 不触发 QuIVer 增量操作
+    quiver_sync_paused: bool,
 }
 
 impl<T: VectorType> MemTable<T> {
@@ -156,7 +159,8 @@ impl<T: VectorType> MemTable<T> {
             ids_to_indices: HashMap::new(),
             fast_tags: Vec::new(),
             free_slots: Vec::new(),
-            int8_pool: None,
+            quiver_index: None,
+            quiver_sync_paused: false,
         }
     }
 
@@ -188,7 +192,8 @@ impl<T: VectorType> MemTable<T> {
             ids_to_indices: HashMap::new(),
             fast_tags: Vec::new(),
             free_slots: Vec::new(),
-            int8_pool: None,
+            quiver_index: None,
+            quiver_sync_paused: false,
         }
     }
 
@@ -308,6 +313,20 @@ impl<T: VectorType> MemTable<T> {
         // 4. 维护属性索引
         self.add_to_property_index(id, &payload);
 
+        // 5. 增量更新 QuIVer 索引（如果已构建且未暂停同步）
+        if !self.quiver_sync_paused {
+        if let Some(ref mut quiver) = self.quiver_index {
+            let vec_f32: Vec<f32> = vector.iter().map(|v| v.to_f32()).collect();
+            let mut lcg = id.wrapping_mul(0x9E3779B97F4A7C15);
+            quiver.insert(&vec_f32, id, idx, &mut lcg);
+            quiver.dirty_count_inc(); // 追加也算增量变更
+            if quiver.needs_rebuild() {
+                self.quiver_index = None;
+                tracing::debug!("QuIVer 索引增量变更超过 25%，已丢弃，下次搜索前将自动重建");
+            }
+        }
+        } // quiver_sync_paused guard
+
         Ok(id)
     }
 
@@ -354,6 +373,20 @@ impl<T: VectorType> MemTable<T> {
         if id >= self.next_id {
             self.next_id = id + 1;
         }
+
+        // 增量更新 QuIVer 索引（如果已构建且未暂停同步）
+        if !self.quiver_sync_paused {
+        if let Some(ref mut quiver) = self.quiver_index {
+            let vec_f32: Vec<f32> = vector.iter().map(|v| v.to_f32()).collect();
+            let mut lcg = id.wrapping_mul(0x9E3779B97F4A7C15);
+            quiver.insert(&vec_f32, id, idx, &mut lcg);
+            quiver.dirty_count_inc();
+            if quiver.needs_rebuild() {
+                self.quiver_index = None;
+                tracing::debug!("QuIVer 索引增量变更超过 25%，已丢弃，下次搜索前将自动重建");
+            }
+        }
+        } // quiver_sync_paused guard
 
         Ok(())
     }
@@ -425,11 +458,10 @@ impl<T: VectorType> MemTable<T> {
         }
     }
 
-    /// 确保向量合并缓存已构建（需要 &mut self）
+    /// 确保向量合并缓存已构建，并自动管理 QuIVer 索引生命周期
     ///
     /// 在调用 flat_vectors() 之前调用此方法，确保缓存已准备好。
-    /// 这样设计是为了解决 Rust 借用检查器的限制：
-    /// 允许在获取向量切片后同时调用其他 &self 方法。
+    /// 当活跃节点 >= 10,000 且 QuIVer 索引不存在时，自动构建。
     #[inline]
     pub fn ensure_vectors_cache(&mut self) {
         self.vec_pool.ensure_cache();
@@ -437,8 +469,13 @@ impl<T: VectorType> MemTable<T> {
         let total = self.vec_pool.total_count();
         if self.bq_signatures.len() != total || self.bq_dirty {
             self.rebuild_bq_signatures(total);
-            self.rebuild_int8_pool();
             self.bq_dirty = false;
+        }
+
+        // QuIVer 自动构建：当数据量 >= 10,000 且索引不存在时自动触发
+        let active = self.payloads.len();
+        if active >= 10_000 && self.quiver_index.is_none() {
+            self.build_quiver_impl(&QuIVerConfig::default());
         }
     }
 
@@ -446,7 +483,7 @@ impl<T: VectorType> MemTable<T> {
         let dim = self.dim();
         let flat = self.vec_pool.flat_vectors();
 
-        // 我们利用 flat_vectors 来并行 / 串行提取 1-bit BQ 特征
+        // 利用 flat_vectors 串行提取 1-bit BQ 特征
         let mut new_bq = Vec::with_capacity(total);
         for chunk in flat.chunks(dim) {
             new_bq.push(BqSignature::from_vector(chunk));
@@ -457,17 +494,6 @@ impl<T: VectorType> MemTable<T> {
             new_bq.push(BqSignature::empty());
         }
         self.bq_signatures = new_bq;
-    }
-
-    /// 重建 Int8 量化池（与 BQ 签名池同步触发）
-    fn rebuild_int8_pool(&mut self) {
-        let dim = self.dim();
-        let flat = self.vec_pool.flat_vectors();
-        if flat.is_empty() {
-            self.int8_pool = None;
-            return;
-        }
-        self.int8_pool = Some(Int8Pool::from_generic_vectors(flat, dim));
     }
 
     /// 获取 BQ 量化初筛签名
@@ -493,10 +519,139 @@ impl<T: VectorType> MemTable<T> {
         self.bq_dirty = false; // 刚恢复的签名是干净的
     }
 
-    /// 获取 Int8 量化池引用（三级火箭 Stage 2 中间精筛层）
+    /// 从持久化文件恢复 QuIVer 索引（跳过重建）
+    pub fn set_quiver_index(&mut self, quiver: QuIVer) {
+        self.quiver_index = Some(quiver);
+    }
+
+    /// 设置 QuIVer 同步暂停标记（事务 commit 期间暂停，commit 后恢复）
     #[inline]
-    pub fn int8_pool(&self) -> Option<&Int8Pool> {
-        self.int8_pool.as_ref()
+    pub fn set_quiver_sync_paused(&mut self, paused: bool) {
+        self.quiver_sync_paused = paused;
+    }
+
+    /// 获取 QuIVer 图索引引用（如果已构建）
+    #[inline]
+    pub fn quiver(&self) -> Option<&QuIVer> {
+        self.quiver_index.as_ref()
+    }
+
+    /// 手动构建 QuIVer BQ-native HNSW 索引
+    ///
+    /// 通常不需要手动调用——`ensure_vectors_cache()` 会在 N >= 10,000 时自动构建。
+    /// 此方法用于提前构建或使用自定义配置。
+    ///
+    /// **冷热分离**：
+    /// - Hot: 2-bit BQ 签名 + HNSW 图拓扑（常驻内存，~2 bits/dim/node）
+    /// - Cold: f32 原始向量（仅精排时按需访问，由 QuIVer 内部管理）
+    ///
+    /// **事务安全**：`delete()` / `update_vector()` 会使索引自动失效，
+    /// 下次搜索前由 `ensure_vectors_cache()` 自动重建。
+    pub fn build_quiver(&mut self, config: &QuIVerConfig) {
+        self.ensure_vectors_cache();
+        self.build_quiver_impl(config);
+    }
+
+    /// QuIVer 构建的内部实现（不调用 ensure_vectors_cache，避免递归）
+    fn build_quiver_impl(&mut self, config: &QuIVerConfig) {
+        let flat = self.vec_pool.flat_vectors();
+        let dim = self.dim;
+        if flat.is_empty() || self.payloads.is_empty() {
+            self.quiver_index = None;
+            return;
+        }
+
+        // 收集活跃节点的向量、ID 和 slot 索引（跳过 tombstone）
+        let mut vecs_f32: Vec<f32> = Vec::with_capacity(self.payloads.len() * dim);
+        let mut ids: Vec<u64> = Vec::with_capacity(self.payloads.len());
+        let mut slot_idxs: Vec<usize> = Vec::with_capacity(self.payloads.len());
+        let slot_count = self.indices_to_ids.len();
+        for i in 0..slot_count {
+            let node_id = self.indices_to_ids[i];
+            if node_id == 0 {
+                continue; // tombstone，跳过
+            }
+            if !self.payloads.contains_key(&node_id) {
+                continue;
+            }
+            let offset = i * dim;
+            if offset + dim <= flat.len() {
+                for j in 0..dim {
+                    vecs_f32.push(flat[offset + j].to_f32());
+                }
+                ids.push(node_id);
+                slot_idxs.push(i);
+            }
+        }
+
+        if ids.is_empty() {
+            self.quiver_index = None;
+            return;
+        }
+
+        let mut index = QuIVer::new(dim, config);
+        index.batch_build_experimental_v2(&vecs_f32, &ids, &slot_idxs);
+        self.quiver_index = Some(index);
+        tracing::info!(
+            "QuIVer 索引自动构建完成：{} 个节点，dim={}",
+            ids.len(),
+            dim
+        );
+    }
+
+    /// 使 QuIVer 索引失效（delete / update_vector 后调用）
+    ///
+    /// 如果 QuIVer 索引存在且支持增量删除，优先用 soft_delete。
+    /// 当退化超过 25% 时才丢弃索引，下次搜索前自动重建。
+    fn invalidate_quiver_for_delete(&mut self, node_id: u64) {
+        if let Some(ref mut quiver) = self.quiver_index {
+            quiver.soft_delete(node_id);
+            if quiver.needs_rebuild() {
+                self.quiver_index = None;
+                tracing::debug!("QuIVer 索引退化超过 25%，已丢弃，下次搜索前将自动重建");
+            }
+        }
+    }
+
+    /// 事务 commit 后的 QuIVer 增量同步（Phase 5: 分离时间线）
+    ///
+    /// 遍历已提交的 WAL 条目，将 insert/delete/update_vector 同步到 QuIVer。
+    /// 在 Phase 4（Infallible Apply）成功后调用，不需要回滚能力。
+    pub fn quiver_sync_tx_entries(&mut self, entries: &[crate::storage::wal::WalEntry<T>]) {
+        use crate::storage::wal::WalEntry;
+
+        for entry in entries {
+            match entry {
+                WalEntry::Insert { id, vector, .. } => {
+                    if let Some(ref mut quiver) = self.quiver_index {
+                        let vec_f32: Vec<f32> = vector.iter().map(|v| v.to_f32()).collect();
+                        let slot_idx = self.ids_to_indices.get(id).copied().unwrap_or(0);
+                        let mut lcg = id.wrapping_mul(0x9E3779B97F4A7C15);
+                        quiver.insert(&vec_f32, *id, slot_idx, &mut lcg);
+                        quiver.dirty_count_inc();
+                    }
+                }
+                WalEntry::Delete { id } => {
+                    self.invalidate_quiver_for_delete(*id);
+                }
+                WalEntry::UpdateVector { id, vector } => {
+                    // soft_delete 旧向量 + incremental_insert 新向量
+                    if let Some(ref mut quiver) = self.quiver_index {
+                        quiver.soft_delete(*id);
+                        let vec_f32: Vec<f32> = vector.iter().map(|v| v.to_f32()).collect();
+                        let slot_idx = self.ids_to_indices.get(id).copied().unwrap_or(0);
+                        let mut lcg = id.wrapping_mul(0x9E3779B97F4A7C15);
+                        quiver.insert(&vec_f32, *id, slot_idx, &mut lcg);
+                    }
+                    // 退化检查
+                    if self.quiver_index.as_ref().map_or(false, |q| q.needs_rebuild()) {
+                        self.quiver_index = None;
+                        tracing::debug!("QuIVer 索引退化超过 25%，已丢弃，下次搜索前将自动重建");
+                    }
+                }
+                _ => {} // Link/Unlink/UpdatePayload 不影响 QuIVer
+            }
+        }
     }
 
     /// 暴露底层向量数组供检索层消费（只需 &self）
@@ -712,6 +867,9 @@ impl<T: VectorType> MemTable<T> {
         }
 
         self.bq_dirty = true;
+        if !self.quiver_sync_paused {
+            self.invalidate_quiver_for_delete(id);
+        }
 
         Ok(())
     }
@@ -784,6 +942,19 @@ impl<T: VectorType> MemTable<T> {
             Some(&idx) => {
                 self.vec_pool.update(idx, vector);
                 self.bq_dirty = true; // 向量变了，BQ 签名需要重建
+                // QuIVer 增量更新：soft_delete 旧向量 + incremental_insert 新向量
+                if !self.quiver_sync_paused {
+                if let Some(ref mut quiver) = self.quiver_index {
+                    quiver.soft_delete(id);
+                    let vec_f32: Vec<f32> = vector.iter().map(|v| v.to_f32()).collect();
+                    let mut lcg = id.wrapping_mul(0x9E3779B97F4A7C15);
+                    quiver.insert(&vec_f32, id, idx, &mut lcg);
+                    if quiver.needs_rebuild() {
+                        self.quiver_index = None;
+                        tracing::debug!("QuIVer 索引增量变更超过 25%，已丢弃，下次搜索前将自动重建");
+                    }
+                }
+                } // quiver_sync_paused guard
                 Ok(())
             }
             None => Err(TriviumError::NodeNotFound(id)),
