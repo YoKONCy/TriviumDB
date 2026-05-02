@@ -95,6 +95,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: 运行全量测试（跳过索引相关测试）
+        shell: bash
         run: |
           cargo test --lib --tests -- --test-threads=1 \
             --skip DET_03 \
