@@ -42,22 +42,42 @@ fn bench_config() -> AnnBenchConfig {
     let name = env_string("TRIVIUM_ANN_NAME", "cohere-1m");
 
     // 根据预设名称选择默认路径
-    let (default_train, default_test, default_gt) = match name.as_str() {
+    let (default_train, default_test, default_gt, default_dim) = match name.as_str() {
         "random-1m" => (
             "random_train.f32",
             "random_test.f32",
             "random_groundtruth.i32",
+            768,
+        ),
+        "minilm-384" => (
+            "minilm_train.f32",
+            "minilm_test.f32",
+            "minilm_groundtruth.i32",
+            384,
+        ),
+        "dbpedia-1536" => (
+            "dbpedia_openai_train.f32",
+            "dbpedia_openai_test.f32",
+            "dbpedia_openai_groundtruth.i32",
+            1536,
+        ),
+        "redcaps-512" => (
+            "redcaps_train.f32",
+            "redcaps_test.f32",
+            "redcaps_groundtruth.i32",
+            512,
         ),
         _ => (
             "cohere_train.f32",
             "cohere_test.f32",
             "cohere_groundtruth.i32",
+            768,
         ),
     };
 
     AnnBenchConfig {
         name,
-        dim: env_usize("TRIVIUM_ANN_DIM", DEFAULT_DIM),
+        dim: env_usize("TRIVIUM_ANN_DIM", default_dim),
         train_path: env_string("TRIVIUM_ANN_TRAIN", default_train),
         test_path: env_string("TRIVIUM_ANN_TEST", default_test),
         gt_path: env_string("TRIVIUM_ANN_GT", default_gt),
@@ -245,7 +265,8 @@ fn main() {
         }
     }
     let build_time = t_build.elapsed().as_secs_f64();
-    println!("构建完成! 耗时: {:.2}s", build_time);
+    let build_vecs_per_sec = n_train as f64 / build_time;
+    println!("构建完成! 耗时: {:.2}s ({:.0} vecs/s)", build_time, build_vecs_per_sec);
 
     let stats = index.stats();
     println!(
@@ -284,7 +305,43 @@ fn main() {
         subset_gts
     };
 
-    println!("\n开始测试 Recall@{}:", top_k);
+    // ── 先测 Exact Flat 基准 ──
+    println!(
+        "\n计算 Exact Flat Cosine 基准 (Top-{}, {} 条查询)...",
+        EXACT_TOP_K, BRUTE_FORCE_QUERIES.min(n_test)
+    );
+    let exact_queries = BRUTE_FORCE_QUERIES.min(n_test);
+    let t_norm = Instant::now();
+    let train_norm = normalize_vectors(train_data, dim);
+    let query_norm = normalize_vectors(&test_data[..exact_queries * dim], dim);
+    let norm_time = t_norm.elapsed().as_secs_f64();
+    println!("归一化耗时: {:.2}s", norm_time);
+
+    let t_exact_single = Instant::now();
+    for i in 0..exact_queries {
+        let q = &query_norm[i * dim..(i + 1) * dim];
+        let res = exact_flat_topk_normalized(&train_norm, q, dim, EXACT_TOP_K);
+        std::hint::black_box(res);
+    }
+    let exact_single_time = t_exact_single.elapsed().as_secs_f64();
+    let exact_single_qps = exact_queries as f64 / exact_single_time;
+    let exact_single_lat_ms = exact_single_time / exact_queries as f64 * 1000.0;
+
+    let t_exact_parallel = Instant::now();
+    (0..exact_queries).into_par_iter().for_each(|i| {
+        let q = &query_norm[i * dim..(i + 1) * dim];
+        let res = exact_flat_topk_normalized(&train_norm, q, dim, EXACT_TOP_K);
+        std::hint::black_box(res);
+    });
+    let exact_parallel_time = t_exact_parallel.elapsed().as_secs_f64();
+    let exact_parallel_qps = exact_queries as f64 / exact_parallel_time;
+
+    println!("Exact Flat 单线程: QPS={:.1}, latency={:.2}ms/q", exact_single_qps, exact_single_lat_ms);
+    println!("Exact Flat 多线程: QPS={:.1}", exact_parallel_qps);
+
+    // ── QuIVer 搜索 ──
+    println!("\n{:<8} {:>10} {:>12} {:>10} {:>10}", "ef", "Recall@10", "MT-QPS", "lat(ms)", "vs BF");
+    println!("{}", "-".repeat(54));
 
     for &ef in &[64, 128, 256, 512, 1024] {
         let search_cfg = QuIVerSearchConfig {
@@ -304,58 +361,22 @@ fn main() {
             })
             .sum();
         let total = n_test * top_k;
-
-        let qps = n_test as f64 / t_search.elapsed().as_secs_f64();
+        let elapsed = t_search.elapsed().as_secs_f64();
+        let qps = n_test as f64 / elapsed;
         let recall = hits as f64 / total as f64;
+        let lat_ms = elapsed / n_test as f64 * 1000.0;
+        let speedup = qps / exact_single_qps;
 
         println!(
-            "ef={:<4} | Recall@{}: {:.2}% | QPS: {:.0}",
+            "ef={:<5} {:>9.2}% {:>12.0} {:>9.2} {:>9.1}x",
             ef,
-            top_k,
             recall * 100.0,
-            qps
+            qps,
+            lat_ms,
+            speedup,
         );
     }
 
-    println!(
-        "\n计算标准 Exact Flat Cosine 基准 (预归一化 + Top-{} 小数组，无全量排序)...",
-        EXACT_TOP_K
-    );
-    let exact_queries = BRUTE_FORCE_QUERIES.min(n_test);
-    let t_norm = Instant::now();
-    let train_norm = normalize_vectors(train_data, dim);
-    let query_norm = normalize_vectors(&test_data[..exact_queries * dim], dim);
-    let norm_time = t_norm.elapsed().as_secs_f64();
-    println!("Exact Flat 归一化耗时: {:.2}s", norm_time);
-
-    let t_exact_single = Instant::now();
-    for i in 0..exact_queries {
-        let q = &query_norm[i * dim..(i + 1) * dim];
-        let res = exact_flat_topk_normalized(&train_norm, q, dim, EXACT_TOP_K);
-        std::hint::black_box(res);
-    }
-    let exact_single_time = t_exact_single.elapsed().as_secs_f64();
-    let exact_single_qps = exact_queries as f64 / exact_single_time;
-    println!("Exact Flat 单线程查询数: {}", exact_queries);
-    println!("Exact Flat 单线程耗时: {:.2}s", exact_single_time);
-    println!("Exact Flat 单线程 QPS: {:.4}", exact_single_qps);
-
-    let t_exact_parallel = Instant::now();
-    (0..exact_queries).into_par_iter().for_each(|i| {
-        let q = &query_norm[i * dim..(i + 1) * dim];
-        let res = exact_flat_topk_normalized(&train_norm, q, dim, EXACT_TOP_K);
-        std::hint::black_box(res);
-    });
-    let exact_parallel_time = t_exact_parallel.elapsed().as_secs_f64();
-    let exact_parallel_qps = exact_queries as f64 / exact_parallel_time;
-    println!("Exact Flat 多查询并行耗时: {:.2}s", exact_parallel_time);
-    println!("Exact Flat 多查询并行 QPS: {:.4}", exact_parallel_qps);
-    println!(
-        "ef=64 相对 Exact Flat 单线程加速比请用上方 ef=64 QPS / {:.4} 计算",
-        exact_single_qps
-    );
-    println!(
-        "ef=64 相对 Exact Flat 多查询并行加速比请用上方 ef=64 QPS / {:.4} 计算",
-        exact_parallel_qps
-    );
+    println!("\n构图速率: {:.0} vecs/s", build_vecs_per_sec);
+    println!("Exact Flat 基准 QPS: {:.1} (单线程) / {:.1} (多线程)", exact_single_qps, exact_parallel_qps);
 }

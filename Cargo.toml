@@ -60,27 +60,11 @@ instant-distance = "0.6"
 proptest = "1.11.0"
 
 [[bench]]
-name = "benchmark"
-harness = false
-
-[[bench]]
-name = "bq_vs_brute"
-harness = false
-
-[[bench]]
-name = "bench_500k"
-harness = false
-
-[[bench]]
 name = "bench_queries"
 harness = false
 
 [[bench]]
 name = "ci_report"
-harness = false
-
-[[bench]]
-name = "bench_medium"
 harness = false
 
 [[bench]]
@@ -100,7 +84,7 @@ name = "bench_random1m"
 harness = false
 
 [[bench]]
-name = "bench_usearch_cohere1m"
+name = "bench_sensitivity"
 harness = false
-required-features = ["usearch-bench"]
+
 

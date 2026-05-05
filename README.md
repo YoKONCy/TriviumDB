@@ -24,6 +24,7 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/Python-3.9+-blue?logo=python)](https://pypi.org/)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![arXiv](https://img.shields.io/badge/arXiv-2605.02171-b31b1b.svg)](https://arxiv.org/abs/2605.02171)
 
 </div>
 
@@ -210,6 +211,10 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 ## 向量索引策略：QuIVer
 
 **QuIVer**（**Qu**antized **I**ndexed **Ve**ctor **R**etrieval）是 TriviumDB 自研的 SOTA 级近似最近邻（ANN）图索引，融合 **BQ 二进制量化**与 **Vamana 图导航**，在保持极高召回率的同时实现数量级的检索加速。
+
+> 📄 **学术论文**: [QuIVer: Rethinking ANN Graph Topology via Training-Free Binary Quantization](https://arxiv.org/abs/2605.02171)
+>
+> 在 9 个百万级数据集（384-d 至 1536-d）上验证，QuIVer 以 <0.9 GB 热内存实现 ≥91% Recall@10 @ 16-39K QPS，吞吐量超 hnswlib 16× 和 USearch 5×。
 
 TriviumDB 采用**智能自适应双引擎**向量索引，全程自动路由，无需手动配置：
 
@@ -404,6 +409,20 @@ TriviumDB 的认知检索管线借鉴并实现了以下学术成果（均为本�
 - **Zero-Ghost Node**：基于 FreeList 的墓碑复用策略，消除删除节点的幽灵引用
 - **边特异性强化 / 不应期机制**：自研的图扩散能量调控策略
 - **分离时间线架构**（Separated Timeline）：QuIVer 事务安全策略，利用 Infallible Apply 特性避免图索引回滚
+
+### 📝 引用 QuIVer
+
+如果您在研究中使用了 QuIVer 或 TriviumDB，请引用我们的论文：
+
+```bibtex
+@article{quiver2025,
+  title   = {QuIVer: Rethinking ANN Graph Topology via Training-Free Binary Quantization},
+  author  = {YoKONCy},
+  journal = {arXiv preprint arXiv:2605.02171},
+  year    = {2025},
+  url     = {https://arxiv.org/abs/2605.02171}
+}
+```
 
 ---
 

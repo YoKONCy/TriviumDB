@@ -196,11 +196,12 @@ fn main() {
         let slot_idxs: Vec<usize> = (0..ids.len()).collect();
         index.batch_build_experimental_v2(&vecs, &ids, &slot_idxs);
         let build_s = t0.elapsed().as_secs_f64();
+        let build_vps = ids.len() as f64 / build_s;
 
         let stats = index.stats();
         eprintln!(
-            "  构建耗时: {:.2}s | 平均度数: {:.1}",
-            build_s, stats.avg_degree_l0
+            "  构建耗时: {:.2}s ({:.0} vecs/s) | 平均度数: {:.1}",
+            build_s, build_vps, stats.avg_degree_l0
         );
 
         // 表头

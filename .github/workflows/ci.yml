@@ -271,7 +271,7 @@ jobs:
         run: |
           cargo llvm-cov clean --workspace
           # --lib --tests: 只收集库代码和测试的覆盖率，排除 bench target
-          # （bench_500k 等重型 benchmark 会导致 CI 超时且不贡献库覆盖率）
+          # （重型 benchmark 会导致 CI 超时且不贡献库覆盖率）
           # 跳过索引测试（并发构图依赖平台特定硬件）
           cargo llvm-cov --workspace --lib --tests --lcov --output-path lcov.info --fail-under-lines 80 -- --test-threads=1 \
             --skip DET_03 \

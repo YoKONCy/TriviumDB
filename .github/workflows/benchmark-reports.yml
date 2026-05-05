@@ -8,14 +8,6 @@ name: Benchmark Reports
 on:
   workflow_dispatch:
     inputs:
-      run_heavy:
-        description: '是否运行重型精度/大规模 benchmark'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
       run_extreme:
         description: '是否运行 50万节点/1000万边/1536维极限 benchmark'
         required: false
@@ -56,31 +48,6 @@ jobs:
           name: ci-entry-benchmark-report
           path: target/bench-report/
 
-  medium-scale-report:
-    name: Medium Scale Report (200K nodes + 2M edges)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    continue-on-error: true
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: bench-medium-scale
-
-      - name: 运行中规模 benchmark 报告 (200K×768 + 2M edges, 无 HNSW)
-        run: cargo bench --bench bench_medium
-
-      - name: 上传中规模 benchmark 报告
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: medium-scale-benchmark-report
-          path: target/bench-report/
-
   criterion-query-report:
     name: Query Criterion Report
     runs-on: ubuntu-latest
@@ -96,7 +63,7 @@ jobs:
           key: bench-query-criterion
 
       - name: 运行查询与写入 Criterion benchmark
-        run: cargo bench --bench benchmark --bench bench_queries
+        run: cargo bench --bench bench_queries
 
       - name: 上传 Criterion HTML 报告
         if: always()
@@ -105,61 +72,6 @@ jobs:
           name: criterion-query-report
           path: target/criterion/
 
-  vector-accuracy-report:
-    name: Vector Accuracy Report
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_heavy == 'true'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: bench-vector-accuracy
-
-      - name: 运行 BQ / BruteForce 精度与速度报告
-        run: cargo bench --bench bq_vs_brute
-
-      - name: 上传向量精度 benchmark 报告
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vector-accuracy-report
-          path: |
-            target/criterion/
-            benches/bench_report.md
-
-  large-scale-report:
-    name: Large Scale Report
-    # ⚠️ 500K×1536 维 HNSW 建图需要 16GB+ 内存和多核 CPU，
-    # 免费 GitHub Actions Runner (2核/7GB) 完全无法承载（实测 6h 超时被 cancel）。
-    # 建议在 self-hosted runner 上运行，或本地执行：cargo bench --bench bench_500k
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    continue-on-error: true
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_heavy == 'true'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: bench-large-scale
-
-      - name: 运行大规模 benchmark 报告
-        run: cargo bench --bench bench_500k
-
-      - name: 上传大规模 benchmark 报告
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: large-scale-benchmark-report
-          path: target/criterion/
 
   extreme-graph-vector-report:
     name: Extreme Graph Vector Report
