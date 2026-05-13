@@ -1,13 +1,13 @@
 """
 统一 Baseline 参数扫描 Benchmark
 =================================
-覆盖: hnswlib / FAISS HNSW / FAISS IVF-PQ / USearch / DiskANN
+覆盖: hnswlib / FAISS HNSW / FAISS IVF-PQ / USearch / VSAG / VSAG-HGraph
 数据集: Cohere-1M (768-d, cosine) 或通过环境变量指定
 
 用法:
-  pip install hnswlib faiss-cpu usearch diskannpy   # 按需安装
-  python bench_baselines.py                          # 跑全部已安装的
-  BASELINES=hnswlib,faiss_hnsw python bench_baselines.py  # 只跑指定的
+  pip install hnswlib faiss-cpu usearch pyvsag   # 按需安装
+  python bench_baselines.py                                # 跑全部已安装的
+  BASELINES=hnswlib,faiss_hnsw python bench_baselines.py   # 只跑指定的
 
 环境变量:
   TRIVIUM_ANN_DIM          向量维度 (默认 768)
@@ -22,6 +22,7 @@ import numpy as np
 import time
 import os
 import sys
+import json
 from typing import List, Tuple, Dict, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor
 
@@ -51,12 +52,13 @@ NLIST_VALUES = [256, 1024, 4096]
 M_PQ_VALUES = [32, 48, 64, 96]  # PQ 子空间数，必须整除 DIM(768)
 NPROBE_VALUES = [1, 4, 8, 16, 32, 64, 128, 256]
 
-# === DiskANN 参数 (遵循 ann-benchmarks diskann/config.yml) ===
-# max_outdegree(R) 是最大出度 (不是 2*R)，所以 R=64 ≈ HNSW M=32
-DISKANN_R_VALUES = [32, 64]
-DISKANN_L_BUILD = 125  # ann-benchmarks 标准
-DISKANN_ALPHA_VALUES = [1.0, 1.2]
-DISKANN_L_SEARCH_VALUES = [10, 20, 40, 60, 80, 100, 120, 200, 400]
+# === VSAG 参数 ===
+# VSAG Python 包当前官方示例以 HNSW 为稳定入口；max_degree 对齐 HNSW 的 M。
+VSAG_MAX_DEGREE_VALUES = [8, 16, 32, 48]
+VSAG_EF_CONSTRUCTION_VALUES = [64, 128, 168]
+VSAG_EF_SEARCH_VALUES = [10, 20, 40, 80, 120, 200, 400, 600, 800]
+VSAG_BATCH_THREADS = int(os.environ.get("VSAG_BATCH_THREADS", str(os.cpu_count() or 8)))
+VSAG_HGRAPH_BASE_QUANTIZATION_VALUES = ["sq8", "sq8_reorder_fp32"]
 
 # ============================================================
 #  数据加载
@@ -493,88 +495,160 @@ def bench_usearch(train: np.ndarray, queries: np.ndarray, gt: np.ndarray):
 
 
 # ============================================================
-#  Baseline: DiskANN (diskannpy)
+#  Baseline: VSAG (pyvsag)
 # ============================================================
 
-def bench_diskann(train: np.ndarray, queries: np.ndarray, gt: np.ndarray):
-    """DiskANN (diskannpy) 参数扫描"""
+def _vsag_batch_search(index, queries: np.ndarray, ef_search: int, threads: int, index_name: str = "hnsw") -> np.ndarray:
+    """用 pyvsag 单点 knn_search 组成批量查询。"""
+    search_params = json.dumps({index_name: {"ef_search": ef_search}})
+
+    def search_one(q: np.ndarray) -> np.ndarray:
+        ids, _ = index.knn_search(vector=np.asarray(q, dtype=np.float32), k=K, parameters=search_params)
+        return np.asarray(ids, dtype=np.int64)
+
+    if threads <= 1:
+        return np.vstack([search_one(q) for q in queries])
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        return np.vstack(list(pool.map(search_one, queries)))
+
+
+def bench_vsag(train: np.ndarray, queries: np.ndarray, gt: np.ndarray):
+    """VSAG/pyvsag HNSW 参数扫描。"""
     try:
-        import diskannpy
+        import pyvsag
     except ImportError:
-        print("[跳过] diskannpy 未安装 (pip install diskannpy)")
+        print("[跳过] pyvsag 未安装 (pip install pyvsag)")
         return
 
-    import tempfile
     n_train = train.shape[0]
-    train_norm = normalize_rows(train)
-    queries_norm = normalize_rows(queries)
+    train_norm = normalize_rows(train).astype(np.float32, copy=False)
+    queries_norm = normalize_rows(queries).astype(np.float32, copy=False)
+    ids = np.arange(n_train, dtype=np.int64)
 
     print("\n" + "=" * 70)
-    print("Baseline: DiskANN (diskannpy)")
+    print("Baseline: VSAG (pyvsag HNSW)")
     print("=" * 70)
 
-    for R in DISKANN_R_VALUES:
-        for alpha in DISKANN_ALPHA_VALUES:
-            print(f"\n--- DiskANN R={R}, L_build={DISKANN_L_BUILD}, α={alpha} ---")
+    for ef_c in VSAG_EF_CONSTRUCTION_VALUES:
+        for max_degree in VSAG_MAX_DEGREE_VALUES:
+            print(f"\n--- VSAG HNSW max_degree={max_degree}, ef_c={ef_c} ---")
+            index_params = json.dumps({
+                "dtype": "float32",
+                "metric_type": "l2",
+                "dim": DIM,
+                "hnsw": {
+                    "max_degree": max_degree,
+                    "ef_construction": ef_c,
+                },
+            })
+            index = pyvsag.Index("hnsw", index_params)
 
-            with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                t0 = time.perf_counter()
+                index.build(vectors=train_norm, ids=ids, num_elements=n_train, dim=DIM)
+                build_time = time.perf_counter() - t0
+                vecs_per_sec = n_train / build_time
+                _, mem_str = estimate_hnsw_memory(n_train, DIM, max_degree, stores_vectors=True)
+                print(f"构建: {build_time:.1f}s ({vecs_per_sec:,.0f} vecs/s)")
+                print(f"内存: {mem_str}")
+
+                header = f"{'ef':>6} {'R@10':>9} {'1T-QPS':>10} {'MT-QPS':>10} {'lat(ms)':>9} {'1T/BF':>8} {'MT/BF':>8}"
+                print(header)
+                print("-" * len(header))
+
+                for ef in VSAG_EF_SEARCH_VALUES:
+                    labels_1t, qps_1t, lat_ms = measure_qps(
+                        lambda q, _ef=ef: _vsag_batch_search(index, q, _ef, 1), queries_norm
+                    )
+                    recall = compute_recall(labels_1t, gt)
+
+                    _, qps_mt, _ = measure_qps(
+                        lambda q, _ef=ef: _vsag_batch_search(index, q, _ef, VSAG_BATCH_THREADS), queries_norm
+                    )
+
+                    sp_1t = qps_1t / BRUTE_FORCE_QPS if BRUTE_FORCE_QPS > 0 else 0
+                    sp_mt = qps_mt / BRUTE_FORCE_QPS if BRUTE_FORCE_QPS > 0 else 0
+                    print(f"{ef:>6} {recall*100:>8.2f}% {qps_1t:>10,.0f} {qps_mt:>10,.0f} {lat_ms:>9.2f} {sp_1t:>7.1f}x {sp_mt:>7.1f}x")
+
+            except Exception as e:
+                print(f"[错误] VSAG HNSW max_degree={max_degree}, ef_c={ef_c}: {e}")
+                continue
+
+
+def _vsag_hgraph_index_param(base_quantization: str, max_degree: int, ef_construction: int) -> Dict:
+    """生成 VSAG HGraph 的 index_param。"""
+    index_param = {
+        "base_quantization_type": base_quantization,
+        "max_degree": max_degree,
+        "ef_construction": ef_construction,
+        "alpha": 1.2,
+    }
+    if base_quantization == "sq8_reorder_fp32":
+        index_param["base_quantization_type"] = "sq8"
+        index_param["use_reorder"] = True
+        index_param["precise_quantization_type"] = "fp32"
+    return index_param
+
+
+def bench_vsag_hgraph(train: np.ndarray, queries: np.ndarray, gt: np.ndarray):
+    """VSAG/pyvsag HGraph 参数扫描。"""
+    try:
+        import pyvsag
+    except ImportError:
+        print("[跳过] pyvsag 未安装或当前平台无法加载 (pip install pyvsag)")
+        return
+
+    n_train = train.shape[0]
+    train_norm = normalize_rows(train).astype(np.float32, copy=False)
+    queries_norm = normalize_rows(queries).astype(np.float32, copy=False)
+    ids = np.arange(n_train, dtype=np.int64)
+
+    print("\n" + "=" * 70)
+    print("Baseline: VSAG (pyvsag HGraph)")
+    print("=" * 70)
+
+    for base_quantization in VSAG_HGRAPH_BASE_QUANTIZATION_VALUES:
+        for ef_c in VSAG_EF_CONSTRUCTION_VALUES:
+            for max_degree in VSAG_MAX_DEGREE_VALUES:
+                print(f"\n--- VSAG HGraph quant={base_quantization}, max_degree={max_degree}, ef_c={ef_c} ---")
+                index_params = json.dumps({
+                    "dtype": "float32",
+                    "metric_type": "l2",
+                    "dim": DIM,
+                    "index_param": _vsag_hgraph_index_param(base_quantization, max_degree, ef_c),
+                })
+                index = pyvsag.Index("hgraph", index_params)
+
                 try:
                     t0 = time.perf_counter()
-                    diskannpy.build_memory_index(
-                        data=train_norm,
-                        distance_metric="mips",
-                        vector_dtype=np.float32,
-                        index_directory=tmpdir,
-                        complexity=DISKANN_L_BUILD,
-                        graph_degree=R,
-                        alpha=alpha,
-                        num_threads=os.cpu_count() or 8,
-                        index_prefix="ann",
-                    )
+                    index.build(vectors=train_norm, ids=ids, num_elements=n_train, dim=DIM)
                     build_time = time.perf_counter() - t0
                     vecs_per_sec = n_train / build_time
-                    # DiskANN Vamana 内存: 向量 + 邻接表 (R 个邻居)
-                    adj_bytes = n_train * R * 4
-                    vec_bytes = n_train * DIM * 4
-                    diskann_mb = (adj_bytes + vec_bytes) / 1024 / 1024
+                    _, mem_str = estimate_hnsw_memory(n_train, DIM, max_degree, stores_vectors=True)
                     print(f"构建: {build_time:.1f}s ({vecs_per_sec:,.0f} vecs/s)")
-                    print(f"内存: {diskann_mb:,.0f} MB (向量: {vec_bytes/1024/1024:,.0f} MB + 邻接: {adj_bytes/1024/1024:,.0f} MB)")
+                    print(f"内存: {mem_str}")
 
-                    idx = diskannpy.StaticMemoryIndex(
-                        index_directory=tmpdir,
-                        num_threads=1,
-                        vector_dtype=np.float32,
-                        distance_metric="mips",
-                        index_prefix="ann",
-                    )
-
-                    n_threads = os.cpu_count() or 8
-                    header = f"{'L':>6} {'R@10':>9} {'1T-QPS':>10} {'MT-QPS':>10} {'lat(ms)':>9} {'1T/BF':>8} {'MT/BF':>8}"
+                    header = f"{'ef':>6} {'R@10':>9} {'1T-QPS':>10} {'MT-QPS':>10} {'lat(ms)':>9} {'1T/BF':>8} {'MT/BF':>8}"
                     print(header)
                     print("-" * len(header))
 
-                    for L_search in DISKANN_L_SEARCH_VALUES:
-                        # 单线程
-                        def search_fn_1t(q, _L=L_search):
-                            results = idx.batch_search(q, K, _L, 1)
-                            return results[0]
-
-                        labels_1t, qps_1t, lat_ms = measure_qps(search_fn_1t, queries_norm)
+                    for ef in VSAG_EF_SEARCH_VALUES:
+                        labels_1t, qps_1t, lat_ms = measure_qps(
+                            lambda q, _ef=ef: _vsag_batch_search(index, q, _ef, 1, "hgraph"), queries_norm
+                        )
                         recall = compute_recall(labels_1t, gt)
 
-                        # 多线程
-                        def search_fn_mt(q, _L=L_search):
-                            results = idx.batch_search(q, K, _L, n_threads)
-                            return results[0]
-
-                        _, qps_mt, _ = measure_qps(search_fn_mt, queries_norm)
+                        _, qps_mt, _ = measure_qps(
+                            lambda q, _ef=ef: _vsag_batch_search(index, q, _ef, VSAG_BATCH_THREADS, "hgraph"), queries_norm
+                        )
 
                         sp_1t = qps_1t / BRUTE_FORCE_QPS if BRUTE_FORCE_QPS > 0 else 0
                         sp_mt = qps_mt / BRUTE_FORCE_QPS if BRUTE_FORCE_QPS > 0 else 0
-                        print(f"{L_search:>6} {recall*100:>8.2f}% {qps_1t:>10,.0f} {qps_mt:>10,.0f} {lat_ms:>9.2f} {sp_1t:>7.1f}x {sp_mt:>7.1f}x")
+                        print(f"{ef:>6} {recall*100:>8.2f}% {qps_1t:>10,.0f} {qps_mt:>10,.0f} {lat_ms:>9.2f} {sp_1t:>7.1f}x {sp_mt:>7.1f}x")
 
                 except Exception as e:
-                    print(f"[错误] DiskANN R={R}, α={alpha}: {e}")
+                    print(f"[错误] VSAG HGraph quant={base_quantization}, max_degree={max_degree}, ef_c={ef_c}: {e}")
                     continue
 
 
@@ -587,7 +661,8 @@ ALL_BASELINES = {
     "faiss_hnsw": bench_faiss_hnsw,
     "faiss_ivfpq": bench_faiss_ivfpq,
     "usearch": bench_usearch,
-    "diskann": bench_diskann,
+    "vsag": bench_vsag,
+    "vsag_hgraph": bench_vsag_hgraph,
 }
 
 def main():

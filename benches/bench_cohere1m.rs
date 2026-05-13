@@ -4,7 +4,6 @@ use std::io::Read;
 use std::time::Instant;
 use triviumdb::index::quiver::{QuIVer, QuIVerConfig, QuIVerSearchConfig};
 
-const DEFAULT_DIM: usize = 768;
 const BRUTE_FORCE_QUERIES: usize = 50;
 const EXACT_TOP_K: usize = 10;
 
@@ -54,6 +53,36 @@ fn bench_config() -> AnnBenchConfig {
             "minilm_test.f32",
             "minilm_groundtruth.i32",
             384,
+        ),
+        "minilm-10m" => (
+            "minilm10m_train.f32",
+            "minilm10m_test.f32",
+            "minilm10m_groundtruth.i32",
+            384,
+        ),
+        "cohere-10m" => (
+            "cohere10m_train.f32",
+            "cohere10m_test.f32",
+            "cohere10m_groundtruth.i32",
+            768,
+        ),
+        "msmarco-1m" => (
+            "msmarco1m_train.f32",
+            "msmarco1m_test.f32",
+            "msmarco1m_groundtruth.i32",
+            1024,
+        ),
+        "msmarco-5m" => (
+            "msmarco5m_train.f32",
+            "msmarco5m_test.f32",
+            "msmarco5m_groundtruth.i32",
+            1024,
+        ),
+        "msmarco-10m" => (
+            "msmarco10m_train.f32",
+            "msmarco10m_test.f32",
+            "msmarco10m_groundtruth.i32",
+            1024,
         ),
         "dbpedia-1536" => (
             "dbpedia_openai_train.f32",
@@ -343,10 +372,22 @@ fn main() {
     println!("\n{:<8} {:>10} {:>12} {:>10} {:>10}", "ef", "Recall@10", "MT-QPS", "lat(ms)", "vs BF");
     println!("{}", "-".repeat(54));
 
-    for &ef in &[64, 128, 256, 512, 1024] {
+    let ef_values = std::env::var("TRIVIUM_ANN_EF")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|item| item.trim().parse::<usize>().ok())
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec![64, 128, 256, 512, 1024]);
+
+    for ef in ef_values {
         let search_cfg = QuIVerSearchConfig {
             top_k,
             ef_search: ef,
+            rerank_limit: None,
         };
 
         let t_search = Instant::now();

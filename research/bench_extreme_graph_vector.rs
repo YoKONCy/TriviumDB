@@ -6,9 +6,9 @@ use std::time::Instant;
 use triviumdb::Database;
 use triviumdb::database::SearchConfig;
 
-const NODE_COUNT: usize = 500_000;
-const EDGE_COUNT: usize = 10_000_000;
-const DIM: usize = 1536;
+const NODE_COUNT: usize = 100_000;
+const EDGE_COUNT: usize = 2_000_000;
+const DIM: usize = 768;
 const TOP_K: usize = 10;
 const QUERY_COUNT: usize = 8;
 const VECTOR_SEED: u64 = 0x7a1f_2026_042f_5000;

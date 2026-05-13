@@ -32,7 +32,7 @@ use std::time::Duration;
 /// 则恢复内部数据继续运行，而不是 panic 整个进程。
 pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| {
-        tracing::warn!("Mutex was poisoned, recovering...");
+        tracing::warn!("互斥锁中毒，正在恢复 (Mutex was poisoned, recovering...)");
         poisoned.into_inner()
     })
 }
@@ -137,7 +137,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
             if !entries.is_empty() {
                 tracing::info!(
-                    "Recovering {} entries from WAL, safely truncated at offset {}...",
+                    "正在从 WAL 恢复 {} 条记录，安全截断至偏移 {} (Recovering {} entries from WAL, truncated at offset {})",
+                    entries.len(),
+                    valid_offset,
                     entries.len(),
                     valid_offset
                 );
@@ -146,7 +148,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 }
             } else {
                 tracing::info!(
-                    "Cleared purely corrupt/uncommitted WAL data, truncated back to {}.",
+                    "已清除损坏/未提交的 WAL 数据，回退至偏移 {} (Cleared corrupt/uncommitted WAL, truncated to {})",
+                    valid_offset,
                     valid_offset
                 );
             }
@@ -220,13 +223,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     //  QuIVer 索引管理
     // ════════════════════════════════════════════════════════
 
-    /// 构建 QuIVer BQ-native HNSW 图索引
+    /// 构建 QuIVer BQ-native Vamana 图索引
     ///
     /// 从当前所有活跃数据构建 ANN 图索引，替代默认的三级火箭管线。
     /// 构建后的搜索将自动使用 QuIVer 的 O(log N) 图搜索。
     ///
     /// **冷热分离**：
-    /// - Hot: 2-bit BQ 签名 + HNSW 图拓扑 (~2 bits/dim/node)
+    /// - Hot: 2-bit BQ 签名 + Vamana 图拓扑 (~2 bits/dim/node)
     /// - Cold: f32 原始向量（仅精排阶段按需访问）
     ///
     /// **事务安全**: delete / update_vector 会使索引自动失效，管线回退到三级火箭。
@@ -268,12 +271,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             let usage = lock_or_recover(&self.memtable).estimated_memory_bytes();
             if usage > self.memory_limit {
                 tracing::info!(
-                    "Memory pressure: {}MB > limit {}MB. Auto-flushing...",
+                    "内存压力: {}MB > 上限 {}MB，自动落盘中 (Memory pressure: {}MB > limit {}MB, auto-flushing)",
+                    usage / (1024 * 1024),
+                    self.memory_limit / (1024 * 1024),
                     usage / (1024 * 1024),
                     self.memory_limit / (1024 * 1024)
                 );
                 if let Err(e) = self.flush() {
-                    tracing::error!("Auto-flush failed: {}", e);
+                    tracing::error!("自动落盘失败 (Auto-flush failed): {}", e);
                 }
             }
         }
@@ -304,7 +309,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn compact(&mut self) -> Result<()> {
         {
             let mut mt = lock_or_recover(&self.memtable);
-            tracing::info!("Manual compaction started for {}", self.db_path);
+            tracing::info!("手动压实开始 (Manual compaction started): {}", self.db_path);
             mt.ensure_vectors_cache();
         }
 
@@ -315,7 +320,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             w.clear()?;
         }
 
-        tracing::info!("Manual compaction completed for {}", self.db_path);
+        tracing::info!("手动压实完成 (Manual compaction completed): {}", self.db_path);
         Ok(())
     }
 
@@ -435,6 +440,47 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         }
         {
             let mut w = lock_or_recover(&self.wal);
+            w.append(&WalEntry::UpdatePayload::<T> {
+                id,
+                payload: payload_str,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// 部分更新节点的 Payload（$set / $inc / $unset）
+    ///
+    /// 与 `update_payload` 的全量替换不同，只修改指定字段，其他字段保持不变。
+    ///
+    /// # 示例
+    /// ```rust,ignore
+    /// // 设置字段
+    /// db.patch_payload(id, serde_json::json!({"$set": {"name": "Alice"}}))?;
+    /// // 递增计数器
+    /// db.patch_payload(id, serde_json::json!({"$inc": {"visits": 1}}))?;
+    /// // 删除字段
+    /// db.patch_payload(id, serde_json::json!({"$unset": {"old_field": true}}))?;
+    /// // 简写模式（等价于 $set）
+    /// db.patch_payload(id, serde_json::json!({"name": "Bob"}))?;
+    /// ```
+    pub fn patch_payload(&mut self, id: NodeId, patch: serde_json::Value) -> Result<()> {
+        let final_payload = {
+            let mut mt = lock_or_recover(&self.memtable);
+            mt.patch_payload(id, &patch)?;
+            // 获取 patch 后的完整 payload 用于 WAL
+            mt.get_payload(id).cloned().unwrap_or_default()
+        };
+
+        let payload_str = final_payload.to_string();
+        if payload_str.len() > 8 * 1024 * 1024 {
+            return Err(crate::error::TriviumError::PayloadTooLarge {
+                size_bytes: payload_str.len(),
+                max_bytes: 8 * 1024 * 1024,
+            });
+        }
+        {
+            let mut w = lock_or_recover(&self.wal);
+            // WAL 记录 patch 后的完整 payload（保证崩溃恢复的幂等性）
             w.append(&WalEntry::UpdatePayload::<T> {
                 id,
                 payload: payload_str,
@@ -919,7 +965,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         new_db.flush()?;
         tracing::info!(
-            "维度迁移完成: {} → {}，共迁移 {} 个节点",
+            "维度迁移完成: {} → {}，共迁移 {} 个节点 (Dimension migration done: {} → {}, {} nodes migrated)",
+            mt.dim(),
+            new_dim,
+            node_ids.len(),
             mt.dim(),
             new_dim,
             node_ids.len()

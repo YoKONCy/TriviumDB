@@ -206,9 +206,8 @@ fn gen_and_write_vectors(
 
             // 3) 投影到 d 维：v = W × point_k
             let mut vec_d = vec![0.0f32; dim];
-            for col in 0..k {
+            for (col, &w) in point_k.iter().enumerate().take(k) {
                 let basis_offset = col * dim;
-                let w = point_k[col];
                 for row in 0..dim {
                     vec_d[row] += w * basis[basis_offset + row];
                 }

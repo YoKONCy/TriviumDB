@@ -46,25 +46,12 @@ Thumbs.db
 desktop.ini
 
 # ══════ Benchmark datasets ══════
-cohere_groundtruth.i32
-cohere_test.f32
-cohere_train.f32
-dbpedia_openai_groundtruth.i32
-dbpedia_openai_test.f32
-dbpedia_openai_train.f32
-random_groundtruth.i32
-random_test.f32
-random_train.f32
-glove100_train.f32
-glove100_test.f32
-glove100_groundtruth.i32
-sift128_train.f32
-sift128_test.f32
-sift128_groundtruth.i32
-gist960_train.f32
-gist960_test.f32
-gist960_groundtruth.i32
+*.f32
+*.i32
 *.hdf5
+.hf_cache/
+research/bq2_llm
+diskann_data/
 
 # ══════ 论文（未发表，不纳入版本控制）══════
 research/paper/

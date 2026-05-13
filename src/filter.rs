@@ -1,7 +1,8 @@
 use serde_json::Value;
 
 /// 过滤条件表达式
-/// 支持: $eq, $ne, $gt, $gte, $lt, $lte, $in, $and, $or
+/// 支持: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $startsWith, $contains,
+///       $exists, $size, $all, $type, $and, $or
 #[derive(Debug, Clone)]
 pub enum Filter {
     /// 精确匹配: {"field": {"$eq": value}}
@@ -32,6 +33,10 @@ pub enum Filter {
     All(String, Vec<Value>),
     /// 字段类型匹配
     TypeMatch(String, String),
+    /// 前缀匹配: {"field": {"$startsWith": "/地理"}}
+    StartsWith(String, String),
+    /// 包含子串: {"field": {"$contains": "关键词"}}
+    Contains(String, String),
 }
 
 impl Filter {
@@ -96,6 +101,16 @@ impl Filter {
 
             Filter::And(filters) => filters.iter().all(|f| f.matches(payload)),
             Filter::Or(filters) => filters.iter().any(|f| f.matches(payload)),
+
+            Filter::StartsWith(key, prefix) => payload
+                .get(key)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.starts_with(prefix.as_str())),
+
+            Filter::Contains(key, substr) => payload
+                .get(key)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains(substr.as_str())),
         }
     }
 
@@ -169,6 +184,12 @@ impl Filter {
     }
     pub fn type_match(key: impl Into<String>, t: impl Into<String>) -> Self {
         Filter::TypeMatch(key.into(), t.into())
+    }
+    pub fn starts_with(key: impl Into<String>, prefix: impl Into<String>) -> Self {
+        Filter::StartsWith(key.into(), prefix.into())
+    }
+    pub fn contains(key: impl Into<String>, substr: impl Into<String>) -> Self {
+        Filter::Contains(key.into(), substr.into())
     }
 
     /// 从 JSON Value 解析为 Filter（类 MongoDB 语法）
@@ -258,6 +279,18 @@ impl Filter {
                                         .ok_or_else(|| "$type 需要字符串".to_string())?;
                                     Filter::TypeMatch(field.to_string(), t.to_string())
                                 }
+                                "$startsWith" => {
+                                    let prefix = op_val
+                                        .as_str()
+                                        .ok_or_else(|| "$startsWith 需要字符串".to_string())?;
+                                    Filter::StartsWith(field.to_string(), prefix.to_string())
+                                }
+                                "$contains" => {
+                                    let substr = op_val
+                                        .as_str()
+                                        .ok_or_else(|| "$contains 需要字符串".to_string())?;
+                                    Filter::Contains(field.to_string(), substr.to_string())
+                                }
                                 unknown => return Err(format!("未知操作符: {}", unknown)),
                             };
                             filters.push(f);
@@ -283,4 +316,104 @@ impl Filter {
 
 fn extract_number(payload: &Value, key: &str) -> Option<f64> {
     payload.get(key)?.as_f64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ═══════ $startsWith 测试 ═══════
+
+    #[test]
+    fn starts_with_basic_match() {
+        let filter = Filter::starts_with("folder", "/地理");
+        let payload = json!({"folder": "/地理/亚洲/中国"});
+        assert!(filter.matches(&payload));
+    }
+
+    #[test]
+    fn starts_with_exact_match() {
+        let filter = Filter::starts_with("folder", "/地理");
+        let payload = json!({"folder": "/地理"});
+        assert!(filter.matches(&payload), "精确等于前缀时也应匹配");
+    }
+
+    #[test]
+    fn starts_with_no_match() {
+        let filter = Filter::starts_with("folder", "/地理");
+        let payload = json!({"folder": "/天文/恒星"});
+        assert!(!filter.matches(&payload));
+    }
+
+    #[test]
+    fn starts_with_missing_field() {
+        let filter = Filter::starts_with("folder", "/地理");
+        let payload = json!({"name": "test"});
+        assert!(!filter.matches(&payload), "字段不存在应返回 false");
+    }
+
+    #[test]
+    fn starts_with_non_string_field() {
+        let filter = Filter::starts_with("count", "12");
+        let payload = json!({"count": 123});
+        assert!(!filter.matches(&payload), "非字符串字段应返回 false");
+    }
+
+    // ═══════ $contains 测试 ═══════
+
+    #[test]
+    fn contains_basic_match() {
+        let filter = Filter::contains("text", "关键词");
+        let payload = json!({"text": "这是一个包含关键词的文本"});
+        assert!(filter.matches(&payload));
+    }
+
+    #[test]
+    fn contains_no_match() {
+        let filter = Filter::contains("text", "不存在");
+        let payload = json!({"text": "正常文本"});
+        assert!(!filter.matches(&payload));
+    }
+
+    // ═══════ from_json 解析测试 ═══════
+
+    #[test]
+    fn from_json_starts_with() {
+        let json_filter = json!({"folder": {"$startsWith": "/地理"}});
+        let filter = Filter::from_json(&json_filter).unwrap();
+        let payload = json!({"folder": "/地理/亚洲"});
+        assert!(filter.matches(&payload));
+
+        let payload2 = json!({"folder": "/天文"});
+        assert!(!filter.matches(&payload2));
+    }
+
+    #[test]
+    fn from_json_contains() {
+        let json_filter = json!({"tag": {"$contains": "重要"}});
+        let filter = Filter::from_json(&json_filter).unwrap();
+        assert!(filter.matches(&json!({"tag": "非常重要的文档"})));
+        assert!(!filter.matches(&json!({"tag": "普通文档"})));
+    }
+
+    #[test]
+    fn from_json_starts_with_invalid_type() {
+        let json_filter = json!({"folder": {"$startsWith": 123}});
+        assert!(Filter::from_json(&json_filter).is_err(), "$startsWith 传入数字应报错");
+    }
+
+    // ═══════ 组合使用测试 ═══════
+
+    #[test]
+    fn or_with_starts_with() {
+        // 模拟: folder 以 /地理 或 /天文 开头
+        let filter = Filter::or(vec![
+            Filter::starts_with("folder", "/地理"),
+            Filter::starts_with("folder", "/天文"),
+        ]);
+        assert!(filter.matches(&json!({"folder": "/地理/亚洲"})));
+        assert!(filter.matches(&json!({"folder": "/天文/恒星"})));
+        assert!(!filter.matches(&json!({"folder": "/历史/近代"})));
+    }
 }

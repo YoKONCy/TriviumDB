@@ -407,7 +407,7 @@ impl FfiHook {
         unsafe {
             let lib = libloading::Library::new(path).map_err(|e| {
                 crate::error::TriviumError::HookLoadError(format!(
-                    "无法加载外置 Hook 动态库 '{}': {}",
+                    "无法加载外置 Hook 动态库 (Failed to load FFI Hook library) '{}': {}",
                     path, e
                 ))
             })?;
@@ -416,7 +416,7 @@ impl FfiHook {
             let rerank_fn = lib.get::<FfiRerankFn>(b"trivium_rerank").ok().map(|f| *f);
 
             tracing::info!(
-                "已加载外置 Hook 模块: {} (recall={}, rerank={})",
+                "已加载外置 Hook 模块 (FFI Hook loaded): {} (recall={}, rerank={})",
                 path,
                 recall_fn.is_some(),
                 rerank_fn.is_some()
@@ -457,7 +457,7 @@ impl SearchHook for FfiHook {
         };
 
         if ret != 0 {
-            tracing::warn!("FFI recall 函数返回错误码: {}", ret);
+            tracing::warn!("FFI recall 函数返回错误码 (FFI recall returned error code): {}", ret);
             return None;
         }
 
@@ -495,7 +495,7 @@ impl SearchHook for FfiHook {
         let ret = unsafe { (rerank_fn)(ffi_hits.as_mut_ptr(), ffi_hits.len()) };
 
         if ret != 0 {
-            tracing::warn!("FFI rerank 函数返回错误码: {}", ret);
+            tracing::warn!("FFI rerank 函数返回错误码 (FFI rerank returned error code): {}", ret);
             return None;
         }
 

@@ -674,8 +674,39 @@ results = db.filter_where({
 | `$lt` | 小于 | 数字 | `{"age": {"$lt": 30}}` |
 | `$lte` | 小于等于 | 数字 | `{"price": {"$lte": 99.9}}` |
 | `$in` | 包含于列表 | 数组 | `{"role": {"$in": ["admin", "mod"]}}` |
+| `$nin` | 不在列表中 | 数组 | `{"status": {"$nin": ["banned", "deleted"]}}` |
+| `$startsWith` | 前缀匹配 | 字符串 | `{"folder": {"$startsWith": "/地理"}}` |
+| `$contains` | 包含子串 | 字符串 | `{"tag": {"$contains": "重要"}}` |
+| `$exists` | 字段是否存在 | 布尔 | `{"email": {"$exists": true}}` |
+| `$size` | 数组长度 | 正整数 | `{"tags": {"$size": 3}}` |
+| `$all` | 数组包含所有 | 数组 | `{"tags": {"$all": ["A", "B"]}}` |
+| `$type` | 字段类型 | 字符串 | `{"age": {"$type": "number"}}` |
 | `$and` | 逻辑与 | 条件数组 | `{"$and": [{...}, {...}]}` |
 | `$or` | 逻辑或 | 条件数组 | `{"$or": [{...}, {...}]}` |
+
+**字符串匹配示例（v0.7.1 新增）：**
+
+```python
+# 前缀匹配：匹配 /地理 及其所有子路径
+results = db.filter_where({"folder": {"$startsWith": "/地理"}})
+
+# 多前缀 OR 组合：匹配多个路径前缀
+results = db.filter_where({
+    "$or": [
+        {"folder": {"$startsWith": "/地理"}},
+        {"folder": {"$startsWith": "/天文"}}
+    ]
+})
+
+# 子串包含
+results = db.filter_where({"description": {"$contains": "关键词"}})
+
+# search() 中使用 payload_filter 前缀过滤
+results = db.search(
+    query_vector=[0.1, ...],
+    payload_filter={"folder": {"$startsWith": "/地理"}}
+)
+```
 
 **Rust：**
 ```rust

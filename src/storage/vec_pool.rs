@@ -25,7 +25,7 @@ fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
         }
     }
     // 逻辑上不可达：循环必定 return。防御性返回避免审查标记。
-    Err(std::io::Error::other("robust_rename exhausted retries"))
+    Err(std::io::Error::other("robust_rename 重试次数耗尽 (exhausted retries)"))
 }
 
 #[cfg(not(windows))]
@@ -87,7 +87,7 @@ pub struct VecPool<T: VectorType> {
 /// | 顺序预读 | `Sequential` | mmap 建立后（BruteForce 全量扫描） |
 /// | 主动预加载 | `WillNeed` | `search_hybrid()` 触发前（大数据集） |
 /// | 冷页释放 | `DontNeed` | Compaction 完成后 / 内存压力 |
-/// | 随机访问 | `Random` | HNSW 图遍历（稀疏随机访问） |
+/// | 随机访问 | `Random` | Vamana 图遍历（稀疏随机访问） |
 #[cfg(unix)]
 #[inline]
 fn madvise(mmap: &memmap2::MmapMut, advice: memmap2::Advice) {
@@ -126,7 +126,7 @@ impl<T: VectorType> VecPool<T> {
 
             if file_len < expected_size {
                 return Err(TriviumError::CorruptedFile(format!(
-                    "向量文件大小不匹配: 文件 {} 字节, 预期最少 {} 字节",
+                    "向量文件大小不匹配 (Vec file size mismatch): 文件 {} 字节, 预期最少 {} 字节",
                     file_len, expected_size
                 )));
             }
@@ -429,7 +429,7 @@ impl<T: VectorType> VecPool<T> {
         self.invalidate_cache();
 
         tracing::debug!(
-            "[VecPool] 追加写入: +{} 向量, 累计 {} 向量",
+            "[VecPool] 追加写入 (appended): +{} 向量, 累计 {} 向量",
             append_count,
             new_total
         );
@@ -495,7 +495,7 @@ impl<T: VectorType> VecPool<T> {
         self.has_dirty_base = false;
         self.invalidate_cache();
 
-        tracing::debug!("[VecPool] 全量重写: {} 向量", total);
+        tracing::debug!("[VecPool] 全量重写 (full rewrite): {} 向量", total);
         Ok(total)
     }
 
@@ -516,7 +516,7 @@ impl<T: VectorType> VecPool<T> {
         if let Some(ref m) = self.mmap {
             let _ = unsafe { m.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
             tracing::debug!(
-                "[VecPool] madvise(DONTNEED)：释放 {} MB 冷页",
+                "[VecPool] madvise(DONTNEED)：释放 {} MB 冷页 (releasing cold pages)",
                 self.mmap_count * self.dim * std::mem::size_of::<T>() / (1024 * 1024)
             );
         }
@@ -525,10 +525,10 @@ impl<T: VectorType> VecPool<T> {
     /// 切换为随机访问模式建议（MADV_RANDOM）
     ///
     /// 告知 OS 页面将被随机访问，禁用预读（readahead）。
-    /// 在顺序预读无效时（如 HNSW 稀疏图遍历），可以减少无效 I/O。
+    /// 在顺序预读无效时（如 Vamana 稀疏图遍历），可以减少无效 I/O。
     ///
-    /// 注意：HNSW 模式下向量在 `rebuild()` 时被 `to_vec()` clone 进图结构，
-    /// 真正的 HNSW search 并不直接访问 mmap，因此此调用主要作为
+    /// 注意：Vamana 模式下向量在 `rebuild()` 时被 `to_vec()` clone 进图结构，
+    /// 真正的 Vamana search 并不直接访问 mmap，因此此调用主要作为
     /// "一次 rebuild 后不再需要顺序扫描" 的信号。
     pub fn advise_random(&self) {
         #[cfg(unix)]

@@ -28,7 +28,7 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
         } => {
             if mt.contains(id) {
                 // 幂等：该 ID 已存在（可能来自 .tdb 加载或重复回放），跳过
-                tracing::debug!("WAL 回放跳过已存在的节点 {}", id);
+                tracing::debug!("WAL 回放跳过已存在的节点 (WAL replay skipped existing node) {}", id);
             } else {
                 let payload_val: serde_json::Value =
                     serde_json::from_str(&payload).unwrap_or_default();
@@ -217,7 +217,7 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Drop
     fn drop(&mut self) {
         if !self.committed && !self.ops.is_empty() {
             tracing::warn!(
-                "Transaction with {} pending ops was dropped without commit/rollback. Operations discarded.",
+                "事务未提交/回滚即被丢弃 (Transaction dropped without commit/rollback)，{} 个操作已放弃",
                 self.ops.len()
             );
         }
@@ -331,7 +331,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         let f = item.to_f32();
                         if f.is_nan() || f.is_infinite() {
                             return Err(crate::error::TriviumError::InvalidVector {
-                                reason: "Vector contains NaN or Infinity".into(),
+                                reason: "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)".into(),
                             });
                         }
                     }
@@ -353,7 +353,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         let f = item.to_f32();
                         if f.is_nan() || f.is_infinite() {
                             return Err(crate::error::TriviumError::InvalidVector {
-                                reason: "Vector contains NaN or Infinity".into(),
+                                reason: "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)".into(),
                             });
                         }
                     }
@@ -405,7 +405,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         let f = item.to_f32();
                         if f.is_nan() || f.is_infinite() {
                             return Err(crate::error::TriviumError::InvalidVector {
-                                reason: "Vector contains NaN or Infinity".into(),
+                                reason: "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)".into(),
                             });
                         }
                     }

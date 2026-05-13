@@ -39,7 +39,7 @@ fn 测试_全业务链路_社交网络复杂流转() {
         storage_mode: StorageMode::Mmap,
         ..Default::default()
     };
-    // 使用默认 HNSW 机制
+    // 使用默认配置
     let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
 
     let alice_id = 1;
@@ -145,7 +145,7 @@ fn 测试_全业务链路_社交网络复杂流转() {
         // 管理员封禁 Bob
         db.delete(bob_id).expect("独立接口删除失败");
 
-        // 执行大规模底层空间压实，确保图谱和HNSW索引同时裁剪墓碑完成对齐
+        // 执行大规模底层空间压实，确保图谱和 QuIVer 索引同时裁剪墓碑完成对齐
         db.compact().expect("压实异常");
 
         // 验证 Bob 已被彻底清理

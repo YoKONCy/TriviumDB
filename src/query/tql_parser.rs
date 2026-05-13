@@ -481,6 +481,20 @@ impl TqlParser {
                 };
                 Ok(Filter::TypeMatch(field.into(), t))
             }
+            "$startsWith" => {
+                let prefix = match self.advance() {
+                    TqlToken::StringLit(s) => s,
+                    other => return Err(format!("$startsWith expects string, got {:?}", other)),
+                };
+                Ok(Filter::StartsWith(field.into(), prefix))
+            }
+            "$contains" => {
+                let substr = match self.advance() {
+                    TqlToken::StringLit(s) => s,
+                    other => return Err(format!("$contains expects string, got {:?}", other)),
+                };
+                Ok(Filter::Contains(field.into(), substr))
+            }
             unknown => Err(format!("Unknown operator: {}", unknown)),
         }
     }

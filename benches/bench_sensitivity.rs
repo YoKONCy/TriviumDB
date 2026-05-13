@@ -35,13 +35,6 @@ fn env_string(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
 struct DataSet {
     name: String,
     dim: usize,
@@ -63,11 +56,53 @@ fn load_dataset() -> DataSet {
             "dbpedia_openai_groundtruth.i32",
             1536,
         ),
-        "redcaps-512" => (
-            "redcaps_train.f32",
-            "redcaps_test.f32",
-            "redcaps_groundtruth.i32",
+        "wolt-clip-512" => (
+            "wolt_clip_train.f32",
+            "wolt_clip_test.f32",
+            "wolt_clip_groundtruth.i32",
             512,
+        ),
+        "sift-128" => (
+            "sift128_train.f32",
+            "sift128_test.f32",
+            "sift128_groundtruth.i32",
+            128,
+        ),
+        "gist-960" => (
+            "gist960_train.f32",
+            "gist960_test.f32",
+            "gist960_groundtruth.i32",
+            960,
+        ),
+        "glove-100" => (
+            "glove100_train.f32",
+            "glove100_test.f32",
+            "glove100_groundtruth.i32",
+            100,
+        ),
+        "dbpedia-3072" => (
+            "dbpedia_openai_3072_train.f32",
+            "dbpedia_openai_3072_test.f32",
+            "dbpedia_openai_3072_groundtruth.i32",
+            3072,
+        ),
+        "bge-m3-1024" => (
+            "bge_m3_train.f32",
+            "bge_m3_test.f32",
+            "bge_m3_groundtruth.i32",
+            1024,
+        ),
+        "random-1m" => (
+            "random_train.f32",
+            "random_test.f32",
+            "random_groundtruth.i32",
+            768,
+        ),
+        "sphere-1m" => (
+            "sphere_train.f32",
+            "sphere_test.f32",
+            "sphere_groundtruth.i32",
+            768,
         ),
         _ => ("cohere_train.f32", "cohere_test.f32", "cohere_groundtruth.i32", 768),
     };
@@ -156,63 +191,56 @@ fn build_index(train: &[f32], dim: usize, m: usize, ef_c: usize, alpha: f32) -> 
     (index, build_secs, hot_mb, vecs_per_sec)
 }
 
-/// 单线程串行查询，返回 (recall, qps)
-fn measure_single_thread(
-    index: &QuIVer,
-    test: &[f32],
-    train: &[f32],
+struct SearchEval<'a> {
+    test: &'a [f32],
+    train: &'a [f32],
     dim: usize,
     n_test: usize,
-    gts: &[Vec<u64>],
-    ef: usize,
+    gts: &'a [Vec<u64>],
     top_k: usize,
-) -> (f64, f64) {
+}
+
+/// 单线程串行查询，返回 (recall, qps)
+fn measure_single_thread(index: &QuIVer, eval: &SearchEval<'_>, ef: usize) -> (f64, f64) {
     let cfg = QuIVerSearchConfig {
-        top_k,
+        top_k: eval.top_k,
         ef_search: ef,
+        rerank_limit: None,
     };
 
     let t = Instant::now();
     let mut hits = 0usize;
-    for i in 0..n_test {
-        let q = &test[i * dim..(i + 1) * dim];
-        let res = index.search(q, train, &cfg);
-        hits += res.iter().filter(|&&(id, _)| gts[i].contains(&id)).count();
+    for i in 0..eval.n_test {
+        let q = &eval.test[i * eval.dim..(i + 1) * eval.dim];
+        let res = index.search(q, eval.train, &cfg);
+        hits += res.iter().filter(|&&(id, _)| eval.gts[i].contains(&id)).count();
     }
     let elapsed = t.elapsed().as_secs_f64();
-    let recall = hits as f64 / (n_test * top_k) as f64;
-    let qps = n_test as f64 / elapsed;
+    let recall = hits as f64 / (eval.n_test * eval.top_k) as f64;
+    let qps = eval.n_test as f64 / elapsed;
     (recall, qps)
 }
 
 /// 多线程并行查询，返回 (recall, qps)
-fn measure_multi_thread(
-    index: &QuIVer,
-    test: &[f32],
-    train: &[f32],
-    dim: usize,
-    n_test: usize,
-    gts: &[Vec<u64>],
-    ef: usize,
-    top_k: usize,
-) -> (f64, f64) {
+fn measure_multi_thread(index: &QuIVer, eval: &SearchEval<'_>, ef: usize) -> (f64, f64) {
     let cfg = QuIVerSearchConfig {
-        top_k,
+        top_k: eval.top_k,
         ef_search: ef,
+        rerank_limit: None,
     };
 
     let t = Instant::now();
-    let hits: usize = (0..n_test)
+    let hits: usize = (0..eval.n_test)
         .into_par_iter()
         .map(|i| {
-            let q = &test[i * dim..(i + 1) * dim];
-            let res = index.search(q, train, &cfg);
-            res.iter().filter(|&&(id, _)| gts[i].contains(&id)).count()
+            let q = &eval.test[i * eval.dim..(i + 1) * eval.dim];
+            let res = index.search(q, eval.train, &cfg);
+            res.iter().filter(|&&(id, _)| eval.gts[i].contains(&id)).count()
         })
         .sum();
     let elapsed = t.elapsed().as_secs_f64();
-    let recall = hits as f64 / (n_test * top_k) as f64;
-    let qps = n_test as f64 / elapsed;
+    let recall = hits as f64 / (eval.n_test * eval.top_k) as f64;
+    let qps = eval.n_test as f64 / elapsed;
     (recall, qps)
 }
 
@@ -227,18 +255,31 @@ fn experiment_param_sensitivity(ds: &DataSet) {
     println!("{}", "=".repeat(70));
 
     let top_k = 10;
-    // 支持跳过已完成的子实验：TRIVIUM_SENSITIVITY_START=1c 则跳过 1a、1b
+    let eval = SearchEval {
+        test: &ds.test,
+        train: &ds.train,
+        dim: ds.dim,
+        n_test: ds.n_test,
+        gts: &ds.gts,
+        top_k,
+    };
+
+    // 支持跳过子实验：
+    //   TRIVIUM_SENSITIVITY_START=1d 则跳过 1a、1b、1c
+    //   TRIVIUM_SENSITIVITY_END=1e   则跳过 1f（m×α 交叉，已证明 α 影响极小）
     let start = env_string("TRIVIUM_SENSITIVITY_START", "1a");
-    let should_run = |tag: &str| tag >= start.as_str();
+    let end = env_string("TRIVIUM_SENSITIVITY_END", "1e");
+    let should_run = |tag: &str| tag >= start.as_str() && tag <= end.as_str();
 
     // 1a/1b/1c 共用的探测 ef 列表
     let ef_probes = [32, 64, 128, 256, 512, 1024];
 
-    // 先测 brute-force baseline
-    println!("\n计算 brute-force 基准 QPS...");
+    // 先测 brute-force baseline（限制最多 1000 queries，避免高维数据集耗时爆炸）
+    let bf_n = ds.n_test.min(1000);
+    println!("\n计算 brute-force 基准 QPS ({}q)...", bf_n);
     let bf_qps = {
         let t = Instant::now();
-        let _: usize = (0..ds.n_test)
+        let _: usize = (0..bf_n)
             .into_par_iter()
             .map(|i| {
                 let q = &ds.test[i * ds.dim..(i + 1) * ds.dim];
@@ -265,8 +306,8 @@ fn experiment_param_sensitivity(ds: &DataSet) {
             })
             .sum();
         let elapsed = t.elapsed().as_secs_f64();
-        let qps = ds.n_test as f64 / elapsed;
-        let lat_ms = elapsed / ds.n_test as f64 * 1000.0;
+        let qps = bf_n as f64 / elapsed;
+        let lat_ms = elapsed / bf_n as f64 * 1000.0;
         println!("Brute-force 基准: QPS={:.1}, latency={:.2}ms/q", qps, lat_ms);
         qps
     };
@@ -287,9 +328,7 @@ fn experiment_param_sensitivity(ds: &DataSet) {
         let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, m, 128, 1.2);
         print!("{:<6} {:>10.1} {:>10.0} {:>10}", m, build_s, vps, hot_mb);
         for &ef in &ef_probes {
-            let (recall, qps) = measure_multi_thread(
-                &index, &ds.test, &ds.train, ds.dim, ds.n_test, &ds.gts, ef, top_k,
-            );
+            let (recall, qps) = measure_multi_thread(&index, &eval, ef);
             print!("  {:>6.2}%  {:>6.0}", recall * 100.0, qps);
         }
         println!();
@@ -312,9 +351,7 @@ fn experiment_param_sensitivity(ds: &DataSet) {
         let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, 32, ef_c, 1.2);
         print!("{:<8} {:>10.1} {:>10.0} {:>10}", ef_c, build_s, vps, hot_mb);
         for &ef in &ef_probes {
-            let (recall, qps) = measure_multi_thread(
-                &index, &ds.test, &ds.train, ds.dim, ds.n_test, &ds.gts, ef, top_k,
-            );
+            let (recall, qps) = measure_multi_thread(&index, &eval, ef);
             print!("  {:>6.2}%  {:>6.0}", recall * 100.0, qps);
         }
         println!();
@@ -339,9 +376,7 @@ fn experiment_param_sensitivity(ds: &DataSet) {
         let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, 32, 128, alpha);
         print!("{:<8.2} {:>10.1} {:>10.0} {:>10}", alpha, build_s, vps, hot_mb);
         for &ef in &ef_probes {
-            let (recall, qps) = measure_multi_thread(
-                &index, &ds.test, &ds.train, ds.dim, ds.n_test, &ds.gts, ef, top_k,
-            );
+            let (recall, qps) = measure_multi_thread(&index, &eval, ef);
             print!("  {:>6.2}%  {:>6.0}", recall * 100.0, qps);
         }
         println!();
@@ -361,12 +396,8 @@ fn experiment_param_sensitivity(ds: &DataSet) {
 
     let (index, _, _, _) = build_index(&ds.train, ds.dim, 32, 128, 1.2);
     for &ef in &ef_search_fine {
-        let (recall, qps_mt) = measure_multi_thread(
-            &index, &ds.test, &ds.train, ds.dim, ds.n_test, &ds.gts, ef, top_k,
-        );
-        let (_, qps_st) = measure_single_thread(
-            &index, &ds.test, &ds.train, ds.dim, ds.n_test, &ds.gts, ef, top_k,
-        );
+        let (recall, qps_mt) = measure_multi_thread(&index, &eval, ef);
+        let (_, qps_st) = measure_single_thread(&index, &eval, ef);
         let lat_ms = 1000.0 / qps_st;
         let speedup = qps_mt / bf_qps;
         println!(
@@ -388,9 +419,7 @@ fn experiment_param_sensitivity(ds: &DataSet) {
     for &m in &pareto_m {
         let (index, _, _, _) = build_index(&ds.train, ds.dim, m, 128, 1.2);
         for &ef in &pareto_ef {
-            let (recall, qps) = measure_multi_thread(
-                &index, &ds.test, &ds.train, ds.dim, ds.n_test, &ds.gts, ef, top_k,
-            );
+            let (recall, qps) = measure_multi_thread(&index, &eval, ef);
             let speedup = qps / bf_qps;
             println!(
                 "{:<6} {:<8} {:>9.2}% {:>12.0} {:>9.1}x",
@@ -418,9 +447,7 @@ fn experiment_param_sensitivity(ds: &DataSet) {
         print!("{:<6}", m);
         for &alpha in &cross_alpha {
             let (index, _, _, _) = build_index(&ds.train, ds.dim, m, 128, alpha);
-            let (recall, _) = measure_multi_thread(
-                &index, &ds.test, &ds.train, ds.dim, ds.n_test, &ds.gts, 64, top_k,
-            );
+            let (recall, _) = measure_multi_thread(&index, &eval, 64);
             print!(" {:>7.2}%", recall * 100.0);
         }
         println!();
@@ -439,6 +466,14 @@ fn experiment_thread_scaling(ds: &DataSet) {
     println!("{}", "=".repeat(70));
 
     let top_k = 10;
+    let eval = SearchEval {
+        test: &ds.test,
+        train: &ds.train,
+        dim: ds.dim,
+        n_test: ds.n_test,
+        gts: &ds.gts,
+        top_k,
+    };
     let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, 32, 128, 1.2);
     println!("索引构建: {:.1}s ({:.0} vecs/s), Hot {} MB", build_s, vps, hot_mb);
 
@@ -450,12 +485,8 @@ fn experiment_thread_scaling(ds: &DataSet) {
     println!("{}", "-".repeat(58));
 
     for &ef in &[64, 128, 256, 512, 1024] {
-        let (recall, qps_st) = measure_single_thread(
-            &index, &ds.test, &ds.train, ds.dim, ds.n_test, &ds.gts, ef, top_k,
-        );
-        let (_, qps_mt) = measure_multi_thread(
-            &index, &ds.test, &ds.train, ds.dim, ds.n_test, &ds.gts, ef, top_k,
-        );
+        let (recall, qps_st) = measure_single_thread(&index, &eval, ef);
+        let (_, qps_mt) = measure_multi_thread(&index, &eval, ef);
         let speedup = qps_mt / qps_st;
         println!(
             "{:<8} {:>12.0} {:>12.0} {:>11.2}% {:>9.1}x",
@@ -470,9 +501,7 @@ fn experiment_thread_scaling(ds: &DataSet) {
 
     let ef = 64;
     // 先测单线程基准
-    let (_, qps_1t) = measure_single_thread(
-        &index, &ds.test, &ds.train, ds.dim, ds.n_test, &ds.gts, ef, top_k,
-    );
+    let (_, qps_1t) = measure_single_thread(&index, &eval, ef);
     println!("{:<10} {:>12.0} {:>11.1}x", 1, qps_1t, 1.0);
 
     let available = rayon::current_num_threads();
@@ -490,6 +519,7 @@ fn experiment_thread_scaling(ds: &DataSet) {
         let cfg = QuIVerSearchConfig {
             top_k,
             ef_search: ef,
+            rerank_limit: None,
         };
 
         let t = Instant::now();

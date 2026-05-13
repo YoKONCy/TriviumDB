@@ -1,5 +1,6 @@
 use half::f16;
 use std::fmt::Debug;
+use crate::index::bq::FORCE_NO_AVX512;
 
 /// 定义通用向量类型的 Trait，支持多种引擎底层数据 (f32 / f16 / u64)
 pub trait VectorType:
@@ -21,14 +22,20 @@ pub trait VectorType:
     /// 返回类型的零值（用于逻辑删除时清空底座）
     fn zero() -> Self;
 
-    /// 将单个元素转换为 f32（用于 HNSW 索引等需要统一浮点表示的场景）
+    /// 将单个元素转换为 f32（用于 QuIVer 索引等需要统一浮点表示的场景）
     fn to_f32(self) -> f32;
 
     /// 从 f32 构造单元素（用于产生数学计算后的残差向量等机制）
     fn from_f32(v: f32) -> Self;
 }
 
-// ════════ SIMD 内核：AVX2 + FMA 余弦相似度 ════════
+// ════════ SIMD 多级回退内核：余弦相似度 ════════
+//
+// 分发优先级（运行时检测）：
+//   x86_64: AVX-512F → AVX2+FMA → SSE3 → 标量
+//   aarch64: NEON → 标量
+//
+// 注：AVX10/512 与 AVX-512F 共享同一指令集，无需额外检测。
 
 /// 标量回退路径（四路展开，减少循环依赖链提升 IPC）
 #[inline]
@@ -67,16 +74,75 @@ fn cosine_similarity_scalar(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a.sqrt() * norm_b.sqrt())
 }
 
+/// AVX-512F 加速路径：每次并行处理 16 个 f32
+#[cfg(all(target_arch = "x86_64", not(coverage)))]
+#[target_feature(enable = "avx512f")]
+unsafe fn cosine_similarity_avx512(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let len = a.len().min(b.len());
+    unsafe {
+        let mut v_dot = _mm512_setzero_ps();
+        let mut v_na = _mm512_setzero_ps();
+        let mut v_nb = _mm512_setzero_ps();
+
+        let chunks = len / 16;
+        for i in 0..chunks {
+            let offset = i * 16;
+            let va = _mm512_loadu_ps(a.as_ptr().add(offset));
+            let vb = _mm512_loadu_ps(b.as_ptr().add(offset));
+            v_dot = _mm512_fmadd_ps(va, vb, v_dot);
+            v_na = _mm512_fmadd_ps(va, va, v_na);
+            v_nb = _mm512_fmadd_ps(vb, vb, v_nb);
+        }
+
+        // 水平归约：512-bit → 256-bit → 128-bit → 标量
+        let dot256_lo = _mm512_castps512_ps256(v_dot);
+        let dot256_hi = _mm512_castps512_ps256(
+            _mm512_shuffle_f32x4(v_dot, v_dot, 0b_01_00_11_10),
+        );
+        let d256 = _mm256_add_ps(dot256_lo, dot256_hi);
+        let d128 = _mm_add_ps(_mm256_castps256_ps128(d256), _mm256_extractf128_ps(d256, 1));
+        let d128 = _mm_hadd_ps(d128, d128);
+        let d128 = _mm_hadd_ps(d128, d128);
+        let mut dot = _mm_cvtss_f32(d128);
+
+        let na256_lo = _mm512_castps512_ps256(v_na);
+        let na256_hi = _mm512_castps512_ps256(
+            _mm512_shuffle_f32x4(v_na, v_na, 0b_01_00_11_10),
+        );
+        let n256 = _mm256_add_ps(na256_lo, na256_hi);
+        let n128 = _mm_add_ps(_mm256_castps256_ps128(n256), _mm256_extractf128_ps(n256, 1));
+        let n128 = _mm_hadd_ps(n128, n128);
+        let n128 = _mm_hadd_ps(n128, n128);
+        let mut norm_a = _mm_cvtss_f32(n128);
+
+        let nb256_lo = _mm512_castps512_ps256(v_nb);
+        let nb256_hi = _mm512_castps512_ps256(
+            _mm512_shuffle_f32x4(v_nb, v_nb, 0b_01_00_11_10),
+        );
+        let nb256 = _mm256_add_ps(nb256_lo, nb256_hi);
+        let nb128 = _mm_add_ps(_mm256_castps256_ps128(nb256), _mm256_extractf128_ps(nb256, 1));
+        let nb128 = _mm_hadd_ps(nb128, nb128);
+        let nb128 = _mm_hadd_ps(nb128, nb128);
+        let mut norm_b = _mm_cvtss_f32(nb128);
+
+        let tail_start = chunks * 16;
+        for i in tail_start..len {
+            dot += a[i] * b[i];
+            norm_a += a[i] * a[i];
+            norm_b += b[i] * b[i];
+        }
+        if norm_a == 0.0 || norm_b == 0.0 { return 0.0; }
+        dot / (norm_a.sqrt() * norm_b.sqrt())
+    }
+}
+
 /// AVX2 + FMA 加速路径：每次并行处理 8 个 f32
-/// 安全契约：调用方须确保 CPU 支持 avx2 + fma
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
-
     let len = a.len().min(b.len());
-
-    // SAFETY: 调用方已通过运行时检测确认 CPU 支持 avx2 + fma
     unsafe {
         let mut v_dot = _mm256_setzero_ps();
         let mut v_na = _mm256_setzero_ps();
@@ -87,9 +153,9 @@ unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
             let offset = i * 8;
             let va = _mm256_loadu_ps(a.as_ptr().add(offset));
             let vb = _mm256_loadu_ps(b.as_ptr().add(offset));
-            v_dot = _mm256_fmadd_ps(va, vb, v_dot); // dot += a * b
-            v_na = _mm256_fmadd_ps(va, va, v_na); // na  += a * a
-            v_nb = _mm256_fmadd_ps(vb, vb, v_nb); // nb  += b * b
+            v_dot = _mm256_fmadd_ps(va, vb, v_dot);
+            v_na = _mm256_fmadd_ps(va, va, v_na);
+            v_nb = _mm256_fmadd_ps(vb, vb, v_nb);
         }
 
         // 水平归约：256-bit → 128-bit → 标量
@@ -102,7 +168,6 @@ unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
         let s_dot = _mm_add_ps(l_dot, h_dot);
         let s_na = _mm_add_ps(l_na, h_na);
         let s_nb = _mm_add_ps(l_nb, h_nb);
-        // 128-bit 内部水平加：[a,b,c,d] → hadd → [a+b,c+d,...] → hadd → [a+b+c+d,...]
         let s_dot = _mm_add_ps(_mm_hadd_ps(s_dot, s_dot), _mm_setzero_ps());
         let s_dot = _mm_hadd_ps(s_dot, s_dot);
         let s_na = _mm_hadd_ps(_mm_hadd_ps(s_na, s_na), _mm_hadd_ps(s_na, s_na));
@@ -112,24 +177,64 @@ unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
         let mut norm_a = _mm_cvtss_f32(s_na);
         let mut norm_b = _mm_cvtss_f32(s_nb);
 
-        // 处理尾部不足 8 个的元素
         let tail_start = chunks * 8;
         for i in tail_start..len {
             dot += a[i] * b[i];
             norm_a += a[i] * a[i];
             norm_b += b[i] * b[i];
         }
+        if norm_a == 0.0 || norm_b == 0.0 { return 0.0; }
+        dot / (norm_a.sqrt() * norm_b.sqrt())
+    }
+}
 
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 0.0;
+/// SSE3 加速路径：每次并行处理 4 个 f32（为无 AVX2 的老 x86_64 CPU 兜底）
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse3")]
+unsafe fn cosine_similarity_sse3(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let len = a.len().min(b.len());
+    unsafe {
+        let mut v_dot = _mm_setzero_ps();
+        let mut v_na = _mm_setzero_ps();
+        let mut v_nb = _mm_setzero_ps();
+
+        let chunks = len / 4;
+        for i in 0..chunks {
+            let offset = i * 4;
+            let va = _mm_loadu_ps(a.as_ptr().add(offset));
+            let vb = _mm_loadu_ps(b.as_ptr().add(offset));
+            v_dot = _mm_add_ps(v_dot, _mm_mul_ps(va, vb));
+            v_na = _mm_add_ps(v_na, _mm_mul_ps(va, va));
+            v_nb = _mm_add_ps(v_nb, _mm_mul_ps(vb, vb));
         }
+
+        // 水平归约（SSE3 hadd）
+        let s_dot = _mm_hadd_ps(v_dot, v_dot);
+        let s_dot = _mm_hadd_ps(s_dot, s_dot);
+        let s_na = _mm_hadd_ps(v_na, v_na);
+        let s_na = _mm_hadd_ps(s_na, s_na);
+        let s_nb = _mm_hadd_ps(v_nb, v_nb);
+        let s_nb = _mm_hadd_ps(s_nb, s_nb);
+
+        let mut dot = _mm_cvtss_f32(s_dot);
+        let mut norm_a = _mm_cvtss_f32(s_na);
+        let mut norm_b = _mm_cvtss_f32(s_nb);
+
+        let tail_start = chunks * 4;
+        for i in tail_start..len {
+            dot += a[i] * b[i];
+            norm_a += a[i] * a[i];
+            norm_b += b[i] * b[i];
+        }
+        if norm_a == 0.0 || norm_b == 0.0 { return 0.0; }
         dot / (norm_a.sqrt() * norm_b.sqrt())
     }
 }
 
 /// ARM NEON 加速路径：每次并行处理 4 个 f32
 /// ARM64 (aarch64) 默认支持 NEON，无需运行时检测
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(coverage)))]
 #[target_feature(enable = "neon")]
 unsafe fn cosine_similarity_neon(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::aarch64::*;
@@ -173,20 +278,25 @@ unsafe fn cosine_similarity_neon(a: &[f32], b: &[f32]) -> f32 {
 
 /// 公开的分发函数：运行时自动选择最快路径
 ///
-/// 优先级：x86 AVX2+FMA → ARM NEON → 标量回退
+/// 优先级：x86 AVX-512F → AVX2+FMA → SSE3 → ARM NEON → 标量回退
 #[inline]
 pub fn cosine_similarity_f32(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
+        #[cfg(not(coverage))]
+        if !*FORCE_NO_AVX512 && is_x86_feature_detected!("avx512f") {
+            return unsafe { cosine_similarity_avx512(a, b) };
+        }
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            // SAFETY: 已通过运行时检测确认 CPU 支持 avx2 + fma
             return unsafe { cosine_similarity_avx2(a, b) };
         }
+        if is_x86_feature_detected!("sse3") {
+            return unsafe { cosine_similarity_sse3(a, b) };
+        }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(coverage)))]
     {
         // ARM64 默认支持 NEON（ARMv8 基线指令集），无需运行时检测
-        // SAFETY: aarch64 target 保证 NEON 可用
         return unsafe { cosine_similarity_neon(a, b) };
     }
     #[allow(unreachable_code)]
@@ -268,5 +378,57 @@ impl VectorType for u64 {
     #[inline]
     fn from_f32(v: f32) -> Self {
         v as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use half::f16;
+
+    #[test]
+    fn test_cosine_similarity() {
+        let a = vec![1.0, 0.0, 0.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0, 0.0, 0.0];
+        let c = vec![-1.0, 0.0, 0.0, 0.0, 0.0];
+        let d = vec![0.0, 1.0, 0.0, 0.0, 0.0];
+
+        assert!((f32::similarity(&a, &b) - 1.0).abs() < 1e-5);
+        assert!((f32::similarity(&a, &c) + 1.0).abs() < 1e-5);
+        assert!((f32::similarity(&a, &d)).abs() < 1e-5);
+
+        let a16 = vec![f16::from_f32(1.0), f16::from_f32(0.0)];
+        let b16 = vec![f16::from_f32(0.0), f16::from_f32(1.0)];
+        assert!((f16::similarity(&a16, &b16)).abs() < 1e-5);
+
+        let au = vec![0b1010, 0b1100];
+        let bu = vec![0b0010, 0b0100];
+        assert_eq!(u64::similarity(&au, &bu), 63.0 + 63.0); 
+    }
+
+    #[test]
+    fn test_cosine_scalar_loop() {
+        let a = vec![1.0; 20];
+        let b = vec![1.0; 20];
+        assert!((f32::similarity(&a, &b) - 1.0).abs() < 1e-5);
+        
+        // 边界情况：零向量
+        let zeros = vec![0.0; 20];
+        assert_eq!(f32::similarity(&zeros, &a), 0.0);
+    }
+
+    #[test]
+    fn test_zero_and_f32_conv() {
+        assert_eq!(f32::zero(), 0.0);
+        assert_eq!(f16::zero(), f16::from_f32(0.0));
+        assert_eq!(u64::zero(), 0);
+
+        assert_eq!(1.5f32.to_f32(), 1.5);
+        assert_eq!(f16::from_f32(1.5).to_f32(), 1.5);
+        assert_eq!(1u64.to_f32(), 1.0);
+
+        assert_eq!(f32::from_f32(2.0), 2.0);
+        assert_eq!(f16::from_f32(2.0), f16::from_f32(2.0));
+        assert_eq!(u64::from_f32(2.0), 2);
     }
 }

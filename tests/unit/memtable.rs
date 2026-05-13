@@ -295,6 +295,115 @@ fn update_payload_不存在报错() {
     assert!(mt.update_payload(999, json!({})).is_err());
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  patch_payload (部分更新)
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn patch_payload_set_基础() {
+    let mut mt = make_mt();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"name": "Alice", "age": 25}))
+        .unwrap();
+    mt.patch_payload(1, &json!({"$set": {"age": 26, "city": "Tokyo"}}))
+        .unwrap();
+    let p = mt.get_payload(1).unwrap();
+    assert_eq!(p["name"], "Alice", "$set 不应影响未修改的字段");
+    assert_eq!(p["age"], 26, "$set 应更新已有字段");
+    assert_eq!(p["city"], "Tokyo", "$set 应创建新字段");
+}
+
+#[test]
+fn patch_payload_inc_整数递增() {
+    let mut mt = make_mt();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"visits": 10, "score": 3.5}))
+        .unwrap();
+    mt.patch_payload(1, &json!({"$inc": {"visits": 1, "score": -0.5}}))
+        .unwrap();
+    let p = mt.get_payload(1).unwrap();
+    assert_eq!(p["visits"], 11);
+    assert_eq!(p["score"], 3.0);
+}
+
+#[test]
+fn patch_payload_inc_字段不存在视为零() {
+    let mut mt = make_mt();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"name": "Alice"}))
+        .unwrap();
+    mt.patch_payload(1, &json!({"$inc": {"counter": 5}}))
+        .unwrap();
+    let p = mt.get_payload(1).unwrap();
+    assert_eq!(p["counter"], 5, "不存在的字段 $inc 应视为从 0 开始");
+}
+
+#[test]
+fn patch_payload_unset_删除字段() {
+    let mut mt = make_mt();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"a": 1, "b": 2, "c": 3}))
+        .unwrap();
+    mt.patch_payload(1, &json!({"$unset": {"b": true}}))
+        .unwrap();
+    let p = mt.get_payload(1).unwrap();
+    assert_eq!(p["a"], 1, "$unset 不应影响其他字段");
+    assert!(p.get("b").is_none(), "$unset 应删除目标字段");
+    assert_eq!(p["c"], 3);
+}
+
+#[test]
+fn patch_payload_简写模式() {
+    let mut mt = make_mt();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"x": 1}))
+        .unwrap();
+    // 不含 $set/$inc/$unset 时，整个 patch 视为 $set
+    mt.patch_payload(1, &json!({"y": 2})).unwrap();
+    let p = mt.get_payload(1).unwrap();
+    assert_eq!(p["x"], 1, "简写模式不应删除已有字段");
+    assert_eq!(p["y"], 2, "简写模式应设置新字段");
+}
+
+#[test]
+fn patch_payload_组合操作() {
+    let mut mt = make_mt();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"name": "Alice", "age": 25, "old": true}))
+        .unwrap();
+    mt.patch_payload(1, &json!({
+        "$set": {"name": "Bob"},
+        "$inc": {"age": 1},
+        "$unset": {"old": true}
+    }))
+    .unwrap();
+    let p = mt.get_payload(1).unwrap();
+    assert_eq!(p["name"], "Bob");
+    assert_eq!(p["age"], 26);
+    assert!(p.get("old").is_none());
+}
+
+#[test]
+fn patch_payload_不存在报错() {
+    let mut mt = make_mt();
+    assert!(mt.patch_payload(999, &json!({"$set": {"x": 1}})).is_err());
+}
+
+#[test]
+fn patch_payload_属性索引自动维护() {
+    let mut mt = make_mt();
+    mt.register_property_index("status");
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"status": "active"}))
+        .unwrap();
+
+    // patch 修改 status
+    mt.patch_payload(1, &json!({"$set": {"status": "inactive"}}))
+        .unwrap();
+
+    let active = mt
+        .find_by_property_index("status", &json!("active"))
+        .unwrap();
+    assert!(active.is_empty(), "旧值索引应被清理");
+    let inactive = mt
+        .find_by_property_index("status", &json!("inactive"))
+        .unwrap();
+    assert_eq!(inactive.len(), 1, "新值应出现在索引中");
+}
+
 #[test]
 fn update_vector_基础() {
     let mut mt = make_mt();

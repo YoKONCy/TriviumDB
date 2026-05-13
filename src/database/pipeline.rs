@@ -55,7 +55,8 @@ pub(crate) fn execute_pipeline<T: VectorType>(
             let f = item.to_f32();
             if f.is_nan() || f.is_infinite() {
                 return Err(crate::error::TriviumError::InvalidVector {
-                    reason: "Query vector contains NaN or Infinity".to_string(),
+                    reason: "查询向量包含 NaN 或 Infinity (Query vector contains NaN or Infinity)"
+                        .to_string(),
                 });
             }
         }
@@ -276,7 +277,7 @@ fn recall_vector<T: VectorType>(
 
     // ═══════════════════════════════════════════════════════
     // 动态引擎路由：
-    // 1. QuIVer HNSW 图搜索（N >= 10,000 时由 ensure_vectors_cache 自动构建）
+    // 1. QuIVer Vamana 图搜索（N >= 10,000 时由 ensure_vectors_cache 自动构建）
     // 2. 暴力全扫（N < 10,000 或 force_brute_force）
     // ═══════════════════════════════════════════════════════
     let vector_hits: Vec<SearchHit> = if !config.force_brute_force && mt.quiver().is_some() {
@@ -324,10 +325,10 @@ fn brute_force_pipeline<T: VectorType + Sync>(
     )
 }
 
-/// QuIVer 管线：BQ-native HNSW 图搜索（替代三级火箭）
+/// QuIVer 管线：BQ-native Vamana 图搜索（替代三级火箭）
 ///
 /// 冷热分离架构：
-/// - Hot 路径（O(log N)）：2-bit BQ 签名 beam search 遍历 HNSW 图
+/// - Hot 路径（O(log N)）：2-bit BQ 签名 beam search 遍历 Vamana 图
 /// - Cold 路径（O(ef)）：仅对候选集做 f32 cosine 精排
 /// - 相比三级火箭的 O(N) 全扫，大规模数据下速度提升显著
 fn quiver_pipeline<T: VectorType + Sync>(
@@ -343,11 +344,12 @@ fn quiver_pipeline<T: VectorType + Sync>(
     let flat = mt.flat_vectors();
     let ext_vectors: Vec<f32> = flat.iter().map(|x| x.to_f32()).collect();
 
-    // ef_search 默认为 top_k * 4，保证足够的候选覆盖率
-    let ef_search = config.top_k.max(1) * 4;
+    // ef_search 默认为 top_k * 8，BQ 2-bit 量化精度较低，需要更宽的 beam 覆盖
+    let ef_search = config.top_k.max(1) * 8;
     let search_cfg = QuIVerSearchConfig {
         top_k: config.top_k.max(1) * 2, // 多召回一些，给 filter 留余量
         ef_search,
+        rerank_limit: None,
     };
 
     let raw_results = quiver.search(&q_f32, &ext_vectors, &search_cfg);
@@ -405,7 +407,7 @@ fn recall_residual<T: VectorType>(
     // L5: 残差足够大时触发影子查询
     if residual_norm > config.fista_threshold {
         tracing::debug!(
-            "FISTA 残差较高 ({} > {})，触发影子查询",
+            "FISTA 残差较高 (FISTA residual high) ({} > {})，触发影子查询 (shadow query triggered)",
             residual_norm,
             config.fista_threshold
         );

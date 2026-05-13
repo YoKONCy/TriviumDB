@@ -88,9 +88,6 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 struct Stats {
     mean: f64,
     std: f64,
-    p50: f64,
-    p95: f64,
-    p99: f64,
 }
 
 fn compute_stats(values: &[f64]) -> Stats {
@@ -103,9 +100,6 @@ fn compute_stats(values: &[f64]) -> Stats {
     Stats {
         mean,
         std,
-        p50: percentile(&sorted, 50.0),
-        p95: percentile(&sorted, 95.0),
-        p99: percentile(&sorted, 99.0),
     }
 }
 
@@ -211,7 +205,7 @@ fn main() {
         );
 
         for &ef in &ef_tests {
-            let cfg = QuIVerSearchConfig { top_k: TOP_K, ef_search: ef };
+            let cfg = QuIVerSearchConfig { top_k: TOP_K, ef_search: ef, rerank_limit: None };
 
             // Warmup（丢弃结果，预热 cache）
             for q in &warmup_queries {

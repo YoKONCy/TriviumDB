@@ -114,7 +114,7 @@ fn run_bench(dim: usize, n: usize, clusters: usize, noise: f32) {
 
         eprintln!("  {:<8} {:>8} {:>8} {:>8}", "ef", "Recall", "QPS", "加速");
         for &ef in &ef_tests {
-            let cfg = QuIVerSearchConfig { top_k, ef_search: ef };
+            let cfg = QuIVerSearchConfig { top_k, ef_search: ef, rerank_limit: None };
             let t0 = Instant::now();
             let mut tr = 0.0;
             for (qi, q) in queries.iter().enumerate() {

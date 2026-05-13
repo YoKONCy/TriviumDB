@@ -55,7 +55,7 @@ fn bq_hamming_distance_完全不同() {
 #[test]
 fn bq_empty签名() {
     let sig = BqSignature::empty();
-    assert_eq!(sig.data, [0u64; 32]);
+    assert_eq!(sig.data, [0u64; 48]);
 }
 
 #[test]

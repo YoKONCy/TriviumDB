@@ -6,14 +6,11 @@
 #   3. 常规 CI 短时 fuzz（PR 级快速模糊测试）
 #   4. AddressSanitizer 内存安全检测（nightly, Linux）
 #   5. 测试覆盖率报告与 80% 覆盖率门禁
-#   6. 代码格式检查 & Clippy 静态分析
+#   6. Clippy 静态分析
 #   7. 突变测试（手动触发，发布前质量门禁）
 #   8. 基准测试（手动触发）
 #
-# 注意：索引相关测试（QuIVer/BQ 构图）已从 CI 中移除。
-# 原因：并发构图具有平台相关的非确定性（依赖 rayon 线程调度），
-# 且 CI runner 缺少 AVX-512 等特定硬件支持。
-# 索引测试由本地 bench_cohere1m / bench_quiver_ablation 覆盖。
+
 
 name: CI
 
@@ -94,14 +91,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: 运行全量测试（跳过索引相关测试）
+      - name: 运行全量测试
         shell: bash
-        run: |
-          cargo test --lib --tests -- --test-threads=1 \
-            --skip DET_03 \
-            --skip P1_5_BQ \
-            --skip bq_ \
-            --skip quiver_
+        run: cargo test --lib --tests -- --test-threads=1
 
       - name: 运行文档测试
         run: cargo test --doc
@@ -142,16 +134,12 @@ jobs:
       - name: 构建测试 (aarch64)
         run: cargo test --target aarch64-unknown-linux-gnu --lib --tests --no-run
 
-      - name: 运行测试 (aarch64 via QEMU, 跳过索引和硬件测试)
+      - name: 运行测试 (aarch64 via QEMU, 跳过硬件测试)
         run: |
           cargo test --target aarch64-unknown-linux-gnu --lib --tests -- \
             --test-threads=1 \
             --skip HW \
-            --skip INTRUDE \
-            --skip DET_03 \
-            --skip P1_5_BQ \
-            --skip bq_ \
-            --skip quiver_
+            --skip INTRUDE
 
   # ═══════════════════════════════════════════
   #  Job 3: 常规 CI 短时 fuzz
@@ -237,11 +225,7 @@ jobs:
           cargo +nightly test --lib --tests \
             -Z build-std \
             --target x86_64-unknown-linux-gnu \
-            -- --test-threads=1 \
-            --skip DET_03 \
-            --skip P1_5_BQ \
-            --skip bq_ \
-            --skip quiver_
+            -- --test-threads=1
 
   # ═══════════════════════════════════════════
   #  Job 5: 测试覆盖率报告与门禁
@@ -272,12 +256,7 @@ jobs:
           cargo llvm-cov clean --workspace
           # --lib --tests: 只收集库代码和测试的覆盖率，排除 bench target
           # （重型 benchmark 会导致 CI 超时且不贡献库覆盖率）
-          # 跳过索引测试（并发构图依赖平台特定硬件）
-          cargo llvm-cov --workspace --lib --tests --lcov --output-path lcov.info --fail-under-lines 80 -- --test-threads=1 \
-            --skip DET_03 \
-            --skip P1_5_BQ \
-            --skip bq_ \
-            --skip quiver_
+          cargo llvm-cov --workspace --lib --tests --lcov --output-path lcov.info --fail-under-lines 80 -- --test-threads=1
           cargo llvm-cov report --html --output-dir target/llvm-cov/html
           cargo llvm-cov report
 
@@ -293,7 +272,7 @@ jobs:
   #  Job 6: 代码质量检查
   # ═══════════════════════════════════════════
   lint:
-    name: Lint & Format
+    name: Clippy
     runs-on: ubuntu-latest
 
     steps:
@@ -301,17 +280,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: 格式检查 (rustfmt)
-        shell: bash
-        run: |
-          if ! cargo fmt --all -- --check; then
-            echo "::warning::rustfmt 检查发现格式差异，请在本地运行 cargo fmt --all 修复。"
-            exit 0
-          fi
 
       - name: 静态分析 (Clippy)
         run: cargo clippy --all-targets -- -D warnings

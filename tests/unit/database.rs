@@ -223,6 +223,119 @@ fn update_payload_不存在() {
     assert!(db.update_payload(999, json!({})).is_err());
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  patch_payload (部分更新 API)
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn patch_payload_set_操作() {
+    let mut db = open_db("patch_set");
+    let id = db
+        .insert(&[1.0, 0.0, 0.0], json!({"name": "Alice", "age": 25}))
+        .unwrap();
+    db.patch_payload(id, json!({"$set": {"age": 26, "city": "Tokyo"}}))
+        .unwrap();
+    let p = db.get_payload(id).unwrap();
+    assert_eq!(p["name"], "Alice", "$set 不应影响未修改字段");
+    assert_eq!(p["age"], 26);
+    assert_eq!(p["city"], "Tokyo");
+}
+
+#[test]
+fn patch_payload_inc_操作() {
+    let mut db = open_db("patch_inc");
+    let id = db
+        .insert(&[1.0, 0.0, 0.0], json!({"visits": 10}))
+        .unwrap();
+    db.patch_payload(id, json!({"$inc": {"visits": 3}}))
+        .unwrap();
+    assert_eq!(db.get_payload(id).unwrap()["visits"], 13);
+
+    // 连续递增
+    db.patch_payload(id, json!({"$inc": {"visits": -5}}))
+        .unwrap();
+    assert_eq!(db.get_payload(id).unwrap()["visits"], 8);
+}
+
+#[test]
+fn patch_payload_unset_操作() {
+    let mut db = open_db("patch_unset");
+    let id = db
+        .insert(&[1.0, 0.0, 0.0], json!({"a": 1, "b": 2}))
+        .unwrap();
+    db.patch_payload(id, json!({"$unset": {"b": true}}))
+        .unwrap();
+    let p = db.get_payload(id).unwrap();
+    assert_eq!(p["a"], 1);
+    assert!(p.get("b").is_none());
+}
+
+#[test]
+fn patch_payload_简写模式() {
+    let mut db = open_db("patch_short");
+    let id = db
+        .insert(&[1.0, 0.0, 0.0], json!({"x": 1}))
+        .unwrap();
+    db.patch_payload(id, json!({"y": 2})).unwrap();
+    let p = db.get_payload(id).unwrap();
+    assert_eq!(p["x"], 1, "简写不应覆盖已有字段");
+    assert_eq!(p["y"], 2);
+}
+
+#[test]
+fn patch_payload_组合操作() {
+    let mut db = open_db("patch_combo");
+    let id = db
+        .insert(
+            &[1.0, 0.0, 0.0],
+            json!({"name": "Alice", "score": 100, "deprecated": true}),
+        )
+        .unwrap();
+    db.patch_payload(
+        id,
+        json!({
+            "$set": {"name": "Bob"},
+            "$inc": {"score": -10},
+            "$unset": {"deprecated": true}
+        }),
+    )
+    .unwrap();
+    let p = db.get_payload(id).unwrap();
+    assert_eq!(p["name"], "Bob");
+    assert_eq!(p["score"], 90);
+    assert!(p.get("deprecated").is_none());
+}
+
+#[test]
+fn patch_payload_不存在节点() {
+    let mut db = open_db("patch_404");
+    assert!(
+        db.patch_payload(999, json!({"$set": {"x": 1}})).is_err(),
+        "对不存在节点 patch_payload 应返回 Err"
+    );
+}
+
+#[test]
+fn patch_payload_WAL持久化() {
+    // 验证 patch 后关闭再打开，数据仍在
+    let path = temp_db("patch_wal");
+    let id;
+    {
+        let mut db = Database::<f32>::open(&path, 3).unwrap();
+        id = db
+            .insert(&[1.0, 0.0, 0.0], json!({"counter": 0}))
+            .unwrap();
+        db.patch_payload(id, json!({"$inc": {"counter": 42}}))
+            .unwrap();
+        db.close().unwrap();
+    }
+    {
+        let db = Database::<f32>::open(&path, 3).unwrap();
+        let p = db.get_payload(id).unwrap();
+        assert_eq!(p["counter"], 42, "WAL 恢复后 patch 结果应持久化");
+    }
+}
+
 #[test]
 fn update_vector_不存在() {
     let mut db = open_db("vec_404");

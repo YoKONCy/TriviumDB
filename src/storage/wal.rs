@@ -72,7 +72,7 @@ impl SyncMode {
             "normal" => Ok(SyncMode::Normal),
             "off" => Ok(SyncMode::Off),
             other => Err(format!(
-                "Unsupported sync_mode: '{}'. Use 'full', 'normal', or 'off'",
+                "不支持的同步模式 (Unsupported sync_mode): '{}'。请使用 'full', 'normal' 或 'off'",
                 other
             )),
         }
@@ -261,7 +261,7 @@ impl Wal {
             if stored_crc != computed_crc {
                 // CRC 不匹配 → 数据损坏，停止回放
                 tracing::error!(
-                    "WAL CRC mismatch at entry {}: stored={:#010x}, computed={:#010x}. Stopping recovery.",
+                    "WAL CRC 校验不匹配 (CRC mismatch)，第 {} 条记录: 存储={:#010x}, 计算={:#010x}。停止恢复 (Stopping recovery)",
                     entries_with_offset.len(),
                     stored_crc,
                     computed_crc
@@ -277,7 +277,7 @@ impl Wal {
                 Ok(entry) => entries_with_offset.push((entry, physical_offset)),
                 Err(e) => {
                     tracing::error!(
-                        "WAL Deserialize error at entry {}: {}. Stopping recovery.",
+                        "WAL 反序列化错误 (Deserialize error)，第 {} 条记录: {}。停止恢复 (Stopping recovery)",
                         entries_with_offset.len(),
                         e
                     );
@@ -324,7 +324,8 @@ impl Wal {
 
         if in_tx && !pending_tx.is_empty() {
             tracing::warn!(
-                "Discarded a partial transaction ({} operations) due to missing TxCommit (Power loss simulation). Truncating WAL to offset {}.",
+                "丢弃了一个不完整事务 ({} 个操作)，缺少 TxCommit (Discarded partial transaction, {} ops, missing TxCommit)。WAL 截断至偏移 {}",
+                pending_tx.len(),
                 pending_tx.len(),
                 safe_commit_offset
             );

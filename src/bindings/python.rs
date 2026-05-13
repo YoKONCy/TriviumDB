@@ -687,6 +687,30 @@ pub mod python {
             )
         }
 
+        /// 部分更新节点 Payload（$set / $inc / $unset）
+        ///
+        /// 只修改指定字段，其他字段保持不变。
+        ///
+        /// 示例：
+        /// ```python
+        /// db.patch_payload(id, {"$set": {"name": "Alice"}})
+        /// db.patch_payload(id, {"$inc": {"visits": 1}})
+        /// db.patch_payload(id, {"$unset": {"old_field": True}})
+        /// db.patch_payload(id, {"name": "Bob"})  # 简写，等价于 $set
+        /// ```
+        fn patch_payload(
+            &mut self,
+            py: Python<'_>,
+            id: u64,
+            patch: &Bound<'_, PyAny>,
+        ) -> PyResult<()> {
+            let json = pyobject_to_json(py, patch);
+            dispatch!(self, mut db => db.patch_payload(id, json)).map_err(
+                |e: crate::error::TriviumError| {
+                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                },
+            )
+        }
         fn update_vector(&mut self, vector: Bound<'_, PyAny>, id: u64) -> PyResult<()> {
             match &mut self.inner {
                 DbBackend::F32(db) => {

@@ -109,7 +109,7 @@ pub struct MemTable<T: VectorType> {
     // 空闲索引回收槽：O(1) 回收墓碑位置，防止物理大数组无尽膨胀
     free_slots: Vec<usize>,
 
-    // 4. QuIVer BQ-native HNSW 图索引（惰性构建，N >= 10,000 时自动触发）
+    // 4. QuIVer BQ-native Vamana 图索引（惰性构建，N >= 10,000 时自动触发）
     //    冷热分离：QuIVer 内部 BQ sigs + 图拓扑 = hot，f32 向量 = cold
     //    事务安全：事务 commit 期间暂停 QuIVer 同步，commit 后由事务层统一同步
     quiver_index: Option<QuIVer>,
@@ -132,7 +132,7 @@ impl<T: VectorType> MemTable<T> {
             let f = elem.to_f32();
             if f.is_nan() || f.is_infinite() {
                 return Err(TriviumError::InvalidVector {
-                    reason: "Vector contains NaN or Infinity; insert rejected to prevent silent search corruption".into(),
+                    reason: "向量包含 NaN 或 Infinity，已拒绝插入以防止搜索污染 (Vector contains NaN or Infinity; insert rejected)".into(),
                 });
             }
         }
@@ -314,18 +314,20 @@ impl<T: VectorType> MemTable<T> {
         self.add_to_property_index(id, &payload);
 
         // 5. 增量更新 QuIVer 索引（如果已构建且未暂停同步）
-        if !self.quiver_sync_paused {
-        if let Some(ref mut quiver) = self.quiver_index {
+        if !self.quiver_sync_paused
+            && let Some(ref mut quiver) = self.quiver_index
+        {
             let vec_f32: Vec<f32> = vector.iter().map(|v| v.to_f32()).collect();
             let mut lcg = id.wrapping_mul(0x9E3779B97F4A7C15);
             quiver.insert(&vec_f32, id, idx, &mut lcg);
             quiver.dirty_count_inc(); // 追加也算增量变更
             if quiver.needs_rebuild() {
                 self.quiver_index = None;
-                tracing::debug!("QuIVer 索引增量变更超过 25%，已丢弃，下次搜索前将自动重建");
+                tracing::debug!(
+                    "QuIVer 索引增量变更超过 25%，已丢弃 (QuIVer index >25% dirty, discarded)，下次搜索前将自动重建"
+                );
             }
         }
-        } // quiver_sync_paused guard
 
         Ok(id)
     }
@@ -375,18 +377,20 @@ impl<T: VectorType> MemTable<T> {
         }
 
         // 增量更新 QuIVer 索引（如果已构建且未暂停同步）
-        if !self.quiver_sync_paused {
-        if let Some(ref mut quiver) = self.quiver_index {
+        if !self.quiver_sync_paused
+            && let Some(ref mut quiver) = self.quiver_index
+        {
             let vec_f32: Vec<f32> = vector.iter().map(|v| v.to_f32()).collect();
             let mut lcg = id.wrapping_mul(0x9E3779B97F4A7C15);
             quiver.insert(&vec_f32, id, idx, &mut lcg);
             quiver.dirty_count_inc();
             if quiver.needs_rebuild() {
                 self.quiver_index = None;
-                tracing::debug!("QuIVer 索引增量变更超过 25%，已丢弃，下次搜索前将自动重建");
+                tracing::debug!(
+                    "QuIVer 索引增量变更超过 25%，已丢弃 (QuIVer index >25% dirty, discarded)，下次搜索前将自动重建"
+                );
             }
         }
-        } // quiver_sync_paused guard
 
         Ok(())
     }
@@ -536,13 +540,13 @@ impl<T: VectorType> MemTable<T> {
         self.quiver_index.as_ref()
     }
 
-    /// 手动构建 QuIVer BQ-native HNSW 索引
+    /// 手动构建 QuIVer BQ-native Vamana 索引
     ///
     /// 通常不需要手动调用——`ensure_vectors_cache()` 会在 N >= 10,000 时自动构建。
     /// 此方法用于提前构建或使用自定义配置。
     ///
     /// **冷热分离**：
-    /// - Hot: 2-bit BQ 签名 + HNSW 图拓扑（常驻内存，~2 bits/dim/node）
+    /// - Hot: 2-bit BQ 签名 + Vamana 图拓扑（常驻内存，~2 bits/dim/node）
     /// - Cold: f32 原始向量（仅精排时按需访问，由 QuIVer 内部管理）
     ///
     /// **事务安全**：`delete()` / `update_vector()` 会使索引自动失效，
@@ -593,7 +597,7 @@ impl<T: VectorType> MemTable<T> {
         index.batch_build_experimental_v2(&vecs_f32, &ids, &slot_idxs);
         self.quiver_index = Some(index);
         tracing::info!(
-            "QuIVer 索引自动构建完成：{} 个节点，dim={}",
+            "QuIVer 索引自动构建完成 (QuIVer index auto-built): {} 个节点，dim={}",
             ids.len(),
             dim
         );
@@ -608,7 +612,9 @@ impl<T: VectorType> MemTable<T> {
             quiver.soft_delete(node_id);
             if quiver.needs_rebuild() {
                 self.quiver_index = None;
-                tracing::debug!("QuIVer 索引退化超过 25%，已丢弃，下次搜索前将自动重建");
+                tracing::debug!(
+                    "QuIVer 索引退化超过 25%，已丢弃 (QuIVer index >25% degraded, discarded)，下次搜索前将自动重建"
+                );
             }
         }
     }
@@ -644,9 +650,15 @@ impl<T: VectorType> MemTable<T> {
                         quiver.insert(&vec_f32, *id, slot_idx, &mut lcg);
                     }
                     // 退化检查
-                    if self.quiver_index.as_ref().map_or(false, |q| q.needs_rebuild()) {
+                    if self
+                        .quiver_index
+                        .as_ref()
+                        .is_some_and(|q| q.needs_rebuild())
+                    {
                         self.quiver_index = None;
-                        tracing::debug!("QuIVer 索引退化超过 25%，已丢弃，下次搜索前将自动重建");
+                        tracing::debug!(
+                            "QuIVer 索引退化超过 25%，已丢弃 (QuIVer index >25% degraded, discarded)，下次搜索前将自动重建"
+                        );
                     }
                 }
                 _ => {} // Link/Unlink/UpdatePayload 不影响 QuIVer
@@ -924,6 +936,99 @@ impl<T: VectorType> MemTable<T> {
         }
     }
 
+    /// 部分更新节点的元数据（Payload），支持 $set / $inc / $unset 操作
+    ///
+    /// 不同于 `update_payload` 的全量替换，`patch_payload` 只修改指定字段，
+    /// 其他字段保持不变。
+    ///
+    /// # 操作类型
+    /// - `$set`: 设置字段值（不存在则创建）
+    /// - `$inc`: 数值字段递增（字段不存在视为 0）
+    /// - `$unset`: 删除字段
+    ///
+    /// # 示例 patch JSON
+    /// ```json
+    /// {
+    ///   "$set": {"name": "Alice", "status": "active"},
+    ///   "$inc": {"visit_count": 1, "score": -0.5},
+    ///   "$unset": {"deprecated_field": true}
+    /// }
+    /// ```
+    pub fn patch_payload(&mut self, id: NodeId, patch: &serde_json::Value) -> Result<()> {
+        let old_payload = self
+            .payloads
+            .get(&id)
+            .cloned()
+            .ok_or(TriviumError::NodeNotFound(id))?;
+
+        let mut new_payload = old_payload.clone();
+
+        // 确保 payload 是 Object 类型
+        let obj = new_payload
+            .as_object_mut()
+            .ok_or_else(|| TriviumError::InvalidInput("Payload 不是 JSON 对象".into()))?;
+
+        if let Some(patch_obj) = patch.as_object() {
+            // $set: 设置字段值
+            if let Some(set_val) = patch_obj.get("$set") {
+                if let Some(set_map) = set_val.as_object() {
+                    for (k, v) in set_map {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+
+            // $inc: 数值递增
+            if let Some(inc_val) = patch_obj.get("$inc") {
+                if let Some(inc_map) = inc_val.as_object() {
+                    for (k, v) in inc_map {
+                        let delta = v.as_f64().unwrap_or(0.0);
+                        let current = obj.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let new_val = current + delta;
+                        // 如果结果是整数，保持整数类型
+                        if new_val.fract() == 0.0
+                            && new_val >= i64::MIN as f64
+                            && new_val <= i64::MAX as f64
+                        {
+                            obj.insert(
+                                k.clone(),
+                                serde_json::Value::Number(serde_json::Number::from(new_val as i64)),
+                            );
+                        } else {
+                            obj.insert(k.clone(), serde_json::json!(new_val));
+                        }
+                    }
+                }
+            }
+
+            // $unset: 删除字段
+            if let Some(unset_val) = patch_obj.get("$unset") {
+                if let Some(unset_map) = unset_val.as_object() {
+                    for k in unset_map.keys() {
+                        obj.remove(k);
+                    }
+                }
+            }
+
+            // 如果 patch 不包含任何操作符，视为纯 $set（兼容简写模式）
+            if !patch_obj.contains_key("$set")
+                && !patch_obj.contains_key("$inc")
+                && !patch_obj.contains_key("$unset")
+            {
+                for (k, v) in patch_obj {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        } else {
+            return Err(TriviumError::InvalidInput(
+                "patch_payload 的 patch 参数必须是 JSON 对象".into(),
+            ));
+        }
+
+        // 复用 update_payload 的完整路径（含属性索引维护）
+        self.update_payload(id, new_payload)
+    }
+
     /// 就地替换节点的向量（维度必须一致）
     pub fn update_vector(&mut self, id: NodeId, vector: &[T]) -> Result<()> {
         if vector.len() != self.dim {
@@ -943,18 +1048,20 @@ impl<T: VectorType> MemTable<T> {
                 self.vec_pool.update(idx, vector);
                 self.bq_dirty = true; // 向量变了，BQ 签名需要重建
                 // QuIVer 增量更新：soft_delete 旧向量 + incremental_insert 新向量
-                if !self.quiver_sync_paused {
-                if let Some(ref mut quiver) = self.quiver_index {
+                if !self.quiver_sync_paused
+                    && let Some(ref mut quiver) = self.quiver_index
+                {
                     quiver.soft_delete(id);
                     let vec_f32: Vec<f32> = vector.iter().map(|v| v.to_f32()).collect();
                     let mut lcg = id.wrapping_mul(0x9E3779B97F4A7C15);
                     quiver.insert(&vec_f32, id, idx, &mut lcg);
                     if quiver.needs_rebuild() {
                         self.quiver_index = None;
-                        tracing::debug!("QuIVer 索引增量变更超过 25%，已丢弃，下次搜索前将自动重建");
+                        tracing::debug!(
+                            "QuIVer 索引增量变更超过 25%，已丢弃 (QuIVer index >25% dirty, discarded)，下次搜索前将自动重建"
+                        );
                     }
                 }
-                } // quiver_sync_paused guard
                 Ok(())
             }
             None => Err(TriviumError::NodeNotFound(id)),
@@ -1074,7 +1181,8 @@ impl<T: VectorType> MemTable<T> {
         self.text_index.build();
         if !self.payloads.is_empty() {
             tracing::info!(
-                "TextIndex 从 {} 个节点的 payload 自动重建完成",
+                "TextIndex 从 {} 个节点的 payload 自动重建完成 (TextIndex auto-rebuilt from {} node payloads)",
+                self.payloads.len(),
                 self.payloads.len()
             );
         }

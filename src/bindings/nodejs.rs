@@ -478,6 +478,22 @@ pub mod nodejs {
                 .map_err(|e| napi::Error::from_reason(e.to_string()))
         }
 
+        /// 部分更新节点 Payload（$set / $inc / $unset）
+        ///
+        /// 只修改指定字段，其他字段保持不变。
+        ///
+        /// ```js
+        /// db.patchPayload(id, { $set: { name: "Alice" } })
+        /// db.patchPayload(id, { $inc: { visits: 1 } })
+        /// db.patchPayload(id, { $unset: { oldField: true } })
+        /// db.patchPayload(id, { name: "Bob" })  // 简写，等价于 $set
+        /// ```
+        #[napi]
+        pub fn patch_payload(&mut self, id: f64, patch: serde_json::Value) -> napi::Result<()> {
+            dispatch!(self, mut db => db.patch_payload(id as u64, patch))
+                .map_err(|e| napi::Error::from_reason(e.to_string()))
+        }
+
         /// 更新节点向量
         #[napi]
         pub fn update_vector(&mut self, id: f64, vector: Vec<f64>) -> napi::Result<()> {

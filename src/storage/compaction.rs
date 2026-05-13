@@ -55,7 +55,7 @@ impl CompactionThread {
                 // 1. 取出短命锁（Short-lived Lock），提取构建所需的内存副本快照
                 {
                     let mut mt = memtable.lock().unwrap_or_else(|p| {
-                        tracing::warn!("Compaction thread: MemTable Mutex poisoned, recovering...");
+                        tracing::warn!("Compaction 线程: MemTable 互斥锁中毒，正在恢复 (MemTable Mutex poisoned, recovering)");
                         p.into_inner()
                     });
                     mt.ensure_vectors_cache();
@@ -69,7 +69,7 @@ impl CompactionThread {
                     p.into_inner()
                 });
                 tracing::info!(
-                    "Compaction I/O started for {}: foreground queries will be blocked during I/O",
+                    "Compaction I/O 开始，前台查询将被阻塞 (Compaction I/O started, foreground blocked): {}",
                     db_path.clone()
                 );
 
@@ -78,17 +78,17 @@ impl CompactionThread {
                         // 💀 绝对不能在这里先 `drop(mt)`！
                         // 必须在此之前拿到 WAL 锁，然后一起释放，防止前台乘虚而入写入 WAL 然后被下面 clear!
                         let mut w = wal.lock().unwrap_or_else(|p| {
-                            tracing::warn!("Compaction thread: WAL Mutex poisoned, recovering...");
+                            tracing::warn!("Compaction 线程: WAL 互斥锁中毒，正在恢复 (WAL Mutex poisoned, recovering)");
                             p.into_inner()
                         });
                         let _ = w.clear();
 
                         drop(w); // 优先释放 WAL 写锁
                         drop(mt); // 其次释放 内存大锁
-                        tracing::debug!("Auto-compaction completed for {}", db_path);
+                        tracing::debug!("自动压实完成 (Auto-compaction completed): {}", db_path);
                     }
                     Err(e) => {
-                        tracing::error!("Auto-compaction failed for {}: {}", db_path, e);
+                        tracing::error!("自动压实失败 (Auto-compaction failed): {}: {}", db_path, e);
                     }
                 }
             }

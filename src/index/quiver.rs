@@ -1,6 +1,6 @@
 //! QuIVer — QUantized Index for Vector Retrieval
 //!
-//! BQ-native Vamana HNSW 图索引，论文核心实现。
+//! BQ-native Vamana 图索引，论文核心实现。
 //! 支持 rayon 并行批量构建（batch_build）。
 //!
 //! 核心架构：
@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Copy, Clone, PartialEq)]
 pub struct NonNanF32(pub f32);
+
 impl Eq for NonNanF32 {}
 impl PartialOrd for NonNanF32 {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -35,49 +36,6 @@ impl Ord for NonNanF32 {
     }
 }
 
-#[inline]
-pub fn adc_distance(query: &[f32], sig: &Bq2Signature) -> NonNanF32 {
-    let mut score = 0.0f32;
-    let chunks = query.len().div_ceil(64);
-    for i in 0..chunks {
-        let a = sig.pos[i];
-        let b = sig.strong[i];
-        let valid_bits = if i == chunks - 1 && !query.len().is_multiple_of(64) {
-            (1u64 << (query.len() % 64)) - 1
-        } else {
-            !0u64
-        };
-        // 强正方向（2x权重）
-        let mut strong_pos = a & b & valid_bits;
-        while strong_pos != 0 {
-            let tz = strong_pos.trailing_zeros();
-            score += 2.0 * query[i * 64 + tz as usize];
-            strong_pos &= strong_pos - 1;
-        }
-        // 弱正方向（1x权重）
-        let mut weak_pos = a & (!b) & valid_bits;
-        while weak_pos != 0 {
-            let tz = weak_pos.trailing_zeros();
-            score += query[i * 64 + tz as usize];
-            weak_pos &= weak_pos - 1;
-        }
-        // 弱负方向（-1x权重）
-        let mut weak_neg = (!a) & (!b) & valid_bits;
-        while weak_neg != 0 {
-            let tz = weak_neg.trailing_zeros();
-            score -= query[i * 64 + tz as usize];
-            weak_neg &= weak_neg - 1;
-        }
-        // 强负方向（-2x权重）
-        let mut strong_neg = (!a) & b & valid_bits;
-        while strong_neg != 0 {
-            let tz = strong_neg.trailing_zeros();
-            score -= 2.0 * query[i * 64 + tz as usize];
-            strong_neg &= strong_neg - 1;
-        }
-    }
-    NonNanF32(-score) // 距离越小越好，所以取负
-}
 
 // ── Bitset ──
 
@@ -244,7 +202,7 @@ impl FlatAdj {
     }
 }
 
-// ── BQ-Vamana HNSW ──
+// ── BQ-Vamana 图 ──
 
 struct ConcurrentFlatAdj {
     data: Box<[UnsafeCell<u32>]>,
@@ -595,6 +553,14 @@ impl Default for QuIVerConfig {
 pub struct QuIVerSearchConfig {
     pub top_k: usize,
     pub ef_search: usize,
+    pub rerank_limit: Option<usize>,
+}
+
+impl QuIVerSearchConfig {
+    #[inline]
+    fn rerank_limit(&self) -> usize {
+        self.rerank_limit.unwrap_or(self.ef_search).max(self.top_k)
+    }
 }
 
 impl QuIVer {
@@ -827,8 +793,7 @@ impl QuIVer {
         )
     }
 
-    /// Layer 0 Symmetric beam search（XOR+Popcount 极速寻路）
-    /// 使用外部 visited bitset，支持并行调用
+    /// Layer 0 搜索：cheap BQ 导航后用完整 2-bit BQ 距离重排候选
     fn beam_search_l0(
         &self,
         q_sig: &Bq2Signature,
@@ -844,7 +809,7 @@ impl QuIVer {
         let mut candidates: BinaryHeap<Reverse<(NonNanF32, u32)>> = BinaryHeap::with_capacity(ef * 2);
         let mut results: BinaryHeap<(NonNanF32, u32)> = BinaryHeap::with_capacity(ef + 1);
 
-        let d = NonNanF32(self.bq_store.distance_to_sig(entry as usize, q_sig, self.dim) as f32);
+        let d = NonNanF32(self.bq_store.distance_to_sig_cheap(entry as usize, q_sig, self.dim) as f32);
         visited.set(entry as usize);
         candidates.push(Reverse((d, entry)));
         results.push((d, entry));
@@ -856,7 +821,6 @@ impl QuIVer {
 
             let nbs = self.layer0.neighbors(cur);
 
-            // 批量预取未访问邻居的 BQ 签名到 L1 cache
             for &nb in nbs {
                 if !visited.test(nb as usize) {
                     self.bq_store.prefetch_sig(nb as usize);
@@ -869,7 +833,7 @@ impl QuIVer {
                 }
                 visited.set(nb as usize);
 
-                let nd = NonNanF32(self.bq_store.distance_to_sig(nb as usize, q_sig, self.dim) as f32);
+                let nd = NonNanF32(self.bq_store.distance_to_sig_cheap(nb as usize, q_sig, self.dim) as f32);
                 if results.len() < ef || nd < results.peek().unwrap().0 {
                     candidates.push(Reverse((nd, nb)));
                     results.push((nd, nb));
@@ -881,6 +845,9 @@ impl QuIVer {
         }
 
         let mut res: Vec<(NonNanF32, u32)> = results.into_vec();
+        for item in &mut res {
+            item.0 = NonNanF32(self.bq_store.distance_to_sig(item.1 as usize, q_sig, self.dim) as f32);
+        }
         res.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         res
     }
@@ -1040,7 +1007,6 @@ impl QuIVer {
 
         // Stage 2: f32 精排（跳过 tombstone，通过 slot_indices 映射到外部向量）
         // 先预取所有候选的外部向量到 cache
-        #[cfg(target_arch = "x86_64")]
         {
             for &(_, nid) in &bq_candidates {
                 if !self.tombstones[nid as usize] {
@@ -1048,17 +1014,28 @@ impl QuIVer {
                     let offset = slot * dim;
                     if offset + dim <= ext_vectors.len() {
                         unsafe {
-                            use std::arch::x86_64::*;
-                            let ptr = ext_vectors.as_ptr().add(offset) as *const i8;
-                            _mm_prefetch(ptr, _MM_HINT_T0);
-                            _mm_prefetch(ptr.add(64), _MM_HINT_T0);
+                            let ptr = ext_vectors.as_ptr().add(offset);
+                            #[cfg(target_arch = "x86_64")]
+                            {
+                                use std::arch::x86_64::*;
+                                let p = ptr as *const i8;
+                                _mm_prefetch(p, _MM_HINT_T0);
+                                _mm_prefetch(p.add(64), _MM_HINT_T0);
+                            }
+                            #[cfg(target_arch = "aarch64")]
+                            {
+                                std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) ptr, options(nostack, preserves_flags));
+                                std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) ptr.add(16), options(nostack, preserves_flags));
+                            }
                         }
                     }
                 }
             }
         }
+        let rerank_limit = config.rerank_limit().min(bq_candidates.len());
         let mut scored: Vec<(f32, u32)> = bq_candidates
             .iter()
+            .take(rerank_limit)
             .filter(|&&(_, nid)| !self.tombstones[nid as usize])
             .filter_map(|&(_, nid)| {
                 let slot = self.slot_indices[nid as usize];
@@ -1267,6 +1244,95 @@ impl QuIVer {
         self.batch_build_experimental_v2_impl(vectors, ids, slot_idxs, false);
     }
 
+    // ── 实验代码路径 (feature = "ablation") ────────────────────────
+    // 以下方法仅用于论文 encoding ablation 实验，不属于生产 API。
+    // 正常构建不会编译此段代码。
+    // 对应 bench: benches/bench_encoding_ablation.rs
+    // ──────────────────────────────────────────────────────────────
+
+    /// 使用外部预构建的 Bq2Store 构建图（**仅限实验**）。
+    ///
+    /// 与 `batch_build_experimental_v2` 逻辑完全相同，但跳过内部
+    /// `push_from_vector` 编码步骤，直接使用传入的 `store`。
+    /// 用于对比不同编码方案（1-bit sign / 2-bit SM）对图拓扑的影响。
+    ///
+    /// 调用方需保证 `store.len() == ids.len()`。
+    #[cfg(feature = "ablation")]
+    pub fn batch_build_with_store(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize], store: Bq2Store) {
+        let n = ids.len();
+        let dim = self.dim;
+        assert_eq!(vectors.len(), n * dim);
+        assert_eq!(slot_idxs.len(), n);
+        assert_eq!(store.len(), n, "Bq2Store 长度必须与 ids 长度一致");
+        if n == 0 {
+            return;
+        }
+
+        // 直接使用外部 store，不做内部编码
+        let mut lcg: u64 = 12345;
+        let mut levels = Vec::with_capacity(n);
+        for _ in 0..n {
+            levels.push(self.random_level(&mut lcg) as u8);
+        }
+
+        self.n = n;
+        self.bq_store = store;
+        self.ids.clear();
+        self.ids.extend_from_slice(ids);
+        self.slot_indices.clear();
+        self.slot_indices.extend_from_slice(slot_idxs);
+        self.id_to_internal.clear();
+        for (i, &id) in ids.iter().enumerate() {
+            self.id_to_internal.insert(id, i as u32);
+        }
+        self.tombstones = vec![false; n];
+        self.dirty_count = 0;
+        self.node_max_layer = levels;
+        self.entry_point = 0;
+        self.max_level = 0;
+        self.upper_layers.clear();
+        self.visited = Bitset::new(n);
+        self.layer0.reset_full(n);
+
+        let locks = StripedSpinLocks::new(n, self.m0);
+        let concurrent_adj = ConcurrentFlatAdj::new(n, self.layer0.stride);
+        let view = ExperimentalBuildView {
+            adj: &concurrent_adj,
+            n,
+            dim,
+            m0: self.m0,
+            ef: self.ef_construction,
+            alpha: self.alpha,
+            sigs: &self.bq_store,
+            locks: &locks,
+        };
+
+        let chunk = 256usize;
+        let rounds = n.div_ceil(chunk);
+        for round in 0..rounds {
+            let start = round * chunk;
+            let end = ((round + 1) * chunk).min(n);
+            (start..end).into_par_iter().for_each(|i| {
+                let mut visited = Bitset::new(n);
+                view.connect_node_fast(i as u32, &mut visited);
+            });
+        }
+
+        concurrent_adj.freeze_into_flat(&mut self.layer0);
+    }
+
+    /// 获取 Layer 0 节点的邻居列表（**仅限实验**）。
+    #[cfg(feature = "ablation")]
+    pub fn layer0_neighbors(&self, node: u32) -> &[u32] {
+        self.layer0.neighbors(node)
+    }
+
+    /// 获取图的入口节点索引（**仅限实验**）。
+    #[cfg(feature = "ablation")]
+    pub fn ablation_entry_point(&self) -> u32 {
+        self.entry_point as u32
+    }
+
     fn batch_build_experimental_v2_impl(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize], checked: bool) {
         let n = ids.len();
         let dim = self.dim;
@@ -1336,7 +1402,8 @@ impl QuIVer {
         }
 
         concurrent_adj.freeze_into_flat(&mut self.layer0);
-        if cfg!(debug_assertions) || std::env::var("TRIVIUM_BQ_HNSW_VALIDATE").as_deref() == Ok("1")
+        if cfg!(debug_assertions)
+            || std::env::var("TRIVIUM_BQ_VAMANA_VALIDATE").as_deref() == Ok("1")
         {
             self.validate_layer0();
         }
@@ -1763,7 +1830,7 @@ impl QuIVer {
         std::fs::rename(&tmp_path, path)?;
 
         tracing::info!(
-            "QuIVer 索引已持久化：{} 个节点，dim={}，max_level={}",
+            "QuIVer 索引已持久化 (QuIVer index persisted)：{} 个节点，dim={}，max_level={}",
             self.n, self.dim, self.max_level
         );
         Ok(())
@@ -1777,7 +1844,7 @@ impl QuIVer {
         if bytes.len() < 48 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "QuIVer 文件太小",
+                "QuIVer 文件太小 (QuIVer file too small)",
             ));
         }
 
@@ -1785,7 +1852,7 @@ impl QuIVer {
         if &bytes[0..4] != Self::QUIVER_MAGIC {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("无效的 QuIVer magic: {:?}", &bytes[0..4]),
+                format!("无效的 QuIVer magic (Invalid QuIVer magic): {:?}", &bytes[0..4]),
             ));
         }
 
@@ -1794,7 +1861,7 @@ impl QuIVer {
         if version != Self::QUIVER_VERSION {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("不支持的 QuIVer 版本: {}", version),
+                format!("不支持的 QuIVer 版本 (Unsupported QuIVer version): {}", version),
             ));
         }
 
@@ -1818,7 +1885,7 @@ impl QuIVer {
         let pos_end = off + bq_bytes_per_array;
         let strong_end = pos_end + bq_bytes_per_array;
         if strong_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "BQ 签名数据不完整"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "BQ 签名数据不完整 (BQ signature data incomplete)"));
         }
         let pos_data: Vec<u64> = bytes[off..pos_end]
             .chunks_exact(8)
@@ -1836,7 +1903,7 @@ impl QuIVer {
         let l0_size = n * stride * 4;
         let l0_end = off + l0_size;
         if l0_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Layer0 数据不完整"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Layer0 数据不完整 (Layer0 data incomplete)"));
         }
         let l0_data: Vec<u32> = bytes[off..l0_end]
             .chunks_exact(4)
@@ -1847,7 +1914,7 @@ impl QuIVer {
         // Tombstones
         let tomb_end = off + n;
         if tomb_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Tombstone 数据不完整"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Tombstone 数据不完整 (Tombstone data incomplete)"));
         }
         let tombstones: Vec<bool> = bytes[off..tomb_end].iter().map(|&b| b != 0).collect();
         off = tomb_end;
@@ -1855,7 +1922,7 @@ impl QuIVer {
         // IDs
         let ids_end = off + n * 8;
         if ids_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "IDs 数据不完整"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "IDs 数据不完整 (IDs data incomplete)"));
         }
         let ids: Vec<u64> = bytes[off..ids_end]
             .chunks_exact(8)
@@ -1866,7 +1933,7 @@ impl QuIVer {
         // SlotIndices
         let si_end = off + n * 8;
         if si_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "SlotIndices 数据不完整"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "SlotIndices 数据不完整 (SlotIndices data incomplete)"));
         }
         let slot_indices: Vec<usize> = bytes[off..si_end]
             .chunks_exact(8)
@@ -1877,14 +1944,14 @@ impl QuIVer {
         // NodeMaxLayer
         let nml_end = off + n;
         if nml_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "NodeMaxLayer 数据不完整"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "NodeMaxLayer 数据不完整 (NodeMaxLayer data incomplete)"));
         }
         let node_max_layer: Vec<u8> = bytes[off..nml_end].to_vec();
         off = nml_end;
 
         // Upper Layers
         if off + 4 > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper Layers header 不完整"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper Layers header 不完整 (Upper Layers header incomplete)"));
         }
         let num_upper = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize;
         off += 4;
@@ -1892,7 +1959,7 @@ impl QuIVer {
         let mut upper_layers = Vec::with_capacity(num_upper);
         for _ in 0..num_upper {
             if off + 4 > bytes.len() {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper layer 节点数不完整"));
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper layer 节点数不完整 (Upper layer node count incomplete)"));
             }
             let layer_nodes = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize;
             off += 4;
@@ -1900,13 +1967,13 @@ impl QuIVer {
             let mut layer = Vec::with_capacity(layer_nodes);
             for _ in 0..layer_nodes {
                 if off + 2 > bytes.len() {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper adj degree 不完整"));
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper adj 度数不完整 (Upper adj degree incomplete)"));
                 }
                 let deg = u16::from_le_bytes(bytes[off..off+2].try_into().unwrap()) as usize;
                 off += 2;
 
                 if off + deg * 4 > bytes.len() {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper adj 邻居列表不完整"));
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper adj 邻居列表不完整 (Upper adj neighbor list incomplete)"));
                 }
                 let mut adj = Vec::with_capacity(deg);
                 for _ in 0..deg {
@@ -1925,7 +1992,7 @@ impl QuIVer {
         }
 
         tracing::info!(
-            "QuIVer 索引从磁盘加载完成：{} 个节点，dim={}，max_level={}，tombstone={}",
+            "QuIVer 索引从磁盘加载完成 (QuIVer index loaded from disk)：{} 个节点，dim={}，max_level={}，tombstone={}",
             n, dim, max_level, tombstones.iter().filter(|&&t| t).count()
         );
 
@@ -1972,3 +2039,283 @@ pub fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     }
     dot / (na.sqrt() * nb.sqrt()).max(1e-30)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造 N 个正交基向量（dim 维），每个向量只在第 i%dim 维为 1.0
+    fn make_orthogonal_vectors(n: usize, dim: usize) -> Vec<f32> {
+        let mut vecs = vec![0.0f32; n * dim];
+        for i in 0..n {
+            vecs[i * dim + (i % dim)] = 1.0;
+        }
+        vecs
+    }
+
+    /// 构造随机向量（确定性 LCG）
+    fn make_random_vectors(n: usize, dim: usize, seed: u64) -> Vec<f32> {
+        let mut vecs = vec![0.0f32; n * dim];
+        let mut lcg = seed;
+        for v in vecs.iter_mut() {
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *v = ((lcg >> 33) as f32 / (1u32 << 31) as f32) * 2.0 - 1.0;
+        }
+        vecs
+    }
+
+    #[test]
+    fn test_quiver_基础建图与搜索() {
+        let config = QuIVerConfig {
+            m: 16,
+            ef_construction: 32,
+            alpha: 1.2,
+        };
+        let mut quiver = QuIVer::new(4, &config);
+
+        let vectors = vec![
+            1.0f32, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let ids = vec![10, 20, 30, 40];
+        let slots = vec![0, 1, 2, 3];
+
+        quiver.batch_build_experimental_v2(&vectors, &ids, &slots);
+
+        assert_eq!(quiver.active_count(), 4);
+        assert_eq!(quiver.total_count(), 4);
+
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let search_config = QuIVerSearchConfig {
+            top_k: 2,
+            ef_search: 10,
+            rerank_limit: None,
+        };
+        
+        let results = quiver.search(&query, &vectors, &search_config);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, 10);
+
+        // 测试软删除
+        quiver.soft_delete(10);
+        assert_eq!(quiver.active_count(), 3);
+        
+        let results_after = quiver.search(&query, &vectors, &search_config);
+        if !results_after.is_empty() {
+            assert_ne!(results_after[0].0, 10);
+        }
+
+        let stats = quiver.stats();
+        assert_eq!(stats.n, 4);
+        assert_eq!(stats.tombstone_count, 1);
+        
+        assert!(!quiver.needs_rebuild());
+    }
+
+    #[test]
+    fn test_quiver_多路径建图与序列化() {
+        let config = QuIVerConfig {
+            m: 16,
+            ef_construction: 32,
+            alpha: 1.2,
+        };
+        let mut quiver = QuIVer::new(4, &config);
+
+        let vectors = vec![
+            1.0f32, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let ids = vec![10, 20, 30, 40];
+        let slots = vec![0, 1, 2, 3];
+
+        // 测试批量建图
+        quiver.batch_build(&vectors, &ids, &slots);
+        assert_eq!(quiver.total_count(), 4);
+
+        // 测试追加式批量建图
+        quiver.batch_build_experimental(&vectors, &vec![50, 60, 70, 80], &vec![4, 5, 6, 7]);
+        assert_eq!(quiver.total_count(), 8);
+
+        // 测试带校验的批量建图（会重置图）
+        quiver.batch_build_experimental_v2_checked(&vectors, &ids, &slots);
+        assert_eq!(quiver.total_count(), 4);
+
+        // 测试单节点增量插入
+        let mut lcg = 12345;
+        let v5 = vec![0.5, 0.5, 0.0, 0.0];
+        quiver.insert(&v5, 50, 4, &mut lcg);
+        assert_eq!(quiver.total_count(), 5);
+
+        quiver.dirty_count_inc();
+        quiver.dirty_count_inc();
+        assert!(quiver.needs_rebuild());
+
+        quiver.debug_connectivity();
+
+        // 测试序列化与反序列化
+        let path = std::path::Path::new("test_quiver_ser.quiv");
+        quiver.save_to_file(path).unwrap();
+
+        let loaded = QuIVer::load_from_file(path).unwrap();
+        assert_eq!(loaded.total_count(), 5);
+        assert_eq!(loaded.active_count(), 5);
+        assert_eq!(loaded.dim, 4);
+        assert_eq!(loaded.entry_point, quiver.entry_point);
+        assert_eq!(loaded.ids, vec![10, 20, 30, 40, 50]);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_quiver_中等规模搜索() {
+        // 50 个节点，8 维，测试更完整的 beam search 路径
+        let dim = 8;
+        let n = 50;
+        let config = QuIVerConfig {
+            m: 8,
+            ef_construction: 32,
+            alpha: 1.2,
+        };
+        let mut quiver = QuIVer::new(dim, &config);
+
+        let vectors = make_random_vectors(n, dim, 42);
+        let ids: Vec<u64> = (0..n as u64).collect();
+        let slots: Vec<usize> = (0..n).collect();
+
+        quiver.batch_build_experimental_v2(&vectors, &ids, &slots);
+        assert_eq!(quiver.total_count(), n);
+
+        let stats = quiver.stats();
+        assert!(stats.avg_degree_l0 > 0.0);
+        assert!(stats.hot_bytes > 0);
+
+        // 用第 0 号向量自身做查询，应该能搜到自己
+        let query = vectors[0..dim].to_vec();
+        let search_config = QuIVerSearchConfig {
+            top_k: 5,
+            ef_search: 32,
+            rerank_limit: Some(20),
+        };
+        let results = quiver.search(&query, &vectors, &search_config);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, 0); // 自身应为 Top-1
+
+        // 删除一半节点再搜索
+        for i in 0..n/2 {
+            quiver.soft_delete(i as u64);
+        }
+        assert_eq!(quiver.active_count(), n - n/2);
+        let results2 = quiver.search(&query, &vectors, &search_config);
+        for (id, _) in &results2 {
+            assert!(*id >= n as u64 / 2, "已删除节点不应出现在结果中");
+        }
+    }
+
+    #[test]
+    fn test_quiver_空图搜索() {
+        let config = QuIVerConfig::default();
+        let quiver = QuIVer::new(4, &config);
+        assert_eq!(quiver.total_count(), 0);
+        assert_eq!(quiver.active_count(), 0);
+
+        let query = vec![1.0f32, 0.0, 0.0, 0.0];
+        let search_config = QuIVerSearchConfig {
+            top_k: 5,
+            ef_search: 10,
+            rerank_limit: None,
+        };
+        let results = quiver.search(&query, &[], &search_config);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_quiver_单节点图() {
+        let config = QuIVerConfig::default();
+        let mut quiver = QuIVer::new(4, &config);
+
+        let vectors = vec![1.0f32, 0.0, 0.0, 0.0];
+        quiver.batch_build_experimental_v2(&vectors, &[42], &[0]);
+        assert_eq!(quiver.total_count(), 1);
+
+        let search_config = QuIVerSearchConfig {
+            top_k: 1,
+            ef_search: 10,
+            rerank_limit: None,
+        };
+        let results = quiver.search(&[1.0, 0.0, 0.0, 0.0], &vectors, &search_config);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 42);
+    }
+
+    #[test]
+    fn test_quiver_soft_delete_不存在的id() {
+        let config = QuIVerConfig::default();
+        let mut quiver = QuIVer::new(4, &config);
+        let vectors = vec![1.0, 0.0, 0.0, 0.0];
+        quiver.batch_build_experimental_v2(&vectors, &[1], &[0]);
+
+        // 删除不存在的 ID
+        assert!(!quiver.soft_delete(999));
+        // 删除存在的 ID
+        assert!(quiver.soft_delete(1));
+        // 重复删除（已经是 tombstone）
+        assert!(quiver.soft_delete(1));
+    }
+
+    #[test]
+    fn test_quiver_序列化错误路径() {
+        // 加载不存在的文件
+        let result = QuIVer::load_from_file(std::path::Path::new("nonexistent.quiv"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cosine_sim_函数() {
+        let a = [1.0f32, 0.0, 0.0];
+        let b = [1.0f32, 0.0, 0.0];
+        assert!((cosine_sim(&a, &b) - 1.0).abs() < 1e-5);
+
+        let c = [0.0f32, 1.0, 0.0];
+        assert!(cosine_sim(&a, &c).abs() < 1e-5);
+
+        let d = [-1.0f32, 0.0, 0.0];
+        assert!((cosine_sim(&a, &d) + 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_quiver_config_default() {
+        let config = QuIVerConfig::default();
+        assert_eq!(config.m, 16);
+        assert_eq!(config.ef_construction, 128);
+        assert!((config.alpha - 1.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_quiver_search_config_rerank_limit() {
+        let cfg = QuIVerSearchConfig {
+            top_k: 10,
+            ef_search: 50,
+            rerank_limit: None,
+        };
+        assert_eq!(cfg.rerank_limit(), 50); // 默认取 ef_search
+
+        let cfg2 = QuIVerSearchConfig {
+            top_k: 10,
+            ef_search: 50,
+            rerank_limit: Some(30),
+        };
+        assert_eq!(cfg2.rerank_limit(), 30);
+
+        let cfg3 = QuIVerSearchConfig {
+            top_k: 100,
+            ef_search: 50,
+            rerank_limit: Some(30),
+        };
+        assert_eq!(cfg3.rerank_limit(), 100); // max(rerank_limit, top_k)
+    }
+}
+

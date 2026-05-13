@@ -35,9 +35,11 @@ fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
                     // ERROR_ACCESS_DENIED (5) 或 ERROR_SHARING_VIOLATION (32)
                     if os_err == Some(5) || os_err == Some(32) {
                         tracing::debug!(
-                            "robust_rename: attempt {} failed (os_error={:?}), retrying in {:?}",
+                            "robust_rename: 第 {} 次重试失败 (attempt {} failed), os_error={:?}, {:?} 后重试 (retrying in {:?})",
+                            attempt + 1,
                             attempt + 1,
                             os_err,
+                            delay,
                             delay
                         );
                         std::thread::sleep(delay);
@@ -50,7 +52,7 @@ fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
             }
         }
         // 逻辑上不可达：循环必定 return。防御性返回避免审查标记。
-        Err(std::io::Error::other("robust_rename exhausted retries"))
+        Err(std::io::Error::other("robust_rename 重试次数耗尽 (exhausted retries)"))
     }
 }
 
@@ -129,7 +131,7 @@ pub fn save<T: VectorType>(
     let quiver_path = quiver_path_from_db(path);
     if let Some(quiver) = memtable.quiver() {
         if let Err(e) = quiver.save_to_file(std::path::Path::new(&quiver_path)) {
-            tracing::warn!("QuIVer 索引持久化失败（不影响主数据）: {}", e);
+            tracing::warn!("QuIVer 索引持久化失败（不影响主数据）(QuIVer persist failed, main data unaffected): {}", e);
         }
     } else {
         // QuIVer 不存在时清理残留文件
@@ -324,7 +326,7 @@ fn save_tdb<T: VectorType>(
     robust_rename(Path::new(&tmp_path), Path::new(path))?;
 
     tracing::info!(
-        "持久化完成: {} 个槽位(含删除), {} 个向量, {} 个 BQ 签名, Mode: {}",
+        "持久化完成 (Flush completed): {} 个槽位(含删除), {} 个向量, {} 个 BQ 签名, 模式 (Mode): {}",
         node_count,
         vec_count,
         bq_count,
@@ -341,14 +343,14 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
 
     if mmap.len() < HEADER_SIZE as usize {
         return Err(TriviumError::CorruptedFile(
-            "File too small for header".into(),
+            "文件头过小 (File too small for header)".into(),
         ));
     }
 
     let bytes = &mmap[..];
     if &bytes[0..4] != MAGIC {
         return Err(TriviumError::CorruptedFile(format!(
-            "Invalid file magic: expected TVDB, got {:?}",
+            "文件魔数无效 (Invalid file magic): 期望 TVDB，实际 {:?}",
             &bytes[0..4]
         )));
     }
@@ -376,20 +378,20 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
 
     if payload_offset > file_len {
         return Err(TriviumError::CorruptedFile(format!(
-            "payload_offset ({}) exceeds file size ({}), file truncated",
+            "payload_offset ({}) 超出文件大小 ({})，文件被截断 (file truncated)",
             payload_offset, file_len
         )));
     }
     if edge_offset > file_len {
         return Err(TriviumError::CorruptedFile(format!(
-            "edge_offset ({}) exceeds file size ({}), file truncated",
+            "edge_offset ({}) 超出文件大小 ({})，文件被截断 (file truncated)",
             edge_offset, file_len
         )));
     }
     if bq_offset > 0 {
         if bq_offset > file_len {
             return Err(TriviumError::CorruptedFile(format!(
-                "bq_offset ({}) exceeds file size ({}), file truncated",
+                "bq_offset ({}) 超出文件大小 ({})，文件被截断 (file truncated)",
                 bq_offset, file_len
             )));
         }
@@ -403,8 +405,8 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
                 let expected_bq_end = bq_offset + 8 + bq_count * sig_size;
                 if expected_bq_end > file_len {
                     return Err(TriviumError::CorruptedFile(format!(
-                        "BQ block truncated: expected {} bytes (offset {} + 8 + {} × {}), \
-                         actual file size {} bytes",
+                        "BQ 块被截断 (BQ block truncated): 期望 {} 字节 (offset {} + 8 + {} × {})，\
+                         实际文件大小 {} 字节",
                         expected_bq_end, bq_offset, bq_count, sig_size, file_len
                     )));
                 }
@@ -466,7 +468,7 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
             Ok(mt)
         } else {
             tracing::warn!(
-                "检测到 .tdb/.vec 跨文件撕裂（.flush_ok 标记缺失或不匹配），\
+                "检测到 .tdb/.vec 跨文件撕裂 (Cross-file tear detected)（.flush_ok 标记缺失或不匹配），\
                  将尝试按当前文件恢复，失败后再降级为仅加载 .tdb 元数据"
             );
             match load_v2(
@@ -486,7 +488,7 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
                     Ok(mt)
                 }
                 Err(e) => {
-                    tracing::warn!("当前 .tdb/.vec 组合不可用，进入安全降级恢复: {}", e);
+                    tracing::warn!("当前 .tdb/.vec 组合不可用，进入安全降级恢复 (Falling back to metadata-only recovery): {}", e);
                     let mut mt = load_v2_metadata_only(
                         bytes,
                         dim,
@@ -595,7 +597,7 @@ fn load_v1_rom<T: VectorType>(
 
     if vector_offset + expected_vec_size > tdb_mmap.len() {
         return Err(TriviumError::CorruptedFile(
-            "Vector block exceeds file size".into(),
+            "向量块超出文件大小 (Vector block exceeds file size)".into(),
         ));
     }
 
@@ -644,7 +646,7 @@ fn load_payloads<T: VectorType>(
     let mut cursor = offset;
     for _ in 0..node_count {
         if cursor.saturating_add(12) > end_offset {
-            return Err(TriviumError::CorruptedFile("Payload block overflow".into()));
+            return Err(TriviumError::CorruptedFile("Payload 块溢出 (Payload block overflow)".into()));
         }
         let nid = read_u64_le(bytes, cursor, "payload node_id")?;
         cursor += 8;
@@ -657,10 +659,10 @@ fn load_payloads<T: VectorType>(
         }
 
         if cursor.saturating_add(json_len) > end_offset {
-            return Err(TriviumError::CorruptedFile("JSON data overflow".into()));
+            return Err(TriviumError::CorruptedFile("JSON 数据溢出 (JSON data overflow)".into()));
         }
         let payload: serde_json::Value = serde_json::from_slice(&bytes[cursor..cursor + json_len])
-            .map_err(|e| TriviumError::CorruptedFile(format!("JSON parse error: {}", e)))?;
+            .map_err(|e| TriviumError::CorruptedFile(format!("JSON 解析错误 (JSON parse error): {}", e)))?;
         cursor += json_len;
 
         memtable.register_node(nid, payload)?;
@@ -686,7 +688,7 @@ fn load_edges<T: VectorType>(
             break;
         }
         let label = String::from_utf8(bytes[cursor..cursor + label_len].to_vec())
-            .map_err(|e| TriviumError::CorruptedFile(format!("Label decode error: {}", e)))?;
+            .map_err(|e| TriviumError::CorruptedFile(format!("标签解码错误 (Label decode error): {}", e)))?;
         cursor += label_len;
         let weight = read_f32_le(bytes, cursor, "edge weight")?;
         cursor += 4;
@@ -721,7 +723,7 @@ fn load_bq_block<T: VectorType>(
 
     if data_end > file_len {
         tracing::warn!(
-            "BQ Block 数据不完整（需要 {} 字节，文件仅剩 {} 字节），跳过恢复",
+            "BQ Block 数据不完整 (BQ Block data incomplete)（需要 {} 字节，文件仅剩 {} 字节），跳过恢复",
             bq_count * sig_size,
             file_len.saturating_sub(data_start)
         );
@@ -750,7 +752,7 @@ fn load_bq_block<T: VectorType>(
     };
 
     memtable.set_bq_signatures(sigs);
-    tracing::info!("从 .tdb 恢复了 {} 个 BQ 签名（零拷贝加载）", bq_count);
+    tracing::info!("从 .tdb 恢复了 {} 个 BQ 签名 (Restored {} BQ signatures from .tdb)（零拷贝加载）", bq_count, bq_count);
 }
 
 /// 尝试从 .tdb.quiver 文件加载 QuIVer 索引
@@ -771,7 +773,7 @@ fn load_quiver_index<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) {
         }
         Err(e) => {
             tracing::warn!(
-                "QuIVer 索引加载失败（将在首次查询时自动重建）: {}",
+                "QuIVer 索引加载失败 (QuIVer index load failed)（将在首次查询时自动重建）: {}",
                 e
             );
             // 删除损坏的文件

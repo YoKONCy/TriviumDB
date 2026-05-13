@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       run_extreme:
-        description: '是否运行 50万节点/1000万边/1536维极限 benchmark'
+        description: '是否运行 10万节点/200万边/768维 QuIVer benchmark'
         required: false
         default: 'false'
         type: choice
@@ -89,7 +89,7 @@ jobs:
         with:
           key: bench-extreme-graph-vector
 
-      - name: 运行 50万节点/1000万边/1536维极限 benchmark 报告
+      - name: 运行 10万节点/200万边/768维 QuIVer benchmark 报告
         run: cargo bench --bench bench_extreme_graph_vector
 
       - name: 上传极限规模 benchmark 报告

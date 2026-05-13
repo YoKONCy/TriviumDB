@@ -26,6 +26,8 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![arXiv](https://img.shields.io/badge/arXiv-2605.02171-b31b1b.svg)](https://arxiv.org/abs/2605.02171)
 
+**中文** | [**English**](README_EN.md)
+
 </div>
 
 ---
@@ -189,20 +191,20 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 
 ## 核心特性
 
-| 特性                  | 说明                                                                                                                             |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| 🔍 **混合检索**       | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序                                                                    |
-| 🧠 **认知管线**       | 内置多层认知检索管线（本项目自研分层设计）：FISTA 残差寻隐 / PPR 图扩散 / DPP 多样性采样 / 疲劳不应期，运行时可自适应开关        |
-| 🔌 **Hook 扩展系统**  | 6 个管线关键阶段的自定义注入点：查询预处理 / 自定义召回 / 召回后处理 / 图扩散前 / 重排序 / 最终后处理，支持 C/C++ FFI 动态库插件 |
-| 📦 **三位一体 O(1)**  | 自动增量 O(1) FreeList 墓碑空洞复用；删节点 O(1) 反向边哈希表（本项目称 Reverse Hash Net），彻底杜绝盘面膨胀与图谱雪崩           |
-| ⚡ **QuIVer ANN 索引** | 自研 SOTA 级近似最近邻图索引：BQ 签名 + Vamana 图导航，冷热分离架构，增量 Insert/Delete/Update 无需重建                           |
-| 💾 **双模式存储**     | Mmap（大模型极速分体冷启动） / Rom（传统 SQLite 级单文件打包携带），无缝热切换                                                   |
-| 🛡️ **四层灾备防御**   | 预写日志(WAL) + 写入原子替换 + 事务预检干跑(Dry-Run) + OS 内存写时复制隔离                                                       |
-| 🔄 **零开销事务**     | `begin_tx()` 验证前置架构，中途报错绝不污染内存，实现真正的零代价原子回滚；QuIVer 索引事务安全（分离时间线架构）                  |
-| 🔎 **高级过滤**       | 类 MongoDB 语法：`$eq/$ne/$gt/$lt/$in/$and/$or` + 行级布隆特征阵列（Parallel Bit-Tag Array）硬件级加速                            |
-| 📝 **图谱查询**       | 内置类 Cypher 查询引擎：`MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b`                                                      |
-| 🐍 **Python 原生**    | PyO3 绑定，`pip install` 后直接 `import triviumdb`                                                                               |
-| 🌐 **Node.js 原生**   | napi-rs 绑定，`npm install` 后直接 `require('triviumdb')`                                                                        |
+| 特性                   | 说明                                                                                                                             |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 🔍 **混合检索**        | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序                                                                    |
+| 🧠 **认知管线**        | 内置多层认知检索管线（本项目自研分层设计）：FISTA 残差寻隐 / PPR 图扩散 / DPP 多样性采样 / 疲劳不应期，运行时可自适应开关        |
+| 🔌 **Hook 扩展系统**   | 6 个管线关键阶段的自定义注入点：查询预处理 / 自定义召回 / 召回后处理 / 图扩散前 / 重排序 / 最终后处理，支持 C/C++ FFI 动态库插件 |
+| 📦 **三位一体 O(1)**   | 自动增量 O(1) FreeList 墓碑空洞复用；删节点 O(1) 反向边哈希表（本项目称 Reverse Hash Net），彻底杜绝盘面膨胀与图谱雪崩           |
+| ⚡ **QuIVer ANN 索引** | 自研 SOTA 级近似最近邻图索引：BQ 签名 + Vamana 图导航，冷热分离架构，增量 Insert/Delete/Update 无需重建                          |
+| 💾 **双模式存储**      | Mmap（大模型极速分体冷启动） / Rom（传统 SQLite 级单文件打包携带），无缝热切换                                                   |
+| 🛡️ **四层灾备防御**    | 预写日志(WAL) + 写入原子替换 + 事务预检干跑(Dry-Run) + OS 内存写时复制隔离                                                       |
+| 🔄 **零开销事务**      | `begin_tx()` 验证前置架构，中途报错绝不污染内存，实现真正的零代价原子回滚；QuIVer 索引事务安全（分离时间线架构）                 |
+| 🔎 **高级过滤**        | 类 MongoDB 语法：`$eq/$ne/$gt/$lt/$in/$and/$or` + 行级布隆特征阵列（Parallel Bit-Tag Array）硬件级加速                           |
+| 📝 **图谱查询**        | 内置类 Cypher 查询引擎：`MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b`                                                      |
+| 🐍 **Python 原生**     | PyO3 绑定，`pip install` 后直接 `import triviumdb`                                                                               |
+| 🌐 **Node.js 原生**    | napi-rs 绑定，`npm install` 后直接 `require('triviumdb')`                                                                        |
 
 > 📖 深入了解架构设计和技术细节请查看 **[支持特性详解](docs/features.md)**。
 
@@ -214,14 +216,14 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 
 > 📄 **学术论文**: [QuIVer: Rethinking ANN Graph Topology via Training-Free Binary Quantization](https://arxiv.org/abs/2605.02171)
 >
-> 在 9 个百万级数据集（384-d 至 1536-d）上验证，QuIVer 以 <0.9 GB 热内存实现 ≥91% Recall@10 @ 16-39K QPS，吞吐量超 hnswlib 16× 和 USearch 5×。
+> 在 12 个百万级数据集（384-d 至 3072-d）上验证，QuIVer 以 \<1.3 GB 热内存实现 ≥88% Recall@10 @ 13-41K QPS，多线程吞吐量超 DiskANN Rust 2.5-3.3×、hnswlib 3.6-4.7×、FAISS HNSW 3.8-4.9×。
 
 TriviumDB 采用**智能自适应双引擎**向量索引，全程自动路由，无需手动配置：
 
-| 阶段           | 引擎              | 激活条件                                 | 特点                                                               |
-| -------------- | ----------------- | ---------------------------------------- | ------------------------------------------------------------------ |
-| **小规模热区** | BruteForce        | < 1 万节点（或 QuIVer 未就绪）           | 100% 精确召回，rayon 多核，延迟极低                                |
-| **大规模冷区** | **QuIVer**        | ≥ 1 万节点时自动构建，独立持久化         | BQ 签名 + Vamana 图导航 + f32 精排，冷热分离                      |
+| 阶段           | 引擎       | 激活条件                         | 特点                                         |
+| -------------- | ---------- | -------------------------------- | -------------------------------------------- |
+| **小规模热区** | BruteForce | < 1 万节点（或 QuIVer 未就绪）   | 100% 精确召回，rayon 多核，延迟极低          |
+| **大规模冷区** | **QuIVer** | ≥ 1 万节点时自动构建，独立持久化 | BQ 签名 + Vamana 图导航 + f32 精排，冷热分离 |
 
 ### QuIVer 的核心创新
 
@@ -348,18 +350,17 @@ TriviumDB/
 
 ---
 
-
 ## 与现有方案对比
 
-| 维度          | SQLite       | Qdrant      | Neo4j       | SurrealDB    | **TriviumDB**         |
-| ------------- | ------------ | ----------- | ----------- | ------------ | --------------------- |
-| 文档型数据    | ✅ SQL       | ❌ 仅过滤   | ⚠️ 属性     | ✅ SurrealQL | ✅ JSON + $gt/$in      |
-| 向量检索      | ⚠️ 需外挂    | ✅ HNSW     | ❌ 需插件   | ✅ DiskANN   | ✅ 自研 QuIVer (BQ+Vamana) |
-| 图谱遍历      | ⚠️ JOIN 模拟 | ❌          | ✅ Cypher  | ✅ 图查询     | ✅ 原生邻接表           |
-| 嵌入式单文件  | ✅           | ❌ 独立服务  | ❌ JVM 服务 | ✅ 可切换     | ✅ 单 .tdb             |
-| 混合检索      | ❌           | ❌          | ❌         | ⚠️ 手动实现   | ✅ 向量+图扩散          |
-| 零外部依赖    | ✅           | ✅          | ❌ JVM     | ❌ RocksDB   | ✅ 纯 Rust             |
-| 删除代价      | ✅ O(1)      | ⚠️ 重建索引 | ⚠️ 重连图边  | ⚠️ 墓碑GC    | ✅ 增量 Tombstone，25% 阈值重建 |
+| 维度         | SQLite       | Qdrant      | Neo4j       | SurrealDB    | **TriviumDB**                   |
+| ------------ | ------------ | ----------- | ----------- | ------------ | ------------------------------- |
+| 文档型数据   | ✅ SQL       | ❌ 仅过滤   | ⚠️ 属性     | ✅ SurrealQL | ✅ JSON + $gt/$in               |
+| 向量检索     | ⚠️ 需外挂    | ✅ HNSW     | ❌ 需插件   | ✅ DiskANN   | ✅ 自研 QuIVer (BQ+Vamana)      |
+| 图谱遍历     | ⚠️ JOIN 模拟 | ❌          | ✅ Cypher   | ✅ 图查询    | ✅ 原生邻接表                   |
+| 嵌入式单文件 | ✅           | ❌ 独立服务 | ❌ JVM 服务 | ✅ 可切换    | ✅ 单 .tdb                      |
+| 混合检索     | ❌           | ❌          | ❌          | ⚠️ 手动实现  | ✅ 向量+图扩散                  |
+| 零外部依赖   | ✅           | ✅          | ❌ JVM      | ❌ RocksDB   | ✅ 纯 Rust                      |
+| 删除代价     | ✅ O(1)      | ⚠️ 重建索引 | ⚠️ 重连图边 | ⚠️ 墓碑GC    | ✅ 增量 Tombstone，25% 阈值重建 |
 
 ---
 
@@ -377,15 +378,15 @@ TriviumDB/
 
 ## 📖 文档
 
-| 文档                                        | 说明                                                   |
-| ------------------------------------------- | ------------------------------------------------------ |
-| **[API 完整参考](docs/api-reference.md)**   | 全部 Python / Node.js / Rust API、参数说明、返回值类型 |
-| **[支持特性详解](docs/features.md)**        | 架构设计、存储引擎、索引策略、崩溃恢复等技术细节       |
-| **[最佳实践](docs/best-practices.md)**      | 数据建模范式、性能调优、Hook 使用指南、避坑指南         |
-| **[TQL 查询语言参考](docs/tql-reference.md)** | MATCH / FIND / SEARCH 语法、DML 写操作、属性索引      |
-| **[Hook 开发指南](docs/hook-guide.md)**     | C/C++ FFI 插件编写、Rust Hook 实现、管线诊断实战       |
-| **[测试实践](docs/testing.md)**             | 四层测试体系、属性测试、变异测试、覆盖率度量与 CI 建议 |
-| **[安全设计说明](docs/security.md)**        | 并发安全、数据完整性、unsafe 审计、FFI 安全边界         |
+| 文档                                          | 说明                                                   |
+| --------------------------------------------- | ------------------------------------------------------ |
+| **[API 完整参考](docs/api-reference.md)**     | 全部 Python / Node.js / Rust API、参数说明、返回值类型 |
+| **[支持特性详解](docs/features.md)**          | 架构设计、存储引擎、索引策略、崩溃恢复等技术细节       |
+| **[最佳实践](docs/best-practices.md)**        | 数据建模范式、性能调优、Hook 使用指南、避坑指南        |
+| **[TQL 查询语言参考](docs/tql-reference.md)** | MATCH / FIND / SEARCH 语法、DML 写操作、属性索引       |
+| **[Hook 开发指南](docs/hook-guide.md)**       | C/C++ FFI 插件编写、Rust Hook 实现、管线诊断实战       |
+| **[测试实践](docs/testing.md)**               | 四层测试体系、属性测试、变异测试、覆盖率度量与 CI 建议 |
+| **[安全设计说明](docs/security.md)**          | 并发安全、数据完整性、unsafe 审计、FFI 安全边界        |
 
 ---
 
@@ -415,11 +416,11 @@ TriviumDB 的认知检索管线借鉴并实现了以下学术成果（均为本�
 如果您在研究中使用了 QuIVer 或 TriviumDB，请引用我们的论文：
 
 ```bibtex
-@article{quiver2025,
+@article{quiver2026,
   title   = {QuIVer: Rethinking ANN Graph Topology via Training-Free Binary Quantization},
-  author  = {YoKONCy},
+  author  = {Xiao, Wenxuan and Wang, Zhiyou and Li, Chengcheng},
   journal = {arXiv preprint arXiv:2605.02171},
-  year    = {2025},
+  year    = {2026},
   url     = {https://arxiv.org/abs/2605.02171}
 }
 ```
