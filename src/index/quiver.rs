@@ -2045,6 +2045,7 @@ mod tests {
     use super::*;
 
     /// 构造 N 个正交基向量（dim 维），每个向量只在第 i%dim 维为 1.0
+    #[allow(dead_code)]
     fn make_orthogonal_vectors(n: usize, dim: usize) -> Vec<f32> {
         let mut vecs = vec![0.0f32; n * dim];
         for i in 0..n {
@@ -2137,7 +2138,7 @@ mod tests {
         assert_eq!(quiver.total_count(), 4);
 
         // 测试追加式批量建图
-        quiver.batch_build_experimental(&vectors, &vec![50, 60, 70, 80], &vec![4, 5, 6, 7]);
+        quiver.batch_build_experimental(&vectors, &[50, 60, 70, 80], &[4, 5, 6, 7]);
         assert_eq!(quiver.total_count(), 8);
 
         // 测试带校验的批量建图（会重置图）

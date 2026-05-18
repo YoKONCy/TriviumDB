@@ -1,15 +1,15 @@
-/// Random-Sphere 数据集生成器
-///
-/// 纯高斯球面向量（无任何结构），用于验证 BQ 在完全随机数据上的表现。
-/// 与 Synthetic-LR (bench_random1m.rs) 形成控制变量对比：
-///   - Random-Sphere: 无低秩、无聚簇 → BQ 几乎无法工作 (~0.3% recall)
-///   - Synthetic-LR:  有低秩、有聚簇 → BQ 部分可用 (~50% recall)
-///   - Cohere-1M:     真实对比学习嵌入 → BQ 高效 (~95% recall)
-///
-/// 用法：
-///   cargo bench --bench bench_random_sphere
-///   $env:TRIVIUM_ANN_NAME="sphere-1m"
-///   cargo bench --bench bench_sensitivity
+//! Random-Sphere 数据集生成器
+//!
+//! 纯高斯球面向量（无任何结构），用于验证 BQ 在完全随机数据上的表现。
+//! 与 Synthetic-LR (bench_random1m.rs) 形成控制变量对比：
+//!   - Random-Sphere: 无低秩、无聚簇 → BQ 几乎无法工作 (~0.3% recall)
+//!   - Synthetic-LR:  有低秩、有聚簇 → BQ 部分可用 (~50% recall)
+//!   - Cohere-1M:     真实对比学习嵌入 → BQ 高效 (~95% recall)
+//!
+//! 用法：
+//!   cargo bench --bench bench_random_sphere
+//!   $env:TRIVIUM_ANN_NAME="sphere-1m"
+//!   cargo bench --bench bench_sensitivity
 
 use rayon::prelude::*;
 use std::io::Write;
