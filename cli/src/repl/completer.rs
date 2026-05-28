@@ -3,7 +3,7 @@
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
-use rustyline::validate::Validator;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Context, Helper};
 
 const TQL_KEYWORDS: &[&str] = &[
@@ -85,5 +85,163 @@ impl Highlighter for ReplHelper {
     }
 }
 
-impl Validator for ReplHelper {}
+impl Validator for ReplHelper {
+    fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
+        Ok(check_complete(ctx.input()))
+    }
+}
+
+/// 判断输入是否为完整的 TQL 语句（供 Validator 和单元测试共用）。
+fn check_complete(input: &str) -> ValidationResult {
+    let trimmed = input.trim();
+
+    // 空行或元命令直接提交
+    if trimmed.is_empty() || trimmed.starts_with('.') {
+        return ValidationResult::Valid(None);
+    }
+
+    // 统计括号深度（跳过字符串字面量内部）
+    let mut paren = 0i32; // ()
+    let mut brace = 0i32; // {}
+    let mut bracket = 0i32; // []
+    let mut in_sq = false; // 单引号字符串
+    let mut in_dq = false; // 双引号字符串
+    let mut escape = false;
+
+    for ch in trimmed.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' && (in_sq || in_dq) {
+            escape = true;
+            continue;
+        }
+        if in_sq {
+            if ch == '\'' {
+                in_sq = false;
+            }
+            continue;
+        }
+        if in_dq {
+            if ch == '"' {
+                in_dq = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => in_sq = true,
+            '"' => in_dq = true,
+            '(' => paren += 1,
+            ')' => paren -= 1,
+            '{' => brace += 1,
+            '}' => brace -= 1,
+            '[' => bracket += 1,
+            ']' => bracket -= 1,
+            _ => {}
+        }
+    }
+
+    // 未关闭的字符串或括号 → 继续输入
+    if in_sq || in_dq || paren > 0 || brace > 0 || bracket > 0 {
+        return ValidationResult::Incomplete;
+    }
+
+    // 缺少末尾分号 → 继续输入
+    if !trimmed.ends_with(';') {
+        return ValidationResult::Incomplete;
+    }
+
+    ValidationResult::Valid(None)
+}
 impl Helper for ReplHelper {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate(input: &str) -> ValidationResult {
+        check_complete(input)
+    }
+
+    #[test]
+    fn metacommand_submits_immediately() {
+        assert!(matches!(validate(".help"), ValidationResult::Valid(_)));
+        assert!(matches!(validate(".quit"), ValidationResult::Valid(_)));
+    }
+
+    #[test]
+    fn empty_submits() {
+        assert!(matches!(validate(""), ValidationResult::Valid(_)));
+        assert!(matches!(validate("   "), ValidationResult::Valid(_)));
+    }
+
+    #[test]
+    fn complete_statement_with_semicolon() {
+        assert!(matches!(
+            validate("MATCH (n) RETURN n;"),
+            ValidationResult::Valid(_)
+        ));
+    }
+
+    #[test]
+    fn missing_semicolon_is_incomplete() {
+        assert!(matches!(
+            validate("MATCH (n) RETURN n"),
+            ValidationResult::Incomplete
+        ));
+    }
+
+    #[test]
+    fn unbalanced_parens_incomplete() {
+        assert!(matches!(
+            validate("MATCH (n;"),
+            ValidationResult::Incomplete
+        ));
+    }
+
+    #[test]
+    fn unbalanced_braces_incomplete() {
+        assert!(matches!(
+            validate("FIND {\"name\": \"x\";"),
+            ValidationResult::Incomplete
+        ));
+    }
+
+    #[test]
+    fn unbalanced_brackets_incomplete() {
+        assert!(matches!(
+            validate("FIND {\"tags\": [1, 2};"),
+            ValidationResult::Incomplete
+        ));
+    }
+
+    #[test]
+    fn brackets_inside_string_ignored() {
+        // 字符串内的括号不影响平衡判断
+        assert!(matches!(
+            validate("FIND {\"name\": \"a(b[c{d\"};"),
+            ValidationResult::Valid(_)
+        ));
+    }
+
+    #[test]
+    fn multiline_complete() {
+        let input = "MATCH (n)\nRETURN n\nLIMIT 10;";
+        assert!(matches!(validate(input), ValidationResult::Valid(_)));
+    }
+
+    #[test]
+    fn multiline_incomplete() {
+        let input = "MATCH (n)\nRETURN n\nLIMIT 10";
+        assert!(matches!(validate(input), ValidationResult::Incomplete));
+    }
+
+    #[test]
+    fn unclosed_string_incomplete() {
+        assert!(matches!(
+            validate("FIND {\"name\": \"hello;"),
+            ValidationResult::Incomplete
+        ));
+    }
+}

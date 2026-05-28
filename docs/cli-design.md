@@ -483,6 +483,7 @@ tql> .quit
 - [x] Graph View 交互优化（k-hop 展开/折叠 e/c、缩放 +/-、平移 Shift+方向、复位 f）
 - [x] 搜索 Playground（`s` 以选中节点向量检索，结果带 score 列）
 - [x] 配置文件支持 (`~/.triviumdb.toml`，优先级 CLI > 配置 > 默认)
+- [x] REPL 多行输入（rustyline Validator：括号平衡 + 分号终止检测）
 
 ### 分工建议
 
