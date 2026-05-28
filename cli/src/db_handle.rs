@@ -1,0 +1,243 @@
+//! dtype 动态分发层。
+//!
+//! `triviumdb::Database<T>` 是泛型的（`f32` / `f16` / `u64`）。CLI 在运行时
+//! 才知道用户要打开哪种 dtype 的数据库，因此用 [`DbHandle`] 枚举把三种具体
+//! 类型擦除成一个统一句柄，并通过 [`dispatch!`] 宏把方法调用转发到内部的
+//! 具体 `Database<T>` 实例。
+//!
+//! 所有对外暴露的查询结果都被转换成 dtype 无关的 [`CliNode`]（向量统一以
+//! `f32` 表示），这样上层的 `commands` / `repl` / `tui` 都无需关心泛型参数。
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
+
+use half::f16;
+use serde_json::Value;
+use triviumdb::node::{Edge, NodeId, NodeView};
+use triviumdb::{Database, Result, TriviumError, VectorType};
+
+/// 数据库底层数值类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DType {
+    F32,
+    F16,
+    U64,
+}
+
+impl DType {
+    /// 从字符串解析 dtype（大小写不敏感）。
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "f32" | "float32" | "float" => Ok(DType::F32),
+            "f16" | "float16" | "half" => Ok(DType::F16),
+            "u64" | "uint64" | "bits" => Ok(DType::U64),
+            other => Err(TriviumError::InvalidInput(format!(
+                "未知 dtype: '{other}' (支持: f32 / f16 / u64)"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DType::F32 => "f32",
+            DType::F16 => "f16",
+            DType::U64 => "u64",
+        }
+    }
+}
+
+impl std::fmt::Display for DType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// dtype 无关的节点视图，专供 CLI/TUI 展示使用。
+///
+/// 向量统一通过 [`VectorType::to_f32`] 转换为 `f32`，屏蔽底层 dtype 差异。
+#[derive(Debug, Clone)]
+pub struct CliNode {
+    pub id: NodeId,
+    pub vector: Vec<f32>,
+    pub payload: Value,
+    pub edges: Vec<Edge>,
+}
+
+impl CliNode {
+    fn from_view<T: VectorType>(v: NodeView<T>) -> Self {
+        CliNode {
+            id: v.id,
+            vector: v.vector.iter().map(|x| x.to_f32()).collect(),
+            payload: v.payload,
+            edges: v.edges,
+        }
+    }
+}
+
+/// TQL 查询的一行：变量名 → 节点快照。
+pub type CliRow = HashMap<String, CliNode>;
+/// TQL 查询结果：多行绑定。
+pub type CliRows = Vec<CliRow>;
+
+/// TQL 写操作结果。
+#[derive(Debug, Clone, Default)]
+pub struct MutSummary {
+    pub affected: usize,
+    pub created_ids: Vec<NodeId>,
+}
+
+/// dtype 擦除后的统一数据库句柄。
+pub enum DbHandle {
+    F32(Database<f32>),
+    F16(Database<f16>),
+    U64(Database<u64>),
+}
+
+/// 把方法调用转发到内部具体的 `Database<T>`。
+///
+/// 利用 match 人体工学（match ergonomics），无论 `$self` 是 `&self` 还是
+/// `&mut self`，`$db` 都会被正确地绑定为 `&Database<T>` 或 `&mut Database<T>`。
+macro_rules! dispatch {
+    ($self:expr, $db:ident => $body:expr) => {
+        match $self {
+            DbHandle::F32($db) => $body,
+            DbHandle::F16($db) => $body,
+            DbHandle::U64($db) => $body,
+        }
+    };
+}
+
+fn convert_rows<T: VectorType>(rows: Vec<HashMap<String, NodeView<T>>>) -> CliRows {
+    rows.into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|(k, v)| (k, CliNode::from_view(v)))
+                .collect()
+        })
+        .collect()
+}
+
+impl DbHandle {
+    /// 打开（或创建）数据库。
+    pub fn open(path: &str, dim: usize, dtype: DType) -> Result<Self> {
+        Ok(match dtype {
+            DType::F32 => DbHandle::F32(Database::<f32>::open(path, dim)?),
+            DType::F16 => DbHandle::F16(Database::<f16>::open(path, dim)?),
+            DType::U64 => DbHandle::U64(Database::<u64>::open(path, dim)?),
+        })
+    }
+
+    /// 打开数据库，`dim` 缺省时尝试从 `.tdb` 文件头嗅探。
+    ///
+    /// 若文件不存在且未显式给出维度，则报错提示用户用 `--dim` 指定。
+    pub fn open_auto(path: &str, dim: Option<usize>, dtype: DType) -> Result<Self> {
+        let dim = match dim {
+            Some(d) => d,
+            None => sniff_header(path).map(|h| h.dim).map_err(|_| {
+                TriviumError::InvalidInput(format!(
+                    "无法从 '{path}' 嗅探维度（文件不存在或损坏），请用 --dim 显式指定"
+                ))
+            })?,
+        };
+        Self::open(path, dim, dtype)
+    }
+
+    /// 当前句柄的 dtype。
+    pub fn dtype(&self) -> DType {
+        match self {
+            DbHandle::F32(_) => DType::F32,
+            DbHandle::F16(_) => DType::F16,
+            DbHandle::U64(_) => DType::U64,
+        }
+    }
+
+    pub fn node_count(&self) -> usize {
+        dispatch!(self, db => db.node_count())
+    }
+
+    pub fn dim(&self) -> usize {
+        dispatch!(self, db => db.dim())
+    }
+
+    pub fn contains(&self, id: NodeId) -> bool {
+        dispatch!(self, db => db.contains(id))
+    }
+
+    pub fn get(&self, id: NodeId) -> Option<CliNode> {
+        dispatch!(self, db => db.get(id).map(CliNode::from_view))
+    }
+
+    pub fn get_payload(&self, id: NodeId) -> Option<Value> {
+        dispatch!(self, db => db.get_payload(id))
+    }
+
+    pub fn get_edges(&self, id: NodeId) -> Vec<Edge> {
+        dispatch!(self, db => db.get_edges(id))
+    }
+
+    pub fn get_all_ids(&self) -> Vec<NodeId> {
+        dispatch!(self, db => db.get_all_ids())
+    }
+
+    pub fn neighbors(&self, id: NodeId, depth: usize) -> Vec<NodeId> {
+        dispatch!(self, db => db.neighbors(id, depth))
+    }
+
+    pub fn estimated_memory(&self) -> usize {
+        dispatch!(self, db => db.estimated_memory())
+    }
+
+    /// 执行只读 TQL 查询，结果转换为 dtype 无关的 [`CliRows`]。
+    pub fn tql(&self, query: &str) -> Result<CliRows> {
+        dispatch!(self, db => {
+            let rows = db.tql(query)?;
+            Ok(convert_rows(rows))
+        })
+    }
+
+    /// 执行写 TQL 语句（CREATE / SET / DELETE）。
+    pub fn tql_mut(&mut self, query: &str) -> Result<MutSummary> {
+        dispatch!(self, db => {
+            let r = db.tql_mut(query)?;
+            Ok(MutSummary { affected: r.affected, created_ids: r.created_ids })
+        })
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        dispatch!(self, db => db.flush())
+    }
+
+    pub fn compact(&mut self) -> Result<()> {
+        dispatch!(self, db => db.compact())
+    }
+}
+
+/// 从 `.tdb` 文件头嗅探维度（不挂载数据库）。
+///
+/// 文件头布局：`[0..4] MAGIC "TVDB"`, `[4..6] version (u16 LE)`,
+/// `[6..10] dim (u32 LE)`。
+pub fn sniff_header(tdb_path: &str) -> Result<HeaderInfo> {
+    let mut file = File::open(tdb_path)?;
+    let mut header = [0u8; 10];
+    file.read_exact(&mut header)?;
+
+    if &header[0..4] != b"TVDB" {
+        return Err(TriviumError::CorruptedFile(format!(
+            "非法魔数: '{}' 不是 TriviumDB 文件",
+            tdb_path
+        )));
+    }
+
+    let version = u16::from_le_bytes([header[4], header[5]]);
+    let dim = u32::from_le_bytes([header[6], header[7], header[8], header[9]]) as usize;
+
+    Ok(HeaderInfo { version, dim })
+}
+
+/// `.tdb` 文件头信息。
+#[derive(Debug, Clone, Copy)]
+pub struct HeaderInfo {
+    pub version: u16,
+    pub dim: usize,
+}

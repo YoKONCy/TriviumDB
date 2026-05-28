@@ -1,0 +1,33 @@
+[package]
+name = "triviumdb-cli"
+version = "0.1.0"
+edition = "2024"
+authors = ["YoKONCy <2752026184@qq.com>"]
+description = "CLI & TUI tool for TriviumDB — interactive REPL, non-interactive commands, and a full-screen terminal UI."
+repository = "https://github.com/YoKONCy/TriviumDB"
+license = "Apache-2.0"
+readme = "README.md"
+
+[[bin]]
+name = "triviumdb"
+path = "src/main.rs"
+
+[dependencies]
+triviumdb = { path = "..", default-features = false }
+
+# 核心数据类型
+serde_json = "1.0"
+half = { version = "2.7.1", features = ["bytemuck", "serde"] }
+
+# CLI 解析与输出
+clap = { version = "4", features = ["derive", "env"] }
+colored = "2"
+tabled = "0.17"
+unicode-width = "0.2"
+
+# REPL
+rustyline = "14"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"

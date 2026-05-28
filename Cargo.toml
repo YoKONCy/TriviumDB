@@ -1,3 +1,7 @@
+[workspace]
+members = ["cli"]
+resolver = "2"
+
 [package]
 name = "triviumdb"
 version = "0.7.1"
@@ -17,19 +21,8 @@ crate-type = ["cdylib", "rlib"]
 default = []
 python = ["dep:pyo3"]
 nodejs = ["dep:napi", "dep:napi-derive"]
-cli = [] # 仅供终端工具使用
 usearch-bench = ["dep:usearch"]
 ablation = [] # encoding ablation 实验专用
-
-[[bin]]
-name = "triviumdb"
-path = "src/main.rs"
-required-features = ["cli"]
-
-[[bin]]
-name = "trivium_repair"
-path = "src/bin/trivium_repair.rs"
-required-features = ["cli"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
