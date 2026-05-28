@@ -8,8 +8,10 @@ repository = "https://github.com/YoKONCy/TriviumDB"
 license = "Apache-2.0"
 readme = "README.md"
 
+# 二进制名为 `tdb`（而非 `triviumdb`）：lib 的 cdylib 产物为 `triviumdb.dll`，
+# 与同名 bin 在 Windows 上会产生 `triviumdb.pdb` 输出冲突，故采用简短名 `tdb`。
 [[bin]]
-name = "triviumdb"
+name = "tdb"
 path = "src/main.rs"
 
 [dependencies]

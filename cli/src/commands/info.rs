@@ -11,12 +11,17 @@ use crate::db_handle::{DType, DbHandle, sniff_header};
 use crate::formatter::OutputFormat;
 use crate::util::{file_size, human_bytes_opt};
 
+/// 非交互入口：打开数据库后展示元信息。
 pub fn run(path: &str, dim: Option<usize>, dtype: DType, format: OutputFormat) -> CliResult {
-    // 1) 不挂载也能读取的文件头信息
-    let header = sniff_header(path).ok();
-
-    // 2) 挂载数据库获取实时统计
     let handle = DbHandle::open_auto(path, dim, dtype)?;
+    print_info(&handle, path, format)
+}
+
+/// 基于已打开的句柄展示元信息（供 REPL `.info` 复用，避免重复加锁打开）。
+pub fn print_info(handle: &DbHandle, path: &str, format: OutputFormat) -> CliResult {
+    // 不挂载也能读取的文件头信息
+    let header = sniff_header(path).ok();
+    let dtype = handle.dtype();
 
     let tdb_size = file_size(path);
     let vec_path = format!("{path}.vec");
