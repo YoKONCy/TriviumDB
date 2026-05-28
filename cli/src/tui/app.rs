@@ -22,6 +22,24 @@ pub enum LeftView {
     Graph,
 }
 
+/// 图视图的交互状态：k-hop 扩展节点集 + 视口缩放/平移。
+pub struct GraphState {
+    /// 结果集之外、被 expand 加入的节点
+    pub extra: std::collections::HashSet<NodeId>,
+    pub zoom: f64,
+    pub center: (f64, f64), // 画布坐标 [0,100]²，默认 (50,50)
+}
+
+impl Default for GraphState {
+    fn default() -> Self {
+        Self {
+            extra: std::collections::HashSet::new(),
+            zoom: 1.0,
+            center: (50.0, 50.0),
+        }
+    }
+}
+
 /// TUI 全局状态。
 pub struct App {
     pub handle: DbHandle,
@@ -39,6 +57,7 @@ pub struct App {
     pub last_elapsed: Option<Duration>,
     pub focus: Focus,
     pub left_view: LeftView,
+    pub graph_state: GraphState,
     pub show_help: bool,
     pub should_quit: bool,
 }
@@ -63,6 +82,7 @@ impl App {
             last_elapsed: None,
             focus: Focus::Query,
             left_view: LeftView::Results,
+            graph_state: GraphState::default(),
             show_help: false,
             should_quit: false,
         }
@@ -103,6 +123,7 @@ impl App {
                     rows.sort_by_key(super::graph::row_primary_id);
                     self.rows = rows;
                     self.row_scores = Vec::new(); // 退出搜索态
+                    self.graph_state.extra.clear(); // 新结果集，清空图扩展
                     self.selected = 0;
                     self.table_state.select(if self.rows.is_empty() { None } else { Some(0) });
                     self.status = format!("{} 行结果", self.rows.len());
@@ -198,6 +219,49 @@ impl App {
     }
 
     fn on_key_results(&mut self, key: KeyEvent) {
+        // 图视图专属交互键（优先于通用键处理）
+        if self.left_view == LeftView::Graph {
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+            match key.code {
+                KeyCode::Char('e') => {
+                    self.graph_expand();
+                    return;
+                }
+                KeyCode::Char('c') => {
+                    self.graph_collapse();
+                    return;
+                }
+                KeyCode::Char('f') => {
+                    self.graph_reset_view();
+                    return;
+                }
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    self.graph_zoom(1.25);
+                    return;
+                }
+                KeyCode::Char('-') | KeyCode::Char('_') => {
+                    self.graph_zoom(0.8);
+                    return;
+                }
+                KeyCode::Left if shift => {
+                    self.graph_pan(-12.0, 0.0);
+                    return;
+                }
+                KeyCode::Right if shift => {
+                    self.graph_pan(12.0, 0.0);
+                    return;
+                }
+                KeyCode::Up if shift => {
+                    self.graph_pan(0.0, 12.0);
+                    return;
+                }
+                KeyCode::Down if shift => {
+                    self.graph_pan(0.0, -12.0);
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('?') => self.show_help = true,
@@ -250,6 +314,36 @@ impl App {
             LeftView::Results => LeftView::Graph,
             LeftView::Graph => LeftView::Results,
         };
+    }
+
+    /// 把选中节点的 1-hop 邻居加入图（k-hop 展开）。
+    fn graph_expand(&mut self) {
+        if let Some(id) = self.selected_node_id() {
+            for nb in self.handle.neighbors(id, 1) {
+                self.graph_state.extra.insert(nb);
+            }
+            self.status = format!("展开 #{id} 邻居（图扩展节点 {}）", self.graph_state.extra.len());
+        }
+    }
+
+    /// 折叠所有扩展节点，回到结果集。
+    fn graph_collapse(&mut self) {
+        self.graph_state.extra.clear();
+        self.status = "已折叠图扩展节点".into();
+    }
+
+    fn graph_reset_view(&mut self) {
+        self.graph_state.zoom = 1.0;
+        self.graph_state.center = (50.0, 50.0);
+    }
+
+    fn graph_zoom(&mut self, factor: f64) {
+        self.graph_state.zoom = (self.graph_state.zoom * factor).clamp(0.3, 5.0);
+    }
+
+    fn graph_pan(&mut self, dx: f64, dy: f64) {
+        self.graph_state.center.0 += dx / self.graph_state.zoom;
+        self.graph_state.center.1 += dy / self.graph_state.zoom;
     }
 }
 
@@ -326,6 +420,27 @@ mod tests {
         app.run_search();
         assert!(!app.rows.is_empty(), "检索应返回命中");
         assert_eq!(app.rows.len(), app.row_scores.len(), "score 与 rows 应等长");
+    }
+
+    #[test]
+    fn graph_interaction_zoom_expand_collapse() {
+        let mut app = temp_app();
+        app.handle.link(1, 2, "knows", 0.9).unwrap(); // 让节点 1 有邻居 2
+        app.initial_load();
+        app.left_view = LeftView::Graph;
+
+        // 缩放
+        let z0 = app.graph_state.zoom;
+        app.on_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
+        assert!(app.graph_state.zoom > z0, "+ 应放大");
+
+        // 展开选中节点（id=1）的邻居
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert!(!app.graph_state.extra.is_empty(), "展开后应有扩展节点");
+
+        // 折叠
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(app.graph_state.extra.is_empty(), "折叠后扩展节点应清空");
     }
 
     #[test]

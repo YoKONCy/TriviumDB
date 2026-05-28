@@ -20,6 +20,7 @@ use crate::db_handle::{CliNode, CliRow};
 
 struct GraphData {
     labels: Vec<String>,
+    is_extra: Vec<bool>, // 是否为 k-hop 展开加入的节点
     edges: Vec<(usize, usize)>,
     pos: Vec<(f64, f64)>, // 归一化到 [0,1]
     selected: Option<usize>,
@@ -33,10 +34,11 @@ pub fn render_graph(f: &mut Frame, app: &App, area: Rect, focused: bool) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
+    let z = app.graph_state.zoom;
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(
-            "Graph ({} nodes, {} edges)  [g] 表格",
+            "Graph ({}n {}e) {z:.1}x  [e/c]展开折叠 [+/-/Shift方向/f]视图 [g]表格",
             data.labels.len(),
             data.edges.len()
         ))
@@ -47,23 +49,27 @@ pub fn render_graph(f: &mut Frame, app: &App, area: Rect, focused: bool) {
         return;
     }
 
-    // 归一化坐标 [0,1] → 画布坐标 [5,95]（留边距）；画布 y 轴向上，故翻转
+    // 力导向坐标 [0,1] → 画布 [0,100]（画布 y 轴向上，故翻转）
     let xy: Vec<(f64, f64)> = data
         .pos
         .iter()
-        .map(|&(x, y)| (x * 90.0 + 5.0, (1.0 - y) * 90.0 + 5.0))
+        .map(|&(x, y)| (x * 100.0, (1.0 - y) * 100.0))
         .collect();
     let edges = data.edges.clone();
     let labels = data.labels.clone();
+    let is_extra = data.is_extra.clone();
     let selected = data.selected;
+
+    // 视口：以 center 为中心，半宽 50/zoom
+    let (cx, cy) = app.graph_state.center;
+    let half = 50.0 / z;
 
     let canvas = Canvas::default()
         .block(block)
         .marker(Marker::Braille)
-        .x_bounds([0.0, 100.0])
-        .y_bounds([0.0, 100.0])
+        .x_bounds([cx - half, cx + half])
+        .y_bounds([cy - half, cy + half])
         .paint(move |ctx| {
-            // 先画边
             for &(a, b) in &edges {
                 ctx.draw(&CanvasLine {
                     x1: xy[a].0,
@@ -75,14 +81,15 @@ pub fn render_graph(f: &mut Frame, app: &App, area: Rect, focused: bool) {
             }
             ctx.layer(); // 节点画在边之上
             for (i, &(x, y)) in xy.iter().enumerate() {
-                let is_sel = selected == Some(i);
-                let style = if is_sel {
+                let style = if selected == Some(i) {
                     Style::default()
                         .fg(Color::Black)
                         .bg(Color::Yellow)
                         .add_modifier(Modifier::BOLD)
+                } else if is_extra[i] {
+                    Style::default().fg(Color::Green) // 展开节点
                 } else {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(Color::Cyan) // 结果集节点
                 };
                 ctx.print(x, y, Span::styled(format!("●{}", labels[i]), style));
             }
@@ -92,18 +99,37 @@ pub fn render_graph(f: &mut Frame, app: &App, area: Rect, focused: bool) {
 }
 
 fn build_graph(app: &App) -> GraphData {
-    // 1) 收集结果集中出现的不同节点（稳定顺序）+ 标签
+    use std::collections::hash_map::Entry;
+
     let mut order: Vec<NodeId> = Vec::new();
     let mut label_of: HashMap<NodeId, String> = HashMap::new();
+    let mut extra_of: HashMap<NodeId, bool> = HashMap::new();
+
+    // 1) 结果集节点
     for row in &app.rows {
         let mut keys: Vec<&String> = row.keys().collect();
         keys.sort();
         for k in keys {
             let node = &row[k];
-            if let std::collections::hash_map::Entry::Vacant(e) = label_of.entry(node.id) {
+            if let Entry::Vacant(e) = label_of.entry(node.id) {
                 order.push(node.id);
-                e.insert(node_label(node));
+                e.insert(node_label_node(node));
+                extra_of.insert(node.id, false);
             }
+        }
+    }
+
+    // 2) k-hop 展开加入的额外节点（结果集之外）
+    for &id in &app.graph_state.extra {
+        if let Entry::Vacant(e) = label_of.entry(id) {
+            order.push(id);
+            let name = app
+                .handle
+                .get_payload(id)
+                .and_then(|p| p.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("#{id}"));
+            e.insert(truncate_label(&name));
+            extra_of.insert(id, true);
         }
     }
 
@@ -131,23 +157,28 @@ fn build_graph(app: &App) -> GraphData {
     // 4) 选中节点下标
     let selected = primary_id(app).and_then(|id| index.get(&id).copied());
 
-    let labels = order.iter().map(|id| label_of[id].clone()).collect();
-    GraphData { labels, edges, pos, selected }
+    let labels: Vec<String> = order.iter().map(|id| label_of[id].clone()).collect();
+    let is_extra: Vec<bool> = order.iter().map(|id| extra_of[id]).collect();
+    GraphData { labels, is_extra, edges, pos, selected }
 }
 
 /// 节点标签：优先 payload.name，否则 #id；截断到 ~12 字符。
-fn node_label(node: &CliNode) -> String {
+fn node_label_node(node: &CliNode) -> String {
     let name = node
         .payload
         .get("name")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(str::to_string)
         .unwrap_or_else(|| format!("#{}", node.id));
+    truncate_label(&name)
+}
+
+fn truncate_label(name: &str) -> String {
     if name.chars().count() > 12 {
         let s: String = name.chars().take(12).collect();
         format!("{s}…")
     } else {
-        name
+        name.to_string()
     }
 }
 
