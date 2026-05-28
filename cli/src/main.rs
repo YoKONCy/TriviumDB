@@ -182,7 +182,7 @@ fn run(cli: Cli, cfg: config::Config) -> CliResult {
         },
         Commands::Export { db, output } => {
             let handle = open(&db, &cfg)?;
-            commands::export::run(&handle, &output)
+            commands::export::run(&handle, &db.path, &output)
         }
         Commands::Import { db, input } => {
             let mut handle = open(&db, &cfg)?;

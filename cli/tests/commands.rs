@@ -254,6 +254,29 @@ fn export_jsonl_format_correct() {
     }
 }
 
+#[test]
+fn export_refuses_database_path() {
+    let (_dir, path) = seed_db();
+
+    tdb()
+        .args(["export", &path, &path, "--color", "never"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("拒绝导出到数据库相关文件"));
+}
+
+#[test]
+fn export_refuses_database_sidecar_path() {
+    let (_dir, path) = seed_db();
+    let sidecar = format!("{path}.vec");
+
+    tdb()
+        .args(["export", &path, &sidecar, "--color", "never"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("拒绝导出到数据库相关文件"));
+}
+
 // ── import 从手写 JSONL ────────────────────────────────────────
 
 #[test]

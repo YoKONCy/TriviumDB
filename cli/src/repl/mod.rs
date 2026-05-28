@@ -148,7 +148,7 @@ fn handle_meta(
             if arg.is_empty() {
                 eprintln!("用法: .export <file.jsonl>");
             } else {
-                let _ = commands::export::run(handle, arg);
+                let _ = commands::export::run(handle, path, arg);
             }
         }
         ".format" => match OutputFormat::parse(arg) {
