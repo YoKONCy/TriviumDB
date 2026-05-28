@@ -359,27 +359,24 @@ fn is_mutation(query: &str) -> bool {
 mod tests {
     use super::*;
     use crate::db_handle::{DType, DbHandle};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    use tempfile::TempDir;
 
     /// 创建一个隔离的临时数据库并预置 2 个 person 节点。
-    fn temp_app() -> App {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("tdb_tui_test_{}_{n}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("t.tdb").to_string_lossy().to_string();
+    /// 返回 `(App, TempDir)`——TempDir 在 App 之后析构，确保文件锁释放后再清理。
+    fn temp_app() -> (App, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.tdb").to_string_lossy().to_string();
         let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
         h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice", "type": "person"}))
             .unwrap();
         h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob", "type": "person"}))
             .unwrap();
-        App::new(h, path, 50)
+        (App::new(h, path, 50), dir)
     }
 
     #[test]
     fn default_query_populates_rows() {
-        let mut app = temp_app();
+        let (mut app, _dir) = temp_app();
         app.initial_load();
         assert_eq!(app.rows.len(), 2);
         assert!(app.detail.is_some());
@@ -388,7 +385,7 @@ mod tests {
 
     #[test]
     fn navigation_updates_selection_and_quit() {
-        let mut app = temp_app();
+        let (mut app, _dir) = temp_app();
         app.initial_load();
         assert_eq!(app.selected, 0);
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -401,7 +398,7 @@ mod tests {
 
     #[test]
     fn editing_and_executing_query() {
-        let mut app = temp_app();
+        let (mut app, _dir) = temp_app();
         app.focus = Focus::Query;
         app.query.clear();
         app.cursor = 0;
@@ -414,7 +411,7 @@ mod tests {
 
     #[test]
     fn search_by_example_populates_scores() {
-        let mut app = temp_app();
+        let (mut app, _dir) = temp_app();
         app.initial_load();
         assert!(app.detail.is_some(), "应有选中节点");
         app.run_search();
@@ -424,7 +421,7 @@ mod tests {
 
     #[test]
     fn graph_interaction_zoom_expand_collapse() {
-        let mut app = temp_app();
+        let (mut app, _dir) = temp_app();
         app.handle.link(1, 2, "knows", 0.9).unwrap(); // 让节点 1 有邻居 2
         app.initial_load();
         app.left_view = LeftView::Graph;
@@ -445,7 +442,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_quits_from_any_focus() {
-        let mut app = temp_app();
+        let (mut app, _dir) = temp_app();
         app.focus = Focus::Query;
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(app.should_quit);
@@ -456,7 +453,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = temp_app();
+        let (mut app, _dir) = temp_app();
         app.initial_load();
 
         let backend = TestBackend::new(120, 30);
