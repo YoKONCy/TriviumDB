@@ -25,7 +25,7 @@ pub type CliResult = Result<(), Box<dyn std::error::Error>>;
 
 #[derive(Parser)]
 #[command(
-    name = "triviumdb",
+    name = "tdb",
     version,
     about = "TriviumDB CLI & TUI — 交互式 REPL、非交互命令与终端可视化面板",
     long_about = None,

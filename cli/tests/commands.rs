@@ -38,6 +38,16 @@ fn tdb() -> Command {
     Command::cargo_bin("tdb").unwrap()
 }
 
+#[test]
+fn help_uses_tdb_command_name() {
+    tdb()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage: tdb"))
+        .stdout(predicate::str::contains("triviumdb").not());
+}
+
 // ── info ───────────────────────────────────────────────────────
 
 #[test]
@@ -209,6 +219,25 @@ fn repair_check_nonexistent() {
         .assert()
         .success()
         .stdout(predicate::str::contains("不存在"));
+}
+
+#[test]
+fn repair_dump_outputs_nodes() {
+    let (_dir, path) = seed_db();
+    tdb()
+        .args([
+            "repair",
+            "dump",
+            &path,
+            "--format",
+            "json",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Alice"))
+        .stdout(predicate::str::contains("Bob"));
 }
 
 // ── error cases ────────────────────────────────────────────────
