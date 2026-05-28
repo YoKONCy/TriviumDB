@@ -84,17 +84,69 @@ pub enum TqlToken {
     Eof,
 }
 
+/// 带源位置信息的 token（用于错误诊断高亮）
+#[derive(Debug, Clone)]
+pub struct PosToken {
+    pub token: TqlToken,
+    /// 在原始输入字符串中的字节起始位置
+    pub byte_start: usize,
+}
+
+/// 带位置的词法/语法错误
+#[derive(Debug, Clone)]
+pub struct ParseErrorAt {
+    pub msg: String,
+    /// 在原始输入字符串中的字节位置（错误锚点）
+    pub byte_pos: usize,
+}
+
+impl ParseErrorAt {
+    pub fn new(msg: impl Into<String>, byte_pos: usize) -> Self {
+        Self {
+            msg: msg.into(),
+            byte_pos,
+        }
+    }
+}
+
+impl std::fmt::Display for ParseErrorAt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (at byte {})", self.msg, self.byte_pos)
+    }
+}
+
+impl std::error::Error for ParseErrorAt {}
+
 pub struct TqlLexer {
     chars: Vec<char>,
     pos: usize,
+    /// 与 chars 平行：chars[i] 在原始输入字符串中的字节起始偏移
+    char_byte_offsets: Vec<usize>,
 }
 
 impl TqlLexer {
     pub fn new(input: &str) -> Self {
-        Self {
-            chars: input.chars().collect(),
-            pos: 0,
+        let chars: Vec<char> = input.chars().collect();
+        let mut char_byte_offsets = Vec::with_capacity(chars.len() + 1);
+        let mut byte = 0usize;
+        for c in &chars {
+            char_byte_offsets.push(byte);
+            byte += c.len_utf8();
         }
+        char_byte_offsets.push(byte); // 末尾哨兵：input.len()
+        Self {
+            chars,
+            pos: 0,
+            char_byte_offsets,
+        }
+    }
+
+    /// 当前字符位置 -> 原始输入字节偏移
+    fn current_byte_pos(&self) -> usize {
+        self.char_byte_offsets
+            .get(self.pos)
+            .copied()
+            .unwrap_or_else(|| *self.char_byte_offsets.last().unwrap_or(&0))
     }
 
     fn peek(&self) -> Option<char> {
@@ -132,6 +184,28 @@ impl TqlLexer {
     }
 
     pub fn tokenize(&mut self) -> Result<Vec<TqlToken>, String> {
+        self.tokenize_inner(None)
+    }
+
+    /// 同时返回 token 流与每个 token 在输入中的字节起始位置。
+    /// 错误也带位置（指向当前字符的字节偏移）。
+    pub fn tokenize_with_positions(&mut self) -> Result<Vec<PosToken>, ParseErrorAt> {
+        let mut positions = Vec::new();
+        let tokens = self
+            .tokenize_inner(Some(&mut positions))
+            .map_err(|msg| ParseErrorAt::new(msg, self.current_byte_pos()))?;
+        debug_assert_eq!(tokens.len(), positions.len());
+        Ok(tokens
+            .into_iter()
+            .zip(positions)
+            .map(|(token, byte_start)| PosToken { token, byte_start })
+            .collect())
+    }
+
+    fn tokenize_inner(
+        &mut self,
+        mut positions: Option<&mut Vec<usize>>,
+    ) -> Result<Vec<TqlToken>, String> {
         let mut tokens = Vec::new();
 
         loop {
@@ -139,10 +213,14 @@ impl TqlLexer {
 
             match self.peek() {
                 None => {
+                    if let Some(rec) = positions.as_deref_mut() {
+                        rec.push(self.current_byte_pos());
+                    }
                     tokens.push(TqlToken::Eof);
                     break;
                 }
                 Some(ch) => {
+                    let token_byte_start = self.current_byte_pos();
                     let tok = match ch {
                         '(' => {
                             self.advance();
@@ -364,6 +442,9 @@ impl TqlLexer {
 
                         _ => return Err(format!("Unexpected character: '{}'", ch)),
                     };
+                    if let Some(rec) = positions.as_deref_mut() {
+                        rec.push(token_byte_start);
+                    }
                     tokens.push(tok);
                 }
             }
@@ -480,5 +561,49 @@ mod tests {
         assert_eq!(tokens[0], TqlToken::IntLit(1));
         assert_eq!(tokens[1], TqlToken::DotDot);
         assert_eq!(tokens[2], TqlToken::IntLit(3));
+    }
+
+    #[test]
+    fn tokenize_with_positions_records_byte_starts() {
+        let input = "MATCH (n) RETURN n";
+        let mut lexer = TqlLexer::new(input);
+        let toks = lexer.tokenize_with_positions().unwrap();
+        // 第一个 token 是 MATCH，起始位置 0
+        assert!(matches!(toks[0].token, TqlToken::Match));
+        assert_eq!(toks[0].byte_start, 0);
+        // (n) 中的 ( 在 "MATCH " 之后
+        let lparen = toks.iter().find(|t| matches!(t.token, TqlToken::LParen)).unwrap();
+        assert_eq!(lparen.byte_start, 6);
+        // EOF 位置 = 字符串长度
+        let last = toks.last().unwrap();
+        assert!(matches!(last.token, TqlToken::Eof));
+        assert_eq!(last.byte_start, input.len());
+    }
+
+    #[test]
+    fn tokenize_with_positions_lex_error_carries_byte_pos() {
+        // '@' 是非法字符
+        let input = "MATCH (n) @ RETURN n";
+        let mut lexer = TqlLexer::new(input);
+        let err = lexer.tokenize_with_positions().unwrap_err();
+        assert!(err.msg.contains("Unexpected character"));
+        assert_eq!(err.byte_pos, 10);
+    }
+
+    #[test]
+    fn parse_tql_with_pos_reports_position() {
+        // 缺少 RETURN
+        let input = "MATCH (n) WHERE n.x == 1";
+        let err = super::super::tql_parser::parse_tql_with_pos(input).unwrap_err();
+        // 错误位置应在 EOF（即 input 末尾）
+        assert!(err.byte_pos <= input.len());
+        assert!(err.byte_pos >= input.find("==").unwrap());
+    }
+
+    #[test]
+    fn parse_tql_with_pos_ok_returns_query() {
+        let input = "MATCH (n) RETURN n LIMIT 5";
+        let q = super::super::tql_parser::parse_tql_with_pos(input).unwrap();
+        assert_eq!(q.limit, Some(5));
     }
 }

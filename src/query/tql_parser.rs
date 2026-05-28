@@ -5,13 +5,15 @@
 //! 支持聚合函数、DISTINCT、AS 别名
 
 use super::tql_ast::*;
-use super::tql_lexer::TqlToken;
+use super::tql_lexer::{ParseErrorAt, TqlToken};
 use crate::filter::Filter;
 
 pub struct TqlParser {
     tokens: Vec<TqlToken>,
     pos: usize,
     depth: usize,
+    /// 与 tokens 平行的字节起始位置（用于错误诊断）
+    positions: Option<Vec<usize>>,
 }
 
 impl TqlParser {
@@ -20,7 +22,27 @@ impl TqlParser {
             tokens,
             pos: 0,
             depth: 0,
+            positions: None,
         }
+    }
+
+    /// 构造带位置信息的 parser（错误时可定位到字节偏移）
+    pub fn new_with_positions(tokens: Vec<TqlToken>, positions: Vec<usize>) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+            positions: Some(positions),
+        }
+    }
+
+    /// 当前 token 在原始输入中的字节起始位置；若未提供位置信息则返回 None
+    pub fn current_byte_pos(&self) -> Option<usize> {
+        let positions = self.positions.as_ref()?;
+        positions
+            .get(self.pos)
+            .or_else(|| positions.last())
+            .copied()
     }
 
     fn peek(&self) -> &TqlToken {
@@ -1195,4 +1217,38 @@ pub fn parse_tql_statement(input: &str) -> Result<TqlStatement, String> {
     let tokens = lexer.tokenize()?;
     let mut parser = TqlParser::new(tokens);
     parser.parse_statement()
+}
+
+/// 带位置诊断的 TQL 解析（仅读查询）。错误中包含字节偏移，便于上层 CLI/IDE 高亮。
+pub fn parse_tql_with_pos(input: &str) -> Result<TqlQuery, ParseErrorAt> {
+    let mut lexer = super::tql_lexer::TqlLexer::new(input);
+    let tokens_with_pos = lexer.tokenize_with_positions()?;
+    let mut tokens = Vec::with_capacity(tokens_with_pos.len());
+    let mut positions = Vec::with_capacity(tokens_with_pos.len());
+    for pt in tokens_with_pos {
+        tokens.push(pt.token);
+        positions.push(pt.byte_start);
+    }
+    let mut parser = TqlParser::new_with_positions(tokens, positions);
+    parser.parse_query().map_err(|msg| {
+        let pos = parser.current_byte_pos().unwrap_or(input.len());
+        ParseErrorAt::new(msg, pos)
+    })
+}
+
+/// 带位置诊断的 TQL 解析（读 / 写均可）。错误中包含字节偏移。
+pub fn parse_tql_statement_with_pos(input: &str) -> Result<TqlStatement, ParseErrorAt> {
+    let mut lexer = super::tql_lexer::TqlLexer::new(input);
+    let tokens_with_pos = lexer.tokenize_with_positions()?;
+    let mut tokens = Vec::with_capacity(tokens_with_pos.len());
+    let mut positions = Vec::with_capacity(tokens_with_pos.len());
+    for pt in tokens_with_pos {
+        tokens.push(pt.token);
+        positions.push(pt.byte_start);
+    }
+    let mut parser = TqlParser::new_with_positions(tokens, positions);
+    parser.parse_statement().map_err(|msg| {
+        let pos = parser.current_byte_pos().unwrap_or(input.len());
+        ParseErrorAt::new(msg, pos)
+    })
 }
