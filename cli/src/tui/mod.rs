@@ -19,10 +19,10 @@ use crate::CliResult;
 use crate::db_handle::DbHandle;
 use app::App;
 
-pub fn run(handle: DbHandle, path: &str) -> CliResult {
+pub fn run(handle: DbHandle, path: &str, limit: usize) -> CliResult {
     let mut terminal = setup_terminal()?;
 
-    let mut app = App::new(handle, path.to_string());
+    let mut app = App::new(handle, path.to_string(), limit);
     app.initial_load();
 
     let res = run_loop(&mut terminal, &mut app);

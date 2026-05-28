@@ -62,17 +62,17 @@ pub struct App {
     pub should_quit: bool,
 }
 
-// 注意：TQL 不允许空的 `FIND {}`（会报“文档过滤不能为空”），
-// 因此用 Cypher 风格的 `MATCH (n)` 作为“列出全部节点”的默认查询。
-const DEFAULT_QUERY: &str = "MATCH (n) RETURN n LIMIT 50";
-
 impl App {
-    pub fn new(handle: DbHandle, path: String) -> Self {
+    /// `limit` 控制启动默认查询的 LIMIT（来自配置 tui.default_limit）。
+    pub fn new(handle: DbHandle, path: String, limit: usize) -> Self {
+        // 注意：TQL 不允许空的 `FIND {}`（会报“文档过滤不能为空”），
+        // 因此用 Cypher 风格的 `MATCH (n)` 作为“列出全部节点”的默认查询。
+        let default_query = format!("MATCH (n) RETURN n LIMIT {limit}");
         App {
             handle,
             path,
-            query: DEFAULT_QUERY.chars().collect(),
-            cursor: DEFAULT_QUERY.chars().count(),
+            query: default_query.chars().collect(),
+            cursor: default_query.chars().count(),
             rows: Vec::new(),
             row_scores: Vec::new(),
             selected: 0,
@@ -374,7 +374,7 @@ mod tests {
             .unwrap();
         h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob", "type": "person"}))
             .unwrap();
-        App::new(h, path)
+        App::new(h, path, 50)
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! - TUI 可视化面板（`ui`）
 
 mod commands;
+mod config;
 mod db_handle;
 mod formatter;
 mod repl;
@@ -31,9 +32,9 @@ pub type CliResult = Result<(), Box<dyn std::error::Error>>;
     propagate_version = true
 )]
 struct Cli {
-    /// 输出格式
-    #[arg(long, global = true, default_value = "table")]
-    format: OutputFormat,
+    /// 输出格式（缺省时取配置文件 defaults.format，再缺省为 table）
+    #[arg(long, global = true)]
+    format: Option<OutputFormat>,
 
     /// 彩色输出控制
     #[arg(long, global = true, value_enum, default_value_t = ColorWhen::Auto)]
@@ -60,9 +61,9 @@ struct DbArgs {
     #[arg(long)]
     dim: Option<usize>,
 
-    /// 数据类型
-    #[arg(long, default_value = "f32")]
-    dtype: String,
+    /// 数据类型（缺省时取配置文件 defaults.dtype，再缺省为 f32）
+    #[arg(long)]
+    dtype: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -125,16 +126,17 @@ enum RepairAction {
         /// 数据库路径 (.tdb)
         path: String,
         /// 数据类型
-        #[arg(long, default_value = "f32")]
-        dtype: String,
+        #[arg(long)]
+        dtype: Option<String>,
     },
 }
 
 fn main() {
     let cli = Cli::parse();
     apply_color(cli.color);
+    let cfg = config::Config::load();
 
-    let result = run(cli);
+    let result = run(cli, cfg);
     if let Err(e) = result {
         eprintln!("{} {}", "error:".red().bold(), e);
         std::process::exit(1);
@@ -149,53 +151,74 @@ fn apply_color(when: ColorWhen) {
     }
 }
 
-fn run(cli: Cli) -> CliResult {
-    let format = cli.format;
+fn run(cli: Cli, cfg: config::Config) -> CliResult {
+    let format = resolve_format(cli.format, &cfg);
     match cli.command {
         Commands::Open(db) => {
-            let handle = open(&db)?;
+            let handle = open(&db, &cfg)?;
             repl::run(handle, &db.path, format)
         }
         Commands::Ui(db) => {
-            let handle = open(&db)?;
-            tui::run(handle, &db.path)
+            let handle = open(&db, &cfg)?;
+            let limit = cfg.tui.default_limit.unwrap_or(50);
+            tui::run(handle, &db.path, limit)
         }
-        Commands::Info(db) => commands::info::run(&db.path, db.dim, parse_dtype(&db.dtype)?, format),
+        Commands::Info(db) => {
+            commands::info::run(&db.path, db.dim, resolve_dtype(&db.dtype, &cfg)?, format)
+        }
         Commands::Exec {
             db,
             query,
             mutate,
         } => {
-            let mut handle = open(&db)?;
+            let mut handle = open(&db, &cfg)?;
             commands::exec::run(&mut handle, &query, mutate, format)
         }
         Commands::Repair { action } => match action {
             RepairAction::Check { path } => commands::repair::check(&path),
             RepairAction::Dump { path, dtype } => {
-                commands::repair::dump(&path, parse_dtype(&dtype)?, format)
+                commands::repair::dump(&path, resolve_dtype(&dtype, &cfg)?, format)
             }
         },
         Commands::Export { db, output } => {
-            let handle = open(&db)?;
+            let handle = open(&db, &cfg)?;
             commands::export::run(&handle, &output)
         }
         Commands::Import { db, input } => {
-            let mut handle = open(&db)?;
+            let mut handle = open(&db, &cfg)?;
             commands::import::run(&mut handle, &input)
         }
         Commands::Compact(db) => {
-            let mut handle = open(&db)?;
+            let mut handle = open(&db, &cfg)?;
             commands::compact::run(&mut handle)
         }
     }
 }
 
-fn parse_dtype(s: &str) -> Result<DType, Box<dyn std::error::Error>> {
-    Ok(DType::parse(s)?)
+/// 解析输出格式：CLI > 配置 > 默认(table)。
+fn resolve_format(cli: Option<OutputFormat>, cfg: &config::Config) -> OutputFormat {
+    if let Some(f) = cli {
+        return f;
+    }
+    if let Some(s) = cfg.defaults.format.as_deref()
+        && let Ok(f) = OutputFormat::parse(s)
+    {
+        return f;
+    }
+    OutputFormat::Table
 }
 
-/// 按 [`DbArgs`] 打开数据库（自动嗅探维度）。
-fn open(db: &DbArgs) -> Result<db_handle::DbHandle, Box<dyn std::error::Error>> {
-    let dtype = parse_dtype(&db.dtype)?;
+/// 解析 dtype：CLI > 配置 > 默认(f32)。
+fn resolve_dtype(cli: &Option<String>, cfg: &config::Config) -> Result<DType, Box<dyn std::error::Error>> {
+    let s = cli
+        .clone()
+        .or_else(|| cfg.defaults.dtype.clone())
+        .unwrap_or_else(|| "f32".to_string());
+    Ok(DType::parse(&s)?)
+}
+
+/// 按 [`DbArgs`] 打开数据库（自动嗅探维度，dtype 走配置优先级）。
+fn open(db: &DbArgs, cfg: &config::Config) -> Result<db_handle::DbHandle, Box<dyn std::error::Error>> {
+    let dtype = resolve_dtype(&db.dtype, cfg)?;
     Ok(db_handle::DbHandle::open_auto(&db.path, db.dim, dtype)?)
 }

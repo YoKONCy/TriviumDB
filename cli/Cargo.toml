@@ -18,7 +18,9 @@ path = "src/main.rs"
 triviumdb = { path = "..", default-features = false }
 
 # 核心数据类型
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 half = { version = "2.7.1", features = ["bytemuck", "serde"] }
 
 # CLI 解析与输出

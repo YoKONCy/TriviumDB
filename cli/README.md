@@ -30,4 +30,17 @@ tdb open mydata.tdb
 tdb ui mydata.tdb
 ```
 
+## 配置文件
+
+可选的 `~/.triviumdb.toml` 提供默认值（优先级：**命令行参数 > 配置 > 内置默认**）：
+
+```toml
+[defaults]
+dtype  = "f32"      # f32 | f16 | u64
+format = "table"    # table | json | csv
+
+[tui]
+default_limit = 50  # TUI 启动默认 MATCH (n) ... LIMIT N
+```
+
 详见 [`docs/cli-design.md`](../docs/cli-design.md)。

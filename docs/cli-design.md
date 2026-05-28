@@ -480,9 +480,9 @@ tql> .quit
 - [x] TQL 语法高亮（REPL ANSI + TUI 彩色 Span，共享 `tql_highlight` 分词器）
 - [x] 大数据集导入/导出进度条（indicatif）
 - [x] Graph View 力导向 ASCII 图（ratatui Canvas + Braille）
-- [ ] Graph View 交互优化（展开/折叠/缩放）
-- [ ] 搜索 Playground (向量输入 + 可视化命中)
-- [ ] 配置文件支持 (`~/.triviumdb.toml`)
+- [x] Graph View 交互优化（k-hop 展开/折叠 e/c、缩放 +/-、平移 Shift+方向、复位 f）
+- [x] 搜索 Playground（`s` 以选中节点向量检索，结果带 score 列）
+- [x] 配置文件支持 (`~/.triviumdb.toml`，优先级 CLI > 配置 > 默认)
 
 ### 分工建议
 
