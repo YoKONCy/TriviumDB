@@ -68,6 +68,22 @@ fn pair(s: &str) -> Pair {
 impl Hinter for ReplHelper {
     type Hint = String;
 }
-impl Highlighter for ReplHelper {}
+
+impl Highlighter for ReplHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
+        // 元命令（.xxx）与空行不着色，避免干扰
+        if line.is_empty() || line.trim_start().starts_with('.') {
+            std::borrow::Cow::Borrowed(line)
+        } else {
+            std::borrow::Cow::Owned(crate::tql_highlight::highlight_ansi(line))
+        }
+    }
+
+    fn highlight_char(&self, line: &str, _pos: usize, _forced: bool) -> bool {
+        // 仅当输入是 TQL（非空、非元命令）时才触发逐键重绘
+        !line.is_empty() && !line.trim_start().starts_with('.')
+    }
+}
+
 impl Validator for ReplHelper {}
 impl Helper for ReplHelper {}

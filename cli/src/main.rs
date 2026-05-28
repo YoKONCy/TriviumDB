@@ -9,6 +9,7 @@ mod commands;
 mod db_handle;
 mod formatter;
 mod repl;
+mod tql_highlight;
 mod tui;
 mod util;
 

@@ -1,5 +1,18 @@
 //! 通用辅助函数。
 
+use indicatif::{ProgressBar, ProgressStyle};
+
+/// 创建一个带前缀标签的进度条（写到 stderr，不污染 stdout）。
+pub fn progress_bar(len: u64, label: &str) -> ProgressBar {
+    let pb = ProgressBar::new(len);
+    let style = ProgressStyle::with_template("{prefix:>8} [{bar:30.cyan/blue}] {pos}/{len} ({eta})")
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .progress_chars("=>-");
+    pb.set_style(style);
+    pb.set_prefix(label.to_string());
+    pb
+}
+
 /// 读取文件大小（字节），文件不存在时返回 `None`。
 pub fn file_size(path: &str) -> Option<u64> {
     std::fs::metadata(path).ok().map(|m| m.len())

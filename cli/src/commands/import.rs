@@ -36,6 +36,7 @@ pub fn run(handle: &mut DbHandle, input: &str) -> CliResult {
     }
 
     // Pass 1: 插入节点
+    let pb = crate::util::progress_bar(records.len() as u64, "nodes");
     let mut inserted = 0usize;
     for rec in &records {
         match rec.id {
@@ -45,9 +46,17 @@ pub fn run(handle: &mut DbHandle, input: &str) -> CliResult {
             }
         }
         inserted += 1;
+        pb.inc(1);
     }
+    pb.finish_and_clear();
 
     // Pass 2: 建立边（仅对有显式 id 的记录）
+    let total_edges: u64 = records
+        .iter()
+        .filter(|r| r.id.is_some())
+        .map(|r| r.edges.len() as u64)
+        .sum();
+    let pb = crate::util::progress_bar(total_edges, "edges");
     let mut linked = 0usize;
     for rec in &records {
         if let Some(src) = rec.id {
@@ -55,9 +64,11 @@ pub fn run(handle: &mut DbHandle, input: &str) -> CliResult {
                 if handle.link(src, *target, label, *weight).is_ok() {
                     linked += 1;
                 }
+                pb.inc(1);
             }
         }
     }
+    pb.finish_and_clear();
 
     handle.flush()?;
     println!(

@@ -6,8 +6,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 
-use super::app::{App, Focus};
+use super::app::{App, Focus, LeftView};
+use super::graph;
 use crate::db_handle::{CliNode, CliRows};
+use crate::tql_highlight;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
@@ -48,7 +50,10 @@ fn render_body(f: &mut Frame, app: &mut App, area: Rect) {
 
     let left = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(cols[0]);
     render_query(f, app, left[0]);
-    render_results(f, app, left[1]);
+    match app.left_view {
+        LeftView::Results => render_results(f, app, left[1]),
+        LeftView::Graph => graph::render_graph(f, app, left[1], app.focus == Focus::Results),
+    }
     render_detail(f, app, cols[1]);
 }
 
@@ -58,8 +63,9 @@ fn render_query(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .title("TQL Query  (Enter 执行)")
         .border_style(focus_style(focused));
-    let text = app.query_string();
-    let p = Paragraph::new(text).block(block);
+    // 语法高亮：把查询渲染为彩色 Span
+    let spans = tql_highlight::highlight_spans(&app.query_string());
+    let p = Paragraph::new(Line::from(spans)).block(block);
     f.render_widget(p, area);
 
     if focused {
@@ -123,7 +129,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
 fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.focus {
         Focus::Query => "[Enter] 执行  [Tab/Esc] 结果面板  [Ctrl-C] 退出",
-        Focus::Results => "[↑/↓] 选择  [/ |Tab] 编辑查询  [?] 帮助  [q] 退出",
+        Focus::Results => "[↑/↓] 选择  [/ |Tab] 编辑查询  [g] 图/表  [?] 帮助  [q] 退出",
     };
     let timing = app
         .last_elapsed
@@ -151,6 +157,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from("结果面板:"),
         Line::from("  ↑/↓ 或 j/k   选择行（联动右侧节点详情）"),
+        Line::from("  g            切换 结果表格 / 力导向图"),
         Line::from("  / 或 Tab     切换到查询编辑器"),
         Line::from("  ?            显示/隐藏本帮助"),
         Line::from("  q / Esc      退出"),

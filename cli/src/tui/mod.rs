@@ -1,6 +1,7 @@
 //! TUI 模式：全屏终端可视化面板（查询编辑器 + 结果表 + 节点详情）。
 
 mod app;
+mod graph;
 mod ui;
 
 use std::io::{self, Stdout};

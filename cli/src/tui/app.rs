@@ -15,6 +15,13 @@ pub enum Focus {
     Results,
 }
 
+/// 左下区显示内容：结果表格 / 力导向图。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LeftView {
+    Results,
+    Graph,
+}
+
 /// TUI 全局状态。
 pub struct App {
     pub handle: DbHandle,
@@ -29,6 +36,7 @@ pub struct App {
     pub status: String,
     pub last_elapsed: Option<Duration>,
     pub focus: Focus,
+    pub left_view: LeftView,
     pub show_help: bool,
     pub should_quit: bool,
 }
@@ -51,6 +59,7 @@ impl App {
             status: String::from("就绪"),
             last_elapsed: None,
             focus: Focus::Query,
+            left_view: LeftView::Results,
             show_help: false,
             should_quit: false,
         }
@@ -86,7 +95,9 @@ impl App {
             }
         } else {
             match self.handle.tql(&q) {
-                Ok(rows) => {
+                Ok(mut rows) => {
+                    // 结果按主节点 id 排序，避免 MemTable 槽位序造成的乱序
+                    rows.sort_by_key(super::graph::row_primary_id);
                     self.rows = rows;
                     self.selected = 0;
                     self.table_state.select(if self.rows.is_empty() { None } else { Some(0) });
@@ -187,10 +198,18 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('/') | KeyCode::Tab => self.focus = Focus::Query,
+            KeyCode::Char('g') => self.toggle_left_view(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
             _ => {}
         }
+    }
+
+    fn toggle_left_view(&mut self) {
+        self.left_view = match self.left_view {
+            LeftView::Results => LeftView::Graph,
+            LeftView::Graph => LeftView::Results,
+        };
     }
 }
 

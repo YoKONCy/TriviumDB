@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive", "env"] }
 colored = "2"
 tabled = "0.17"
 unicode-width = "0.2"
+indicatif = "0.17"
 
 # REPL
 rustyline = "14"

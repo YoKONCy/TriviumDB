@@ -437,46 +437,49 @@ tql> .quit
 
 ### Phase 0: 基础设施 (1-2 天)
 
-- [ ] 根 Cargo.toml 添加 `[workspace]`
-- [ ] 创建 `cli/` 目录和 `cli/Cargo.toml`
-- [ ] `main.rs` + clap 骨架，确保 `cargo build -p triviumdb-cli` 通过
-- [ ] `db_handle.rs` — 实现 DbHandle enum + open + dtype 分发宏
-- [ ] 移除或 deprecate 旧的 `src/bin/trivium_repair.rs`（逻辑迁入 `commands/repair.rs`）
+- [x] 根 Cargo.toml 升级为 workspace（`members=["cli"]`, `default-members=["."]`）
+- [x] 创建 `cli/` 目录和 `cli/Cargo.toml`（bin 名 `tdb`，避免与 lib cdylib `triviumdb.pdb` 冲突）
+- [x] `main.rs` + clap 骨架，`cargo build -p triviumdb-cli` 通过
+- [x] `db_handle.rs` — DbHandle enum + open + dtype 分发宏
+- [x] 移除旧 demo bin（`src/main.rs` / `src/bin/trivium_repair.rs`），repair 逻辑迁入 `commands/repair.rs`
 
 ### Phase 1: 共享层 (3-5 天)
 
-- [ ] `commands/info.rs` — 读取文件头 + 统计信息
-- [ ] `commands/exec.rs` — TQL 执行 + 结果收集
-- [ ] `commands/repair.rs` — check / dump (迁移自 trivium_repair)
-- [ ] `commands/export.rs` — JSONL 导出
-- [ ] `commands/import.rs` — JSONL 导入
-- [ ] `commands/compact.rs` — 手动压缩
-- [ ] `formatter.rs` — table / json / csv 三种格式化
+- [x] `commands/info.rs` — 读取文件头 + 统计信息
+- [x] `commands/exec.rs` — TQL 执行 + 结果收集
+- [x] `commands/repair.rs` — check / dump (迁移自 trivium_repair)
+- [x] `commands/export.rs` — JSONL 导出
+- [x] `commands/import.rs` — JSONL 导入
+- [x] `commands/compact.rs` — 手动压缩
+- [x] `formatter.rs` — table / json / csv 三种格式化
 
 ### Phase 2a: REPL (2-3 天) — 可与 Phase 2b 并行
 
-- [ ] REPL 主循环 (rustyline)
-- [ ] 元命令解析 (`.info`, `.flush`, `.help`, `.quit`, ...)
-- [ ] TQL 多行输入
-- [ ] Tab 补全
-- [ ] 历史记录持久化
-- [ ] 错误位置高亮
+- [x] REPL 主循环 (rustyline)
+- [x] 元命令解析 (`.info`, `.stats`, `.schema`, `.flush`, `.compact`, `.export`, `.format`, `.help`, `.quit`)
+- [x] Tab 补全（TQL 关键词 + 元命令）
+- [x] 历史记录持久化（`~/.triviumdb_history`）
+- [x] TQL 语法高亮（ANSI）
+- [ ] TQL 多行输入（待办）
+- [ ] 错误位置高亮（待办）
 
 ### Phase 2b: TUI (5-8 天) — 可与 Phase 2a 并行
 
-- [ ] App state 设计 + event loop (crossterm)
-- [ ] 布局框架 (ratatui constraints)
-- [ ] Status Bar
-- [ ] Results Table (分页、选择、联动)
-- [ ] Query Editor (单行编辑、历史、执行)
-- [ ] Node Detail (JSON 渲染、边列表)
-- [ ] Graph View (ASCII 力导向布局)
-- [ ] 面板切换 + 联动逻辑
+- [x] App state 设计 + event loop (crossterm)
+- [x] 布局框架 (ratatui constraints)
+- [x] Status Bar
+- [x] Results Table (选择、联动、按 id 排序)
+- [x] Query Editor (单行编辑、执行、语法高亮)
+- [x] Node Detail (JSON 渲染、边列表、向量摘要)
+- [x] Graph View (ASCII 力导向布局，`g` 在表格/图间切换)
+- [x] 面板切换 + 联动逻辑
+- [x] 单元测试（App 状态机 + TestBackend 渲染冒烟）
 
 ### Phase 3: 打磨 (持续)
 
-- [ ] TQL 语法高亮
-- [ ] 大数据集导入进度条
+- [x] TQL 语法高亮（REPL ANSI + TUI 彩色 Span，共享 `tql_highlight` 分词器）
+- [x] 大数据集导入/导出进度条（indicatif）
+- [x] Graph View 力导向 ASCII 图（ratatui Canvas + Braille）
 - [ ] Graph View 交互优化（展开/折叠/缩放）
 - [ ] 搜索 Playground (向量输入 + 可视化命中)
 - [ ] 配置文件支持 (`~/.triviumdb.toml`)

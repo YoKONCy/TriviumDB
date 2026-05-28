@@ -15,8 +15,10 @@ pub fn run(handle: &DbHandle, output: &str) -> CliResult {
     let file = File::create(output)?;
     let mut w = BufWriter::new(file);
 
+    let ids = handle.get_all_ids();
+    let pb = crate::util::progress_bar(ids.len() as u64, "export");
     let mut count = 0usize;
-    for id in handle.get_all_ids() {
+    for id in ids {
         if let Some(node) = handle.get(id) {
             let line = json!({
                 "id": node.id,
@@ -31,7 +33,9 @@ pub fn run(handle: &DbHandle, output: &str) -> CliResult {
             writeln!(w, "{}", serde_json::to_string(&line)?)?;
             count += 1;
         }
+        pb.inc(1);
     }
+    pb.finish_and_clear();
     w.flush()?;
 
     println!("{} 导出 {count} 个节点 -> {output}", "✓".green().bold());
