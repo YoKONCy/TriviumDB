@@ -211,6 +211,23 @@ impl DbHandle {
         dispatch!(self, db => db.link(src, dst, label, weight))
     }
 
+    /// 向量相似度检索（query 以 f32 给出，按 dtype 转换）。
+    ///
+    /// 返回按得分降序的 `(id, score, payload)` 列表。
+    pub fn search_f32(
+        &self,
+        vector: &[f32],
+        top_k: usize,
+        expand: usize,
+        min_score: f32,
+    ) -> Result<Vec<(NodeId, f32, Value)>> {
+        dispatch!(self, db => {
+            let v: Vec<_> = vector.iter().map(|x| VectorType::from_f32(*x)).collect();
+            let hits = db.search(&v, top_k, expand, min_score)?;
+            Ok(hits.into_iter().map(|h| (h.id, h.score, h.payload)).collect())
+        })
+    }
+
     pub fn estimated_memory(&self) -> usize {
         dispatch!(self, db => db.estimated_memory())
     }

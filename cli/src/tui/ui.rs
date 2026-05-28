@@ -79,8 +79,12 @@ fn render_query(f: &mut Frame, app: &App, area: Rect) {
 fn render_results(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Results;
     let cols = collect_columns(&app.rows);
+    let show_scores = !app.row_scores.is_empty();
 
     let mut header_cells: Vec<Cell> = vec![Cell::from("#")];
+    if show_scores {
+        header_cells.push(Cell::from("score"));
+    }
     header_cells.extend(cols.iter().map(|c| Cell::from(c.clone())));
     let header = Row::new(header_cells).style(Style::default().add_modifier(Modifier::BOLD));
 
@@ -90,6 +94,10 @@ fn render_results(f: &mut Frame, app: &mut App, area: Rect) {
         .enumerate()
         .map(|(i, row)| {
             let mut cells = vec![Cell::from((i + 1).to_string())];
+            if show_scores {
+                let s = app.row_scores.get(i).copied().unwrap_or(0.0);
+                cells.push(Cell::from(format!("{s:.3}")));
+            }
             for c in &cols {
                 let text = row.get(c).map(node_cell).unwrap_or_default();
                 cells.push(Cell::from(text));
@@ -99,6 +107,9 @@ fn render_results(f: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let mut widths = vec![Constraint::Length(4)];
+    if show_scores {
+        widths.push(Constraint::Length(7));
+    }
     for _ in &cols {
         widths.push(Constraint::Min(12));
     }
@@ -129,7 +140,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
 fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.focus {
         Focus::Query => "[Enter] 执行  [Tab/Esc] 结果面板  [Ctrl-C] 退出",
-        Focus::Results => "[↑/↓] 选择  [/ |Tab] 编辑查询  [g] 图/表  [?] 帮助  [q] 退出",
+        Focus::Results => "[↑/↓] 选择  [/ |Tab] 查询  [g] 图/表  [s] 检索  [?] 帮助  [q] 退出",
     };
     let timing = app
         .last_elapsed
@@ -158,6 +169,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from("结果面板:"),
         Line::from("  ↑/↓ 或 j/k   选择行（联动右侧节点详情）"),
         Line::from("  g            切换 结果表格 / 力导向图"),
+        Line::from("  s            以选中节点向量做相似度检索（带 score）"),
         Line::from("  / 或 Tab     切换到查询编辑器"),
         Line::from("  ?            显示/隐藏本帮助"),
         Line::from("  q / Esc      退出"),

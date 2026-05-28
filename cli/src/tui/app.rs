@@ -30,6 +30,8 @@ pub struct App {
     pub query: Vec<char>,
     pub cursor: usize,
     pub rows: CliRows,
+    /// 与 rows 平行的得分（仅向量检索结果非空；普通 TQL 为空）
+    pub row_scores: Vec<f32>,
     pub selected: usize,
     pub detail: Option<CliNode>,
     pub table_state: TableState,
@@ -53,6 +55,7 @@ impl App {
             query: DEFAULT_QUERY.chars().collect(),
             cursor: DEFAULT_QUERY.chars().count(),
             rows: Vec::new(),
+            row_scores: Vec::new(),
             selected: 0,
             detail: None,
             table_state: TableState::default(),
@@ -99,6 +102,7 @@ impl App {
                     // 结果按主节点 id 排序，避免 MemTable 槽位序造成的乱序
                     rows.sort_by_key(super::graph::row_primary_id);
                     self.rows = rows;
+                    self.row_scores = Vec::new(); // 退出搜索态
                     self.selected = 0;
                     self.table_state.select(if self.rows.is_empty() { None } else { Some(0) });
                     self.status = format!("{} 行结果", self.rows.len());
@@ -199,10 +203,46 @@ impl App {
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('/') | KeyCode::Tab => self.focus = Focus::Query,
             KeyCode::Char('g') => self.toggle_left_view(),
+            KeyCode::Char('s') => self.run_search(),
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
             _ => {}
         }
+    }
+
+    /// 以当前选中节点的向量为 query 做相似度检索（搜索 Playground）。
+    fn run_search(&mut self) {
+        let (vector, qid) = match &self.detail {
+            Some(n) => (n.vector.clone(), n.id),
+            None => {
+                self.status = "无选中节点可作为检索样例".into();
+                return;
+            }
+        };
+
+        let start = Instant::now();
+        match self.handle.search_f32(&vector, 20, 1, 0.0) {
+            Ok(hits) => {
+                let mut rows: CliRows = Vec::new();
+                let mut scores: Vec<f32> = Vec::new();
+                for (id, score, _payload) in &hits {
+                    if let Some(n) = self.handle.get(*id) {
+                        let mut row = std::collections::HashMap::new();
+                        row.insert("node".to_string(), n);
+                        rows.push(row);
+                        scores.push(*score);
+                    }
+                }
+                self.rows = rows;
+                self.row_scores = scores;
+                self.selected = 0;
+                self.table_state.select(if self.rows.is_empty() { None } else { Some(0) });
+                self.status = format!("SEARCH from #{qid} → {} 命中（Enter 重新查询返回）", self.rows.len());
+                self.update_detail();
+            }
+            Err(e) => self.status = format!("检索错误: {e}"),
+        }
+        self.last_elapsed = Some(start.elapsed());
     }
 
     fn toggle_left_view(&mut self) {
@@ -276,6 +316,16 @@ mod tests {
         }
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.rows.len(), 2);
+    }
+
+    #[test]
+    fn search_by_example_populates_scores() {
+        let mut app = temp_app();
+        app.initial_load();
+        assert!(app.detail.is_some(), "应有选中节点");
+        app.run_search();
+        assert!(!app.rows.is_empty(), "检索应返回命中");
+        assert_eq!(app.rows.len(), app.row_scores.len(), "score 与 rows 应等长");
     }
 
     #[test]
