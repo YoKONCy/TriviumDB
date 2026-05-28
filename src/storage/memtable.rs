@@ -970,43 +970,43 @@ impl<T: VectorType> MemTable<T> {
 
         if let Some(patch_obj) = patch.as_object() {
             // $set: 设置字段值
-            if let Some(set_val) = patch_obj.get("$set") {
-                if let Some(set_map) = set_val.as_object() {
-                    for (k, v) in set_map {
-                        obj.insert(k.clone(), v.clone());
-                    }
+            if let Some(set_val) = patch_obj.get("$set")
+                && let Some(set_map) = set_val.as_object()
+            {
+                for (k, v) in set_map {
+                    obj.insert(k.clone(), v.clone());
                 }
             }
 
             // $inc: 数值递增
-            if let Some(inc_val) = patch_obj.get("$inc") {
-                if let Some(inc_map) = inc_val.as_object() {
-                    for (k, v) in inc_map {
-                        let delta = v.as_f64().unwrap_or(0.0);
-                        let current = obj.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let new_val = current + delta;
-                        // 如果结果是整数，保持整数类型
-                        if new_val.fract() == 0.0
-                            && new_val >= i64::MIN as f64
-                            && new_val <= i64::MAX as f64
-                        {
-                            obj.insert(
-                                k.clone(),
-                                serde_json::Value::Number(serde_json::Number::from(new_val as i64)),
-                            );
-                        } else {
-                            obj.insert(k.clone(), serde_json::json!(new_val));
-                        }
+            if let Some(inc_val) = patch_obj.get("$inc")
+                && let Some(inc_map) = inc_val.as_object()
+            {
+                for (k, v) in inc_map {
+                    let delta = v.as_f64().unwrap_or(0.0);
+                    let current = obj.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let new_val = current + delta;
+                    // 如果结果是整数，保持整数类型
+                    if new_val.fract() == 0.0
+                        && new_val >= i64::MIN as f64
+                        && new_val <= i64::MAX as f64
+                    {
+                        obj.insert(
+                            k.clone(),
+                            serde_json::Value::Number(serde_json::Number::from(new_val as i64)),
+                        );
+                    } else {
+                        obj.insert(k.clone(), serde_json::json!(new_val));
                     }
                 }
             }
 
             // $unset: 删除字段
-            if let Some(unset_val) = patch_obj.get("$unset") {
-                if let Some(unset_map) = unset_val.as_object() {
-                    for k in unset_map.keys() {
-                        obj.remove(k);
-                    }
+            if let Some(unset_val) = patch_obj.get("$unset")
+                && let Some(unset_map) = unset_val.as_object()
+            {
+                for k in unset_map.keys() {
+                    obj.remove(k);
                 }
             }
 

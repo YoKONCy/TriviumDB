@@ -3,7 +3,7 @@ use bytemuck::{Pod, Zeroable};
 
 /// 环境变量 `TRIVIUM_NO_AVX512=1` 时强制禁用 AVX-512 路径（用于消融实验）
 pub(crate) static FORCE_NO_AVX512: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    std::env::var("TRIVIUM_NO_AVX512").map_or(false, |v| v == "1")
+    std::env::var("TRIVIUM_NO_AVX512").is_ok_and(|v| v == "1")
 });
 
 /// BQ 签名最大 chunks 数量（每个 u64 chunk 覆盖 64 维）
@@ -948,7 +948,7 @@ mod tests {
         let vec = vec![0.0f32, 1.0, -1.0, 2.0, -2.0, 0.5, -0.5];
         let sig = Bq2Signature::from_vector(&vec);
         assert_ne!(sig, Bq2Signature::empty());
-        let sig2 = Bq2Signature::from_vector(&vec![1.0f32, -1.0]);
+        let sig2 = Bq2Signature::from_vector(&[1.0f32, -1.0]);
         assert_ne!(sig, sig2);
     }
 

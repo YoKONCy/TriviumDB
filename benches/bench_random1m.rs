@@ -1,25 +1,25 @@
-/// 仿 LLM Embedding 随机 1M 向量数据生成器 v2
-///
-/// 使用低秩子空间 + Zipf 簇分布模型，生成分布接近真实 LLM embedding 的数据。
-///
-/// 核心洞察：真实 LLM embedding 活在一个低秩流形上（有效维度 ~50-100），
-/// 名义上 768 维但大部分方差集中在少数主成分方向。简单的高斯混合在 768 维
-/// 归一化后会被距离浓缩碾平，但低秩信号 + 微弱全秩噪声的结构能存活。
-///
-/// 模型：
-///   v = W × (centroid_k + σ × gaussian_k) + ε × noise_768
-///   v = v / ||v||
-///
-///   - W ∈ R^{768×k}: 正交基底（intrinsic manifold）
-///   - k = 64: 有效维度
-///   - 256 个簇，大小服从 Zipf(s=1.2)
-///   - σ = 0.3: 簇内扰动
-///   - ε = 0.05: 全秩噪声强度
-///
-/// 用法：
-///   cargo bench --bench bench_random1m
-///   $env:TRIVIUM_ANN_NAME="random-1m"
-///   cargo bench --bench bench_cohere1m
+//! 仿 LLM Embedding 随机 1M 向量数据生成器 v2
+//!
+//! 使用低秩子空间 + Zipf 簇分布模型，生成分布接近真实 LLM embedding 的数据。
+//!
+//! 核心洞察：真实 LLM embedding 活在一个低秩流形上（有效维度 ~50-100），
+//! 名义上 768 维但大部分方差集中在少数主成分方向。简单的高斯混合在 768 维
+//! 归一化后会被距离浓缩碾平，但低秩信号 + 微弱全秩噪声的结构能存活。
+//!
+//! 模型：
+//!   v = W × (centroid_k + σ × gaussian_k) + ε × noise_768
+//!   v = v / ||v||
+//!
+//!   - W ∈ R^{768×k}: 正交基底（intrinsic manifold）
+//!   - k = 64: 有效维度
+//!   - 256 个簇，大小服从 Zipf(s=1.2)
+//!   - σ = 0.3: 簇内扰动
+//!   - ε = 0.05: 全秩噪声强度
+//!
+//! 用法：
+//!   cargo bench --bench bench_random1m
+//!   $env:TRIVIUM_ANN_NAME="random-1m"
+//!   cargo bench --bench bench_cohere1m
 use rayon::prelude::*;
 use std::io::Write;
 use std::time::Instant;
