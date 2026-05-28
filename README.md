@@ -345,8 +345,8 @@ TriviumDB/
 - [x] 增量图维护：Insert / Delete(Tombstone) / Update 全部增量，无需全量重建
 - [x] QuIVer 独立持久化（`.tdb.quiver` 文件，POD memcpy 极速序列化）
 - [x] 事务安全的分离时间线架构（Phase 5 QuIVer Sync）
-- [ ] 数据库可视化 UI 工具
-- [ ] CLI 工具 (`triviumdb-cli`)
+- [x] CLI 工具 `triviumdb-cli`（命令 `tdb`）：非交互命令 + REPL，见 [`docs/cli-design.md`](docs/cli-design.md)
+- [x] 数据库可视化工具：终端 TUI（`tdb ui`，图谱/查询/结果/节点详情联动）
 
 ---
 

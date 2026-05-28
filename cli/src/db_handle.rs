@@ -160,7 +160,8 @@ impl DbHandle {
         dispatch!(self, db => db.dim())
     }
 
-    // 以下读方法供 Phase 2b TUI（节点详情 / 图谱面板）使用。
+    // 以下读方法构成 DbHandle 的完整读 API：部分由 REPL/TUI 使用，
+    // 其余（contains / get_edges / neighbors）为后续图谱可视化功能预留。
     #[allow(dead_code)]
     pub fn contains(&self, id: NodeId) -> bool {
         dispatch!(self, db => db.contains(id))
