@@ -111,8 +111,16 @@ impl App {
         if is_mutation(&q) {
             match self.handle.tql_mut(&q) {
                 Ok(s) => {
-                    let _ = self.handle.flush();
-                    self.status = format!("写入成功 affected={}, created_ids={:?}", s.affected, s.created_ids);
+                    self.status = match self.handle.flush() {
+                        Ok(_) => format!(
+                            "写入成功 affected={}, created_ids={:?}",
+                            s.affected, s.created_ids
+                        ),
+                        Err(e) => format!(
+                            "写入成功但 flush 失败: {e}; affected={}, created_ids={:?}",
+                            s.affected, s.created_ids
+                        ),
+                    };
                 }
                 Err(e) => self.status = format!("错误: {e}"),
             }

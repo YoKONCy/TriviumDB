@@ -320,3 +320,28 @@ fn import_from_handwritten_jsonl() {
     let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(v["node_count"], 2);
 }
+
+#[test]
+fn import_rejects_missing_vector() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("bad.tdb");
+    let jsonl = dir.path().join("bad.jsonl");
+
+    let mut f = std::fs::File::create(&jsonl).unwrap();
+    writeln!(f, r#"{{"id":1,"payload":{{"k":"v"}}}}"#).unwrap();
+    drop(f);
+
+    tdb()
+        .args([
+            "import",
+            db_path.to_str().unwrap(),
+            jsonl.to_str().unwrap(),
+            "--dim",
+            "4",
+            "--color",
+            "never",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("缺少 vector 字段"));
+}

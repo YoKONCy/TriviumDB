@@ -85,7 +85,7 @@ fn run_tql(input: &str, handle: &mut DbHandle, format: OutputFormat) {
     if is_mutation(query) {
         match handle.tql_mut(query) {
             Ok(s) => {
-                let _ = handle.flush();
+                let flush = handle.flush();
                 println!(
                     "{} affected={}, created_ids={:?} ({:.2?})",
                     "OK".green().bold(),
@@ -93,6 +93,9 @@ fn run_tql(input: &str, handle: &mut DbHandle, format: OutputFormat) {
                     s.created_ids,
                     start.elapsed()
                 );
+                if let Err(e) = flush {
+                    eprintln!("{} 写入成功但 flush 失败: {e}", "warning:".yellow());
+                }
             }
             Err(e) => eprintln!("{} {e}", "error:".red()),
         }

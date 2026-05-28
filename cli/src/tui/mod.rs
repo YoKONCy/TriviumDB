@@ -20,29 +20,62 @@ use crate::db_handle::DbHandle;
 use app::App;
 
 pub fn run(handle: DbHandle, path: &str, limit: usize) -> CliResult {
-    let mut terminal = setup_terminal()?;
+    let mut session = setup_terminal()?;
 
     let mut app = App::new(handle, path.to_string(), limit);
     app.initial_load();
 
-    let res = run_loop(&mut terminal, &mut app);
+    let res = run_loop(&mut session.terminal, &mut app);
 
-    restore_terminal(&mut terminal)?;
+    session.restore()?;
     res
 }
 
-fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    Terminal::new(CrosstermBackend::new(stdout))
+struct TerminalSession {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    restored: bool,
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    Ok(())
+impl TerminalSession {
+    fn restore(&mut self) -> io::Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        let raw = disable_raw_mode();
+        let screen = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let cursor = self.terminal.show_cursor();
+        self.restored = true;
+        raw?;
+        screen?;
+        cursor?;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn setup_terminal() -> io::Result<TerminalSession> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    if let Err(e) = execute!(stdout, EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(e);
+    }
+    match Terminal::new(CrosstermBackend::new(stdout)) {
+        Ok(terminal) => Ok(TerminalSession {
+            terminal,
+            restored: false,
+        }),
+        Err(e) => {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            Err(e)
+        }
+    }
 }
 
 fn run_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> CliResult {
