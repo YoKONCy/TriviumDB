@@ -43,4 +43,4 @@ format = "table"    # table | json | csv
 default_limit = 50  # TUI 启动默认 MATCH (n) ... LIMIT N
 ```
 
-详见 [`docs/cli-design.md`](../docs/cli-design.md)。
+更多细节请参阅源码及根目录 [README](../README.md)。

@@ -37,6 +37,7 @@ flowchart TD
         API1[Python binding]:::module
         API2[Node.js binding]:::module
         API3[Rust pub API]:::module
+        API4["CLI / TUI (tdb)"]:::module
     end
     Layer1:::layer
 
