@@ -2,7 +2,10 @@
 
 mod app;
 mod graph;
+mod marker;
 mod ui;
+
+pub use marker::GraphMarker;
 
 use std::io::{self, Stdout};
 use std::time::Duration;
@@ -19,10 +22,10 @@ use crate::CliResult;
 use crate::db_handle::DbHandle;
 use app::App;
 
-pub fn run(handle: DbHandle, path: &str, limit: usize) -> CliResult {
+pub fn run(handle: DbHandle, path: &str, limit: usize, marker: GraphMarker) -> CliResult {
     let mut session = setup_terminal()?;
 
-    let mut app = App::new(handle, path.to_string(), limit);
+    let mut app = App::new(handle, path.to_string(), limit, marker.resolve());
     app.initial_load();
 
     let res = run_loop(&mut session.terminal, &mut app);

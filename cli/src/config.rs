@@ -35,6 +35,8 @@ pub struct Defaults {
 #[serde(default)]
 pub struct TuiConfig {
     pub default_limit: Option<usize>,
+    /// 图视图字符渲染：auto / braille / dot / block / half_block
+    pub graph_marker: Option<String>,
 }
 
 impl Config {

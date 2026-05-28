@@ -3,6 +3,7 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::symbols::Marker;
 use ratatui::widgets::TableState;
 use triviumdb::node::NodeId;
 
@@ -44,9 +45,10 @@ impl Default for GraphState {
 pub struct App {
     pub handle: DbHandle,
     pub path: String,
-    /// 查询编辑器缓冲（按字符存储，避免多字节越界）
-    pub query: Vec<char>,
-    pub cursor: usize,
+    /// 查询编辑器：多行文本缓冲
+    pub lines: Vec<String>,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
     pub rows: CliRows,
     /// 与 rows 平行的得分（仅向量检索结果非空；普通 TQL 为空）
     pub row_scores: Vec<f32>,
@@ -60,19 +62,25 @@ pub struct App {
     pub graph_state: GraphState,
     pub show_help: bool,
     pub should_quit: bool,
+    /// 最近一次解析错误在查询编辑器中的 (line, col)（0-based）
+    pub parse_error_loc: Option<(usize, usize)>,
+    /// 图视图字符渲染模式（Braille / Dot / Block / HalfBlock）
+    pub graph_marker: Marker,
 }
 
 impl App {
     /// `limit` 控制启动默认查询的 LIMIT（来自配置 tui.default_limit）。
-    pub fn new(handle: DbHandle, path: String, limit: usize) -> Self {
+    /// `marker` 决定图视图使用的字符（Braille 默认；旧 Windows 控制台降级为 Dot）。
+    pub fn new(handle: DbHandle, path: String, limit: usize, marker: Marker) -> Self {
         // 注意：TQL 不允许空的 `FIND {}`（会报“文档过滤不能为空”），
         // 因此用 Cypher 风格的 `MATCH (n)` 作为“列出全部节点”的默认查询。
         let default_query = format!("MATCH (n) RETURN n LIMIT {limit}");
         App {
             handle,
             path,
-            query: default_query.chars().collect(),
-            cursor: default_query.chars().count(),
+            lines: vec![default_query.clone()],
+            cursor_row: 0,
+            cursor_col: default_query.chars().count(),
             rows: Vec::new(),
             row_scores: Vec::new(),
             selected: 0,
@@ -85,11 +93,18 @@ impl App {
             graph_state: GraphState::default(),
             show_help: false,
             should_quit: false,
+            parse_error_loc: None,
+            graph_marker: marker,
         }
     }
 
     pub fn query_string(&self) -> String {
-        self.query.iter().collect()
+        self.lines.join("\n")
+    }
+
+    /// 当前行字符数
+    fn current_line_len(&self) -> usize {
+        self.lines[self.cursor_row].chars().count()
     }
 
     /// 启动时执行默认查询并把焦点切到结果面板。
@@ -104,10 +119,30 @@ impl App {
         let q = q.trim().trim_end_matches(';').trim().to_string();
         if q.is_empty() {
             self.status = "（空查询）".into();
+            self.parse_error_loc = None;
             return;
         }
 
         let start = Instant::now();
+        // 预校验：带位置的解析错误高亮
+        let parse_res = if is_mutation(&q) {
+            triviumdb::query::tql_parser::parse_tql_statement_with_pos(&q).map(|_| ())
+        } else {
+            triviumdb::query::tql_parser::parse_tql_with_pos(&q).map(|_| ())
+        };
+        if let Err(err) = parse_res {
+            let diag = crate::diagnostics::Diagnostic::from_parse_error(&q, &err);
+            self.parse_error_loc = Some((diag.line, diag.col));
+            self.status = format!(
+                "解析错误 line {}, col {}: {}",
+                diag.line + 1,
+                diag.col + 1,
+                diag.msg
+            );
+            self.last_elapsed = Some(start.elapsed());
+            return;
+        }
+        self.parse_error_loc = None;
         if is_mutation(&q) {
             match self.handle.tql_mut(&q) {
                 Ok(s) => {
@@ -195,32 +230,84 @@ impl App {
     }
 
     fn on_key_query(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Enter => self.execute_query(),
+            KeyCode::Enter if ctrl => self.execute_query(),
+            KeyCode::Enter => {
+                // 在当前行光标处断行
+                let line: Vec<char> = self.lines[self.cursor_row].chars().collect();
+                let left: String = line[..self.cursor_col].iter().collect();
+                let right: String = line[self.cursor_col..].iter().collect();
+                self.lines[self.cursor_row] = left;
+                self.lines.insert(self.cursor_row + 1, right);
+                self.cursor_row += 1;
+                self.cursor_col = 0;
+            }
             KeyCode::Tab => self.focus = Focus::Results,
             KeyCode::Esc => self.focus = Focus::Results,
             KeyCode::Backspace => {
-                if self.cursor > 0 {
-                    self.query.remove(self.cursor - 1);
-                    self.cursor -= 1;
+                if self.cursor_col > 0 {
+                    let mut chars: Vec<char> = self.lines[self.cursor_row].chars().collect();
+                    chars.remove(self.cursor_col - 1);
+                    self.lines[self.cursor_row] = chars.into_iter().collect();
+                    self.cursor_col -= 1;
+                } else if self.cursor_row > 0 {
+                    // 合并到上一行
+                    let current = self.lines.remove(self.cursor_row);
+                    self.cursor_row -= 1;
+                    self.cursor_col = self.lines[self.cursor_row].chars().count();
+                    self.lines[self.cursor_row].push_str(&current);
                 }
             }
             KeyCode::Delete => {
-                if self.cursor < self.query.len() {
-                    self.query.remove(self.cursor);
+                let len = self.current_line_len();
+                if self.cursor_col < len {
+                    let mut chars: Vec<char> = self.lines[self.cursor_row].chars().collect();
+                    chars.remove(self.cursor_col);
+                    self.lines[self.cursor_row] = chars.into_iter().collect();
+                } else if self.cursor_row + 1 < self.lines.len() {
+                    // 合并下一行
+                    let next = self.lines.remove(self.cursor_row + 1);
+                    self.lines[self.cursor_row].push_str(&next);
                 }
             }
-            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Left => {
+                if self.cursor_col > 0 {
+                    self.cursor_col -= 1;
+                } else if self.cursor_row > 0 {
+                    self.cursor_row -= 1;
+                    self.cursor_col = self.current_line_len();
+                }
+            }
             KeyCode::Right => {
-                if self.cursor < self.query.len() {
-                    self.cursor += 1;
+                let len = self.current_line_len();
+                if self.cursor_col < len {
+                    self.cursor_col += 1;
+                } else if self.cursor_row + 1 < self.lines.len() {
+                    self.cursor_row += 1;
+                    self.cursor_col = 0;
                 }
             }
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => self.cursor = self.query.len(),
+            KeyCode::Up => {
+                if self.cursor_row > 0 {
+                    self.cursor_row -= 1;
+                    self.cursor_col = self.cursor_col.min(self.current_line_len());
+                }
+            }
+            KeyCode::Down => {
+                if self.cursor_row + 1 < self.lines.len() {
+                    self.cursor_row += 1;
+                    self.cursor_col = self.cursor_col.min(self.current_line_len());
+                }
+            }
+            KeyCode::Home => self.cursor_col = 0,
+            KeyCode::End => self.cursor_col = self.current_line_len(),
             KeyCode::Char(c) => {
-                self.query.insert(self.cursor, c);
-                self.cursor += 1;
+                let mut chars: Vec<char> = self.lines[self.cursor_row].chars().collect();
+                chars.insert(self.cursor_col, c);
+                self.lines[self.cursor_row] = chars.into_iter().collect();
+                self.cursor_col += 1;
+                self.parse_error_loc = None;
             }
             _ => {}
         }
@@ -265,6 +352,14 @@ impl App {
                 }
                 KeyCode::Down if shift => {
                     self.graph_pan(0.0, -12.0);
+                    return;
+                }
+                KeyCode::Char('m') => {
+                    self.graph_marker = super::marker::GraphMarker::cycle(self.graph_marker);
+                    self.status = format!(
+                        "图字符: {}",
+                        super::marker::GraphMarker::label(self.graph_marker)
+                    );
                     return;
                 }
                 _ => {}
@@ -379,7 +474,7 @@ mod tests {
             .unwrap();
         h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob", "type": "person"}))
             .unwrap();
-        (App::new(h, path, 50), dir)
+        (App::new(h, path, 50, Marker::Braille), dir)
     }
 
     #[test]
@@ -408,13 +503,91 @@ mod tests {
     fn editing_and_executing_query() {
         let (mut app, _dir) = temp_app();
         app.focus = Focus::Query;
-        app.query.clear();
-        app.cursor = 0;
+        app.lines = vec![String::new()];
+        app.cursor_row = 0;
+        app.cursor_col = 0;
         for c in "FIND {type: \"person\"} RETURN *".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // Ctrl+Enter 执行
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
         assert_eq!(app.rows.len(), 2);
+    }
+
+    #[test]
+    fn multiline_editor_enter_inserts_newline_ctrl_enter_executes() {
+        let (mut app, _dir) = temp_app();
+        app.focus = Focus::Query;
+        app.lines = vec![String::new()];
+        app.cursor_row = 0;
+        app.cursor_col = 0;
+        for c in "FIND".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        // 普通 Enter 应换行
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.lines.len(), 2);
+        assert_eq!(app.lines[0], "FIND");
+        assert_eq!(app.cursor_row, 1);
+        assert_eq!(app.cursor_col, 0);
+
+        for c in r#"{type:"person"} RETURN *"#.chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        // Up 回到第一行
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.cursor_row, 0);
+
+        // Ctrl+Enter 执行
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(app.rows.len(), 2);
+    }
+
+    #[test]
+    fn graph_marker_cycles_with_m_key_in_graph_view() {
+        let (mut app, _dir) = temp_app();
+        app.initial_load();
+        app.left_view = LeftView::Graph;
+        // Braille -> Dot
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        assert_eq!(
+            super::super::marker::GraphMarker::label(app.graph_marker),
+            "dot"
+        );
+        // Dot -> Block
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        assert_eq!(
+            super::super::marker::GraphMarker::label(app.graph_marker),
+            "block"
+        );
+    }
+
+    #[test]
+    fn parse_error_records_position_and_clears_on_edit() {
+        let (mut app, _dir) = temp_app();
+        app.focus = Focus::Query;
+        app.lines = vec!["MATCH (n) WHERE n.x ==".into()];
+        app.cursor_row = 0;
+        app.cursor_col = app.lines[0].chars().count();
+        app.execute_query();
+        assert!(app.parse_error_loc.is_some(), "应记录解析错误位置");
+        assert!(app.status.contains("解析错误"));
+        // 输入字符后应清空错误标记
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.parse_error_loc.is_none());
+    }
+
+    #[test]
+    fn multiline_editor_backspace_at_line_start_merges() {
+        let (mut app, _dir) = temp_app();
+        app.focus = Focus::Query;
+        app.lines = vec!["AB".into(), "CD".into()];
+        app.cursor_row = 1;
+        app.cursor_col = 0;
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.lines, vec!["ABCD".to_string()]);
+        assert_eq!(app.cursor_row, 0);
+        assert_eq!(app.cursor_col, 2);
     }
 
     #[test]

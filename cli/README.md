@@ -90,20 +90,35 @@ REPL 支持多行 TQL；普通 TQL 语句需以分号结束。
 
 在 `tdb ui <db>` 中可用：
 
-- **`Tab`**：在查询区与结果区之间切换焦点。
-- **`Enter`**：执行当前查询。
+查询编辑器（多行）：
+
+- **`Enter`**：换行。
+- **`Ctrl+Enter`**：执行当前查询。
+- **`Tab` / `Esc`**：切换到结果面板。
+- **`←/→/↑/↓`**：移动光标；`Home/End` 跳到行首/尾。
+- **`Backspace` / `Delete`**：删除字符；行首处合并行。
+
+结果面板：
+
 - **`/`**：跳到查询区。
 - **`g`**：在表格视图与图视图之间切换。
 - **`s`**：基于当前节点执行相似搜索。
-- **`e`**：展开当前节点的邻接边。
-- **`c`**：清空图扩展。
-- **`+` / `-`**：图视图缩放。
-- **`Shift + 方向键`**：图视图平移。
-- **`f`**：重置图视图。
 - **`?`**：显示 / 隐藏帮助。
 - **`q` / `Ctrl-C`**：退出。
 
-TUI 查询编辑器当前是单行输入；复杂多行 TQL 建议使用 REPL。
+图视图（`g` 进入）：
+
+- **`e` / `c`**：展开 / 折叠选中节点邻居。
+- **`+` / `-`**：缩放；**`Shift + 方向键`** 平移；**`f`** 复位视图。
+- **`m`**：循环切换字符渲染（Braille → Dot → Block → HalfBlock）。
+
+## TQL 错误位置高亮
+
+执行非法查询时：
+
+- **REPL / `tdb exec`**：打印带 caret 的多行错误信息（仿 rustc）。
+- **TUI**：查询编辑器边框变红、状态栏显示 `line/col`，错误列字符红色高亮。
+- 编辑查询会自动清除错误标记。
 
 ## 配置文件
 
@@ -116,7 +131,16 @@ format = "table"    # table | json | csv
 
 [tui]
 default_limit = 50  # TUI 启动默认 MATCH (n) ... LIMIT N
+graph_marker  = "auto"  # auto | braille | dot | block | half_block
 ```
+
+`graph_marker = "auto"`（默认）会根据终端环境自动选择：
+
+- **Windows Terminal / VS Code / JetBrains** → Braille（最高密度）
+- **传统 cmd.exe / 老 PowerShell**（Braille 字体支持差） → 自动降级到 Dot
+- **其他平台** → 默认 Braille
+
+如果发现图视图字符渲染异常，可在 TUI 内按 `m` 实时切换；或在配置中显式指定。
 
 ## 安全注意事项
 

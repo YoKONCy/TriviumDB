@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::symbols::Marker;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
@@ -35,10 +34,11 @@ pub fn render_graph(f: &mut Frame, app: &App, area: Rect, focused: bool) {
         Style::default().fg(Color::DarkGray)
     };
     let z = app.graph_state.zoom;
+    let marker_name = super::marker::GraphMarker::label(app.graph_marker);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(
-            "Graph ({}n {}e) {z:.1}x  [e/c]展开折叠 [+/-/Shift方向/f]视图 [g]表格",
+            "Graph ({}n {}e) {z:.1}x [{marker_name}]  [e/c]展开折叠 [+/-/Shift方向/f]视图 [m]字符 [g]表格",
             data.labels.len(),
             data.edges.len()
         ))
@@ -66,7 +66,7 @@ pub fn render_graph(f: &mut Frame, app: &App, area: Rect, focused: bool) {
 
     let canvas = Canvas::default()
         .block(block)
-        .marker(Marker::Braille)
+        .marker(app.graph_marker)
         .x_bounds([cx - half, cx + half])
         .y_bounds([cy - half, cy + half])
         .paint(move |ctx| {

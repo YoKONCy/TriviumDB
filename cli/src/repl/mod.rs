@@ -82,7 +82,15 @@ fn run_tql(input: &str, handle: &mut DbHandle, format: OutputFormat) {
     let query = input.trim_end_matches(';').trim();
     let start = Instant::now();
 
+    // 先做带位置的预校验，错误时渲染 caret 诊断
     if is_mutation(query) {
+        if let Err(err) = triviumdb::query::tql_parser::parse_tql_statement_with_pos(query) {
+            eprint!(
+                "{}",
+                crate::diagnostics::Diagnostic::from_parse_error(query, &err).render_ansi()
+            );
+            return;
+        }
         match handle.tql_mut(query) {
             Ok(s) => {
                 let flush = handle.flush();
@@ -100,6 +108,13 @@ fn run_tql(input: &str, handle: &mut DbHandle, format: OutputFormat) {
             Err(e) => eprintln!("{} {e}", "error:".red()),
         }
     } else {
+        if let Err(err) = triviumdb::query::tql_parser::parse_tql_with_pos(query) {
+            eprint!(
+                "{}",
+                crate::diagnostics::Diagnostic::from_parse_error(query, &err).render_ansi()
+            );
+            return;
+        }
         match handle.tql(query) {
             Ok(rows) => {
                 let n = rows.len();

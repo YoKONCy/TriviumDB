@@ -48,7 +48,8 @@ fn render_title(f: &mut Frame, app: &App, area: Rect) {
 fn render_body(f: &mut Frame, app: &mut App, area: Rect) {
     let cols = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(area);
 
-    let left = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(cols[0]);
+    let query_height = (app.lines.len() as u16 + 2).clamp(3, 10); // border(2) + lines
+    let left = Layout::vertical([Constraint::Length(query_height), Constraint::Min(0)]).split(cols[0]);
     render_query(f, app, left[0]);
     match app.left_view {
         LeftView::Results => render_results(f, app, left[1]),
@@ -59,21 +60,95 @@ fn render_body(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_query(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Query;
+    let err_style = if app.parse_error_loc.is_some() {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else {
+        focus_style(focused)
+    };
+    let title = if let Some((row, col)) = app.parse_error_loc {
+        format!("TQL Query  ✗ line {}, col {}", row + 1, col + 1)
+    } else {
+        "TQL Query  (Ctrl+Enter 执行)".into()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("TQL Query  (Enter 执行)")
-        .border_style(focus_style(focused));
-    // 语法高亮：把查询渲染为彩色 Span
-    let spans = tql_highlight::highlight_spans(&app.query_string());
-    let p = Paragraph::new(Line::from(spans)).block(block);
+        .title(title)
+        .border_style(err_style);
+    // 多行语法高亮 + 错误列下划线
+    let text_lines: Vec<Line> = app
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(row, l)| {
+            let mut spans = tql_highlight::highlight_spans(l);
+            if let Some((er_row, er_col)) = app.parse_error_loc
+                && er_row == row
+            {
+                spans = mark_error_column(spans, er_col);
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let p = Paragraph::new(Text::from(text_lines)).block(block);
     f.render_widget(p, area);
 
     if focused {
-        // 把终端光标放到编辑位置（字符列近似为列偏移）
-        let x = area.x + 1 + app.cursor.min(area.width.saturating_sub(2) as usize) as u16;
-        let y = area.y + 1;
-        f.set_cursor_position((x, y));
+        let max_col = area.width.saturating_sub(2) as usize;
+        let x = area.x + 1 + app.cursor_col.min(max_col) as u16;
+        let y = area.y + 1 + app.cursor_row as u16;
+        if y < area.y + area.height.saturating_sub(1) {
+            f.set_cursor_position((x, y));
+        }
     }
+}
+
+/// 在 spans 序列中把第 `col` 个 unicode scalar 字符标红（包含 underline）。
+/// col 超过文本长度时把末尾追加一个红色 caret 字符。
+fn mark_error_column<'a>(spans: Vec<Span<'a>>, col: usize) -> Vec<Span<'a>> {
+    let err = Style::default()
+        .fg(Color::White)
+        .bg(Color::Red)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mut out: Vec<Span> = Vec::with_capacity(spans.len() + 2);
+    let mut consumed = 0usize;
+    let mut placed = false;
+    for span in spans {
+        if placed {
+            out.push(span);
+            continue;
+        }
+        let len = span.content.chars().count();
+        if consumed + len <= col {
+            consumed += len;
+            out.push(span);
+            continue;
+        }
+        // 错误列落在本 span 内：拆分
+        let local = col - consumed;
+        let mut chars = span.content.chars();
+        let left: String = chars.by_ref().take(local).collect();
+        let mid: String = chars.by_ref().take(1).collect();
+        let right: String = chars.collect();
+        if !left.is_empty() {
+            out.push(Span::styled(left, span.style));
+        }
+        if !mid.is_empty() {
+            out.push(Span::styled(mid, err));
+        } else {
+            // span 实际只有 left 长度（不应发生，因 len > col-consumed），保险
+            out.push(Span::styled("^".to_string(), err));
+        }
+        if !right.is_empty() {
+            out.push(Span::styled(right, span.style));
+        }
+        placed = true;
+    }
+    if !placed {
+        // 错误列在所有 span 之后（如 EOF 错误），追加一个 caret
+        out.push(Span::styled(" ".to_string(), Style::default()));
+        out.push(Span::styled("^".to_string(), err));
+    }
+    out
 }
 
 fn render_results(f: &mut Frame, app: &mut App, area: Rect) {
@@ -139,7 +214,7 @@ fn render_detail(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_status(f: &mut Frame, app: &App, area: Rect) {
     let hint = match app.focus {
-        Focus::Query => "[Enter] 执行  [Tab/Esc] 结果面板  [Ctrl-C] 退出",
+        Focus::Query => "[Ctrl+Enter] 执行  [Enter] 换行  [Tab/Esc] 结果面板  [Ctrl-C] 退出",
         Focus::Results => "[↑/↓] 选择  [/ |Tab] 查询  [g] 图/表  [s] 检索  [?] 帮助  [q] 退出",
     };
     let timing = app
@@ -162,9 +237,11 @@ fn render_help(f: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from("查询编辑器:"),
-        Line::from("  Enter        执行查询（FIND/MATCH/SEARCH 或 CREATE/SET/DELETE）"),
+        Line::from("  Enter        换行"),
+        Line::from("  Ctrl+Enter   执行查询（FIND/MATCH/SEARCH 或 CREATE/SET/DELETE）"),
         Line::from("  Tab / Esc    切换到结果面板"),
-        Line::from("  ←/→ Home/End 移动光标   Backspace/Delete 删除"),
+        Line::from("  ←/→/↑/↓      移动光标   Home/End 行首尾"),
+        Line::from("  Backspace    删除字符/合并行   Delete 删除后方/合并下行"),
         Line::from(""),
         Line::from("结果面板:"),
         Line::from("  ↑/↓ 或 j/k   选择行（联动右侧节点详情）"),
@@ -177,6 +254,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from("图视图 (按 g 进入):"),
         Line::from("  e / c        展开选中节点邻居 / 折叠扩展"),
         Line::from("  + / -        缩放    Shift+方向  平移    f  复位视图"),
+        Line::from("  m            循环切换字符 (Braille / Dot / Block / HalfBlock)"),
         Line::from(""),
         Line::from("全局:  Ctrl-C 退出"),
         Line::from(""),

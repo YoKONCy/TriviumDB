@@ -8,6 +8,7 @@
 mod commands;
 mod config;
 mod db_handle;
+mod diagnostics;
 mod formatter;
 mod repl;
 mod tql_highlight;
@@ -161,7 +162,8 @@ fn run(cli: Cli, cfg: config::Config) -> CliResult {
         Commands::Ui(db) => {
             let handle = open(&db, &cfg)?;
             let limit = cfg.tui.default_limit.unwrap_or(50);
-            tui::run(handle, &db.path, limit)
+            let marker = resolve_graph_marker(cfg.tui.graph_marker.as_deref());
+            tui::run(handle, &db.path, limit, marker)
         }
         Commands::Info(db) => {
             commands::info::run(&db.path, db.dim, resolve_dtype(&db.dtype, &cfg)?, format)
@@ -221,4 +223,15 @@ fn resolve_dtype(cli: &Option<String>, cfg: &config::Config) -> Result<DType, Bo
 fn open(db: &DbArgs, cfg: &config::Config) -> Result<db_handle::DbHandle, Box<dyn std::error::Error>> {
     let dtype = resolve_dtype(&db.dtype, cfg)?;
     Ok(db_handle::DbHandle::open_auto(&db.path, db.dim, dtype)?)
+}
+
+/// 解析图字符渲染模式：配置缺失或不识别值都回退到 Auto。
+fn resolve_graph_marker(s: Option<&str>) -> tui::GraphMarker {
+    match s.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("braille") => tui::GraphMarker::Braille,
+        Some("dot") => tui::GraphMarker::Dot,
+        Some("block") => tui::GraphMarker::Block,
+        Some("half_block") | Some("halfblock") => tui::GraphMarker::HalfBlock,
+        _ => tui::GraphMarker::Auto,
+    }
 }

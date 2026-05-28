@@ -11,6 +11,23 @@ use crate::formatter::{OutputFormat, format_rows};
 pub fn run(handle: &mut DbHandle, query: &str, mutate: bool, format: OutputFormat) -> CliResult {
     let start = Instant::now();
 
+    // 解析阶段错误带位置高亮（caret），优于裸字符串
+    if mutate {
+        if let Err(err) = triviumdb::query::tql_parser::parse_tql_statement_with_pos(query) {
+            eprint!(
+                "{}",
+                crate::diagnostics::Diagnostic::from_parse_error(query, &err).render_ansi()
+            );
+            return Err(err.msg.into());
+        }
+    } else if let Err(err) = triviumdb::query::tql_parser::parse_tql_with_pos(query) {
+        eprint!(
+            "{}",
+            crate::diagnostics::Diagnostic::from_parse_error(query, &err).render_ansi()
+        );
+        return Err(err.msg.into());
+    }
+
     if mutate {
         let summary = handle.tql_mut(query)?;
         handle.flush()?;
