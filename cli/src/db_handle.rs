@@ -285,3 +285,157 @@ pub struct HeaderInfo {
     pub version: u16,
     pub dim: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // ── DType ──────────────────────────────────────────────────
+
+    #[test]
+    fn dtype_parse_f32_aliases() {
+        assert_eq!(DType::parse("f32").unwrap(), DType::F32);
+        assert_eq!(DType::parse("float32").unwrap(), DType::F32);
+        assert_eq!(DType::parse("FLOAT").unwrap(), DType::F32);
+    }
+
+    #[test]
+    fn dtype_parse_f16_aliases() {
+        assert_eq!(DType::parse("f16").unwrap(), DType::F16);
+        assert_eq!(DType::parse("float16").unwrap(), DType::F16);
+        assert_eq!(DType::parse("half").unwrap(), DType::F16);
+    }
+
+    #[test]
+    fn dtype_parse_u64_aliases() {
+        assert_eq!(DType::parse("u64").unwrap(), DType::U64);
+        assert_eq!(DType::parse("uint64").unwrap(), DType::U64);
+        assert_eq!(DType::parse("bits").unwrap(), DType::U64);
+    }
+
+    #[test]
+    fn dtype_parse_invalid() {
+        assert!(DType::parse("i32").is_err());
+        assert!(DType::parse("").is_err());
+    }
+
+    #[test]
+    fn dtype_as_str_roundtrip() {
+        for dt in [DType::F32, DType::F16, DType::U64] {
+            assert_eq!(DType::parse(dt.as_str()).unwrap(), dt);
+        }
+    }
+
+    #[test]
+    fn dtype_display() {
+        assert_eq!(format!("{}", DType::F32), "f32");
+        assert_eq!(format!("{}", DType::F16), "f16");
+        assert_eq!(format!("{}", DType::U64), "u64");
+    }
+
+    // ── DbHandle ───────────────────────────────────────────────
+
+    #[test]
+    fn dbhandle_open_insert_get() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.tdb").to_string_lossy().to_string();
+        let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
+
+        let id = h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
+        assert_eq!(h.node_count(), 1);
+        assert_eq!(h.dim(), 4);
+        assert_eq!(h.dtype(), DType::F32);
+
+        let node = h.get(id).unwrap();
+        assert_eq!(node.payload["name"], "Alice");
+        assert_eq!(node.vector.len(), 4);
+    }
+
+    #[test]
+    fn dbhandle_tql_match_returns_all() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.tdb").to_string_lossy().to_string();
+        let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
+        h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
+        h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"})).unwrap();
+
+        let rows = h.tql("MATCH (n) RETURN n").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains_key("n"));
+    }
+
+    #[test]
+    fn dbhandle_search_f32_top1() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.tdb").to_string_lossy().to_string();
+        let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
+        h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
+        h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"})).unwrap();
+
+        let hits = h.search_f32(&[1.0, 0.0, 0.0, 0.0], 1, 0, 0.0).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].2["name"], "Alice");
+    }
+
+    #[test]
+    fn dbhandle_link_and_get_edges() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.tdb").to_string_lossy().to_string();
+        let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
+        let a = h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+        let b = h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+        h.link(a, b, "knows", 1.0).unwrap();
+
+        let edges = h.get_edges(a);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target_id, b);
+        assert_eq!(edges[0].label, "knows");
+    }
+
+    #[test]
+    fn dbhandle_flush_and_compact() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.tdb").to_string_lossy().to_string();
+        let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
+        h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+        h.flush().unwrap();
+        h.compact().unwrap();
+        assert_eq!(h.node_count(), 1);
+    }
+
+    // ── sniff_header ───────────────────────────────────────────
+
+    #[test]
+    fn sniff_header_on_flushed_db() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("t.tdb").to_string_lossy().to_string();
+        {
+            let mut h = DbHandle::open(&path, 8, DType::F32).unwrap();
+            h.insert_f32(&[0.0; 8], serde_json::json!({})).unwrap();
+            h.flush().unwrap();
+        }
+        let info = sniff_header(&path).unwrap();
+        assert_eq!(info.dim, 8);
+    }
+
+    #[test]
+    fn sniff_header_nonexistent_file() {
+        assert!(sniff_header("__nonexistent__.tdb").is_err());
+    }
+
+    #[test]
+    fn open_auto_with_explicit_dim() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("new.tdb").to_string_lossy().to_string();
+        let h = DbHandle::open_auto(&path, Some(4), DType::F32).unwrap();
+        assert_eq!(h.dim(), 4);
+    }
+
+    #[test]
+    fn open_auto_without_dim_on_nonexistent_fails() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("no.tdb").to_string_lossy().to_string();
+        assert!(DbHandle::open_auto(&path, None, DType::F32).is_err());
+    }
+}
