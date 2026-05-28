@@ -1,5 +1,8 @@
 [workspace]
 members = ["cli"]
+# 默认成员仅为根 lib 包：保持 `cargo check/test/clippy`（不带 --workspace）
+# 的作用域与引入 workspace 前一致；CLI 工具需用 `-p triviumdb-cli` 显式构建。
+default-members = ["."]
 resolver = "2"
 
 [package]

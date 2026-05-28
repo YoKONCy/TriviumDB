@@ -160,6 +160,8 @@ impl DbHandle {
         dispatch!(self, db => db.dim())
     }
 
+    // 以下读方法供 Phase 2b TUI（节点详情 / 图谱面板）使用。
+    #[allow(dead_code)]
     pub fn contains(&self, id: NodeId) -> bool {
         dispatch!(self, db => db.contains(id))
     }
@@ -168,10 +170,12 @@ impl DbHandle {
         dispatch!(self, db => db.get(id).map(CliNode::from_view))
     }
 
+    #[allow(dead_code)]
     pub fn get_payload(&self, id: NodeId) -> Option<Value> {
         dispatch!(self, db => db.get_payload(id))
     }
 
+    #[allow(dead_code)]
     pub fn get_edges(&self, id: NodeId) -> Vec<Edge> {
         dispatch!(self, db => db.get_edges(id))
     }
@@ -180,8 +184,30 @@ impl DbHandle {
         dispatch!(self, db => db.get_all_ids())
     }
 
+    #[allow(dead_code)]
     pub fn neighbors(&self, id: NodeId, depth: usize) -> Vec<NodeId> {
         dispatch!(self, db => db.neighbors(id, depth))
+    }
+
+    /// 插入节点，向量以 `f32` 给出并按 dtype 自动转换。
+    pub fn insert_f32(&mut self, vector: &[f32], payload: Value) -> Result<NodeId> {
+        dispatch!(self, db => {
+            let v: Vec<_> = vector.iter().map(|x| VectorType::from_f32(*x)).collect();
+            db.insert(&v, payload)
+        })
+    }
+
+    /// 以指定 ID 插入节点，向量以 `f32` 给出并按 dtype 自动转换。
+    pub fn insert_with_id_f32(&mut self, id: NodeId, vector: &[f32], payload: Value) -> Result<()> {
+        dispatch!(self, db => {
+            let v: Vec<_> = vector.iter().map(|x| VectorType::from_f32(*x)).collect();
+            db.insert_with_id(id, &v, payload)
+        })
+    }
+
+    /// 创建一条有向带权边。
+    pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) -> Result<()> {
+        dispatch!(self, db => db.link(src, dst, label, weight))
     }
 
     pub fn estimated_memory(&self) -> usize {

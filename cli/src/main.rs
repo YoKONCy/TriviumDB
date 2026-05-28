@@ -10,6 +10,7 @@ mod db_handle;
 mod formatter;
 mod repl;
 mod tui;
+mod util;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use colored::Colorize;
