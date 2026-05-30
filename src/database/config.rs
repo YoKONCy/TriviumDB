@@ -77,6 +77,20 @@ pub struct SearchConfig {
     /// 可选的 Payload 过滤条件，在向量搜索阶段即可跳过不符合条件的节点。
     /// 典型用途：多 Agent 隔离（按 agent_id 过滤）。
     pub payload_filter: Option<Filter>,
+
+    // --- 上下文条件扩散 (Context-Conditioned Spreading Activation) ---
+    /// 扩散方向偏置向量：当提供时，图扩散优先沿着与此向量语义相近的节点方向传播。
+    ///
+    /// 在 PPR 扩散的每条边上施加 attention gate: `gate_j = σ(bias · v_j / √dim)`，
+    /// 其中 `v_j` 为目标节点的 embedding。gate ∈ (0, 1) 调制能量传导强度。
+    ///
+    /// 不提供时退化为标准 PPR（向后兼容）。
+    ///
+    /// 典型用途：
+    /// - 对话系统：传入 RNN 隐状态的投影向量，让扩散感知对话方向
+    /// - RAG 应用：传入查询向量本身，让扩散偏向查询语义方向
+    /// - 推荐系统：传入用户偏好向量，让扩散偏向用户兴趣方向
+    pub diffusion_bias: Option<Vec<f32>>,
 }
 
 impl Default for SearchConfig {
@@ -101,6 +115,7 @@ impl Default for SearchConfig {
             bm25_k1: 1.2,
             bm25_b: 0.75,
             payload_filter: None,
+            diffusion_bias: None,
         }
     }
 }

@@ -97,6 +97,21 @@ export interface JsSearchConfig {
   textBoost?: number;
   /** 自定义检索文本（用于跨模态或覆盖 payload 文本） */
   customQueryText?: string;
+  /** 强制使用暴力搜索 (默认 false) */
+  forceBruteForce?: boolean;
+  /**
+   * CCSA: 扩散方向偏置向量
+   *
+   * 当提供时，图扩散优先沿着与此向量语义相近的节点方向传播。
+   * gate_j = σ(bias · v_j / √dim)，gate ∈ (0, 1) 调制能量传导强度。
+   * 不提供时退化为标准 PPR（向后兼容）。
+   *
+   * 典型用途:
+   * - 对话系统: 传入 RNN 隐状态的投影向量，让扩散感知对话方向
+   * - RAG 应用: 传入查询向量本身，让扩散偏向查询语义方向
+   * - 推荐系统: 传入用户偏好向量，让扩散偏向用户兴趣方向
+   */
+  diffusionBias?: number[];
 }
 
 export interface JsClusterResult {

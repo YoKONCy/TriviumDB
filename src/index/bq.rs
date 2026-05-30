@@ -934,7 +934,7 @@ impl Bq2Store {
     /// 从裸数据恢复（反序列化用）
     pub fn from_raw(pos: Vec<u64>, strong: Vec<u64>, chunks: usize) -> Self {
         assert_eq!(pos.len(), strong.len(), "pos/strong 长度必须一致");
-        let n = if chunks > 0 { pos.len() / chunks } else { 0 };
+        let n = pos.len().checked_div(chunks).unwrap_or(0);
         Self { pos, strong, chunks, n }
     }
 }

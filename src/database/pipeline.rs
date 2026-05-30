@@ -173,6 +173,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
         config.enable_inverse_inhibition,
         config.lateral_inhibition_threshold,
         config.enable_refractory_fatigue,
+        config.diffusion_bias.as_deref(), // CCSA: 传递扩散偏置向量
     );
     ctx.record_timing("graph_expand", t_graph.elapsed());
 

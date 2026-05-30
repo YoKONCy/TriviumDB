@@ -129,7 +129,7 @@ pub fn run_leiden(adj: &AdjacencySnapshot, config: &LeidenConfig) -> LeidenResul
     // 排序确保确定性映射
     let mut sorted_valid: Vec<u32> = valid_clusters.into_iter().collect();
     sorted_valid.sort_unstable();
-    for (new_id, c) in (1u32..).zip(sorted_valid.into_iter()) {
+    for (new_id, c) in (1u32..).zip(sorted_valid) {
         remap.insert(c, new_id);
     }
 
