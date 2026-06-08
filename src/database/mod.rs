@@ -310,7 +310,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         {
             let mut mt = lock_or_recover(&self.memtable);
             tracing::info!("手动压实开始 (Manual compaction started): {}", self.db_path);
-            mt.ensure_vectors_cache();
+            // 预热 BQ 签名/QuIVer；merged 缓存由随后的 save 按存储模式自行决定，
+            // 此处无需强制物化（避免把整库复制入堆）。
+            mt.ensure_vectors_cache(false);
         }
 
         {

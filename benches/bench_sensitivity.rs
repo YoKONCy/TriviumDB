@@ -217,7 +217,7 @@ fn measure_single_thread(index: &QuIVer, eval: &SearchEval<'_>, ef: usize) -> (f
     let mut hits = 0usize;
     for i in 0..eval.n_test {
         let q = &eval.test[i * eval.dim..(i + 1) * eval.dim];
-        let res = index.search(q, eval.train, &cfg);
+        let res = index.search_flat(q, eval.train, &cfg);
         hits += res.iter().filter(|&&(id, _)| eval.gts[i].contains(&id)).count();
     }
     let elapsed = t.elapsed().as_secs_f64();
@@ -239,7 +239,7 @@ fn measure_multi_thread(index: &QuIVer, eval: &SearchEval<'_>, ef: usize) -> (f6
         .into_par_iter()
         .map(|i| {
             let q = &eval.test[i * eval.dim..(i + 1) * eval.dim];
-            let res = index.search(q, eval.train, &cfg);
+            let res = index.search_flat(q, eval.train, &cfg);
             res.iter().filter(|&&(id, _)| eval.gts[i].contains(&id)).count()
         })
         .sum();
@@ -533,7 +533,7 @@ fn experiment_thread_scaling(ds: &DataSet) {
                 .into_par_iter()
                 .map(|i| {
                     let q = &ds.test[i * ds.dim..(i + 1) * ds.dim];
-                    let res = index.search(q, &ds.train, &cfg);
+                    let res = index.search_flat(q, &ds.train, &cfg);
                     res.iter()
                         .filter(|&&(id, _)| ds.gts[i].contains(&id))
                         .count()

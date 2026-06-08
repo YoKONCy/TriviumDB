@@ -236,7 +236,7 @@ fn run_search_bench(
 
     if do_warmup {
         for q in warmup_queries {
-            let _ = index.search(q, ext_vectors, &search_cfg);
+            let _ = index.search_flat(q, ext_vectors, &search_cfg);
         }
     }
 
@@ -247,7 +247,7 @@ fn run_search_bench(
         let mut round_recall = 0.0;
         for (qi, q) in queries.iter().enumerate() {
             let t0 = Instant::now();
-            let res = index.search(q, ext_vectors, &search_cfg);
+            let res = index.search_flat(q, ext_vectors, &search_cfg);
             let lat = t0.elapsed().as_secs_f64() * 1e6;
             all_latencies.push(lat);
             round_recall += recall_at_k(&gts[qi], &res);

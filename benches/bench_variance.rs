@@ -171,7 +171,7 @@ fn main() {
         // Warmup
         let warmup_cfg = QuIVerSearchConfig { top_k: TOP_K, ef_search: 128, rerank_limit: None };
         for q in &queries[..WARMUP.min(n_test)] {
-            let _ = index.search(q, &train_data, &warmup_cfg);
+            let _ = index.search_flat(q, &train_data, &warmup_cfg);
         }
 
         eprintln!("  {:<8} {:>10} {:>10}", "ef", "Recall@10", "QPS");
@@ -182,7 +182,7 @@ fn main() {
             let t0 = Instant::now();
             let mut total_recall = 0.0;
             for (qi, q) in queries.iter().enumerate() {
-                let res = index.search(q, &train_data, &cfg);
+                let res = index.search_flat(q, &train_data, &cfg);
                 total_recall += recall_at_k_ids(&eval_gts[qi], &res);
             }
             let elapsed = t0.elapsed().as_secs_f64();
@@ -229,7 +229,7 @@ fn main() {
     // Warmup
     let warmup_cfg = QuIVerSearchConfig { top_k: TOP_K, ef_search: 256, rerank_limit: None };
     for q in &queries[..WARMUP.min(n_test)] {
-        let _ = index.search(q, &train_data, &warmup_cfg);
+        let _ = index.search_flat(q, &train_data, &warmup_cfg);
     }
 
     eprintln!("  {:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
@@ -245,7 +245,7 @@ fn main() {
         for _ in 0..rounds {
             for q in &queries {
                 let t0 = Instant::now();
-                let res = index.search(q, &train_data, &cfg);
+                let res = index.search_flat(q, &train_data, &cfg);
                 std::hint::black_box(&res);
                 let lat_us = t0.elapsed().as_secs_f64() * 1e6;
                 all_lats.push(lat_us);
@@ -293,7 +293,7 @@ fn main() {
 
         // Warmup
         for q in &queries[..WARMUP.min(n_test)] {
-            let _ = index_arc.search(q, &vecs_arc, &cfg);
+            let _ = index_arc.search_flat(q, &vecs_arc, &cfg);
         }
 
         // 并发执行
@@ -315,7 +315,7 @@ fn main() {
                 bar.wait();
                 for q in &qs {
                     let t0 = Instant::now();
-                    let res = idx.search(q, &vs, &cfg_clone);
+                    let res = idx.search_flat(q, &vs, &cfg_clone);
                     std::hint::black_box(&res);
                     lats.push(t0.elapsed().as_secs_f64() * 1e6);
                 }

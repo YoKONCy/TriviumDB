@@ -955,11 +955,26 @@ impl QuIVer {
         selected
     }
 
-    /// 两阶段搜索：Symmetric 寻路 + f32 精排
+    /// 两阶段搜索：Symmetric BQ 寻路 + f32 按需精排（真正的冷热分离）
     ///
-    /// `ext_vectors`: 外部 flat 向量数组（来自 MemTable 的 flat_vectors，已转为 f32）
-    /// 精排时通过 `slot_indices` 映射到 `ext_vectors` 中对应的偏移
-    pub fn search(&self, query: &[f32], ext_vectors: &[f32], config: &QuIVerSearchConfig) -> Vec<(u64, f32)> {
+    /// # 冷热分离
+    /// - **Hot（Stage 1）**：beam search 全程仅访问常驻内存的 2-bit BQ 签名与图拓扑，
+    ///   不触碰任何 f32 原始向量。
+    /// - **Cold（Stage 2）**：仅对 beam search 召回的 ~ef 个候选，通过 `get_vec_f32`
+    ///   回调按 MemTable slot 索引**按需**取回单条 f32 向量做精排。
+    ///
+    /// `get_vec_f32(slot, buf)`：把 `slot` 对应节点的向量以 f32 写入 `buf`，
+    /// 成功返回 `true`。冷数据由调用方按需从 mmap 零拷贝读取，
+    /// 不再要求传入全量 f32 数组——这是 QuIVer 冷热分离设计的最后一块拼图。
+    pub fn search<F>(
+        &self,
+        query: &[f32],
+        mut get_vec_f32: F,
+        config: &QuIVerSearchConfig,
+    ) -> Vec<(u64, f32)>
+    where
+        F: FnMut(usize, &mut Vec<f32>) -> bool,
+    {
         if self.n == 0 {
             return Vec::new();
         }
@@ -1005,49 +1020,20 @@ impl QuIVer {
             self.beam_search_l0(&q_sig, cur_node, config.ef_search, &mut visited)
         });
 
-        // Stage 2: f32 精排（跳过 tombstone，通过 slot_indices 映射到外部向量）
-        // 先预取所有候选的外部向量到 cache
-        {
-            for &(_, nid) in &bq_candidates {
-                if !self.tombstones[nid as usize] {
-                    let slot = self.slot_indices[nid as usize];
-                    let offset = slot * dim;
-                    if offset + dim <= ext_vectors.len() {
-                        unsafe {
-                            let ptr = ext_vectors.as_ptr().add(offset);
-                            #[cfg(target_arch = "x86_64")]
-                            {
-                                use std::arch::x86_64::*;
-                                let p = ptr as *const i8;
-                                _mm_prefetch(p, _MM_HINT_T0);
-                                _mm_prefetch(p.add(64), _MM_HINT_T0);
-                            }
-                            #[cfg(target_arch = "aarch64")]
-                            {
-                                std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) ptr, options(nostack, preserves_flags));
-                                std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) ptr.add(16), options(nostack, preserves_flags));
-                            }
-                        }
-                    }
-                }
+        // Stage 2: f32 按需精排（跳过 tombstone，通过 slot_indices 映射到冷存储）
+        // 复用单个缓冲区，避免每个候选 heap alloc；冷向量按需取回仅触达 ~ef 个候选。
+        let rerank_limit = config.rerank_limit().min(bq_candidates.len());
+        let mut buf: Vec<f32> = Vec::with_capacity(dim);
+        let mut scored: Vec<(f32, u32)> = Vec::with_capacity(rerank_limit);
+        for &(_, nid) in bq_candidates.iter().take(rerank_limit) {
+            if self.tombstones[nid as usize] {
+                continue;
+            }
+            let slot = self.slot_indices[nid as usize];
+            if get_vec_f32(slot, &mut buf) && buf.len() == dim {
+                scored.push((cosine_similarity_f32(query, &buf), nid));
             }
         }
-        let rerank_limit = config.rerank_limit().min(bq_candidates.len());
-        let mut scored: Vec<(f32, u32)> = bq_candidates
-            .iter()
-            .take(rerank_limit)
-            .filter(|&&(_, nid)| !self.tombstones[nid as usize])
-            .filter_map(|&(_, nid)| {
-                let slot = self.slot_indices[nid as usize];
-                let offset = slot * dim;
-                if offset + dim <= ext_vectors.len() {
-                    let v = &ext_vectors[offset..offset + dim];
-                    Some((cosine_similarity_f32(query, v), nid))
-                } else {
-                    None // slot 越界（不应发生，防御性跳过）
-                }
-            })
-            .collect();
         scored.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
 
         scored
@@ -1055,6 +1041,33 @@ impl QuIVer {
             .take(config.top_k)
             .map(|&(sim, nid)| (self.ids[nid as usize], sim))
             .collect()
+    }
+
+    /// 便捷封装：从连续 f32 数组（按 slot 偏移）精排。
+    ///
+    /// 主要用于纯内存场景与单元测试。生产检索路径应直接调用 `search`
+    /// 并传入按需读取 mmap 冷存储的回调，以保持冷热分离。
+    pub fn search_flat(
+        &self,
+        query: &[f32],
+        ext_vectors: &[f32],
+        config: &QuIVerSearchConfig,
+    ) -> Vec<(u64, f32)> {
+        let dim = self.dim;
+        self.search(
+            query,
+            |slot, buf| {
+                let offset = slot * dim;
+                if offset + dim <= ext_vectors.len() {
+                    buf.clear();
+                    buf.extend_from_slice(&ext_vectors[offset..offset + dim]);
+                    true
+                } else {
+                    false // slot 越界（不应发生，防御性跳过）
+                }
+            },
+            config,
+        )
     }
 
     /// ═══ 并行批量构建（rayon 加速）═══
@@ -2095,7 +2108,7 @@ mod tests {
             rerank_limit: None,
         };
         
-        let results = quiver.search(&query, &vectors, &search_config);
+        let results = quiver.search_flat(&query, &vectors, &search_config);
         assert!(!results.is_empty());
         assert_eq!(results[0].0, 10);
 
@@ -2103,7 +2116,7 @@ mod tests {
         quiver.soft_delete(10);
         assert_eq!(quiver.active_count(), 3);
         
-        let results_after = quiver.search(&query, &vectors, &search_config);
+        let results_after = quiver.search_flat(&query, &vectors, &search_config);
         if !results_after.is_empty() {
             assert_ne!(results_after[0].0, 10);
         }
@@ -2201,7 +2214,7 @@ mod tests {
             ef_search: 32,
             rerank_limit: Some(20),
         };
-        let results = quiver.search(&query, &vectors, &search_config);
+        let results = quiver.search_flat(&query, &vectors, &search_config);
         assert!(!results.is_empty());
         assert_eq!(results[0].0, 0); // 自身应为 Top-1
 
@@ -2210,7 +2223,7 @@ mod tests {
             quiver.soft_delete(i as u64);
         }
         assert_eq!(quiver.active_count(), n - n/2);
-        let results2 = quiver.search(&query, &vectors, &search_config);
+        let results2 = quiver.search_flat(&query, &vectors, &search_config);
         for (id, _) in &results2 {
             assert!(*id >= n as u64 / 2, "已删除节点不应出现在结果中");
         }
@@ -2229,7 +2242,7 @@ mod tests {
             ef_search: 10,
             rerank_limit: None,
         };
-        let results = quiver.search(&query, &[], &search_config);
+        let results = quiver.search_flat(&query, &[], &search_config);
         assert!(results.is_empty());
     }
 
@@ -2247,7 +2260,7 @@ mod tests {
             ef_search: 10,
             rerank_limit: None,
         };
-        let results = quiver.search(&[1.0, 0.0, 0.0, 0.0], &vectors, &search_config);
+        let results = quiver.search_flat(&[1.0, 0.0, 0.0, 0.0], &vectors, &search_config);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 42);
     }

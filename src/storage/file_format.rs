@@ -172,8 +172,8 @@ fn save_mmap<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()
 
 /// Rom 模式保存：把向量合并，写单文件，抛弃 .vec
 fn save_rom<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()> {
-    // 1. 确保在纯内存中获取到完整的合并数组
-    memtable.ensure_vectors_cache();
+    // 1. 确保在纯内存中获取到完整的合并数组（Rom 单文件持久化必须物化 flat）
+    memtable.ensure_vectors_cache(true);
     let total_vectors = memtable.internal_indices().len();
 
     // 2. 将数据合并写入单文件
@@ -202,8 +202,10 @@ fn save_tdb<T: VectorType>(
     vec_count: usize,
     is_mmap_mode: bool,
 ) -> Result<()> {
-    // 始终确保 BQ 签名和向量缓存已构建（v5 持久化需要写入 BQ Block）
-    memtable.ensure_vectors_cache();
+    // 始终确保 BQ 签名和向量缓存已构建（v5 持久化需要写入 BQ Block）。
+    // 仅 Rom 单文件模式（!is_mmap_mode）需要写出连续 flat 向量块，才物化 merged；
+    // Mmap 分离模式下向量已在 .vec 文件，无需把整库复制入堆。
+    memtable.ensure_vectors_cache(!is_mmap_mode);
 
     let tmp_path = format!("{}.tmp", path);
     let file = File::create(&tmp_path)?;
@@ -770,6 +772,9 @@ fn load_quiver_index<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) {
     match QuIVer::load_from_file(qp) {
         Ok(quiver) => {
             memtable.set_quiver_index(quiver);
+            // 加载后即进入 QuIVer 检索路径：冷向量随机按需读取，
+            // 提示 OS 关闭顺序预读以降低 PageCache 常驻
+            memtable.vec_pool_mut().advise_random();
         }
         Err(e) => {
             tracing::warn!(

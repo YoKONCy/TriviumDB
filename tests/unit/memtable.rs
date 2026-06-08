@@ -132,7 +132,7 @@ fn raw_insert_跳过NaN检查() {
 fn get_vector_往返() {
     let mut mt = make_mt();
     mt.insert_with_id(1, &[1.0, 2.0, 3.0], json!({})).unwrap();
-    mt.ensure_vectors_cache();
+    mt.ensure_vectors_cache(true);
     let v = mt.get_vector(1).unwrap();
     assert_eq!(v, &[1.0, 2.0, 3.0]);
 }
@@ -409,7 +409,7 @@ fn update_vector_基础() {
     let mut mt = make_mt();
     mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({})).unwrap();
     mt.update_vector(1, &[0.0, 1.0, 0.0]).unwrap();
-    mt.ensure_vectors_cache();
+    mt.ensure_vectors_cache(true);
     assert_eq!(mt.get_vector(1).unwrap(), &[0.0, 1.0, 0.0]);
 }
 
@@ -644,7 +644,7 @@ fn flat_vectors_和_ensure_cache() {
     let mut mt = make_mt();
     mt.insert_with_id(1, &[1.0, 2.0, 3.0], json!({})).unwrap();
     mt.insert_with_id(2, &[4.0, 5.0, 6.0], json!({})).unwrap();
-    mt.ensure_vectors_cache();
+    mt.ensure_vectors_cache(true);
 
     let flat = mt.flat_vectors();
     assert_eq!(flat.len(), 6);
@@ -654,7 +654,7 @@ fn flat_vectors_和_ensure_cache() {
 fn bq_signatures_重建() {
     let mut mt = make_mt();
     mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({})).unwrap();
-    mt.ensure_vectors_cache();
+    mt.ensure_vectors_cache(true);
     assert!(!mt.bq_signatures_slice().is_empty());
     assert!(mt.get_bq_signature(0).is_some());
 }

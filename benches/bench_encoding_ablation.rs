@@ -480,7 +480,7 @@ fn run_recall_bench(
         rerank_limit: None,
     };
     for q in warmup_queries {
-        let _ = index.search(q, vecs, &search_cfg);
+        let _ = index.search_flat(q, vecs, &search_cfg);
     }
 
     eprintln!("  {:<8} {:>10} {:>10}", "ef", "Recall@10", "QPS");
@@ -498,7 +498,7 @@ fn run_recall_bench(
             let mut round_recall = 0.0;
             let t0 = Instant::now();
             for (qi, q) in queries.iter().enumerate() {
-                let res = index.search(q, vecs, &cfg);
+                let res = index.search_flat(q, vecs, &cfg);
                 round_recall += recall_at_k(&gts[qi], &res);
             }
             let elapsed = t0.elapsed().as_secs_f64();

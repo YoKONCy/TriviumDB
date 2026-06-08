@@ -58,7 +58,8 @@ impl CompactionThread {
                         tracing::warn!("Compaction 线程: MemTable 互斥锁中毒，正在恢复 (MemTable Mutex poisoned, recovering)");
                         p.into_inner()
                     });
-                    mt.ensure_vectors_cache();
+                    // 后台压实只需预热 BQ 签名/QuIVer，不强制物化 merged（避免整库入堆）
+                    mt.ensure_vectors_cache(false);
                 } // 👑👑👑 锁在此刻被丢弃，前台彻底解放！
 
                 // 2. 长时间无锁计算区（原旧版索引用，已废除，这里留出空白阶段）

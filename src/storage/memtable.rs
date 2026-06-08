@@ -462,40 +462,49 @@ impl<T: VectorType> MemTable<T> {
         }
     }
 
-    /// 确保向量合并缓存已构建，并自动管理 QuIVer 索引生命周期
+    /// 确保 BQ 签名/向量缓存已就绪，并自动管理 QuIVer 索引生命周期
     ///
-    /// 在调用 flat_vectors() 之前调用此方法，确保缓存已准备好。
-    /// 当活跃节点 >= 10,000 且 QuIVer 索引不存在时，自动构建。
-    #[inline]
-    pub fn ensure_vectors_cache(&mut self) {
-        self.vec_pool.ensure_cache();
-
+    /// # 冷热分离与内存控制
+    /// `materialize_flat` 控制是否物化全量 merged 缓存（把整个 mmap 复制入堆）：
+    /// - `true`：调用方随后需要连续的 `flat_vectors()`（暴力全扫 / 残差影子查询 /
+    ///   Rom 持久化），必须物化。
+    /// - `false`：纯 QuIVer 检索路径——冷向量按需从 mmap 读取，无需 merged。
+    ///
+    /// 注意：即便传入 `false`，若没有可用的 QuIVer 索引（查询将回退到暴力全扫），
+    /// 仍会物化 merged 以保证暴力路径可用。
+    ///
+    /// BQ 签名与 QuIVer 构建均采用按 slot 流式读取 mmap 的方式，不依赖 merged 缓存。
+    pub fn ensure_vectors_cache(&mut self, materialize_flat: bool) {
+        // 1. BQ 签名（流式重建，不触发 merged 缓存）
         let total = self.vec_pool.total_count();
         if self.bq_signatures.len() != total || self.bq_dirty {
             self.rebuild_bq_signatures(total);
             self.bq_dirty = false;
         }
 
-        // QuIVer 自动构建：当数据量 >= 10,000 且索引不存在时自动触发
+        // 2. QuIVer 自动构建：当数据量 >= 10,000 且索引不存在时自动触发
         let active = self.payloads.len();
         if active >= 10_000 && self.quiver_index.is_none() {
             self.build_quiver_impl(&QuIVerConfig::default());
         }
+
+        // 3. 仅在确实需要连续 flat 数组时才物化 merged 缓存：
+        //    - 调用方显式要求（Rom 持久化 / 残差 / 强制暴力）
+        //    - 或没有 QuIVer 索引（查询将回退暴力全扫，需要 flat）
+        if materialize_flat || self.quiver_index.is_none() {
+            self.vec_pool.ensure_cache();
+        }
     }
 
+    /// 流式重建 BQ 签名：按 slot 逐条从 mmap 零拷贝读取，不物化全量 merged 缓存。
     fn rebuild_bq_signatures(&mut self, total: usize) {
-        let dim = self.dim();
-        let flat = self.vec_pool.flat_vectors();
-
-        // 利用 flat_vectors 串行提取 1-bit BQ 特征
         let mut new_bq = Vec::with_capacity(total);
-        for chunk in flat.chunks(dim) {
-            new_bq.push(BqSignature::from_vector(chunk));
-        }
-
-        // 兜底以防向量池维度异常不对齐
-        while new_bq.len() < total {
-            new_bq.push(BqSignature::empty());
+        for i in 0..total {
+            match self.vec_pool.get(i) {
+                Some(v) => new_bq.push(BqSignature::from_vector(v)),
+                // 兜底以防向量池维度异常或越界
+                None => new_bq.push(BqSignature::empty()),
+            }
         }
         self.bq_signatures = new_bq;
     }
@@ -552,20 +561,27 @@ impl<T: VectorType> MemTable<T> {
     /// **事务安全**：`delete()` / `update_vector()` 会使索引自动失效，
     /// 下次搜索前由 `ensure_vectors_cache()` 自动重建。
     pub fn build_quiver(&mut self, config: &QuIVerConfig) {
-        self.ensure_vectors_cache();
+        // 确保 BQ 签名就绪（流式，不物化 merged），然后构建索引
+        let total = self.vec_pool.total_count();
+        if self.bq_signatures.len() != total || self.bq_dirty {
+            self.rebuild_bq_signatures(total);
+            self.bq_dirty = false;
+        }
         self.build_quiver_impl(config);
     }
 
     /// QuIVer 构建的内部实现（不调用 ensure_vectors_cache，避免递归）
+    ///
+    /// 按 slot 流式从 mmap 零拷贝读取向量并转 f32，不物化全量 merged 缓存，
+    /// 避免构建期把整个冷数据集复制入堆。
     fn build_quiver_impl(&mut self, config: &QuIVerConfig) {
-        let flat = self.vec_pool.flat_vectors();
         let dim = self.dim;
-        if flat.is_empty() || self.payloads.is_empty() {
+        if self.vec_pool.total_count() == 0 || self.payloads.is_empty() {
             self.quiver_index = None;
             return;
         }
 
-        // 收集活跃节点的向量、ID 和 slot 索引（跳过 tombstone）
+        // 收集活跃节点的向量、ID 和 slot 索引（跳过 tombstone），按需从 mmap 读取
         let mut vecs_f32: Vec<f32> = Vec::with_capacity(self.payloads.len() * dim);
         let mut ids: Vec<u64> = Vec::with_capacity(self.payloads.len());
         let mut slot_idxs: Vec<usize> = Vec::with_capacity(self.payloads.len());
@@ -578,11 +594,8 @@ impl<T: VectorType> MemTable<T> {
             if !self.payloads.contains_key(&node_id) {
                 continue;
             }
-            let offset = i * dim;
-            if offset + dim <= flat.len() {
-                for j in 0..dim {
-                    vecs_f32.push(flat[offset + j].to_f32());
-                }
+            if let Some(v) = self.vec_pool.get(i) {
+                vecs_f32.extend(v.iter().map(|x| x.to_f32()));
                 ids.push(node_id);
                 slot_idxs.push(i);
             }
@@ -596,6 +609,10 @@ impl<T: VectorType> MemTable<T> {
         let mut index = QuIVer::new(dim, config);
         index.batch_build_experimental_v2(&vecs_f32, &ids, &slot_idxs);
         self.quiver_index = Some(index);
+
+        // QuIVer 精排按 slot 随机读取冷向量，提示 OS 关闭顺序预读以降低 PageCache 占用
+        self.vec_pool.advise_random();
+
         tracing::info!(
             "QuIVer 索引自动构建完成 (QuIVer index auto-built): {} 个节点，dim={}",
             ids.len(),
