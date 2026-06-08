@@ -196,7 +196,16 @@ jobs:
           key: short-fuzz-${{ matrix.target }}
 
       - name: 安装 cargo-fuzz
-        uses: taiki-e/install-action@cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+        continue-on-error: true
+
+      - name: Fallback 安装 cargo-fuzz
+        run: |
+          if ! cargo fuzz --version 2>/dev/null; then
+            cargo install cargo-fuzz --locked
+          fi
 
       - name: 运行短时模糊测试 (${{ matrix.target }})
         run: |

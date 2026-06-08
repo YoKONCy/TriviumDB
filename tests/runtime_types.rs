@@ -103,12 +103,14 @@ fn seed_typed_graph(path: &str) -> Database<f32> {
         )
         .unwrap();
     }
-    let ids = db.all_node_ids();
+    let mut ids = db.all_node_ids();
+    ids.sort(); // 确保边拓扑在所有平台上确定性一致（HashMap 迭代序不保证稳定）
     for i in 0..ids.len() - 1 {
         db.link(ids[i], ids[i + 1], "seq", 1.0).unwrap();
     }
     db
 }
+
 
 /// WHERE 浮点数比较 (cmp_f64 全 6 操作符: ==, !=, >, >=, <, <=)
 #[test]
