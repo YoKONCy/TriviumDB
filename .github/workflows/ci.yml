@@ -196,7 +196,7 @@ jobs:
           key: short-fuzz-${{ matrix.target }}
 
       - name: 安装 cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        uses: taiki-e/install-action@cargo-fuzz
 
       - name: 运行短时模糊测试 (${{ matrix.target }})
         run: |

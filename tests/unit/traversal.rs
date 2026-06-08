@@ -35,7 +35,7 @@ fn seed(id: u64, score: f32) -> SearchHit {
 fn expand_depth0_返回原始seeds() {
     let mt = build_graph();
     let seeds = vec![seed(1, 1.0)];
-    let result = expand_graph(&mt, seeds.clone(), 0, 0.0, false, 0, false);
+    let result = expand_graph(&mt, seeds.clone(), 0, 0.0, false, 0, false, None);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].id, 1);
 }
@@ -44,7 +44,7 @@ fn expand_depth0_返回原始seeds() {
 fn expand_depth1_扩展邻居() {
     let mt = build_graph();
     let seeds = vec![seed(1, 1.0)];
-    let result = expand_graph(&mt, seeds, 1, 0.0, false, 0, false);
+    let result = expand_graph(&mt, seeds, 1, 0.0, false, 0, false, None);
     assert!(result.len() >= 3, "应扩展到 1,2,4 至少 3 个节点");
 }
 
@@ -52,7 +52,7 @@ fn expand_depth1_扩展邻居() {
 fn expand_depth2_扩展二跳() {
     let mt = build_graph();
     let seeds = vec![seed(1, 1.0)];
-    let result = expand_graph(&mt, seeds, 2, 0.0, false, 0, false);
+    let result = expand_graph(&mt, seeds, 2, 0.0, false, 0, false, None);
     assert!(result.len() >= 4, "两跳应到达 3 和 5");
 }
 
@@ -61,8 +61,8 @@ fn expand_PPR阻尼因子() {
     let mt = build_graph();
     let seeds = vec![seed(1, 1.0)];
 
-    let r_no_damp = expand_graph(&mt, seeds.clone(), 1, 0.0, false, 0, false);
-    let r_damped = expand_graph(&mt, seeds, 1, 0.5, false, 0, false);
+    let r_no_damp = expand_graph(&mt, seeds.clone(), 1, 0.0, false, 0, false, None);
+    let r_damped = expand_graph(&mt, seeds, 1, 0.5, false, 0, false, None);
 
     // 有阻尼时传播能量减半
     let score_no = r_no_damp.iter().find(|h| h.id == 2).unwrap().score;
@@ -83,7 +83,7 @@ fn expand_反向抑制() {
     mt.link(1, 4, "a".into(), 1.0).unwrap();
 
     let seeds = vec![seed(1, 1.0)];
-    let result = expand_graph(&mt, seeds, 1, 0.0, true, 0, false);
+    let result = expand_graph(&mt, seeds, 1, 0.0, true, 0, false, None);
 
     let score3 = result
         .iter()
@@ -108,7 +108,7 @@ fn expand_侧向截断() {
     let mt = build_graph();
     let seeds = vec![seed(1, 1.0)];
     // lateral_inhibition_threshold=1: 每轮只保留最强的 1 个节点
-    let result = expand_graph(&mt, seeds, 2, 0.0, false, 1, false);
+    let result = expand_graph(&mt, seeds, 2, 0.0, false, 1, false, None);
     // 由于截断，结果数应少于不截断时
     assert!(result.len() <= 4);
 }
@@ -119,8 +119,8 @@ fn expand_不应期疲劳() {
     mt.mark_fatigued(&[2]); // 节点 2 处于疲劳状态
 
     let seeds = vec![seed(1, 1.0)];
-    let r_fatigue = expand_graph(&mt, seeds.clone(), 1, 0.0, false, 0, true);
-    let r_normal = expand_graph(&mt, seeds, 1, 0.0, false, 0, false);
+    let r_fatigue = expand_graph(&mt, seeds.clone(), 1, 0.0, false, 0, true, None);
+    let r_normal = expand_graph(&mt, seeds, 1, 0.0, false, 0, false, None);
 
     let score_f = r_fatigue
         .iter()
@@ -150,7 +150,7 @@ fn expand_inhibition边_负能量() {
     mt.link(1, 2, "inhibition".into(), 1.0).unwrap();
 
     let seeds = vec![seed(1, 1.0)];
-    let result = expand_graph(&mt, seeds, 1, 0.0, false, 0, false);
+    let result = expand_graph(&mt, seeds, 1, 0.0, false, 0, false, None);
     let score2 = result
         .iter()
         .find(|h| h.id == 2)
@@ -162,6 +162,6 @@ fn expand_inhibition边_负能量() {
 #[test]
 fn expand_空seeds() {
     let mt = build_graph();
-    let result = expand_graph(&mt, vec![], 2, 0.0, false, 0, false);
+    let result = expand_graph(&mt, vec![], 2, 0.0, false, 0, false, None);
     assert!(result.is_empty());
 }

@@ -50,8 +50,7 @@ desktop.ini
 *.i32
 *.hdf5
 .hf_cache/
-research/bq2_llm
 diskann_data/
 
-# ══════ 论文（未发表，不纳入版本控制）══════
-research/paper/
+# ══════ 研究目录（脚本、数据、论文，不纳入版本控制）══════
+research/

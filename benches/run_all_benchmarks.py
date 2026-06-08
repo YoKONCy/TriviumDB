@@ -7,12 +7,12 @@ QuIVer 多数据集批量 benchmark 挂机脚本
 跳过已经跑过的数据集（检测日志文件是否存在且包含"全部实验完成"标记）。
 
 用法：
-  python scripts/run_all_benchmarks.py              # 跑 1d+1e+实验2（推荐，每数据集约5-15min）
-  python scripts/run_all_benchmarks.py --full        # 跑全部子实验（1a~1f+实验2，非常耗时）
-  python scripts/run_all_benchmarks.py --force       # 强制重跑所有（不跳过已完成的）
-  python scripts/run_all_benchmarks.py --only minilm-384 sift-128  # 只跑指定的
-  python scripts/run_all_benchmarks.py --mode params  # 只跑参数敏感性（不跑线程扩展）
-  python scripts/run_all_benchmarks.py --start 1e    # 自定义起始子实验
+  python benches/run_all_benchmarks.py              # 跑 1d+1e+实验2（推荐，每数据集约5-15min）
+  python benches/run_all_benchmarks.py --full        # 跑全部子实验（1a~1f+实验2，非常耗时）
+  python benches/run_all_benchmarks.py --force       # 强制重跑所有（不跳过已完成的）
+  python benches/run_all_benchmarks.py --only minilm-384 sift-128  # 只跑指定的
+  python benches/run_all_benchmarks.py --mode params  # 只跑参数敏感性（不跑线程扩展）
+  python benches/run_all_benchmarks.py --start 1e    # 自定义起始子实验
 
 日志输出目录: research/bench_logs/
 """

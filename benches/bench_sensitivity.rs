@@ -98,12 +98,17 @@ fn load_dataset() -> DataSet {
             "random_groundtruth.i32",
             768,
         ),
-        "sphere-1m" => (
-            "sphere_train.f32",
-            "sphere_test.f32",
-            "sphere_groundtruth.i32",
-            768,
-        ),
+        "sphere-1m" => ("sphere_train.f32", "sphere_test.f32", "sphere_groundtruth.i32", 768),
+        // VIBE 768-d 同维数据集
+        "arxiv-nomic" => ("arxiv_nomic_train.f32", "arxiv_nomic_test.f32", "arxiv_nomic_groundtruth.i32", 768),
+        "ccnews-nomic" => ("ccnews_nomic_train.f32", "ccnews_nomic_test.f32", "ccnews_nomic_groundtruth.i32", 768),
+        "coco-nomic" => ("coco_nomic_train.f32", "coco_nomic_test.f32", "coco_nomic_groundtruth.i32", 768),
+        "codesearch-jina" => ("codesearch_jina_train.f32", "codesearch_jina_test.f32", "codesearch_jina_groundtruth.i32", 768),
+        "gooaq-roberta" => ("gooaq_roberta_train.f32", "gooaq_roberta_test.f32", "gooaq_roberta_groundtruth.i32", 768),
+        "landmark-nomic" => ("landmark_nomic_train.f32", "landmark_nomic_test.f32", "landmark_nomic_groundtruth.i32", 768),
+        "landmark-dino" => ("landmark_dino_train.f32", "landmark_dino_test.f32", "landmark_dino_groundtruth.i32", 768),
+        // MSMARCO 论文 scalability 数据集
+        "msmarco-cohere" => ("msmarco_cohere_train.f32", "msmarco_cohere_test.f32", "msmarco_cohere_groundtruth.i32", 1024),
         _ => ("cohere_train.f32", "cohere_test.f32", "cohere_groundtruth.i32", 768),
     };
 
@@ -212,7 +217,7 @@ fn measure_single_thread(index: &QuIVer, eval: &SearchEval<'_>, ef: usize) -> (f
     let mut hits = 0usize;
     for i in 0..eval.n_test {
         let q = &eval.test[i * eval.dim..(i + 1) * eval.dim];
-        let res = index.search(q, eval.train, &cfg);
+        let res = index.search_flat(q, eval.train, &cfg);
         hits += res.iter().filter(|&&(id, _)| eval.gts[i].contains(&id)).count();
     }
     let elapsed = t.elapsed().as_secs_f64();
@@ -234,7 +239,7 @@ fn measure_multi_thread(index: &QuIVer, eval: &SearchEval<'_>, ef: usize) -> (f6
         .into_par_iter()
         .map(|i| {
             let q = &eval.test[i * eval.dim..(i + 1) * eval.dim];
-            let res = index.search(q, eval.train, &cfg);
+            let res = index.search_flat(q, eval.train, &cfg);
             res.iter().filter(|&&(id, _)| eval.gts[i].contains(&id)).count()
         })
         .sum();
@@ -528,7 +533,7 @@ fn experiment_thread_scaling(ds: &DataSet) {
                 .into_par_iter()
                 .map(|i| {
                     let q = &ds.test[i * ds.dim..(i + 1) * ds.dim];
-                    let res = index.search(q, &ds.train, &cfg);
+                    let res = index.search_flat(q, &ds.train, &cfg);
                     res.iter()
                         .filter(|&&(id, _)| ds.gts[i].contains(&id))
                         .count()

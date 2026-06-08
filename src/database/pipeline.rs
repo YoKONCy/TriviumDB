@@ -120,8 +120,12 @@ pub(crate) fn execute_pipeline<T: VectorType>(
         }
     } else {
         // === 内置召回管线 ===
-        // 提前确保向量缓存已就绪（需要 &mut，只在此处调用一次）
-        mt.ensure_vectors_cache();
+        // 提前确保向量缓存已就绪（需要 &mut，只在此处调用一次）。
+        // 仅当将走暴力路径或启用残差影子查询时才需要物化全量 merged 缓存；
+        // 纯 QuIVer 路径按需从 mmap 读取冷向量，无需 merged（避免全量入堆）。
+        let need_flat =
+            config.force_brute_force || (config.enable_advanced_pipeline && config.enable_sparse_residual);
+        mt.ensure_vectors_cache(need_flat);
         recall_text(&mt, config, query_text, &mut seed_map);
         recall_vector(&mt, config, query_vector, &mut seed_map);
         recall_residual(&mt, config, query_vector, &mut seed_map);
@@ -173,6 +177,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
         config.enable_inverse_inhibition,
         config.lateral_inhibition_threshold,
         config.enable_refractory_fatigue,
+        config.diffusion_bias.as_deref(), // CCSA: 传递扩散偏置向量
     );
     ctx.record_timing("graph_expand", t_graph.elapsed());
 
@@ -263,8 +268,6 @@ fn recall_vector<T: VectorType>(
     };
 
     let dim = mt.dim();
-    // ensure_vectors_cache() 已在 execute_pipeline 中提前调用
-    let vectors = mt.flat_vectors();
 
     // 构建 payload 过滤闭包
     let filter_ref = config.payload_filter.as_ref();
@@ -278,11 +281,15 @@ fn recall_vector<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     // 动态引擎路由：
     // 1. QuIVer Vamana 图搜索（N >= 10,000 时由 ensure_vectors_cache 自动构建）
+    //    —— 冷热分离：f32 向量按需从 mmap 读取，无需物化全量 flat 数组
     // 2. 暴力全扫（N < 10,000 或 force_brute_force）
+    //    —— 需要连续 flat 数组，由 ensure_vectors_cache 在该路径下构建 merged 缓存
     // ═══════════════════════════════════════════════════════
     let vector_hits: Vec<SearchHit> = if !config.force_brute_force && mt.quiver().is_some() {
         quiver_pipeline(mt, config, query_vector, &passes_filter)
     } else {
+        // ensure_vectors_cache() 已在 execute_pipeline 中按需构建好 merged 缓存
+        let vectors = mt.flat_vectors();
         brute_force_pipeline(mt, config, query_vector, vectors, dim, &passes_filter)
     };
 
@@ -340,10 +347,6 @@ fn quiver_pipeline<T: VectorType + Sync>(
     let quiver = mt.quiver().unwrap();
     let q_f32: Vec<f32> = query_vector.iter().map(|x| x.to_f32()).collect();
 
-    // 获取外部 flat 向量用于精排（MemTable 的向量缓存已由 ensure_vectors_cache 保证有效）
-    let flat = mt.flat_vectors();
-    let ext_vectors: Vec<f32> = flat.iter().map(|x| x.to_f32()).collect();
-
     // ef_search 默认为 top_k * 8，BQ 2-bit 量化精度较低，需要更宽的 beam 覆盖
     let ef_search = config.top_k.max(1) * 8;
     let search_cfg = QuIVerSearchConfig {
@@ -352,7 +355,22 @@ fn quiver_pipeline<T: VectorType + Sync>(
         rerank_limit: None,
     };
 
-    let raw_results = quiver.search(&q_f32, &ext_vectors, &search_cfg);
+    // 冷热分离精排回调：按 MemTable slot 索引**按需**从 mmap 零拷贝取回单条向量，
+    // 转为 f32 写入复用缓冲区。整个查询只触达 ~ef 个候选，
+    // 不再物化全量 f32 数组（不触发 merged 缓存），冷数据始终留在 OS PageCache。
+    let vec_pool = mt.vec_pool();
+    let raw_results = quiver.search(
+        &q_f32,
+        |slot, buf| match vec_pool.get(slot) {
+            Some(v) => {
+                buf.clear();
+                buf.extend(v.iter().map(|x| x.to_f32()));
+                true
+            }
+            None => false,
+        },
+        &search_cfg,
+    );
 
     // 应用 payload 过滤 + min_score 阈值
     let mut hits: Vec<SearchHit> = raw_results
@@ -640,7 +658,7 @@ mod tests {
                 (3, vec![0.0, 0.0, 1.0], serde_json::json!({})),
             ],
         );
-        mt.ensure_vectors_cache();
+        mt.ensure_vectors_cache(true);
 
         let cfg = SearchConfig {
             top_k: 2,
@@ -665,7 +683,7 @@ mod tests {
     #[test]
     fn test_recall_vector_none_query_is_noop() {
         let mut mt = make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]);
-        mt.ensure_vectors_cache();
+        mt.ensure_vectors_cache(true);
         let cfg = default_config();
         let mut seed_map = std::collections::HashMap::new();
         recall_vector(&mt, &cfg, None, &mut seed_map);
@@ -681,7 +699,7 @@ mod tests {
                 (2, vec![0.9, 0.1, 0.0], serde_json::json!({"tag": "no"})),
             ],
         );
-        mt.ensure_vectors_cache();
+        mt.ensure_vectors_cache(true);
 
         let cfg = SearchConfig {
             top_k: 5,
@@ -737,7 +755,7 @@ mod tests {
     #[test]
     fn test_recall_residual_disabled_is_noop() {
         let mut mt = make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]);
-        mt.ensure_vectors_cache();
+        mt.ensure_vectors_cache(true);
         let cfg = SearchConfig {
             enable_advanced_pipeline: false,
             ..Default::default()
@@ -753,7 +771,7 @@ mod tests {
     #[test]
     fn test_recall_residual_empty_seeds_is_noop() {
         let mut mt = make_memtable(3, &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))]);
-        mt.ensure_vectors_cache();
+        mt.ensure_vectors_cache(true);
         let cfg = SearchConfig {
             enable_advanced_pipeline: true,
             enable_sparse_residual: true,

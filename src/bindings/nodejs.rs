@@ -61,6 +61,8 @@ pub mod nodejs {
         pub text_boost: Option<f64>,
         pub force_brute_force: Option<bool>,
         pub custom_query_text: Option<String>,
+        /// CCSA: 扩散方向偏置向量，让图扩散优先沿语义相近的节点方向传播
+        pub diffusion_bias: Option<Vec<f64>>,
     }
 
     /// 节点关系边
@@ -237,6 +239,7 @@ pub mod nodejs {
                 enable_text_hybrid_search: None,
                 text_boost: None,
                 force_brute_force: None,
+                diffusion_bias: None,
             });
 
             let core_config = crate::database::SearchConfig {
@@ -254,6 +257,7 @@ pub mod nodejs {
                 enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
                 text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
                 force_brute_force: cfg.force_brute_force.unwrap_or(false),
+                diffusion_bias: cfg.diffusion_bias.map(|v| v.iter().map(|&x| x as f32).collect()),
                 ..Default::default()
             };
 
@@ -688,6 +692,7 @@ pub mod nodejs {
                 enable_text_hybrid_search: None,
                 text_boost: None,
                 force_brute_force: None,
+                diffusion_bias: None,
             });
 
             let core_config = crate::database::SearchConfig {
@@ -705,6 +710,7 @@ pub mod nodejs {
                 enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
                 text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
                 force_brute_force: cfg.force_brute_force.unwrap_or(false),
+                diffusion_bias: cfg.diffusion_bias.map(|v| v.iter().map(|&x| x as f32).collect()),
                 ..Default::default()
             };
 

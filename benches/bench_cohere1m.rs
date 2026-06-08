@@ -395,7 +395,7 @@ fn main() {
             .into_par_iter()
             .map(|i| {
                 let q = &test_data[i * dim..(i + 1) * dim];
-                let res = index.search(q, train_data, &search_cfg);
+                let res = index.search_flat(q, train_data, &search_cfg);
                 let gt_set = &eval_gts[i];
 
                 res.iter().filter(|&&(id, _)| gt_set.contains(&id)).count()

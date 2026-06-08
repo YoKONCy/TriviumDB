@@ -82,14 +82,9 @@ DATASETS = {
         "desc": "Wikipedia all-MiniLM-L6-v2 (384-d)",
     },
     "cohere": {
-        "source": "huggingface",
-        "hf_id": "Cohere/wikipedia-22-12-en-embeddings",
-        "embedding_col": "emb",
-        "dim": 768,
-        "n_train": 1_000_000,
-        "n_test": 1_000,
+        "source": "hf_bin",
+        "hf_id": "YoKONCy/Cohere-1M-wikipedia-768d",
         "prefix": "cohere",
-        "streaming": True,
         "desc": "Cohere Wikipedia embed-english-v2.0 (768-d)",
     },
     "bge_m3": {
@@ -362,6 +357,34 @@ def process_synthetic(cfg):
     save_dataset(cfg["prefix"], train, test, gt)
 
 
+def process_hf_bin(cfg):
+    """从 HuggingFace Hub 下载预计算好的 raw binary 格式数据集"""
+    from huggingface_hub import hf_hub_download
+    import shutil
+
+    repo_id = cfg["hf_id"]
+    prefix = cfg["prefix"]
+
+    # 预估要下载的三个文件映射
+    files_to_download = {
+        f"{prefix}_train.f32": ROOT / f"{prefix}_train.f32",
+        f"{prefix}_test.f32": ROOT / f"{prefix}_test.f32",
+        f"{prefix}_groundtruth.i32": ROOT / f"{prefix}_groundtruth.i32",
+    }
+
+    for repo_file, local_path in files_to_download.items():
+        print(f"  正在下载 {repo_file} 并保存到 {local_path}...")
+        downloaded_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=repo_file,
+            repo_type="dataset"
+        )
+        # 将缓存文件拷贝到目标位置
+        shutil.copy(downloaded_path, local_path)
+        mb = local_path.stat().st_size / 1024 / 1024
+        print(f"  [OK] {repo_file} ({mb:.1f} MB)")
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  主入口
 # ══════════════════════════════════════════════════════════════════════
@@ -370,6 +393,7 @@ PROCESSORS = {
     "hdf5": process_hdf5,
     "huggingface": process_huggingface,
     "synthetic": process_synthetic,
+    "hf_bin": process_hf_bin,
 }
 
 

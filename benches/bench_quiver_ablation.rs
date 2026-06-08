@@ -209,7 +209,7 @@ fn main() {
 
             // Warmup（丢弃结果，预热 cache）
             for q in &warmup_queries {
-                let _ = index.search(q, &vecs, &cfg);
+                let _ = index.search_flat(q, &vecs, &cfg);
             }
 
             // 多轮正式测量
@@ -224,7 +224,7 @@ fn main() {
                 let round_start = Instant::now();
                 for (qi, q) in queries.iter().enumerate() {
                     let q_start = Instant::now();
-                    let res = index.search(q, &vecs, &cfg);
+                    let res = index.search_flat(q, &vecs, &cfg);
                     let elapsed_us = q_start.elapsed().as_secs_f64() * 1_000_000.0;
                     latencies.push(elapsed_us);
                     round_recall_sum += recall(&gts[qi], &res);
