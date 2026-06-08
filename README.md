@@ -281,6 +281,18 @@ TriviumDB/
 │       ├── mod.rs          # 统一入口（feature-gated）
 │       ├── python.rs       # PyO3 绑定（含 Hook 管理接口）
 │       └── nodejs.rs       # napi-rs 绑定（含 Hook 管理接口）
+├── cli/                    # 🖥️ CLI & TUI 工具（triviumdb-cli，命令 `tdb`）
+│   ├── Cargo.toml
+│   ├── README.md
+│   └── src/
+│       ├── main.rs             # clap 参数解析 + 模式分发
+│       ├── db_handle.rs        # DbHandle dtype 动态分发（dispatch! 宏）
+│       ├── formatter.rs        # table / json / csv 输出格式化
+│       ├── tql_highlight.rs    # TQL 语法高亮（REPL ANSI + TUI Span）
+│       ├── config.rs           # ~/.triviumdb.toml 配置加载
+│       ├── commands/           # 非交互子命令（info/exec/export/import/repair/compact）
+│       ├── repl/               # REPL 模式（rustyline + Tab 补全 + 多行输入）
+│       └── tui/                # TUI 模式（ratatui + crossterm 全屏可视化）
 ├── benches/
 │   └── benchmark.rs        # Criterion 性能基准测试套件
 ├── tests/
@@ -347,8 +359,8 @@ TriviumDB/
 - [x] 增量图维护：Insert / Delete(Tombstone) / Update 全部增量，无需全量重建
 - [x] QuIVer 独立持久化（`.tdb.quiver` 文件，POD memcpy 极速序列化）
 - [x] 事务安全的分离时间线架构（Phase 5 QuIVer Sync）
-- [ ] 数据库可视化 UI 工具
-- [ ] CLI 工具 (`triviumdb-cli`)
+- [x] CLI 工具 `triviumdb-cli`（命令 `tdb`）：非交互命令 + REPL（Tab 补全 / 语法高亮 / 多行输入）+ 配置文件
+- [x] 数据库可视化工具：终端 TUI（`tdb ui`，图谱力导向布局 / k-hop 展开 / 向量搜索 Playground）
 
 ---
 
@@ -389,6 +401,7 @@ TriviumDB/
 | **[Hook 开发指南](docs/hook-guide.md)**       | C/C++ FFI 插件编写、Rust Hook 实现、管线诊断实战       |
 | **[测试实践](docs/testing.md)**               | 四层测试体系、属性测试、变异测试、覆盖率度量与 CI 建议 |
 | **[安全设计说明](docs/security.md)**          | 并发安全、数据完整性、unsafe 审计、FFI 安全边界        |
+| **[CLI 工具指南](cli/README.md)**             | `tdb` 命令行工具安装、用法、REPL/TUI 模式、配置文件   |
 
 ---
 

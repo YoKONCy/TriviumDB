@@ -2058,7 +2058,7 @@ mod tests {
     use super::*;
 
     /// 构造 N 个正交基向量（dim 维），每个向量只在第 i%dim 维为 1.0
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 测试辅助函数，保留备用
     fn make_orthogonal_vectors(n: usize, dim: usize) -> Vec<f32> {
         let mut vecs = vec![0.0f32; n * dim];
         for i in 0..n {

@@ -295,6 +295,18 @@ TriviumDB/
 │       ├── mod.rs          # Unified entry (feature-gated)
 │       ├── python.rs       # PyO3 bindings
 │       └── nodejs.rs       # napi-rs bindings
+├── cli/                    # 🖥️ CLI & TUI tool (triviumdb-cli, command `tdb`)
+│   ├── Cargo.toml
+│   ├── README.md
+│   └── src/
+│       ├── main.rs             # clap argument parsing + mode dispatch
+│       ├── db_handle.rs        # DbHandle dtype dynamic dispatch (dispatch! macro)
+│       ├── formatter.rs        # table / json / csv output formatting
+│       ├── tql_highlight.rs    # TQL syntax highlighting (REPL ANSI + TUI Span)
+│       ├── config.rs           # ~/.triviumdb.toml configuration loading
+│       ├── commands/           # Non-interactive subcommands (info/exec/export/import/repair/compact)
+│       ├── repl/               # REPL mode (rustyline + Tab completion + multi-line input)
+│       └── tui/                # TUI mode (ratatui + crossterm full-screen visualization)
 ├── benches/
 │   └── benchmark.rs        # Criterion performance benchmarks
 ├── tests/
@@ -360,8 +372,8 @@ TriviumDB/
 - [x] Incremental graph maintenance: Insert / Delete (Tombstone) / Update — no full rebuild
 - [x] QuIVer independent persistence (`.tdb.quiver` file, POD memcpy serialization)
 - [x] Transaction-safe separated timeline architecture (Phase 5 QuIVer Sync)
-- [ ] Database visualization UI tool
-- [ ] CLI tool (`triviumdb-cli`)
+- [x] CLI tool `triviumdb-cli` (command `tdb`): non-interactive commands + REPL (Tab completion / syntax highlighting / multi-line input) + config file
+- [x] Database visualization: terminal TUI (`tdb ui`, force-directed graph layout / k-hop expand / vector search playground)
 
 ---
 
@@ -388,6 +400,7 @@ TriviumDB/
 | **[Hook Guide](docs/hook-guide.md)**         | C/C++ FFI plugin development, Rust Hook implementation           |
 | **[Testing Practices](docs/testing.md)**     | 4-layer testing, property testing, mutation testing, coverage    |
 | **[Security Design](docs/security.md)**      | Concurrency safety, data integrity, unsafe audit, FFI boundaries |
+| **[CLI Tool Guide](cli/README.md)**           | `tdb` command-line tool installation, usage, REPL/TUI modes, config file |
 
 ---
 

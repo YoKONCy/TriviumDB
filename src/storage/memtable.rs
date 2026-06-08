@@ -987,14 +987,18 @@ impl<T: VectorType> MemTable<T> {
 
         if let Some(patch_obj) = patch.as_object() {
             // $set: 设置字段值
-            if let Some(set_map) = patch_obj.get("$set").and_then(|v| v.as_object()) {
+            if let Some(set_val) = patch_obj.get("$set")
+                && let Some(set_map) = set_val.as_object()
+            {
                 for (k, v) in set_map {
                     obj.insert(k.clone(), v.clone());
                 }
             }
 
             // $inc: 数值递增
-            if let Some(inc_map) = patch_obj.get("$inc").and_then(|v| v.as_object()) {
+            if let Some(inc_val) = patch_obj.get("$inc")
+                && let Some(inc_map) = inc_val.as_object()
+            {
                 for (k, v) in inc_map {
                     let delta = v.as_f64().unwrap_or(0.0);
                     let current = obj.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1015,7 +1019,9 @@ impl<T: VectorType> MemTable<T> {
             }
 
             // $unset: 删除字段
-            if let Some(unset_map) = patch_obj.get("$unset").and_then(|v| v.as_object()) {
+            if let Some(unset_val) = patch_obj.get("$unset")
+                && let Some(unset_map) = unset_val.as_object()
+            {
                 for k in unset_map.keys() {
                     obj.remove(k);
                 }

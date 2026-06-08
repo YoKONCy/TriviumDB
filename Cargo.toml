@@ -1,3 +1,10 @@
+[workspace]
+members = ["cli"]
+# 默认成员仅为根 lib 包：保持 `cargo check/test/clippy`（不带 --workspace）
+# 的作用域与引入 workspace 前一致；CLI 工具需用 `-p triviumdb-cli` 显式构建。
+default-members = ["."]
+resolver = "2"
+
 [package]
 name = "triviumdb"
 version = "0.7.1"
@@ -17,20 +24,9 @@ crate-type = ["cdylib", "rlib"]
 default = []
 python = ["dep:pyo3"]
 nodejs = ["dep:napi", "dep:napi-derive"]
-cli = [] # 仅供终端工具使用
 usearch-bench = ["dep:usearch"]
 ablation = [] # encoding ablation 实验专用
 casa = [] # CASA 研究实验专用
-
-[[bin]]
-name = "triviumdb"
-path = "src/main.rs"
-required-features = ["cli"]
-
-[[bin]]
-name = "trivium_repair"
-path = "src/bin/trivium_repair.rs"
-required-features = ["cli"]
 
 # ─── CASA 研究实验 (research/CASA/) ───
 
@@ -58,7 +54,6 @@ required-features = ["casa"]
 name = "ccsa_noise_sweep"
 path = "research/CASA/ccsa_noise_sweep.rs"
 required-features = ["casa"]
-
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
