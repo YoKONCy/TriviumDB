@@ -17,7 +17,8 @@ use crate::index::bq::{Bq2Signature, Bq2Store};
 use crate::vector::cosine_similarity_f32;
 use rayon::prelude::*;
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 #[derive(Copy, Clone, PartialEq)]
 pub struct NonNanF32(pub f32);
@@ -135,6 +136,85 @@ impl StripedSpinLocks {
             std::hint::spin_loop();
         }
         NodeGuard((node, SpinLockGuard { lock }))
+    }
+
+    /// 计时版加锁：返回自旋等待耗时(ns)，用于构图性能探针
+    #[inline(always)]
+    fn lock_timed(&self, node: u32) -> (NodeGuard<'_>, u64) {
+        let lock = &self.locks[self.stripe(node)];
+        let t0 = Instant::now();
+        let mut spun = false;
+        while lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spun = true;
+            std::hint::spin_loop();
+        }
+        // 仅在确实自旋等待时计入耗时，避免无争用时 Instant 噪声主导
+        let wait = if spun { t0.elapsed().as_nanos() as u64 } else { 0 };
+        (NodeGuard((node, SpinLockGuard { lock })), wait)
+    }
+}
+
+/// 构图性能探针：通过环境变量 TRIVIUM_BUILD_PROFILE=1 启用，默认零开销。
+/// 分段累计纳秒，定位 spin-lock 弱扩展的真正主因。
+struct BuildProfile {
+    enabled: bool,
+    bitset_ns: AtomicU64,    // 每节点 Bitset 分配耗时
+    beam_ns: AtomicU64,      // beam search 寻路耗时
+    fwd_ns: AtomicU64,       // 前向候选准备+vamana_select+写自身边
+    rev_wait_ns: AtomicU64,  // 反向剪枝的自旋锁等待耗时
+    rev_work_ns: AtomicU64,  // 反向剪枝的锁内做活耗时(去掉等待)
+    nodes: AtomicU64,        // 处理节点数
+}
+
+impl BuildProfile {
+    fn new() -> Self {
+        let enabled = std::env::var("TRIVIUM_BUILD_PROFILE").as_deref() == Ok("1");
+        Self {
+            enabled,
+            bitset_ns: AtomicU64::new(0),
+            beam_ns: AtomicU64::new(0),
+            fwd_ns: AtomicU64::new(0),
+            rev_wait_ns: AtomicU64::new(0),
+            rev_work_ns: AtomicU64::new(0),
+            nodes: AtomicU64::new(0),
+        }
+    }
+
+    #[inline(always)]
+    fn add(&self, counter: &AtomicU64, ns: u64) {
+        if self.enabled {
+            counter.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
+    fn report(&self, wall_secs: f64, threads: usize) {
+        if !self.enabled {
+            return;
+        }
+        let nodes = self.nodes.load(Ordering::Relaxed).max(1);
+        let ms = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e6;
+        let per = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / nodes as f64;
+        let total_cpu_ms = ms(&self.bitset_ns)
+            + ms(&self.beam_ns)
+            + ms(&self.fwd_ns)
+            + ms(&self.rev_wait_ns)
+            + ms(&self.rev_work_ns);
+        eprintln!("================ 构图性能探针 (TRIVIUM_BUILD_PROFILE) ================");
+        eprintln!("节点数={nodes}  线程数={threads}  墙钟={wall_secs:.2}s  累计CPU时间={:.1}ms", total_cpu_ms);
+        let line = |name: &str, c: &AtomicU64| {
+            let cpu_ms = ms(c);
+            let pct = if total_cpu_ms > 0.0 { cpu_ms / total_cpu_ms * 100.0 } else { 0.0 };
+            eprintln!("  {name:<22} 累计CPU {cpu_ms:>10.1}ms ({pct:>5.1}%)  每节点 {:>8.1}ns", per(c));
+        };
+        line("Bitset分配", &self.bitset_ns);
+        line("beam search寻路", &self.beam_ns);
+        line("前向选边", &self.fwd_ns);
+        line("反向剪枝-锁等待", &self.rev_wait_ns);
+        line("反向剪枝-锁内做活", &self.rev_work_ns);
+        eprintln!("====================================================================");
     }
 }
 
@@ -255,6 +335,48 @@ impl ConcurrentFlatAdj {
         }
     }
 
+    /// 邻接表单节点容量（不含度数槽）
+    #[inline(always)]
+    fn capacity(&self) -> usize {
+        self.stride - 1
+    }
+
+    /// 读取节点当前度数（需持锁调用，惰性剪枝用）
+    #[inline(always)]
+    fn degree_raw(&self, node: u32) -> usize {
+        self.check_node(node);
+        unsafe { (*self.data[node as usize * self.stride].get() as usize).min(self.stride - 1) }
+    }
+
+    /// 判断节点邻居中是否已含 nb（需持锁调用，惰性剪枝用）
+    fn contains_raw(&self, node: u32, nb: u32) -> bool {
+        self.check_node(node);
+        unsafe {
+            let base = node as usize * self.stride;
+            let deg = (*self.data[base].get() as usize).min(self.stride - 1);
+            for i in 0..deg {
+                if *self.data[base + 1 + i].get() == nb {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+
+    /// 追加一条边（不剪枝，调用方保证未满且无重复，需持锁调用）
+    #[inline(always)]
+    fn push_neighbor_raw(&self, node: u32, nb: u32) {
+        self.check_node(node);
+        unsafe {
+            let base = node as usize * self.stride;
+            let deg = *self.data[base].get() as usize;
+            if deg + 1 < self.stride {
+                *self.data[base + 1 + deg].get() = nb;
+                *self.data[base].get() = (deg + 1) as u32;
+            }
+        }
+    }
+
     fn neighbors_with_guard(&self, guard: &NodeGuard<'_>) -> Vec<u32> {
         self.neighbors_raw(guard.node())
     }
@@ -310,6 +432,7 @@ struct ExperimentalBuildView<'a> {
     alpha: f32,
     sigs: &'a Bq2Store,
     locks: &'a StripedSpinLocks,
+    profile: &'a BuildProfile,
 }
 
 impl ExperimentalBuildView<'_> {
@@ -440,8 +563,14 @@ impl ExperimentalBuildView<'_> {
             return;
         }
 
+        let prof = self.profile.enabled;
         let my_sig = self.sigs.get_sig(idx as usize);
+        let t_beam = if prof { Some(Instant::now()) } else { None };
         let candidates_sym = self.beam_search_l0_locked(&my_sig, 0, self.ef, visited);
+        if let Some(t) = t_beam {
+            self.profile.add(&self.profile.beam_ns, t.elapsed().as_nanos() as u64);
+        }
+        let t_fwd = if prof { Some(Instant::now()) } else { None };
         let mut candidates: Vec<(u32, u32)> = candidates_sym
             .into_iter()
             .filter(|&(_, id)| id != idx)
@@ -476,30 +605,65 @@ impl ExperimentalBuildView<'_> {
             QuIVer::vamana_select(self.sigs, idx, &candidates, self.m0, self.dim, self.alpha);
         self.adj
             .set_neighbors_locked_fast(idx, &selected, self.locks);
-
-        for &nb in &selected {
-            let _guard = self.locks.lock(nb);
-            let mut current = self.adj.neighbors_raw(nb);
-            if !current.contains(&idx) {
-                current.push(idx);
-            }
-            let mut nb_candidates: Vec<(u32, u32)> = current
-                .into_iter()
-                .filter(|&n| n != nb)
-                .map(|n| {
-                    (
-                        self.sigs.distance(nb as usize, n as usize, self.dim),
-                        n,
-                    )
-                })
-                .collect();
-            nb_candidates.sort_unstable_by_key(|&(_, id)| id);
-            nb_candidates.dedup_by_key(|&mut (_, id)| id);
-            nb_candidates.sort_unstable_by_key(|&(d, _)| d);
-            let pruned =
-                QuIVer::vamana_select(self.sigs, nb, &nb_candidates, self.m0, self.dim, self.alpha);
-            self.adj.set_neighbors_raw(nb, &pruned);
+        if let Some(t) = t_fwd {
+            self.profile.add(&self.profile.fwd_ns, t.elapsed().as_nanos() as u64);
         }
+
+        let cap = self.adj.capacity();
+        for &nb in &selected {
+            let (_guard, wait_ns) = self.locks.lock_timed(nb);
+            self.profile.add(&self.profile.rev_wait_ns, wait_ns);
+            let t_work = if prof { Some(Instant::now()) } else { None };
+
+            // 惰性剪枝：邻居表未满则直接追加(O(deg))，仅当容量用尽才触发一次完整剪枝。
+            // 邻接表 stride=m0*2+1 留有 2× headroom，使昂贵的 vamana_select(O(deg²))
+            // 从"每条反向边都跑"降为"约每 m0 条才跑一次"，砍掉构图主成本。
+            if !self.adj.contains_raw(nb, idx) {
+                if self.adj.degree_raw(nb) < cap {
+                    self.adj.push_neighbor_raw(nb, idx);
+                } else {
+                    let mut current = self.adj.neighbors_raw(nb);
+                    current.push(idx);
+                    let mut nb_candidates: Vec<(u32, u32)> = current
+                        .into_iter()
+                        .filter(|&n| n != nb)
+                        .map(|n| (self.sigs.distance(nb as usize, n as usize, self.dim), n))
+                        .collect();
+                    nb_candidates.sort_unstable_by_key(|&(_, id)| id);
+                    nb_candidates.dedup_by_key(|&mut (_, id)| id);
+                    nb_candidates.sort_unstable_by_key(|&(d, _)| d);
+                    let pruned = QuIVer::vamana_select(
+                        self.sigs, nb, &nb_candidates, self.m0, self.dim, self.alpha,
+                    );
+                    self.adj.set_neighbors_raw(nb, &pruned);
+                }
+            }
+
+            if let Some(t) = t_work {
+                self.profile.add(&self.profile.rev_work_ns, t.elapsed().as_nanos() as u64);
+            }
+        }
+        self.profile.nodes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 构图后 final-prune：把惰性追加导致 deg>m0 的节点并行收敛到 m0。
+    /// 每节点最多剪一次，O(n) 单次剪枝，相对原"每边重剪"成本可忽略。
+    fn final_prune(&self, node: u32) {
+        let deg = self.adj.degree_raw(node);
+        if deg <= self.m0 {
+            return;
+        }
+        let current = self.adj.neighbors_raw(node);
+        let mut cand: Vec<(u32, u32)> = current
+            .into_iter()
+            .filter(|&n| n != node)
+            .map(|n| (self.sigs.distance(node as usize, n as usize, self.dim), n))
+            .collect();
+        cand.sort_unstable_by_key(|&(_, id)| id);
+        cand.dedup_by_key(|&mut (_, id)| id);
+        cand.sort_unstable_by_key(|&(d, _)| d);
+        let pruned = QuIVer::vamana_select(self.sigs, node, &cand, self.m0, self.dim, self.alpha);
+        self.adj.set_neighbors_raw(node, &pruned);
     }
 }
 
@@ -1309,6 +1473,7 @@ impl QuIVer {
 
         let locks = StripedSpinLocks::new(n, self.m0);
         let concurrent_adj = ConcurrentFlatAdj::new(n, self.layer0.stride);
+        let profile = BuildProfile::new();
         let view = ExperimentalBuildView {
             adj: &concurrent_adj,
             n,
@@ -1318,18 +1483,28 @@ impl QuIVer {
             alpha: self.alpha,
             sigs: &self.bq_store,
             locks: &locks,
+            profile: &profile,
         };
 
+        let t_build = Instant::now();
         let chunk = 256usize;
         let rounds = n.div_ceil(chunk);
         for round in 0..rounds {
             let start = round * chunk;
             let end = ((round + 1) * chunk).min(n);
             (start..end).into_par_iter().for_each(|i| {
+                let prof = profile.enabled;
+                let t_bs = if prof { Some(Instant::now()) } else { None };
                 let mut visited = Bitset::new(n);
+                if let Some(t) = t_bs {
+                    profile.add(&profile.bitset_ns, t.elapsed().as_nanos() as u64);
+                }
                 view.connect_node_fast(i as u32, &mut visited);
             });
         }
+        // final-prune：把惰性追加导致 deg>m0 的节点并行收敛到 m0
+        (0..n as u32).into_par_iter().for_each(|node| view.final_prune(node));
+        profile.report(t_build.elapsed().as_secs_f64(), rayon::current_num_threads());
 
         concurrent_adj.freeze_into_flat(&mut self.layer0);
     }
@@ -1388,6 +1563,7 @@ impl QuIVer {
 
         let locks = StripedSpinLocks::new(n, self.m0);
         let concurrent_adj = ConcurrentFlatAdj::new(n, self.layer0.stride);
+        let profile = BuildProfile::new();
         let view = ExperimentalBuildView {
             adj: &concurrent_adj,
             n,
@@ -1397,15 +1573,22 @@ impl QuIVer {
             alpha: self.alpha,
             sigs: &self.bq_store,
             locks: &locks,
+            profile: &profile,
         };
 
+        let t_build = Instant::now();
         let chunk = 256usize;
         let rounds = n.div_ceil(chunk);
         for round in 0..rounds {
             let start = round * chunk;
             let end = ((round + 1) * chunk).min(n);
             (start..end).into_par_iter().for_each(|i| {
+                let prof = profile.enabled;
+                let t_bs = if prof { Some(Instant::now()) } else { None };
                 let mut visited = Bitset::new(n);
+                if let Some(t) = t_bs {
+                    profile.add(&profile.bitset_ns, t.elapsed().as_nanos() as u64);
+                }
                 if checked {
                     view.connect_node_checked(i as u32, &mut visited);
                 } else {
@@ -1413,6 +1596,9 @@ impl QuIVer {
                 }
             });
         }
+        // final-prune：fast 路径惰性追加后收敛到 m0；checked 路径 deg≤m0 时为空操作
+        (0..n as u32).into_par_iter().for_each(|node| view.final_prune(node));
+        profile.report(t_build.elapsed().as_secs_f64(), rayon::current_num_threads());
 
         concurrent_adj.freeze_into_flat(&mut self.layer0);
         if cfg!(debug_assertions)
