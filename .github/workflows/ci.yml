@@ -196,16 +196,10 @@ jobs:
           key: short-fuzz-${{ matrix.target }}
 
       - name: 安装 cargo-fuzz
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
-        continue-on-error: true
-
-      - name: Fallback 安装 cargo-fuzz
-        run: |
-          if ! cargo fuzz --version 2>/dev/null; then
-            cargo install cargo-fuzz --locked
-          fi
+        # install-action 会回退到 musl 预编译包，使 cargo-fuzz 错把 CI 主机识别为
+        # x86_64-unknown-linux-musl；ASan 与静态 musl 不兼容，因此从源码为实际
+        # x86_64-unknown-linux-gnu 主机安装。
+        run: cargo install cargo-fuzz --locked
 
       - name: 运行短时模糊测试 (${{ matrix.target }})
         run: |
