@@ -12,7 +12,8 @@
 //! - 精度边界与极端值
 
 use half::f16;
-use triviumdb::Database;
+use triviumdb::database::SearchConfig;
+use triviumdb::{Database, Filter};
 
 // ════════════════════════════════════════════════════════════════
 //  公共基础设施
@@ -110,6 +111,62 @@ fn F16_搜索_余弦相似度正确排序() {
     );
     // 第二名应是 near_target（余弦相似度 ≈ 0.99），不是 orthogonal（余弦 = 0）
     assert_eq!(results[1].payload["label"], "near_target");
+
+    cleanup(&path);
+}
+
+#[test]
+fn F16_Payload过滤在TopK截断前生效() {
+    let path = tmp_db("f16_filter_before_topk");
+    cleanup(&path);
+
+    let mut db = Database::<f16>::open(&path, F16_DIM).unwrap();
+    db.insert(
+        &f16_vec(&[1.0, 0.0, 0.0, 0.0]),
+        serde_json::json!({"tenant": "drop"}),
+    )
+    .unwrap();
+    db.insert(
+        &f16_vec(&[0.8, 0.6, 0.0, 0.0]),
+        serde_json::json!({"tenant": "drop"}),
+    )
+    .unwrap();
+    let first_keep = db
+        .insert(
+            &f16_vec(&[0.6, 0.8, 0.0, 0.0]),
+            serde_json::json!({"tenant": "keep"}),
+        )
+        .unwrap();
+    let second_keep = db
+        .insert(
+            &f16_vec(&[0.0, 1.0, 0.0, 0.0]),
+            serde_json::json!({"tenant": "keep"}),
+        )
+        .unwrap();
+    db.insert(
+        &f16_vec(&[-0.6, 0.8, 0.0, 0.0]),
+        serde_json::json!({"tenant": "keep"}),
+    )
+    .unwrap();
+
+    let config = SearchConfig {
+        top_k: 2,
+        expand_depth: 0,
+        min_score: -1.0,
+        force_brute_force: true,
+        payload_filter: Some(Filter::eq("tenant", serde_json::json!("keep"))),
+        ..Default::default()
+    };
+    let results = db
+        .search_advanced(&f16_vec(&[1.0, 0.0, 0.0, 0.0]), &config)
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        vec![first_keep, second_keep]
+    );
+    assert!(results.iter().all(|hit| hit.payload["tenant"] == "keep"));
 
     cleanup(&path);
 }
@@ -328,6 +385,57 @@ fn U64_搜索_汉明相似度正确排序() {
         results[1].id, id_near,
         "1 位差异的哈希应排第二（汉明距离 = 1）"
     );
+
+    cleanup(&path);
+}
+
+#[test]
+fn U64_Payload过滤在TopK截断前生效() {
+    let path = tmp_db("u64_filter_before_topk");
+    cleanup(&path);
+
+    let mut db = Database::<u64>::open(&path, U64_DIM).unwrap();
+    db.insert(&[u64::MAX, u64::MAX], serde_json::json!({"tenant": "drop"}))
+        .unwrap();
+    db.insert(
+        &[u64::MAX - 1, u64::MAX],
+        serde_json::json!({"tenant": "drop"}),
+    )
+    .unwrap();
+    let first_keep = db
+        .insert(
+            &[u64::MAX - 3, u64::MAX],
+            serde_json::json!({"tenant": "keep"}),
+        )
+        .unwrap();
+    let second_keep = db
+        .insert(
+            &[u64::MAX - 7, u64::MAX],
+            serde_json::json!({"tenant": "keep"}),
+        )
+        .unwrap();
+    db.insert(
+        &[u64::MAX - 15, u64::MAX],
+        serde_json::json!({"tenant": "keep"}),
+    )
+    .unwrap();
+
+    let config = SearchConfig {
+        top_k: 2,
+        expand_depth: 0,
+        min_score: 0.0,
+        force_brute_force: true,
+        payload_filter: Some(Filter::eq("tenant", serde_json::json!("keep"))),
+        ..Default::default()
+    };
+    let results = db.search_advanced(&[u64::MAX, u64::MAX], &config).unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+        vec![first_keep, second_keep]
+    );
+    assert!(results.iter().all(|hit| hit.payload["tenant"] == "keep"));
 
     cleanup(&path);
 }

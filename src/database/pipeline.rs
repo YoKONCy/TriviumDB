@@ -127,7 +127,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
             config.force_brute_force || (config.enable_advanced_pipeline && config.enable_sparse_residual);
         mt.ensure_vectors_cache(need_flat);
         recall_text(&mt, config, query_text, &mut seed_map);
-        recall_vector(&mt, config, query_vector, &mut seed_map);
+        recall_vector(&mut mt, config, query_vector, &mut seed_map);
         recall_residual(&mt, config, query_vector, &mut seed_map);
     }
 
@@ -257,7 +257,7 @@ fn recall_text<T: VectorType>(
 
 /// L2 + L3: 向量稠密召回（自适应路由 + 布隆预过滤）
 fn recall_vector<T: VectorType>(
-    mt: &MemTable<T>,
+    mt: &mut MemTable<T>,
     config: &SearchConfig,
     query_vector: Option<&[T]>,
     seed_map: &mut std::collections::HashMap<NodeId, f32>,
@@ -269,15 +269,6 @@ fn recall_vector<T: VectorType>(
 
     let dim = mt.dim();
 
-    // 构建 payload 过滤闭包
-    let filter_ref = config.payload_filter.as_ref();
-    let passes_filter = |id: NodeId| -> bool {
-        match filter_ref {
-            None => true,
-            Some(f) => mt.get_payload(id).is_some_and(|p| f.matches(p)),
-        }
-    };
-
     // ═══════════════════════════════════════════════════════
     // 动态引擎路由：
     // 1. QuIVer Vamana 图搜索（N >= 10,000 时由 ensure_vectors_cache 自动构建）
@@ -286,11 +277,26 @@ fn recall_vector<T: VectorType>(
     //    —— 需要连续 flat 数组，由 ensure_vectors_cache 在该路径下构建 merged 缓存
     // ═══════════════════════════════════════════════════════
     let vector_hits: Vec<SearchHit> = if !config.force_brute_force && mt.quiver().is_some() {
-        quiver_pipeline(mt, config, query_vector, &passes_filter)
+        let approximate_hits = quiver_pipeline(mt, config, query_vector);
+        if config.payload_filter.is_some() && approximate_hits.len() < config.top_k {
+            // QuIVer 的 BQ beam 候选池本身不感知 Payload。高选择性过滤可能令
+            // `ef_search` 池中不足 top_k，即使池外仍有匹配节点。仅在确实欠填时
+            // 物化连续缓存并回退精确扫描，兼顾常规冷路径与过滤结果完整性。
+            tracing::debug!(
+                returned = approximate_hits.len(),
+                requested = config.top_k,
+                "QuIVer 过滤后结果不足，回退精确暴力扫描 (filtered QuIVer underfilled; falling back to exact scan)"
+            );
+            mt.ensure_vectors_cache(true);
+            let vectors = mt.flat_vectors();
+            brute_force_pipeline(mt, config, query_vector, vectors, dim)
+        } else {
+            approximate_hits
+        }
     } else {
         // ensure_vectors_cache() 已在 execute_pipeline 中按需构建好 merged 缓存
         let vectors = mt.flat_vectors();
-        brute_force_pipeline(mt, config, query_vector, vectors, dim, &passes_filter)
+        brute_force_pipeline(mt, config, query_vector, vectors, dim)
     };
 
     for hit in vector_hits {
@@ -305,30 +311,19 @@ fn brute_force_pipeline<T: VectorType + Sync>(
     query_vector: &[T],
     vectors: &[T],
     dim: usize,
-    passes_filter: &(dyn Fn(NodeId) -> bool + Sync),
 ) -> Vec<SearchHit> {
     let bloom_mask = config
         .payload_filter
         .as_ref()
         .map(|f| f.extract_must_have_mask())
         .unwrap_or(0);
-    let fast_tags = mt.fast_tags_slice();
-    brute_force::search(
+    brute_force::search_filter_map(
         query_vector,
         vectors,
         dim,
         config.top_k,
         config.min_score,
-        |idx| {
-            let id = mt.get_id_by_index(idx);
-            if bloom_mask != 0
-                && idx < fast_tags.len()
-                && (fast_tags[idx] & bloom_mask) != bloom_mask
-            {
-                return 0; // True Negative
-            }
-            if passes_filter(id) { id } else { 0 }
-        },
+        |idx| eligible_node_id(mt, config.payload_filter.as_ref(), bloom_mask, idx),
     )
 }
 
@@ -342,7 +337,6 @@ fn quiver_pipeline<T: VectorType + Sync>(
     mt: &MemTable<T>,
     config: &SearchConfig,
     query_vector: &[T],
-    passes_filter: &(dyn Fn(NodeId) -> bool + Sync),
 ) -> Vec<SearchHit> {
     let quiver = mt.quiver().unwrap();
     let q_f32: Vec<f32> = query_vector.iter().map(|x| x.to_f32()).collect();
@@ -355,19 +349,31 @@ fn quiver_pipeline<T: VectorType + Sync>(
         rerank_limit: None,
     };
 
+    let filter_ref = config.payload_filter.as_ref();
+    let bloom_mask = filter_ref
+        .map(|filter| filter.extract_must_have_mask())
+        .unwrap_or(0);
+
     // 冷热分离精排回调：按 MemTable slot 索引**按需**从 mmap 零拷贝取回单条向量，
     // 转为 f32 写入复用缓冲区。整个查询只触达 ~ef 个候选，
     // 不再物化全量 f32 数组（不触发 merged 缓存），冷数据始终留在 OS PageCache。
     let vec_pool = mt.vec_pool();
     let raw_results = quiver.search(
         &q_f32,
-        |slot, buf| match vec_pool.get(slot) {
-            Some(v) => {
-                buf.clear();
-                buf.extend(v.iter().map(|x| x.to_f32()));
-                true
+        |slot, buf| {
+            // QuIVer 仍可穿过不匹配节点进行图导航，但只有满足过滤条件的候选
+            // 才进入 f32 精排与内部 top_k，避免固定 2× 过召回被无效候选占满。
+            if eligible_node_id(mt, filter_ref, bloom_mask, slot).is_none() {
+                return false;
             }
-            None => false,
+            match vec_pool.get(slot) {
+                Some(v) => {
+                    buf.clear();
+                    buf.extend(v.iter().map(|x| x.to_f32()));
+                    true
+                }
+                None => false,
+            }
         },
         &search_cfg,
     );
@@ -375,7 +381,9 @@ fn quiver_pipeline<T: VectorType + Sync>(
     // 应用 payload 过滤 + min_score 阈值
     let mut hits: Vec<SearchHit> = raw_results
         .into_iter()
-        .filter(|&(id, score)| score >= config.min_score && passes_filter(id))
+        .filter(|&(id, score)| {
+            score >= config.min_score && matches_payload_filter(mt, filter_ref, id)
+        })
         .map(|(id, score)| SearchHit {
             id,
             score,
@@ -410,13 +418,24 @@ fn recall_residual<T: VectorType>(
         None => return,
     };
 
+    let filter_ref = config.payload_filter.as_ref();
+    let bloom_mask = filter_ref
+        .map(|filter| filter.extract_must_have_mask())
+        .unwrap_or(0);
+
     let entity_vecs: Vec<Vec<f32>> = seed_map
         .keys()
         .filter_map(|&id| {
+            if !matches_payload_filter(mt, filter_ref, id) {
+                return None;
+            }
             mt.get_vector(id)
                 .map(|v| v.iter().map(|&x| x.to_f32()).collect())
         })
         .collect();
+    if entity_vecs.is_empty() {
+        return;
+    }
     let q_f32: Vec<f32> = query_vector.iter().map(|&x| x.to_f32()).collect();
 
     let (_, residual, residual_norm) =
@@ -431,13 +450,13 @@ fn recall_residual<T: VectorType>(
         );
         let r_orig: Vec<T> = residual.iter().map(|&x| T::from_f32(x)).collect();
         let dim = mt.dim();
-        let shadow_hits = brute_force::search(
+        let shadow_hits = brute_force::search_filter_map(
             &r_orig,
             mt.flat_vectors(),
             dim,
             config.top_k,
             config.min_score,
-            |idx| mt.get_id_by_index(idx),
+            |idx| eligible_node_id(mt, filter_ref, bloom_mask, idx),
         );
         for sh in shadow_hits {
             *seed_map.entry(sh.id).or_insert(0.0) += sh.score * 0.8; // 影子抑制衰减
@@ -454,18 +473,12 @@ fn aggregate_seeds<T: VectorType>(
 ) {
     let filter_ref = config.payload_filter.as_ref();
     for (&id, &score) in seed_map {
-        if score >= config.min_score {
-            let passes = match filter_ref {
-                None => mt.contains(id),
-                Some(f) => mt.get_payload(id).is_some_and(|p| f.matches(p)),
-            };
-            if passes {
-                let payload = mt
-                    .get_payload(id)
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                anchor_hits.push(SearchHit { id, score, payload });
-            }
+        if score >= config.min_score && matches_payload_filter(mt, filter_ref, id) {
+            let payload = mt
+                .get_payload(id)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            anchor_hits.push(SearchHit { id, score, payload });
         }
     }
     anchor_hits.sort_by(|a, b| {
@@ -474,6 +487,56 @@ fn aggregate_seeds<T: VectorType>(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     anchor_hits.truncate(config.top_k.max(15));
+}
+
+/// 检查一个逻辑节点是否仍然活跃并满足精确 Payload 条件。
+#[inline]
+fn matches_payload_filter<T: VectorType>(
+    mt: &MemTable<T>,
+    filter: Option<&crate::filter::Filter>,
+    id: NodeId,
+) -> bool {
+    if id == 0 {
+        return false;
+    }
+    match filter {
+        None => mt.contains(id),
+        Some(filter) => mt
+            .get_payload(id)
+            .is_some_and(|payload| filter.matches(payload)),
+    }
+}
+
+/// 将物理向量槽位映射为可参与召回的逻辑节点。
+///
+/// 顺序固定为：墓碑检查 → Bloom true-negative → 精确 Payload 判断。
+/// 返回 `None` 的槽位不会计算相似度，也不会占用任何 `top_k` 名额。
+#[inline]
+fn eligible_node_id<T: VectorType>(
+    mt: &MemTable<T>,
+    filter: Option<&crate::filter::Filter>,
+    bloom_mask: u64,
+    idx: usize,
+) -> Option<NodeId> {
+    let id = *mt.internal_indices().get(idx)?;
+    if id == 0 {
+        return None;
+    }
+    if bloom_mask != 0
+        && mt
+            .fast_tags_slice()
+            .get(idx)
+            .is_some_and(|tag| (*tag & bloom_mask) != bloom_mask)
+    {
+        return None;
+    }
+    match filter {
+        None => Some(id),
+        Some(filter) => mt
+            .get_payload(id)
+            .filter(|payload| filter.matches(payload))
+            .map(|_| id),
+    }
 }
 
 /// L9: DPP 多样性采样
@@ -537,6 +600,36 @@ mod tests {
             mt.insert_with_id(*id, vec, payload.clone()).unwrap();
         }
         mt
+    }
+
+    fn filter_regression_nodes() -> Vec<(u64, Vec<f32>, serde_json::Value)> {
+        vec![
+            (
+                10,
+                vec![1.0, 0.0],
+                serde_json::json!({"tenant": "drop", "rank": 0}),
+            ),
+            (
+                11,
+                vec![0.8, 0.6],
+                serde_json::json!({"tenant": "drop", "rank": 0}),
+            ),
+            (
+                12,
+                vec![0.6, 0.8],
+                serde_json::json!({"tenant": "keep", "rank": 1}),
+            ),
+            (
+                13,
+                vec![0.0, 1.0],
+                serde_json::json!({"tenant": "keep", "rank": 2}),
+            ),
+            (
+                14,
+                vec![-0.6, 0.8],
+                serde_json::json!({"tenant": "keep", "rank": 3}),
+            ),
+        ]
     }
 
     fn wrap(mt: MemTable<f32>) -> Arc<Mutex<MemTable<f32>>> {
@@ -668,7 +761,7 @@ mod tests {
         let query: Vec<f32> = vec![1.0, 0.0, 0.0];
         let mut seed_map = std::collections::HashMap::new();
 
-        recall_vector(&mt, &cfg, Some(&query), &mut seed_map);
+        recall_vector(&mut mt, &cfg, Some(&query), &mut seed_map);
 
         assert!(!seed_map.is_empty(), "应召回至少一个节点");
         // 节点 1 与 query 完全对齐，得分最高
@@ -686,7 +779,7 @@ mod tests {
         mt.ensure_vectors_cache(true);
         let cfg = default_config();
         let mut seed_map = std::collections::HashMap::new();
-        recall_vector(&mt, &cfg, None, &mut seed_map);
+        recall_vector(&mut mt, &cfg, None, &mut seed_map);
         assert!(seed_map.is_empty());
     }
 
@@ -709,13 +802,159 @@ mod tests {
         };
         let query = vec![1.0, 0.0, 0.0];
         let mut seed_map = std::collections::HashMap::new();
-        recall_vector(&mt, &cfg, Some(&query), &mut seed_map);
+        recall_vector(&mut mt, &cfg, Some(&query), &mut seed_map);
 
         assert!(seed_map.contains_key(&1));
         assert!(
             !seed_map.contains_key(&2),
             "node 2 应被 payload_filter 过滤"
         );
+    }
+
+    #[test]
+    fn test_recall_vector_filter_before_top_k() {
+        let mut mt = make_memtable(2, &filter_regression_nodes());
+        mt.ensure_vectors_cache(true);
+
+        let cfg = SearchConfig {
+            top_k: 2,
+            min_score: -1.0,
+            force_brute_force: true,
+            payload_filter: Some(Filter::eq("tenant", serde_json::json!("keep"))),
+            ..Default::default()
+        };
+        let mut seed_map = std::collections::HashMap::new();
+        recall_vector(&mut mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
+
+        assert_eq!(seed_map.len(), 2);
+        assert!(seed_map.contains_key(&12));
+        assert!(seed_map.contains_key(&13));
+        assert!(!seed_map.contains_key(&0));
+        assert!(!seed_map.contains_key(&10));
+        assert!(!seed_map.contains_key(&11));
+    }
+
+    #[test]
+    fn test_recall_vector_non_bloom_filter_before_top_k() {
+        let mut mt = make_memtable(2, &filter_regression_nodes());
+        mt.ensure_vectors_cache(true);
+
+        let cfg = SearchConfig {
+            top_k: 2,
+            min_score: -1.0,
+            force_brute_force: true,
+            payload_filter: Some(Filter::gt("rank", 0.0)),
+            ..Default::default()
+        };
+        let mut seed_map = std::collections::HashMap::new();
+        recall_vector(&mut mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
+
+        assert_eq!(seed_map.len(), 2);
+        assert!(seed_map.contains_key(&12));
+        assert!(seed_map.contains_key(&13));
+    }
+
+    #[test]
+    fn test_recall_vector_tombstone_does_not_consume_top_k() {
+        let mut mt = make_memtable(
+            2,
+            &[
+                (1, vec![1.0, 0.0], serde_json::json!({})),
+                (2, vec![-1.0, 0.0], serde_json::json!({})),
+                (3, vec![-0.8, 0.6], serde_json::json!({})),
+            ],
+        );
+        mt.delete(1).unwrap();
+        mt.ensure_vectors_cache(true);
+
+        let cfg = SearchConfig {
+            top_k: 1,
+            min_score: -1.0,
+            force_brute_force: true,
+            ..Default::default()
+        };
+        let mut seed_map = std::collections::HashMap::new();
+        recall_vector(&mut mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
+
+        assert_eq!(seed_map.len(), 1);
+        assert!(seed_map.contains_key(&3));
+        assert!(!seed_map.contains_key(&0));
+    }
+
+    #[test]
+    fn test_recall_vector_quiver_filters_before_internal_top_k() {
+        let mut mt = make_memtable(2, &filter_regression_nodes());
+        mt.build_quiver(&crate::index::quiver::QuIVerConfig::default());
+        assert!(mt.quiver().is_some());
+
+        let cfg = SearchConfig {
+            top_k: 2,
+            min_score: -1.0,
+            payload_filter: Some(Filter::eq("tenant", serde_json::json!("keep"))),
+            ..Default::default()
+        };
+        let mut seed_map = std::collections::HashMap::new();
+        recall_vector(&mut mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
+
+        assert_eq!(seed_map.len(), 2);
+        assert!(seed_map.contains_key(&12));
+        assert!(seed_map.contains_key(&13));
+    }
+
+    #[test]
+    fn test_recall_vector_quiver_high_selectivity_falls_back_to_exact_scan() {
+        let mut nodes: Vec<(u64, Vec<f32>, serde_json::Value)> = (1..=40)
+            .map(|id| (id, vec![1.0, 0.0], serde_json::json!({"tenant": "drop"})))
+            .collect();
+        nodes.extend([
+            (100, vec![0.0, 1.0], serde_json::json!({"tenant": "keep"})),
+            (101, vec![-0.8, 0.6], serde_json::json!({"tenant": "keep"})),
+            (102, vec![-1.0, 0.0], serde_json::json!({"tenant": "keep"})),
+        ]);
+        let mut mt = make_memtable(2, &nodes);
+        mt.build_quiver(&crate::index::quiver::QuIVerConfig::default());
+
+        let cfg = SearchConfig {
+            top_k: 2,
+            min_score: -1.0,
+            payload_filter: Some(Filter::eq("tenant", serde_json::json!("keep"))),
+            ..Default::default()
+        };
+        let approximate_hits = quiver_pipeline(&mt, &cfg, &[1.0, 0.0]);
+        assert!(
+            approximate_hits.len() < cfg.top_k,
+            "该数据集必须先复现 QuIVer 未过滤候选池欠填"
+        );
+        let mut seed_map = std::collections::HashMap::new();
+        recall_vector(&mut mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
+
+        assert_eq!(seed_map.len(), 2);
+        assert!(seed_map.contains_key(&100));
+        assert!(seed_map.contains_key(&101));
+    }
+
+    #[test]
+    fn test_recall_vector_bloom_preserves_signed_zero_equality() {
+        let mut mt = make_memtable(2, &[(1, vec![1.0, 0.0], serde_json::json!({"zero": -0.0}))]);
+        mt.ensure_vectors_cache(true);
+
+        let filter = Filter::eq("zero", serde_json::json!(0.0));
+        let bloom_mask = filter.extract_must_have_mask();
+        assert_ne!(bloom_mask, 0);
+        assert_eq!(mt.fast_tags_slice()[0] & bloom_mask, bloom_mask);
+
+        let cfg = SearchConfig {
+            top_k: 1,
+            min_score: -1.0,
+            force_brute_force: true,
+            payload_filter: Some(filter),
+            ..Default::default()
+        };
+        let mut seed_map = std::collections::HashMap::new();
+        recall_vector(&mut mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
+
+        assert_eq!(seed_map.len(), 1);
+        assert!(seed_map.contains_key(&1));
     }
 
     // ════════ recall_text ════════
@@ -781,6 +1020,40 @@ mod tests {
         let mut seed_map = std::collections::HashMap::new();
         recall_residual(&mt, &cfg, Some(&query), &mut seed_map);
         assert!(seed_map.is_empty());
+    }
+
+    #[test]
+    fn test_recall_residual_shadow_filters_before_top_k() {
+        let mut mt = make_memtable(
+            2,
+            &[
+                (1, vec![0.0, 1.0], serde_json::json!({"tenant": "keep"})),
+                (2, vec![1.0, 0.0], serde_json::json!({"tenant": "drop"})),
+                (3, vec![0.8, 0.6], serde_json::json!({"tenant": "drop"})),
+                (4, vec![0.6, 0.8], serde_json::json!({"tenant": "keep"})),
+                (5, vec![-0.6, 0.8], serde_json::json!({"tenant": "keep"})),
+            ],
+        );
+        mt.ensure_vectors_cache(true);
+
+        let cfg = SearchConfig {
+            top_k: 2,
+            min_score: -1.0,
+            enable_advanced_pipeline: true,
+            enable_sparse_residual: true,
+            fista_threshold: 0.0,
+            payload_filter: Some(Filter::eq("tenant", serde_json::json!("keep"))),
+            ..Default::default()
+        };
+        let mut seed_map = std::collections::HashMap::from([(1, 1.0)]);
+
+        recall_residual(&mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
+
+        assert_eq!(seed_map.len(), 2);
+        assert!(seed_map.contains_key(&1));
+        assert!(seed_map.contains_key(&4));
+        assert!(!seed_map.contains_key(&2));
+        assert!(!seed_map.contains_key(&3));
     }
 
     // ════════ apply_dpp ════════
@@ -949,6 +1222,31 @@ mod tests {
         let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].id, 1, "最相似节点应排第一");
+    }
+
+    #[test]
+    fn test_execute_pipeline_payload_filter_fills_top_k() {
+        let mt = wrap(make_memtable(2, &filter_regression_nodes()));
+        let hook: Arc<dyn SearchHook> = Arc::new(NoopHook);
+        let cfg = SearchConfig {
+            top_k: 2,
+            min_score: -1.0,
+            expand_depth: 0,
+            force_brute_force: true,
+            payload_filter: Some(Filter::eq("tenant", serde_json::json!("keep"))),
+            ..Default::default()
+        };
+        let mut ctx = HookContext::new();
+
+        let results =
+            execute_pipeline(&mt, &hook, None, Some(&[1.0, 0.0]), &cfg, &mut ctx).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            vec![12, 13]
+        );
+        assert!(results.iter().all(|hit| hit.payload["tenant"] == "keep"));
     }
 
     #[test]

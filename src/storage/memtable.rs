@@ -7,6 +7,23 @@ use crate::node::{Edge, NodeId};
 use crate::storage::vec_pool::VecPool;
 use std::collections::{HashMap, HashSet};
 
+/// 返回可安全用于自增分配器的下一个节点 ID。
+///
+/// `0` 是墓碑哨兵，`NodeId::MAX` 没有可表示的后继值，因此二者都不能作为
+/// 可分配 ID。集中校验可避免 debug panic、release 回绕以及由此产生的真实 ID 0。
+pub(crate) fn checked_next_node_id(id: NodeId) -> Result<NodeId> {
+    match id {
+        0 => Err(TriviumError::InvalidInput(
+            "节点 ID 0 为墓碑保留值 (Node ID 0 is reserved for tombstones)".into(),
+        )),
+        NodeId::MAX => Err(TriviumError::InvalidInput(
+            "节点 ID 空间已耗尽，不能分配 u64::MAX (Node ID space exhausted; u64::MAX cannot be assigned)"
+                .into(),
+        )),
+        _ => Ok(id + 1),
+    }
+}
+
 /// 计算给定 JSON 对象的行级特征布隆签名（共 64 位）
 fn calculate_json_signature(value: &serde_json::Value) -> u64 {
     let mut sig = 0u64;
@@ -32,19 +49,13 @@ fn flatten_and_hash_json(prefix: &str, value: &serde_json::Value, sig: &mut u64)
                 flatten_and_hash_json(prefix, v, sig);
             }
         }
-        serde_json::Value::String(s) => {
+        serde_json::Value::String(_)
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_) => {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            format!("{}:{}", prefix, s).hash(&mut hasher);
-            *sig |= 1u64 << (hasher.finish() % 64);
-        }
-        serde_json::Value::Bool(b) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            format!("{}:{}", prefix, b).hash(&mut hasher);
-            *sig |= 1u64 << (hasher.finish() % 64);
-        }
-        serde_json::Value::Number(n) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            format!("{}:{}", prefix, n).hash(&mut hasher);
+            let scalar = crate::filter::bloom_scalar_repr(value)
+                .expect("string/bool/number must have a Bloom representation");
+            format!("{}:{}", prefix, scalar).hash(&mut hasher);
             *sig |= 1u64 << (hasher.finish() % 64);
         }
         serde_json::Value::Null => {}
@@ -287,7 +298,8 @@ impl<T: VectorType> MemTable<T> {
         Self::validate_vector(vector)?;
 
         let id = self.next_id;
-        self.next_id += 1;
+        let next_id = checked_next_node_id(id)?;
+        self.next_id = next_id;
 
         // 1. 记录向量（优先尝试从空闲槽复活，否则推入尾部增量层）
         let sig = calculate_json_signature(&payload);
@@ -333,13 +345,15 @@ impl<T: VectorType> MemTable<T> {
     }
 
     /// 使用外部指定的 ID 插入节点（例如从外部知识库导入数据）。
-    /// 如果 ID 已存在会返回错误，并且会自动更新内部的 next_id 以免未来冲突。
+    /// 合法范围是 `1..NodeId::MAX`：0 保留为墓碑，MAX 没有可表示的后继 ID。
+    /// 如果 ID 已存在会返回错误，并自动更新 next_id 以免未来冲突。
     pub fn insert_with_id(
         &mut self,
         id: NodeId,
         vector: &[T],
         payload: serde_json::Value,
     ) -> Result<()> {
+        let next_id = checked_next_node_id(id)?;
         if self.payloads.contains_key(&id) {
             return Err(TriviumError::NodeAlreadyExists(id));
         }
@@ -373,7 +387,7 @@ impl<T: VectorType> MemTable<T> {
 
         // 防御性推进分配器指针，避免后续普通 insert 撞车
         if id >= self.next_id {
-            self.next_id = id + 1;
+            self.next_id = next_id;
         }
 
         // 增量更新 QuIVer 索引（如果已构建且未暂停同步）

@@ -1,5 +1,24 @@
 use serde_json::Value;
 
+/// 将可安全写入行级 Bloom 签名的标量规范化为稳定字符串。
+///
+/// `serde_json::Number` 认为浮点 `+0.0` 与 `-0.0` 相等，但它们的 Display
+/// 字符串不同；这里统一成 `0.0`，确保“精确相等”必然得到相同 Bloom 位。
+pub(crate) fn bloom_scalar_repr(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => {
+            if value.is_f64() && value.as_f64() == Some(0.0) {
+                Some("0.0".to_string())
+            } else {
+                Some(value.to_string())
+            }
+        }
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
 /// 过滤条件表达式
 /// 支持: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $startsWith, $contains,
 ///       $exists, $size, $all, $type, $and, $or
@@ -119,13 +138,15 @@ impl Filter {
     pub fn extract_must_have_mask(&self) -> u64 {
         match self {
             Filter::Eq(key, val) => {
+                // 行级签名只为标量叶子写入 `key:value` 位。
+                // 数组、对象和 Null 的展开方式无法安全表示“整体相等”，若仍生成查询位
+                // 会把真实匹配错误判成 Bloom true-negative，因此必须退化到精确过滤。
+                let Some(val_str) = bloom_scalar_repr(val) else {
+                    return 0;
+                };
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 use std::hash::{Hash, Hasher};
                 // Consistent with how fast_tags hashes values
-                let val_str = match val {
-                    Value::String(s) => s.clone(),
-                    v => v.to_string(),
-                };
                 format!("{}:{}", key, val_str).hash(&mut hasher);
                 1u64 << (hasher.finish() % 64)
             }

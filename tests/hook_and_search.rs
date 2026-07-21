@@ -480,6 +480,7 @@ fn COV3_18_payload_filter() {
         ..Default::default()
     };
     let hits = db.search_advanced(&[10.0, 0.0, 0.0, 0.0], &config).unwrap();
+    assert_eq!(hits.len(), 10, "应填满全部 10 个 group=A 的匹配结果");
     for h in &hits {
         let p = db.get_payload(h.id).unwrap();
         assert_eq!(p["group"], "A", "payload_filter 应只返回 group=A");

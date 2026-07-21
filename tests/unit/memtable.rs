@@ -7,6 +7,7 @@
 //!       register_node, register_tombstone, advance_next_id, 等全部公开方法
 
 use serde_json::json;
+use triviumdb::TriviumError;
 use triviumdb::storage::memtable::MemTable;
 
 const DIM: usize = 3;
@@ -91,6 +92,36 @@ fn insert_with_id_基础() {
     assert!(mt.contains(42));
     assert_eq!(mt.node_count(), 1);
     assert!(mt.next_id_value() > 42);
+}
+
+#[test]
+fn insert_with_id_拒绝墓碑保留ID零() {
+    let mut mt = make_mt();
+    let err = mt.insert_with_id(0, &[1.0, 2.0, 3.0], json!({}));
+
+    assert!(matches!(err, Err(TriviumError::InvalidInput(_))));
+    assert_eq!(mt.node_count(), 0);
+}
+
+#[test]
+fn insert_with_id_拒绝无后继的最大ID() {
+    let mut mt = make_mt();
+    let err = mt.insert_with_id(u64::MAX, &[1.0, 2.0, 3.0], json!({}));
+
+    assert!(matches!(err, Err(TriviumError::InvalidInput(_))));
+    assert_eq!(mt.node_count(), 0);
+    assert_eq!(mt.next_id_value(), 1);
+    assert_eq!(mt.insert(&[1.0, 2.0, 3.0], json!({})).unwrap(), 1);
+}
+
+#[test]
+fn insert_ID空间耗尽时原子失败() {
+    let mut mt = MemTable::<f32>::new_with_next_id(DIM, u64::MAX);
+    let err = mt.insert(&[1.0, 2.0, 3.0], json!({}));
+
+    assert!(matches!(err, Err(TriviumError::InvalidInput(_))));
+    assert_eq!(mt.node_count(), 0);
+    assert_eq!(mt.next_id_value(), u64::MAX);
 }
 
 #[test]

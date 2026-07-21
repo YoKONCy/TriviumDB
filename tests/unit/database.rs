@@ -8,7 +8,7 @@
 //!       find_nodes_by_field, register_property_index
 
 use serde_json::json;
-use triviumdb::Database;
+use triviumdb::{Database, TriviumError};
 
 fn temp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join(format!("tdb_unit_{}", name));
@@ -70,6 +70,38 @@ fn insert_with_id_和_get() {
     let node = db.get(42).unwrap();
     assert_eq!(node.vector, vec![1.0, 0.0, 0.0]);
     assert_eq!(node.id, 42);
+}
+
+#[test]
+fn insert_with_id_拒绝墓碑保留ID零() {
+    let mut db = open_db("insert_zero_id");
+    let err = db.insert_with_id(0, &[1.0, 0.0, 0.0], json!({}));
+
+    assert!(matches!(err, Err(TriviumError::InvalidInput(_))));
+    assert_eq!(db.node_count(), 0);
+}
+
+#[test]
+fn insert_with_id_拒绝无后继的最大ID() {
+    let mut db = open_db("insert_max_id");
+    let err = db.insert_with_id(u64::MAX, &[1.0, 0.0, 0.0], json!({}));
+
+    assert!(matches!(err, Err(TriviumError::InvalidInput(_))));
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.insert(&[1.0, 0.0, 0.0], json!({})).unwrap(), 1);
+}
+
+#[test]
+fn insert_在最大可用ID后返回空间耗尽且不写入() {
+    let mut db = open_db("insert_exhausted_id_space");
+    db.insert_with_id(u64::MAX - 1, &[1.0, 0.0, 0.0], json!({}))
+        .unwrap();
+
+    let err = db.insert(&[0.0, 1.0, 0.0], json!({}));
+    assert!(matches!(err, Err(TriviumError::InvalidInput(_))));
+    assert_eq!(db.node_count(), 1);
+    assert!(db.contains(u64::MAX - 1));
+    assert!(!db.contains(0));
 }
 
 #[test]
@@ -430,6 +462,41 @@ fn tx_insert_with_id() {
         tx.commit().unwrap();
     }
     assert!(db.contains(100));
+}
+
+#[test]
+fn tx_insert_with_id_拒绝墓碑保留ID零() {
+    let mut db = open_db("tx_insert_zero_id");
+    let mut tx = db.begin_tx();
+    tx.insert_with_id(0, &[1.0, 0.0, 0.0], json!({}));
+
+    assert!(matches!(tx.commit(), Err(TriviumError::InvalidInput(_))));
+    assert_eq!(db.node_count(), 0);
+}
+
+#[test]
+fn tx_insert_with_id_拒绝无后继的最大ID且保持原子性() {
+    let mut db = open_db("tx_insert_max_id");
+    let mut tx = db.begin_tx();
+    tx.insert_with_id(u64::MAX, &[1.0, 0.0, 0.0], json!({}));
+    tx.insert(&[0.0, 1.0, 0.0], json!({}));
+
+    assert!(matches!(tx.commit(), Err(TriviumError::InvalidInput(_))));
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.insert(&[1.0, 0.0, 0.0], json!({})).unwrap(), 1);
+}
+
+#[test]
+fn tx_最大可用ID后自动分配失败且保持原子性() {
+    let mut db = open_db("tx_exhausted_id_space");
+    let mut tx = db.begin_tx();
+    tx.insert_with_id(u64::MAX - 1, &[1.0, 0.0, 0.0], json!({}));
+    tx.insert(&[0.0, 1.0, 0.0], json!({}));
+
+    assert!(matches!(tx.commit(), Err(TriviumError::InvalidInput(_))));
+    assert_eq!(db.node_count(), 0);
+    assert!(!db.contains(u64::MAX - 1));
+    assert!(!db.contains(0));
 }
 
 #[test]

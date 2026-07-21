@@ -9,7 +9,7 @@ use crate::VectorType;
 use crate::database::Database;
 use crate::error::Result;
 use crate::node::NodeId;
-use crate::storage::memtable::MemTable;
+use crate::storage::memtable::{MemTable, checked_next_node_id};
 use crate::storage::wal::WalEntry;
 
 use super::lock_or_recover;
@@ -35,7 +35,7 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
                 let _ = mt.raw_insert(id, &vector, payload_val);
             }
             // 无论是否跳过，都必须推进 next_id 防止后续 insert 复用已物化的 ID
-            mt.advance_next_id(id + 1);
+            mt.advance_next_id(id.checked_add(1).unwrap_or(NodeId::MAX));
         }
         WalEntry::Link {
             src,
@@ -335,11 +335,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                             });
                         }
                     }
-                    pre_assigned_ids.push(Some(sim_next_id));
-                    pending_ids.insert(sim_next_id);
-                    sim_next_id += 1;
+                    let assigned_id = sim_next_id;
+                    let next_id = checked_next_node_id(assigned_id)?;
+                    pre_assigned_ids.push(Some(assigned_id));
+                    pending_ids.insert(assigned_id);
+                    sim_next_id = next_id;
                 }
                 TxOp::InsertWithId { id, vector, .. } => {
+                    let next_id = checked_next_node_id(*id)?;
                     if check_exists!(id) {
                         return Err(crate::error::TriviumError::NodeAlreadyExists(*id));
                     }
@@ -360,7 +363,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     pre_assigned_ids.push(Some(*id));
                     pending_ids.insert(*id);
                     if *id >= sim_next_id {
-                        sim_next_id = *id + 1;
+                        sim_next_id = next_id;
                     }
                 }
                 TxOp::Link { src, dst, .. } => {

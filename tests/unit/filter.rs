@@ -253,6 +253,37 @@ fn bloom_mask_eq产生非零掩码() {
 }
 
 #[test]
+fn bloom_mask_eq仅为安全标量生成掩码() {
+    assert_ne!(
+        Filter::eq("enabled", json!(true)).extract_must_have_mask(),
+        0
+    );
+    assert_ne!(Filter::eq("count", json!(3)).extract_must_have_mask(), 0);
+
+    assert_eq!(
+        Filter::eq("items", json!([1, 2])).extract_must_have_mask(),
+        0
+    );
+    assert_eq!(
+        Filter::eq("meta", json!({"kind": "x"})).extract_must_have_mask(),
+        0
+    );
+    assert_eq!(
+        Filter::eq("missing", json!(null)).extract_must_have_mask(),
+        0
+    );
+}
+
+#[test]
+fn bloom_mask_浮点正负零使用相同规范表示() {
+    let positive_zero = Filter::eq("zero", json!(0.0)).extract_must_have_mask();
+    let negative_zero = Filter::eq("zero", json!(-0.0)).extract_must_have_mask();
+
+    assert_ne!(positive_zero, 0);
+    assert_eq!(positive_zero, negative_zero);
+}
+
+#[test]
 fn bloom_mask_and合并多个掩码() {
     let f = Filter::and(vec![
         Filter::eq("role", json!("admin")),
