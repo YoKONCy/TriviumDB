@@ -31,3 +31,6 @@ doc = false
 name = "fuzz_filter_parse"
 path = "fuzz_targets/fuzz_filter_parse.rs"
 doc = false
+
+# cargo-fuzz 作为独立 workspace 构建，避免被父级 workspace 发现后拒绝运行。
+[workspace]
