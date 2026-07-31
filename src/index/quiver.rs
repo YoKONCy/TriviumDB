@@ -433,6 +433,8 @@ struct ExperimentalBuildView<'a> {
     sigs: &'a Bq2Store,
     locks: &'a StripedSpinLocks,
     profile: &'a BuildProfile,
+    /// 反向剪枝模式：true=旧的"每条边全量剪枝"(A/B对照用)，false=惰性剪枝(默认)
+    eager: bool,
 }
 
 impl ExperimentalBuildView<'_> {
@@ -618,7 +620,25 @@ impl ExperimentalBuildView<'_> {
             // 惰性剪枝：邻居表未满则直接追加(O(deg))，仅当容量用尽才触发一次完整剪枝。
             // 邻接表 stride=m0*2+1 留有 2× headroom，使昂贵的 vamana_select(O(deg²))
             // 从"每条反向边都跑"降为"约每 m0 条才跑一次"，砍掉构图主成本。
-            if !self.adj.contains_raw(nb, idx) {
+            // eager=true 时恢复旧的"每条边全量剪枝"行为，用于 recall A/B 对照。
+            if self.eager {
+                let mut current = self.adj.neighbors_raw(nb);
+                if !current.contains(&idx) {
+                    current.push(idx);
+                }
+                let mut nb_candidates: Vec<(u32, u32)> = current
+                    .into_iter()
+                    .filter(|&n| n != nb)
+                    .map(|n| (self.sigs.distance(nb as usize, n as usize, self.dim), n))
+                    .collect();
+                nb_candidates.sort_unstable_by_key(|&(_, id)| id);
+                nb_candidates.dedup_by_key(|&mut (_, id)| id);
+                nb_candidates.sort_unstable_by_key(|&(d, _)| d);
+                let pruned = QuIVer::vamana_select(
+                    self.sigs, nb, &nb_candidates, self.m0, self.dim, self.alpha,
+                );
+                self.adj.set_neighbors_raw(nb, &pruned);
+            } else if !self.adj.contains_raw(nb, idx) {
                 if self.adj.degree_raw(nb) < cap {
                     self.adj.push_neighbor_raw(nb, idx);
                 } else {
@@ -1484,6 +1504,7 @@ impl QuIVer {
             sigs: &self.bq_store,
             locks: &locks,
             profile: &profile,
+            eager: std::env::var("TRIVIUM_EAGER_PRUNE").as_deref() == Ok("1"),
         };
 
         let t_build = Instant::now();
@@ -1574,6 +1595,7 @@ impl QuIVer {
             sigs: &self.bq_store,
             locks: &locks,
             profile: &profile,
+            eager: std::env::var("TRIVIUM_EAGER_PRUNE").as_deref() == Ok("1"),
         };
 
         let t_build = Instant::now();

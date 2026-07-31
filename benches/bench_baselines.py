@@ -43,9 +43,25 @@ GT_PATH = os.environ.get("TRIVIUM_ANN_GT", os.path.join(PROJECT_DIR, "cohere_gro
 #   - M × ef_c 交叉扫描：覆盖低/中/高构图质量
 #   - ef_search 密扫，画 Recall-QPS Pareto 曲线
 # 注意: HNSW 的最大度数 = 2*M，所以 M=32 ↔ QuIVer m=32（最大度 64）
-EF_CONSTRUCTION_VALUES = [64, 128, 168]
-M_VALUES = [8, 16, 32, 48]
-EF_SEARCH_VALUES = [10, 20, 40, 80, 120, 200, 400, 600, 800]
+def _env_int_list(key, default):
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    return [int(x) for x in raw.split(",") if x.strip()]
+
+# MT 线程数：容器内 os.cpu_count() 返回宿主全部核（会导致超额订阅），
+# 默认改用 cgroup 实际可用核数；可用 TRIVIUM_MT_THREADS 覆盖（对齐论文 16T）
+try:
+    _AVAIL_CPUS = len(os.sched_getaffinity(0))
+except AttributeError:
+    _AVAIL_CPUS = os.cpu_count()
+    if not _AVAIL_CPUS:
+        _AVAIL_CPUS = 8
+MT_THREADS = int(os.environ.get("TRIVIUM_MT_THREADS", str(_AVAIL_CPUS)))
+
+EF_CONSTRUCTION_VALUES = _env_int_list("TRIVIUM_BL_EFC", [64, 128, 168])
+M_VALUES = _env_int_list("TRIVIUM_BL_M", [8, 16, 32, 48])
+EF_SEARCH_VALUES = _env_int_list("TRIVIUM_BL_EF", [10, 20, 40, 80, 120, 200, 400, 600, 800])
 
 # === FAISS IVF-PQ 参数 ===
 NLIST_VALUES = [256, 1024, 4096]
@@ -57,7 +73,7 @@ NPROBE_VALUES = [1, 4, 8, 16, 32, 64, 128, 256]
 VSAG_MAX_DEGREE_VALUES = [8, 16, 32, 48]
 VSAG_EF_CONSTRUCTION_VALUES = [64, 128, 168]
 VSAG_EF_SEARCH_VALUES = [10, 20, 40, 80, 120, 200, 400, 600, 800]
-VSAG_BATCH_THREADS = int(os.environ.get("VSAG_BATCH_THREADS", str(os.cpu_count() or 8)))
+VSAG_BATCH_THREADS = int(os.environ.get("VSAG_BATCH_THREADS", str(MT_THREADS)))
 VSAG_HGRAPH_BASE_QUANTIZATION_VALUES = ["sq8", "sq8_reorder_fp32"]
 
 # ============================================================
@@ -188,7 +204,7 @@ def bench_hnswlib(train: np.ndarray, queries: np.ndarray, gt: np.ndarray):
             print(f"\n--- hnswlib M={M}, ef_c={ef_c} ---")
             idx = hnswlib.Index(space='cosine', dim=DIM)
             idx.init_index(max_elements=n_train, ef_construction=ef_c, M=M)
-            idx.set_num_threads(os.cpu_count() or 8)
+            idx.set_num_threads(MT_THREADS)
 
             t0 = time.perf_counter()
             idx.add_items(train, np.arange(n_train))
@@ -213,7 +229,7 @@ def bench_hnswlib(train: np.ndarray, queries: np.ndarray, gt: np.ndarray):
                 recall = compute_recall(labels_1t, gt)
 
                 # 多线程
-                idx.set_num_threads(os.cpu_count() or 8)
+                idx.set_num_threads(MT_THREADS)
                 _, qps_mt, _ = measure_qps(
                     lambda q: idx.knn_query(q, k=K)[0], queries
                 )
@@ -274,7 +290,7 @@ def bench_faiss_hnsw(train: np.ndarray, queries: np.ndarray, gt: np.ndarray):
                 recall = compute_recall(labels_1t, gt)
 
                 # 多线程
-                faiss.omp_set_num_threads(os.cpu_count() or 8)
+                faiss.omp_set_num_threads(MT_THREADS)
                 _, qps_mt, _ = measure_qps(
                     lambda q: idx.search(q, K)[1], queries_norm
                 )
@@ -332,7 +348,7 @@ def bench_faiss_ivfpq(train: np.ndarray, queries: np.ndarray, gt: np.ndarray):
                     lambda q: idx.search(q, K)[1], queries_norm
                 )
                 recall = compute_recall(labels_1t, gt)
-                faiss.omp_set_num_threads(os.cpu_count() or 8)
+                faiss.omp_set_num_threads(MT_THREADS)
                 _, qps_mt, _ = measure_qps(
                     lambda q: idx.search(q, K)[1], queries_norm
                 )
@@ -423,7 +439,7 @@ def bench_faiss_ivfpq(train: np.ndarray, queries: np.ndarray, gt: np.ndarray):
                     )
                     recall = compute_recall(labels_1t, gt)
 
-                    faiss.omp_set_num_threads(os.cpu_count() or 8)
+                    faiss.omp_set_num_threads(MT_THREADS)
                     _, qps_mt, _ = measure_qps(
                         lambda q: refine_index.search(q, K)[1], queries_norm
                     )
@@ -470,7 +486,7 @@ def bench_usearch(train: np.ndarray, queries: np.ndarray, gt: np.ndarray):
             print(header)
             print("-" * len(header))
 
-            n_threads = os.cpu_count() or 8
+            n_threads = MT_THREADS
             for ef in EF_SEARCH_VALUES:
                 idx.expansion_search = ef
 
@@ -694,7 +710,7 @@ def main():
             print(f"[警告] BASELINE_START={start_from} 不在列表中，忽略")
 
     print(f"\n将运行: {', '.join(names)}")
-    print(f"硬件: {os.cpu_count()} 核")
+    print(f"硬件: MT={MT_THREADS} 线程, cgroup 可用 {_AVAIL_CPUS} 核 (宿主 {os.cpu_count()})")
 
     for name in names:
         fn = ALL_BASELINES.get(name)

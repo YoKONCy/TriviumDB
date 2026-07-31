@@ -275,24 +275,68 @@ fn main() {
 
     let t_build = Instant::now();
     let slot_idxs: Vec<usize> = (0..ids.len()).collect();
+
+    // 增量更新实验（D 实验）：TRIVIUM_ANN_INCREMENTAL=f 表示先批量构建前 f% 的向量，
+    // 再把剩余 (100-f)% 通过 insert() 逐条增量插入。f=100（默认）即纯批量构建。
+    // 用于测量"增量插入图"相对"全量重建图"的 recall 衰减，佐证 25% 重建阈值。
+    let incr_frac = env_usize("TRIVIUM_ANN_INCREMENTAL", 100).clamp(1, 100);
+    let batch_n = if incr_frac >= 100 {
+        n_train
+    } else {
+        (n_train * incr_frac / 100).max(1)
+    };
+    let batch_data = &train_data[..batch_n * dim];
+    let batch_ids = &ids[..batch_n];
+    let batch_slots = &slot_idxs[..batch_n];
+    if batch_n < n_train {
+        println!(
+            "增量模式: 批量构建前 {}% ({} 条) + 增量插入剩余 {} 条",
+            incr_frac,
+            batch_n,
+            n_train - batch_n
+        );
+    }
+
     match std::env::var("TRIVIUM_BQ_HNSW_EXPERIMENTAL").as_deref() {
         Ok("2-checked") => {
             println!("使用类型化校验并发构图路径");
-            index.batch_build_experimental_v2_checked(train_data, &ids, &slot_idxs);
+            index.batch_build_experimental_v2_checked(batch_data, batch_ids, batch_slots);
         }
         Ok("1") => {
             println!("使用早期反向剪枝并行构图路径（旧版）");
-            index.batch_build_experimental(train_data, &ids, &slot_idxs);
+            index.batch_build_experimental(batch_data, batch_ids, batch_slots);
         }
         Ok("serial") => {
             println!("使用串行构图路径（旧版，仅用于对照）");
-            index.batch_build(train_data, &ids, &slot_idxs);
+            index.batch_build(batch_data, batch_ids, batch_slots);
         }
         _ => {
             println!("使用并发构图路径（默认）");
-            index.batch_build_experimental_v2(train_data, &ids, &slot_idxs);
+            index.batch_build_experimental_v2(batch_data, batch_ids, batch_slots);
         }
     }
+
+    // 增量插入剩余部分
+    if batch_n < n_train {
+        let t_incr = Instant::now();
+        let mut lcg = 0x2545_F491_4F6C_DD1Du64;
+        for i in batch_n..n_train {
+            index.insert(
+                &train_data[i * dim..(i + 1) * dim],
+                ids[i],
+                slot_idxs[i],
+                &mut lcg,
+            );
+        }
+        let incr_time = t_incr.elapsed().as_secs_f64();
+        println!(
+            "增量插入完成! {} 条耗时: {:.2}s ({:.0} vecs/s, 单线程)",
+            n_train - batch_n,
+            incr_time,
+            (n_train - batch_n) as f64 / incr_time
+        );
+    }
+
     let build_time = t_build.elapsed().as_secs_f64();
     let build_vecs_per_sec = n_train as f64 / build_time;
     println!("构建完成! 耗时: {:.2}s ({:.0} vecs/s)", build_time, build_vecs_per_sec);
@@ -369,9 +413,6 @@ fn main() {
     println!("Exact Flat 多线程: QPS={:.1}", exact_parallel_qps);
 
     // ── QuIVer 搜索 ──
-    println!("\n{:<8} {:>10} {:>12} {:>10} {:>10}", "ef", "Recall@10", "MT-QPS", "lat(ms)", "vs BF");
-    println!("{}", "-".repeat(54));
-
     let ef_values = std::env::var("TRIVIUM_ANN_EF")
         .ok()
         .map(|value| {
@@ -383,39 +424,68 @@ fn main() {
         .filter(|values| !values.is_empty())
         .unwrap_or_else(|| vec![64, 128, 256, 512, 1024]);
 
+    // rerank_limit 扫描：固定 ef 下精排候选数对 recall 的影响（C 实验）。
+    // 设置 TRIVIUM_ANN_RERANK=10,20,50,... 时启用内层扫描（复用同一个图，避免重复构建）；
+    // 未设置时退化为 None（rerank_limit=ef_search，即原始行为）。
+    let rerank_values: Vec<Option<usize>> = std::env::var("TRIVIUM_ANN_RERANK")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|item| item.trim().parse::<usize>().ok())
+                .map(Some)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec![None]);
+
+    println!(
+        "\n{:<8} {:>8} {:>10} {:>12} {:>10} {:>10}",
+        "ef", "rerank", "Recall@10", "MT-QPS", "lat(ms)", "vs BF"
+    );
+    println!("{}", "-".repeat(62));
+
     for ef in ef_values {
-        let search_cfg = QuIVerSearchConfig {
-            top_k,
-            ef_search: ef,
-            rerank_limit: None,
-        };
+        for &rr in &rerank_values {
+            let search_cfg = QuIVerSearchConfig {
+                top_k,
+                ef_search: ef,
+                rerank_limit: rr,
+            };
 
-        let t_search = Instant::now();
-        let hits: usize = (0..n_test)
-            .into_par_iter()
-            .map(|i| {
-                let q = &test_data[i * dim..(i + 1) * dim];
-                let res = index.search_flat(q, train_data, &search_cfg);
-                let gt_set = &eval_gts[i];
+            let t_search = Instant::now();
+            let hits: usize = (0..n_test)
+                .into_par_iter()
+                .map(|i| {
+                    let q = &test_data[i * dim..(i + 1) * dim];
+                    let res = index.search_flat(q, train_data, &search_cfg);
+                    let gt_set = &eval_gts[i];
 
-                res.iter().filter(|&&(id, _)| gt_set.contains(&id)).count()
-            })
-            .sum();
-        let total = n_test * top_k;
-        let elapsed = t_search.elapsed().as_secs_f64();
-        let qps = n_test as f64 / elapsed;
-        let recall = hits as f64 / total as f64;
-        let lat_ms = elapsed / n_test as f64 * 1000.0;
-        let speedup = qps / exact_single_qps;
+                    res.iter().filter(|&&(id, _)| gt_set.contains(&id)).count()
+                })
+                .sum();
+            let total = n_test * top_k;
+            let elapsed = t_search.elapsed().as_secs_f64();
+            let qps = n_test as f64 / elapsed;
+            let recall = hits as f64 / total as f64;
+            let lat_ms = elapsed / n_test as f64 * 1000.0;
+            let speedup = qps / exact_single_qps;
 
-        println!(
-            "ef={:<5} {:>9.2}% {:>12.0} {:>9.2} {:>9.1}x",
-            ef,
-            recall * 100.0,
-            qps,
-            lat_ms,
-            speedup,
-        );
+            // rerank=ef 表示未限制（None），打印为 "ef" 便于区分
+            let rr_label = match rr {
+                Some(v) => v.to_string(),
+                None => format!("ef({})", ef),
+            };
+            println!(
+                "ef={:<5} {:>8} {:>9.2}% {:>12.0} {:>9.2} {:>9.1}x",
+                ef,
+                rr_label,
+                recall * 100.0,
+                qps,
+                lat_ms,
+                speedup,
+            );
+        }
     }
 
     println!("\n构图速率: {:.0} vecs/s", build_vecs_per_sec);

@@ -488,6 +488,37 @@ fn COV3_18_payload_filter() {
     cleanup(&path);
 }
 
+#[test]
+fn payload_filter_applies_before_top_k() {
+    let path = tmp_db("payload_filter_top_k");
+    let mut db = Database::<f32>::open(&path, 2).unwrap();
+    for (vector, group) in [
+        ([1.0, 0.0], "drop"),
+        ([0.8, 0.6], "drop"),
+        ([0.6, 0.8], "keep"),
+        ([0.0, 1.0], "keep"),
+        ([-0.6, 0.8], "keep"),
+    ] {
+        db.insert(&vector, serde_json::json!({"group": group}))
+            .unwrap();
+    }
+
+    let config = SearchConfig {
+        top_k: 2,
+        expand_depth: 0,
+        min_score: -1.0,
+        force_brute_force: true,
+        payload_filter: Some(triviumdb::Filter::eq("group", "keep".into())),
+        ..Default::default()
+    };
+    let hits = db.search_advanced(&[1.0, 0.0], &config).unwrap();
+
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().all(|hit| hit.payload["group"] == "keep"));
+
+    cleanup(&path);
+}
+
 /// tql_mut CREATE + edge
 #[test]
 fn COV3_19_tql_create_with_edge() {
