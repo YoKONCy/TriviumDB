@@ -1539,7 +1539,7 @@ impl QuIVer {
     /// 获取图的入口节点索引（**仅限实验**）。
     #[cfg(feature = "ablation")]
     pub fn ablation_entry_point(&self) -> u32 {
-        self.entry_point as u32
+        self.entry_point
     }
 
     fn batch_build_experimental_v2_impl(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize], checked: bool) {

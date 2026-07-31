@@ -196,16 +196,7 @@ jobs:
           key: short-fuzz-${{ matrix.target }}
 
       - name: 安装 cargo-fuzz
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
-        continue-on-error: true
-
-      - name: Fallback 安装 cargo-fuzz
-        run: |
-          if ! cargo fuzz --version 2>/dev/null; then
-            cargo install cargo-fuzz --locked
-          fi
+        run: cargo install cargo-fuzz --locked
 
       - name: 运行短时模糊测试 (${{ matrix.target }})
         run: |
@@ -286,17 +277,21 @@ jobs:
       - name: 安装 cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: 生成覆盖率报告并执行 80% 门禁
+      - name: 生成覆盖率数据
         run: |
           cargo llvm-cov clean --workspace
           # --lib --tests: 只收集库代码和测试的覆盖率，排除 bench target
           # （重型 benchmark 会导致 CI 超时且不贡献库覆盖率）
           # --exclude triviumdb-cli: CLI/TUI 工具是独立交付物，不计入核心库 80% 门禁
-          cargo llvm-cov --workspace --exclude triviumdb-cli --lib --tests --lcov --output-path lcov.info --fail-under-lines 80 -- --test-threads=1
-          cargo llvm-cov report --workspace --exclude triviumdb-cli --html --output-dir target/llvm-cov/html
-          cargo llvm-cov report --workspace --exclude triviumdb-cli
+          cargo llvm-cov --workspace --exclude triviumdb-cli --lib --tests --lcov --output-path lcov.info -- --test-threads=1
+          cargo llvm-cov report --html --output-dir target/llvm-cov/html
+          cargo llvm-cov report
+
+      - name: 执行 80% 覆盖率门禁
+        run: cargo llvm-cov report --fail-under-lines 80
 
       - name: 上传覆盖率报告
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
