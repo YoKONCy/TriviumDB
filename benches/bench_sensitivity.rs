@@ -49,7 +49,12 @@ struct DataSet {
 fn load_dataset() -> DataSet {
     let name = env_string("TRIVIUM_ANN_NAME", "cohere-1m");
     let (train_path, test_path, gt_path, dim) = match name.as_str() {
-        "minilm-384" => ("minilm_train.f32", "minilm_test.f32", "minilm_groundtruth.i32", 384),
+        "minilm-384" => (
+            "minilm_train.f32",
+            "minilm_test.f32",
+            "minilm_groundtruth.i32",
+            384,
+        ),
         "dbpedia-1536" => (
             "dbpedia_openai_train.f32",
             "dbpedia_openai_test.f32",
@@ -98,18 +103,68 @@ fn load_dataset() -> DataSet {
             "random_groundtruth.i32",
             768,
         ),
-        "sphere-1m" => ("sphere_train.f32", "sphere_test.f32", "sphere_groundtruth.i32", 768),
+        "sphere-1m" => (
+            "sphere_train.f32",
+            "sphere_test.f32",
+            "sphere_groundtruth.i32",
+            768,
+        ),
         // VIBE 768-d 同维数据集
-        "arxiv-nomic" => ("arxiv_nomic_train.f32", "arxiv_nomic_test.f32", "arxiv_nomic_groundtruth.i32", 768),
-        "ccnews-nomic" => ("ccnews_nomic_train.f32", "ccnews_nomic_test.f32", "ccnews_nomic_groundtruth.i32", 768),
-        "coco-nomic" => ("coco_nomic_train.f32", "coco_nomic_test.f32", "coco_nomic_groundtruth.i32", 768),
-        "codesearch-jina" => ("codesearch_jina_train.f32", "codesearch_jina_test.f32", "codesearch_jina_groundtruth.i32", 768),
-        "gooaq-roberta" => ("gooaq_roberta_train.f32", "gooaq_roberta_test.f32", "gooaq_roberta_groundtruth.i32", 768),
-        "landmark-nomic" => ("landmark_nomic_train.f32", "landmark_nomic_test.f32", "landmark_nomic_groundtruth.i32", 768),
-        "landmark-dino" => ("landmark_dino_train.f32", "landmark_dino_test.f32", "landmark_dino_groundtruth.i32", 768),
+        "arxiv-nomic" => (
+            "arxiv_nomic_train.f32",
+            "arxiv_nomic_test.f32",
+            "arxiv_nomic_groundtruth.i32",
+            768,
+        ),
+        "ccnews-nomic" => (
+            "ccnews_nomic_train.f32",
+            "ccnews_nomic_test.f32",
+            "ccnews_nomic_groundtruth.i32",
+            768,
+        ),
+        "coco-nomic" => (
+            "coco_nomic_train.f32",
+            "coco_nomic_test.f32",
+            "coco_nomic_groundtruth.i32",
+            768,
+        ),
+        "codesearch-jina" => (
+            "codesearch_jina_train.f32",
+            "codesearch_jina_test.f32",
+            "codesearch_jina_groundtruth.i32",
+            768,
+        ),
+        "gooaq-roberta" => (
+            "gooaq_roberta_train.f32",
+            "gooaq_roberta_test.f32",
+            "gooaq_roberta_groundtruth.i32",
+            768,
+        ),
+        "landmark-nomic" => (
+            "landmark_nomic_train.f32",
+            "landmark_nomic_test.f32",
+            "landmark_nomic_groundtruth.i32",
+            768,
+        ),
+        "landmark-dino" => (
+            "landmark_dino_train.f32",
+            "landmark_dino_test.f32",
+            "landmark_dino_groundtruth.i32",
+            768,
+        ),
         // MSMARCO 论文 scalability 数据集
-        "msmarco-cohere" => ("msmarco_cohere_train.f32", "msmarco_cohere_test.f32", "msmarco_cohere_groundtruth.i32", 1024),
-        _ => ("cohere_train.f32", "cohere_test.f32", "cohere_groundtruth.i32", 768),
+        "msmarco-cohere" => (
+            "msmarco_cohere_train.f32",
+            "msmarco_cohere_test.f32",
+            "msmarco_cohere_groundtruth.i32",
+            1024,
+        ),
+        _ => (
+            "cohere_train.f32",
+            "cohere_test.f32",
+            "cohere_groundtruth.i32",
+            768,
+        ),
     };
 
     println!("加载 {} 数据集...", name);
@@ -176,7 +231,13 @@ fn read_i32_bin(path: &str) -> Vec<i32> {
 // ============================================================
 
 /// 构建索引，返回 (索引, 构图时间秒, hot内存MB, vecs/s)
-fn build_index(train: &[f32], dim: usize, m: usize, ef_c: usize, alpha: f32) -> (QuIVer, f64, usize, f64) {
+fn build_index(
+    train: &[f32],
+    dim: usize,
+    m: usize,
+    ef_c: usize,
+    alpha: f32,
+) -> (QuIVer, f64, usize, f64) {
     let config = QuIVerConfig {
         m,
         ef_construction: ef_c,
@@ -218,7 +279,10 @@ fn measure_single_thread(index: &QuIVer, eval: &SearchEval<'_>, ef: usize) -> (f
     for i in 0..eval.n_test {
         let q = &eval.test[i * eval.dim..(i + 1) * eval.dim];
         let res = index.search_flat(q, eval.train, &cfg);
-        hits += res.iter().filter(|&&(id, _)| eval.gts[i].contains(&id)).count();
+        hits += res
+            .iter()
+            .filter(|&&(id, _)| eval.gts[i].contains(&id))
+            .count();
     }
     let elapsed = t.elapsed().as_secs_f64();
     let recall = hits as f64 / (eval.n_test * eval.top_k) as f64;
@@ -240,7 +304,9 @@ fn measure_multi_thread(index: &QuIVer, eval: &SearchEval<'_>, ef: usize) -> (f6
         .map(|i| {
             let q = &eval.test[i * eval.dim..(i + 1) * eval.dim];
             let res = index.search_flat(q, eval.train, &cfg);
-            res.iter().filter(|&&(id, _)| eval.gts[i].contains(&id)).count()
+            res.iter()
+                .filter(|&&(id, _)| eval.gts[i].contains(&id))
+                .count()
         })
         .sum();
     let elapsed = t.elapsed().as_secs_f64();
@@ -313,150 +379,178 @@ fn experiment_param_sensitivity(ds: &DataSet) {
         let elapsed = t.elapsed().as_secs_f64();
         let qps = bf_n as f64 / elapsed;
         let lat_ms = elapsed / bf_n as f64 * 1000.0;
-        println!("Brute-force 基准: QPS={:.1}, latency={:.2}ms/q", qps, lat_ms);
+        println!(
+            "Brute-force 基准: QPS={:.1}, latency={:.2}ms/q",
+            qps, lat_ms
+        );
         qps
     };
 
     if should_run("1a") {
-    // ── 1a: m 的影响（固定 ef_c=128, alpha=1.2）──
-    let m_values = [4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64];
+        // ── 1a: m 的影响（固定 ef_c=128, alpha=1.2）──
+        let m_values = [4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64];
 
-    println!("\n--- 1a: m 的影响 (ef_c=128, α=1.2) ---");
-    print!("{:<6} {:>10} {:>10} {:>10}", "m", "Build(s)", "vecs/s", "Hot(MB)");
-    for &ef in &ef_probes {
-        print!("  ef={:<4}R  ef={:<4}Q", ef, ef);
-    }
-    println!();
-    println!("{}", "-".repeat(6 + 10 + 10 + 10 + ef_probes.len() * 22));
-
-    for &m in &m_values {
-        let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, m, 128, 1.2);
-        print!("{:<6} {:>10.1} {:>10.0} {:>10}", m, build_s, vps, hot_mb);
+        println!("\n--- 1a: m 的影响 (ef_c=128, α=1.2) ---");
+        print!(
+            "{:<6} {:>10} {:>10} {:>10}",
+            "m", "Build(s)", "vecs/s", "Hot(MB)"
+        );
         for &ef in &ef_probes {
-            let (recall, qps) = measure_multi_thread(&index, &eval, ef);
-            print!("  {:>6.2}%  {:>6.0}", recall * 100.0, qps);
+            print!("  ef={:<4}R  ef={:<4}Q", ef, ef);
         }
         println!();
-    }
+        println!("{}", "-".repeat(6 + 10 + 10 + 10 + ef_probes.len() * 22));
+
+        for &m in &m_values {
+            let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, m, 128, 1.2);
+            print!("{:<6} {:>10.1} {:>10.0} {:>10}", m, build_s, vps, hot_mb);
+            for &ef in &ef_probes {
+                let (recall, qps) = measure_multi_thread(&index, &eval, ef);
+                print!("  {:>6.2}%  {:>6.0}", recall * 100.0, qps);
+            }
+            println!();
+        }
     } // end 1a
 
     if should_run("1b") {
-    // ── 1b: ef_construction 的影响（固定 m=32, alpha=1.2）──
-    let ef_c_values = [16, 32, 48, 64, 96, 128, 160, 200, 256, 384, 512];
+        // ── 1b: ef_construction 的影响（固定 m=32, alpha=1.2）──
+        let ef_c_values = [16, 32, 48, 64, 96, 128, 160, 200, 256, 384, 512];
 
-    println!("\n--- 1b: ef_construction 的影响 (m=32, α=1.2) ---");
-    print!("{:<8} {:>10} {:>10} {:>10}", "ef_c", "Build(s)", "vecs/s", "Hot(MB)");
-    for &ef in &ef_probes {
-        print!("  ef={:<4}R  ef={:<4}Q", ef, ef);
-    }
-    println!();
-    println!("{}", "-".repeat(8 + 10 + 10 + 10 + ef_probes.len() * 22));
-
-    for &ef_c in &ef_c_values {
-        let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, 32, ef_c, 1.2);
-        print!("{:<8} {:>10.1} {:>10.0} {:>10}", ef_c, build_s, vps, hot_mb);
+        println!("\n--- 1b: ef_construction 的影响 (m=32, α=1.2) ---");
+        print!(
+            "{:<8} {:>10} {:>10} {:>10}",
+            "ef_c", "Build(s)", "vecs/s", "Hot(MB)"
+        );
         for &ef in &ef_probes {
-            let (recall, qps) = measure_multi_thread(&index, &eval, ef);
-            print!("  {:>6.2}%  {:>6.0}", recall * 100.0, qps);
+            print!("  ef={:<4}R  ef={:<4}Q", ef, ef);
         }
         println!();
-    }
+        println!("{}", "-".repeat(8 + 10 + 10 + 10 + ef_probes.len() * 22));
+
+        for &ef_c in &ef_c_values {
+            let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, 32, ef_c, 1.2);
+            print!("{:<8} {:>10.1} {:>10.0} {:>10}", ef_c, build_s, vps, hot_mb);
+            for &ef in &ef_probes {
+                let (recall, qps) = measure_multi_thread(&index, &eval, ef);
+                print!("  {:>6.2}%  {:>6.0}", recall * 100.0, qps);
+            }
+            println!();
+        }
     } // end 1b
 
     if should_run("1c") {
-    // ── 1c: alpha 的影响（固定 m=32, ef_c=128）──
-    let alpha_values = [
-        1.0f32, 1.05, 1.1, 1.15, 1.2, 1.25,
-    ];
+        // ── 1c: alpha 的影响（固定 m=32, ef_c=128）──
+        let alpha_values = [1.0f32, 1.05, 1.1, 1.15, 1.2, 1.25];
 
-    println!("\n--- 1c: α 的影响 (m=32, ef_c=128) ---");
-    print!("{:<8} {:>10} {:>10} {:>10}", "alpha", "Build(s)", "vecs/s", "Hot(MB)");
-    for &ef in &ef_probes {
-        print!("  ef={:<4}R  ef={:<4}Q", ef, ef);
-    }
-    println!();
-    println!("{}", "-".repeat(8 + 10 + 10 + 10 + ef_probes.len() * 22));
-
-    for &alpha in &alpha_values {
-        let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, 32, 128, alpha);
-        print!("{:<8.2} {:>10.1} {:>10.0} {:>10}", alpha, build_s, vps, hot_mb);
+        println!("\n--- 1c: α 的影响 (m=32, ef_c=128) ---");
+        print!(
+            "{:<8} {:>10} {:>10} {:>10}",
+            "alpha", "Build(s)", "vecs/s", "Hot(MB)"
+        );
         for &ef in &ef_probes {
-            let (recall, qps) = measure_multi_thread(&index, &eval, ef);
-            print!("  {:>6.2}%  {:>6.0}", recall * 100.0, qps);
+            print!("  ef={:<4}R  ef={:<4}Q", ef, ef);
         }
         println!();
-    }
+        println!("{}", "-".repeat(8 + 10 + 10 + 10 + ef_probes.len() * 22));
+
+        for &alpha in &alpha_values {
+            let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, 32, 128, alpha);
+            print!(
+                "{:<8.2} {:>10.1} {:>10.0} {:>10}",
+                alpha, build_s, vps, hot_mb
+            );
+            for &ef in &ef_probes {
+                let (recall, qps) = measure_multi_thread(&index, &eval, ef);
+                print!("  {:>6.2}%  {:>6.0}", recall * 100.0, qps);
+            }
+            println!();
+        }
     } // end 1c
 
     if should_run("1d") {
-    // ── 1d: 精细 ef_search Recall-QPS 曲线（默认参数）──
-    let ef_search_fine = [
-        8, 12, 16, 20, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128,
-        160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024,
-    ];
+        // ── 1d: 精细 ef_search Recall-QPS 曲线（默认参数）──
+        let ef_search_fine = [
+            8, 12, 16, 20, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384,
+            448, 512, 640, 768, 896, 1024,
+        ];
 
-    println!("\n--- 1d: ef_search 精细 Recall-QPS 曲线 (m=32, ef_c=128, α=1.2) ---");
-    println!("{:<8} {:>10} {:>12} {:>12} {:>10} {:>10}", "ef", "R@10(%)", "MT-QPS", "1T-QPS", "lat(ms)", "vs BF");
-    println!("{}", "-".repeat(66));
-
-    let (index, _, _, _) = build_index(&ds.train, ds.dim, 32, 128, 1.2);
-    for &ef in &ef_search_fine {
-        let (recall, qps_mt) = measure_multi_thread(&index, &eval, ef);
-        let (_, qps_st) = measure_single_thread(&index, &eval, ef);
-        let lat_ms = 1000.0 / qps_st;
-        let speedup = qps_mt / bf_qps;
+        println!("\n--- 1d: ef_search 精细 Recall-QPS 曲线 (m=32, ef_c=128, α=1.2) ---");
         println!(
-            "{:<8} {:>9.2}% {:>12.0} {:>12.0} {:>9.2} {:>9.1}x",
-            ef, recall * 100.0, qps_mt, qps_st, lat_ms, speedup
+            "{:<8} {:>10} {:>12} {:>12} {:>10} {:>10}",
+            "ef", "R@10(%)", "MT-QPS", "1T-QPS", "lat(ms)", "vs BF"
         );
-    }
+        println!("{}", "-".repeat(66));
+
+        let (index, _, _, _) = build_index(&ds.train, ds.dim, 32, 128, 1.2);
+        for &ef in &ef_search_fine {
+            let (recall, qps_mt) = measure_multi_thread(&index, &eval, ef);
+            let (_, qps_st) = measure_single_thread(&index, &eval, ef);
+            let lat_ms = 1000.0 / qps_st;
+            let speedup = qps_mt / bf_qps;
+            println!(
+                "{:<8} {:>9.2}% {:>12.0} {:>12.0} {:>9.2} {:>9.1}x",
+                ef,
+                recall * 100.0,
+                qps_mt,
+                qps_st,
+                lat_ms,
+                speedup
+            );
+        }
     } // end 1d
 
     if should_run("1e") {
-    // ── 1e: 不同 m 的完整 Pareto 曲线（论文 Figure 级别）──
-    let pareto_m = [8, 16, 32, 48, 64];
-    let pareto_ef = [32, 64, 128, 256, 512, 1024];
+        // ── 1e: 不同 m 的完整 Pareto 曲线（论文 Figure 级别）──
+        let pareto_m = [8, 16, 32, 48, 64];
+        let pareto_ef = [32, 64, 128, 256, 512, 1024];
 
-    println!("\n--- 1e: 不同 m 的 Pareto 曲线 (ef_c=128, α=1.2) ---");
-    println!("{:<6} {:<8} {:>10} {:>12} {:>10}", "m", "ef", "R@10(%)", "MT-QPS", "vs BF");
-    println!("{}", "-".repeat(50));
+        println!("\n--- 1e: 不同 m 的 Pareto 曲线 (ef_c=128, α=1.2) ---");
+        println!(
+            "{:<6} {:<8} {:>10} {:>12} {:>10}",
+            "m", "ef", "R@10(%)", "MT-QPS", "vs BF"
+        );
+        println!("{}", "-".repeat(50));
 
-    for &m in &pareto_m {
-        let (index, _, _, _) = build_index(&ds.train, ds.dim, m, 128, 1.2);
-        for &ef in &pareto_ef {
-            let (recall, qps) = measure_multi_thread(&index, &eval, ef);
-            let speedup = qps / bf_qps;
-            println!(
-                "{:<6} {:<8} {:>9.2}% {:>12.0} {:>9.1}x",
-                m, ef, recall * 100.0, qps, speedup
-            );
+        for &m in &pareto_m {
+            let (index, _, _, _) = build_index(&ds.train, ds.dim, m, 128, 1.2);
+            for &ef in &pareto_ef {
+                let (recall, qps) = measure_multi_thread(&index, &eval, ef);
+                let speedup = qps / bf_qps;
+                println!(
+                    "{:<6} {:<8} {:>9.2}% {:>12.0} {:>9.1}x",
+                    m,
+                    ef,
+                    recall * 100.0,
+                    qps,
+                    speedup
+                );
+            }
+            println!();
         }
-        println!();
-    }
     } // end 1e
 
     if should_run("1f") {
-    // ── 1f: m × alpha 交叉实验 (ef_c=128, ef_search=64)──
-    let cross_m = [8, 16, 32, 48, 64];
-    let cross_alpha = [1.0f32, 1.1, 1.15, 1.2, 1.25];
+        // ── 1f: m × alpha 交叉实验 (ef_c=128, ef_search=64)──
+        let cross_m = [8, 16, 32, 48, 64];
+        let cross_alpha = [1.0f32, 1.1, 1.15, 1.2, 1.25];
 
-    println!("\n--- 1f: m × α 交叉实验 (ef_c=128, ef_search=64) ---");
-    print!("{:<6}", "m\\α");
-    for &a in &cross_alpha {
-        print!(" {:>8.2}", a);
-    }
-    println!();
-    println!("{}", "-".repeat(6 + cross_alpha.len() * 9));
-
-    for &m in &cross_m {
-        print!("{:<6}", m);
-        for &alpha in &cross_alpha {
-            let (index, _, _, _) = build_index(&ds.train, ds.dim, m, 128, alpha);
-            let (recall, _) = measure_multi_thread(&index, &eval, 64);
-            print!(" {:>7.2}%", recall * 100.0);
+        println!("\n--- 1f: m × α 交叉实验 (ef_c=128, ef_search=64) ---");
+        print!("{:<6}", "m\\α");
+        for &a in &cross_alpha {
+            print!(" {:>8.2}", a);
         }
         println!();
-    }
+        println!("{}", "-".repeat(6 + cross_alpha.len() * 9));
+
+        for &m in &cross_m {
+            print!("{:<6}", m);
+            for &alpha in &cross_alpha {
+                let (index, _, _, _) = build_index(&ds.train, ds.dim, m, 128, alpha);
+                let (recall, _) = measure_multi_thread(&index, &eval, 64);
+                print!(" {:>7.2}%", recall * 100.0);
+            }
+            println!();
+        }
     } // end 1f
 }
 
@@ -480,7 +574,10 @@ fn experiment_thread_scaling(ds: &DataSet) {
         top_k,
     };
     let (index, build_s, hot_mb, vps) = build_index(&ds.train, ds.dim, 32, 128, 1.2);
-    println!("索引构建: {:.1}s ({:.0} vecs/s), Hot {} MB", build_s, vps, hot_mb);
+    println!(
+        "索引构建: {:.1}s ({:.0} vecs/s), Hot {} MB",
+        build_s, vps, hot_mb
+    );
 
     println!("\n--- 2a: 不同 ef 下的 单线程 vs 多线程 QPS ---");
     println!(
@@ -495,7 +592,11 @@ fn experiment_thread_scaling(ds: &DataSet) {
         let speedup = qps_mt / qps_st;
         println!(
             "{:<8} {:>12.0} {:>12.0} {:>11.2}% {:>9.1}x",
-            ef, qps_st, qps_mt, recall * 100.0, speedup
+            ef,
+            qps_st,
+            qps_mt,
+            recall * 100.0,
+            speedup
         );
     }
 
@@ -541,10 +642,7 @@ fn experiment_thread_scaling(ds: &DataSet) {
                 .sum()
         });
         let qps = ds.n_test as f64 / t.elapsed().as_secs_f64();
-        println!(
-            "{:<10} {:>12.0} {:>11.1}x",
-            num_threads, qps, qps / qps_1t
-        );
+        println!("{:<10} {:>12.0} {:>11.1}x", num_threads, qps, qps / qps_1t);
     }
 }
 

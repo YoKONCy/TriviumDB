@@ -26,7 +26,16 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok", ".tmp", ".vec.tmp"] {
+    for ext in &[
+        "",
+        ".wal",
+        ".vec",
+        ".lock",
+        ".flush_ok",
+        ".tmp",
+        ".vec.tmp",
+        ".quiver",
+    ] {
         std::fs::remove_file(format!("{}{}", path, ext)).ok();
     }
 }
@@ -120,6 +129,96 @@ fn COV3_02_composite_hook_abort() {
 
     let hits = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 0, 0.0).unwrap();
     assert!(hits.is_empty(), "Abort hook 应导致空结果");
+
+    cleanup(&path);
+}
+
+#[test]
+fn Hook修改查询向量后_维度和有限值必须重新校验() {
+    struct InvalidVectorHook {
+        value: Vec<f32>,
+    }
+
+    impl SearchHook for InvalidVectorHook {
+        fn on_pre_search(
+            &self,
+            query_vector: &mut Vec<f32>,
+            _config: &mut SearchConfig,
+            _ctx: &mut HookContext,
+        ) {
+            *query_vector = self.value.clone();
+        }
+    }
+
+    let path = tmp_db("hook_vector_validation");
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
+
+    db.set_hook(InvalidVectorHook {
+        value: vec![1.0, 0.0],
+    });
+    let dimension_error = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 0, 0.0);
+    assert!(matches!(
+        dimension_error,
+        Err(triviumdb::TriviumError::DimensionMismatch {
+            expected: DIM,
+            got: 2
+        })
+    ));
+
+    db.set_hook(InvalidVectorHook {
+        value: vec![1.0, f32::NAN, 0.0, 0.0],
+    });
+    let finite_error = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 0, 0.0);
+    assert!(matches!(
+        finite_error,
+        Err(triviumdb::TriviumError::InvalidVector { .. })
+    ));
+
+    cleanup(&path);
+}
+
+#[test]
+fn Hook修改配置后_diffusion_bias边界必须重新校验() {
+    struct InvalidConfigHook {
+        bias: Vec<f32>,
+    }
+
+    impl SearchHook for InvalidConfigHook {
+        fn on_pre_search(
+            &self,
+            _query_vector: &mut Vec<f32>,
+            config: &mut SearchConfig,
+            _ctx: &mut HookContext,
+        ) {
+            config.diffusion_bias = Some(self.bias.clone());
+        }
+    }
+
+    let path = tmp_db("hook_config_validation");
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
+
+    db.set_hook(InvalidConfigHook { bias: Vec::new() });
+    let empty_error = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 1, 0.0);
+    assert!(matches!(
+        empty_error,
+        Err(triviumdb::TriviumError::DimensionMismatch {
+            expected: DIM,
+            got: 0
+        })
+    ));
+
+    db.set_hook(InvalidConfigHook {
+        bias: vec![0.0, f32::INFINITY, 0.0, 0.0],
+    });
+    let finite_error = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 1, 0.0);
+    assert!(matches!(
+        finite_error,
+        Err(triviumdb::TriviumError::InvalidVector { .. })
+    ));
 
     cleanup(&path);
 }

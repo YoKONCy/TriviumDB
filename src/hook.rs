@@ -457,7 +457,10 @@ impl SearchHook for FfiHook {
         };
 
         if ret != 0 {
-            tracing::warn!("FFI recall 函数返回错误码 (FFI recall returned error code): {}", ret);
+            tracing::warn!(
+                "FFI recall 函数返回错误码 (FFI recall returned error code): {}",
+                ret
+            );
             return None;
         }
 
@@ -495,7 +498,10 @@ impl SearchHook for FfiHook {
         let ret = unsafe { (rerank_fn)(ffi_hits.as_mut_ptr(), ffi_hits.len()) };
 
         if ret != 0 {
-            tracing::warn!("FFI rerank 函数返回错误码 (FFI rerank returned error code): {}", ret);
+            tracing::warn!(
+                "FFI rerank 函数返回错误码 (FFI rerank returned error code): {}",
+                ret
+            );
             return None;
         }
 

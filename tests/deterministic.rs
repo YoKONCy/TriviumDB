@@ -29,7 +29,9 @@ fn deterministic_vector(seed: u32, dim: usize) -> Vec<f32> {
     let mut lcg = seed as u64 ^ 0xDEADBEEF;
     let raw: Vec<f32> = (0..dim)
         .map(|_| {
-            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lcg = lcg
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             // 将 u64 映射到 [-1, 1] 区间
             ((lcg >> 33) as f64 / (1u64 << 31) as f64 * 2.0 - 1.0) as f32
         })
@@ -182,7 +184,8 @@ fn DET_03_QuIVer与BruteForce_Top1近似一致性() {
         m: 32,
         ef_construction: 256,
         alpha: 1.2,
-    })).unwrap();
+    }))
+    .unwrap();
 
     for q_seed in [42u32, 100, 200, 300, 400, 999, 1234, 5678] {
         let query = deterministic_vector(q_seed, test_dim);
@@ -213,7 +216,9 @@ fn DET_03_QuIVer与BruteForce_Top1近似一致性() {
         assert!(
             quiver[0].score >= brute[0].score * 0.80,
             "query_seed={}: QuIVer Top-1 分数 ({}) 远低于 BruteForce ({})",
-            q_seed, quiver[0].score, brute[0].score
+            q_seed,
+            quiver[0].score,
+            brute[0].score
         );
     }
 
@@ -254,7 +259,9 @@ fn DET_03B_自动QuIVer路由_结果结构正确() {
             assert!(payload_idx < 10_001, "自动 QuIVer 不能返回越界 payload");
         }
         assert!(
-            results.windows(2).all(|pair| pair[0].score >= pair[1].score),
+            results
+                .windows(2)
+                .all(|pair| pair[0].score >= pair[1].score),
             "自动 QuIVer 返回结果必须按精排分数降序排列"
         );
     }

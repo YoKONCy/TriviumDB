@@ -137,25 +137,19 @@ fn parse_record(v: &Value, lineno: usize) -> Result<Record, String> {
                 let target = edge_obj
                     .get("target")
                     .and_then(|t| t.as_u64())
-                    .ok_or_else(|| {
-                        format!("第 {lineno} 行 edges[{idx}].target 必须是非负整数")
-                    })?;
+                    .ok_or_else(|| format!("第 {lineno} 行 edges[{idx}].target 必须是非负整数"))?;
                 let label = match edge_obj.get("label") {
                     Some(label) => label
                         .as_str()
-                        .ok_or_else(|| {
-                            format!("第 {lineno} 行 edges[{idx}].label 必须是字符串")
-                        })?
+                        .ok_or_else(|| format!("第 {lineno} 行 edges[{idx}].label 必须是字符串"))?
                         .to_string(),
                     None => String::new(),
                 };
                 let weight = match edge_obj.get("weight") {
                     Some(weight) => {
-                        let value = weight
-                            .as_f64()
-                            .ok_or_else(|| {
-                                format!("第 {lineno} 行 edges[{idx}].weight 必须是数字")
-                            })? as f32;
+                        let value = weight.as_f64().ok_or_else(|| {
+                            format!("第 {lineno} 行 edges[{idx}].weight 必须是数字")
+                        })? as f32;
                         if !value.is_finite() {
                             return Err(format!(
                                 "第 {lineno} 行 edges[{idx}].weight 不是有限 f32 数值"

@@ -1278,9 +1278,10 @@ pub mod python {
                 "f16" => TxBuilderBackend::F16(crate::database::TxBuilder::new()),
                 "u64" => TxBuilderBackend::U64(crate::database::TxBuilder::new()),
                 _ => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        format!("不支持的 dtype: {}", dtype),
-                    ));
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "不支持的 dtype: {}",
+                        dtype
+                    )));
                 }
             };
             Ok(PyTransaction {
@@ -1332,7 +1333,12 @@ pub mod python {
     #[pymethods]
     impl PyTransaction {
         /// 缓冲一个插入操作
-        fn insert(&mut self, py: Python<'_>, vector: Vec<f64>, payload: &Bound<'_, PyAny>) -> PyResult<()> {
+        fn insert(
+            &mut self,
+            py: Python<'_>,
+            vector: Vec<f64>,
+            payload: &Bound<'_, PyAny>,
+        ) -> PyResult<()> {
             check_finished!(self);
             let json = pyobject_to_json(py, payload);
             match self.builder.as_mut().expect("TxBuilder missing") {
@@ -1341,7 +1347,10 @@ pub mod python {
                     b.insert(&v, json);
                 }
                 TxBuilderBackend::F16(b) => {
-                    let v: Vec<half::f16> = vector.iter().map(|&x| half::f16::from_f32(x as f32)).collect();
+                    let v: Vec<half::f16> = vector
+                        .iter()
+                        .map(|&x| half::f16::from_f32(x as f32))
+                        .collect();
                     b.insert(&v, json);
                 }
                 TxBuilderBackend::U64(b) => {
@@ -1353,7 +1362,13 @@ pub mod python {
         }
 
         /// 缓冲一个带自定义 ID 的插入操作
-        fn insert_with_id(&mut self, py: Python<'_>, id: u64, vector: Vec<f64>, payload: &Bound<'_, PyAny>) -> PyResult<()> {
+        fn insert_with_id(
+            &mut self,
+            py: Python<'_>,
+            id: u64,
+            vector: Vec<f64>,
+            payload: &Bound<'_, PyAny>,
+        ) -> PyResult<()> {
             check_finished!(self);
             let json = pyobject_to_json(py, payload);
             match self.builder.as_mut().expect("TxBuilder missing") {
@@ -1362,7 +1377,10 @@ pub mod python {
                     b.insert_with_id(id, &v, json);
                 }
                 TxBuilderBackend::F16(b) => {
-                    let v: Vec<half::f16> = vector.iter().map(|&x| half::f16::from_f32(x as f32)).collect();
+                    let v: Vec<half::f16> = vector
+                        .iter()
+                        .map(|&x| half::f16::from_f32(x as f32))
+                        .collect();
                     b.insert_with_id(id, &v, json);
                 }
                 TxBuilderBackend::U64(b) => {
@@ -1408,7 +1426,12 @@ pub mod python {
         }
 
         /// 缓冲一个更新 payload 操作
-        fn update_payload(&mut self, py: Python<'_>, id: u64, payload: &Bound<'_, PyAny>) -> PyResult<()> {
+        fn update_payload(
+            &mut self,
+            py: Python<'_>,
+            id: u64,
+            payload: &Bound<'_, PyAny>,
+        ) -> PyResult<()> {
             check_finished!(self);
             let json = pyobject_to_json(py, payload);
             match self.builder.as_mut().expect("TxBuilder missing") {
@@ -1428,7 +1451,10 @@ pub mod python {
                     b.update_vector(id, &v);
                 }
                 TxBuilderBackend::F16(b) => {
-                    let v: Vec<half::f16> = vector.iter().map(|&x| half::f16::from_f32(x as f32)).collect();
+                    let v: Vec<half::f16> = vector
+                        .iter()
+                        .map(|&x| half::f16::from_f32(x as f32))
+                        .collect();
                     b.update_vector(id, &v);
                 }
                 TxBuilderBackend::U64(b) => {
@@ -1461,15 +1487,15 @@ pub mod python {
             let mut db_ref = self.db.borrow_mut(py);
 
             match (&mut db_ref.inner, builder) {
-                (DbBackend::F32(db), TxBuilderBackend::F32(b)) => {
-                    db.commit_tx(b).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-                }
-                (DbBackend::F16(db), TxBuilderBackend::F16(b)) => {
-                    db.commit_tx(b).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-                }
-                (DbBackend::U64(db), TxBuilderBackend::U64(b)) => {
-                    db.commit_tx(b).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-                }
+                (DbBackend::F32(db), TxBuilderBackend::F32(b)) => db
+                    .commit_tx(b)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+                (DbBackend::F16(db), TxBuilderBackend::F16(b)) => db
+                    .commit_tx(b)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+                (DbBackend::U64(db), TxBuilderBackend::U64(b)) => db
+                    .commit_tx(b)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
                 _ => Err(pyo3::exceptions::PyRuntimeError::new_err("dtype 不匹配")),
             }
         }
@@ -1520,8 +1546,6 @@ pub mod python {
         }
     }
 
-
-
     // ════════════════════════════════════════════════════════
     //  PySearchHookWrapper — Python 原生 Hook 支持
     // ════════════════════════════════════════════════════════
@@ -1554,7 +1578,8 @@ pub mod python {
                     let _ = d.set_item("payload", json_to_pyobject(py, &h.payload));
                     d
                 }),
-            ).expect("创建 Python list 失败");
+            )
+            .expect("创建 Python list 失败");
             list.into_any().unbind()
         }
 
@@ -1564,11 +1589,22 @@ pub mod python {
             if let Ok(list) = obj.bind(py).downcast::<pyo3::types::PyList>() {
                 for item in list.iter() {
                     if let Ok(dict) = item.downcast::<PyDict>() {
-                        let id = dict.get_item("id").ok().flatten()
-                            .and_then(|v| v.extract::<u64>().ok()).unwrap_or(0);
-                        let score = dict.get_item("score").ok().flatten()
-                            .and_then(|v| v.extract::<f32>().ok()).unwrap_or(0.0);
-                        let payload = dict.get_item("payload").ok().flatten()
+                        let id = dict
+                            .get_item("id")
+                            .ok()
+                            .flatten()
+                            .and_then(|v| v.extract::<u64>().ok())
+                            .unwrap_or(0);
+                        let score = dict
+                            .get_item("score")
+                            .ok()
+                            .flatten()
+                            .and_then(|v| v.extract::<f32>().ok())
+                            .unwrap_or(0.0);
+                        let payload = dict
+                            .get_item("payload")
+                            .ok()
+                            .flatten()
                             .map(|v| pyobject_to_json(py, &v))
                             .unwrap_or(serde_json::Value::Null);
                         hits.push(crate::node::SearchHit { id, score, payload });
@@ -1591,7 +1627,8 @@ pub mod python {
                 if let Ok(method) = hook.getattr("on_pre_search") {
                     if let Ok(py_vec) = pyo3::types::PyList::new(py, query_vector.iter()) {
                         let py_ctx = PyDict::new(py);
-                        let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
+                        let _ =
+                            py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
                         let _ = py_ctx.set_item("abort", ctx.abort);
 
                         if let Ok(result) = method.call1((&py_vec, &py_ctx)) {
@@ -1611,7 +1648,11 @@ pub mod python {
             });
         }
 
-        fn on_post_recall(&self, hits: &mut Vec<crate::node::SearchHit>, ctx: &mut crate::hook::HookContext) {
+        fn on_post_recall(
+            &self,
+            hits: &mut Vec<crate::node::SearchHit>,
+            ctx: &mut crate::hook::HookContext,
+        ) {
             pyo3::Python::with_gil(|py| {
                 let hook = self.py_hook.bind(py);
                 if let Ok(method) = hook.getattr("on_post_recall") {
@@ -1653,7 +1694,11 @@ pub mod python {
             })
         }
 
-        fn on_post_search(&self, hits: &mut Vec<crate::node::SearchHit>, ctx: &mut crate::hook::HookContext) {
+        fn on_post_search(
+            &self,
+            hits: &mut Vec<crate::node::SearchHit>,
+            ctx: &mut crate::hook::HookContext,
+        ) {
             pyo3::Python::with_gil(|py| {
                 let hook = self.py_hook.bind(py);
                 if let Ok(method) = hook.getattr("on_post_search") {

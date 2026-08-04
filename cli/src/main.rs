@@ -168,11 +168,7 @@ fn run(cli: Cli, cfg: config::Config) -> CliResult {
         Commands::Info(db) => {
             commands::info::run(&db.path, db.dim, resolve_dtype(&db.dtype, &cfg)?, format)
         }
-        Commands::Exec {
-            db,
-            query,
-            mutate,
-        } => {
+        Commands::Exec { db, query, mutate } => {
             let mut handle = open(&db, &cfg)?;
             commands::exec::run(&mut handle, &query, mutate, format)
         }
@@ -211,7 +207,10 @@ fn resolve_format(cli: Option<OutputFormat>, cfg: &config::Config) -> OutputForm
 }
 
 /// 解析 dtype：CLI > 配置 > 默认(f32)。
-fn resolve_dtype(cli: &Option<String>, cfg: &config::Config) -> Result<DType, Box<dyn std::error::Error>> {
+fn resolve_dtype(
+    cli: &Option<String>,
+    cfg: &config::Config,
+) -> Result<DType, Box<dyn std::error::Error>> {
     let s = cli
         .clone()
         .or_else(|| cfg.defaults.dtype.clone())
@@ -220,7 +219,10 @@ fn resolve_dtype(cli: &Option<String>, cfg: &config::Config) -> Result<DType, Bo
 }
 
 /// 按 [`DbArgs`] 打开数据库（自动嗅探维度，dtype 走配置优先级）。
-fn open(db: &DbArgs, cfg: &config::Config) -> Result<db_handle::DbHandle, Box<dyn std::error::Error>> {
+fn open(
+    db: &DbArgs,
+    cfg: &config::Config,
+) -> Result<db_handle::DbHandle, Box<dyn std::error::Error>> {
     let dtype = resolve_dtype(&db.dtype, cfg)?;
     Ok(db_handle::DbHandle::open_auto(&db.path, db.dim, dtype)?)
 }

@@ -10,9 +10,9 @@
 //  用法：cargo bench --bench bench_variance --features ablation
 // ══════════════════════════════════════════════════════════════
 
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
 use std::collections::HashSet;
 use std::io::Read;
 use std::time::Instant;
@@ -36,7 +36,8 @@ fn read_f32_bin(path: &str) -> Vec<f32> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes.len() % 4, 0);
-    bytes.chunks_exact(4)
+    bytes
+        .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }
@@ -46,7 +47,8 @@ fn read_i32_bin(path: &str) -> Vec<i32> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes.len() % 4, 0);
-    bytes.chunks_exact(4)
+    bytes
+        .chunks_exact(4)
         .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }
@@ -59,7 +61,11 @@ fn recall_at_k_ids(gt: &[u64], res: &[(u64, f32)]) -> f64 {
 /// 用打乱顺序的向量构建 QuIVer 索引
 /// seed 控制 shuffle 的随机性
 fn build_with_shuffled_order(
-    vecs: &[f32], n: usize, dim: usize, config: &QuIVerConfig, seed: u64
+    vecs: &[f32],
+    n: usize,
+    dim: usize,
+    config: &QuIVerConfig,
+    seed: u64,
 ) -> QuIVer {
     let mut rng = StdRng::seed_from_u64(seed);
 
@@ -122,8 +128,10 @@ fn main() {
     let n_train = train_data.len() / DIM;
     let n_test = test_data.len() / DIM;
     let k_gt = gt_data.len() / n_test;
-    eprintln!("  ✅ 训练集: {} × {}d | 测试集: {} × {}d | GT K: {}",
-              n_train, DIM, n_test, DIM, k_gt);
+    eprintln!(
+        "  ✅ 训练集: {} × {}d | 测试集: {} × {}d | GT K: {}",
+        n_train, DIM, n_test, DIM, k_gt
+    );
 
     // 解析 Ground Truth → Vec<Vec<u64>>（取 Top-10）
     let eval_gts: Vec<Vec<u64>> = (0..n_test)
@@ -153,8 +161,14 @@ fn main() {
     //  测量 recall 在不同图拓扑下的方差
     // ══════════════════════════════════════════════════════════════
     eprintln!("\n┌────────────────────────────────────────────────────────────────────┐");
-    eprintln!("│  Phase 1: 多次独立构图方差 ({} 个 seed)                           │", BUILD_SEEDS.len());
-    eprintln!("│  数据集: Cohere-1M ({} vecs × {}d){:>35}│", n_train, DIM, "");
+    eprintln!(
+        "│  Phase 1: 多次独立构图方差 ({} 个 seed)                           │",
+        BUILD_SEEDS.len()
+    );
+    eprintln!(
+        "│  数据集: Cohere-1M ({} vecs × {}d){:>35}│",
+        n_train, DIM, ""
+    );
     eprintln!("├────────────────────────────────────────────────────────────────────┤");
 
     // 存储每个 ef × seed 的 recall
@@ -166,10 +180,17 @@ fn main() {
         let index = build_with_shuffled_order(&train_data, n_train, DIM, &config, seed);
         let build_s = t0.elapsed().as_secs_f64();
         let stats = index.stats();
-        eprintln!("  构建: {:.2}s | 平均度数: {:.1}", build_s, stats.avg_degree_l0);
+        eprintln!(
+            "  构建: {:.2}s | 平均度数: {:.1}",
+            build_s, stats.avg_degree_l0
+        );
 
         // Warmup
-        let warmup_cfg = QuIVerSearchConfig { top_k: TOP_K, ef_search: 128, rerank_limit: None };
+        let warmup_cfg = QuIVerSearchConfig {
+            top_k: TOP_K,
+            ef_search: 128,
+            rerank_limit: None,
+        };
         for q in &queries[..WARMUP.min(n_test)] {
             let _ = index.search_flat(q, &train_data, &warmup_cfg);
         }
@@ -177,7 +198,11 @@ fn main() {
         eprintln!("  {:<8} {:>10} {:>10}", "ef", "Recall@10", "QPS");
 
         for (ei, &ef) in EF_TESTS.iter().enumerate() {
-            let cfg = QuIVerSearchConfig { top_k: TOP_K, ef_search: ef, rerank_limit: None };
+            let cfg = QuIVerSearchConfig {
+                top_k: TOP_K,
+                ef_search: ef,
+                rerank_limit: None,
+            };
 
             let t0 = Instant::now();
             let mut total_recall = 0.0;
@@ -196,19 +221,25 @@ fn main() {
 
     // 汇总方差
     eprintln!("\n  ── 构图方差汇总 ──");
-    eprintln!("  {:<8} {:>10} {:>10} {:>10} {:>10}", "ef", "Mean(%)", "Std(%)", "RSD(%)", "Range(%)");
+    eprintln!(
+        "  {:<8} {:>10} {:>10} {:>10} {:>10}",
+        "ef", "Mean(%)", "Std(%)", "RSD(%)", "Range(%)"
+    );
 
     for (ei, &ef) in EF_TESTS.iter().enumerate() {
         let recalls = &all_recalls[ei];
         let mean = recalls.iter().sum::<f64>() / recalls.len() as f64;
-        let variance = recalls.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / recalls.len() as f64;
+        let variance =
+            recalls.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / recalls.len() as f64;
         let std = variance.sqrt();
         let rsd = std / mean * 100.0;
         let min = recalls.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = recalls.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-        eprintln!("  ef={:<5} {:>8.2} {:>8.3} {:>8.2} {:>5.1}–{:.1}",
-                  ef, mean, std, rsd, min, max);
+        eprintln!(
+            "  ef={:<5} {:>8.2} {:>8.3} {:>8.2} {:>5.1}–{:.1}",
+            ef, mean, std, rsd, min, max
+        );
     }
     eprintln!("└────────────────────────────────────────────────────────────────────┘");
 
@@ -227,16 +258,26 @@ fn main() {
     let index = build_with_shuffled_order(&train_data, n_train, DIM, &config, BUILD_SEEDS[0]);
 
     // Warmup
-    let warmup_cfg = QuIVerSearchConfig { top_k: TOP_K, ef_search: 256, rerank_limit: None };
+    let warmup_cfg = QuIVerSearchConfig {
+        top_k: TOP_K,
+        ef_search: 256,
+        rerank_limit: None,
+    };
     for q in &queries[..WARMUP.min(n_test)] {
         let _ = index.search_flat(q, &train_data, &warmup_cfg);
     }
 
-    eprintln!("  {:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-              "ef", "Avg", "P50", "P95", "P99", "P99.9", "Max");
+    eprintln!(
+        "  {:<8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "ef", "Avg", "P50", "P95", "P99", "P99.9", "Max"
+    );
 
     for &ef in &EF_TESTS {
-        let cfg = QuIVerSearchConfig { top_k: TOP_K, ef_search: ef, rerank_limit: None };
+        let cfg = QuIVerSearchConfig {
+            top_k: TOP_K,
+            ef_search: ef,
+            rerank_limit: None,
+        };
 
         // 跑 3 轮取所有延迟
         let rounds = 3;
@@ -253,8 +294,10 @@ fn main() {
         }
 
         let stats = compute_latency_stats(&mut all_lats);
-        eprintln!("  ef={:<5} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0}",
-                  ef, stats.avg, stats.p50, stats.p95, stats.p99, stats.p999, stats.max);
+        eprintln!(
+            "  ef={:<5} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0}",
+            ef, stats.avg, stats.p50, stats.p95, stats.p99, stats.p999, stats.max
+        );
     }
     eprintln!("└────────────────────────────────────────────────────────────────────┘");
 
@@ -276,11 +319,17 @@ fn main() {
     let vecs_arc = std::sync::Arc::new(train_data);
 
     eprintln!("  ef={}, 每客户端 {} 查询", test_ef, queries_per_client);
-    eprintln!("  {:<10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-              "Clients", "Total QPS", "Avg(μs)", "P50(μs)", "P99(μs)", "Max(μs)");
+    eprintln!(
+        "  {:<10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "Clients", "Total QPS", "Avg(μs)", "P50(μs)", "P99(μs)", "Max(μs)"
+    );
 
     for &n_clients in &concurrency_levels {
-        let cfg = QuIVerSearchConfig { top_k: TOP_K, ef_search: test_ef, rerank_limit: None };
+        let cfg = QuIVerSearchConfig {
+            top_k: TOP_K,
+            ef_search: test_ef,
+            rerank_limit: None,
+        };
 
         // 预分配每个客户端的查询（循环使用查询集）
         let client_queries: Vec<Vec<Vec<f32>>> = (0..n_clients)
@@ -307,7 +356,11 @@ fn main() {
             let vs = vecs_arc.clone();
             let qs = client_queries[client_id].clone();
             let bar = barrier.clone();
-            let cfg_clone = QuIVerSearchConfig { top_k: TOP_K, ef_search: test_ef, rerank_limit: None };
+            let cfg_clone = QuIVerSearchConfig {
+                top_k: TOP_K,
+                ef_search: test_ef,
+                rerank_limit: None,
+            };
 
             handles.push(std::thread::spawn(move || {
                 let mut lats = Vec::with_capacity(queries_per_client);
@@ -335,8 +388,10 @@ fn main() {
 
         let stats = compute_latency_stats(&mut all_lats);
 
-        eprintln!("  {:<10} {:>8.0} {:>8.0} {:>8.0} {:>8.0} {:>8.0}",
-                  n_clients, total_qps, stats.avg, stats.p50, stats.p99, stats.max);
+        eprintln!(
+            "  {:<10} {:>8.0} {:>8.0} {:>8.0} {:>8.0} {:>8.0}",
+            n_clients, total_qps, stats.avg, stats.p50, stats.p99, stats.max
+        );
     }
 
     eprintln!("└────────────────────────────────────────────────────────────────────┘");

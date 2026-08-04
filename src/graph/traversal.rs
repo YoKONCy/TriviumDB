@@ -31,7 +31,9 @@ pub fn expand_graph<T: crate::VectorType>(
     let mut current_tier = HashMap::<NodeId, f32>::new();
 
     // CCSA: 预计算 bias 维度的平方根，用于缩放点积防止饱和
-    let bias_scale = diffusion_bias.map(|b| 1.0 / (b.len() as f32).sqrt());
+    let bias_scale = diffusion_bias
+        .filter(|bias| !bias.is_empty())
+        .map(|bias| 1.0 / (bias.len() as f32).sqrt());
 
     // 用于收集在漫游期间真实遇到过并生效削弱的疲劳节点
     let mut active_fatigue = Vec::new();
@@ -79,28 +81,38 @@ pub fn expand_graph<T: crate::VectorType>(
                     };
 
                     // CCSA: 计算 attention gate（当提供 diffusion_bias 时）
-                    let attention_gate = if let (Some(bias), Some(scale)) = (diffusion_bias, bias_scale) {
-                        // 获取目标节点的 embedding，计算 gate = σ(bias · v_j / √dim)
-                        if let Some(target_vec) = db.get_vector(edge.target_id) {
-                            let dot: f32 = bias.iter()
-                                .zip(target_vec.iter())
-                                .map(|(b, v)| *b * v.to_f32())
-                                .sum();
-                            // sigmoid 激活: 将缩放后的点积压缩到 (0, 1)
-                            1.0 / (1.0 + (-dot * scale).exp())
+                    let attention_gate =
+                        if let (Some(bias), Some(scale)) = (diffusion_bias, bias_scale) {
+                            // 获取目标节点的 embedding，计算 gate = σ(bias · v_j / √dim)
+                            if let Some(target_vec) = db.get_vector(edge.target_id) {
+                                let dot: f32 = bias
+                                    .iter()
+                                    .zip(target_vec.iter())
+                                    .map(|(b, v)| *b * v.to_f32())
+                                    .sum();
+                                // sigmoid 激活: 将缩放后的点积压缩到 (0, 1)
+                                1.0 / (1.0 + (-dot * scale).exp())
+                            } else {
+                                1.0 // 无法获取向量时不施加门控
+                            }
                         } else {
-                            1.0 // 无法获取向量时不施加门控
-                        }
-                    } else {
-                        1.0 // 未提供 bias 时 gate = 1.0，退化为标准 PPR
-                    };
+                            1.0 // 未提供 bias 时 gate = 1.0，退化为标准 PPR
+                        };
 
                     // 发散传播的能量片段（含 CCSA attention gate）
                     let transmitted = if edge.label == "inhibition" {
                         // 负面边不仅不贡献，还会扣除能量
-                        -(spread_energy * edge.weight * inhibition_factor * fatigue_discount * attention_gate)
+                        -(spread_energy
+                            * edge.weight
+                            * inhibition_factor
+                            * fatigue_discount
+                            * attention_gate)
                     } else {
-                        spread_energy * edge.weight * inhibition_factor * fatigue_discount * attention_gate
+                        spread_energy
+                            * edge.weight
+                            * inhibition_factor
+                            * fatigue_discount
+                            * attention_gate
                     };
 
                     // 1. 将收到的片段累加到下一轮发射台

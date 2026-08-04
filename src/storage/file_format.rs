@@ -3,6 +3,7 @@ use crate::database::StorageMode;
 use crate::error::{Result, TriviumError};
 use crate::index::bq::BqSignature;
 use crate::node::{Edge, NodeId};
+use crate::storage::fs::robust_rename_and_sync;
 use crate::storage::memtable::MemTable;
 use crate::storage::vec_pool::VecPool;
 use memmap2::Mmap;
@@ -10,56 +11,87 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-/// Windows 下应对杀毒软件瞬态文件锁定的原子重命名
-///
-/// 杀毒软件（Windows Defender / 火绒等）会在文件关闭的瞬间以独占模式扫描，
-/// 导致紧随其后的 rename 操作遇到 ERROR_SHARING_VIOLATION (32) 或
-/// ERROR_ACCESS_DENIED (5)。此函数通过短暂指数退避重试来等待杀软释放锁。
-///
-/// 在非 Windows 平台上直接调用 std::fs::rename，零开销。
-fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(not(windows))]
-    {
-        std::fs::rename(from, to)
-    }
-
-    #[cfg(windows)]
-    {
-        let max_retries = 10;
-        let mut delay = std::time::Duration::from_millis(1);
-        for attempt in 0..max_retries {
-            match std::fs::rename(from, to) {
-                Ok(()) => return Ok(()),
-                Err(e) if attempt < max_retries - 1 => {
-                    let os_err = e.raw_os_error();
-                    // ERROR_ACCESS_DENIED (5) 或 ERROR_SHARING_VIOLATION (32)
-                    if os_err == Some(5) || os_err == Some(32) {
-                        tracing::debug!(
-                            "robust_rename: 第 {} 次重试失败 (attempt {} failed), os_error={:?}, {:?} 后重试 (retrying in {:?})",
-                            attempt + 1,
-                            attempt + 1,
-                            os_err,
-                            delay,
-                            delay
-                        );
-                        std::thread::sleep(delay);
-                        delay = (delay * 2).min(std::time::Duration::from_millis(50));
-                        continue;
-                    }
-                    return Err(e);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        // 逻辑上不可达：循环必定 return。防御性返回避免审查标记。
-        Err(std::io::Error::other("robust_rename 重试次数耗尽 (exhausted retries)"))
-    }
-}
-
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
 const VERSION: u16 = 5; // v5: 新增 BQ Metadata Block 持久化，header 扩展至 58 字节
 const HEADER_SIZE: u64 = 58;
+
+// ══════ flush_ok 提交标记常量 ══════
+/// 标记魔数：Trivium Flush Marker
+const FLUSH_MARKER_MAGIC: &[u8; 4] = b"TFMK";
+/// 标记版本号（u8，单字节）
+const FLUSH_MARKER_VERSION: u8 = 1;
+/// 标记总长度：magic(4) + version(1) + generation(8) + tdb_size(8) + vec_size(8) = 29
+const FLUSH_MARKER_SIZE: usize = 29;
+
+/// flush_ok 提交标记：记录 .tdb 和 .vec 的文件大小及单调递增的 generation 号
+///
+/// 格式：magic(u32) + version(u8) + generation(u64) + tdb_size(u64) + vec_size(u64)
+struct FlushMarker {
+    generation: u64,
+    tdb_size: u64,
+    vec_size: u64,
+}
+
+/// 编码 flush marker 为固定字节数组
+fn encode_flush_marker(marker: &FlushMarker) -> [u8; FLUSH_MARKER_SIZE] {
+    let mut bytes = [0u8; FLUSH_MARKER_SIZE];
+    bytes[0..4].copy_from_slice(FLUSH_MARKER_MAGIC);
+    bytes[4] = FLUSH_MARKER_VERSION;
+    bytes[5..13].copy_from_slice(&marker.generation.to_le_bytes());
+    bytes[13..21].copy_from_slice(&marker.tdb_size.to_le_bytes());
+    bytes[21..29].copy_from_slice(&marker.vec_size.to_le_bytes());
+    bytes
+}
+
+/// 解码 flush marker，校验 magic 和 version，不匹配时返回错误
+fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
+    if bytes.len() != FLUSH_MARKER_SIZE {
+        return Err(TriviumError::CorruptedFile(format!(
+            "flush marker 长度无效：期望 {} 字节，实际 {} 字节",
+            FLUSH_MARKER_SIZE,
+            bytes.len()
+        )));
+    }
+    if &bytes[0..4] != FLUSH_MARKER_MAGIC {
+        return Err(TriviumError::CorruptedFile("flush marker 魔数无效".into()));
+    }
+    let version = bytes[4];
+    if version != FLUSH_MARKER_VERSION {
+        return Err(TriviumError::CorruptedFile(format!(
+            "flush marker 版本无效：期望 {}，实际 {}",
+            FLUSH_MARKER_VERSION, version
+        )));
+    }
+    Ok(FlushMarker {
+        generation: read_u64_le(bytes, 5, "flush marker generation")?,
+        tdb_size: read_u64_le(bytes, 13, "flush marker tdb_size")?,
+        vec_size: read_u64_le(bytes, 21, "flush marker vec_size")?,
+    })
+}
+
+/// 读取现有 flush_ok 标记的 generation 号（用于单调递增）
+/// 如果标记不存在或无效，返回 None
+fn read_marker_generation(marker_path: &str) -> Option<u64> {
+    let bytes = std::fs::read(marker_path).ok()?;
+    decode_flush_marker(&bytes).ok().map(|m| m.generation)
+}
+
+/// 校验 flush_ok 标记是否有效
+/// 检查 magic、version，以及 tdb_size/vec_size 是否与实际文件大小匹配
+fn validate_flush_marker(marker_path: &str, tdb_path: &str, vec_path: &str) -> bool {
+    let marker_bytes = match std::fs::read(marker_path) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let marker = match decode_flush_marker(&marker_bytes) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let actual_tdb = std::fs::metadata(tdb_path).map(|m| m.len()).unwrap_or(0);
+    let actual_vec = std::fs::metadata(vec_path).map(|m| m.len()).unwrap_or(0);
+    marker.tdb_size == actual_tdb && marker.vec_size == actual_vec
+}
 
 /// 从字节切片中安全读取小端序整数（军工级：禁止裸 unwrap）
 ///
@@ -131,7 +163,10 @@ pub fn save<T: VectorType>(
     let quiver_path = quiver_path_from_db(path);
     if let Some(quiver) = memtable.quiver() {
         if let Err(e) = quiver.save_to_file(std::path::Path::new(&quiver_path)) {
-            tracing::warn!("QuIVer 索引持久化失败（不影响主数据）(QuIVer persist failed, main data unaffected): {}", e);
+            tracing::warn!(
+                "QuIVer 索引持久化失败（不影响主数据）(QuIVer persist failed, main data unaffected): {}",
+                e
+            );
         }
     } else {
         // QuIVer 不存在时清理残留文件
@@ -158,14 +193,25 @@ fn save_mmap<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()
         .map(|m| m.len())
         .unwrap_or(0);
     let marker_path = flush_ok_path_from_db(path);
+
+    // 读取上一次的 generation 号，单调递增；不存在或无效时从 1 开始
+    let generation = read_marker_generation(&marker_path)
+        .map(|g| g.wrapping_add(1))
+        .unwrap_or(1);
+
+    let marker = FlushMarker {
+        generation,
+        tdb_size,
+        vec_size,
+    };
+    let marker_bytes = encode_flush_marker(&marker);
     let marker_tmp = format!("{}.tmp", marker_path);
     {
         let mut f = File::create(&marker_tmp)?;
-        f.write_all(&tdb_size.to_le_bytes())?;
-        f.write_all(&vec_size.to_le_bytes())?;
+        f.write_all(&marker_bytes)?;
         f.sync_all()?;
     }
-    robust_rename(Path::new(&marker_tmp), Path::new(&marker_path))?;
+    robust_rename_and_sync(Path::new(&marker_tmp), Path::new(&marker_path))?;
 
     Ok(())
 }
@@ -325,7 +371,7 @@ fn save_tdb<T: VectorType>(
     file.sync_all()?;
     drop(file);
 
-    robust_rename(Path::new(&tmp_path), Path::new(path))?;
+    robust_rename_and_sync(Path::new(&tmp_path), Path::new(path))?;
 
     tracing::info!(
         "持久化完成 (Flush completed): {} 个槽位(含删除), {} 个向量, {} 个 BQ 签名, 模式 (Mode): {}",
@@ -399,9 +445,9 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
         }
         // BQ Block 完整性：读取 bq_count 并验证整个 Block 未被截断
         if bq_offset + 8 <= file_len {
-            let bq_count = u64::from_le_bytes(
-                bytes[bq_offset..bq_offset + 8].try_into().unwrap_or([0; 8]),
-            ) as usize;
+            let bq_count =
+                u64::from_le_bytes(bytes[bq_offset..bq_offset + 8].try_into().unwrap_or([0; 8]))
+                    as usize;
             if bq_count > 0 {
                 let sig_size = std::mem::size_of::<BqSignature>();
                 let expected_bq_end = bq_offset + 8 + bq_count * sig_size;
@@ -437,22 +483,14 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
     // 由下一次 flush 再按照最新的 StorageMode 决定写出格式
     if vector_offset == 0 && Path::new(&vec_file_path).exists() {
         // ═══ 跨文件一致性校验 ═══
-        // 检查 .flush_ok 标记是否存在且文件大小吻合，防止撕裂写入
+        // 检查 .flush_ok 标记是否存在且 magic/version/大小均吻合，防止撕裂写入。
+        // marker 无效时直接走 metadata-only 路径，依赖 WAL 恢复数据，
+        // 不再尝试加载可能不一致的 .vec 文件。
         let marker_path = flush_ok_path_from_db(path);
-        let flush_ok_valid = (|| -> Option<bool> {
-            let marker_bytes = std::fs::read(&marker_path).ok()?;
-            if marker_bytes.len() < 16 {
-                return Some(false);
-            }
-            let stored_tdb = u64::from_le_bytes(marker_bytes[0..8].try_into().ok()?);
-            let stored_vec = u64::from_le_bytes(marker_bytes[8..16].try_into().ok()?);
-            let actual_tdb = std::fs::metadata(path).ok()?.len();
-            let actual_vec = std::fs::metadata(&vec_file_path).ok()?.len();
-            Some(stored_tdb == actual_tdb && stored_vec == actual_vec)
-        })()
-        .unwrap_or(false);
+        let flush_ok_valid = validate_flush_marker(&marker_path, path, &vec_file_path);
 
         if flush_ok_valid {
+            // marker 有效：安全加载 .vec
             let mut mt = load_v2(
                 bytes,
                 dim,
@@ -469,11 +507,12 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
             load_quiver_index(&mut mt, path);
             Ok(mt)
         } else {
+            // marker 缺失或不匹配：直接安全降级，仅加载 .tdb 元数据，依赖 WAL 回放
             tracing::warn!(
                 "检测到 .tdb/.vec 跨文件撕裂 (Cross-file tear detected)（.flush_ok 标记缺失或不匹配），\
-                 将尝试按当前文件恢复，失败后再降级为仅加载 .tdb 元数据"
+                 直接进入安全降级恢复 (metadata-only)，依赖 WAL 回放数据"
             );
-            match load_v2(
+            let mut mt = load_v2_metadata_only(
                 bytes,
                 dim,
                 next_id,
@@ -481,30 +520,10 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
                 payload_offset,
                 edge_offset,
                 edge_limit_offset,
-                &vec_file_path,
-                &mmap,
-            ) {
-                Ok(mut mt) => {
-                    load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
-                    load_quiver_index(&mut mt, path);
-                    Ok(mt)
-                }
-                Err(e) => {
-                    tracing::warn!("当前 .tdb/.vec 组合不可用，进入安全降级恢复 (Falling back to metadata-only recovery): {}", e);
-                    let mut mt = load_v2_metadata_only(
-                        bytes,
-                        dim,
-                        next_id,
-                        node_count,
-                        payload_offset,
-                        edge_offset,
-                        edge_limit_offset,
-                    )?;
-                    load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
-                    load_quiver_index(&mut mt, path);
-                    Ok(mt)
-                }
-            }
+            )?;
+            load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+            load_quiver_index(&mut mt, path);
+            Ok(mt)
         }
     } else {
         let mut mt = load_v1_rom(
@@ -569,13 +588,13 @@ fn load_v2_metadata_only<T: VectorType>(
         payload_offset,
         edge_offset,
     )?;
+    // register_node/register_tombstone 只注册元数据映射，不向 VecPool 推入向量。
+    // 安全降级时 .vec 不被信任，为保持 indices_to_ids 与 vec_pool 索引严格对齐，
+    // 为每个槽位（含 tombstone 占位）推入零向量，后续由 WAL 回放覆盖为真实向量。
     let zero = vec![T::zero(); dim];
-    for id in memtable.internal_indices().to_vec() {
-        if id != 0
-            && let Some(payload) = memtable.get_payload(id).cloned()
-        {
-            memtable.raw_insert(id, &zero, payload)?;
-        }
+    let slot_count = memtable.internal_slot_count();
+    for _ in 0..slot_count {
+        memtable.vec_pool_mut().push(&zero);
     }
     load_edges(&mut memtable, bytes, edge_offset, edge_limit_offset)?;
     Ok(memtable)
@@ -648,7 +667,9 @@ fn load_payloads<T: VectorType>(
     let mut cursor = offset;
     for _ in 0..node_count {
         if cursor.saturating_add(12) > end_offset {
-            return Err(TriviumError::CorruptedFile("Payload 块溢出 (Payload block overflow)".into()));
+            return Err(TriviumError::CorruptedFile(
+                "Payload 块溢出 (Payload block overflow)".into(),
+            ));
         }
         let nid = read_u64_le(bytes, cursor, "payload node_id")?;
         cursor += 8;
@@ -661,10 +682,14 @@ fn load_payloads<T: VectorType>(
         }
 
         if cursor.saturating_add(json_len) > end_offset {
-            return Err(TriviumError::CorruptedFile("JSON 数据溢出 (JSON data overflow)".into()));
+            return Err(TriviumError::CorruptedFile(
+                "JSON 数据溢出 (JSON data overflow)".into(),
+            ));
         }
         let payload: serde_json::Value = serde_json::from_slice(&bytes[cursor..cursor + json_len])
-            .map_err(|e| TriviumError::CorruptedFile(format!("JSON 解析错误 (JSON parse error): {}", e)))?;
+            .map_err(|e| {
+                TriviumError::CorruptedFile(format!("JSON 解析错误 (JSON parse error): {}", e))
+            })?;
         cursor += json_len;
 
         memtable.register_node(nid, payload)?;
@@ -689,8 +714,9 @@ fn load_edges<T: VectorType>(
         if cursor.saturating_add(label_len).saturating_add(4) > file_len {
             break;
         }
-        let label = String::from_utf8(bytes[cursor..cursor + label_len].to_vec())
-            .map_err(|e| TriviumError::CorruptedFile(format!("标签解码错误 (Label decode error): {}", e)))?;
+        let label = String::from_utf8(bytes[cursor..cursor + label_len].to_vec()).map_err(|e| {
+            TriviumError::CorruptedFile(format!("标签解码错误 (Label decode error): {}", e))
+        })?;
         cursor += label_len;
         let weight = read_f32_le(bytes, cursor, "edge weight")?;
         cursor += 4;
@@ -754,7 +780,11 @@ fn load_bq_block<T: VectorType>(
     };
 
     memtable.set_bq_signatures(sigs);
-    tracing::info!("从 .tdb 恢复了 {} 个 BQ 签名 (Restored {} BQ signatures from .tdb)（零拷贝加载）", bq_count, bq_count);
+    tracing::info!(
+        "从 .tdb 恢复了 {} 个 BQ 签名 (Restored {} BQ signatures from .tdb)（零拷贝加载）",
+        bq_count,
+        bq_count
+    );
 }
 
 /// 尝试从 .tdb.quiver 文件加载 QuIVer 索引
@@ -771,10 +801,17 @@ fn load_quiver_index<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) {
 
     match QuIVer::load_from_file(qp) {
         Ok(quiver) => {
-            memtable.set_quiver_index(quiver);
-            // 加载后即进入 QuIVer 检索路径：冷向量随机按需读取，
-            // 提示 OS 关闭顺序预读以降低 PageCache 常驻
-            memtable.vec_pool_mut().advise_random();
+            if memtable.quiver_matches_storage(&quiver) {
+                memtable.set_quiver_index(quiver);
+                // 加载后即进入 QuIVer 检索路径：冷向量随机按需读取，
+                // 提示 OS 关闭顺序预读以降低 PageCache 常驻
+                memtable.vec_pool_mut().advise_random();
+            } else {
+                tracing::warn!(
+                    "QuIVer sidecar 与主数据不匹配，已拒绝加载并删除 (QuIVer sidecar mismatch, rejected and removed)"
+                );
+                std::fs::remove_file(qp).ok();
+            }
         }
         Err(e) => {
             tracing::warn!(

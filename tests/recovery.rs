@@ -23,7 +23,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok"] {
+    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok", ".quiver"] {
         std::fs::remove_file(format!("{}{}", path, ext)).ok();
     }
 }
@@ -84,6 +84,43 @@ fn Rom模式_持久化后重新加载_数据完整() {
     cleanup(&path);
 }
 
+#[test]
+fn QuIVer_sidecar错配主数据时_拒绝加载并清理() {
+    let source_path = tmp_db("quiver_sidecar_source");
+    let target_path = tmp_db("quiver_sidecar_target");
+    cleanup(&source_path);
+    cleanup(&target_path);
+
+    {
+        let mut source = Database::<f32>::open(&source_path, DIM).unwrap();
+        source
+            .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"db": "source"}))
+            .unwrap();
+        source.build_quiver_index(None).unwrap();
+        source.flush().unwrap();
+    }
+    {
+        let mut target = Database::<f32>::open(&target_path, DIM).unwrap();
+        target
+            .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"db": "target"}))
+            .unwrap();
+        target.build_quiver_index(None).unwrap();
+        target.flush().unwrap();
+    }
+
+    let source_sidecar = format!("{}.quiver", source_path);
+    let target_sidecar = format!("{}.quiver", target_path);
+    std::fs::copy(&source_sidecar, &target_sidecar).unwrap();
+
+    let target = Database::<f32>::open(&target_path, DIM).unwrap();
+    assert!(!Path::new(&target_sidecar).exists());
+    let node = target.get(1).unwrap();
+    assert_eq!(node.payload["db"], "target");
+
+    cleanup(&source_path);
+    cleanup(&target_path);
+}
+
 // ════════ P0-1：flush_ok 标记校验 ════════
 
 #[test]
@@ -111,7 +148,7 @@ fn P0_1_Mmap模式_flush后应生成flush_ok标记() {
 }
 
 #[test]
-fn P0_1_删除flush_ok后重加载_应降级或拒绝但不panic() {
+fn P0_1_删除flush_ok后重加载_应降级为零向量() {
     let path = tmp_db("flush_ok_torn");
     cleanup(&path);
 
@@ -119,7 +156,7 @@ fn P0_1_删除flush_ok后重加载_应降级或拒绝但不panic() {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
         {
             let mut tx = db.begin_tx();
-            tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}));
+            tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "alice"}));
             tx.commit().unwrap();
         }
         db.flush().unwrap();
@@ -128,13 +165,19 @@ fn P0_1_删除flush_ok后重加载_应降级或拒绝但不panic() {
     // 模拟撕裂：删除 .flush_ok
     std::fs::remove_file(format!("{}.flush_ok", path)).unwrap();
 
-    // 允许 Err（拒绝加载）或 Ok（安全降级），不允许 panic
-    let result = Database::<f32>::open(&path, DIM);
-    match result {
-        Ok(db) => {
-            let _ = db.node_count();
-        }
-        Err(_) => { /* 拒绝加载也是合法行为 */ }
+    // marker 无效时应安全降级：节点元数据保留，但向量必须为零向量（不信任 .vec）
+    let db = Database::<f32>::open(&path, DIM)
+        .expect("marker 无效时应安全降级为 metadata-only 而非报错");
+    assert_eq!(db.node_count(), 1, "降级后节点元数据应保留");
+
+    // 断言返回的向量是零向量，而非可能错误的 .vec 数据
+    for id in db.all_node_ids() {
+        let node = db.get(id).expect("节点应存在");
+        assert!(
+            node.vector.iter().all(|&x| x == 0.0),
+            "marker 无效时向量应为零向量，实际 {:?}",
+            node.vector
+        );
     }
 
     cleanup(&path);
@@ -249,6 +292,121 @@ fn 删除后持久化再加载_节点确实消失() {
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert!(!db.contains(del_id), "删除并 flush 后重加载，节点应不存在");
     assert_eq!(db.node_count(), 1, "应只剩 1 个节点");
+
+    cleanup(&path);
+}
+
+// ════════ 回归测试：flush marker 加固 ════════
+
+/// 回归测试：marker magic 被篡改时不加载 .vec，降级为零向量
+#[test]
+fn 回归_marker_magic被篡改时不加载vec_降级为零向量() {
+    let path = tmp_db("marker_magic_corrupt");
+    cleanup(&path);
+
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        db.insert(&[1.0, 2.0, 3.0, 4.0], serde_json::json!({"v": 1}))
+            .unwrap();
+        db.flush().unwrap();
+    }
+
+    // 篡改 marker 的 magic 字节，使其无效
+    let marker_path = format!("{}.flush_ok", path);
+    let mut marker = std::fs::read(&marker_path).unwrap();
+    marker[0..4].copy_from_slice(b"XXXX");
+    std::fs::write(&marker_path, &marker).unwrap();
+
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+    assert_eq!(db.node_count(), 1, "节点元数据应保留");
+
+    // marker 无效时不加载 .vec，向量应为零向量
+    let node = db.get(1).unwrap();
+    assert!(
+        node.vector.iter().all(|&x| x == 0.0),
+        "marker magic 被篡改时向量应为零向量，实际 {:?}",
+        node.vector
+    );
+
+    cleanup(&path);
+}
+
+/// 回归测试：marker version 不匹配时不加载 .vec，降级为零向量
+#[test]
+fn 回归_marker_version不匹配时拒绝加载vec() {
+    let path = tmp_db("marker_version_mismatch");
+    cleanup(&path);
+
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        db.insert(&[1.0, 2.0, 3.0, 4.0], serde_json::json!({"v": 1}))
+            .unwrap();
+        db.flush().unwrap();
+    }
+
+    // 篡改 marker 的 version 字节，使其不匹配
+    let marker_path = format!("{}.flush_ok", path);
+    let mut marker = std::fs::read(&marker_path).unwrap();
+    marker[4] = 255; // 不支持的版本号
+    std::fs::write(&marker_path, &marker).unwrap();
+
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+    assert_eq!(db.node_count(), 1, "节点元数据应保留");
+
+    // marker version 不匹配时不加载 .vec，向量应为零向量
+    let node = db.get(1).unwrap();
+    assert!(
+        node.vector.iter().all(|&x| x == 0.0),
+        "version 不匹配时向量应为零向量，实际 {:?}",
+        node.vector
+    );
+
+    cleanup(&path);
+}
+
+/// 回归测试：marker generation 在多次 flush 中单调递增
+#[test]
+fn 回归_marker_generation单调递增() {
+    let path = tmp_db("marker_generation_increment");
+    cleanup(&path);
+
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"seq": 1}))
+            .unwrap();
+        db.flush().unwrap();
+    }
+
+    // 第一次 flush 后读取 generation
+    let marker_path = format!("{}.flush_ok", path);
+    let marker_bytes = std::fs::read(&marker_path).unwrap();
+    assert_eq!(marker_bytes.len(), 29, "marker 应为 29 字节");
+    let gen1 = u64::from_le_bytes(marker_bytes[5..13].try_into().unwrap());
+    assert_eq!(gen1, 1, "首次 flush 的 generation 应为 1");
+
+    // 第二次 flush
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"seq": 2}))
+            .unwrap();
+        db.flush().unwrap();
+    }
+
+    let marker_bytes = std::fs::read(&marker_path).unwrap();
+    let gen2 = u64::from_le_bytes(marker_bytes[5..13].try_into().unwrap());
+    assert_eq!(gen2, 2, "第二次 flush 的 generation 应为 2（单调递增）");
+
+    // 第三次 flush
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        db.insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"seq": 3}))
+            .unwrap();
+        db.flush().unwrap();
+    }
+
+    let marker_bytes = std::fs::read(&marker_path).unwrap();
+    let gen3 = u64::from_le_bytes(marker_bytes[5..13].try_into().unwrap());
+    assert_eq!(gen3, 3, "第三次 flush 的 generation 应为 3（单调递增）");
 
     cleanup(&path);
 }

@@ -94,6 +94,14 @@ fn insert_with_id_基础() {
 }
 
 #[test]
+fn insert_with_id_ID0拒绝() {
+    let mut mt = make_mt();
+    assert!(mt.insert_with_id(0, &[1.0, 2.0, 3.0], json!({})).is_err());
+    assert!(!mt.contains(0));
+    assert_eq!(mt.next_id_value(), 1);
+}
+
+#[test]
 fn insert_with_id_重复ID报错() {
     let mut mt = make_mt();
     mt.insert_with_id(1, &[1.0, 2.0, 3.0], json!({})).unwrap();
@@ -363,13 +371,20 @@ fn patch_payload_简写模式() {
 #[test]
 fn patch_payload_组合操作() {
     let mut mt = make_mt();
-    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"name": "Alice", "age": 25, "old": true}))
-        .unwrap();
-    mt.patch_payload(1, &json!({
-        "$set": {"name": "Bob"},
-        "$inc": {"age": 1},
-        "$unset": {"old": true}
-    }))
+    mt.insert_with_id(
+        1,
+        &[1.0, 0.0, 0.0],
+        json!({"name": "Alice", "age": 25, "old": true}),
+    )
+    .unwrap();
+    mt.patch_payload(
+        1,
+        &json!({
+            "$set": {"name": "Bob"},
+            "$inc": {"age": 1},
+            "$unset": {"old": true}
+        }),
+    )
     .unwrap();
     let p = mt.get_payload(1).unwrap();
     assert_eq!(p["name"], "Bob");
@@ -664,7 +679,8 @@ fn quiver_手动构建和失效() {
     use triviumdb::index::quiver::QuIVerConfig;
     let mut mt = make_mt();
     for i in 1..=5u64 {
-        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({})).unwrap();
+        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({}))
+            .unwrap();
     }
     assert!(mt.quiver().is_none(), "数据量不足时 QuIVer 不应自动构建");
     mt.build_quiver(&QuIVerConfig::default());
@@ -672,11 +688,37 @@ fn quiver_手动构建和失效() {
 
     // delete 使用 soft_delete（tombstone 标记），索引仍存在
     mt.delete(1).unwrap();
-    assert!(mt.quiver().is_some(), "单次 delete 后 QuIVer 应仍存在（soft_delete）");
+    assert!(
+        mt.quiver().is_some(),
+        "单次 delete 后 QuIVer 应仍存在（soft_delete）"
+    );
 
     // 删除超过 25% 后索引失效（5 个节点中删除 2 个 = 40%）
     mt.delete(2).unwrap();
     assert!(mt.quiver().is_none(), "退化超过 25% 后 QuIVer 应自动失效");
+}
+
+#[test]
+fn quiver_事务同步超过退化阈值后立即重建() {
+    use triviumdb::index::quiver::QuIVerConfig;
+    use triviumdb::storage::wal::WalEntry;
+
+    let mut mt = make_mt();
+    for i in 1..=5u64 {
+        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({}))
+            .unwrap();
+    }
+    mt.build_quiver(&QuIVerConfig::default());
+    mt.set_quiver_sync_paused(true);
+    mt.delete(1).unwrap();
+    mt.delete(2).unwrap();
+    mt.set_quiver_sync_paused(false);
+
+    mt.quiver_sync_tx_entries(&[WalEntry::Delete { id: 1 }, WalEntry::Delete { id: 2 }]);
+
+    let quiver = mt.quiver().expect("事务提交后必须恢复可用的 QuIVer 索引");
+    assert_eq!(quiver.total_count(), 3);
+    assert_eq!(quiver.active_count(), 3);
 }
 
 #[test]

@@ -19,10 +19,10 @@ const DIM: usize = 768;
 const N: usize = 20000;
 const CLUSTERS: usize = 100;
 const NOISE: f32 = 0.15;
-const NQ: usize = 200;       // 查询数
+const NQ: usize = 200; // 查询数
 const TOP_K: usize = 10;
-const WARMUP: usize = 20;    // 预热查询数
-const ROUNDS: usize = 5;     // 每配置重复测量轮数
+const WARMUP: usize = 20; // 预热查询数
+const ROUNDS: usize = 5; // 每配置重复测量轮数
 
 fn gauss(rng: &mut StdRng) -> f32 {
     let u1 = rng.gen_range(1e-10f32..1.0);
@@ -36,7 +36,13 @@ fn gen_unit(rng: &mut StdRng, d: usize) -> Vec<f32> {
     v.iter().map(|x| x / n).collect()
 }
 
-fn gen_clustered(c: usize, p: usize, d: usize, noise: f32, rng: &mut StdRng) -> (Vec<f32>, Vec<u64>) {
+fn gen_clustered(
+    c: usize,
+    p: usize,
+    d: usize,
+    noise: f32,
+    rng: &mut StdRng,
+) -> (Vec<f32>, Vec<u64>) {
     let mut vecs = Vec::with_capacity(c * p * d);
     let mut ids = Vec::with_capacity(c * p);
     for ci in 0..c {
@@ -44,7 +50,9 @@ fn gen_clustered(c: usize, p: usize, d: usize, noise: f32, rng: &mut StdRng) -> 
         for pi in 0..p {
             let mut v: Vec<f32> = ctr.iter().map(|&x| x + gauss(rng) * noise).collect();
             let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
-            for x in &mut v { *x /= n; }
+            for x in &mut v {
+                *x /= n;
+            }
             vecs.extend_from_slice(&v);
             ids.push((ci * p + pi) as u64);
         }
@@ -76,11 +84,15 @@ fn recall(gt: &[(u64, f32)], res: &[(u64, f32)]) -> f64 {
 
 /// 百分位数（线性插值）
 fn percentile(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() { return 0.0; }
+    if sorted.is_empty() {
+        return 0.0;
+    }
     let idx = p / 100.0 * (sorted.len() - 1) as f64;
     let lo = idx.floor() as usize;
     let hi = idx.ceil() as usize;
-    if lo == hi { return sorted[lo]; }
+    if lo == hi {
+        return sorted[lo];
+    }
     sorted[lo] * (hi as f64 - idx) + sorted[hi] * (idx - lo as f64)
 }
 
@@ -97,10 +109,7 @@ fn compute_stats(values: &[f64]) -> Stats {
     let std = var.sqrt();
     let mut sorted = values.to_vec();
     sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-    Stats {
-        mean,
-        std,
-    }
+    Stats { mean, std }
 }
 
 fn main() {
@@ -121,7 +130,9 @@ fn main() {
             let base = &vecs[idx * DIM..(idx + 1) * DIM];
             let mut q: Vec<f32> = base.iter().map(|&x| x + gauss(&mut rng) * 0.05).collect();
             let norm = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
-            for x in &mut q { *x /= norm; }
+            for x in &mut q {
+                *x /= norm;
+            }
             q
         })
         .collect();
@@ -133,7 +144,9 @@ fn main() {
             let base = &vecs[idx * DIM..(idx + 1) * DIM];
             let mut q: Vec<f32> = base.iter().map(|&x| x + gauss(&mut rng) * 0.05).collect();
             let norm = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
-            for x in &mut q { *x /= norm; }
+            for x in &mut q {
+                *x /= norm;
+            }
             q
         })
         .collect();
@@ -144,7 +157,10 @@ fn main() {
         let _ = brute_force(&vecs, DIM, q, TOP_K);
     }
 
-    let gts: Vec<_> = queries.iter().map(|q| brute_force(&vecs, DIM, q, TOP_K)).collect();
+    let gts: Vec<_> = queries
+        .iter()
+        .map(|q| brute_force(&vecs, DIM, q, TOP_K))
+        .collect();
 
     let mut bf_qps_samples = Vec::with_capacity(ROUNDS);
     for _ in 0..ROUNDS {
@@ -171,9 +187,24 @@ fn main() {
     }
     let experiments = [
         // α=1.2 是基准
-        Exp { label: "1. m=32 (ef_c=256, α=1.2)", m: 32, ef_c: 256, alpha: 1.2 },
-        Exp { label: "2. m=48 (ef_c=256, α=1.2)", m: 48, ef_c: 256, alpha: 1.2 },
-        Exp { label: "3. m=64 (ef_c=512, α=1.2)", m: 64, ef_c: 512, alpha: 1.2 },
+        Exp {
+            label: "1. m=32 (ef_c=256, α=1.2)",
+            m: 32,
+            ef_c: 256,
+            alpha: 1.2,
+        },
+        Exp {
+            label: "2. m=48 (ef_c=256, α=1.2)",
+            m: 48,
+            ef_c: 256,
+            alpha: 1.2,
+        },
+        Exp {
+            label: "3. m=64 (ef_c=512, α=1.2)",
+            m: 64,
+            ef_c: 512,
+            alpha: 1.2,
+        },
     ];
 
     for exp in experiments.iter() {
@@ -205,7 +236,11 @@ fn main() {
         );
 
         for &ef in &ef_tests {
-            let cfg = QuIVerSearchConfig { top_k: TOP_K, ef_search: ef, rerank_limit: None };
+            let cfg = QuIVerSearchConfig {
+                top_k: TOP_K,
+                ef_search: ef,
+                rerank_limit: None,
+            };
 
             // Warmup（丢弃结果，预热 cache）
             for q in &warmup_queries {

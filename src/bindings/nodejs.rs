@@ -257,7 +257,9 @@ pub mod nodejs {
                 enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
                 text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
                 force_brute_force: cfg.force_brute_force.unwrap_or(false),
-                diffusion_bias: cfg.diffusion_bias.map(|v| v.iter().map(|&x| x as f32).collect()),
+                diffusion_bias: cfg
+                    .diffusion_bias
+                    .map(|v| v.iter().map(|&x| x as f32).collect()),
                 ..Default::default()
             };
 
@@ -710,7 +712,9 @@ pub mod nodejs {
                 enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
                 text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
                 force_brute_force: cfg.force_brute_force.unwrap_or(false),
-                diffusion_bias: cfg.diffusion_bias.map(|v| v.iter().map(|&x| x as f32).collect()),
+                diffusion_bias: cfg
+                    .diffusion_bias
+                    .map(|v| v.iter().map(|&x| x as f32).collect()),
                 ..Default::default()
             };
 

@@ -1,6 +1,6 @@
+use crate::index::bq::FORCE_NO_AVX512;
 use half::f16;
 use std::fmt::Debug;
-use crate::index::bq::FORCE_NO_AVX512;
 
 /// 定义通用向量类型的 Trait，支持多种引擎底层数据 (f32 / f16 / u64)
 pub trait VectorType:
@@ -97,9 +97,7 @@ unsafe fn cosine_similarity_avx512(a: &[f32], b: &[f32]) -> f32 {
 
         // 水平归约：512-bit → 256-bit → 128-bit → 标量
         let dot256_lo = _mm512_castps512_ps256(v_dot);
-        let dot256_hi = _mm512_castps512_ps256(
-            _mm512_shuffle_f32x4(v_dot, v_dot, 0b_01_00_11_10),
-        );
+        let dot256_hi = _mm512_castps512_ps256(_mm512_shuffle_f32x4(v_dot, v_dot, 0b_01_00_11_10));
         let d256 = _mm256_add_ps(dot256_lo, dot256_hi);
         let d128 = _mm_add_ps(_mm256_castps256_ps128(d256), _mm256_extractf128_ps(d256, 1));
         let d128 = _mm_hadd_ps(d128, d128);
@@ -107,9 +105,7 @@ unsafe fn cosine_similarity_avx512(a: &[f32], b: &[f32]) -> f32 {
         let mut dot = _mm_cvtss_f32(d128);
 
         let na256_lo = _mm512_castps512_ps256(v_na);
-        let na256_hi = _mm512_castps512_ps256(
-            _mm512_shuffle_f32x4(v_na, v_na, 0b_01_00_11_10),
-        );
+        let na256_hi = _mm512_castps512_ps256(_mm512_shuffle_f32x4(v_na, v_na, 0b_01_00_11_10));
         let n256 = _mm256_add_ps(na256_lo, na256_hi);
         let n128 = _mm_add_ps(_mm256_castps256_ps128(n256), _mm256_extractf128_ps(n256, 1));
         let n128 = _mm_hadd_ps(n128, n128);
@@ -117,11 +113,12 @@ unsafe fn cosine_similarity_avx512(a: &[f32], b: &[f32]) -> f32 {
         let mut norm_a = _mm_cvtss_f32(n128);
 
         let nb256_lo = _mm512_castps512_ps256(v_nb);
-        let nb256_hi = _mm512_castps512_ps256(
-            _mm512_shuffle_f32x4(v_nb, v_nb, 0b_01_00_11_10),
-        );
+        let nb256_hi = _mm512_castps512_ps256(_mm512_shuffle_f32x4(v_nb, v_nb, 0b_01_00_11_10));
         let nb256 = _mm256_add_ps(nb256_lo, nb256_hi);
-        let nb128 = _mm_add_ps(_mm256_castps256_ps128(nb256), _mm256_extractf128_ps(nb256, 1));
+        let nb128 = _mm_add_ps(
+            _mm256_castps256_ps128(nb256),
+            _mm256_extractf128_ps(nb256, 1),
+        );
         let nb128 = _mm_hadd_ps(nb128, nb128);
         let nb128 = _mm_hadd_ps(nb128, nb128);
         let mut norm_b = _mm_cvtss_f32(nb128);
@@ -132,7 +129,9 @@ unsafe fn cosine_similarity_avx512(a: &[f32], b: &[f32]) -> f32 {
             norm_a += a[i] * a[i];
             norm_b += b[i] * b[i];
         }
-        if norm_a == 0.0 || norm_b == 0.0 { return 0.0; }
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 0.0;
+        }
         dot / (norm_a.sqrt() * norm_b.sqrt())
     }
 }
@@ -183,7 +182,9 @@ unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
             norm_a += a[i] * a[i];
             norm_b += b[i] * b[i];
         }
-        if norm_a == 0.0 || norm_b == 0.0 { return 0.0; }
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 0.0;
+        }
         dot / (norm_a.sqrt() * norm_b.sqrt())
     }
 }
@@ -227,7 +228,9 @@ unsafe fn cosine_similarity_sse3(a: &[f32], b: &[f32]) -> f32 {
             norm_a += a[i] * a[i];
             norm_b += b[i] * b[i];
         }
-        if norm_a == 0.0 || norm_b == 0.0 { return 0.0; }
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 0.0;
+        }
         dot / (norm_a.sqrt() * norm_b.sqrt())
     }
 }
@@ -403,7 +406,7 @@ mod tests {
 
         let au = vec![0b1010, 0b1100];
         let bu = vec![0b0010, 0b0100];
-        assert_eq!(u64::similarity(&au, &bu), 63.0 + 63.0); 
+        assert_eq!(u64::similarity(&au, &bu), 63.0 + 63.0);
     }
 
     #[test]
@@ -411,7 +414,7 @@ mod tests {
         let a = vec![1.0; 20];
         let b = vec![1.0; 20];
         assert!((f32::similarity(&a, &b) - 1.0).abs() < 1e-5);
-        
+
         // 边界情况：零向量
         let zeros = vec![0.0; 20];
         assert_eq!(f32::similarity(&zeros, &a), 0.0);

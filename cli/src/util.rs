@@ -5,9 +5,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 /// 创建一个带前缀标签的进度条（写到 stderr，不污染 stdout）。
 pub fn progress_bar(len: u64, label: &str) -> ProgressBar {
     let pb = ProgressBar::new(len);
-    let style = ProgressStyle::with_template("{prefix:>8} [{bar:30.cyan/blue}] {pos}/{len} ({eta})")
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
-        .progress_chars("=>-");
+    let style =
+        ProgressStyle::with_template("{prefix:>8} [{bar:30.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("=>-");
     pb.set_style(style);
     pb.set_prefix(label.to_string());
     pb

@@ -35,7 +35,8 @@ fn read_f32_bin(path: &str) -> Vec<f32> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes.len() % 4, 0);
-    bytes.chunks_exact(4)
+    bytes
+        .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }
@@ -45,7 +46,8 @@ fn read_i32_bin(path: &str) -> Vec<i32> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes.len() % 4, 0);
-    bytes.chunks_exact(4)
+    bytes
+        .chunks_exact(4)
         .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }
@@ -77,17 +79,34 @@ fn clear_standby_list() -> bool {
 
         // LUID_AND_ATTRIBUTES + TOKEN_PRIVILEGES 布局
         #[repr(C)]
-        struct Luid { low: u32, high: i32 }
+        struct Luid {
+            low: u32,
+            high: i32,
+        }
         #[repr(C)]
-        struct LuidAndAttributes { luid: Luid, attributes: u32 }
+        struct LuidAndAttributes {
+            luid: Luid,
+            attributes: u32,
+        }
         #[repr(C)]
-        struct TokenPrivileges { count: u32, privileges: [LuidAndAttributes; 1] }
+        struct TokenPrivileges {
+            count: u32,
+            privileges: [LuidAndAttributes; 1],
+        }
 
         // 动态加载函数签名
         type NtSetSystemInformationFn = unsafe extern "system" fn(u32, *mut c_void, u32) -> i32;
         type OpenProcessTokenFn = unsafe extern "system" fn(isize, u32, *mut isize) -> i32;
-        type LookupPrivilegeValueAFn = unsafe extern "system" fn(*const u8, *const u8, *mut Luid) -> i32;
-        type AdjustTokenPrivilegesFn = unsafe extern "system" fn(isize, i32, *const TokenPrivileges, u32, *mut TokenPrivileges, *mut u32) -> i32;
+        type LookupPrivilegeValueAFn =
+            unsafe extern "system" fn(*const u8, *const u8, *mut Luid) -> i32;
+        type AdjustTokenPrivilegesFn = unsafe extern "system" fn(
+            isize,
+            i32,
+            *const TokenPrivileges,
+            u32,
+            *mut TokenPrivileges,
+            *mut u32,
+        ) -> i32;
         type GetCurrentProcessFn = unsafe extern "system" fn() -> isize;
         type CloseHandleFn = unsafe extern "system" fn(isize) -> i32;
 
@@ -95,28 +114,48 @@ fn clear_standby_list() -> bool {
             // 加载 DLL
             let ntdll = match libloading::Library::new("ntdll.dll") {
                 Ok(lib) => lib,
-                Err(e) => { eprintln!("  ❌ 无法加载 ntdll.dll: {}", e); return false; }
+                Err(e) => {
+                    eprintln!("  ❌ 无法加载 ntdll.dll: {}", e);
+                    return false;
+                }
             };
             let advapi32 = match libloading::Library::new("advapi32.dll") {
                 Ok(lib) => lib,
-                Err(e) => { eprintln!("  ❌ 无法加载 advapi32.dll: {}", e); return false; }
+                Err(e) => {
+                    eprintln!("  ❌ 无法加载 advapi32.dll: {}", e);
+                    return false;
+                }
             };
             let kernel32 = match libloading::Library::new("kernel32.dll") {
                 Ok(lib) => lib,
-                Err(e) => { eprintln!("  ❌ 无法加载 kernel32.dll: {}", e); return false; }
+                Err(e) => {
+                    eprintln!("  ❌ 无法加载 kernel32.dll: {}", e);
+                    return false;
+                }
             };
 
             // 获取函数指针
-            let nt_set: libloading::Symbol<NtSetSystemInformationFn> = ntdll.get(b"NtSetSystemInformation").unwrap();
-            let open_token: libloading::Symbol<OpenProcessTokenFn> = advapi32.get(b"OpenProcessToken").unwrap();
-            let lookup_priv: libloading::Symbol<LookupPrivilegeValueAFn> = advapi32.get(b"LookupPrivilegeValueA").unwrap();
-            let adjust_priv: libloading::Symbol<AdjustTokenPrivilegesFn> = advapi32.get(b"AdjustTokenPrivileges").unwrap();
-            let get_process: libloading::Symbol<GetCurrentProcessFn> = kernel32.get(b"GetCurrentProcess").unwrap();
-            let close_handle: libloading::Symbol<CloseHandleFn> = kernel32.get(b"CloseHandle").unwrap();
+            let nt_set: libloading::Symbol<NtSetSystemInformationFn> =
+                ntdll.get(b"NtSetSystemInformation").unwrap();
+            let open_token: libloading::Symbol<OpenProcessTokenFn> =
+                advapi32.get(b"OpenProcessToken").unwrap();
+            let lookup_priv: libloading::Symbol<LookupPrivilegeValueAFn> =
+                advapi32.get(b"LookupPrivilegeValueA").unwrap();
+            let adjust_priv: libloading::Symbol<AdjustTokenPrivilegesFn> =
+                advapi32.get(b"AdjustTokenPrivileges").unwrap();
+            let get_process: libloading::Symbol<GetCurrentProcessFn> =
+                kernel32.get(b"GetCurrentProcess").unwrap();
+            let close_handle: libloading::Symbol<CloseHandleFn> =
+                kernel32.get(b"CloseHandle").unwrap();
 
             // Step 1: 打开当前进程 token
             let mut token: isize = 0;
-            if open_token(get_process(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) == 0 {
+            if open_token(
+                get_process(),
+                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                &mut token,
+            ) == 0
+            {
                 eprintln!("  ❌ OpenProcessToken 失败");
                 return false;
             }
@@ -133,9 +172,19 @@ fn clear_standby_list() -> bool {
             // Step 3: 启用特权
             let tp = TokenPrivileges {
                 count: 1,
-                privileges: [LuidAndAttributes { luid, attributes: SE_PRIVILEGE_ENABLED }],
+                privileges: [LuidAndAttributes {
+                    luid,
+                    attributes: SE_PRIVILEGE_ENABLED,
+                }],
             };
-            adjust_priv(token, 0, &tp, mem::size_of::<TokenPrivileges>() as u32, std::ptr::null_mut(), std::ptr::null_mut());
+            adjust_priv(
+                token,
+                0,
+                &tp,
+                mem::size_of::<TokenPrivileges>() as u32,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
             close_handle(token);
 
             eprintln!("  🔑 已启用 SeProfileSingleProcessPrivilege");
@@ -152,7 +201,10 @@ fn clear_standby_list() -> bool {
                 eprintln!("  ✅ Standby list 已清除 (page cache dropped)");
                 true
             } else {
-                eprintln!("  ❌ NtSetSystemInformation 失败: NTSTATUS=0x{:08X}", status as u32);
+                eprintln!(
+                    "  ❌ NtSetSystemInformation 失败: NTSTATUS=0x{:08X}",
+                    status as u32
+                );
                 eprintln!("     请确保以管理员身份运行！");
                 false
             }
@@ -183,10 +235,7 @@ fn write_vectors_to_file(vecs: &[f32], path: &str) -> std::io::Result<()> {
     let mut f = std::fs::File::create(path)?;
     // 直接写入 f32 的字节
     let bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(
-            vecs.as_ptr() as *const u8,
-            std::mem::size_of_val(vecs),
-        )
+        std::slice::from_raw_parts(vecs.as_ptr() as *const u8, std::mem::size_of_val(vecs))
     };
     f.write_all(bytes)?;
     f.sync_all()?;
@@ -289,8 +338,10 @@ fn main() {
     let n_test = test_data.len() / DIM;
     let k_gt = gt_data.len() / n_test;
     let vec_bytes = n_train * DIM * 4;
-    eprintln!("  ✅ 训练集: {} × {}d | 测试集: {} × {}d | GT K: {}",
-              n_train, DIM, n_test, DIM, k_gt);
+    eprintln!(
+        "  ✅ 训练集: {} × {}d | 测试集: {} × {}d | GT K: {}",
+        n_train, DIM, n_test, DIM, k_gt
+    );
     eprintln!("  向量数据大小: {:.1} MB", vec_bytes as f64 / 1048576.0);
 
     // 解析 Ground Truth
@@ -339,7 +390,10 @@ fn main() {
     // ══════════════════════════════════════════════════════════════
     eprintln!("\n┌────────────────────────────────────────────────────────────────────┐");
     eprintln!("│  Phase 1: All-RAM (f32 向量在堆内存)                              │");
-    eprintln!("│  数据集: Cohere-1M ({} vecs × {}d)                               │", n_train, DIM);
+    eprintln!(
+        "│  数据集: Cohere-1M ({} vecs × {}d)                               │",
+        n_train, DIM
+    );
     eprintln!("├────────────────────────────────────────────────────────────────────┤");
     eprintln!(
         "  {:<8} {:>10} {:>10} {:>12} {:>12}",
@@ -348,7 +402,15 @@ fn main() {
 
     let mut ram_results = Vec::new();
     for &ef in &EF_TESTS {
-        let r = run_search_bench(&index, &train_data, &queries, &warmup_queries, &eval_gts, ef, true);
+        let r = run_search_bench(
+            &index,
+            &train_data,
+            &queries,
+            &warmup_queries,
+            &eval_gts,
+            ef,
+            true,
+        );
         eprintln!(
             "  ef={:<5} {:>8.1}% {:>8.0} {:>10.1} {:>10.1}",
             r.ef, r.recall, r.qps, r.avg_latency_us, r.p99_latency_us
@@ -384,7 +446,15 @@ fn main() {
 
     let mut warm_results = Vec::new();
     for &ef in &EF_TESTS {
-        let r = run_search_bench(&index, mmap_vecs, &queries, &warmup_queries, &eval_gts, ef, true);
+        let r = run_search_bench(
+            &index,
+            mmap_vecs,
+            &queries,
+            &warmup_queries,
+            &eval_gts,
+            ef,
+            true,
+        );
         eprintln!(
             "  ef={:<5} {:>8.1}% {:>8.0} {:>10.1} {:>10.1}",
             r.ef, r.recall, r.qps, r.avg_latency_us, r.p99_latency_us

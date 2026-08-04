@@ -983,41 +983,25 @@ impl TqlParser {
         let mut edges = Vec::new();
 
         loop {
-            // 解析 (var {payload}) 或 (var)-[:label]->(var2)
             self.expect(&TqlToken::LParen)?;
-
-            let var = if let TqlToken::Ident(_) = self.peek() {
+            let mut current_var = if let TqlToken::Ident(_) = self.peek() {
                 if let TqlToken::Ident(name) = self.advance() {
-                    Some(name)
+                    name
                 } else {
-                    None
+                    unreachable!()
                 }
             } else {
-                None
+                format!("_auto_{}", nodes.len())
             };
-
             let payload = if self.at(&TqlToken::LBrace) {
                 self.parse_create_payload()?
             } else {
                 serde_json::json!({})
             };
-
             self.expect(&TqlToken::RParen)?;
+            merge_create_node(&mut nodes, current_var.clone(), payload)?;
 
-            nodes.push(CreateNode {
-                var: var.clone(),
-                payload,
-            });
-
-            // 检查是否有边: )-[:label]->(
-            if self.at(&TqlToken::Dash) {
-                let src_var = var.unwrap_or_else(|| format!("_auto_{}", nodes.len() - 1));
-                // 回填变量名
-                if nodes.last().unwrap().var.is_none() {
-                    nodes.last_mut().unwrap().var = Some(src_var.clone());
-                }
-
-                // 解析边模式
+            while self.at(&TqlToken::Dash) {
                 self.expect(&TqlToken::Dash)?;
                 self.expect(&TqlToken::LBracket)?;
                 let mut label = String::new();
@@ -1049,8 +1033,6 @@ impl TqlParser {
                 }
                 self.expect(&TqlToken::RBracket)?;
                 self.expect(&TqlToken::Arrow)?;
-
-                // 目标节点
                 self.expect(&TqlToken::LParen)?;
                 let dst_var = if let TqlToken::Ident(_) = self.peek() {
                     if let TqlToken::Ident(name) = self.advance() {
@@ -1067,25 +1049,16 @@ impl TqlParser {
                     serde_json::json!({})
                 };
                 self.expect(&TqlToken::RParen)?;
-
-                // 如果目标节点有 payload，添加为新节点
-                let needs_create_dst = !dst_payload.as_object().is_none_or(|m| m.is_empty());
-                if needs_create_dst {
-                    nodes.push(CreateNode {
-                        var: Some(dst_var.clone()),
-                        payload: dst_payload,
-                    });
-                }
-
+                merge_create_node(&mut nodes, dst_var.clone(), dst_payload)?;
                 edges.push(CreateEdge {
-                    src_var,
-                    dst_var,
+                    src_var: current_var,
+                    dst_var: dst_var.clone(),
                     label,
                     weight,
                 });
+                current_var = dst_var;
             }
 
-            // 逗号分隔的多节点创建
             if self.at(&TqlToken::Comma) {
                 self.advance();
                 continue;
@@ -1201,6 +1174,36 @@ impl TqlParser {
         }
         Ok(vars)
     }
+}
+
+fn merge_create_node(
+    nodes: &mut Vec<CreateNode>,
+    var: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    if let Some(existing) = nodes
+        .iter_mut()
+        .find(|node| node.var.as_deref() == Some(var.as_str()))
+    {
+        let has_existing_payload = existing
+            .payload
+            .as_object()
+            .is_some_and(|object| !object.is_empty());
+        let has_new_payload = payload.as_object().is_some_and(|object| !object.is_empty());
+        if has_existing_payload && has_new_payload && existing.payload != payload {
+            return Err(format!("CREATE 变量 {var} 定义了冲突的 payload"));
+        }
+        if !has_existing_payload && has_new_payload {
+            existing.payload = payload;
+        }
+        return Ok(());
+    }
+
+    nodes.push(CreateNode {
+        var: Some(var),
+        payload,
+    });
+    Ok(())
 }
 
 /// 便捷入口：TQL 字符串 → TqlQuery AST（仅读查询）

@@ -111,7 +111,6 @@ fn seed_typed_graph(path: &str) -> Database<f32> {
     db
 }
 
-
 /// WHERE 浮点数比较 (cmp_f64 全 6 操作符: ==, !=, >, >=, <, <=)
 #[test]
 fn COV5_01_where_float_cmp() {

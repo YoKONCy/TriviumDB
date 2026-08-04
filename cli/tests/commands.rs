@@ -93,7 +93,13 @@ fn exec_json_format_valid() {
     let (_dir, path) = seed_db();
     let output = tdb()
         .args([
-            "exec", &path, "MATCH (n) RETURN n", "--format", "json", "--color", "never",
+            "exec",
+            &path,
+            "MATCH (n) RETURN n",
+            "--format",
+            "json",
+            "--color",
+            "never",
         ])
         .output()
         .unwrap();
@@ -108,7 +114,13 @@ fn exec_csv_format_has_header() {
     let (_dir, path) = seed_db();
     tdb()
         .args([
-            "exec", &path, "MATCH (n) RETURN n", "--format", "csv", "--color", "never",
+            "exec",
+            &path,
+            "MATCH (n) RETURN n",
+            "--format",
+            "csv",
+            "--color",
+            "never",
         ])
         .assert()
         .success()
@@ -122,7 +134,12 @@ fn exec_mutate_create_node() {
     let (_dir, path) = seed_db();
     tdb()
         .args([
-            "exec", &path, r#"CREATE (a {name: "Charlie"})"#, "--mutate", "--color", "never",
+            "exec",
+            &path,
+            r#"CREATE (a {name: "Charlie"})"#,
+            "--mutate",
+            "--color",
+            "never",
         ])
         .assert()
         .success()
@@ -147,7 +164,13 @@ fn export_import_roundtrip() {
 
     // export
     tdb()
-        .args(["export", &src_path, jsonl_path.to_str().unwrap(), "--color", "never"])
+        .args([
+            "export",
+            &src_path,
+            jsonl_path.to_str().unwrap(),
+            "--color",
+            "never",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("2"));
@@ -215,7 +238,13 @@ fn repair_check_nonexistent() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("nope.tdb");
     tdb()
-        .args(["repair", "check", path.to_str().unwrap(), "--color", "never"])
+        .args([
+            "repair",
+            "check",
+            path.to_str().unwrap(),
+            "--color",
+            "never",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("不存在"));
@@ -226,13 +255,7 @@ fn repair_dump_outputs_nodes() {
     let (_dir, path) = seed_db();
     tdb()
         .args([
-            "repair",
-            "dump",
-            &path,
-            "--format",
-            "json",
-            "--color",
-            "never",
+            "repair", "dump", &path, "--format", "json", "--color", "never",
         ])
         .assert()
         .success()
@@ -316,7 +339,11 @@ fn import_from_handwritten_jsonl() {
 
     // 手写 JSONL
     let mut f = std::fs::File::create(&jsonl).unwrap();
-    writeln!(f, r#"{{"id":100,"vector":[1,0,0,0],"payload":{{"k":"v"}}}}"#).unwrap();
+    writeln!(
+        f,
+        r#"{{"id":100,"vector":[1,0,0,0],"payload":{{"k":"v"}}}}"#
+    )
+    .unwrap();
     writeln!(f, r#"{{"id":200,"vector":[0,1,0,0],"payload":{{"k":"w"}},"edges":[{{"target":100,"label":"ref","weight":0.5}}]}}"#).unwrap();
     drop(f);
 

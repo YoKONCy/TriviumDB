@@ -168,7 +168,8 @@ impl App {
                     self.row_scores = Vec::new(); // 退出搜索态
                     self.graph_state.extra.clear(); // 新结果集，清空图扩展
                     self.selected = 0;
-                    self.table_state.select(if self.rows.is_empty() { None } else { Some(0) });
+                    self.table_state
+                        .select(if self.rows.is_empty() { None } else { Some(0) });
                     self.status = format!("{} 行结果", self.rows.len());
                     self.update_detail();
                 }
@@ -403,8 +404,12 @@ impl App {
                 self.rows = rows;
                 self.row_scores = scores;
                 self.selected = 0;
-                self.table_state.select(if self.rows.is_empty() { None } else { Some(0) });
-                self.status = format!("SEARCH from #{qid} → {} 命中（Enter 重新查询返回）", self.rows.len());
+                self.table_state
+                    .select(if self.rows.is_empty() { None } else { Some(0) });
+                self.status = format!(
+                    "SEARCH from #{qid} → {} 命中（Enter 重新查询返回）",
+                    self.rows.len()
+                );
                 self.update_detail();
             }
             Err(e) => self.status = format!("检索错误: {e}"),
@@ -425,7 +430,10 @@ impl App {
             for nb in self.handle.neighbors(id, 1) {
                 self.graph_state.extra.insert(nb);
             }
-            self.status = format!("展开 #{id} 邻居（图扩展节点 {}）", self.graph_state.extra.len());
+            self.status = format!(
+                "展开 #{id} 邻居（图扩展节点 {}）",
+                self.graph_state.extra.len()
+            );
         }
     }
 
@@ -470,10 +478,16 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("t.tdb").to_string_lossy().to_string();
         let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
-        h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice", "type": "person"}))
-            .unwrap();
-        h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob", "type": "person"}))
-            .unwrap();
+        h.insert_f32(
+            &[1.0, 0.0, 0.0, 0.0],
+            serde_json::json!({"name": "Alice", "type": "person"}),
+        )
+        .unwrap();
+        h.insert_f32(
+            &[0.0, 1.0, 0.0, 0.0],
+            serde_json::json!({"name": "Bob", "type": "person"}),
+        )
+        .unwrap();
         (App::new(h, path, 50, Marker::Braille), dir)
     }
 

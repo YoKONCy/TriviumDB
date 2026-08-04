@@ -37,7 +37,6 @@ impl Ord for NonNanF32 {
     }
 }
 
-
 // ── Bitset ──
 
 struct Bitset {
@@ -99,7 +98,7 @@ struct NodeGuard<'a>((u32, SpinLockGuard<'a>));
 impl NodeGuard<'_> {
     #[inline(always)]
     fn node(&self) -> u32 {
-        self.0 .0
+        self.0.0
     }
 }
 
@@ -152,7 +151,11 @@ impl StripedSpinLocks {
             std::hint::spin_loop();
         }
         // 仅在确实自旋等待时计入耗时，避免无争用时 Instant 噪声主导
-        let wait = if spun { t0.elapsed().as_nanos() as u64 } else { 0 };
+        let wait = if spun {
+            t0.elapsed().as_nanos() as u64
+        } else {
+            0
+        };
         (NodeGuard((node, SpinLockGuard { lock })), wait)
     }
 }
@@ -161,12 +164,12 @@ impl StripedSpinLocks {
 /// 分段累计纳秒，定位 spin-lock 弱扩展的真正主因。
 struct BuildProfile {
     enabled: bool,
-    bitset_ns: AtomicU64,    // 每节点 Bitset 分配耗时
-    beam_ns: AtomicU64,      // beam search 寻路耗时
-    fwd_ns: AtomicU64,       // 前向候选准备+vamana_select+写自身边
-    rev_wait_ns: AtomicU64,  // 反向剪枝的自旋锁等待耗时
-    rev_work_ns: AtomicU64,  // 反向剪枝的锁内做活耗时(去掉等待)
-    nodes: AtomicU64,        // 处理节点数
+    bitset_ns: AtomicU64,   // 每节点 Bitset 分配耗时
+    beam_ns: AtomicU64,     // beam search 寻路耗时
+    fwd_ns: AtomicU64,      // 前向候选准备+vamana_select+写自身边
+    rev_wait_ns: AtomicU64, // 反向剪枝的自旋锁等待耗时
+    rev_work_ns: AtomicU64, // 反向剪枝的锁内做活耗时(去掉等待)
+    nodes: AtomicU64,       // 处理节点数
 }
 
 impl BuildProfile {
@@ -203,11 +206,21 @@ impl BuildProfile {
             + ms(&self.rev_wait_ns)
             + ms(&self.rev_work_ns);
         eprintln!("================ 构图性能探针 (TRIVIUM_BUILD_PROFILE) ================");
-        eprintln!("节点数={nodes}  线程数={threads}  墙钟={wall_secs:.2}s  累计CPU时间={:.1}ms", total_cpu_ms);
+        eprintln!(
+            "节点数={nodes}  线程数={threads}  墙钟={wall_secs:.2}s  累计CPU时间={:.1}ms",
+            total_cpu_ms
+        );
         let line = |name: &str, c: &AtomicU64| {
             let cpu_ms = ms(c);
-            let pct = if total_cpu_ms > 0.0 { cpu_ms / total_cpu_ms * 100.0 } else { 0.0 };
-            eprintln!("  {name:<22} 累计CPU {cpu_ms:>10.1}ms ({pct:>5.1}%)  每节点 {:>8.1}ns", per(c));
+            let pct = if total_cpu_ms > 0.0 {
+                cpu_ms / total_cpu_ms * 100.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "  {name:<22} 累计CPU {cpu_ms:>10.1}ms ({pct:>5.1}%)  每节点 {:>8.1}ns",
+                per(c)
+            );
         };
         line("Bitset分配", &self.bitset_ns);
         line("beam search寻路", &self.beam_ns);
@@ -450,7 +463,8 @@ impl ExperimentalBuildView<'_> {
 
         visited.clear();
 
-        let mut candidates: BinaryHeap<Reverse<(NonNanF32, u32)>> = BinaryHeap::with_capacity(ef * 2);
+        let mut candidates: BinaryHeap<Reverse<(NonNanF32, u32)>> =
+            BinaryHeap::with_capacity(ef * 2);
         let mut results: BinaryHeap<(NonNanF32, u32)> = BinaryHeap::with_capacity(ef + 1);
 
         let d = NonNanF32(self.sigs.distance_to_sig(entry as usize, q_sig, self.dim) as f32);
@@ -544,12 +558,7 @@ impl ExperimentalBuildView<'_> {
             let mut nb_candidates: Vec<(u32, u32)> = current
                 .into_iter()
                 .filter(|&n| n != nb)
-                .map(|n| {
-                    (
-                        self.sigs.distance(nb as usize, n as usize, self.dim),
-                        n,
-                    )
-                })
+                .map(|n| (self.sigs.distance(nb as usize, n as usize, self.dim), n))
                 .collect();
             nb_candidates.sort_unstable_by_key(|&(_, id)| id);
             nb_candidates.dedup_by_key(|&mut (_, id)| id);
@@ -570,7 +579,8 @@ impl ExperimentalBuildView<'_> {
         let t_beam = if prof { Some(Instant::now()) } else { None };
         let candidates_sym = self.beam_search_l0_locked(&my_sig, 0, self.ef, visited);
         if let Some(t) = t_beam {
-            self.profile.add(&self.profile.beam_ns, t.elapsed().as_nanos() as u64);
+            self.profile
+                .add(&self.profile.beam_ns, t.elapsed().as_nanos() as u64);
         }
         let t_fwd = if prof { Some(Instant::now()) } else { None };
         let mut candidates: Vec<(u32, u32)> = candidates_sym
@@ -608,7 +618,8 @@ impl ExperimentalBuildView<'_> {
         self.adj
             .set_neighbors_locked_fast(idx, &selected, self.locks);
         if let Some(t) = t_fwd {
-            self.profile.add(&self.profile.fwd_ns, t.elapsed().as_nanos() as u64);
+            self.profile
+                .add(&self.profile.fwd_ns, t.elapsed().as_nanos() as u64);
         }
 
         let cap = self.adj.capacity();
@@ -635,7 +646,12 @@ impl ExperimentalBuildView<'_> {
                 nb_candidates.dedup_by_key(|&mut (_, id)| id);
                 nb_candidates.sort_unstable_by_key(|&(d, _)| d);
                 let pruned = QuIVer::vamana_select(
-                    self.sigs, nb, &nb_candidates, self.m0, self.dim, self.alpha,
+                    self.sigs,
+                    nb,
+                    &nb_candidates,
+                    self.m0,
+                    self.dim,
+                    self.alpha,
                 );
                 self.adj.set_neighbors_raw(nb, &pruned);
             } else if !self.adj.contains_raw(nb, idx) {
@@ -653,14 +669,20 @@ impl ExperimentalBuildView<'_> {
                     nb_candidates.dedup_by_key(|&mut (_, id)| id);
                     nb_candidates.sort_unstable_by_key(|&(d, _)| d);
                     let pruned = QuIVer::vamana_select(
-                        self.sigs, nb, &nb_candidates, self.m0, self.dim, self.alpha,
+                        self.sigs,
+                        nb,
+                        &nb_candidates,
+                        self.m0,
+                        self.dim,
+                        self.alpha,
                     );
                     self.adj.set_neighbors_raw(nb, &pruned);
                 }
             }
 
             if let Some(t) = t_work {
-                self.profile.add(&self.profile.rev_work_ns, t.elapsed().as_nanos() as u64);
+                self.profile
+                    .add(&self.profile.rev_work_ns, t.elapsed().as_nanos() as u64);
             }
         }
         self.profile.nodes.fetch_add(1, Ordering::Relaxed);
@@ -703,16 +725,16 @@ pub struct QuIVer {
     node_max_layer: Vec<u8>,
 
     // ID 映射
-    ids: Vec<u64>,                             // internal_index → NodeId
-    slot_indices: Vec<usize>,                  // internal_index → MemTable slot_index（精排用）
+    ids: Vec<u64>,                                       // internal_index → NodeId
+    slot_indices: Vec<usize>, // internal_index → MemTable slot_index（精排用）
     id_to_internal: std::collections::HashMap<u64, u32>, // NodeId → internal_index（增量操作用）
 
     entry_point: u32,
     max_level: usize,
 
     // 增量管理
-    tombstones: Vec<bool>,                     // internal_index → 是否已删除
-    dirty_count: usize,                        // 增量变更计数（tombstone + 追加节点）
+    tombstones: Vec<bool>, // internal_index → 是否已删除
+    dirty_count: usize,    // 增量变更计数（tombstone + 追加节点）
 
     visited: Bitset, // 建图期间复用，搜索时每次新建
 }
@@ -828,7 +850,9 @@ impl QuIVer {
             if ul_idx < self.upper_layers.len() {
                 loop {
                     let mut changed = false;
-                    let cur_d = self.bq_store.distance(idx as usize, cur_node as usize, self.dim);
+                    let cur_d = self
+                        .bq_store
+                        .distance(idx as usize, cur_node as usize, self.dim);
                     let mut best_d = cur_d;
 
                     for &nb in &self.upper_layers[ul_idx][cur_node as usize] {
@@ -865,7 +889,12 @@ impl QuIVer {
             };
             let candidates: Vec<(u32, u32)> = candidates_sym
                 .into_iter()
-                .map(|(_, id)| (self.bq_store.distance(idx as usize, id as usize, self.dim), id))
+                .map(|(_, id)| {
+                    (
+                        self.bq_store.distance(idx as usize, id as usize, self.dim),
+                        id,
+                    )
+                })
                 .collect();
 
             let max_nb = if l == 0 { self.m0 } else { self.m };
@@ -889,12 +918,7 @@ impl QuIVer {
                         .layer0
                         .neighbors(nb)
                         .iter()
-                        .map(|&n| {
-                            (
-                                self.bq_store.distance(nb as usize, n as usize, self.dim),
-                                n,
-                            )
-                        })
+                        .map(|&n| (self.bq_store.distance(nb as usize, n as usize, self.dim), n))
                         .collect();
 
                     // 如果 idx 还不在 nb 的邻居中，加入候选
@@ -928,12 +952,7 @@ impl QuIVer {
                 for &nb in &selected {
                     let mut nb_candidates: Vec<(u32, u32)> = self.upper_layers[ul][nb as usize]
                         .iter()
-                        .map(|&n| {
-                            (
-                                self.bq_store.distance(nb as usize, n as usize, self.dim),
-                                n,
-                            )
-                        })
+                        .map(|&n| (self.bq_store.distance(nb as usize, n as usize, self.dim), n))
                         .collect();
 
                     if !self.upper_layers[ul][nb as usize].contains(&idx) {
@@ -990,10 +1009,14 @@ impl QuIVer {
 
         visited.clear();
 
-        let mut candidates: BinaryHeap<Reverse<(NonNanF32, u32)>> = BinaryHeap::with_capacity(ef * 2);
+        let mut candidates: BinaryHeap<Reverse<(NonNanF32, u32)>> =
+            BinaryHeap::with_capacity(ef * 2);
         let mut results: BinaryHeap<(NonNanF32, u32)> = BinaryHeap::with_capacity(ef + 1);
 
-        let d = NonNanF32(self.bq_store.distance_to_sig_cheap(entry as usize, q_sig, self.dim) as f32);
+        let d = NonNanF32(
+            self.bq_store
+                .distance_to_sig_cheap(entry as usize, q_sig, self.dim) as f32,
+        );
         visited.set(entry as usize);
         candidates.push(Reverse((d, entry)));
         results.push((d, entry));
@@ -1017,7 +1040,11 @@ impl QuIVer {
                 }
                 visited.set(nb as usize);
 
-                let nd = NonNanF32(self.bq_store.distance_to_sig_cheap(nb as usize, q_sig, self.dim) as f32);
+                let nd = NonNanF32(
+                    self.bq_store
+                        .distance_to_sig_cheap(nb as usize, q_sig, self.dim)
+                        as f32,
+                );
                 if results.len() < ef || nd < results.peek().unwrap().0 {
                     candidates.push(Reverse((nd, nb)));
                     results.push((nd, nb));
@@ -1030,7 +1057,10 @@ impl QuIVer {
 
         let mut res: Vec<(NonNanF32, u32)> = results.into_vec();
         for item in &mut res {
-            item.0 = NonNanF32(self.bq_store.distance_to_sig(item.1 as usize, q_sig, self.dim) as f32);
+            item.0 = NonNanF32(
+                self.bq_store
+                    .distance_to_sig(item.1 as usize, q_sig, self.dim) as f32,
+            );
         }
         res.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         res
@@ -1060,7 +1090,10 @@ impl QuIVer {
         let mut candidates: BinaryHeap<Reverse<(NonNanF32, u32)>> = BinaryHeap::new();
         let mut results: BinaryHeap<(NonNanF32, u32)> = BinaryHeap::with_capacity(ef + 1);
 
-        let d = NonNanF32(self.bq_store.distance_to_sig(entry as usize, q_sig, self.dim) as f32);
+        let d = NonNanF32(
+            self.bq_store
+                .distance_to_sig(entry as usize, q_sig, self.dim) as f32,
+        );
         visited.set(entry as usize);
         candidates.push(Reverse((d, entry)));
         results.push((d, entry));
@@ -1076,7 +1109,8 @@ impl QuIVer {
                     continue;
                 }
                 visited.set(nb as usize);
-                let nd = NonNanF32(self.bq_store.distance_to_sig(nb as usize, q_sig, self.dim) as f32);
+                let nd =
+                    NonNanF32(self.bq_store.distance_to_sig(nb as usize, q_sig, self.dim) as f32);
                 if results.len() < ef || nd < results.peek().unwrap().0 {
                     candidates.push(Reverse((nd, nb)));
                     results.push((nd, nb));
@@ -1174,7 +1208,9 @@ impl QuIVer {
             if ul < self.upper_layers.len() {
                 loop {
                     let mut changed = false;
-                    let cur_d = self.bq_store.distance_to_sig(cur_node as usize, &q_sig, dim);
+                    let cur_d = self
+                        .bq_store
+                        .distance_to_sig(cur_node as usize, &q_sig, dim);
                     let mut best_d = cur_d;
                     for &nb in &self.upper_layers[ul][cur_node as usize] {
                         let nd = self.bq_store.distance_to_sig(nb as usize, &q_sig, dim);
@@ -1387,12 +1423,7 @@ impl QuIVer {
                             .layer0
                             .neighbors(nb)
                             .iter()
-                            .map(|&n| {
-                                (
-                                    self.bq_store.distance(nb as usize, n as usize, dim),
-                                    n,
-                                )
-                            })
+                            .map(|&n| (self.bq_store.distance(nb as usize, n as usize, dim), n))
                             .collect();
                         if !self.layer0.contains(nb, idx) {
                             let d = self.bq_store.distance(nb as usize, idx as usize, dim);
@@ -1433,11 +1464,21 @@ impl QuIVer {
         }
     }
 
-    pub fn batch_build_experimental_v2_checked(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize]) {
+    pub fn batch_build_experimental_v2_checked(
+        &mut self,
+        vectors: &[f32],
+        ids: &[u64],
+        slot_idxs: &[usize],
+    ) {
         self.batch_build_experimental_v2_impl(vectors, ids, slot_idxs, true);
     }
 
-    pub fn batch_build_experimental_v2(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize]) {
+    pub fn batch_build_experimental_v2(
+        &mut self,
+        vectors: &[f32],
+        ids: &[u64],
+        slot_idxs: &[usize],
+    ) {
         self.batch_build_experimental_v2_impl(vectors, ids, slot_idxs, false);
     }
 
@@ -1455,7 +1496,13 @@ impl QuIVer {
     ///
     /// 调用方需保证 `store.len() == ids.len()`。
     #[cfg(feature = "ablation")]
-    pub fn batch_build_with_store(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize], store: Bq2Store) {
+    pub fn batch_build_with_store(
+        &mut self,
+        vectors: &[f32],
+        ids: &[u64],
+        slot_idxs: &[usize],
+        store: Bq2Store,
+    ) {
         let n = ids.len();
         let dim = self.dim;
         assert_eq!(vectors.len(), n * dim);
@@ -1524,8 +1571,13 @@ impl QuIVer {
             });
         }
         // final-prune：把惰性追加导致 deg>m0 的节点并行收敛到 m0
-        (0..n as u32).into_par_iter().for_each(|node| view.final_prune(node));
-        profile.report(t_build.elapsed().as_secs_f64(), rayon::current_num_threads());
+        (0..n as u32)
+            .into_par_iter()
+            .for_each(|node| view.final_prune(node));
+        profile.report(
+            t_build.elapsed().as_secs_f64(),
+            rayon::current_num_threads(),
+        );
 
         concurrent_adj.freeze_into_flat(&mut self.layer0);
     }
@@ -1542,7 +1594,13 @@ impl QuIVer {
         self.entry_point
     }
 
-    fn batch_build_experimental_v2_impl(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize], checked: bool) {
+    fn batch_build_experimental_v2_impl(
+        &mut self,
+        vectors: &[f32],
+        ids: &[u64],
+        slot_idxs: &[usize],
+        checked: bool,
+    ) {
         let n = ids.len();
         let dim = self.dim;
         assert_eq!(vectors.len(), n * dim);
@@ -1619,8 +1677,13 @@ impl QuIVer {
             });
         }
         // final-prune：fast 路径惰性追加后收敛到 m0；checked 路径 deg≤m0 时为空操作
-        (0..n as u32).into_par_iter().for_each(|node| view.final_prune(node));
-        profile.report(t_build.elapsed().as_secs_f64(), rayon::current_num_threads());
+        (0..n as u32)
+            .into_par_iter()
+            .for_each(|node| view.final_prune(node));
+        profile.report(
+            t_build.elapsed().as_secs_f64(),
+            rayon::current_num_threads(),
+        );
 
         concurrent_adj.freeze_into_flat(&mut self.layer0);
         if cfg!(debug_assertions)
@@ -1747,12 +1810,7 @@ impl QuIVer {
                             .layer0
                             .neighbors(nb)
                             .iter()
-                            .map(|&n| {
-                                (
-                                    this.bq_store.distance(nb as usize, n as usize, dim),
-                                    n,
-                                )
-                            })
+                            .map(|&n| (this.bq_store.distance(nb as usize, n as usize, dim), n))
                             .collect();
                         if !this.layer0.contains(nb, idx) {
                             let d = this.bq_store.distance(nb as usize, idx as usize, dim);
@@ -1950,6 +2008,36 @@ impl QuIVer {
         self.n
     }
 
+    pub(crate) fn matches_storage<F>(
+        &self,
+        dim: usize,
+        active_count: usize,
+        slot_count: usize,
+        mut entry_at: F,
+    ) -> bool
+    where
+        F: FnMut(usize) -> Option<(u64, Bq2Signature)>,
+    {
+        if self.dim != dim || self.active_count() != active_count {
+            return false;
+        }
+
+        self.ids
+            .iter()
+            .zip(&self.slot_indices)
+            .zip(&self.tombstones)
+            .enumerate()
+            .filter(|(_, (_, tombstone))| !**tombstone)
+            .all(|(internal, ((&id, &slot), _))| {
+                if slot >= slot_count {
+                    return false;
+                }
+                entry_at(slot).is_some_and(|(stored_id, signature)| {
+                    stored_id == id && self.bq_store.get_sig(internal) == signature
+                })
+            })
+    }
+
     /// 递增增量变更计数（增量追加节点时调用）
     #[inline]
     pub fn dirty_count_inc(&mut self) {
@@ -2007,7 +2095,11 @@ impl QuIVer {
         w.write_all(bytemuck::cast_slice(&self.layer0.data))?;
 
         // Tombstones
-        let tomb_bytes: Vec<u8> = self.tombstones.iter().map(|&t| if t { 1 } else { 0 }).collect();
+        let tomb_bytes: Vec<u8> = self
+            .tombstones
+            .iter()
+            .map(|&t| if t { 1 } else { 0 })
+            .collect();
         w.write_all(&tomb_bytes)?;
 
         // IDs
@@ -2052,7 +2144,9 @@ impl QuIVer {
 
         tracing::info!(
             "QuIVer 索引已持久化 (QuIVer index persisted)：{} 个节点，dim={}，max_level={}",
-            self.n, self.dim, self.max_level
+            self.n,
+            self.dim,
+            self.max_level
         );
         Ok(())
     }
@@ -2073,7 +2167,10 @@ impl QuIVer {
         if &bytes[0..4] != Self::QUIVER_MAGIC {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("无效的 QuIVer magic (Invalid QuIVer magic): {:?}", &bytes[0..4]),
+                format!(
+                    "无效的 QuIVer magic (Invalid QuIVer magic): {:?}",
+                    &bytes[0..4]
+                ),
             ));
         }
 
@@ -2082,31 +2179,47 @@ impl QuIVer {
         if version != Self::QUIVER_VERSION {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("不支持的 QuIVer 版本 (Unsupported QuIVer version): {}", version),
+                format!(
+                    "不支持的 QuIVer 版本 (Unsupported QuIVer version): {}",
+                    version
+                ),
             ));
         }
 
         // Header
         let mut off = 8;
-        let dim = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize; off += 4;
-        let n = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize; off += 4;
-        let m = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize; off += 4;
-        let m0 = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize; off += 4;
-        let ef_construction = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize; off += 4;
-        let alpha = f32::from_le_bytes(bytes[off..off+4].try_into().unwrap()); off += 4;
-        let entry_point = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()); off += 4;
-        let max_level = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize; off += 4;
-        let dirty_count = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize; off += 4;
+        let dim = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        let n = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        let m = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        let m0 = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        let ef_construction = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        let alpha = f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        off += 4;
+        let entry_point = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        off += 4;
+        let max_level = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        let dirty_count = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
         off += 4; // 保留字段
 
         // BQ Signatures（紧凑格式）
-        let chunks = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize; off += 4;
+        let chunks = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
         let bq_u64_count = n * chunks;
         let bq_bytes_per_array = bq_u64_count * 8;
         let pos_end = off + bq_bytes_per_array;
         let strong_end = pos_end + bq_bytes_per_array;
         if strong_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "BQ 签名数据不完整 (BQ signature data incomplete)"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "BQ 签名数据不完整 (BQ signature data incomplete)",
+            ));
         }
         let pos_data: Vec<u64> = bytes[off..pos_end]
             .chunks_exact(8)
@@ -2124,7 +2237,10 @@ impl QuIVer {
         let l0_size = n * stride * 4;
         let l0_end = off + l0_size;
         if l0_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Layer0 数据不完整 (Layer0 data incomplete)"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Layer0 数据不完整 (Layer0 data incomplete)",
+            ));
         }
         let l0_data: Vec<u32> = bytes[off..l0_end]
             .chunks_exact(4)
@@ -2135,7 +2251,10 @@ impl QuIVer {
         // Tombstones
         let tomb_end = off + n;
         if tomb_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Tombstone 数据不完整 (Tombstone data incomplete)"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Tombstone 数据不完整 (Tombstone data incomplete)",
+            ));
         }
         let tombstones: Vec<bool> = bytes[off..tomb_end].iter().map(|&b| b != 0).collect();
         off = tomb_end;
@@ -2143,7 +2262,10 @@ impl QuIVer {
         // IDs
         let ids_end = off + n * 8;
         if ids_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "IDs 数据不完整 (IDs data incomplete)"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "IDs 数据不完整 (IDs data incomplete)",
+            ));
         }
         let ids: Vec<u64> = bytes[off..ids_end]
             .chunks_exact(8)
@@ -2154,7 +2276,10 @@ impl QuIVer {
         // SlotIndices
         let si_end = off + n * 8;
         if si_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "SlotIndices 数据不完整 (SlotIndices data incomplete)"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "SlotIndices 数据不完整 (SlotIndices data incomplete)",
+            ));
         }
         let slot_indices: Vec<usize> = bytes[off..si_end]
             .chunks_exact(8)
@@ -2165,40 +2290,55 @@ impl QuIVer {
         // NodeMaxLayer
         let nml_end = off + n;
         if nml_end > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "NodeMaxLayer 数据不完整 (NodeMaxLayer data incomplete)"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "NodeMaxLayer 数据不完整 (NodeMaxLayer data incomplete)",
+            ));
         }
         let node_max_layer: Vec<u8> = bytes[off..nml_end].to_vec();
         off = nml_end;
 
         // Upper Layers
         if off + 4 > bytes.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper Layers header 不完整 (Upper Layers header incomplete)"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Upper Layers header 不完整 (Upper Layers header incomplete)",
+            ));
         }
-        let num_upper = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize;
+        let num_upper = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
         off += 4;
 
         let mut upper_layers = Vec::with_capacity(num_upper);
         for _ in 0..num_upper {
             if off + 4 > bytes.len() {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper layer 节点数不完整 (Upper layer node count incomplete)"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Upper layer 节点数不完整 (Upper layer node count incomplete)",
+                ));
             }
-            let layer_nodes = u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()) as usize;
+            let layer_nodes = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
             off += 4;
 
             let mut layer = Vec::with_capacity(layer_nodes);
             for _ in 0..layer_nodes {
                 if off + 2 > bytes.len() {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper adj 度数不完整 (Upper adj degree incomplete)"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Upper adj 度数不完整 (Upper adj degree incomplete)",
+                    ));
                 }
-                let deg = u16::from_le_bytes(bytes[off..off+2].try_into().unwrap()) as usize;
+                let deg = u16::from_le_bytes(bytes[off..off + 2].try_into().unwrap()) as usize;
                 off += 2;
 
                 if off + deg * 4 > bytes.len() {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Upper adj 邻居列表不完整 (Upper adj neighbor list incomplete)"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Upper adj 邻居列表不完整 (Upper adj neighbor list incomplete)",
+                    ));
                 }
                 let mut adj = Vec::with_capacity(deg);
                 for _ in 0..deg {
-                    adj.push(u32::from_le_bytes(bytes[off..off+4].try_into().unwrap()));
+                    adj.push(u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()));
                     off += 4;
                 }
                 layer.push(adj);
@@ -2214,7 +2354,10 @@ impl QuIVer {
 
         tracing::info!(
             "QuIVer 索引从磁盘加载完成 (QuIVer index loaded from disk)：{} 个节点，dim={}，max_level={}，tombstone={}",
-            n, dim, max_level, tombstones.iter().filter(|&&t| t).count()
+            n,
+            dim,
+            max_level,
+            tombstones.iter().filter(|&&t| t).count()
         );
 
         Ok(Self {
@@ -2226,7 +2369,10 @@ impl QuIVer {
             ml: 1.0 / (m as f64).ln(),
             alpha,
             bq_store,
-            layer0: FlatAdj { data: l0_data, stride },
+            layer0: FlatAdj {
+                data: l0_data,
+                stride,
+            },
             upper_layers,
             node_max_layer,
             ids,
@@ -2296,10 +2442,7 @@ mod tests {
         let mut quiver = QuIVer::new(4, &config);
 
         let vectors = vec![
-            1.0f32, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
+            1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let ids = vec![10, 20, 30, 40];
         let slots = vec![0, 1, 2, 3];
@@ -2315,7 +2458,7 @@ mod tests {
             ef_search: 10,
             rerank_limit: None,
         };
-        
+
         let results = quiver.search_flat(&query, &vectors, &search_config);
         assert!(!results.is_empty());
         assert_eq!(results[0].0, 10);
@@ -2323,7 +2466,7 @@ mod tests {
         // 测试软删除
         quiver.soft_delete(10);
         assert_eq!(quiver.active_count(), 3);
-        
+
         let results_after = quiver.search_flat(&query, &vectors, &search_config);
         if !results_after.is_empty() {
             assert_ne!(results_after[0].0, 10);
@@ -2332,7 +2475,7 @@ mod tests {
         let stats = quiver.stats();
         assert_eq!(stats.n, 4);
         assert_eq!(stats.tombstone_count, 1);
-        
+
         assert!(!quiver.needs_rebuild());
     }
 
@@ -2346,10 +2489,7 @@ mod tests {
         let mut quiver = QuIVer::new(4, &config);
 
         let vectors = vec![
-            1.0f32, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
+            1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let ids = vec![10, 20, 30, 40];
         let slots = vec![0, 1, 2, 3];
@@ -2427,10 +2567,10 @@ mod tests {
         assert_eq!(results[0].0, 0); // 自身应为 Top-1
 
         // 删除一半节点再搜索
-        for i in 0..n/2 {
+        for i in 0..n / 2 {
             quiver.soft_delete(i as u64);
         }
-        assert_eq!(quiver.active_count(), n - n/2);
+        assert_eq!(quiver.active_count(), n - n / 2);
         let results2 = quiver.search_flat(&query, &vectors, &search_config);
         for (id, _) in &results2 {
             assert!(*id >= n as u64 / 2, "已删除节点不应出现在结果中");
@@ -2540,4 +2680,3 @@ mod tests {
         assert_eq!(cfg3.rerank_limit(), 100); // max(rerank_limit, top_k)
     }
 }
-

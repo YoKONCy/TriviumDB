@@ -25,6 +25,64 @@ use std::sync::{Arc, Mutex};
 
 use super::lock_or_recover;
 
+fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
+    for (name, value) in [
+        ("min_score", config.min_score),
+        ("fista_lambda", config.fista_lambda),
+        ("teleport_alpha", config.teleport_alpha),
+        ("dpp_quality_weight", config.dpp_quality_weight),
+        ("fista_threshold", config.fista_threshold),
+        ("text_boost", config.text_boost),
+        ("bm25_k1", config.bm25_k1),
+        ("bm25_b", config.bm25_b),
+    ] {
+        if !value.is_finite() {
+            return Err(crate::error::TriviumError::InvalidInput(format!(
+                "检索配置 {name} 必须是有限数值 (Search config {name} must be finite)"
+            )));
+        }
+    }
+
+    if let Some(bias) = config.diffusion_bias.as_deref() {
+        if bias.len() != dim {
+            return Err(crate::error::TriviumError::DimensionMismatch {
+                expected: dim,
+                got: bias.len(),
+            });
+        }
+        if bias.iter().any(|value| !value.is_finite()) {
+            return Err(crate::error::TriviumError::InvalidVector {
+                reason:
+                    "扩散偏置向量包含 NaN 或 Infinity (Diffusion bias contains NaN or Infinity)"
+                        .to_string(),
+            });
+        }
+    }
+
+    config.top_k = config.top_k.max(1);
+    config.fista_lambda = config.fista_lambda.clamp(1e-5, 100.0);
+    config.teleport_alpha = config.teleport_alpha.clamp(0.0, 1.0);
+    config.dpp_quality_weight = config.dpp_quality_weight.clamp(0.0, 10.0);
+    config.fista_threshold = config.fista_threshold.clamp(0.0, f32::MAX);
+    Ok(())
+}
+
+fn validate_hooked_query(query: &[f32], dim: usize) -> Result<()> {
+    if query.len() != dim {
+        return Err(crate::error::TriviumError::DimensionMismatch {
+            expected: dim,
+            got: query.len(),
+        });
+    }
+    if query.iter().any(|value| !value.is_finite()) {
+        return Err(crate::error::TriviumError::InvalidVector {
+            reason: "Hook 修改后的查询向量包含 NaN 或 Infinity (Hook-modified query vector contains NaN or Infinity)"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// 执行完整的混合检索管线
 ///
 /// 这是从 `Database::search_hybrid_internal` 中提取出的核心管线逻辑。
@@ -64,11 +122,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
 
     // 隔离作用域：强行钳平越界的玄学配置参数，防止底层矩阵求解 Panic 或死循环
     let mut safe_cfg = config.clone();
-    safe_cfg.top_k = safe_cfg.top_k.max(1);
-    safe_cfg.fista_lambda = safe_cfg.fista_lambda.clamp(1e-5, 100.0);
-    safe_cfg.teleport_alpha = safe_cfg.teleport_alpha.clamp(0.0, 1.0);
-    safe_cfg.dpp_quality_weight = safe_cfg.dpp_quality_weight.clamp(0.0, 10.0);
-    safe_cfg.fista_threshold = safe_cfg.fista_threshold.clamp(0.0, f32::MAX);
+    sanitize_config(&mut safe_cfg, dim)?;
 
     // ═══════════════════════════════════════════════════════
     // 🔌 Hook #1: on_pre_search — 查询预处理
@@ -85,6 +139,11 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     // 如果 Hook 请求提前终止管线，直接返回空结果
     if ctx.abort {
         return Ok(vec![]);
+    }
+
+    sanitize_config(&mut safe_cfg, dim)?;
+    if query_vector.is_some() {
+        validate_hooked_query(&query_vec_f32, dim)?;
     }
 
     // 如果 Hook 修改了查询向量，需要转回泛型 T

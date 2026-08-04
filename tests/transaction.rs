@@ -49,6 +49,24 @@ fn 事务_基本提交_返回正确的生成ID() {
 }
 
 #[test]
+fn 事务_insert_with_id_ID0拒绝且无状态残留() {
+    let path = tmp_db("id_zero");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+
+    let result = {
+        let mut tx = db.begin_tx();
+        tx.insert_with_id(0, &[1.0, 0.0, 0.0, 0.0], serde_json::json!({}));
+        tx.commit()
+    };
+
+    assert!(result.is_err());
+    assert!(!db.contains(0));
+    assert_eq!(db.node_count(), 0);
+    cleanup(&path);
+}
+
+#[test]
 fn 事务_插入边_可以查询() {
     let path = tmp_db("edge_commit");
     cleanup(&path);

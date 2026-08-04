@@ -89,7 +89,11 @@ impl CompactionThread {
                         tracing::debug!("自动压实完成 (Auto-compaction completed): {}", db_path);
                     }
                     Err(e) => {
-                        tracing::error!("自动压实失败 (Auto-compaction failed): {}: {}", db_path, e);
+                        tracing::error!(
+                            "自动压实失败 (Auto-compaction failed): {}: {}",
+                            db_path,
+                            e
+                        );
                     }
                 }
             }

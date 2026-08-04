@@ -138,12 +138,7 @@ fn is_mutation(query: &str) -> bool {
 }
 
 /// 处理点号元命令，返回 `true` 表示请求退出。
-fn handle_meta(
-    input: &str,
-    handle: &mut DbHandle,
-    path: &str,
-    format: &mut OutputFormat,
-) -> bool {
+fn handle_meta(input: &str, handle: &mut DbHandle, path: &str, format: &mut OutputFormat) -> bool {
     let mut parts = input.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
@@ -184,7 +179,10 @@ fn handle_meta(
 
 fn print_help() {
     let lines = [
-        (".info", "数据库元信息（维度、节点数、文件大小、WAL、QuIVer）"),
+        (
+            ".info",
+            "数据库元信息（维度、节点数、文件大小、WAL、QuIVer）",
+        ),
         (".stats", "实时统计（节点数、内存占用）"),
         (".schema", "采样 payload 字段分布"),
         (".flush", "手动落盘"),
@@ -236,7 +234,12 @@ fn print_schema(handle: &DbHandle) {
     println!("{} (采样 {sampled} 个节点)", "Payload Schema:".bold());
     for (field, (count, types)) in &fields {
         let types: Vec<&str> = types.iter().copied().collect();
-        println!("  {:<24} {:>5}  [{}]", field.cyan(), count, types.join(", "));
+        println!(
+            "  {:<24} {:>5}  [{}]",
+            field.cyan(),
+            count,
+            types.join(", ")
+        );
     }
 }
 

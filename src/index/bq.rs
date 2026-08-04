@@ -2,9 +2,8 @@ use crate::VectorType;
 use bytemuck::{Pod, Zeroable};
 
 /// 环境变量 `TRIVIUM_NO_AVX512=1` 时强制禁用 AVX-512 路径（用于消融实验）
-pub(crate) static FORCE_NO_AVX512: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    std::env::var("TRIVIUM_NO_AVX512").is_ok_and(|v| v == "1")
-});
+pub(crate) static FORCE_NO_AVX512: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var("TRIVIUM_NO_AVX512").is_ok_and(|v| v == "1"));
 
 /// BQ 签名最大 chunks 数量（每个 u64 chunk 覆盖 64 维）
 /// 48 chunks × 64 bits = 3072 维上限
@@ -24,7 +23,9 @@ pub struct BqSignature {
 
 impl Default for BqSignature {
     fn default() -> Self {
-        Self { data: [0u64; MAX_BQ_CHUNKS] }
+        Self {
+            data: [0u64; MAX_BQ_CHUNKS],
+        }
     }
 }
 
@@ -129,7 +130,6 @@ impl Bq2Signature {
         Self { pos, strong }
     }
 
-
     /// 2-bit 加权 Hamming 距离
     ///
     /// 运行时自动选择最优实现：
@@ -140,24 +140,35 @@ impl Bq2Signature {
         #[cfg(target_arch = "x86_64")]
         {
             #[cfg(not(coverage))]
-            if !*FORCE_NO_AVX512 && is_x86_feature_detected!("avx512vpopcntdq") && is_x86_feature_detected!("avx512f") {
+            if !*FORCE_NO_AVX512
+                && is_x86_feature_detected!("avx512vpopcntdq")
+                && is_x86_feature_detected!("avx512f")
+            {
                 return unsafe { self.distance_avx512(other, dim) };
             }
             if is_x86_feature_detected!("avx2") {
-                return unsafe { bq2_distance_raw_avx2(
-                    self.pos.as_ptr(), self.strong.as_ptr(),
-                    other.pos.as_ptr(), other.strong.as_ptr(),
-                    dim,
-                ) };
+                return unsafe {
+                    bq2_distance_raw_avx2(
+                        self.pos.as_ptr(),
+                        self.strong.as_ptr(),
+                        other.pos.as_ptr(),
+                        other.strong.as_ptr(),
+                        dim,
+                    )
+                };
             }
         }
         #[cfg(all(target_arch = "aarch64", not(coverage)))]
         {
-            return unsafe { bq2_distance_raw_neon(
-                self.pos.as_ptr(), self.strong.as_ptr(),
-                other.pos.as_ptr(), other.strong.as_ptr(),
-                dim,
-            ) };
+            return unsafe {
+                bq2_distance_raw_neon(
+                    self.pos.as_ptr(),
+                    self.strong.as_ptr(),
+                    other.pos.as_ptr(),
+                    other.strong.as_ptr(),
+                    dim,
+                )
+            };
         }
         self.distance_scalar(other, dim)
     }
@@ -333,14 +344,19 @@ impl Bq2Signature {
 /// 分发：AVX-512 VPOPCNTDQ → AVX2 → NEON → 标量
 #[inline]
 fn bq2_distance_raw(
-    pos_a: *const u64, strong_a: *const u64,
-    pos_b: *const u64, strong_b: *const u64,
+    pos_a: *const u64,
+    strong_a: *const u64,
+    pos_b: *const u64,
+    strong_b: *const u64,
     dim: usize,
 ) -> u32 {
     #[cfg(target_arch = "x86_64")]
     {
         #[cfg(not(coverage))]
-        if !*FORCE_NO_AVX512 && is_x86_feature_detected!("avx512vpopcntdq") && is_x86_feature_detected!("avx512f") {
+        if !*FORCE_NO_AVX512
+            && is_x86_feature_detected!("avx512vpopcntdq")
+            && is_x86_feature_detected!("avx512f")
+        {
             return unsafe { bq2_distance_raw_avx512(pos_a, strong_a, pos_b, strong_b, dim) };
         }
         if is_x86_feature_detected!("avx2") {
@@ -357,8 +373,10 @@ fn bq2_distance_raw(
 
 #[inline]
 fn bq2_distance_raw_scalar(
-    pos_a: *const u64, strong_a: *const u64,
-    pos_b: *const u64, strong_b: *const u64,
+    pos_a: *const u64,
+    strong_a: *const u64,
+    pos_b: *const u64,
+    strong_b: *const u64,
     dim: usize,
 ) -> u32 {
     let chunks = dim.div_ceil(64);
@@ -370,7 +388,11 @@ fn bq2_distance_raw_scalar(
 
     let mut dot = 0i32;
     for i in 0..chunks {
-        let mask = if i == chunks - 1 { valid_bits_last } else { !0u64 };
+        let mask = if i == chunks - 1 {
+            valid_bits_last
+        } else {
+            !0u64
+        };
         let a1 = unsafe { *pos_a.add(i) } & mask;
         let b1 = unsafe { *strong_a.add(i) } & mask;
         let a2 = unsafe { *pos_b.add(i) } & mask;
@@ -396,8 +418,10 @@ fn bq2_distance_raw_scalar(
 #[cfg(all(target_arch = "x86_64", not(coverage)))]
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
 unsafe fn bq2_distance_raw_avx512(
-    pos_a: *const u64, strong_a: *const u64,
-    pos_b: *const u64, strong_b: *const u64,
+    pos_a: *const u64,
+    strong_a: *const u64,
+    pos_b: *const u64,
+    strong_b: *const u64,
     dim: usize,
 ) -> u32 {
     unsafe {
@@ -430,12 +454,30 @@ unsafe fn bq2_distance_raw_avx512(
             let b_or = _mm512_or_si512(b1, b2);
             let both_weak = _mm512_xor_si512(b_or, ones_mask);
 
-            acc_w4_pos = _mm512_add_epi64(acc_w4_pos, _mm512_popcnt_epi64(_mm512_and_si512(same, both_strong)));
-            acc_w4_neg = _mm512_add_epi64(acc_w4_neg, _mm512_popcnt_epi64(_mm512_and_si512(diff, both_strong)));
-            acc_w2_pos = _mm512_add_epi64(acc_w2_pos, _mm512_popcnt_epi64(_mm512_and_si512(same, one_strong)));
-            acc_w2_neg = _mm512_add_epi64(acc_w2_neg, _mm512_popcnt_epi64(_mm512_and_si512(diff, one_strong)));
-            acc_w1_pos = _mm512_add_epi64(acc_w1_pos, _mm512_popcnt_epi64(_mm512_and_si512(same, both_weak)));
-            acc_w1_neg = _mm512_add_epi64(acc_w1_neg, _mm512_popcnt_epi64(_mm512_and_si512(diff, both_weak)));
+            acc_w4_pos = _mm512_add_epi64(
+                acc_w4_pos,
+                _mm512_popcnt_epi64(_mm512_and_si512(same, both_strong)),
+            );
+            acc_w4_neg = _mm512_add_epi64(
+                acc_w4_neg,
+                _mm512_popcnt_epi64(_mm512_and_si512(diff, both_strong)),
+            );
+            acc_w2_pos = _mm512_add_epi64(
+                acc_w2_pos,
+                _mm512_popcnt_epi64(_mm512_and_si512(same, one_strong)),
+            );
+            acc_w2_neg = _mm512_add_epi64(
+                acc_w2_neg,
+                _mm512_popcnt_epi64(_mm512_and_si512(diff, one_strong)),
+            );
+            acc_w1_pos = _mm512_add_epi64(
+                acc_w1_pos,
+                _mm512_popcnt_epi64(_mm512_and_si512(same, both_weak)),
+            );
+            acc_w1_neg = _mm512_add_epi64(
+                acc_w1_neg,
+                _mm512_popcnt_epi64(_mm512_and_si512(diff, both_weak)),
+            );
         }
 
         let hsum = |v: __m512i| -> i64 { _mm512_reduce_add_epi64(v) };
@@ -449,9 +491,17 @@ unsafe fn bq2_distance_raw_avx512(
 
         if remainder > 0 {
             let start = full_rounds * 8;
-            let valid_bits_last = if dim.is_multiple_of(64) { !0u64 } else { (1u64 << (dim % 64)) - 1 };
+            let valid_bits_last = if dim.is_multiple_of(64) {
+                !0u64
+            } else {
+                (1u64 << (dim % 64)) - 1
+            };
             for i in start..chunks {
-                let mask = if i == chunks - 1 { valid_bits_last } else { !0u64 };
+                let mask = if i == chunks - 1 {
+                    valid_bits_last
+                } else {
+                    !0u64
+                };
                 let a1 = *pos_a.add(i) & mask;
                 let b1 = *strong_a.add(i) & mask;
                 let a2 = *pos_b.add(i) & mask;
@@ -488,8 +538,8 @@ unsafe fn popcnt256(v: std::arch::x86_64::__m256i) -> std::arch::x86_64::__m256i
         let low_mask = _mm256_set1_epi8(0x0F);
         // 每个 nibble (0-15) 的 popcount 查找表
         let lookup = _mm256_setr_epi8(
-            0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4,
-            0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4,
+            0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2,
+            3, 3, 4,
         );
         let lo = _mm256_and_si256(v, low_mask);
         let hi = _mm256_and_si256(_mm256_srli_epi16(v, 4), low_mask);
@@ -505,8 +555,10 @@ unsafe fn popcnt256(v: std::arch::x86_64::__m256i) -> std::arch::x86_64::__m256i
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn bq2_distance_raw_avx2(
-    pos_a: *const u64, strong_a: *const u64,
-    pos_b: *const u64, strong_b: *const u64,
+    pos_a: *const u64,
+    strong_a: *const u64,
+    pos_b: *const u64,
+    strong_b: *const u64,
     dim: usize,
 ) -> u32 {
     use std::arch::x86_64::*;
@@ -537,10 +589,14 @@ unsafe fn bq2_distance_raw_avx2(
             let one_strong = _mm256_xor_si256(b1, b2);
             let both_weak = _mm256_xor_si256(_mm256_or_si256(b1, b2), ones);
 
-            acc_w4_pos = _mm256_add_epi64(acc_w4_pos, popcnt256(_mm256_and_si256(same, both_strong)));
-            acc_w4_neg = _mm256_add_epi64(acc_w4_neg, popcnt256(_mm256_and_si256(diff, both_strong)));
-            acc_w2_pos = _mm256_add_epi64(acc_w2_pos, popcnt256(_mm256_and_si256(same, one_strong)));
-            acc_w2_neg = _mm256_add_epi64(acc_w2_neg, popcnt256(_mm256_and_si256(diff, one_strong)));
+            acc_w4_pos =
+                _mm256_add_epi64(acc_w4_pos, popcnt256(_mm256_and_si256(same, both_strong)));
+            acc_w4_neg =
+                _mm256_add_epi64(acc_w4_neg, popcnt256(_mm256_and_si256(diff, both_strong)));
+            acc_w2_pos =
+                _mm256_add_epi64(acc_w2_pos, popcnt256(_mm256_and_si256(same, one_strong)));
+            acc_w2_neg =
+                _mm256_add_epi64(acc_w2_neg, popcnt256(_mm256_and_si256(diff, one_strong)));
             acc_w1_pos = _mm256_add_epi64(acc_w1_pos, popcnt256(_mm256_and_si256(same, both_weak)));
             acc_w1_neg = _mm256_add_epi64(acc_w1_neg, popcnt256(_mm256_and_si256(diff, both_weak)));
         }
@@ -565,9 +621,17 @@ unsafe fn bq2_distance_raw_avx2(
         // 余数（标量）
         if remainder > 0 {
             let start = full_rounds * 4;
-            let valid_bits_last = if dim.is_multiple_of(64) { !0u64 } else { (1u64 << (dim % 64)) - 1 };
+            let valid_bits_last = if dim.is_multiple_of(64) {
+                !0u64
+            } else {
+                (1u64 << (dim % 64)) - 1
+            };
             for i in start..chunks {
-                let mask = if i == chunks - 1 { valid_bits_last } else { !0u64 };
+                let mask = if i == chunks - 1 {
+                    valid_bits_last
+                } else {
+                    !0u64
+                };
                 let a1 = *pos_a.add(i) & mask;
                 let b1 = *strong_a.add(i) & mask;
                 let a2 = *pos_b.add(i) & mask;
@@ -597,8 +661,10 @@ unsafe fn bq2_distance_raw_avx2(
 #[cfg(all(target_arch = "aarch64", not(coverage)))]
 #[target_feature(enable = "neon")]
 unsafe fn bq2_distance_raw_neon(
-    pos_a: *const u64, strong_a: *const u64,
-    pos_b: *const u64, strong_b: *const u64,
+    pos_a: *const u64,
+    strong_a: *const u64,
+    pos_b: *const u64,
+    strong_b: *const u64,
     dim: usize,
 ) -> u32 {
     use std::arch::aarch64::*;
@@ -607,14 +673,18 @@ unsafe fn bq2_distance_raw_neon(
 
         // NEON popcount：字节级 vcnt → 逐级宽化求和 → 得到每 64-bit lane 的 popcount
         let popcnt128 = |v: uint64x2_t| -> int64x2_t {
-            let bytes = vcntq_u8(vreinterpretq_u8_u64(v));    // 每字节 popcount
-            let h16 = vpaddlq_u8(bytes);                       // u8→u16 对加
-            let h32 = vpaddlq_u16(h16);                        // u16→u32 对加
-            vreinterpretq_s64_u64(vpaddlq_u32(h32))            // u32→u64 对加
+            let bytes = vcntq_u8(vreinterpretq_u8_u64(v)); // 每字节 popcount
+            let h16 = vpaddlq_u8(bytes); // u8→u16 对加
+            let h32 = vpaddlq_u16(h16); // u16→u32 对加
+            vreinterpretq_s64_u64(vpaddlq_u32(h32)) // u32→u64 对加
         };
 
         let mut dot = 0i64;
-        let valid_bits_last = if dim % 64 == 0 { !0u64 } else { (1u64 << (dim % 64)) - 1 };
+        let valid_bits_last = if dim % 64 == 0 {
+            !0u64
+        } else {
+            (1u64 << (dim % 64)) - 1
+        };
 
         // 每次处理 2 个 u64 chunk
         let full_rounds = chunks / 2;
@@ -660,7 +730,11 @@ unsafe fn bq2_distance_raw_neon(
         // 余数（标量）
         let start = full_rounds * 2;
         for i in start..chunks {
-            let mask = if i == chunks - 1 { valid_bits_last } else { !0u64 };
+            let mask = if i == chunks - 1 {
+                valid_bits_last
+            } else {
+                !0u64
+            };
             let a1 = *pos_a.add(i) & mask;
             let b1 = *strong_a.add(i) & mask;
             let a2 = *pos_b.add(i) & mask;
@@ -741,7 +815,8 @@ unsafe fn bq2_distance_cheap_avx512(
             let sa = _mm512_loadu_si512(strong_a.add(off) as *const _);
             let qs = _mm512_loadu_si512(strong_b.add(off) as *const _);
             acc_pos = _mm512_add_epi64(acc_pos, _mm512_popcnt_epi64(_mm512_xor_si512(pa, qa)));
-            acc_strong = _mm512_add_epi64(acc_strong, _mm512_popcnt_epi64(_mm512_xor_si512(sa, qs)));
+            acc_strong =
+                _mm512_add_epi64(acc_strong, _mm512_popcnt_epi64(_mm512_xor_si512(sa, qs)));
         }
 
         let mut pos_dist = _mm512_reduce_add_epi64(acc_pos) as u32;
@@ -780,12 +855,23 @@ impl Bq2Store {
     /// 创建空的紧凑存储
     pub fn new(dim: usize) -> Self {
         let chunks = if dim == 0 { 1 } else { dim.div_ceil(64) };
-        Self { pos: Vec::new(), strong: Vec::new(), chunks, n: 0 }
+        Self {
+            pos: Vec::new(),
+            strong: Vec::new(),
+            chunks,
+            n: 0,
+        }
     }
 
-    pub fn chunks(&self) -> usize { self.chunks }
-    pub fn len(&self) -> usize { self.n }
-    pub fn is_empty(&self) -> bool { self.n == 0 }
+    pub fn chunks(&self) -> usize {
+        self.chunks
+    }
+    pub fn len(&self) -> usize {
+        self.n
+    }
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
 
     /// 预分配空间
     pub fn reserve(&mut self, additional: usize) {
@@ -796,8 +882,14 @@ impl Bq2Store {
     /// 从向量直接编码并追加（紧凑路径）
     pub fn push_from_vector<T: crate::VectorType>(&mut self, vec: &[T]) {
         let mut sum_abs = 0.0f32;
-        for v in vec { sum_abs += v.to_f32().abs(); }
-        let alpha = if vec.is_empty() { 0.0 } else { sum_abs / vec.len() as f32 };
+        for v in vec {
+            sum_abs += v.to_f32().abs();
+        }
+        let alpha = if vec.is_empty() {
+            0.0
+        } else {
+            sum_abs / vec.len() as f32
+        };
 
         for i in 0..self.chunks {
             let mut cp = 0u64;
@@ -806,8 +898,12 @@ impl Bq2Store {
                 let idx = i * 64 + j;
                 if idx < vec.len() {
                     let val = vec[idx].to_f32();
-                    if val > 0.0 { cp |= 1u64 << j; }
-                    if val.abs() > alpha { cs |= 1u64 << j; }
+                    if val > 0.0 {
+                        cp |= 1u64 << j;
+                    }
+                    if val.abs() > alpha {
+                        cs |= 1u64 << j;
+                    }
                 }
             }
             self.pos.push(cp);
@@ -869,8 +965,10 @@ impl Bq2Store {
     pub fn distance_to_sig(&self, idx: usize, other: &Bq2Signature, dim: usize) -> u32 {
         let off = idx * self.chunks;
         bq2_distance_raw(
-            self.pos[off..].as_ptr(), self.strong[off..].as_ptr(),
-            other.pos.as_ptr(), other.strong.as_ptr(),
+            self.pos[off..].as_ptr(),
+            self.strong[off..].as_ptr(),
+            other.pos.as_ptr(),
+            other.strong.as_ptr(),
             dim,
         )
     }
@@ -880,7 +978,10 @@ impl Bq2Store {
         let off = idx * self.chunks;
         #[cfg(all(target_arch = "x86_64", not(coverage)))]
         {
-            if !*FORCE_NO_AVX512 && is_x86_feature_detected!("avx512vpopcntdq") && is_x86_feature_detected!("avx512f") {
+            if !*FORCE_NO_AVX512
+                && is_x86_feature_detected!("avx512vpopcntdq")
+                && is_x86_feature_detected!("avx512f")
+            {
                 return unsafe {
                     if dim == 768 {
                         bq2_distance_cheap_avx512_768(
@@ -916,8 +1017,10 @@ impl Bq2Store {
         let off_i = i * self.chunks;
         let off_j = j * self.chunks;
         bq2_distance_raw(
-            self.pos[off_i..].as_ptr(), self.strong[off_i..].as_ptr(),
-            self.pos[off_j..].as_ptr(), self.strong[off_j..].as_ptr(),
+            self.pos[off_i..].as_ptr(),
+            self.strong[off_i..].as_ptr(),
+            self.pos[off_j..].as_ptr(),
+            self.strong[off_j..].as_ptr(),
             dim,
         )
     }
@@ -928,14 +1031,23 @@ impl Bq2Store {
     }
 
     /// 底层数据访问（序列化用）
-    pub fn pos_data(&self) -> &[u64] { &self.pos }
-    pub fn strong_data(&self) -> &[u64] { &self.strong }
+    pub fn pos_data(&self) -> &[u64] {
+        &self.pos
+    }
+    pub fn strong_data(&self) -> &[u64] {
+        &self.strong
+    }
 
     /// 从裸数据恢复（反序列化用）
     pub fn from_raw(pos: Vec<u64>, strong: Vec<u64>, chunks: usize) -> Self {
         assert_eq!(pos.len(), strong.len(), "pos/strong 长度必须一致");
         let n = pos.len().checked_div(chunks).unwrap_or(0);
-        Self { pos, strong, chunks, n }
+        Self {
+            pos,
+            strong,
+            chunks,
+            n,
+        }
     }
 }
 
@@ -968,18 +1080,22 @@ mod tests {
         let v2 = vec![1.0f32, -1.0, 1.0, -1.0];
         let sig1 = Bq2Signature::from_vector(&v1);
         let sig2 = Bq2Signature::from_vector(&v2);
-        
+
         let dist = bq2_distance_raw_scalar(
-            sig1.pos.as_ptr(), sig1.strong.as_ptr(),
-            sig2.pos.as_ptr(), sig2.strong.as_ptr(),
-            4
+            sig1.pos.as_ptr(),
+            sig1.strong.as_ptr(),
+            sig2.pos.as_ptr(),
+            sig2.strong.as_ptr(),
+            4,
         );
         assert_eq!(dist, sig1.distance(&sig2, 4));
-        
+
         let raw_dist = bq2_distance_raw(
-            sig1.pos.as_ptr(), sig1.strong.as_ptr(),
-            sig2.pos.as_ptr(), sig2.strong.as_ptr(),
-            4
+            sig1.pos.as_ptr(),
+            sig1.strong.as_ptr(),
+            sig2.pos.as_ptr(),
+            sig2.strong.as_ptr(),
+            4,
         );
         assert_eq!(dist, raw_dist);
     }
@@ -989,15 +1105,15 @@ mod tests {
         let mut store = Bq2Store::new(4);
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
-        
+
         store.reserve(10);
-        
+
         store.push_from_vector(&[1.0f32, 2.0, 3.0, 4.0]);
         assert_eq!(store.len(), 1);
-        
+
         store.push_from_vector(&[-1.0f32, -2.0, -3.0, -4.0]);
         assert_eq!(store.len(), 2);
-        
+
         let dist01 = store.distance(0, 1, 4);
         let dist00 = store.distance(0, 0, 4);
         assert!(dist01 > dist00);

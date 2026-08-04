@@ -375,6 +375,11 @@ impl Wal {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn close_writer_for_test(&mut self) {
+        self.writer = None;
+    }
+
     /// WAL 文件是否存在且非空（用于判断是否需要恢复）
     pub fn needs_recovery(db_path: &str) -> bool {
         let wal_path = format!("{}.wal", db_path);

@@ -2,7 +2,7 @@
 //!
 //! 被非交互命令、REPL 共享使用。TUI 有自己的渲染逻辑，不走这里。
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tabled::builder::Builder;
 use tabled::settings::{Style, Width};
 
@@ -22,7 +22,9 @@ impl OutputFormat {
             "table" => Ok(OutputFormat::Table),
             "json" => Ok(OutputFormat::Json),
             "csv" => Ok(OutputFormat::Csv),
-            other => Err(format!("未知输出格式: '{other}' (支持: table / json / csv)")),
+            other => Err(format!(
+                "未知输出格式: '{other}' (支持: table / json / csv)"
+            )),
         }
     }
 }
@@ -130,7 +132,9 @@ fn rows_to_table(rows: &CliRows) -> String {
     }
 
     let mut table = builder.build();
-    table.with(Style::rounded()).with(Width::wrap(140).keep_words(true));
+    table
+        .with(Style::rounded())
+        .with(Width::wrap(140).keep_words(true));
     format!("{table}\n{} row(s)", rows.len())
 }
 

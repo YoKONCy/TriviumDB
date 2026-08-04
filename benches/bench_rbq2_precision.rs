@@ -21,7 +21,8 @@ fn read_f32_bin(path: &str) -> Vec<f32> {
     let mut file = File::open(path).unwrap_or_else(|_| panic!("无法打开 {}", path));
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).unwrap();
-    bytes.chunks_exact(4)
+    bytes
+        .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }
@@ -45,16 +46,25 @@ impl FhtKacRotator {
         let mut state = seed;
         let bytes_per_flip = padded_dim / 8;
         let mut flips = [
-            vec![0u8; bytes_per_flip], vec![0u8; bytes_per_flip],
-            vec![0u8; bytes_per_flip], vec![0u8; bytes_per_flip],
+            vec![0u8; bytes_per_flip],
+            vec![0u8; bytes_per_flip],
+            vec![0u8; bytes_per_flip],
+            vec![0u8; bytes_per_flip],
         ];
         for flip in &mut flips {
             for byte in flip.iter_mut() {
-                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
                 *byte = state as u8;
             }
         }
-        Self { flips, trunc_dim, padded_dim, fac }
+        Self {
+            flips,
+            trunc_dim,
+            padded_dim,
+            fac,
+        }
     }
 
     fn rotate(&self, src: &[f32]) -> Vec<f32> {
@@ -99,7 +109,9 @@ impl FhtKacRotator {
 
 fn flip_sign(flip: &[u8], data: &mut [f32]) {
     for (byte_idx, &byte) in flip.iter().enumerate() {
-        if byte == 0 { continue; }
+        if byte == 0 {
+            continue;
+        }
         for bit in 0..8 {
             let i = byte_idx * 8 + bit;
             if i < data.len() && (byte >> bit) & 1 != 0 {
@@ -126,7 +138,9 @@ fn fht_in_place(x: &mut [f32]) {
 }
 
 fn vec_rescale(data: &mut [f32], fac: f32) {
-    for v in data.iter_mut() { *v *= fac; }
+    for v in data.iter_mut() {
+        *v *= fac;
+    }
 }
 
 fn kacs_walk(data: &mut [f32]) {
@@ -141,7 +155,10 @@ fn kacs_walk(data: &mut [f32]) {
 
 // ═══ 方案 1: BQ2 (我们的 2-bit sign-magnitude) ═══
 
-struct Bq2Sig { pos: Vec<u64>, strong: Vec<u64> }
+struct Bq2Sig {
+    pos: Vec<u64>,
+    strong: Vec<u64>,
+}
 
 fn encode_bq2(x: &[f32], dim: usize) -> Bq2Sig {
     let chunks = dim.div_ceil(64);
@@ -153,15 +170,23 @@ fn encode_bq2(x: &[f32], dim: usize) -> Bq2Sig {
     for (i, &v) in x.iter().enumerate().take(dim) {
         let c = i / 64;
         let b = i % 64;
-        if v > 0.0 { pos[c] |= 1u64 << b; }
-        if v.abs() > alpha { strong[c] |= 1u64 << b; }
+        if v > 0.0 {
+            pos[c] |= 1u64 << b;
+        }
+        if v.abs() > alpha {
+            strong[c] |= 1u64 << b;
+        }
     }
     Bq2Sig { pos, strong }
 }
 
 fn bq2_distance(a: &Bq2Sig, b: &Bq2Sig, dim: usize) -> i32 {
     let chunks = dim.div_ceil(64);
-    let valid_last = if dim.is_multiple_of(64) { !0u64 } else { (1u64 << (dim % 64)) - 1 };
+    let valid_last = if dim.is_multiple_of(64) {
+        !0u64
+    } else {
+        (1u64 << (dim % 64)) - 1
+    };
     let mut dot = 0i32;
     for i in 0..chunks {
         let mask = if i == chunks - 1 { valid_last } else { !0u64 };
@@ -183,7 +208,9 @@ fn bq2_distance(a: &Bq2Sig, b: &Bq2Sig, dim: usize) -> i32 {
 
 // ═══ 方案 2: RaBitQ 1-bit 对称 (旋转后纯 hamming) ═══
 
-struct Bit1Sig { bits: Vec<u64> }
+struct Bit1Sig {
+    bits: Vec<u64>,
+}
 
 fn encode_1bit(x: &[f32], dim: usize) -> Bit1Sig {
     let chunks = dim.div_ceil(64);
@@ -197,7 +224,9 @@ fn encode_1bit(x: &[f32], dim: usize) -> Bit1Sig {
 }
 
 fn hamming_distance(a: &Bit1Sig, b: &Bit1Sig) -> u32 {
-    a.bits.iter().zip(b.bits.iter())
+    a.bits
+        .iter()
+        .zip(b.bits.iter())
         .map(|(x, y)| (x ^ y).count_ones())
         .sum()
 }
@@ -244,7 +273,11 @@ fn encode_rabitq(x_rotated: &[f32], dim: usize) -> RaBitQSig {
         0.0
     };
 
-    RaBitQSig { bits, f_add, f_rescale }
+    RaBitQSig {
+        bits,
+        f_add,
+        f_rescale,
+    }
 }
 
 /// 非对称距离: f32 query × binary DB
@@ -266,7 +299,9 @@ fn rabitq_asym_distance(q_rot: &[f32], db: &RaBitQSig, dim: usize) -> f32 {
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
     for i in 0..a.len() {
-        dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i];
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
     }
     dot / (na.sqrt() * nb.sqrt()).max(1e-12)
 }
@@ -316,7 +351,12 @@ fn main() {
     let raw_queries = read_f32_bin("cohere_test.f32");
     let n_train = N_TRAIN.min(raw_data.len() / DIM);
     let n_queries = N_QUERIES.min(raw_queries.len() / DIM);
-    println!("加载 {} 训练 {} 查询, 耗时 {:.2}s\n", n_train, n_queries, t0.elapsed().as_secs_f64());
+    println!(
+        "加载 {} 训练 {} 查询, 耗时 {:.2}s\n",
+        n_train,
+        n_queries,
+        t0.elapsed().as_secs_f64()
+    );
 
     let rotator = FhtKacRotator::new(DIM, 42);
     let padded = rotator.padded_dim;
@@ -326,20 +366,25 @@ fn main() {
     let t = Instant::now();
 
     // 方案 1: BQ2
-    let bq2_sigs: Vec<Bq2Sig> = (0..n_train).into_par_iter()
-        .map(|i| encode_bq2(&raw_data[i*DIM..(i+1)*DIM], DIM)).collect();
+    let bq2_sigs: Vec<Bq2Sig> = (0..n_train)
+        .into_par_iter()
+        .map(|i| encode_bq2(&raw_data[i * DIM..(i + 1) * DIM], DIM))
+        .collect();
 
     // 方案 2 & 3: 先旋转
-    let rotated: Vec<Vec<f32>> = (0..n_train).into_par_iter()
-        .map(|i| rotator.rotate(&raw_data[i*DIM..(i+1)*DIM])).collect();
+    let rotated: Vec<Vec<f32>> = (0..n_train)
+        .into_par_iter()
+        .map(|i| rotator.rotate(&raw_data[i * DIM..(i + 1) * DIM]))
+        .collect();
 
     // 方案 2: 1-bit 对称
-    let bit1_sigs: Vec<Bit1Sig> = rotated.par_iter()
-        .map(|v| encode_1bit(v, padded)).collect();
+    let bit1_sigs: Vec<Bit1Sig> = rotated.par_iter().map(|v| encode_1bit(v, padded)).collect();
 
     // 方案 3: RaBitQ 非对称 (带修正因子)
-    let rabitq_sigs: Vec<RaBitQSig> = rotated.par_iter()
-        .map(|v| encode_rabitq(v, padded)).collect();
+    let rabitq_sigs: Vec<RaBitQSig> = rotated
+        .par_iter()
+        .map(|v| encode_rabitq(v, padded))
+        .collect();
 
     println!("  编码完成: {:.3}s\n", t.elapsed().as_secs_f64());
 
@@ -359,30 +404,33 @@ fn main() {
         let results: Vec<(f64, f64, f64)> = (0..n_queries)
             .into_par_iter()
             .map(|qi| {
-                let q = &raw_queries[qi*DIM..(qi+1)*DIM];
+                let q = &raw_queries[qi * DIM..(qi + 1) * DIM];
 
                 // f32 真值
                 let f32_scores: Vec<f32> = (0..n_train)
-                    .map(|i| cosine_sim(q, &raw_data[i*DIM..(i+1)*DIM]))
+                    .map(|i| cosine_sim(q, &raw_data[i * DIM..(i + 1) * DIM]))
                     .collect();
                 let gt = topk_f32_desc(&f32_scores, k);
 
                 // 方案 1: BQ2
                 let q_bq2 = encode_bq2(q, DIM);
                 let bq2_d: Vec<i32> = (0..n_train)
-                    .map(|i| bq2_distance(&q_bq2, &bq2_sigs[i], DIM)).collect();
+                    .map(|i| bq2_distance(&q_bq2, &bq2_sigs[i], DIM))
+                    .collect();
                 let bq2_top = topk_i32_asc(&bq2_d, k);
 
                 // 方案 2: RaBitQ 1-bit 对称
                 let q_rot = rotator.rotate(q);
                 let q_1bit = encode_1bit(&q_rot, padded);
                 let sym_d: Vec<u32> = (0..n_train)
-                    .map(|i| hamming_distance(&q_1bit, &bit1_sigs[i])).collect();
+                    .map(|i| hamming_distance(&q_1bit, &bit1_sigs[i]))
+                    .collect();
                 let sym_top = topk_u32_asc(&sym_d, k);
 
                 // 方案 3: RaBitQ 1-bit 非对称
                 let asym_d: Vec<f32> = (0..n_train)
-                    .map(|i| rabitq_asym_distance(&q_rot, &rabitq_sigs[i], padded)).collect();
+                    .map(|i| rabitq_asym_distance(&q_rot, &rabitq_sigs[i], padded))
+                    .collect();
                 let asym_top = topk_f32_asc(&asym_d, k);
 
                 (
@@ -397,8 +445,14 @@ fn main() {
         let avg_sym: f64 = results.iter().map(|r| r.1).sum::<f64>() / n_queries as f64;
         let avg_asym: f64 = results.iter().map(|r| r.2).sum::<f64>() / n_queries as f64;
 
-        println!("{:<6}  {:>11.2}%  {:>11.2}%  {:>11.2}%    ({:.1}s)",
-            k, avg_bq2*100.0, avg_sym*100.0, avg_asym*100.0, t_k.elapsed().as_secs_f64());
+        println!(
+            "{:<6}  {:>11.2}%  {:>11.2}%  {:>11.2}%    ({:.1}s)",
+            k,
+            avg_bq2 * 100.0,
+            avg_sym * 100.0,
+            avg_asym * 100.0,
+            t_k.elapsed().as_secs_f64()
+        );
     }
 
     println!("\n说明:");

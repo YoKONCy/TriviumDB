@@ -520,11 +520,13 @@ fn HW09_连续三次崩溃_累积WAL回放恢复() {
         eprintln!("  轮次 {}: {} 个节点存活", round, db.node_count());
     }
 
-    // 最终验证：3 轮各写入 3 个节点，至少应有部分通过 WAL 回放恢复
+    // 最终验证：3 轮各写入 3 个节点，全部 9 个已确认提交的节点必须通过 WAL 回放恢复
     let db = triviumdb::Database::<f32>::open(&path, DIM).unwrap();
-    assert!(
-        db.node_count() > 0,
-        "连续 3 轮崩溃-写入后，WAL 回放应至少恢复 1 个节点，但实际恢复 0 个！WAL 持久化机制可能存在缺陷"
+    assert_eq!(
+        db.node_count(),
+        9,
+        "连续 3 轮崩溃-写入后，WAL 回放应恢复全部 9 个已确认提交的节点，实际恢复 {} 个",
+        db.node_count()
     );
     // 验证恢复的节点数据可读
     for &id in &db.all_node_ids() {

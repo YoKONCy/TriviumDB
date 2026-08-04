@@ -226,9 +226,8 @@ fn main() {
     drop(train_data);
     drop(test_data);
 
-    let mut gt_file = std::io::BufWriter::new(
-        std::fs::File::create("sphere_groundtruth.i32").unwrap(),
-    );
+    let mut gt_file =
+        std::io::BufWriter::new(std::fs::File::create("sphere_groundtruth.i32").unwrap());
     for row in &gt {
         for &id in row {
             gt_file.write_all(&id.to_le_bytes()).unwrap();
@@ -236,7 +235,10 @@ fn main() {
     }
     gt_file.flush().unwrap();
 
-    println!("  GroundTruth 写入完成! 耗时: {:.2}s", t_gt.elapsed().as_secs_f64());
+    println!(
+        "  GroundTruth 写入完成! 耗时: {:.2}s",
+        t_gt.elapsed().as_secs_f64()
+    );
 
     println!("\n=== 数据生成完毕！===");
     println!("文件列表:");

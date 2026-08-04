@@ -171,14 +171,11 @@ fn EMI_03_WAL单比特翻转_CRC检测率() {
     }
 
     let wal_path = format!("{}.wal", path);
-    let original_wal = match std::fs::read(&wal_path) {
-        Ok(data) if data.len() > 8 => data,
-        _ => {
-            eprintln!("  ⚠️ WAL 文件过小或不存在，跳过 CRC 检测率测试");
-            cleanup(&path);
-            return;
-        }
-    };
+    let original_wal = std::fs::read(&wal_path).expect("WAL 文件不存在，无法执行 CRC 检测率测试");
+    assert!(
+        original_wal.len() > 8,
+        "WAL 文件过小，无法执行 CRC 检测率测试"
+    );
 
     let total_bits = (original_wal.len() * 8).min(2000); // 最多测 2000 bit
     let mut detected = 0usize;

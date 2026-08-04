@@ -400,7 +400,10 @@ mod tests {
     #[test]
     fn from_json_starts_with_invalid_type() {
         let json_filter = json!({"folder": {"$startsWith": 123}});
-        assert!(Filter::from_json(&json_filter).is_err(), "$startsWith 传入数字应报错");
+        assert!(
+            Filter::from_json(&json_filter).is_err(),
+            "$startsWith 传入数字应报错"
+        );
     }
 
     // ═══════ 组合使用测试 ═══════

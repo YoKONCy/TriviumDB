@@ -483,11 +483,7 @@ fn WAL_端到端_文件物理截断后Database重新加载() {
     let wal_bytes = std::fs::read(&wal_path).unwrap_or_default();
     let wal_len = wal_bytes.len();
 
-    if wal_len == 0 {
-        eprintln!("  ⚠️ WAL 文件为空（可能 Drop 时未写入），跳过截断测试");
-        cleanup(&path);
-        return;
-    }
+    assert_ne!(wal_len, 0, "WAL 文件为空，无法执行物理截断恢复测试");
 
     // Step 3: 在关键偏移处截断 WAL，每次截断后重新加载
     // 采样截断点：每 10 字节取一个 + 关键位置

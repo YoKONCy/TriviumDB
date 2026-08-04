@@ -7,9 +7,30 @@ use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Context, Helper};
 
 const TQL_KEYWORDS: &[&str] = &[
-    "FIND", "MATCH", "SEARCH", "VECTOR", "RETURN", "WHERE", "ORDER BY", "LIMIT", "OFFSET",
-    "CREATE", "SET", "DELETE", "DETACH DELETE", "AS", "AND", "OR", "ASC", "DESC", "DISTINCT",
-    "COUNT", "SUM", "AVG", "MIN", "MAX",
+    "FIND",
+    "MATCH",
+    "SEARCH",
+    "VECTOR",
+    "RETURN",
+    "WHERE",
+    "ORDER BY",
+    "LIMIT",
+    "OFFSET",
+    "CREATE",
+    "SET",
+    "DELETE",
+    "DETACH DELETE",
+    "AS",
+    "AND",
+    "OR",
+    "ASC",
+    "DESC",
+    "DISTINCT",
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
 ];
 
 const META_COMMANDS: &[&str] = &[

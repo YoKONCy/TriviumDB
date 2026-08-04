@@ -342,7 +342,9 @@ mod tests {
         let path = dir.path().join("t.tdb").to_string_lossy().to_string();
         let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
 
-        let id = h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
+        let id = h
+            .insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+            .unwrap();
         assert_eq!(h.node_count(), 1);
         assert_eq!(h.dim(), 4);
         assert_eq!(h.dtype(), DType::F32);
@@ -357,8 +359,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("t.tdb").to_string_lossy().to_string();
         let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
-        h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
-        h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"})).unwrap();
+        h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+            .unwrap();
+        h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"}))
+            .unwrap();
 
         let rows = h.tql("MATCH (n) RETURN n").unwrap();
         assert_eq!(rows.len(), 2);
@@ -370,8 +374,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("t.tdb").to_string_lossy().to_string();
         let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
-        h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"})).unwrap();
-        h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"})).unwrap();
+        h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
+            .unwrap();
+        h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"}))
+            .unwrap();
 
         let hits = h.search_f32(&[1.0, 0.0, 0.0, 0.0], 1, 0, 0.0).unwrap();
         assert_eq!(hits.len(), 1);
@@ -383,8 +389,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("t.tdb").to_string_lossy().to_string();
         let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
-        let a = h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
-        let b = h.insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+        let a = h
+            .insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
+        let b = h
+            .insert_f32(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
         h.link(a, b, "knows", 1.0).unwrap();
 
         let edges = h.get_edges(a);
@@ -398,7 +408,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("t.tdb").to_string_lossy().to_string();
         let mut h = DbHandle::open(&path, 4, DType::F32).unwrap();
-        h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({})).unwrap();
+        h.insert_f32(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
         h.flush().unwrap();
         h.compact().unwrap();
         assert_eq!(h.node_count(), 1);

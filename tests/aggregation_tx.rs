@@ -548,6 +548,71 @@ fn COV4_26_tql_multi_order() {
     cleanup(&path);
 }
 
+#[test]
+fn COV4_26A_tql_order_before_offset_limit() {
+    let path = tmp_db("tql_order_page");
+    let db = seed_scored_graph(&path);
+
+    let results = db
+        .tql(r#"FIND {type: "item"} RETURN * ORDER BY _.score DESC LIMIT 3 OFFSET 2"#)
+        .unwrap();
+    let scores: Vec<i64> = results
+        .iter()
+        .map(|row| row["_"].payload["score"].as_f64().unwrap() as i64)
+        .collect();
+    assert_eq!(scores, vec![70, 60, 50], "必须先全量排序，再执行分页");
+
+    cleanup(&path);
+}
+
+#[test]
+fn COV4_26B_tql_aggregate_before_order_and_limit() {
+    let path = tmp_db("tql_agg_page");
+    let db = seed_scored_graph(&path);
+
+    let results = db
+        .tql(r#"FIND {type: "item"} RETURN _.group, count(_) AS total ORDER BY _.group DESC LIMIT 1"#)
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["_"].payload["group"], "beta");
+    assert_eq!(results[0]["total"].payload["total"], 5);
+
+    cleanup(&path);
+}
+
+#[test]
+fn COV4_26C_tql_create_continuous_edges_atomically() {
+    let path = tmp_db("tql_create_chain");
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+
+    let result = db
+        .tql_mut(r#"CREATE (a {name: "a"})-[:first]->(b {name: "b"})-[:second]->(c {name: "c"})"#)
+        .unwrap();
+    assert_eq!(result.created_ids.len(), 3);
+    assert_eq!(result.affected, 5);
+    assert_eq!(
+        db.tql(r#"MATCH (a)-[:first]->(b)-[:second]->(c) RETURN a, b, c"#)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    cleanup(&path);
+}
+
+#[test]
+fn COV4_26D_tql_create_failure_is_atomic() {
+    let path = tmp_db("tql_create_atomic");
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let oversized = "x".repeat(8 * 1024 * 1024 + 1);
+    let query = format!("CREATE (a {{name: \"kept_out\"}})-[:next]->(b {{data: \"{oversized}\"}})");
+
+    assert!(db.tql_mut(&query).is_err());
+    assert_eq!(db.node_count(), 0, "任一操作预检失败时整条 CREATE 不得落库");
+
+    cleanup(&path);
+}
+
 /// RETURN a.field (属性投影)
 #[test]
 fn COV4_27_tql_return_property() {

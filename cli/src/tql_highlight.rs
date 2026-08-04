@@ -51,7 +51,10 @@ pub fn tokenize(input: &str) -> Vec<Token<'_>> {
                 i += 1;
             }
             let (s, e) = slice(input, &chars, a, i);
-            tokens.push(Token { text: &input[s..e], kind: TokenKind::Whitespace });
+            tokens.push(Token {
+                text: &input[s..e],
+                kind: TokenKind::Whitespace,
+            });
         } else if c == '"' || c == '\'' {
             let quote = c;
             let a = i;
@@ -67,14 +70,20 @@ pub fn tokenize(input: &str) -> Vec<Token<'_>> {
                 i += 1; // 收尾引号
             }
             let (s, e) = slice(input, &chars, a, i);
-            tokens.push(Token { text: &input[s..e], kind: TokenKind::Str });
+            tokens.push(Token {
+                text: &input[s..e],
+                kind: TokenKind::Str,
+            });
         } else if c.is_ascii_digit() {
             let a = i;
             while i < n && (chars[i].1.is_ascii_digit() || chars[i].1 == '.') {
                 i += 1;
             }
             let (s, e) = slice(input, &chars, a, i);
-            tokens.push(Token { text: &input[s..e], kind: TokenKind::Number });
+            tokens.push(Token {
+                text: &input[s..e],
+                kind: TokenKind::Number,
+            });
         } else if c == '$' {
             let a = i;
             i += 1;
@@ -82,7 +91,10 @@ pub fn tokenize(input: &str) -> Vec<Token<'_>> {
                 i += 1;
             }
             let (s, e) = slice(input, &chars, a, i);
-            tokens.push(Token { text: &input[s..e], kind: TokenKind::Operator });
+            tokens.push(Token {
+                text: &input[s..e],
+                kind: TokenKind::Operator,
+            });
         } else if c.is_alphabetic() || c == '_' {
             let a = i;
             while i < n && (chars[i].1.is_alphanumeric() || chars[i].1 == '_') {
@@ -102,12 +114,18 @@ pub fn tokenize(input: &str) -> Vec<Token<'_>> {
                 i += 1;
             }
             let (s, e) = slice(input, &chars, a, i);
-            tokens.push(Token { text: &input[s..e], kind: TokenKind::Operator });
+            tokens.push(Token {
+                text: &input[s..e],
+                kind: TokenKind::Operator,
+            });
         } else {
             let a = i;
             i += 1;
             let (s, e) = slice(input, &chars, a, i);
-            tokens.push(Token { text: &input[s..e], kind: TokenKind::Punct });
+            tokens.push(Token {
+                text: &input[s..e],
+                kind: TokenKind::Punct,
+            });
         }
     }
 
@@ -124,7 +142,9 @@ pub fn highlight_spans(input: &str) -> Vec<Span<'static>> {
 
 fn style_for(kind: TokenKind) -> Style {
     match kind {
-        TokenKind::Keyword => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        TokenKind::Keyword => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
         TokenKind::Str => Style::default().fg(Color::Green),
         TokenKind::Number => Style::default().fg(Color::Yellow),
         TokenKind::Operator => Style::default().fg(Color::Magenta),
@@ -154,9 +174,9 @@ fn ansi_for(kind: TokenKind) -> Option<&'static str> {
     match kind {
         TokenKind::Keyword => Some("\x1b[1;36m"), // 粗体青
         TokenKind::Str => Some("\x1b[32m"),       // 绿
-        TokenKind::Number => Some("\x1b[33m"),     // 黄
-        TokenKind::Operator => Some("\x1b[35m"),   // 品红
-        TokenKind::Punct => Some("\x1b[90m"),      // 暗灰
+        TokenKind::Number => Some("\x1b[33m"),    // 黄
+        TokenKind::Operator => Some("\x1b[35m"),  // 品红
+        TokenKind::Punct => Some("\x1b[90m"),     // 暗灰
         TokenKind::Ident | TokenKind::Whitespace => None,
     }
 }
@@ -172,10 +192,19 @@ mod tests {
         assert_eq!(toks[0].text, "FIND");
         assert_eq!(toks[0].kind, TokenKind::Keyword);
         // 含字符串与数字
-        assert!(toks.iter().any(|t| t.kind == TokenKind::Str && t.text == "\"person\""));
-        assert!(toks.iter().any(|t| t.kind == TokenKind::Number && t.text == "28"));
+        assert!(
+            toks.iter()
+                .any(|t| t.kind == TokenKind::Str && t.text == "\"person\"")
+        );
+        assert!(
+            toks.iter()
+                .any(|t| t.kind == TokenKind::Number && t.text == "28")
+        );
         // RETURN 也是关键词
-        assert!(toks.iter().any(|t| t.kind == TokenKind::Keyword && t.text == "RETURN"));
+        assert!(
+            toks.iter()
+                .any(|t| t.kind == TokenKind::Keyword && t.text == "RETURN")
+        );
     }
 
     #[test]
@@ -188,7 +217,13 @@ mod tests {
     #[test]
     fn handles_operators_and_utf8_strings() {
         let toks = tokenize("FIND {name: \"张三\", n: {$gte: 3}}");
-        assert!(toks.iter().any(|t| t.kind == TokenKind::Str && t.text == "\"张三\""));
-        assert!(toks.iter().any(|t| t.kind == TokenKind::Operator && t.text == "$gte"));
+        assert!(
+            toks.iter()
+                .any(|t| t.kind == TokenKind::Str && t.text == "\"张三\"")
+        );
+        assert!(
+            toks.iter()
+                .any(|t| t.kind == TokenKind::Operator && t.text == "$gte")
+        );
     }
 }

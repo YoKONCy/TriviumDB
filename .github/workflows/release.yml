@@ -55,13 +55,41 @@ jobs:
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
           fi
 
+  quality-gate:
+    name: Release Quality Gate
+    runs-on: ubuntu-latest
+    needs: version-gate
+    if: needs.version-gate.outputs.pypi_should_publish == 'true' || needs.version-gate.outputs.npm_should_publish == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 校验发布版本
+        shell: bash
+        run: |
+          test "$(cargo metadata --no-deps --format-version 1 | python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "triviumdb"))')" = "${{ needs.version-gate.outputs.version }}"
+          test "$(node -p "require('./package.json').version")" = "${{ needs.version-gate.outputs.version }}"
+
+      - name: 运行发布质量门禁
+        run: |
+          cargo fmt --all -- --check
+          cargo check --lib --features python
+          cargo check --lib --features nodejs
+          cargo test --lib --tests -- --test-threads=1
+          cargo clippy --all-targets -- -D warnings
+
   # ═══════════════════════════════════════════════════════════
   #  阶段 1: 编译 Python Wheels（含 ARM64）
   # ═══════════════════════════════════════════════════════════
   build-wheels:
     name: Build wheels (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
-    needs: version-gate
+    needs: [version-gate, quality-gate]
     if: needs.version-gate.outputs.pypi_should_publish == 'true'
     strategy:
       fail-fast: false
@@ -80,11 +108,11 @@ jobs:
             target: x86_64-pc-windows-msvc
             sdist: false
           - name: macOS x86_64
-            runner: macos-latest  # Apple Silicon 交叉编译 x86_64
+            runner: macos-15-intel
             target: x86_64-apple-darwin
             sdist: false
           - name: macOS ARM64
-            runner: macos-latest
+            runner: macos-15
             target: aarch64-apple-darwin
             sdist: false
     steps:
@@ -141,7 +169,7 @@ jobs:
   build-node:
     name: Build Node addon (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
-    needs: version-gate
+    needs: [version-gate, quality-gate]
     if: needs.version-gate.outputs.npm_should_publish == 'true'
     strategy:
       fail-fast: false
@@ -157,10 +185,10 @@ jobs:
             runner: windows-latest
             target: x86_64-pc-windows-msvc
           - name: macOS x86_64
-            runner: macos-latest  # Apple Silicon 交叉编译 x86_64
+            runner: macos-15-intel
             target: x86_64-apple-darwin
           - name: macOS ARM64
-            runner: macos-latest
+            runner: macos-15
             target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4

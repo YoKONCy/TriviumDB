@@ -145,10 +145,7 @@ mod tests {
     #[test]
     fn render_ansi_contains_caret_and_line_text() {
         let input = "MATCH (n) WHERE";
-        let d = Diagnostic::from_parse_error(
-            input,
-            &err(input.len(), "Expected RETURN, got Eof"),
-        );
+        let d = Diagnostic::from_parse_error(input, &err(input.len(), "Expected RETURN, got Eof"));
         let out = d.render_ansi();
         assert!(out.contains("Expected RETURN"));
         assert!(out.contains("MATCH (n) WHERE"));

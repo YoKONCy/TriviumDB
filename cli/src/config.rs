@@ -52,7 +52,10 @@ impl Config {
         match toml::from_str::<Self>(&text) {
             Ok(cfg) => cfg,
             Err(e) => {
-                eprintln!("warning: 配置解析失败 {}: {e}（已忽略，使用默认）", path.display());
+                eprintln!(
+                    "warning: 配置解析失败 {}: {e}（已忽略，使用默认）",
+                    path.display()
+                );
                 Self::default()
             }
         }

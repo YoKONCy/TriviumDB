@@ -26,6 +26,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  soak:
+    name: Scheduled Soak
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fault-soak
+
+      - name: 运行定时浸泡测试
+        run: cargo test --test soak -- --test-threads=1 --ignored
+
   logical-crash-consistency:
     name: Logical Crash Consistency
     runs-on: ubuntu-latest

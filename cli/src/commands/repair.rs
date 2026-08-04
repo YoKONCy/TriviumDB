@@ -22,7 +22,10 @@ pub fn check(path: &str) -> CliResult {
     if tdb_exists {
         match sniff_header(path) {
             Ok(h) => {
-                println!("   └─ 架构参数 => Version: v{}, Dimension: {}", h.version, h.dim);
+                println!(
+                    "   └─ 架构参数 => Version: v{}, Dimension: {}",
+                    h.version, h.dim
+                );
                 println!("{}", "数据库头部完好，可安全挂载。".green());
             }
             Err(e) => {
@@ -45,7 +48,11 @@ pub fn dump(path: &str, dtype: DType, format: OutputFormat) -> CliResult {
     println!("尝试以维度 {dim} 强制挂载数据库...");
 
     let handle = DbHandle::open(path, dim, dtype)?;
-    println!("{} 存活节点总数: {}", "挂载成功！".green(), handle.node_count());
+    println!(
+        "{} 存活节点总数: {}",
+        "挂载成功！".green(),
+        handle.node_count()
+    );
     println!("{}", "─".repeat(50));
 
     let mut rows: CliRows = Vec::new();

@@ -572,7 +572,10 @@ mod tests {
         assert!(matches!(toks[0].token, TqlToken::Match));
         assert_eq!(toks[0].byte_start, 0);
         // (n) 中的 ( 在 "MATCH " 之后
-        let lparen = toks.iter().find(|t| matches!(t.token, TqlToken::LParen)).unwrap();
+        let lparen = toks
+            .iter()
+            .find(|t| matches!(t.token, TqlToken::LParen))
+            .unwrap();
         assert_eq!(lparen.byte_start, 6);
         // EOF 位置 = 字符串长度
         let last = toks.last().unwrap();

@@ -288,10 +288,18 @@ fn main() {
     );
     let k_gt = gt_data.len() / n_test;
     assert!(k_gt >= EXACT_TOP_K, "GroundTruth 至少需要 Top-10");
-    assert!(train_data.iter().all(|value| value.is_finite()), "训练集包含 NaN 或 Inf");
-    assert!(test_data.iter().all(|value| value.is_finite()), "测试集包含 NaN 或 Inf");
     assert!(
-        gt_data.iter().all(|&id| id >= 0 && (id as usize) < full_n_train),
+        train_data.iter().all(|value| value.is_finite()),
+        "训练集包含 NaN 或 Inf"
+    );
+    assert!(
+        test_data.iter().all(|value| value.is_finite()),
+        "测试集包含 NaN 或 Inf"
+    );
+    assert!(
+        gt_data
+            .iter()
+            .all(|&id| id >= 0 && (id as usize) < full_n_train),
         "GroundTruth 包含越界 ID"
     );
     let use_original_gt = n_train == full_n_train && k_gt >= EXACT_TOP_K;
@@ -395,13 +403,13 @@ fn main() {
 
     let build_time = t_build.elapsed().as_secs_f64();
     let build_vecs_per_sec = n_train as f64 / build_time;
-    println!("构建完成! 耗时: {:.2}s ({:.0} vecs/s)", build_time, build_vecs_per_sec);
+    println!(
+        "构建完成! 耗时: {:.2}s ({:.0} vecs/s)",
+        build_time, build_vecs_per_sec
+    );
 
     let stats = index.stats();
-    println!(
-        "内存统计: Hot {} MB",
-        stats.hot_bytes / 1024 / 1024
-    );
+    println!("内存统计: Hot {} MB", stats.hot_bytes / 1024 / 1024);
 
     let top_k = 10;
     let eval_gts: Vec<Vec<u64>> = if use_original_gt {
@@ -437,7 +445,8 @@ fn main() {
     // ── 先测 Exact Flat 基准 ──
     println!(
         "\n计算 Exact Flat Cosine 基准 (Top-{}, {} 条查询)...",
-        EXACT_TOP_K, BRUTE_FORCE_QUERIES.min(n_test)
+        EXACT_TOP_K,
+        BRUTE_FORCE_QUERIES.min(n_test)
     );
     let exact_queries = BRUTE_FORCE_QUERIES.min(n_test);
     let t_norm = Instant::now();
@@ -465,7 +474,10 @@ fn main() {
     let exact_parallel_time = t_exact_parallel.elapsed().as_secs_f64();
     let exact_parallel_qps = exact_queries as f64 / exact_parallel_time;
 
-    println!("Exact Flat 单线程: QPS={:.1}, latency={:.2}ms/q", exact_single_qps, exact_single_lat_ms);
+    println!(
+        "Exact Flat 单线程: QPS={:.1}, latency={:.2}ms/q",
+        exact_single_qps, exact_single_lat_ms
+    );
     println!("Exact Flat 多线程: QPS={:.1}", exact_parallel_qps);
 
     // ── QuIVer 搜索 ──
@@ -554,7 +566,10 @@ fn main() {
     }
 
     println!("\n构图速率: {:.0} vecs/s", build_vecs_per_sec);
-    println!("Exact Flat 基准 QPS: {:.1} (单线程) / {:.1} (多线程)", exact_single_qps, exact_parallel_qps);
+    println!(
+        "Exact Flat 基准 QPS: {:.1} (单线程) / {:.1} (多线程)",
+        exact_single_qps, exact_parallel_qps
+    );
 
     if let Ok(result_path) = std::env::var("TRIVIUM_RESULT_PATH") {
         let result = BenchmarkResult {
@@ -583,7 +598,10 @@ fn main() {
             measurements,
         };
         let path = std::path::Path::new(&result_path);
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             std::fs::create_dir_all(parent).expect("无法创建结果目录");
         }
         let temporary = path.with_extension("json.tmp");

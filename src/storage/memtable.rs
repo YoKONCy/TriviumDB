@@ -227,6 +227,9 @@ impl<T: VectorType> MemTable<T> {
         vector: &[T],
         payload: serde_json::Value,
     ) -> Result<()> {
+        if id == 0 {
+            return Err(TriviumError::InvalidInput("节点 ID 0 为内部保留值".into()));
+        }
         if vector.len() != self.dim {
             return Err(TriviumError::DimensionMismatch {
                 expected: self.dim,
@@ -278,13 +281,7 @@ impl<T: VectorType> MemTable<T> {
 
     /// 插入具有原生三维度属性的节点，保证原子性。
     pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) -> Result<NodeId> {
-        if vector.len() != self.dim {
-            return Err(TriviumError::DimensionMismatch {
-                expected: self.dim,
-                got: vector.len(),
-            });
-        }
-        Self::validate_vector(vector)?;
+        self.validate_insert(vector)?;
 
         let id = self.next_id;
         self.next_id += 1;
@@ -340,16 +337,7 @@ impl<T: VectorType> MemTable<T> {
         vector: &[T],
         payload: serde_json::Value,
     ) -> Result<()> {
-        if self.payloads.contains_key(&id) {
-            return Err(TriviumError::NodeAlreadyExists(id));
-        }
-        if vector.len() != self.dim {
-            return Err(TriviumError::DimensionMismatch {
-                expected: self.dim,
-                got: vector.len(),
-            });
-        }
-        Self::validate_vector(vector)?;
+        self.validate_insert_with_id(id, vector)?;
 
         // 优先从空闲槽复活
         let sig = calculate_json_signature(&payload);
@@ -395,14 +383,70 @@ impl<T: VectorType> MemTable<T> {
         Ok(())
     }
 
-    /// 在两节点间建立图谱边
-    pub fn link(&mut self, src: NodeId, dst: NodeId, label: String, weight: f32) -> Result<()> {
+    pub(crate) fn validate_insert(&self, vector: &[T]) -> Result<()> {
+        if vector.len() != self.dim {
+            return Err(TriviumError::DimensionMismatch {
+                expected: self.dim,
+                got: vector.len(),
+            });
+        }
+        Self::validate_vector(vector)
+    }
+
+    pub(crate) fn validate_insert_with_id(&self, id: NodeId, vector: &[T]) -> Result<()> {
+        if id == 0 {
+            return Err(TriviumError::InvalidInput("节点 ID 0 为内部保留值".into()));
+        }
+        if self.payloads.contains_key(&id) {
+            return Err(TriviumError::NodeAlreadyExists(id));
+        }
+        self.validate_insert(vector)
+    }
+
+    pub(crate) fn validate_link(&self, src: NodeId, dst: NodeId) -> Result<()> {
         if !self.payloads.contains_key(&src) {
             return Err(TriviumError::NodeNotFound(src));
         }
         if !self.payloads.contains_key(&dst) {
             return Err(TriviumError::NodeNotFound(dst));
         }
+        Ok(())
+    }
+
+    pub(crate) fn validate_delete(&self, id: NodeId) -> Result<()> {
+        if self.payloads.contains_key(&id) {
+            Ok(())
+        } else {
+            Err(TriviumError::NodeNotFound(id))
+        }
+    }
+
+    pub(crate) fn validate_unlink(&self, src: NodeId) -> Result<()> {
+        if self.edges.contains_key(&src) {
+            Ok(())
+        } else {
+            Err(TriviumError::NodeNotFound(src))
+        }
+    }
+
+    pub(crate) fn validate_update_payload(&self, id: NodeId) -> Result<()> {
+        self.validate_delete(id)
+    }
+
+    pub(crate) fn validate_update_vector(&self, id: NodeId, vector: &[T]) -> Result<()> {
+        if vector.len() != self.dim {
+            return Err(TriviumError::DimensionMismatch {
+                expected: self.dim,
+                got: vector.len(),
+            });
+        }
+        Self::validate_vector(vector)?;
+        self.validate_delete(id)
+    }
+
+    /// 在两节点间建立图谱边
+    pub fn link(&mut self, src: NodeId, dst: NodeId, label: String, weight: f32) -> Result<()> {
+        self.validate_link(src, dst)?;
 
         let edge = Edge {
             target_id: dst,
@@ -537,6 +581,22 @@ impl<T: VectorType> MemTable<T> {
         self.quiver_index = Some(quiver);
     }
 
+    pub(crate) fn quiver_matches_storage(&self, quiver: &QuIVer) -> bool {
+        quiver.matches_storage(
+            self.dim,
+            self.payloads.len(),
+            self.indices_to_ids.len(),
+            |slot| {
+                let id = self.indices_to_ids.get(slot).copied()?;
+                if id == 0 || !self.payloads.contains_key(&id) {
+                    return None;
+                }
+                let vector = self.vec_pool.get(slot)?;
+                Some((id, crate::index::bq::Bq2Signature::from_vector(vector)))
+            },
+        )
+    }
+
     /// 设置 QuIVer 同步暂停标记（事务 commit 期间暂停，commit 后恢复）
     #[inline]
     pub fn set_quiver_sync_paused(&mut self, paused: bool) {
@@ -643,6 +703,8 @@ impl<T: VectorType> MemTable<T> {
     pub fn quiver_sync_tx_entries(&mut self, entries: &[crate::storage::wal::WalEntry<T>]) {
         use crate::storage::wal::WalEntry;
 
+        let had_quiver = self.quiver_index.is_some();
+
         for entry in entries {
             match entry {
                 WalEntry::Insert { id, vector, .. } => {
@@ -680,6 +742,15 @@ impl<T: VectorType> MemTable<T> {
                 }
                 _ => {} // Link/Unlink/UpdatePayload 不影响 QuIVer
             }
+        }
+
+        if had_quiver
+            && self
+                .quiver_index
+                .as_ref()
+                .is_none_or(|quiver| quiver.needs_rebuild())
+        {
+            self.build_quiver(&QuIVerConfig::default());
         }
     }
 
@@ -972,6 +1043,15 @@ impl<T: VectorType> MemTable<T> {
     /// }
     /// ```
     pub fn patch_payload(&mut self, id: NodeId, patch: &serde_json::Value) -> Result<()> {
+        let new_payload = self.preview_patch_payload(id, patch)?;
+        self.update_payload(id, new_payload)
+    }
+
+    pub(crate) fn preview_patch_payload(
+        &self,
+        id: NodeId,
+        patch: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let old_payload = self
             .payloads
             .get(&id)
@@ -1042,24 +1122,12 @@ impl<T: VectorType> MemTable<T> {
             ));
         }
 
-        // 复用 update_payload 的完整路径（含属性索引维护）
-        self.update_payload(id, new_payload)
+        Ok(new_payload)
     }
 
     /// 就地替换节点的向量（维度必须一致）
     pub fn update_vector(&mut self, id: NodeId, vector: &[T]) -> Result<()> {
-        if vector.len() != self.dim {
-            return Err(TriviumError::DimensionMismatch {
-                expected: self.dim,
-                got: vector.len(),
-            });
-        }
-        Self::validate_vector(vector)?;
-        // 必须同时检查 payload 存在性：delete() 会移除 payload 但保留 ids_to_indices，
-        // 仅检查索引表会让 tombstone 节点被错误更新
-        if !self.payloads.contains_key(&id) {
-            return Err(TriviumError::NodeNotFound(id));
-        }
+        self.validate_update_vector(id, vector)?;
         match self.ids_to_indices.get(&id) {
             Some(&idx) => {
                 self.vec_pool.update(idx, vector);

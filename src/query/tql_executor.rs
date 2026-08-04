@@ -41,6 +41,8 @@ pub enum MutationOp<T: VectorType> {
     LinkEdge {
         src_id: NodeId,
         dst_id: NodeId,
+        src_var: String,
+        dst_var: String,
         label: String,
         weight: f32,
     },
@@ -71,7 +73,17 @@ pub fn execute_tql<T: VectorType>(
         return Ok(generate_explain_plan(query, memtable));
     }
 
-    let row_limit = query.limit.unwrap_or(DEFAULT_ROW_LIMIT);
+    let requires_full_input = !query.order_by.is_empty()
+        || matches!(&query.returns, ReturnClause::Expressions(exprs) if exprs.iter().any(|expr| is_aggregate(&expr.kind) || expr.distinct));
+    let row_limit = if requires_full_input {
+        DEFAULT_ROW_LIMIT
+    } else {
+        query
+            .limit
+            .and_then(|limit| limit.checked_add(query.offset.unwrap_or(0)))
+            .unwrap_or(DEFAULT_ROW_LIMIT)
+            .min(DEFAULT_ROW_LIMIT)
+    };
 
     let mut results = match &query.entry {
         QueryEntry::Find { filter } => execute_find(filter, query, memtable, row_limit)?,
@@ -86,7 +98,12 @@ pub fn execute_tql<T: VectorType>(
         } => execute_search(vector, *top_k, expand.as_ref(), query, memtable, row_limit)?,
     };
 
-    // ORDER BY 排序
+    results = apply_aggregation_and_distinct(
+        &query.returns,
+        results,
+        matches!(&query.entry, QueryEntry::Find { .. }),
+    )?;
+
     if !query.order_by.is_empty() {
         sort_results(&mut results, &query.order_by, memtable);
     }
@@ -104,13 +121,6 @@ pub fn execute_tql<T: VectorType>(
     if let Some(lim) = query.limit {
         results.truncate(lim);
     }
-
-    // 聚合函数 + DISTINCT 后处理
-    results = apply_aggregation_and_distinct(
-        &query.returns,
-        results,
-        matches!(&query.entry, QueryEntry::Find { .. }),
-    )?;
 
     // 投影裁剪：对仅属性引用的变量，剥离 vector + edges 节省内存
     apply_projection_pruning(&query.returns, &mut results);
@@ -192,7 +202,7 @@ fn execute_match<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
     row_limit: usize,
-    _optional: bool,
+    optional: bool,
 ) -> Result<TqlResult<T>, TriviumError> {
     // 建立变量映射
     let mut var_map: HashMap<String, usize> = HashMap::new();
@@ -216,13 +226,17 @@ fn execute_match<T: VectorType>(
     }
 
     // 确定起始候选集（含标签索引下推优化）
-    let start_candidates =
-        find_tql_candidates_optimized(&pattern.nodes[0], pattern.edges.first(), mt);
+    let start_candidates = if optional {
+        find_tql_candidates(&pattern.nodes[0], mt)
+    } else {
+        find_tql_candidates_optimized(&pattern.nodes[0], pattern.edges.first(), mt)
+    };
 
     let mut results = Vec::new();
     let mut budget: usize = 0;
 
     for start_id in start_candidates {
+        let result_start = results.len();
         let mut env = vec![None; var_map.len()];
         let cont = tql_dfs(
             mt,
@@ -240,6 +254,19 @@ fn execute_match<T: VectorType>(
         )?;
         if !cont {
             break;
+        }
+        if optional && results.len() == result_start {
+            let mut row = HashMap::new();
+            if let Some(var) = &pattern.nodes[0].var
+                && return_vars.contains(var)
+                && let Some(node) = build_node(start_id, mt)
+            {
+                row.insert(var.clone(), node);
+            }
+            results.push(row);
+            if results.len() >= row_limit {
+                break;
+            }
         }
     }
 
@@ -1683,6 +1710,8 @@ fn execute_create<T: VectorType>(
             ops.push(MutationOp::LinkEdge {
                 src_id: s,
                 dst_id: d,
+                src_var: edge.src_var.clone(),
+                dst_var: edge.dst_var.clone(),
                 label: edge.label.clone(),
                 weight: edge.weight,
             });
@@ -1693,6 +1722,8 @@ fn execute_create<T: VectorType>(
             ops.push(MutationOp::LinkEdge {
                 src_id: src_id.unwrap_or(0),
                 dst_id: dst_id.unwrap_or(0),
+                src_var: edge.src_var.clone(),
+                dst_var: edge.dst_var.clone(),
                 label: edge.label.clone(),
                 weight: edge.weight,
             });

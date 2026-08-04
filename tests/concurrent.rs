@@ -237,11 +237,12 @@ fn 并发_1写4读_写入期间读取一致性() {
 
     assert_eq!(panic_count, 0, "读写混合并发测试失败");
 
-    // 验证最终状态
+    // 验证最终状态：50 初始 + 200 写入 = 250
     let db = db.lock().unwrap();
-    assert!(
-        db.node_count() >= 50,
-        "最终节点数 {} < 初始 50",
+    assert_eq!(
+        db.node_count(),
+        250,
+        "最终节点数应为 250（50 初始 + 200 写入），实际 {}",
         db.node_count()
     );
     eprintln!(

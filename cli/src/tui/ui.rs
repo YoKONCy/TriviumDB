@@ -46,10 +46,12 @@ fn render_title(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_body(f: &mut Frame, app: &mut App, area: Rect) {
-    let cols = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(area);
+    let cols =
+        Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(area);
 
     let query_height = (app.lines.len() as u16 + 2).clamp(3, 10); // border(2) + lines
-    let left = Layout::vertical([Constraint::Length(query_height), Constraint::Min(0)]).split(cols[0]);
+    let left =
+        Layout::vertical([Constraint::Length(query_height), Constraint::Min(0)]).split(cols[0]);
     render_query(f, app, left[0]);
     match app.left_view {
         LeftView::Results => render_results(f, app, left[1]),
@@ -204,9 +206,7 @@ fn render_results(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_detail(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Node Detail");
+    let block = Block::default().borders(Borders::ALL).title("Node Detail");
     let text = detail_text(&app.detail);
     let p = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
     f.render_widget(p, area);
@@ -258,7 +258,10 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from("全局:  Ctrl-C 退出"),
         Line::from(""),
-        Line::from(Span::styled("按任意键关闭", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            "按任意键关闭",
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
     let block = Block::default().borders(Borders::ALL).title("帮助 (Help)");
     let p = Paragraph::new(Text::from(lines))
@@ -271,7 +274,9 @@ fn render_help(f: &mut Frame, area: Rect) {
 
 fn focus_style(focused: bool) -> Style {
     if focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     }

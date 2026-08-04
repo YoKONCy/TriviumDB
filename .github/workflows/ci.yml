@@ -61,6 +61,12 @@ jobs:
       - name: 编译检查 (x86_64 默认特性)
         run: cargo check --all-targets
 
+      - name: 编译检查 (Python 绑定)
+        run: cargo check --lib --features python
+
+      - name: 编译检查 (Node.js 绑定)
+        run: cargo check --lib --features nodejs
+
       - name: 交叉编译检查 (aarch64)
         run: cargo check --target aarch64-unknown-linux-gnu --lib
 
@@ -77,26 +83,32 @@ jobs:
         include:
           - name: Linux x86_64
             runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
           - name: Windows x86_64
             runner: windows-latest
+            target: x86_64-pc-windows-msvc
           - name: macOS x86_64
-            runner: macos-latest  # Apple Silicon 交叉编译 x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
           - name: macOS ARM64 (M-series)
-            runner: macos-latest    # macos-latest = Apple Silicon (M1+)
+            runner: macos-15
+            target: aarch64-apple-darwin
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
 
       - name: 运行全量测试
         shell: bash
-        run: cargo test --lib --tests -- --test-threads=1
+        run: cargo test --target ${{ matrix.target }} --lib --tests -- --test-threads=1
 
       - name: 运行文档测试
-        run: cargo test --doc
+        run: cargo test --target ${{ matrix.target }} --doc
 
   # ═══════════════════════════════════════════
   #  Job 2a: CLI/TUI 工具测试

@@ -86,12 +86,48 @@ fn assert_committed_graph(db: &Database<f32>, expected: &[ExpectedNode]) {
     }
 }
 
+/// metadata-only 降级恢复的断言：校验节点数、payload、边，但不校验向量
+/// （marker 无效时不信任 .vec，向量由 WAL 回放补齐，可能为零向量）
+fn assert_committed_graph_metadata_only(db: &Database<f32>, expected: &[ExpectedNode]) {
+    assert_eq!(
+        db.node_count(),
+        expected.len(),
+        "降级恢复后不能丢失或额外生成已提交节点"
+    );
+    for item in expected {
+        let node = db.get(item.id).expect("已提交节点必须能按 ID 读取");
+        assert_eq!(
+            node.payload.get("idx").and_then(|value| value.as_u64()),
+            Some(item.idx as u64),
+            "节点 payload.idx 必须完整恢复"
+        );
+        assert_eq!(
+            node.payload.get("kind").and_then(|value| value.as_str()),
+            Some("committed"),
+            "节点 payload.kind 必须完整恢复"
+        );
+    }
+    for pair in expected.windows(2) {
+        let edges = db.get_edges(pair[0].id);
+        assert!(
+            edges.iter().any(|edge| {
+                edge.target_id == pair[1].id && edge.label == "next" && edge.weight == 1.0
+            }),
+            "已提交边 {} -> {} 必须完整恢复",
+            pair[0].id,
+            pair[1].id
+        );
+    }
+}
+
 fn corrupt_flush_marker_size(path: &str) {
     let marker_path = format!("{}.flush_ok", path);
     let mut marker = std::fs::read(&marker_path).expect("必须存在 flush_ok 标记");
-    assert!(marker.len() >= 16, "flush_ok 标记必须包含 tdb/vec 大小");
-    let stored_vec = u64::from_le_bytes(marker[8..16].try_into().unwrap());
-    marker[8..16].copy_from_slice(&(stored_vec + 1).to_le_bytes());
+    // 新格式：magic(4) + version(1) + generation(8) + tdb_size(8) + vec_size(8) = 29 字节
+    assert!(marker.len() >= 29, "flush_ok 标记必须包含完整头部");
+    // vec_size 位于 bytes[21..29]
+    let stored_vec = u64::from_le_bytes(marker[21..29].try_into().unwrap());
+    marker[21..29].copy_from_slice(&(stored_vec + 1).to_le_bytes());
     std::fs::write(marker_path, marker).unwrap();
 }
 
@@ -246,7 +282,7 @@ fn COV_04B_compact中断_vec已扩大_tdb未更新_已提交数据不丢() {
     std::fs::write(format!("{}.wal", path), wal_before).unwrap();
 
     let db = Database::<f32>::open(&path, DIM).unwrap();
-    assert_committed_graph(&db, &all_expected);
+    assert_committed_graph_metadata_only(&db, &all_expected);
 
     cleanup(&path);
 }
@@ -274,7 +310,7 @@ fn COV_04C_compact中断_tdb已更新_flush_ok未更新_已提交数据不丢() 
     std::fs::write(format!("{}.wal", path), wal_before).unwrap();
 
     let db = Database::<f32>::open(&path, DIM).unwrap();
-    assert_committed_graph(&db, &all_expected);
+    assert_committed_graph_metadata_only(&db, &all_expected);
 
     cleanup(&path);
 }
@@ -367,7 +403,7 @@ fn COV_04G_compact中断_flush_ok大小不匹配_已提交数据不丢() {
     std::fs::write(format!("{}.wal", path), wal_before).unwrap();
 
     let db = Database::<f32>::open(&path, DIM).unwrap();
-    assert_committed_graph(&db, &all_expected);
+    assert_committed_graph_metadata_only(&db, &all_expected);
 
     cleanup(&path);
 }

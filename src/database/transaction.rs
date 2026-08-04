@@ -28,7 +28,10 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
         } => {
             if mt.contains(id) {
                 // 幂等：该 ID 已存在（可能来自 .tdb 加载或重复回放），跳过
-                tracing::debug!("WAL 回放跳过已存在的节点 (WAL replay skipped existing node) {}", id);
+                tracing::debug!(
+                    "WAL 回放跳过已存在的节点 (WAL replay skipped existing node) {}",
+                    id
+                );
             } else {
                 let payload_val: serde_json::Value =
                     serde_json::from_str(&payload).unwrap_or_default();
@@ -249,15 +252,27 @@ impl<T: VectorType> TxBuilder<T> {
     }
 
     pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) {
-        self.ops.push(TxOp::Insert { vector: vector.to_vec(), payload });
+        self.ops.push(TxOp::Insert {
+            vector: vector.to_vec(),
+            payload,
+        });
     }
 
     pub fn insert_with_id(&mut self, id: NodeId, vector: &[T], payload: serde_json::Value) {
-        self.ops.push(TxOp::InsertWithId { id, vector: vector.to_vec(), payload });
+        self.ops.push(TxOp::InsertWithId {
+            id,
+            vector: vector.to_vec(),
+            payload,
+        });
     }
 
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) {
-        self.ops.push(TxOp::Link { src, dst, label: label.to_string(), weight });
+        self.ops.push(TxOp::Link {
+            src,
+            dst,
+            label: label.to_string(),
+            weight,
+        });
     }
 
     pub fn delete(&mut self, id: NodeId) {
@@ -273,7 +288,10 @@ impl<T: VectorType> TxBuilder<T> {
     }
 
     pub fn update_vector(&mut self, id: NodeId, vector: &[T]) {
-        self.ops.push(TxOp::UpdateVector { id, vector: vector.to_vec() });
+        self.ops.push(TxOp::UpdateVector {
+            id,
+            vector: vector.to_vec(),
+        });
     }
 
     pub fn pending_count(&self) -> usize {
@@ -331,7 +349,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         let f = item.to_f32();
                         if f.is_nan() || f.is_infinite() {
                             return Err(crate::error::TriviumError::InvalidVector {
-                                reason: "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)".into(),
+                                reason:
+                                    "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)"
+                                        .into(),
                             });
                         }
                     }
@@ -340,6 +360,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     sim_next_id += 1;
                 }
                 TxOp::InsertWithId { id, vector, .. } => {
+                    if *id == 0 {
+                        return Err(crate::error::TriviumError::InvalidInput(
+                            "节点 ID 0 为内部保留值".into(),
+                        ));
+                    }
                     if check_exists!(id) {
                         return Err(crate::error::TriviumError::NodeAlreadyExists(*id));
                     }
@@ -353,7 +378,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         let f = item.to_f32();
                         if f.is_nan() || f.is_infinite() {
                             return Err(crate::error::TriviumError::InvalidVector {
-                                reason: "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)".into(),
+                                reason:
+                                    "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)"
+                                        .into(),
                             });
                         }
                     }
@@ -405,7 +432,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         let f = item.to_f32();
                         if f.is_nan() || f.is_infinite() {
                             return Err(crate::error::TriviumError::InvalidVector {
-                                reason: "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)".into(),
+                                reason:
+                                    "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)"
+                                        .into(),
                             });
                         }
                     }

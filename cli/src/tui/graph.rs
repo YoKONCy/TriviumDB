@@ -10,8 +10,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use triviumdb::node::NodeId;
 
 use super::app::App;
@@ -29,7 +29,9 @@ pub fn render_graph(f: &mut Frame, app: &App, area: Rect, focused: bool) {
     let data = build_graph(app);
 
     let border_style = if focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -133,8 +135,7 @@ fn build_graph(app: &App) -> GraphData {
         }
     }
 
-    let index: HashMap<NodeId, usize> =
-        order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let index: HashMap<NodeId, usize> = order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
 
     // 2) 收集结果集内部的边（两端都在结果集中）
     let mut edges: Vec<(usize, usize)> = Vec::new();
@@ -159,7 +160,13 @@ fn build_graph(app: &App) -> GraphData {
 
     let labels: Vec<String> = order.iter().map(|id| label_of[id].clone()).collect();
     let is_extra: Vec<bool> = order.iter().map(|id| extra_of[id]).collect();
-    GraphData { labels, is_extra, edges, pos, selected }
+    GraphData {
+        labels,
+        is_extra,
+        edges,
+        pos,
+        selected,
+    }
 }
 
 /// 节点标签：优先 payload.name，否则 #id；截断到 ~12 字符。
@@ -243,7 +250,9 @@ fn fr_layout(n: usize, edges: &[(usize, usize)], iters: usize) -> Vec<(f64, f64)
 
         // 按温度限幅施加位移
         for i in 0..n {
-            let d = (disp[i].0 * disp[i].0 + disp[i].1 * disp[i].1).sqrt().max(1e-4);
+            let d = (disp[i].0 * disp[i].0 + disp[i].1 * disp[i].1)
+                .sqrt()
+                .max(1e-4);
             pos[i].0 = (pos[i].0 + disp[i].0 / d * d.min(temp)).clamp(0.0, 1.0);
             pos[i].1 = (pos[i].1 + disp[i].1 / d * d.min(temp)).clamp(0.0, 1.0);
         }

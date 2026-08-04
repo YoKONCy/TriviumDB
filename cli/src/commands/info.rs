@@ -67,7 +67,11 @@ pub fn print_info(handle: &DbHandle, path: &str, format: OutputFormat) -> CliRes
             let wal_str = format!(
                 "{}{}",
                 human_bytes_opt(wal_size),
-                if wal_size.unwrap_or(0) > 0 { " (pending)" } else { "" }
+                if wal_size.unwrap_or(0) > 0 {
+                    " (pending)"
+                } else {
+                    ""
+                }
             );
             let quiver_str = if quiver_exists { "present" } else { "—" };
 

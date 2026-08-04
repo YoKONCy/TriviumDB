@@ -102,10 +102,9 @@ fn COV7_01_optional_match_null_fill() {
     let r = db
         .tql(r#"OPTIONAL MATCH (a)-[:nonexistent]->(b) RETURN a, b"#)
         .unwrap();
-    assert!(
-        r.is_empty(),
-        "当前执行器未启用 OPTIONAL 左连接时应安全返回空集"
-    );
+    assert_eq!(r.len(), 1, "无匹配时必须保留左侧节点");
+    assert_eq!(r[0]["a"].payload["name"], "lonely");
+    assert!(!r[0].contains_key("b"), "未匹配的右侧变量必须为空");
     assert_eq!(db.node_count(), 1, "OPTIONAL 空匹配不能改变节点数据");
     assert_eq!(
         db.get_payload(1).and_then(|p| p.get("name").cloned()),
@@ -126,14 +125,23 @@ fn COV7_02_optional_match_mixed() {
     let r = db
         .tql(r#"OPTIONAL MATCH (a)-[:skip]->(b) RETURN a, b"#)
         .unwrap();
-    assert_all_rows_have_vars(&r, &["a", "b"]);
-    assert_eq!(r.len(), 1, "当前执行器应只返回真实命中的 skip 边");
+    assert_eq!(r.len(), 5, "每个左侧节点都必须至少产生一行");
+    assert_eq!(
+        r.iter().filter(|row| row.contains_key("b")).count(),
+        1,
+        "真实命中的右侧节点必须正常绑定"
+    );
+    assert_eq!(
+        r.iter().filter(|row| !row.contains_key("b")).count(),
+        4,
+        "未命中的左侧节点必须以空右侧保留"
+    );
     assert_eq!(db.node_count(), 5, "OPTIONAL 查询不能改变图数据");
     assert_eq!(
         db.tql(r#"MATCH (a)-[:skip]->(b) RETURN a, b"#)
             .unwrap()
             .len(),
-        r.len(),
+        1,
         "OPTIONAL 已命中分支应与普通 MATCH 的真实边数量一致"
     );
 

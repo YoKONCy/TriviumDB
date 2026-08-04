@@ -322,7 +322,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             w.clear()?;
         }
 
-        tracing::info!("手动压实完成 (Manual compaction completed): {}", self.db_path);
+        tracing::info!(
+            "手动压实完成 (Manual compaction completed): {}",
+            self.db_path
+        );
         Ok(())
     }
 
@@ -341,16 +344,17 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         let id = {
             let mut mt = lock_or_recover(&self.memtable);
-            mt.insert(vector, payload.clone())?
-        };
-        {
+            mt.validate_insert(vector)?;
+            let id = mt.next_id_value();
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::Insert {
                 id,
                 vector: vector.to_vec(),
                 payload: payload_str,
             })?;
-        }
+            mt.insert_with_id(id, vector, payload)?;
+            id
+        };
         self.check_memory_pressure();
         Ok(id)
     }
@@ -371,15 +375,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         {
             let mut mt = lock_or_recover(&self.memtable);
-            mt.insert_with_id(id, vector, payload.clone())?;
-        }
-        {
+            mt.validate_insert_with_id(id, vector)?;
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::Insert {
                 id,
                 vector: vector.to_vec(),
                 payload: payload_str,
             })?;
+            mt.insert_with_id(id, vector, payload)?;
         }
         self.check_memory_pressure();
         Ok(())
@@ -388,9 +391,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) -> Result<()> {
         {
             let mut mt = lock_or_recover(&self.memtable);
-            mt.link(src, dst, label.to_string(), weight)?;
-        }
-        {
+            mt.validate_link(src, dst)?;
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::Link::<T> {
                 src,
@@ -398,6 +399,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 label: label.to_string(),
                 weight,
             })?;
+            mt.link(src, dst, label.to_string(), weight)?;
         }
         Ok(())
     }
@@ -405,11 +407,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn delete(&mut self, id: NodeId) -> Result<()> {
         {
             let mut mt = lock_or_recover(&self.memtable);
-            mt.delete(id)?;
-        }
-        {
+            mt.validate_delete(id)?;
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::Delete::<T> { id })?;
+            mt.delete(id)?;
         }
 
         Ok(())
@@ -418,11 +419,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn unlink(&mut self, src: NodeId, dst: NodeId) -> Result<()> {
         {
             let mut mt = lock_or_recover(&self.memtable);
-            mt.unlink(src, dst)?;
-        }
-        {
+            mt.validate_unlink(src)?;
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::Unlink::<T> { src, dst })?;
+            mt.unlink(src, dst)?;
         }
         Ok(())
     }
@@ -438,14 +438,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         {
             let mut mt = lock_or_recover(&self.memtable);
-            mt.update_payload(id, payload.clone())?;
-        }
-        {
+            mt.validate_update_payload(id)?;
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::UpdatePayload::<T> {
                 id,
                 payload: payload_str,
             })?;
+            mt.update_payload(id, payload)?;
         }
         Ok(())
     }
@@ -467,10 +466,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// ```
     pub fn patch_payload(&mut self, id: NodeId, patch: serde_json::Value) -> Result<()> {
         let final_payload = {
-            let mut mt = lock_or_recover(&self.memtable);
-            mt.patch_payload(id, &patch)?;
-            // 获取 patch 后的完整 payload 用于 WAL
-            mt.get_payload(id).cloned().unwrap_or_default()
+            let mt = lock_or_recover(&self.memtable);
+            mt.preview_patch_payload(id, &patch)?
         };
 
         let payload_str = final_payload.to_string();
@@ -481,12 +478,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             });
         }
         {
+            let mut mt = lock_or_recover(&self.memtable);
+            mt.validate_update_payload(id)?;
             let mut w = lock_or_recover(&self.wal);
-            // WAL 记录 patch 后的完整 payload（保证崩溃恢复的幂等性）
             w.append(&WalEntry::UpdatePayload::<T> {
                 id,
                 payload: payload_str,
             })?;
+            mt.update_payload(id, final_payload)?;
         }
         Ok(())
     }
@@ -494,14 +493,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn update_vector(&mut self, id: NodeId, vector: &[T]) -> Result<()> {
         {
             let mut mt = lock_or_recover(&self.memtable);
-            mt.update_vector(id, vector)?;
-        }
-        {
+            mt.validate_update_vector(id, vector)?;
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::UpdateVector::<T> {
                 id,
                 vector: vector.to_vec(),
             })?;
+            mt.update_vector(id, vector)?;
         }
         Ok(())
     }
@@ -784,19 +782,25 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 })
             }
             TqlStatement::Mutation(mutation) => {
-                // 1. 在只读快照上生成 MutationOps
-                let ops = {
+                let (ops, mut next_id) = {
                     let mt = lock_or_recover(&self.memtable);
-                    crate::query::tql_executor::execute_tql_mutation(&mutation, &mt)?
+                    (
+                        crate::query::tql_executor::execute_tql_mutation(&mutation, &mt)?,
+                        mt.next_id_value(),
+                    )
                 };
 
-                // 2. 逐条应用 ops（含 WAL）
                 let mut affected = 0usize;
-                let mut created_ids = Vec::new();
-                // 变量名 → 新创建的 ID（用于 LinkEdge 回填）
                 let mut var_id_map: std::collections::HashMap<String, u64> =
                     std::collections::HashMap::new();
+                for op in &ops {
+                    if let MutationOp::InsertNode { var, .. } = op {
+                        var_id_map.insert(var.clone(), next_id);
+                        next_id += 1;
+                    }
+                }
 
+                let mut tx_ops = Vec::with_capacity(ops.len());
                 for op in ops {
                     match op {
                         MutationOp::InsertNode {
@@ -804,85 +808,78 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                             vector,
                             payload,
                         } => {
-                            let id = self.insert(&vector, payload)?;
-                            var_id_map.insert(var, id);
-                            created_ids.push(id);
+                            let id = var_id_map[&var];
+                            tx_ops.push(transaction::TxOp::InsertWithId {
+                                id,
+                                vector,
+                                payload,
+                            });
                             affected += 1;
                         }
                         MutationOp::LinkEdge {
-                            mut src_id,
-                            mut dst_id,
+                            src_id,
+                            dst_id,
+                            src_var,
+                            dst_var,
                             label,
                             weight,
                         } => {
-                            // 回填 CREATE 变量的 ID（ID=0 表示待回填）
-                            if src_id == 0 {
-                                // 尝试从 var_id_map 查找（通过 CreateEdge.src_var）
-                                // 但这里我们没有 var 信息，需要通过 CreateAction 的边定义
-                                // 暂时跳过无法解析的边
-                            }
-                            if dst_id == 0 {
-                                // 同上
-                            }
-                            // 优化：从 mutation AST 中提取变量名
-                            if let TqlStatement::Mutation(ref m) =
-                                crate::query::tql_parser::parse_tql_statement(input)
-                                    .map_err(TriviumError::QueryParse)?
-                                && let crate::query::tql_ast::MutationAction::Create(ref create) =
-                                    m.action
-                            {
-                                for edge in &create.edges {
-                                    if edge.label == label && edge.weight == weight {
-                                        if src_id == 0
-                                            && let Some(&id) = var_id_map.get(&edge.src_var)
-                                        {
-                                            src_id = id;
-                                        }
-                                        if dst_id == 0
-                                            && let Some(&id) = var_id_map.get(&edge.dst_var)
-                                        {
-                                            dst_id = id;
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                            if src_id > 0 && dst_id > 0 {
-                                self.link(src_id, dst_id, &label, weight)?;
-                                affected += 1;
-                            }
+                            let src = if src_id == 0 {
+                                var_id_map.get(&src_var).copied().ok_or_else(|| {
+                                    TriviumError::QueryExecution(format!(
+                                        "CREATE 边引用了未定义变量 {src_var}"
+                                    ))
+                                })?
+                            } else {
+                                src_id
+                            };
+                            let dst = if dst_id == 0 {
+                                var_id_map.get(&dst_var).copied().ok_or_else(|| {
+                                    TriviumError::QueryExecution(format!(
+                                        "CREATE 边引用了未定义变量 {dst_var}"
+                                    ))
+                                })?
+                            } else {
+                                dst_id
+                            };
+                            tx_ops.push(transaction::TxOp::Link {
+                                src,
+                                dst,
+                                label,
+                                weight,
+                            });
+                            affected += 1;
                         }
                         MutationOp::UpdatePayload { id, payload } => {
-                            self.update_payload(id, payload)?;
+                            tx_ops.push(transaction::TxOp::UpdatePayload { id, payload });
                             affected += 1;
                         }
                         MutationOp::DeleteNode { id, detach } => {
                             if detach {
-                                // 先断开所有边
                                 let edges_to_remove: Vec<(u64, u64)> = {
                                     let mt = lock_or_recover(&self.memtable);
                                     let mut edges = Vec::new();
-                                    // 出边
                                     if let Some(out_edges) = mt.get_edges(id) {
                                         for edge in out_edges {
                                             edges.push((id, edge.target_id));
                                         }
                                     }
-                                    // 入边：利用已有的反向索引 O(1) 查找
                                     for &src_id in mt.get_incoming_sources(id) {
                                         edges.push((src_id, id));
                                     }
                                     edges
                                 };
                                 for (s, d) in edges_to_remove {
-                                    self.unlink(s, d)?;
+                                    tx_ops.push(transaction::TxOp::Unlink { src: s, dst: d });
                                 }
                             }
-                            self.delete(id)?;
+                            tx_ops.push(transaction::TxOp::Delete { id });
                             affected += 1;
                         }
                     }
                 }
+
+                let created_ids = self.commit_ops(tx_ops)?;
 
                 Ok(TqlMutResult {
                     affected,
@@ -993,6 +990,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             committed: false,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn close_wal_writer_for_test(&mut self) {
+        lock_or_recover(&self.wal).close_writer_for_test();
+    }
 }
 
 /// 安全析构：确保 WAL BufWriter 的缓冲数据在 Database 被 drop 时显式落盘。
@@ -1005,5 +1007,70 @@ impl<T: VectorType> Drop for Database<T> {
         if let Ok(mut w) = self.wal.lock() {
             w.flush_writer();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use crate::error::TriviumError;
+    use serde_json::json;
+
+    fn open_db(name: &str) -> Database<f32> {
+        let dir = std::env::temp_dir().join(format!("tdb_wal_first_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Database::open(&dir.join("test.tdb").to_string_lossy(), 3).unwrap()
+    }
+
+    #[test]
+    fn 普通crud_wal失败不修改内存状态() {
+        let mut db = open_db("crud");
+        let first = db
+            .insert(&[1.0, 0.0, 0.0], json!({"name": "first"}))
+            .unwrap();
+        let second = db
+            .insert(&[0.0, 1.0, 0.0], json!({"name": "second"}))
+            .unwrap();
+        db.link(first, second, "rel", 1.0).unwrap();
+        db.close_wal_writer_for_test();
+
+        assert!(matches!(
+            db.insert(&[0.0, 0.0, 1.0], json!({})),
+            Err(TriviumError::WalClosed)
+        ));
+        assert_eq!(db.node_count(), 2);
+        assert!(matches!(
+            db.insert_with_id(42, &[0.0, 0.0, 1.0], json!({})),
+            Err(TriviumError::WalClosed)
+        ));
+        assert!(!db.contains(42));
+        assert!(matches!(
+            db.link(second, first, "back", 1.0),
+            Err(TriviumError::WalClosed)
+        ));
+        assert!(db.get_edges(second).is_empty());
+        assert!(matches!(
+            db.unlink(first, second),
+            Err(TriviumError::WalClosed)
+        ));
+        assert_eq!(db.get_edges(first).len(), 1);
+        assert!(matches!(
+            db.update_payload(first, json!({"name": "changed"})),
+            Err(TriviumError::WalClosed)
+        ));
+        assert_eq!(db.get_payload(first).unwrap()["name"], "first");
+        assert!(matches!(
+            db.patch_payload(first, json!({"name": "patched"})),
+            Err(TriviumError::WalClosed)
+        ));
+        assert_eq!(db.get_payload(first).unwrap()["name"], "first");
+        assert!(matches!(
+            db.update_vector(first, &[9.0, 9.0, 9.0]),
+            Err(TriviumError::WalClosed)
+        ));
+        assert_eq!(db.get(first).unwrap().vector, vec![1.0, 0.0, 0.0]);
+        assert!(matches!(db.delete(first), Err(TriviumError::WalClosed)));
+        assert!(db.contains(first));
     }
 }

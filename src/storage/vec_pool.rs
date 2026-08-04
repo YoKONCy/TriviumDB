@@ -1,37 +1,9 @@
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
+use crate::storage::fs::robust_rename_and_sync;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-/// Windows 下应对杀毒软件瞬态文件锁定的原子重命名（与 file_format.rs 同款）
-#[cfg(windows)]
-fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    let max_retries = 10;
-    let mut delay = std::time::Duration::from_millis(1);
-    for attempt in 0..max_retries {
-        match std::fs::rename(from, to) {
-            Ok(()) => return Ok(()),
-            Err(e) if attempt < max_retries - 1 => {
-                let os_err = e.raw_os_error();
-                if os_err == Some(5) || os_err == Some(32) {
-                    std::thread::sleep(delay);
-                    delay = (delay * 2).min(std::time::Duration::from_millis(50));
-                    continue;
-                }
-                return Err(e);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    // 逻辑上不可达：循环必定 return。防御性返回避免审查标记。
-    Err(std::io::Error::other("robust_rename 重试次数耗尽 (exhausted retries)"))
-}
-
-#[cfg(not(windows))]
-fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::rename(from, to)
-}
 
 /// 分层向量池：将向量存储分为 mmap 基础层 + 内存增量层
 ///
@@ -467,7 +439,7 @@ impl<T: VectorType> VecPool<T> {
         self.mmap = None;
 
         // 3. 原子替换
-        robust_rename(&tmp_path, vec_path)?;
+        robust_rename_and_sync(&tmp_path, vec_path)?;
 
         // 4. 重新映射新文件
         let file = std::fs::File::open(vec_path)?;

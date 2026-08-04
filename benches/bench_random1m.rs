@@ -31,11 +31,11 @@ const TOP_K: usize = 10;
 const SEED: u64 = 42;
 
 // ═══ 低秩子空间模型参数 ═══
-const INTRINSIC_DIM: usize = 64;      // 有效维度（真实 LLM embedding ~50-100）
-const N_CLUSTERS: usize = 256;        // 语义簇数量
-const CLUSTER_SPREAD: f32 = 0.30;     // 簇内扰动标准差（在 k 维空间中）
-const NOISE_SCALE: f32 = 0.05;        // 全秩噪声强度
-const ZIPF_S: f64 = 1.2;             // Zipf 分布参数（越大分布越偏斜）
+const INTRINSIC_DIM: usize = 64; // 有效维度（真实 LLM embedding ~50-100）
+const N_CLUSTERS: usize = 256; // 语义簇数量
+const CLUSTER_SPREAD: f32 = 0.30; // 簇内扰动标准差（在 k 维空间中）
+const NOISE_SCALE: f32 = 0.05; // 全秩噪声强度
+const ZIPF_S: f64 = 1.2; // Zipf 分布参数（越大分布越偏斜）
 
 // ════════════════════════════════════════════════════════
 //  xoshiro256** PRNG
@@ -176,8 +176,8 @@ fn gen_and_write_vectors(
     n: usize,
     dim: usize,
     seed: u64,
-    basis: &[f32],       // d×k 列优先正交基底
-    k: usize,            // 有效维度
+    basis: &[f32],          // d×k 列优先正交基底
+    k: usize,               // 有效维度
     centroids: &[Vec<f32>], // k 维簇中心
 ) {
     let mut rng = Rng::new(seed);
@@ -285,13 +285,25 @@ fn exact_topk(train: &[f32], query: &[f32], dim: usize, top_k: usize) -> Vec<i32
 
 fn main() {
     println!("=== QuIVer 仿 LLM Embedding 数据生成器 v2 ===");
-    println!("名义维度: {}, 有效维度: {}, 簇数: {}", DIM, INTRINSIC_DIM, N_CLUSTERS);
-    println!("训练集: {}, 测试集: {}, Zipf s: {}", N_TRAIN, N_TEST, ZIPF_S);
-    println!("簇内扰动 σ: {}, 全秩噪声 ε: {}", CLUSTER_SPREAD, NOISE_SCALE);
+    println!(
+        "名义维度: {}, 有效维度: {}, 簇数: {}",
+        DIM, INTRINSIC_DIM, N_CLUSTERS
+    );
+    println!(
+        "训练集: {}, 测试集: {}, Zipf s: {}",
+        N_TRAIN, N_TEST, ZIPF_S
+    );
+    println!(
+        "簇内扰动 σ: {}, 全秩噪声 ε: {}",
+        CLUSTER_SPREAD, NOISE_SCALE
+    );
     println!();
 
     // 阶段 0：生成正交基底 W ∈ R^{768×64}（~192 KB）
-    println!("[预处理] 生成 {} 维正交基底（Modified Gram-Schmidt）...", INTRINSIC_DIM);
+    println!(
+        "[预处理] 生成 {} 维正交基底（Modified Gram-Schmidt）...",
+        INTRINSIC_DIM
+    );
     let t_pre = Instant::now();
     let mut meta_rng = Rng::new(SEED.wrapping_add(9999));
     let basis = gen_orthogonal_basis(&mut meta_rng, DIM, INTRINSIC_DIM);
@@ -308,11 +320,17 @@ fn main() {
                 max_dot = max_dot.max(d.abs());
             }
         }
-        println!("  正交性检验: 最大非对角内积 = {:.2e}（应 < 1e-5）", max_dot);
+        println!(
+            "  正交性检验: 最大非对角内积 = {:.2e}（应 < 1e-5）",
+            max_dot
+        );
     }
 
     // 生成簇中心（在 k 维空间中）
-    println!("[预处理] 生成 {} 个簇中心（{}维空间）...", N_CLUSTERS, INTRINSIC_DIM);
+    println!(
+        "[预处理] 生成 {} 个簇中心（{}维空间）...",
+        N_CLUSTERS, INTRINSIC_DIM
+    );
     let centroids = gen_cluster_centroids_k(&mut meta_rng, N_CLUSTERS, INTRINSIC_DIM);
 
     // 验证簇中心在 k 维空间中的分布
@@ -323,7 +341,11 @@ fn main() {
         let mut count = 0u64;
         for i in 0..centroids.len().min(50) {
             for j in (i + 1)..centroids.len().min(50) {
-                let sim: f32 = centroids[i].iter().zip(&centroids[j]).map(|(a, b)| a * b).sum();
+                let sim: f32 = centroids[i]
+                    .iter()
+                    .zip(&centroids[j])
+                    .map(|(a, b)| a * b)
+                    .sum();
                 min_sim = min_sim.min(sim);
                 max_sim = max_sim.max(sim);
                 sum_sim += sim as f64;
@@ -332,7 +354,9 @@ fn main() {
         }
         println!(
             "  簇中心余弦相似度 (k维): min={:.3}, max={:.3}, avg={:.3}",
-            min_sim, max_sim, sum_sim / count as f64
+            min_sim,
+            max_sim,
+            sum_sim / count as f64
         );
     }
 
@@ -358,16 +382,26 @@ fn main() {
     println!("[阶段 1/3] 生成训练集...");
     let t0 = Instant::now();
     gen_and_write_vectors(
-        "random_train.f32", N_TRAIN, DIM, SEED,
-        &basis, INTRINSIC_DIM, &centroids,
+        "random_train.f32",
+        N_TRAIN,
+        DIM,
+        SEED,
+        &basis,
+        INTRINSIC_DIM,
+        &centroids,
     );
     println!("  耗时: {:.2}s\n", t0.elapsed().as_secs_f64());
 
     // 阶段 2：生成测试集
     println!("[阶段 2/3] 生成测试集...");
     gen_and_write_vectors(
-        "random_test.f32", N_TEST, DIM, SEED.wrapping_add(12345),
-        &basis, INTRINSIC_DIM, &centroids,
+        "random_test.f32",
+        N_TEST,
+        DIM,
+        SEED.wrapping_add(12345),
+        &basis,
+        INTRINSIC_DIM,
+        &centroids,
     );
 
     // 释放基底和簇中心
@@ -423,9 +457,8 @@ fn main() {
     drop(train_data);
     drop(test_data);
 
-    let mut gt_file = std::io::BufWriter::new(
-        std::fs::File::create("random_groundtruth.i32").unwrap(),
-    );
+    let mut gt_file =
+        std::io::BufWriter::new(std::fs::File::create("random_groundtruth.i32").unwrap());
     for row in &gt {
         for &id in row {
             gt_file.write_all(&id.to_le_bytes()).unwrap();
@@ -434,7 +467,10 @@ fn main() {
     gt_file.flush().unwrap();
     drop(gt);
 
-    println!("  GroundTruth 写入完成! 耗时: {:.2}s", t_gt.elapsed().as_secs_f64());
+    println!(
+        "  GroundTruth 写入完成! 耗时: {:.2}s",
+        t_gt.elapsed().as_secs_f64()
+    );
 
     println!("\n=== 数据生成完毕！===");
     println!("文件列表:");

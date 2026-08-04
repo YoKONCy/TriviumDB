@@ -73,6 +73,16 @@ fn insert_with_id_和_get() {
 }
 
 #[test]
+fn insert_with_id_ID0拒绝且无状态残留() {
+    let mut db = open_db("insert_id_zero");
+    let result = db.insert_with_id(0, &[1.0, 0.0, 0.0], json!({"invalid": true}));
+    assert!(result.is_err());
+    assert!(!db.contains(0));
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.insert(&[1.0, 0.0, 0.0], json!({})).unwrap(), 1);
+}
+
+#[test]
 fn delete_操作() {
     let mut db = open_db("delete");
     let id = db.insert(&[1.0, 0.0, 0.0], json!({})).unwrap();
@@ -111,6 +121,23 @@ fn update_vector_操作() {
     db.update_vector(id, &[0.0, 1.0, 0.0]).unwrap();
     let vec = db.get(id).unwrap().vector;
     assert_eq!(vec, vec![0.0, 1.0, 0.0]);
+}
+
+#[test]
+fn patch_payload_超限拒绝且保留原状态() {
+    let mut db = open_db("patch_too_large");
+    let id = db
+        .insert(&[1.0, 0.0, 0.0], json!({"name": "original"}))
+        .unwrap();
+    let oversized = "x".repeat(8 * 1024 * 1024);
+
+    let result = db.patch_payload(id, json!({"$set": {"blob": oversized}}));
+
+    assert!(matches!(
+        result,
+        Err(triviumdb::TriviumError::PayloadTooLarge { .. })
+    ));
+    assert_eq!(db.get_payload(id).unwrap(), json!({"name": "original"}));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -244,9 +271,7 @@ fn patch_payload_set_操作() {
 #[test]
 fn patch_payload_inc_操作() {
     let mut db = open_db("patch_inc");
-    let id = db
-        .insert(&[1.0, 0.0, 0.0], json!({"visits": 10}))
-        .unwrap();
+    let id = db.insert(&[1.0, 0.0, 0.0], json!({"visits": 10})).unwrap();
     db.patch_payload(id, json!({"$inc": {"visits": 3}}))
         .unwrap();
     assert_eq!(db.get_payload(id).unwrap()["visits"], 13);
@@ -273,9 +298,7 @@ fn patch_payload_unset_操作() {
 #[test]
 fn patch_payload_简写模式() {
     let mut db = open_db("patch_short");
-    let id = db
-        .insert(&[1.0, 0.0, 0.0], json!({"x": 1}))
-        .unwrap();
+    let id = db.insert(&[1.0, 0.0, 0.0], json!({"x": 1})).unwrap();
     db.patch_payload(id, json!({"y": 2})).unwrap();
     let p = db.get_payload(id).unwrap();
     assert_eq!(p["x"], 1, "简写不应覆盖已有字段");
@@ -322,9 +345,7 @@ fn patch_payload_WAL持久化() {
     let id;
     {
         let mut db = Database::<f32>::open(&path, 3).unwrap();
-        id = db
-            .insert(&[1.0, 0.0, 0.0], json!({"counter": 0}))
-            .unwrap();
+        id = db.insert(&[1.0, 0.0, 0.0], json!({"counter": 0})).unwrap();
         db.patch_payload(id, json!({"$inc": {"counter": 42}}))
             .unwrap();
         db.close().unwrap();
