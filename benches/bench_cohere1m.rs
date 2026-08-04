@@ -1,6 +1,7 @@
 use rayon::prelude::*;
+use serde::Serialize;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::time::Instant;
 use triviumdb::index::quiver::{QuIVer, QuIVerConfig, QuIVerSearchConfig};
 
@@ -13,6 +14,52 @@ struct AnnBenchConfig {
     train_path: String,
     test_path: String,
     gt_path: String,
+}
+
+#[derive(Serialize)]
+struct SearchMeasurement {
+    ef_search: usize,
+    rerank_limit: Option<usize>,
+    recall_at_10: f64,
+    qps: f64,
+    latency_ms: f64,
+    speedup_over_exact: f64,
+}
+
+#[derive(Serialize)]
+struct BenchmarkResult<'a> {
+    schema_version: u32,
+    experiment: &'static str,
+    dataset: &'a str,
+    dim: usize,
+    n_train: usize,
+    n_test: usize,
+    parameters: QuIVerParameters,
+    build: BuildMeasurement,
+    exact: ExactMeasurement,
+    measurements: Vec<SearchMeasurement>,
+}
+
+#[derive(Serialize)]
+struct QuIVerParameters {
+    m: usize,
+    ef_construction: usize,
+    alpha: f32,
+    incremental_batch_percent: usize,
+}
+
+#[derive(Serialize)]
+struct BuildMeasurement {
+    seconds: f64,
+    vectors_per_second: f64,
+    hot_bytes: usize,
+}
+
+#[derive(Serialize)]
+struct ExactMeasurement {
+    queries: usize,
+    single_thread_qps: f64,
+    parallel_qps: f64,
 }
 
 fn env_string(key: &str, default: &str) -> String {
@@ -30,7 +77,7 @@ fn env_usize(key: &str, default: usize) -> usize {
 ///
 /// 支持的预设：
 ///   - "cohere-1m"  (默认) — Cohere 1M 真实数据集
-///   - "random-1m"          — bench_random1m 生成的随机球面数据
+///   - "random-1m"          — bench_random1m 生成的 Synthetic-LR 数据
 ///
 /// 用法：
 ///   $env:TRIVIUM_ANN_NAME="random-1m"
@@ -96,12 +143,13 @@ fn bench_config() -> AnnBenchConfig {
             "redcaps_groundtruth.i32",
             512,
         ),
-        _ => (
+        "cohere-1m" => (
             "cohere_train.f32",
             "cohere_test.f32",
             "cohere_groundtruth.i32",
             768,
         ),
+        _ => panic!("未知数据集预设: {name}"),
     };
 
     AnnBenchConfig {
@@ -231,6 +279,7 @@ fn main() {
     let n_train = train_limit(full_n_train);
     let train_data = &train_data[..n_train * dim];
     let n_test = test_data.len() / dim;
+    assert!(n_test > 0, "测试集不能为空");
     assert_eq!(test_data.len() % dim, 0, "测试集维度不完整");
     assert_eq!(
         gt_data.len() % n_test,
@@ -238,6 +287,13 @@ fn main() {
         "GroundTruth 行数不能被测试集大小整除"
     );
     let k_gt = gt_data.len() / n_test;
+    assert!(k_gt >= EXACT_TOP_K, "GroundTruth 至少需要 Top-10");
+    assert!(train_data.iter().all(|value| value.is_finite()), "训练集包含 NaN 或 Inf");
+    assert!(test_data.iter().all(|value| value.is_finite()), "测试集包含 NaN 或 Inf");
+    assert!(
+        gt_data.iter().all(|&id| id >= 0 && (id as usize) < full_n_train),
+        "GroundTruth 包含越界 ID"
+    );
     let use_original_gt = n_train == full_n_train && k_gt >= EXACT_TOP_K;
 
     println!("加载完成! 耗时: {:.2}s", t0.elapsed().as_secs_f64());
@@ -445,6 +501,7 @@ fn main() {
     );
     println!("{}", "-".repeat(62));
 
+    let mut measurements = Vec::new();
     for ef in ef_values {
         for &rr in &rerank_values {
             let search_cfg = QuIVerSearchConfig {
@@ -485,9 +542,59 @@ fn main() {
                 lat_ms,
                 speedup,
             );
+            measurements.push(SearchMeasurement {
+                ef_search: ef,
+                rerank_limit: rr,
+                recall_at_10: recall,
+                qps,
+                latency_ms: lat_ms,
+                speedup_over_exact: speedup,
+            });
         }
     }
 
     println!("\n构图速率: {:.0} vecs/s", build_vecs_per_sec);
     println!("Exact Flat 基准 QPS: {:.1} (单线程) / {:.1} (多线程)", exact_single_qps, exact_parallel_qps);
+
+    if let Ok(result_path) = std::env::var("TRIVIUM_RESULT_PATH") {
+        let result = BenchmarkResult {
+            schema_version: 1,
+            experiment: "quiver-main",
+            dataset: &bench.name,
+            dim,
+            n_train,
+            n_test,
+            parameters: QuIVerParameters {
+                m: config.m,
+                ef_construction: config.ef_construction,
+                alpha: config.alpha,
+                incremental_batch_percent: incr_frac,
+            },
+            build: BuildMeasurement {
+                seconds: build_time,
+                vectors_per_second: build_vecs_per_sec,
+                hot_bytes: stats.hot_bytes,
+            },
+            exact: ExactMeasurement {
+                queries: exact_queries,
+                single_thread_qps: exact_single_qps,
+                parallel_qps: exact_parallel_qps,
+            },
+            measurements,
+        };
+        let path = std::path::Path::new(&result_path);
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).expect("无法创建结果目录");
+        }
+        let temporary = path.with_extension("json.tmp");
+        let mut file = File::create(&temporary).expect("无法创建临时结果文件");
+        serde_json::to_writer_pretty(&mut file, &result).expect("无法序列化 benchmark 结果");
+        file.write_all(b"\n").expect("无法写入结果文件");
+        file.sync_all().expect("无法同步结果文件");
+        if path.exists() {
+            std::fs::remove_file(path).expect("无法替换已有结果文件");
+        }
+        std::fs::rename(&temporary, path).expect("无法保存结果文件");
+        println!("结构化结果已写入: {}", path.display());
+    }
 }

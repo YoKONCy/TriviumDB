@@ -1,22 +1,22 @@
 """
 将裸 .f32 / .i32 文件转换为 DiskANN 的 .fbin / .ibin 格式（8 字节 header: nrows + ndims）
 """
+import argparse
 import struct
-import sys
-import os
+from pathlib import Path
 
 def convert(input_path, output_path, nrows, ndims, dtype_size=4):
     """在文件头部添加 nrows 和 ndims"""
-    input_size = os.path.getsize(input_path)
+    input_size = input_path.stat().st_size
     expected = nrows * ndims * dtype_size
     assert input_size == expected, f"文件大小不匹配: {input_size} != {expected} (nrows={nrows}, ndims={ndims})"
     
-    with open(output_path, 'wb') as fout:
+    with output_path.open('wb') as fout:
         # 写入 header
         fout.write(struct.pack('<i', nrows))
         fout.write(struct.pack('<i', ndims))
         # 流式拷贝数据
-        with open(input_path, 'rb') as fin:
+        with input_path.open('rb') as fin:
             chunk_size = 64 * 1024 * 1024  # 64MB
             while True:
                 data = fin.read(chunk_size)
@@ -24,37 +24,64 @@ def convert(input_path, output_path, nrows, ndims, dtype_size=4):
                     break
                 fout.write(data)
     
-    final_size = os.path.getsize(output_path)
+    final_size = output_path.stat().st_size
     print(f"[OK] {output_path}: {final_size} bytes (header 8 + data {expected})")
 
-if __name__ == "__main__":
-    base = r"c:\Users\Administrator\OneDrive\桌面\workspace\TriviumDB"
-    out_dir = os.path.join(base, "diskann_data")
-    os.makedirs(out_dir, exist_ok=True)
+def parse_args():
+    parser = argparse.ArgumentParser(description="将 Cohere raw binary 数据转换为 DiskANN 格式")
+    parser.add_argument("--input-dir", type=Path, default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--train-rows", type=int, default=1_000_000)
+    parser.add_argument("--dim", type=int, default=768)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    base = args.input_dir.resolve()
+    out_dir = (args.output_dir or base / "diskann_data").resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    train_path = base / "cohere_train.f32"
+    query_path = base / "cohere_test.f32"
+    gt_path = base / "cohere_groundtruth.i32"
+    query_row_bytes = args.dim * 4
+    query_size = query_path.stat().st_size
+    if query_size % query_row_bytes != 0:
+        raise ValueError(f"查询文件大小无法按 {args.dim} 维 float32 向量解析: {query_size}")
+    query_rows = query_size // query_row_bytes
+    gt_row_bytes = query_rows * 4
+    gt_size = gt_path.stat().st_size
+    if gt_size % gt_row_bytes != 0:
+        raise ValueError(f"Ground truth 文件大小无法按 {query_rows} 行 int32 解析: {gt_size}")
+    gt_dims = gt_size // gt_row_bytes
     
-    # 训练集: 1000000 x 768 float32
+    # 训练集
     print("转换 cohere_train.f32 → data.fbin ...")
     convert(
-        os.path.join(base, "cohere_train.f32"),
-        os.path.join(out_dir, "data.fbin"),
-        nrows=1000000, ndims=768
+        train_path,
+        out_dir / "data.fbin",
+        nrows=args.train_rows, ndims=args.dim
     )
     
-    # 测试集: 1000 x 768 float32
+    # 测试集
     print("转换 cohere_test.f32 → queries.fbin ...")
     convert(
-        os.path.join(base, "cohere_test.f32"),
-        os.path.join(out_dir, "queries.fbin"),
-        nrows=1000, ndims=768
+        query_path,
+        out_dir / "queries.fbin",
+        nrows=query_rows, ndims=args.dim
     )
     
-    # GT: 1000 x 1000 int32 → 只取前 10 列给 DiskANN（它用 recall@10）
-    # 但 DiskANN 的 ibin 格式实际上可以接受更多列，所以直接转全部
+    # Ground truth 的行数和列数根据输入文件推导
     print("转换 cohere_groundtruth.i32 → groundtruth.ibin ...")
     convert(
-        os.path.join(base, "cohere_groundtruth.i32"),
-        os.path.join(out_dir, "groundtruth.ibin"),
-        nrows=1000, ndims=1000
+        gt_path,
+        out_dir / "groundtruth.ibin",
+        nrows=query_rows, ndims=gt_dims
     )
     
     print("\n全部转换完成！")
+
+
+if __name__ == "__main__":
+    main()

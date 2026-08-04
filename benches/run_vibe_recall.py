@@ -25,6 +25,8 @@ DATASETS = [
 LOG_DIR = ROOT / "research" / "bench_logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+failed = []
+
 for name in DATASETS:
     log_path = LOG_DIR / f"{name}.log"
     if log_path.exists() and "全部实验完成" in log_path.read_text(encoding="utf-8", errors="replace"):
@@ -57,5 +59,11 @@ for name in DATASETS:
     elapsed = time.time() - t0
     status = "✅" if proc.returncode == 0 else "❌"
     print(f"  {status} {name} 完成, 耗时 {elapsed:.0f}s")
+    if proc.returncode != 0:
+        failed.append(name)
 
-print("\n全部跑完!")
+if failed:
+    print(f"\n运行失败: {', '.join(failed)}")
+    sys.exit(1)
+
+print("\n全部实验完成!")

@@ -185,7 +185,7 @@ fn write_vectors_to_file(vecs: &[f32], path: &str) -> std::io::Result<()> {
     let bytes: &[u8] = unsafe {
         std::slice::from_raw_parts(
             vecs.as_ptr() as *const u8,
-            vecs.len() * std::mem::size_of::<f32>(),
+            std::mem::size_of_val(vecs),
         )
     };
     f.write_all(bytes)?;
@@ -402,8 +402,10 @@ fn main() {
 
     let cache_cleared = clear_standby_list();
     if !cache_cleared {
-        eprintln!("  ⚠️ 无法清除 page cache，SSD-cold 结果可能偏乐观");
-        eprintln!("  ⚠️ 请以管理员身份重新运行");
+        eprintln!("  ❌ 无法清除 page cache，拒绝生成无效的 SSD-cold 结果");
+        eprintln!("  ❌ 请使用管理员或 root 权限重新运行");
+        let _ = std::fs::remove_file(vec_file);
+        std::process::exit(1);
     }
 
     // 等待 1 秒，确保 OS 完成清除
@@ -417,8 +419,12 @@ fn main() {
     let mut cold_results = Vec::new();
     for (i, &ef) in EF_TESTS.iter().enumerate() {
         // 每个 ef 之前都清一次 cache，确保每次都是 cold start
-        if i > 0 && cache_cleared {
-            clear_standby_list();
+        if i > 0 {
+            if !clear_standby_list() {
+                eprintln!("  ❌ 清除 page cache 失败，SSD-cold 实验中止");
+                let _ = std::fs::remove_file(vec_file);
+                std::process::exit(1);
+            }
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
 

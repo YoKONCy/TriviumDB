@@ -11,7 +11,6 @@ QuIVer 数据集统一准备脚本。
 支持三种数据源：
   1. ann-benchmarks HDF5 文件 (SIFT, GIST, GloVe)
   2. HuggingFace datasets 库 (MiniLM, DBpedia, BGE-M3, Wolt-CLIP, Cohere)
-  3. 本地合成生成 (Random, Synthetic-LR)
 
 用法：
   python scripts/prepare_all.py                    # 准备所有数据集
@@ -21,7 +20,7 @@ QuIVer 数据集统一准备脚本。
 依赖（按需安装）：
   pip install numpy tqdm                # 必需
   pip install h5py                      # HDF5 数据集需要
-  pip install datasets                  # HuggingFace 数据集需要
+  pip install datasets huggingface-hub  # HuggingFace 数据集需要
 """
 
 import sys
@@ -133,26 +132,6 @@ DATASETS = {
         "desc": "Wolt Food CLIP ViT-B/32 (512-d, multimodal)",
     },
 
-    # ── 合成数据集 ───────────────────────────────────────────────────
-    "random": {
-        "source": "synthetic",
-        "generator": "random_uniform",
-        "dim": 768,
-        "n_train": 1_000_000,
-        "n_test": 1_000,
-        "prefix": "random",
-        "desc": "Uniform random on S^{D-1} (768-d, baseline)",
-    },
-    "sphere": {
-        "source": "synthetic",
-        "generator": "low_rank",
-        "dim": 768,
-        "rank": 64,
-        "n_train": 1_000_000,
-        "n_test": 1_000,
-        "prefix": "sphere",
-        "desc": "Synthetic low-rank (768-d, rank-64, control)",
-    },
 }
 
 
@@ -321,42 +300,6 @@ def process_huggingface(cfg):
     save_dataset(cfg["prefix"], train, test, gt)
 
 
-def process_synthetic(cfg):
-    """生成合成数据集"""
-    dim = cfg["dim"]
-    n_train = cfg["n_train"]
-    n_test = cfg["n_test"]
-
-    np.random.seed(42)
-
-    if cfg["generator"] == "random_uniform":
-        # 均匀随机：在 S^{D-1} 上均匀采样
-        print(f"  生成均匀随机向量: {n_train + n_test} × {dim}")
-        all_vecs = np.random.randn(n_train + n_test, dim).astype(np.float32)
-    elif cfg["generator"] == "low_rank":
-        # 低秩合成：先在 rank 维子空间采样，再嵌入高维
-        rank = cfg["rank"]
-        print(f"  生成低秩向量: {n_train + n_test} × {dim}, rank={rank}")
-        low = np.random.randn(n_train + n_test, rank).astype(np.float32)
-        # 随机正交投影矩阵
-        proj = np.random.randn(rank, dim).astype(np.float32)
-        proj = np.linalg.qr(proj.T)[0].T[:rank]  # rank × dim 正交行
-        all_vecs = low @ proj
-    else:
-        raise ValueError(f"未知生成器: {cfg['generator']}")
-
-    # L2 归一化到单位球面
-    all_vecs = l2_normalize(all_vecs)
-
-    train = all_vecs[:n_train]
-    test = all_vecs[n_train:n_train + n_test]
-
-    print(f"  训练集: {train.shape}, 测试集: {test.shape}")
-
-    gt = compute_groundtruth(train, test, TOP_K)
-    save_dataset(cfg["prefix"], train, test, gt)
-
-
 def process_hf_bin(cfg):
     """从 HuggingFace Hub 下载预计算好的 raw binary 格式数据集"""
     from huggingface_hub import hf_hub_download
@@ -392,7 +335,6 @@ def process_hf_bin(cfg):
 PROCESSORS = {
     "hdf5": process_hdf5,
     "huggingface": process_huggingface,
-    "synthetic": process_synthetic,
     "hf_bin": process_hf_bin,
 }
 
@@ -467,6 +409,8 @@ def main():
     print(f"\n{'=' * 70}")
     print(f"  完成! 成功: {ok}, 失败: {fail}")
     print(f"{'=' * 70}")
+    if fail:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
