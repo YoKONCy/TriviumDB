@@ -158,7 +158,7 @@ fn save_mmap<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()
         .map(|m| m.len())
         .unwrap_or(0);
     let marker_path = flush_ok_path_from_db(path);
-    let marker_tmp = format!("{}.tmp", &marker_path);
+    let marker_tmp = format!("{}.tmp", marker_path);
     {
         let mut f = File::create(&marker_tmp)?;
         f.write_all(&tdb_size.to_le_bytes())?;

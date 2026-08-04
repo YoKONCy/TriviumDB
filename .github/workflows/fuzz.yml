@@ -40,7 +40,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
 
       - name: 安装 cargo-fuzz
-        uses: taiki-e/install-action@cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: 验证模糊测试目标
+        run: cargo +nightly fuzz list
 
       - uses: Swatinem/rust-cache@v2
         with:
