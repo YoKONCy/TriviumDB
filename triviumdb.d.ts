@@ -22,6 +22,15 @@ export interface JsSearchHit<T = any> {
   payload: T;
 }
 
+export interface JsEdge {
+  /** 目标节点 ID */
+  targetId: number;
+  /** 边的分组类型或者名称 */
+  label: string;
+  /** 边权重 */
+  weight: number;
+}
+
 export interface JsNodeView<T = any> {
   /** 节点 ID */
   id: number;
@@ -29,13 +38,15 @@ export interface JsNodeView<T = any> {
   vector: Vector;
   /** 节点 JSON 元数据 */
   payload: T;
+  /** 该节点出发的有向边列表 */
+  edges: JsEdge[];
   /** 该节点出发的有向边数量 */
   numEdges: number;
 }
 
-/** 
- * Cypher 查询的一行结果 
- * 键名为 MATCH 语句中你定义的绑定变量（如 a, b），值为匹配到的节点视图摘要 
+/**
+ * Cypher 查询的一行结果
+ * 键名为 MATCH 语句中你定义的绑定变量（如 a, b），值为匹配到的节点视图摘要
  */
 export type QueryRow = Record<string, {
   id: number;
@@ -132,6 +143,24 @@ export interface JsLeidenConfig {
   withCentroids?: boolean;
 }
 
+/** Hook 管线执行上下文（包含各阶段计时统计和自定义数据） */
+export interface JsHookContext {
+  /** 各管线阶段的耗时统计（JSON 对象, 单位: 毫秒） */
+  timings: any;
+  /** Hook 注入的自定义数据 */
+  customData: any;
+  /** 管线是否被 Hook 提前终止 */
+  aborted: boolean;
+}
+
+/** 带上下文的检索结果 */
+export interface JsSearchWithContextResult {
+  /** 检索结果列表 */
+  hits: JsSearchHit[];
+  /** Hook 管线上下文 */
+  context: JsHookContext;
+}
+
 // ==========================================
 // 核心类定义
 // ==========================================
@@ -149,6 +178,38 @@ export class TriviumDB {
    * @param syncMode     WAL 同步模式设定: "full" | "normal" | "off", 默认为 "normal"
    */
   constructor(path: string, dim?: number, dtype?: DType, syncMode?: SyncMode);
+
+  // ── Hook 管理 ──
+
+  /**
+   * 加载 C/C++ 动态库作为检索管线 Hook
+   *
+   * 动态库需导出 C ABI 符号（均可选）：
+   * - `trivium_recall`: 自定义召回
+   * - `trivium_rerank`: 自定义重排序
+   *
+   * ```js
+   * db.loadFfiHook('./libmy_plugin.so')
+   * const results = db.search(queryVec)  // 自动经过 C++ Hook
+   * ```
+   */
+  loadFfiHook(libPath: string): void;
+
+  /** 清除当前已注册的 Hook，恢复为默认的零开销 NoopHook */
+  clearHook(): void;
+
+  /**
+   * 带 Hook 上下文的检索：返回 { hits, context }
+   *
+   * 除了检索结果外，同时返回管线各阶段的计时统计和 Hook 注入的自定义数据。
+   *
+   * ```js
+   * const { hits, context } = db.searchWithContext(queryVec, { topK: 10 })
+   * console.log(context.timings)     // { hook_pre_search: 0.1, graph_expand: 2.3 }
+   * console.log(context.customData)  // Hook 注入的自定义数据
+   * ```
+   */
+  searchWithContext(queryVector: Vector, config?: JsSearchConfig): JsSearchWithContextResult;
 
   // ── CRUD ──
 
@@ -199,6 +260,20 @@ export class TriviumDB {
   updatePayload(id: number, payload: any): void;
 
   /**
+   * 部分更新节点 Payload（$set / $inc / $unset）
+   *
+   * 只修改指定字段，其他字段保持不变。
+   *
+   * ```js
+   * db.patchPayload(id, { $set: { name: "Alice" } })
+   * db.patchPayload(id, { $inc: { visits: 1 } })
+   * db.patchPayload(id, { $unset: { oldField: true } })
+   * db.patchPayload(id, { name: "Bob" })  // 简写，等价于 $set
+   * ```
+   */
+  patchPayload(id: number, patch: any): void;
+
+  /**
    * 更换节点的特征向量（必须保持与 dim 维度一致）
    * @param id 节点 ID
    * @param vector 新向量
@@ -211,6 +286,13 @@ export class TriviumDB {
    * @param id 要删除的节点 ID
    */
   delete(id: number): void;
+
+  /**
+   * 检查节点是否存在
+   * @param id 节点 ID
+   * @returns 节点是否存在
+   */
+  contains(id: number): boolean;
 
   // ── 社区聚类 ──
 
@@ -246,6 +328,13 @@ export class TriviumDB {
    * @returns 深度之内的所有不重复的周边点 ID
    */
   neighbors(id: number, depth?: number): number[];
+
+  /**
+   * 获取节点的出边列表
+   * @param id 节点 ID
+   * @returns 该节点出发的所有有向边
+   */
+  getEdges(id: number): JsEdge[];
 
   // ── 检索与查询 ──
 
@@ -295,17 +384,60 @@ export class TriviumDB {
    */
   buildTextIndex(): void;
 
-  /**
-   * 像类 MongoDB 一样去条件匹配！
-   * @param condition 类似 { age: { $gt: 18 } } 或 { $and: [...] }
-   */
-  filterWhere(condition: FilterCondition): JsNodeView[];
+  // ── 属性二级索引 ──
 
   /**
-   * 类似 neo4j 这样的图谱专用语法检索引擎！
-   * @param cypherQuery eg: `MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b`
+   * 创建属性索引：对指定 payload 字段建立倒排索引
+   *
+   * ```js
+   * db.createIndex('name')   // 之后 tql('FIND {name: "Alice"} RETURN *') 使用 O(1) 索引
+   * ```
    */
-  query(cypherQuery: string): QueryRow[];
+  createIndex(field: string): void;
+
+  /** 删除属性索引（查询仍可用，退化为全扫描） */
+  dropIndex(field: string): void;
+
+  // ── 轻量级单字段查询 ──
+
+  /**
+   * 获取节点的 payload（不含向量，比 get() 更轻量）
+   * @param id 节点 ID
+   * @returns payload 数据，节点不存在时返回 null
+   */
+  getPayload(id: number): any | null;
+
+  // ── TQL 统一查询 ──
+
+  /**
+   * 执行 TQL (Trivium Query Language) 统一查询
+   *
+   * 支持三种入口：MATCH (图遍历) / FIND (文档过滤) / SEARCH (向量检索)
+   *
+   * ```js
+   * // 图遍历
+   * const rows = db.tql('MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b')
+   * // 文档过滤
+   * const rows = db.tql('FIND {type: "event", heat: {$gte: 0.7}} RETURN *')
+   * ```
+   */
+  tql(query: string): any[];
+
+  /**
+   * 执行 TQL 写操作（CREATE / SET / DELETE / DETACH DELETE）
+   *
+   * 返回 { affected: number, createdIds: number[] }
+   *
+   * ```js
+   * const result = db.tqlMut('CREATE (a {name: "Alice", age: 30})')
+   * console.log(result.affected)     // 1
+   * console.log(result.createdIds)   // [1]
+   *
+   * db.tqlMut('MATCH (a {name: "Alice"}) SET a.age == 31')
+   * db.tqlMut('MATCH (a {name: "Alice"}) DELETE a')
+   * ```
+   */
+  tqlMut(query: string): { affected: number; createdIds: number[] };
 
   // ── 辅助与生命周期 ──
 
@@ -320,6 +452,9 @@ export class TriviumDB {
 
   /** 关闭后台的定期压缩 */
   disableAutoCompaction(): void;
+
+  /** 手动触发全量压实（阻塞当前线程） */
+  compact(): void;
 
   /** 当估计的内存占用超过了这个 MB 阈值时会强制落排。填 0 = 不限制 */
   setMemoryLimit(mb: number): void;
@@ -344,6 +479,9 @@ export class TriviumDB {
 
   /** 返回存储内的所有活跃点数量 */
   nodeCount(): number;
+
+  /** 显式关闭数据库（落盘后释放资源） */
+  close(): void;
 
   /** 获取设置的浮点格式 (f32, f16, u64) */
   get dtype(): string;
