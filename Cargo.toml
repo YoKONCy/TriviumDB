@@ -27,34 +27,6 @@ python = ["dep:pyo3"]
 nodejs = ["dep:napi", "dep:napi-derive"]
 usearch-bench = ["dep:usearch"]
 ablation = [] # encoding ablation 实验专用
-casa = [] # CASA 研究实验专用
-
-# ─── CASA 研究实验 (research/CASA/) ───
-
-[[test]]
-name = "ccsa_ablation"
-path = "research/CASA/ccsa_ablation.rs"
-required-features = ["casa"]
-
-[[test]]
-name = "ccsa_highdim"
-path = "research/CASA/ccsa_highdim.rs"
-required-features = ["casa"]
-
-[[test]]
-name = "ccsa_rag_benchmark"
-path = "research/CASA/ccsa_rag_benchmark.rs"
-required-features = ["casa"]
-
-[[test]]
-name = "ccsa_online_learning"
-path = "research/CASA/ccsa_online_learning.rs"
-required-features = ["casa"]
-
-[[test]]
-name = "ccsa_noise_sweep"
-path = "research/CASA/ccsa_noise_sweep.rs"
-required-features = ["casa"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

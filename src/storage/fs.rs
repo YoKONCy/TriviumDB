@@ -1,7 +1,9 @@
 use std::path::Path;
 
 pub(crate) fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
     let Some(parent) = parent else {
         return Ok(());
     };
