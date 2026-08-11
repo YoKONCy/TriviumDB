@@ -422,7 +422,9 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub(crate) fn validate_unlink(&self, src: NodeId) -> Result<()> {
-        if self.edges.contains_key(&src) {
+        // 幂等语义：只要节点存在即可（edges 表只登记有出边的节点，
+        // src 无出边时断开不存在的边应视为无操作，而非误报 NodeNotFound）。
+        if self.payloads.contains_key(&src) {
             Ok(())
         } else {
             Err(TriviumError::NodeNotFound(src))
