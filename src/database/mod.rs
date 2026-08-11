@@ -44,7 +44,8 @@ pub struct Database<T: VectorType> {
     pub(crate) wal: Arc<Mutex<Wal>>,
     pub(crate) compaction: Option<CompactionThread>,
     /// 文件锁：防止多进程同时打开同一个数据库
-    _lock_file: std::fs::File,
+    /// Option 化以便 close() 时显式 take 释放（否则锁要等对象 Drop，JS GC 时机不可控）
+    _lock_file: Option<std::fs::File>,
     /// 内存上限（字节），0 = 无限制
     memory_limit: usize,
     /// 存储模式
@@ -164,7 +165,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             memtable: Arc::new(Mutex::new(memtable)),
             wal: Arc::new(Mutex::new(wal)),
             compaction: None,
-            _lock_file: lock_file,
+            _lock_file: Some(lock_file),
             memory_limit: 0,
             storage_mode: config.storage_mode,
             hook: Arc::new(NoopHook),
@@ -912,7 +913,22 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     pub fn close(mut self) -> Result<()> {
         self.disable_auto_compaction();
-        self.flush()
+        let result = self.flush();
+        self.release_lock();
+        result
+    }
+
+    /// 显式释放文件锁并清理 `.lock` 残留文件（幂等）。
+    ///
+    /// 锁句柄持有 OS flock，必须 Drop 后才释放；此前锁一直要等
+    /// `Database` 对象 Drop（JS/Python 绑定下为 GC 时机），导致
+    /// close() 之后同进程无法立即重开同一库文件。此方法把句柄
+    /// take 出来立即 Drop，并清理锁文件。多进程场景下若其他进程
+    /// 仍持有锁，Windows 上删除文件会失败，忽略即可（不影响锁）。
+    pub fn release_lock(&mut self) {
+        self._lock_file.take();
+        let lock_path = format!("{}.lock", self.db_path);
+        let _ = std::fs::remove_file(&lock_path);
     }
 
     pub fn node_count(&self) -> usize {

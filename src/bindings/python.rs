@@ -1293,7 +1293,9 @@ pub mod python {
 
         /// 显式关闭数据库（落盘后释放资源）
         fn close(&mut self) -> PyResult<()> {
-            self.flush()
+            self.flush()?;
+            dispatch!(self, mut db => db.release_lock());
+            Ok(())
         }
     }
 
