@@ -561,7 +561,7 @@ fn COV7_20_delete_twice() {
     cleanup(&path);
 }
 
-/// unlink 不存在的边
+/// unlink 不存在边的幂等语义（B4 修复后：节点存在但无出边 → 无操作；节点不存在 → 报错）
 #[test]
 fn COV7_21_unlink_nonexistent() {
     let path = tmp_db("unlink_none");
@@ -574,11 +574,16 @@ fn COV7_21_unlink_nonexistent() {
         .unwrap();
 
     let before = db.node_count();
+    // 节点存在但 src 无出边：幂等成功（不再误报 NodeNotFound）
     let r = db.unlink(id1, id2);
-    assert!(r.is_err(), "不存在的边应安全拒绝");
-    assert_eq!(db.node_count(), before, "unlink 失败不能影响节点数");
+    assert!(r.is_ok(), "存在但无出边的节点 unlink 应幂等成功，实际 {:?}", r);
+    assert_eq!(db.node_count(), before, "unlink 不能影响节点数");
     assert!(db.get_payload(id1).is_some(), "源节点不能被误删");
     assert!(db.get_payload(id2).is_some(), "目标节点不能被误删");
+
+    // 节点不存在：仍应报错
+    let r2 = db.unlink(9999, id1);
+    assert!(r2.is_err(), "不存在的节点 unlink 仍应报错");
 
     cleanup(&path);
 }

@@ -422,7 +422,9 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub(crate) fn validate_unlink(&self, src: NodeId) -> Result<()> {
-        if self.edges.contains_key(&src) {
+        // 幂等语义：只要节点存在即可（edges 表只登记有出边的节点，
+        // src 无出边时断开不存在的边应视为无操作，而非误报 NodeNotFound）。
+        if self.payloads.contains_key(&src) {
             Ok(())
         } else {
             Err(TriviumError::NodeNotFound(src))
@@ -976,7 +978,15 @@ impl<T: VectorType> MemTable<T> {
 
     /// 断开两个节点之间的指定边
     pub fn unlink(&mut self, src: NodeId, dst: NodeId) -> Result<()> {
-        if let Some(edge_list) = self.edges.get_mut(&src) {
+        let Some(edge_list) = self.edges.get_mut(&src) else {
+            // src 没有出边：只要节点本身存在，断开不存在的边应视为幂等无操作，
+            // 而不是误报 NodeNotFound（edges 表只登记有出边的节点）。
+            if self.payloads.contains_key(&src) {
+                return Ok(());
+            }
+            return Err(TriviumError::NodeNotFound(src));
+        };
+        {
             let initial_len = edge_list.len();
             // 先清理 label_index 中对应的条目
             for edge in edge_list.iter() {
@@ -997,8 +1007,6 @@ impl<T: VectorType> MemTable<T> {
                 }
             }
             Ok(())
-        } else {
-            Err(TriviumError::NodeNotFound(src))
         }
     }
 

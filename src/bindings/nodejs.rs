@@ -46,7 +46,8 @@ pub mod nodejs {
     /// 高级管线专用配置结构
     #[napi(object)]
     pub struct JsSearchConfig {
-        pub top_k: Option<u32>,
+        /// top_k 用 i64 承载：u32 会把 JS 负数无符号化成超大值（静默返回全库）
+        pub top_k: Option<i64>,
         pub expand_depth: Option<u32>,
         pub min_score: Option<f64>,
         pub teleport_alpha: Option<f64>,
@@ -242,8 +243,14 @@ pub mod nodejs {
                 diffusion_bias: None,
             });
 
+            let top_k = cfg.top_k.unwrap_or(5);
+            if top_k <= 0 {
+                return Err(napi::Error::from_reason(format!(
+                    "top_k 必须为正整数，收到 {top_k}"
+                )));
+            }
             let core_config = crate::database::SearchConfig {
-                top_k: cfg.top_k.unwrap_or(5) as usize,
+                top_k: top_k as usize,
                 expand_depth: cfg.expand_depth.unwrap_or(2) as usize,
                 min_score: cfg.min_score.unwrap_or(0.1) as f32,
                 teleport_alpha: cfg.teleport_alpha.unwrap_or(0.0) as f32,
@@ -634,11 +641,17 @@ pub mod nodejs {
         pub fn search(
             &self,
             query_vector: Vec<f64>,
-            top_k: Option<u32>,
+            top_k: Option<i64>,
             expand_depth: Option<u32>,
             min_score: Option<f64>,
         ) -> napi::Result<Vec<JsSearchHit>> {
-            let top_k = top_k.unwrap_or(5) as usize;
+            let top_k = top_k.unwrap_or(5);
+            if top_k <= 0 {
+                return Err(napi::Error::from_reason(format!(
+                    "top_k 必须为正整数，收到 {top_k}"
+                )));
+            }
+            let top_k = top_k as usize;
             let expand_depth = expand_depth.unwrap_or(0) as usize;
             let min_score = min_score.unwrap_or(0.5) as f32;
 
@@ -697,8 +710,14 @@ pub mod nodejs {
                 diffusion_bias: None,
             });
 
+            let top_k = cfg.top_k.unwrap_or(5);
+            if top_k <= 0 {
+                return Err(napi::Error::from_reason(format!(
+                    "top_k 必须为正整数，收到 {top_k}"
+                )));
+            }
             let core_config = crate::database::SearchConfig {
-                top_k: cfg.top_k.unwrap_or(5) as usize,
+                top_k: top_k as usize,
                 expand_depth: cfg.expand_depth.unwrap_or(2) as usize,
                 min_score: cfg.min_score.unwrap_or(0.1) as f32,
                 teleport_alpha: cfg.teleport_alpha.unwrap_or(0.0) as f32,
@@ -755,12 +774,18 @@ pub mod nodejs {
             &self,
             query_vector: Vec<f64>,
             query_text: String,
-            top_k: Option<u32>,
+            top_k: Option<i64>,
             expand_depth: Option<u32>,
             min_score: Option<f64>,
             hybrid_alpha: Option<f64>,
         ) -> napi::Result<Vec<JsSearchHit>> {
-            let top_k = top_k.unwrap_or(5) as usize;
+            let top_k = top_k.unwrap_or(5);
+            if top_k <= 0 {
+                return Err(napi::Error::from_reason(format!(
+                    "top_k 必须为正整数，收到 {top_k}"
+                )));
+            }
+            let top_k = top_k as usize;
             let expand_depth = expand_depth.unwrap_or(2) as usize;
             let min_score = min_score.unwrap_or(0.1) as f32;
             let alpha = hybrid_alpha.unwrap_or(0.7) as f32;
@@ -1045,7 +1070,9 @@ pub mod nodejs {
         /// 显式关闭数据库（落盘后释放资源）
         #[napi]
         pub fn close(&mut self) -> napi::Result<()> {
-            self.flush()
+            self.flush()?;
+            dispatch!(self, mut db => db.release_lock());
+            Ok(())
         }
     } // impl TriviumDB
 } // mod nodejs
