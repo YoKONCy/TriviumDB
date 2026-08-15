@@ -918,17 +918,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         result
     }
 
-    /// 显式释放文件锁并清理 `.lock` 残留文件（幂等）。
+    /// 显式释放文件锁（幂等）。
     ///
-    /// 锁句柄持有 OS flock，必须 Drop 后才释放；此前锁一直要等
-    /// `Database` 对象 Drop（JS/Python 绑定下为 GC 时机），导致
-    /// close() 之后同进程无法立即重开同一库文件。此方法把句柄
-    /// take 出来立即 Drop，并清理锁文件。多进程场景下若其他进程
-    /// 仍持有锁，Windows 上删除文件会失败，忽略即可（不影响锁）。
+    /// 锁文件必须保留在固定路径上：删除后其他进程可以创建同名新文件并锁住
+    /// 不同的文件实体，从而绕过现有锁。句柄释放后，空的 `.lock` 文件留存是正常现象。
     pub fn release_lock(&mut self) {
         self._lock_file.take();
-        let lock_path = format!("{}.lock", self.db_path);
-        let _ = std::fs::remove_file(&lock_path);
     }
 
     pub fn node_count(&self) -> usize {

@@ -576,7 +576,11 @@ fn COV7_21_unlink_nonexistent() {
     let before = db.node_count();
     // 节点存在但 src 无出边：幂等成功（不再误报 NodeNotFound）
     let r = db.unlink(id1, id2);
-    assert!(r.is_ok(), "存在但无出边的节点 unlink 应幂等成功，实际 {:?}", r);
+    assert!(
+        r.is_ok(),
+        "存在但无出边的节点 unlink 应幂等成功，实际 {:?}",
+        r
+    );
     assert_eq!(db.node_count(), before, "unlink 不能影响节点数");
     assert!(db.get_payload(id1).is_some(), "源节点不能被误删");
     assert!(db.get_payload(id2).is_some(), "目标节点不能被误删");
