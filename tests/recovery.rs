@@ -23,7 +23,17 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok", ".quiver"] {
+    for ext in &[
+        "",
+        ".wal",
+        ".vec",
+        ".lock",
+        ".flush_ok",
+        ".quiver",
+        ".quiver.meta",
+        ".text",
+        ".text.meta",
+    ] {
         std::fs::remove_file(format!("{}{}", path, ext)).ok();
     }
 }
@@ -49,6 +59,156 @@ fn Mmap模式_持久化后重新加载_数据完整() {
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert_eq!(db.node_count(), 2, "Mmap 模式重加载后应有 2 个节点");
 
+    cleanup(&path);
+}
+
+#[test]
+fn P0_TextIndex精确持久化_重启后不从Payload猜测重建() {
+    let path = tmp_db("text_sidecar");
+    cleanup(&path);
+    let indexed_id;
+    let unindexed_id;
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        indexed_id = db
+            .insert(
+                &[1.0, 0.0, 0.0, 0.0],
+                serde_json::json!({"body": "Payload中没有目标词"}),
+            )
+            .unwrap();
+        unindexed_id = db
+            .insert(
+                &[0.0, 1.0, 0.0, 0.0],
+                serde_json::json!({"body": "精确目标词"}),
+            )
+            .unwrap();
+        db.index_text(indexed_id, "精确目标词").unwrap();
+        db.build_text_index().unwrap();
+        db.flush().unwrap();
+    }
+    assert!(Path::new(&format!("{}.text", path)).exists());
+
+    let config = Config {
+        dim: DIM,
+        load_text_index: true,
+        ..Default::default()
+    };
+    let db = Database::<f32>::open_with_config(&path, config).unwrap();
+    let config = triviumdb::database::SearchConfig {
+        top_k: 10,
+        expand_depth: 0,
+        min_score: -1.0,
+        enable_text_hybrid_search: true,
+        ..Default::default()
+    };
+    let hits = db.search_hybrid(Some("精确目标词"), None, &config).unwrap();
+    assert!(hits.iter().any(|hit| hit.id == indexed_id));
+    assert!(!hits.iter().any(|hit| hit.id == unindexed_id));
+    cleanup(&path);
+}
+
+#[test]
+fn P0_TextIndex缺失时打开不扫描Payload自动重建() {
+    let path = tmp_db("text_missing");
+    cleanup(&path);
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        db.insert(
+            &[1.0, 0.0, 0.0, 0.0],
+            serde_json::json!({"body": "不应自动索引的正文"}),
+        )
+        .unwrap();
+        db.flush().unwrap();
+    }
+    assert!(!Path::new(&format!("{}.text", path)).exists());
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+    let config = triviumdb::database::SearchConfig {
+        top_k: 10,
+        expand_depth: 0,
+        min_score: -1.0,
+        enable_text_hybrid_search: true,
+        ..Default::default()
+    };
+    assert!(
+        db.search_hybrid(Some("正文"), None, &config)
+            .unwrap()
+            .is_empty()
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn P0_Payload冷存储重启后按需读取且可再次持久化() {
+    let path = tmp_db("cold_payload");
+    cleanup(&path);
+    let id;
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        id = db
+            .insert(
+                &[1.0, 2.0, 3.0, 4.0],
+                serde_json::json!({"正文": "惰性解析", "nested": {"n": 7}}),
+            )
+            .unwrap();
+        db.flush().unwrap();
+    }
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        assert_eq!(db.get_payload(id).unwrap()["nested"]["n"], 7);
+        db.flush().unwrap();
+    }
+    let db = Database::<f32>::open(&path, DIM).unwrap();
+    assert_eq!(db.get_payload(id).unwrap()["正文"], "惰性解析");
+    let config = triviumdb::database::SearchConfig {
+        top_k: 1,
+        expand_depth: 0,
+        min_score: -1.0,
+        force_brute_force: true,
+        payload_filter: Some(triviumdb::Filter::eq("正文", "惰性解析".into())),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.search_advanced(&[1.0, 2.0, 3.0, 4.0], &config)
+            .unwrap()
+            .len(),
+        1,
+        "冷 Payload 的布隆标签必须保守放行，不能造成过滤假阴性"
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn P0_零秒自动压缩被拒绝() {
+    let path = tmp_db("zero_compaction");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    assert!(
+        db.enable_auto_compaction(std::time::Duration::ZERO)
+            .is_err()
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn P0_关闭自动QuIVer构建时_flush不生成sidecar() {
+    let path = tmp_db("disable_auto_quiver");
+    cleanup(&path);
+    let config = Config {
+        dim: DIM,
+        auto_build_quiver: false,
+        ..Default::default()
+    };
+    let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
+    for i in 0..10_001u32 {
+        db.insert(&[i as f32, 1.0, 0.0, 0.0], serde_json::json!({"i": i}))
+            .unwrap();
+    }
+    db.flush().unwrap();
+    assert!(!Path::new(&format!("{}.quiver", path)).exists());
+    db.build_quiver_index(None).unwrap();
+    db.flush().unwrap();
+    assert!(Path::new(&format!("{}.quiver", path)).exists());
+    assert!(Path::new(&format!("{}.quiver.meta", path)).exists());
     cleanup(&path);
 }
 

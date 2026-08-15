@@ -166,7 +166,8 @@ fn COV_01_auto_compaction_启动停止() {
     }
 
     // 启动后台 compaction（1 秒间隔）
-    db.enable_auto_compaction(std::time::Duration::from_secs(1));
+    db.enable_auto_compaction(std::time::Duration::from_secs(1))
+        .unwrap();
 
     // 等待一轮 compaction 完成
     std::thread::sleep(std::time::Duration::from_millis(1500));

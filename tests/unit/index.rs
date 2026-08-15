@@ -111,6 +111,33 @@ fn text_bm25_无匹配() {
 }
 
 #[test]
+fn text_bm25_英文按词而非字符片段匹配() {
+    let mut idx = TextIndex::new();
+    idx.add_text(1, "machine learning retrieval");
+    idx.add_text(2, "marine biology research");
+    idx.build();
+
+    let results = idx.search_bm25("machine learning", 1.2, 0.75);
+    assert!(results.contains_key(&1));
+    assert!(
+        !results.contains_key(&2),
+        "英文BM25不应因字符片段产生伪匹配"
+    );
+}
+
+#[test]
+fn text_bm25_中文保留二元组匹配() {
+    let mut idx = TextIndex::new();
+    idx.add_text(1, "向量数据库检索");
+    idx.add_text(2, "天气预报服务");
+    idx.build();
+
+    let results = idx.search_bm25("数据库", 1.2, 0.75);
+    assert!(results.contains_key(&1));
+    assert!(!results.contains_key(&2));
+}
+
+#[test]
 fn text_ac_精准匹配() {
     let mut idx = TextIndex::new();
     idx.add_keyword(1, "rust");

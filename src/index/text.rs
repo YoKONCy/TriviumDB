@@ -1,6 +1,26 @@
 use crate::node::NodeId;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{BufReader, BufWriter};
+use std::path::Path;
+
+const TEXT_INDEX_MAGIC: &[u8; 4] = b"TIDX";
+const TEXT_INDEX_VERSION: u32 = 2;
+
+#[derive(Serialize)]
+struct TextIndexSnapshotRef<'a> {
+    keyword_to_nodes: &'a HashMap<String, Vec<NodeId>>,
+    bm25_tf: &'a HashMap<String, HashMap<NodeId, usize>>,
+    doc_lengths: &'a HashMap<NodeId, usize>,
+}
+
+#[derive(Deserialize)]
+struct TextIndexSnapshot {
+    keyword_to_nodes: HashMap<String, Vec<NodeId>>,
+    bm25_tf: HashMap<String, HashMap<NodeId, usize>>,
+    doc_lengths: HashMap<NodeId, usize>,
+}
 
 /// 综合文本搜索引擎：AC自动机 (精准关键词触发) + BM25 (大段落兜底打分)
 ///
@@ -22,6 +42,46 @@ pub struct TextIndex {
     doc_lengths: HashMap<NodeId, usize>,
     avg_dl: f32,
     total_docs: usize,
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    let lowered = text.to_lowercase();
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    let mut cjk_run = Vec::new();
+
+    let flush_word = |word: &mut String, tokens: &mut Vec<String>| {
+        if !word.is_empty() {
+            tokens.push(std::mem::take(word));
+        }
+    };
+    let flush_cjk = |run: &mut Vec<char>, tokens: &mut Vec<String>| {
+        match run.len() {
+            0 => {}
+            1 => tokens.push(run[0].to_string()),
+            _ => tokens.extend(run.windows(2).map(|pair| pair.iter().collect())),
+        }
+        run.clear();
+    };
+
+    for ch in lowered.chars() {
+        if ch.is_ascii_alphanumeric() {
+            flush_cjk(&mut cjk_run, &mut tokens);
+            word.push(ch);
+        } else if ('\u{3400}'..='\u{9fff}').contains(&ch)
+            || ('\u{3040}'..='\u{30ff}').contains(&ch)
+            || ('\u{ac00}'..='\u{d7af}').contains(&ch)
+        {
+            flush_word(&mut word, &mut tokens);
+            cjk_run.push(ch);
+        } else {
+            flush_word(&mut word, &mut tokens);
+            flush_cjk(&mut cjk_run, &mut tokens);
+        }
+    }
+    flush_word(&mut word, &mut tokens);
+    flush_cjk(&mut cjk_run, &mut tokens);
+    tokens
 }
 
 impl TextIndex {
@@ -49,20 +109,12 @@ impl TextIndex {
             .push(id);
     }
 
-    /// 注册一段长文本，建立 BM25 2-Gram 倒排
+    /// 注册一段长文本：拉丁字母/数字按词切分，CJK文本使用字符2-Gram。
     pub fn add_text(&mut self, id: NodeId, text: &str) {
-        let text_lower = text.to_lowercase();
-        let chars: Vec<char> = text_lower.chars().collect();
-        if chars.is_empty() {
+        let tokens = tokenize(text);
+        if tokens.is_empty() {
             return;
         }
-
-        // 我们通过 2-Gram 滑动窗口进行纯净的稀疏表征
-        let tokens: Vec<String> = if chars.len() > 1 {
-            chars.windows(2).map(|w| w.iter().collect()).collect()
-        } else {
-            vec![text_lower]
-        };
 
         let mut local_tf = HashMap::new();
         for token in &tokens {
@@ -79,6 +131,10 @@ impl TextIndex {
 
     /// 全量构建索引 (编译 AC，计算平均文档长度与频次基数)
     pub fn build(&mut self) {
+        self.rebuild_runtime();
+    }
+
+    fn rebuild_runtime(&mut self) {
         // 1. 构建 AC
         let mut keys: Vec<String> = self.keyword_to_nodes.keys().cloned().collect();
         keys.sort_by(|a, b| b.len().cmp(&a.len())); // 优先匹配长词，防止截断
@@ -96,7 +152,95 @@ impl TextIndex {
         if self.total_docs > 0 {
             let sum_dl: usize = self.doc_lengths.values().sum();
             self.avg_dl = sum_dl as f32 / self.total_docs as f32;
+        } else {
+            self.avg_dl = 0.0;
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keyword_to_nodes.is_empty() && self.bm25_tf.is_empty()
+    }
+
+    pub fn estimated_memory_bytes(&self) -> usize {
+        let keywords = self
+            .keyword_to_nodes
+            .iter()
+            .map(|(term, ids)| term.capacity() + ids.capacity() * std::mem::size_of::<NodeId>())
+            .sum::<usize>();
+        let bm25 = self
+            .bm25_tf
+            .iter()
+            .map(|(term, docs)| {
+                term.capacity()
+                    + docs.capacity()
+                        * (std::mem::size_of::<NodeId>() + std::mem::size_of::<usize>())
+            })
+            .sum::<usize>();
+        keywords
+            + bm25
+            + self.doc_lengths.capacity()
+                * (std::mem::size_of::<NodeId>() + std::mem::size_of::<usize>())
+    }
+
+    pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
+        if self.is_empty() {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+            return Ok(());
+        }
+        let tmp = path.with_extension("text.tmp");
+        let mut writer = BufWriter::new(std::fs::File::create(&tmp)?);
+        use std::io::Write;
+        writer.write_all(TEXT_INDEX_MAGIC)?;
+        writer.write_all(&TEXT_INDEX_VERSION.to_le_bytes())?;
+        bincode::serialize_into(
+            &mut writer,
+            &TextIndexSnapshotRef {
+                keyword_to_nodes: &self.keyword_to_nodes,
+                bm25_tf: &self.bm25_tf,
+                doc_lengths: &self.doc_lengths,
+            },
+        )
+        .map_err(std::io::Error::other)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        drop(writer);
+        crate::storage::fs::robust_rename_and_sync(&tmp, path)
+    }
+
+    pub fn load_from_file(path: &Path) -> std::io::Result<Self> {
+        use std::io::Read;
+        let mut reader = BufReader::new(std::fs::File::open(path)?);
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic)?;
+        if &magic != TEXT_INDEX_MAGIC {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "TextIndex 魔数无效",
+            ));
+        }
+        let mut version = [0u8; 4];
+        reader.read_exact(&mut version)?;
+        if u32::from_le_bytes(version) != TEXT_INDEX_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "TextIndex 版本不受支持",
+            ));
+        }
+        let snapshot: TextIndexSnapshot =
+            bincode::deserialize_from(reader).map_err(std::io::Error::other)?;
+        let mut index = Self {
+            ac_matcher: None,
+            keywords: Vec::new(),
+            keyword_to_nodes: snapshot.keyword_to_nodes,
+            bm25_tf: snapshot.bm25_tf,
+            doc_lengths: snapshot.doc_lengths,
+            avg_dl: 0.0,
+            total_docs: 0,
+        };
+        index.rebuild_runtime();
+        Ok(index)
     }
 
     /// 执行 BM25 检索，返回命中节点的原始相似度得分
@@ -106,18 +250,10 @@ impl TextIndex {
             return results;
         }
 
-        let query_lower = query.to_lowercase();
-        let chars: Vec<char> = query_lower.chars().collect();
-        if chars.is_empty() {
+        let tokens = tokenize(query);
+        if tokens.is_empty() {
             return results;
         }
-
-        // 查询向量化
-        let tokens: Vec<String> = if chars.len() > 1 {
-            chars.windows(2).map(|w| w.iter().collect()).collect()
-        } else {
-            vec![query_lower]
-        };
 
         let mut query_tf = HashMap::new();
         for token in &tokens {

@@ -89,6 +89,9 @@ pub mod python {
         /// 各管线阶段的耗时统计（阶段名 → 耗时微秒数）
         #[pyo3(get)]
         pub timings: PyObject,
+        /// 每阶段候选数量
+        #[pyo3(get)]
+        pub counts: PyObject,
         /// Hook 注入的自定义数据
         #[pyo3(get)]
         pub custom_data: PyObject,
@@ -210,26 +213,40 @@ pub mod python {
     #[pymethods]
     impl PyTriviumDB {
         #[new]
-        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal"))]
-        fn new(path: &str, dim: usize, dtype: &str, sync_mode: &str) -> PyResult<Self> {
+        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true))]
+        fn new(
+            path: &str,
+            dim: usize,
+            dtype: &str,
+            sync_mode: &str,
+            load_text_index: bool,
+            auto_build_quiver: bool,
+        ) -> PyResult<Self> {
             let sm = parse_sync_mode(sync_mode)?;
+            let config = crate::database::Config {
+                dim,
+                sync_mode: sm,
+                load_text_index,
+                auto_build_quiver,
+                ..Default::default()
+            };
             let inner = match dtype {
                 "f32" => DbBackend::F32(
-                    GenericDatabase::<f32>::open_with_sync(path, dim, sm).map_err(
+                    GenericDatabase::<f32>::open_with_config(path, config.clone()).map_err(
                         |e: crate::error::TriviumError| {
                             pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
                         },
                     )?,
                 ),
                 "f16" => DbBackend::F16(
-                    GenericDatabase::<half::f16>::open_with_sync(path, dim, sm).map_err(
+                    GenericDatabase::<half::f16>::open_with_config(path, config.clone()).map_err(
                         |e: crate::error::TriviumError| {
                             pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
                         },
                     )?,
                 ),
                 "u64" => DbBackend::U64(
-                    GenericDatabase::<u64>::open_with_sync(path, dim, sm).map_err(
+                    GenericDatabase::<u64>::open_with_config(path, config).map_err(
                         |e: crate::error::TriviumError| {
                             pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
                         },
@@ -312,12 +329,14 @@ pub mod python {
         /// print(ctx.timings)   # {'hook_pre_search': 0.1, 'graph_expand': 2.3, ...}
         /// print(ctx.custom_data)  # Hook 注入的自定义数据
         /// ```
-        #[pyo3(signature = (query_vector, top_k=5, expand_depth=2, min_score=0.1, payload_filter=None))]
+        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None))]
         fn search_with_context(
             &self,
             py: Python<'_>,
             query_vector: Bound<'_, PyAny>,
             top_k: usize,
+            recall_k: usize,
+            rerank_k: usize,
             expand_depth: usize,
             min_score: f32,
             payload_filter: Option<&Bound<'_, PyDict>>,
@@ -328,6 +347,8 @@ pub mod python {
             };
             let config = crate::database::SearchConfig {
                 top_k,
+                recall_k,
+                rerank_k,
                 expand_depth,
                 min_score,
                 payload_filter: rust_filter,
@@ -368,8 +389,13 @@ pub mod python {
             for (stage, dur) in &hook_ctx.stage_timings {
                 let _ = timings_dict.set_item(stage, dur.as_secs_f64() * 1000.0); // 转为毫秒
             }
+            let counts_dict = PyDict::new(py);
+            for (stage, count) in &hook_ctx.stage_counts {
+                let _ = counts_dict.set_item(stage, count);
+            }
             let ctx = PyHookContext {
                 timings: timings_dict.into_any().unbind(),
+                counts: counts_dict.into_any().unbind(),
                 custom_data: json_to_pyobject(py, &hook_ctx.custom_data),
                 aborted: hook_ctx.abort,
             };
@@ -453,12 +479,14 @@ pub mod python {
             )
         }
 
-        #[pyo3(signature = (query_vector, top_k=5, expand_depth=0, min_score=0.5, payload_filter=None))]
+        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, payload_filter=None))]
         fn search(
             &self,
             py: Python<'_>,
             query_vector: Bound<'_, PyAny>,
             top_k: usize,
+            recall_k: usize,
+            rerank_k: usize,
             expand_depth: usize,
             min_score: f32,
             payload_filter: Option<&Bound<'_, PyDict>>,
@@ -470,6 +498,8 @@ pub mod python {
 
             let config = crate::database::SearchConfig {
                 top_k,
+                recall_k,
+                rerank_k,
                 expand_depth,
                 min_score,
                 enable_advanced_pipeline: false,
@@ -509,6 +539,8 @@ pub mod python {
         #[pyo3(signature = (
             query_vector,
             top_k=5,
+            recall_k=0,
+            rerank_k=0,
             expand_depth=2,
             min_score=0.1,
             teleport_alpha=0.0,
@@ -530,6 +562,8 @@ pub mod python {
             py: Python<'_>,
             query_vector: Bound<'_, PyAny>,
             top_k: usize,
+            recall_k: usize,
+            rerank_k: usize,
             expand_depth: usize,
             min_score: f32,
             teleport_alpha: f32,
@@ -554,6 +588,8 @@ pub mod python {
 
             let config = crate::database::SearchConfig {
                 top_k,
+                recall_k,
+                rerank_k,
                 expand_depth,
                 min_score,
                 teleport_alpha,
@@ -927,8 +963,17 @@ pub mod python {
         }
 
         #[pyo3(signature = (interval_secs=7200))]
-        fn enable_auto_compaction(&mut self, interval_secs: u64) {
-            dispatch!(self, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(interval_secs)));
+        fn enable_auto_compaction(&mut self, interval_secs: u64) -> PyResult<()> {
+            dispatch!(self, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(interval_secs)))
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+        }
+
+        fn set_auto_build_quiver(&mut self, enabled: bool) {
+            dispatch!(self, mut db => db.set_auto_build_quiver(enabled));
+        }
+
+        fn clear_search_state(&self) {
+            dispatch!(self, db => db.clear_search_state());
         }
 
         fn disable_auto_compaction(&mut self) {

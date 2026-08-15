@@ -39,6 +39,9 @@ pub struct HookContext {
     /// 格式: `[(阶段名称, 耗时)]`，如 `[("vector_recall", 3.2ms), ("graph_expand", 1.1ms)]`
     pub stage_timings: Vec<(String, std::time::Duration)>,
 
+    /// 每阶段候选数量，便于分析召回、扩散、重排和多样性阶段的增删。
+    pub stage_counts: Vec<(String, usize)>,
+
     /// 当前查询是否被 Hook 提前终止
     ///
     /// 若在 `on_pre_search` 中设为 `true`，管线将跳过后续所有阶段，
@@ -57,6 +60,7 @@ impl HookContext {
         Self {
             custom_data: serde_json::Value::Null,
             stage_timings: Vec::new(),
+            stage_counts: Vec::new(),
             abort: false,
         }
     }
@@ -64,6 +68,10 @@ impl HookContext {
     /// 记录一个阶段的耗时
     pub fn record_timing(&mut self, stage: impl Into<String>, elapsed: std::time::Duration) {
         self.stage_timings.push((stage.into(), elapsed));
+    }
+
+    pub fn record_count(&mut self, stage: impl Into<String>, count: usize) {
+        self.stage_counts.push((stage.into(), count));
     }
 }
 
@@ -100,7 +108,7 @@ impl HookContext {
 ///   🔌 #4 on_pre_graph_expand  — 图扩散前
 ///       │
 ///   ┌── 图谱扩散 ──────┐
-///   │  L6 PPR 扩散      │
+///   │  L6 SA-PPR 扩散   │
 ///   │  L7 不应期/抑制    │
 ///   └──────────────────┘
 ///       │
@@ -169,7 +177,7 @@ pub trait SearchHook: Send + Sync {
 
     /// 🔌 Hook #4：图扩散前拦截
     ///
-    /// 在向量/文本召回的锚点结果送入 PPR 图扩散之前调用。
+    /// 在向量/文本召回的锚点结果送入 SA-PPR 图扩散之前调用。
     ///
     /// # 典型用途
     /// - 修改种子集（添加/移除特定节点）

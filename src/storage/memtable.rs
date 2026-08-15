@@ -6,6 +6,80 @@ use crate::index::text::TextIndex;
 use crate::node::{Edge, NodeId};
 use crate::storage::vec_pool::VecPool;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
+struct PayloadEntry {
+    raw: Box<[u8]>,
+    parsed: OnceLock<serde_json::Value>,
+}
+
+impl PayloadEntry {
+    fn from_value(value: serde_json::Value) -> Self {
+        let raw = serde_json::to_vec(&value).unwrap_or_else(|_| b"null".to_vec());
+        let parsed = OnceLock::new();
+        let _ = parsed.set(value);
+        Self {
+            raw: raw.into_boxed_slice(),
+            parsed,
+        }
+    }
+
+    fn from_raw(raw: &[u8]) -> Result<Self> {
+        use serde::Deserialize;
+        let mut deserializer = serde_json::Deserializer::from_slice(raw);
+        serde::de::IgnoredAny::deserialize(&mut deserializer).map_err(|error| {
+            TriviumError::CorruptedFile(format!("JSON 解析错误 (JSON parse error): {error}"))
+        })?;
+        deserializer.end().map_err(|error| {
+            TriviumError::CorruptedFile(format!("JSON 尾部数据无效 (Invalid JSON tail): {error}"))
+        })?;
+        Ok(Self {
+            raw: raw.to_vec().into_boxed_slice(),
+            parsed: OnceLock::new(),
+        })
+    }
+
+    fn get(&self) -> &serde_json::Value {
+        self.parsed
+            .get_or_init(|| serde_json::from_slice(&self.raw).unwrap_or(serde_json::Value::Null))
+    }
+
+    fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    fn memory_bytes(&self) -> usize {
+        self.raw.len()
+            + self
+                .parsed
+                .get()
+                .map(estimate_json_memory)
+                .unwrap_or_default()
+    }
+}
+
+fn estimate_json_memory(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            std::mem::size_of::<serde_json::Value>()
+        }
+        serde_json::Value::String(text) => {
+            std::mem::size_of::<serde_json::Value>() + text.capacity()
+        }
+        serde_json::Value::Array(values) => {
+            std::mem::size_of::<serde_json::Value>()
+                + values.capacity() * std::mem::size_of::<serde_json::Value>()
+                + values.iter().map(estimate_json_memory).sum::<usize>()
+        }
+        serde_json::Value::Object(map) => {
+            std::mem::size_of::<serde_json::Value>()
+                + map
+                    .iter()
+                    .map(|(key, value)| key.capacity() + estimate_json_memory(value))
+                    .sum::<usize>()
+        }
+    }
+}
 
 /// 计算给定 JSON 对象的行级特征布隆签名（共 64 位）
 fn calculate_json_signature(value: &serde_json::Value) -> u64 {
@@ -73,8 +147,8 @@ pub struct MemTable<T: VectorType> {
     // 附设文本倒排引擎 (完全可选，纯碎占用独立内存不干扰底座)
     text_index: TextIndex,
 
-    // 2. 元数据映射（文档型负载）—— 保持纯内存
-    payloads: HashMap<NodeId, serde_json::Value>,
+    // 2. 元数据映射（文档型负载）—— 原始 JSON 紧凑存储，按访问惰性解析
+    payloads: HashMap<NodeId, PayloadEntry>,
 
     // 3. 图谱邻接表 —— 保持纯内存
     edges: HashMap<NodeId, Vec<Edge>>,
@@ -113,6 +187,7 @@ pub struct MemTable<T: VectorType> {
     //    冷热分离：QuIVer 内部 BQ sigs + 图拓扑 = hot，f32 向量 = cold
     //    事务安全：事务 commit 期间暂停 QuIVer 同步，commit 后由事务层统一同步
     quiver_index: Option<QuIVer>,
+    auto_build_quiver: bool,
     /// 事务同步暂停标记：为 true 时 insert/delete/update_vector 不触发 QuIVer 增量操作
     quiver_sync_paused: bool,
 }
@@ -160,6 +235,7 @@ impl<T: VectorType> MemTable<T> {
             fast_tags: Vec::new(),
             free_slots: Vec::new(),
             quiver_index: None,
+            auto_build_quiver: true,
             quiver_sync_paused: false,
         }
     }
@@ -193,6 +269,7 @@ impl<T: VectorType> MemTable<T> {
             fast_tags: Vec::new(),
             free_slots: Vec::new(),
             quiver_index: None,
+            auto_build_quiver: true,
             quiver_sync_paused: false,
         }
     }
@@ -251,21 +328,27 @@ impl<T: VectorType> MemTable<T> {
             self.fast_tags.push(sig);
             i
         };
-        self.payloads.insert(id, payload.clone());
-        self.ids_to_indices.insert(id, idx);
         self.add_to_property_index(id, &payload);
+        self.payloads.insert(id, PayloadEntry::from_value(payload));
+        self.ids_to_indices.insert(id, idx);
         Ok(())
     }
 
-    /// 从 mmap 加载时使用：仅注册映射关系，不推入向量（向量已在 VecPool 中）
     pub fn register_node(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
-        let sig = calculate_json_signature(&payload);
+        let raw = serde_json::to_vec(&payload)
+            .map_err(|error| TriviumError::InvalidInput(format!("Payload 序列化失败: {error}")))?;
+        self.register_node_raw(id, &raw)
+    }
+
+    /// 从 mmap 加载时使用：仅注册紧凑 JSON 与映射关系，不解析 Payload DOM。
+    pub fn register_node_raw(&mut self, id: NodeId, payload_raw: &[u8]) -> Result<()> {
         let idx = self.indices_to_ids.len();
-        self.payloads.insert(id, payload.clone());
+        self.payloads
+            .insert(id, PayloadEntry::from_raw(payload_raw)?);
         self.indices_to_ids.push(id);
-        self.fast_tags.push(sig);
+        // 冷 Payload 尚未解析时使用全 1，布隆预过滤选择保守放行，避免假阴性。
+        self.fast_tags.push(u64::MAX);
         self.ids_to_indices.insert(id, idx);
-        self.add_to_property_index(id, &payload);
         Ok(())
     }
 
@@ -302,13 +385,13 @@ impl<T: VectorType> MemTable<T> {
         };
 
         // 2. 更新文档型负载
-        self.payloads.insert(id, payload.clone());
+        self.add_to_property_index(id, &payload);
+        self.payloads.insert(id, PayloadEntry::from_value(payload));
 
         // 3. 构建反向映射
         self.ids_to_indices.insert(id, idx);
 
-        // 4. 维护属性索引
-        self.add_to_property_index(id, &payload);
+        // 4. 属性索引已在 Payload 转入冷存储前维护
 
         // 5. 增量更新 QuIVer 索引（如果已构建且未暂停同步）
         if !self.quiver_sync_paused
@@ -353,11 +436,11 @@ impl<T: VectorType> MemTable<T> {
             self.fast_tags.push(sig);
             i
         };
-        self.payloads.insert(id, payload.clone());
+        self.add_to_property_index(id, &payload);
+        self.payloads.insert(id, PayloadEntry::from_value(payload));
         self.ids_to_indices.insert(id, idx);
 
-        // 维护属性索引
-        self.add_to_property_index(id, &payload);
+        // 属性索引已在 Payload 转入冷存储前维护
 
         // 防御性推进分配器指针，避免后续普通 insert 撞车
         if id >= self.next_id {
@@ -489,6 +572,12 @@ impl<T: VectorType> MemTable<T> {
     }
 
     /// 消耗一次疲劳（在扩散使用后调用，清零不应期）
+    pub fn clear_fatigue(&self) {
+        if let Ok(mut map) = self.fatigue_map.write() {
+            map.clear();
+        }
+    }
+
     pub fn consume_fatigue(&self, id: NodeId) {
         if let Ok(mut map) = self.fatigue_map.write()
             && let Some(f) = map.get_mut(&id)
@@ -530,7 +619,7 @@ impl<T: VectorType> MemTable<T> {
 
         // 2. QuIVer 自动构建：当数据量 >= 10,000 且索引不存在时自动触发
         let active = self.payloads.len();
-        if active >= 10_000 && self.quiver_index.is_none() {
+        if self.auto_build_quiver && active >= 10_000 && self.quiver_index.is_none() {
             self.build_quiver_impl(&QuIVerConfig::default());
         }
 
@@ -583,22 +672,6 @@ impl<T: VectorType> MemTable<T> {
         self.quiver_index = Some(quiver);
     }
 
-    pub(crate) fn quiver_matches_storage(&self, quiver: &QuIVer) -> bool {
-        quiver.matches_storage(
-            self.dim,
-            self.payloads.len(),
-            self.indices_to_ids.len(),
-            |slot| {
-                let id = self.indices_to_ids.get(slot).copied()?;
-                if id == 0 || !self.payloads.contains_key(&id) {
-                    return None;
-                }
-                let vector = self.vec_pool.get(slot)?;
-                Some((id, crate::index::bq::Bq2Signature::from_vector(vector)))
-            },
-        )
-    }
-
     /// 设置 QuIVer 同步暂停标记（事务 commit 期间暂停，commit 后恢复）
     #[inline]
     pub fn set_quiver_sync_paused(&mut self, paused: bool) {
@@ -622,6 +695,10 @@ impl<T: VectorType> MemTable<T> {
     ///
     /// **事务安全**：`delete()` / `update_vector()` 会使索引自动失效，
     /// 下次搜索前由 `ensure_vectors_cache()` 自动重建。
+    pub fn set_auto_build_quiver(&mut self, enabled: bool) {
+        self.auto_build_quiver = enabled;
+    }
+
     pub fn build_quiver(&mut self, config: &QuIVerConfig) {
         // 确保 BQ 签名就绪（流式，不物化 merged），然后构建索引
         let total = self.vec_pool.total_count();
@@ -775,7 +852,11 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub fn get_payload(&self, id: NodeId) -> Option<&serde_json::Value> {
-        self.payloads.get(&id)
+        self.payloads.get(&id).map(PayloadEntry::get)
+    }
+
+    pub(crate) fn get_payload_raw(&self, id: NodeId) -> Option<&[u8]> {
+        self.payloads.get(&id).map(PayloadEntry::raw)
     }
 
     pub fn get_edges(&self, id: NodeId) -> Option<&[Edge]> {
@@ -805,7 +886,7 @@ impl<T: VectorType> MemTable<T> {
         self.payloads
             .iter()
             .filter_map(|(&id, payload)| {
-                if payload.get(field) == Some(value) {
+                if payload.get().get(field) == Some(value) {
                     Some(id)
                 } else {
                     None
@@ -828,7 +909,7 @@ impl<T: VectorType> MemTable<T> {
         // 回填：扫描所有 payload，构建索引
         let mut index: HashMap<String, Vec<NodeId>> = HashMap::new();
         for (&id, payload) in &self.payloads {
-            if let Some(val) = payload.get(field) {
+            if let Some(val) = payload.get().get(field) {
                 let key = value_to_index_key(val);
                 index.entry(key).or_default().push(id);
             }
@@ -914,7 +995,7 @@ impl<T: VectorType> MemTable<T> {
         }
 
         // 2. 属性索引清理（必须在 payload 移除之前）
-        if let Some(payload) = self.payloads.get(&id).cloned() {
+        if let Some(payload) = self.get_payload(id).cloned() {
             self.remove_from_property_index(id, &payload);
         }
 
@@ -1016,7 +1097,7 @@ impl<T: VectorType> MemTable<T> {
 
     /// 更新节点的元数据（Payload），不影响向量和图谱
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
-        match self.payloads.get(&id).cloned() {
+        match self.get_payload(id).cloned() {
             Some(old_payload) => {
                 let sig = calculate_json_signature(&payload);
                 if let Some(&idx) = self.ids_to_indices.get(&id) {
@@ -1025,7 +1106,7 @@ impl<T: VectorType> MemTable<T> {
                 // 属性索引：先移除旧值，再添加新值
                 self.remove_from_property_index(id, &old_payload);
                 self.add_to_property_index(id, &payload);
-                self.payloads.insert(id, payload);
+                self.payloads.insert(id, PayloadEntry::from_value(payload));
                 Ok(())
             }
             None => Err(TriviumError::NodeNotFound(id)),
@@ -1061,8 +1142,7 @@ impl<T: VectorType> MemTable<T> {
         patch: &serde_json::Value,
     ) -> Result<serde_json::Value> {
         let old_payload = self
-            .payloads
-            .get(&id)
+            .get_payload(id)
             .cloned()
             .ok_or(TriviumError::NodeNotFound(id))?;
 
@@ -1215,7 +1295,7 @@ impl<T: VectorType> MemTable<T> {
     /// 只计算增量层和合并缓存的实际堆分配。
     pub fn estimated_memory_bytes(&self) -> usize {
         let vec_bytes = self.vec_pool.heap_memory_bytes();
-        let payload_bytes: usize = self.payloads.values().map(|v| v.to_string().len()).sum();
+        let payload_bytes: usize = self.payloads.values().map(PayloadEntry::memory_bytes).sum();
         let edge_bytes: usize = self
             .edges
             .values()
@@ -1229,7 +1309,19 @@ impl<T: VectorType> MemTable<T> {
             .values()
             .map(|pairs| pairs.len() * std::mem::size_of::<(NodeId, NodeId)>())
             .sum();
-        vec_bytes + payload_bytes + edge_bytes + index_bytes + label_index_bytes
+        let quiver_bytes = self
+            .quiver_index
+            .as_ref()
+            .map(|index| index.stats().hot_bytes)
+            .unwrap_or_default();
+        let text_bytes = self.text_index.estimated_memory_bytes();
+        vec_bytes
+            + payload_bytes
+            + edge_bytes
+            + index_bytes
+            + label_index_bytes
+            + quiver_bytes
+            + text_bytes
     }
 
     // --- 文本引擎接口 ---
@@ -1250,6 +1342,14 @@ impl<T: VectorType> MemTable<T> {
         self.text_index.build();
     }
 
+    pub(crate) fn set_text_index(&mut self, text_index: TextIndex) {
+        self.text_index = text_index;
+    }
+
+    pub(crate) fn text_index(&self) -> &TextIndex {
+        &self.text_index
+    }
+
     pub fn text_engine(&self) -> &TextIndex {
         &self.text_index
     }
@@ -1261,7 +1361,7 @@ impl<T: VectorType> MemTable<T> {
     pub fn rebuild_text_index_from_payloads(&mut self) {
         self.text_index.clear();
         for (&id, payload) in &self.payloads {
-            if let serde_json::Value::Object(map) = payload {
+            if let serde_json::Value::Object(map) = payload.get() {
                 for (_key, value) in map {
                     if let serde_json::Value::String(text) = value
                         && !text.is_empty()

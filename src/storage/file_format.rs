@@ -149,6 +149,131 @@ fn quiver_path_from_db(db_path: &str) -> String {
     format!("{}.quiver", db_path)
 }
 
+fn file_crc32(path: impl AsRef<Path>) -> std::io::Result<u32> {
+    use std::io::Read;
+    let mut reader = std::io::BufReader::new(File::open(path)?);
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize())
+}
+
+fn quiver_meta_path_from_db(db_path: &str) -> String {
+    format!("{}.quiver.meta", db_path)
+}
+
+fn write_quiver_meta<T: VectorType>(memtable: &MemTable<T>, db_path: &str) -> std::io::Result<()> {
+    let path = quiver_meta_path_from_db(db_path);
+    let tmp = format!("{path}.tmp");
+    let tdb_size = std::fs::metadata(db_path)?.len();
+    let vec_size = std::fs::metadata(vec_path_from_db(db_path))
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let quiver_path = quiver_path_from_db(db_path);
+    let quiver_size = std::fs::metadata(&quiver_path)?.len();
+    let quiver_crc = file_crc32(&quiver_path)?;
+    let mut bytes = Vec::with_capacity(48);
+    bytes.extend_from_slice(b"QMET");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&tdb_size.to_le_bytes());
+    bytes.extend_from_slice(&vec_size.to_le_bytes());
+    bytes.extend_from_slice(&quiver_size.to_le_bytes());
+    bytes.extend_from_slice(&(memtable.node_count() as u64).to_le_bytes());
+    bytes.extend_from_slice(&(memtable.dim() as u32).to_le_bytes());
+    bytes.extend_from_slice(&quiver_crc.to_le_bytes());
+    let mut file = File::create(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    robust_rename_and_sync(Path::new(&tmp), Path::new(&path))
+}
+
+fn validate_quiver_meta<T: VectorType>(memtable: &MemTable<T>, db_path: &str) -> bool {
+    let Ok(bytes) = std::fs::read(quiver_meta_path_from_db(db_path)) else {
+        return false;
+    };
+    if bytes.len() != 48 || &bytes[0..4] != b"QMET" {
+        return false;
+    }
+    let read_u64 =
+        |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap_or([0; 8]));
+    let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4]));
+    let dim = u32::from_le_bytes(bytes[40..44].try_into().unwrap_or([0; 4])) as usize;
+    let quiver_crc = u32::from_le_bytes(bytes[44..48].try_into().unwrap_or([0; 4]));
+    let actual_quiver_crc = file_crc32(quiver_path_from_db(db_path)).unwrap_or(u32::MAX);
+    version == 1
+        && read_u64(8)
+            == std::fs::metadata(db_path)
+                .map(|m| m.len())
+                .unwrap_or(u64::MAX)
+        && read_u64(16)
+            == std::fs::metadata(vec_path_from_db(db_path))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        && read_u64(24)
+            == std::fs::metadata(quiver_path_from_db(db_path))
+                .map(|m| m.len())
+                .unwrap_or(u64::MAX)
+        && read_u64(32) == memtable.node_count() as u64
+        && dim == memtable.dim()
+        && quiver_crc == actual_quiver_crc
+}
+
+/// TextIndex 索引文件路径（.tdb → .tdb.text）
+fn text_index_path_from_db(db_path: &str) -> String {
+    format!("{}.text", db_path)
+}
+
+fn text_index_meta_path_from_db(db_path: &str) -> String {
+    format!("{}.text.meta", db_path)
+}
+
+fn write_text_index_meta(db_path: &str) -> std::io::Result<()> {
+    let text_path = text_index_path_from_db(db_path);
+    let text_size = std::fs::metadata(&text_path)?.len();
+    let mut bytes = Vec::with_capacity(28);
+    bytes.extend_from_slice(b"TMET");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&std::fs::metadata(db_path)?.len().to_le_bytes());
+    bytes.extend_from_slice(&text_size.to_le_bytes());
+    bytes.extend_from_slice(&file_crc32(&text_path)?.to_le_bytes());
+    let meta_path = text_index_meta_path_from_db(db_path);
+    let tmp = format!("{meta_path}.tmp");
+    let mut file = File::create(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    robust_rename_and_sync(Path::new(&tmp), Path::new(&meta_path))
+}
+
+fn validate_text_index_meta(db_path: &str) -> bool {
+    let Ok(meta) = std::fs::read(text_index_meta_path_from_db(db_path)) else {
+        return false;
+    };
+    let text_path = text_index_path_from_db(db_path);
+    let Ok(text_size_actual) = std::fs::metadata(&text_path).map(|meta| meta.len()) else {
+        return false;
+    };
+    if meta.len() != 28 || &meta[0..4] != b"TMET" {
+        return false;
+    }
+    let version = u32::from_le_bytes(meta[4..8].try_into().unwrap_or([0; 4]));
+    let tdb_size = u64::from_le_bytes(meta[8..16].try_into().unwrap_or([0; 8]));
+    let text_size = u64::from_le_bytes(meta[16..24].try_into().unwrap_or([0; 8]));
+    let text_crc = u32::from_le_bytes(meta[24..28].try_into().unwrap_or([0; 4]));
+    version == 1
+        && tdb_size
+            == std::fs::metadata(db_path)
+                .map(|m| m.len())
+                .unwrap_or(u64::MAX)
+        && text_size == text_size_actual
+        && text_crc == file_crc32(&text_path).unwrap_or(u32::MAX)
+}
+
 pub fn save<T: VectorType>(
     memtable: &mut MemTable<T>,
     path: &str,
@@ -167,13 +292,34 @@ pub fn save<T: VectorType>(
                 "QuIVer 索引持久化失败（不影响主数据）(QuIVer persist failed, main data unaffected): {}",
                 e
             );
+        } else if let Err(error) = write_quiver_meta(memtable, path) {
+            tracing::warn!("QuIVer 元数据持久化失败: {}", error);
         }
     } else {
         // QuIVer 不存在时清理残留文件
-        let qp = std::path::Path::new(&quiver_path);
-        if qp.exists() {
-            std::fs::remove_file(qp).ok();
+        for stale in [&quiver_path, &quiver_meta_path_from_db(path)] {
+            let qp = std::path::Path::new(stale);
+            if qp.exists() {
+                std::fs::remove_file(qp).ok();
+            }
         }
+    }
+
+    let text_path = text_index_path_from_db(path);
+    if let Err(error) = memtable
+        .text_index()
+        .save_to_file(std::path::Path::new(&text_path))
+    {
+        tracing::warn!(
+            "TextIndex 持久化失败（不影响主数据）(TextIndex persist failed): {}",
+            error
+        );
+    } else if std::path::Path::new(&text_path).exists() {
+        if let Err(error) = write_text_index_meta(path) {
+            tracing::warn!("TextIndex 元数据持久化失败: {}", error);
+        }
+    } else {
+        std::fs::remove_file(text_index_meta_path_from_db(path)).ok();
     }
 
     Ok(())
@@ -271,9 +417,8 @@ fn save_tdb<T: VectorType>(
     for &nid in internal_indices {
         if nid != 0 {
             // 有效节点
-            if let Some(p) = memtable.get_payload(nid) {
-                let json_bytes = serde_json::to_vec(p).unwrap_or_default();
-                payload_size += 8 + 4 + json_bytes.len() as u64;
+            if let Some(payload_raw) = memtable.get_payload_raw(nid) {
+                payload_size += 8 + 4 + payload_raw.len() as u64;
             } else {
                 // tombstone 占位符结构：NodeId (0) + len (0) = 12 bytes
                 payload_size += 12;
@@ -324,12 +469,11 @@ fn save_tdb<T: VectorType>(
     // 2. Payload Block 包含 Tombstones
     for &nid in internal_indices {
         if nid != 0
-            && let Some(p) = memtable.get_payload(nid)
+            && let Some(payload_raw) = memtable.get_payload_raw(nid)
         {
-            let json_bytes = serde_json::to_vec(p).unwrap_or_default();
             w.write_all(&nid.to_le_bytes())?;
-            w.write_all(&(json_bytes.len() as u32).to_le_bytes())?;
-            w.write_all(&json_bytes)?;
+            w.write_all(&(payload_raw.len() as u32).to_le_bytes())?;
+            w.write_all(payload_raw)?;
             continue;
         }
         // Tombstone
@@ -384,7 +528,11 @@ fn save_tdb<T: VectorType>(
     Ok(())
 }
 
-pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>> {
+pub fn load<T: VectorType>(
+    path: &str,
+    _mode: StorageMode,
+    load_text_sidecar: bool,
+) -> Result<MemTable<T>> {
     let file = File::open(path).map_err(TriviumError::Io)?;
 
     let mmap = unsafe { Mmap::map(&file) }.map_err(TriviumError::Io)?;
@@ -505,6 +653,9 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
             // 尝试从 BQ Block 恢复签名
             load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
             load_quiver_index(&mut mt, path);
+            if load_text_sidecar {
+                load_text_index(&mut mt, path);
+            }
             Ok(mt)
         } else {
             // marker 缺失或不匹配：直接安全降级，仅加载 .tdb 元数据，依赖 WAL 回放
@@ -523,6 +674,9 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
             )?;
             load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
             load_quiver_index(&mut mt, path);
+            if load_text_sidecar {
+                load_text_index(&mut mt, path);
+            }
             Ok(mt)
         }
     } else {
@@ -541,6 +695,9 @@ pub fn load<T: VectorType>(path: &str, _mode: StorageMode) -> Result<MemTable<T>
         load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
         // 尝试加载 QuIVer 索引
         load_quiver_index(&mut mt, path);
+        if load_text_sidecar {
+            load_text_index(&mut mt, path);
+        }
         Ok(mt)
     }
 }
@@ -686,13 +843,10 @@ fn load_payloads<T: VectorType>(
                 "JSON 数据溢出 (JSON data overflow)".into(),
             ));
         }
-        let payload: serde_json::Value = serde_json::from_slice(&bytes[cursor..cursor + json_len])
-            .map_err(|e| {
-                TriviumError::CorruptedFile(format!("JSON 解析错误 (JSON parse error): {}", e))
-            })?;
+        let payload_raw = &bytes[cursor..cursor + json_len];
         cursor += json_len;
 
-        memtable.register_node(nid, payload)?;
+        memtable.register_node_raw(nid, payload_raw)?;
     }
     Ok(())
 }
@@ -787,6 +941,29 @@ fn load_bq_block<T: VectorType>(
     );
 }
 
+fn load_text_index<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) {
+    let text_path = text_index_path_from_db(db_path);
+    let path = std::path::Path::new(&text_path);
+    if !path.exists() {
+        return;
+    }
+    if !validate_text_index_meta(db_path) {
+        tracing::warn!("TextIndex sidecar 元数据缺失或不匹配，已拒绝并清理");
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(text_index_meta_path_from_db(db_path)).ok();
+        return;
+    }
+    match crate::index::text::TextIndex::load_from_file(path) {
+        Ok(index) => memtable.set_text_index(index),
+        Err(error) => {
+            tracing::warn!(
+                "TextIndex 加载失败，已忽略 sidecar (TextIndex load failed): {}",
+                error
+            );
+        }
+    }
+}
+
 /// 尝试从 .tdb.quiver 文件加载 QuIVer 索引
 ///
 /// 如果文件不存在或加载失败，静默跳过（首次查询时惰性重建）。
@@ -799,19 +976,17 @@ fn load_quiver_index<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) {
         return;
     }
 
+    if !validate_quiver_meta(memtable, db_path) {
+        tracing::warn!("QuIVer sidecar 元数据缺失或不匹配，已拒绝并清理，将在查询时重建");
+        std::fs::remove_file(qp).ok();
+        std::fs::remove_file(quiver_meta_path_from_db(db_path)).ok();
+        return;
+    }
+
     match QuIVer::load_from_file(qp) {
         Ok(quiver) => {
-            if memtable.quiver_matches_storage(&quiver) {
-                memtable.set_quiver_index(quiver);
-                // 加载后即进入 QuIVer 检索路径：冷向量随机按需读取，
-                // 提示 OS 关闭顺序预读以降低 PageCache 常驻
-                memtable.vec_pool_mut().advise_random();
-            } else {
-                tracing::warn!(
-                    "QuIVer sidecar 与主数据不匹配，已拒绝加载并删除 (QuIVer sidecar mismatch, rejected and removed)"
-                );
-                std::fs::remove_file(qp).ok();
-            }
+            memtable.set_quiver_index(quiver);
+            memtable.vec_pool_mut().advise_random();
         }
         Err(e) => {
             tracing::warn!(

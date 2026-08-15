@@ -2008,36 +2008,6 @@ impl QuIVer {
         self.n
     }
 
-    pub(crate) fn matches_storage<F>(
-        &self,
-        dim: usize,
-        active_count: usize,
-        slot_count: usize,
-        mut entry_at: F,
-    ) -> bool
-    where
-        F: FnMut(usize) -> Option<(u64, Bq2Signature)>,
-    {
-        if self.dim != dim || self.active_count() != active_count {
-            return false;
-        }
-
-        self.ids
-            .iter()
-            .zip(&self.slot_indices)
-            .zip(&self.tombstones)
-            .enumerate()
-            .filter(|(_, (_, tombstone))| !**tombstone)
-            .all(|(internal, ((&id, &slot), _))| {
-                if slot >= slot_count {
-                    return false;
-                }
-                entry_at(slot).is_some_and(|(stored_id, signature)| {
-                    stored_id == id && self.bq_store.get_sig(internal) == signature
-                })
-            })
-    }
-
     /// 递增增量变更计数（增量追加节点时调用）
     #[inline]
     pub fn dirty_count_inc(&mut self) {
@@ -2153,7 +2123,8 @@ impl QuIVer {
 
     /// 从文件加载 QuIVer 索引
     pub fn load_from_file(path: &std::path::Path) -> std::io::Result<Self> {
-        let data = std::fs::read(path)?;
+        let file = std::fs::File::open(path)?;
+        let data = unsafe { memmap2::MmapOptions::new().map(&file)? };
         let bytes = &data[..];
 
         if bytes.len() < 48 {

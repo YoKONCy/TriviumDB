@@ -7,7 +7,7 @@
 //! - L3 Payload 预过滤（Parallel Bit-Tag Array 布隆拦截）
 //! - L4 FISTA 残差搜索
 //! - L5 影子查询
-//! - L6 PPR 图谱扩散
+//! - L6 SA-PPR 有限深度图谱扩散
 //! - L7 不应期/侧向抑制
 //! - L9 DPP 多样性采样
 //!
@@ -60,6 +60,17 @@ fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
     }
 
     config.top_k = config.top_k.max(1);
+    config.recall_k = if config.recall_k == 0 {
+        config.top_k.saturating_mul(8).max(64)
+    } else {
+        config.recall_k.max(config.top_k)
+    };
+    config.rerank_k = if config.rerank_k == 0 {
+        config.top_k.saturating_mul(4).max(32)
+    } else {
+        config.rerank_k.max(config.top_k)
+    };
+    config.rerank_k = config.rerank_k.min(config.recall_k);
     config.fista_lambda = config.fista_lambda.clamp(1e-5, 100.0);
     config.teleport_alpha = config.teleport_alpha.clamp(0.0, 1.0);
     config.dpp_quality_weight = config.dpp_quality_weight.clamp(0.0, 10.0);
@@ -171,6 +182,8 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     let mut anchor_hits: Vec<SearchHit> = Vec::new();
     let mut seed_map: std::collections::HashMap<NodeId, f32> = std::collections::HashMap::new();
+    let mut dense_ranking = Vec::new();
+    let mut sparse_ranking = Vec::new();
 
     if let Some(custom_hits) = custom_recall_result {
         // 使用自定义召回结果，跳过内置管线
@@ -179,19 +192,27 @@ pub(crate) fn execute_pipeline<T: VectorType>(
         }
     } else {
         // === 内置召回管线 ===
-        // 提前确保向量缓存已就绪（需要 &mut，只在此处调用一次）。
-        // 仅当将走暴力路径或启用残差影子查询时才需要物化全量 merged 缓存；
-        // 纯 QuIVer 路径按需从 mmap 读取冷向量，无需 merged（避免全量入堆）。
-        let need_flat = config.force_brute_force
-            || (config.enable_advanced_pipeline && config.enable_sparse_residual);
+        let need_flat = config.force_brute_force || mt.quiver().is_none();
         mt.ensure_vectors_cache(need_flat);
-        recall_text(&mt, config, query_text, &mut seed_map);
-        recall_vector(&mut mt, config, query_vector, &mut seed_map);
-        recall_residual(&mt, config, query_vector, &mut seed_map);
+        recall_text_ranked(&mt, config, query_text, &mut sparse_ranking);
+        recall_vector_ranked(&mut mt, config, query_vector, &mut dense_ranking);
+        // FISTA 基于稠密召回候选，融合后再追加影子排名。
+        fuse_rankings_rrf(
+            &mut seed_map,
+            &dense_ranking,
+            &sparse_ranking,
+            config.text_boost,
+        );
+        recall_residual(&mut mt, config, query_vector, &mut seed_map);
     }
+
+    // 内置召回已在分支内完成 RRF；自定义召回保留调用方给出的原始分数。
 
     // 将 seed_map 聚合为 anchor_hits
     aggregate_seeds(&mt, config, &seed_map, &mut anchor_hits);
+    ctx.record_count("dense_recall", dense_ranking.len());
+    ctx.record_count("sparse_recall", sparse_ranking.len());
+    ctx.record_count("fused_recall", anchor_hits.len());
 
     // ═══════════════════════════════════════════════════════
     // 🔌 Hook #3: on_post_recall — 召回后处理
@@ -225,7 +246,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     }
 
     // ═══════════════════════════════════════════════════════
-    //  L6 + L7: PPR 图谱扩散 + 不应期/侧向抑制
+    //  L6 + L7: SA-PPR 有限深度图谱扩散 + 不应期/侧向抑制
     // ═══════════════════════════════════════════════════════
     let t_graph = std::time::Instant::now();
     let mut expanded = crate::graph::traversal::expand_graph(
@@ -251,6 +272,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
             expanded = reranked;
         }
         ctx.record_timing("hook_rerank", t0.elapsed());
+        ctx.record_count("rerank", expanded.len());
     }
 
     // ═══════════════════════════════════════════════════════
@@ -288,38 +310,107 @@ pub(crate) fn execute_pipeline<T: VectorType>(
 //  子管线函数：将各阶段拆为独立函数，提高可读性与可测试性
 // ═══════════════════════════════════════════════════════════
 
+fn effective_recall_k(config: &SearchConfig) -> usize {
+    if config.recall_k == 0 {
+        config.top_k.saturating_mul(8).max(64)
+    } else {
+        config.recall_k.max(config.top_k)
+    }
+}
+
+fn effective_rerank_k(config: &SearchConfig) -> usize {
+    let recall_k = effective_recall_k(config);
+    let rerank_k = if config.rerank_k == 0 {
+        config.top_k.saturating_mul(4).max(32)
+    } else {
+        config.rerank_k.max(config.top_k)
+    };
+    rerank_k.min(recall_k)
+}
+
 /// L1: 文本稀疏召回（AC 自动机精准锚点 + BM25 兜底打分）
-fn recall_text<T: VectorType>(
+fn recall_text_ranked<T: VectorType>(
     mt: &MemTable<T>,
     config: &SearchConfig,
     query_text: Option<&str>,
-    seed_map: &mut std::collections::HashMap<NodeId, f32>,
+    ranking: &mut Vec<(NodeId, f32)>,
 ) {
     if !config.enable_text_hybrid_search {
         return;
     }
     if let Some(txt) = query_text {
         let text_engine = mt.text_engine();
-        // AC 精准命中
-        let ac_hits = text_engine.search_ac(txt);
-        for (id, score) in ac_hits {
-            *seed_map.entry(id).or_insert(0.0) += score * config.text_boost;
+        let mut combined = std::collections::HashMap::<NodeId, f32>::new();
+        for (id, score) in text_engine.search_ac(txt) {
+            *combined.entry(id).or_insert(0.0) += score;
         }
-        // BM25 兜底
-        let bm25_hits = text_engine.search_bm25(txt, config.bm25_k1, config.bm25_b);
-        for (id, score) in bm25_hits {
-            let normalized_score = (score / 10.0).clamp(0.0, 1.0) * config.text_boost;
-            *seed_map.entry(id).or_insert(0.0) += normalized_score;
+        for (id, score) in text_engine.search_bm25(txt, config.bm25_k1, config.bm25_b) {
+            *combined.entry(id).or_insert(0.0) += score;
         }
+        ranking.extend(combined);
+        ranking.sort_by(|a, b| b.1.total_cmp(&a.1));
+        ranking.truncate(effective_recall_k(config));
     }
 }
 
-/// L2 + L3: 向量稠密召回（自适应路由 + 布隆预过滤）
+#[cfg(test)]
+fn recall_text<T: VectorType>(
+    mt: &MemTable<T>,
+    config: &SearchConfig,
+    query_text: Option<&str>,
+    seed_map: &mut std::collections::HashMap<NodeId, f32>,
+) {
+    let mut ranking = Vec::new();
+    recall_text_ranked(mt, config, query_text, &mut ranking);
+    seed_map.extend(ranking);
+}
+
+#[cfg(test)]
 fn recall_vector<T: VectorType>(
     mt: &mut MemTable<T>,
     config: &SearchConfig,
     query_vector: Option<&[T]>,
     seed_map: &mut std::collections::HashMap<NodeId, f32>,
+) {
+    let mut ranking = Vec::new();
+    recall_vector_ranked(mt, config, query_vector, &mut ranking);
+    seed_map.extend(ranking);
+}
+
+fn fuse_rankings_rrf(
+    output: &mut std::collections::HashMap<NodeId, f32>,
+    dense: &[(NodeId, f32)],
+    sparse: &[(NodeId, f32)],
+    sparse_weight: f32,
+) {
+    const RRF_K: f32 = 60.0;
+    output.clear();
+    if sparse.is_empty() {
+        output.extend(dense.iter().copied());
+        return;
+    }
+    if dense.is_empty() {
+        let weight = sparse_weight.max(0.0);
+        for (rank, &(id, _)) in sparse.iter().enumerate() {
+            output.insert(id, weight * RRF_K / (RRF_K + rank as f32 + 1.0));
+        }
+        return;
+    }
+    for (rank, &(id, _)) in dense.iter().enumerate() {
+        *output.entry(id).or_insert(0.0) += RRF_K / (RRF_K + rank as f32 + 1.0);
+    }
+    let weight = sparse_weight.max(0.0);
+    for (rank, &(id, _)) in sparse.iter().enumerate() {
+        *output.entry(id).or_insert(0.0) += weight * RRF_K / (RRF_K + rank as f32 + 1.0);
+    }
+}
+
+/// L2 + L3: 向量稠密召回（自适应路由 + 布隆预过滤）
+fn recall_vector_ranked<T: VectorType>(
+    mt: &mut MemTable<T>,
+    config: &SearchConfig,
+    query_vector: Option<&[T]>,
+    ranking: &mut Vec<(NodeId, f32)>,
 ) {
     let query_vector = match query_vector {
         Some(qv) => qv,
@@ -353,9 +444,7 @@ fn recall_vector<T: VectorType>(
         brute_force_pipeline(mt, config, query_vector, mt.flat_vectors(), dim)
     };
 
-    for hit in vector_hits {
-        *seed_map.entry(hit.id).or_insert(0.0) += hit.score;
-    }
+    ranking.extend(vector_hits.into_iter().map(|hit| (hit.id, hit.score)));
 }
 
 /// 暴力全扫管线（N < 10,000 或 force_brute_force 时使用）
@@ -375,7 +464,7 @@ fn brute_force_pipeline<T: VectorType + Sync>(
         query_vector,
         vectors,
         dim,
-        config.top_k,
+        effective_recall_k(config),
         config.min_score,
         |idx| eligible_node_id(mt, config.payload_filter.as_ref(), bloom_mask, idx),
     )
@@ -395,10 +484,11 @@ fn quiver_pipeline<T: VectorType + Sync>(
     let quiver = mt.quiver().unwrap();
     let q_f32: Vec<f32> = query_vector.iter().map(|x| x.to_f32()).collect();
 
-    // ef_search 默认为 top_k * 8，BQ 2-bit 量化精度较低，需要更宽的 beam 覆盖
-    let ef_search = config.top_k.max(1) * 8;
+    // ef_search 随召回池扩展，保证最终重排有足够候选。
+    let recall_k = effective_recall_k(config);
+    let ef_search = recall_k.max(1) * 8;
     let search_cfg = QuIVerSearchConfig {
-        top_k: config.top_k.max(1) * 2, // 多召回一些，给 filter 留余量
+        top_k: recall_k.max(1) * 2,
         ef_search,
         rerank_limit: None,
     };
@@ -451,13 +541,13 @@ fn quiver_pipeline<T: VectorType + Sync>(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    hits.truncate(config.top_k);
+    hits.truncate(recall_k);
     hits
 }
 
 /// L4 + L5: FISTA 残差搜索 + 影子查询
 fn recall_residual<T: VectorType>(
-    mt: &MemTable<T>,
+    mt: &mut MemTable<T>,
     config: &SearchConfig,
     query_vector: Option<&[T]>,
     seed_map: &mut std::collections::HashMap<NodeId, f32>,
@@ -471,9 +561,6 @@ fn recall_residual<T: VectorType>(
     };
 
     let filter_ref = config.payload_filter.as_ref();
-    let bloom_mask = filter_ref
-        .map(|filter| filter.extract_must_have_mask())
-        .unwrap_or(0);
 
     let entity_vecs: Vec<Vec<f32>> = seed_map
         .keys()
@@ -501,17 +588,16 @@ fn recall_residual<T: VectorType>(
             config.fista_threshold
         );
         let r_orig: Vec<T> = residual.iter().map(|&x| T::from_f32(x)).collect();
-        let dim = mt.dim();
-        let shadow_hits = brute_force::search_filter_map(
-            &r_orig,
-            mt.flat_vectors(),
-            dim,
-            config.top_k,
-            config.min_score,
-            |idx| eligible_node_id(mt, filter_ref, bloom_mask, idx),
-        );
-        for sh in shadow_hits {
-            *seed_map.entry(sh.id).or_insert(0.0) += sh.score * 0.8; // 影子抑制衰减
+        let mut shadow_config = config.clone();
+        shadow_config.recall_k = config.rerank_k;
+        shadow_config.top_k = config.rerank_k;
+        shadow_config.min_score = -1.0;
+        let mut shadow_ranking = Vec::new();
+        recall_vector_ranked(mt, &shadow_config, Some(&r_orig), &mut shadow_ranking);
+        for (rank, (id, _)) in shadow_ranking.into_iter().enumerate() {
+            // 影子分支使用排名融合，避免残差余弦与主召回分数跨量纲相加。
+            let score = 0.5 * 60.0 / (61.0 + rank as f32);
+            *seed_map.entry(id).or_insert(0.0) += score;
         }
     }
 }
@@ -544,7 +630,7 @@ fn aggregate_seeds<T: VectorType>(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    anchor_hits.truncate(config.top_k.max(15));
+    anchor_hits.truncate(effective_rerank_k(config));
 }
 
 #[inline]
@@ -666,6 +752,37 @@ mod tests {
             expand_depth: 0,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_rrf融合不依赖跨量纲原始分数() {
+        let dense = vec![(1, 0.9), (2, 0.8)];
+        let sparse = vec![(2, 1000.0), (1, 0.001)];
+        let mut fused = std::collections::HashMap::new();
+        fuse_rankings_rrf(&mut fused, &dense, &sparse, 1.0);
+        assert!((fused[&1] - fused[&2]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rrf单路保持稠密原始分数() {
+        let dense = vec![(1, 0.91), (2, 0.42)];
+        let mut fused = std::collections::HashMap::new();
+        fuse_rankings_rrf(&mut fused, &dense, &[], 1.0);
+        assert_eq!(fused[&1], 0.91);
+        assert_eq!(fused[&2], 0.42);
+    }
+
+    #[test]
+    fn test_sanitize_config解耦候选池() {
+        let mut config = SearchConfig {
+            top_k: 10,
+            recall_k: 0,
+            rerank_k: 0,
+            ..Default::default()
+        };
+        sanitize_config(&mut config, 128).unwrap();
+        assert_eq!(config.recall_k, 80);
+        assert_eq!(config.rerank_k, 40);
     }
 
     // ════════ aggregate_seeds ════════
@@ -850,6 +967,7 @@ mod tests {
 
         let cfg = SearchConfig {
             top_k: 2,
+            recall_k: 2,
             min_score: -1.0,
             force_brute_force: true,
             payload_filter: Some(Filter::eq("group", serde_json::json!("keep"))),
@@ -879,6 +997,7 @@ mod tests {
 
         let cfg = SearchConfig {
             top_k: 2,
+            recall_k: 2,
             min_score: -1.0,
             payload_filter: Some(Filter::eq("group", serde_json::json!("keep"))),
             ..Default::default()
@@ -937,7 +1056,7 @@ mod tests {
         let mut seed_map = std::collections::HashMap::new();
         seed_map.insert(1u64, 0.9f32);
         let before = seed_map.clone();
-        recall_residual(&mt, &cfg, Some(&query), &mut seed_map);
+        recall_residual(&mut mt, &cfg, Some(&query), &mut seed_map);
         assert_eq!(seed_map, before, "disabled 时 seed_map 不应变化");
     }
 
@@ -952,7 +1071,7 @@ mod tests {
         };
         let query = vec![1.0, 0.0, 0.0];
         let mut seed_map = std::collections::HashMap::new();
-        recall_residual(&mt, &cfg, Some(&query), &mut seed_map);
+        recall_residual(&mut mt, &cfg, Some(&query), &mut seed_map);
         assert!(seed_map.is_empty());
     }
 
@@ -1166,6 +1285,13 @@ mod tests {
         let stage_names: Vec<&str> = ctx.stage_timings.iter().map(|(n, _)| n.as_str()).collect();
         assert!(stage_names.contains(&"hook_pre_search"));
         assert!(stage_names.contains(&"hook_post_search"));
+        let count_names: Vec<&str> = ctx
+            .stage_counts
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(count_names.contains(&"dense_recall"));
+        assert!(count_names.contains(&"fused_recall"));
     }
 
     // ════════ Hook 集成 ════════

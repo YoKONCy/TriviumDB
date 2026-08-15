@@ -122,7 +122,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         })?;
 
         let mut memtable = if std::path::Path::new(path).exists() {
-            file_format::load(path, config.storage_mode)?
+            file_format::load(path, config.storage_mode, config.load_text_index)?
         } else {
             MemTable::new(dim)
         };
@@ -156,8 +156,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
         }
 
-        // 从已有 payload 自动重建 TextIndex
-        memtable.rebuild_text_index_from_payloads();
+        // TextIndex 由 sidecar 精确恢复；缺失时保持为空，避免打开数据库时
+        // 无条件扫描全部 Payload 并改变用户显式 index_text() 的索引语义。
+        memtable.set_auto_build_quiver(config.auto_build_quiver);
 
         let wal = Wal::open_with_sync(path, config.sync_mode)?;
         Ok(Self {
@@ -289,8 +290,21 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     //  Compaction 管理
     // ════════════════════════════════════════════════════════
 
+    pub fn clear_search_state(&self) {
+        lock_or_recover(&self.memtable).clear_fatigue();
+    }
+
+    pub fn set_auto_build_quiver(&mut self, enabled: bool) {
+        lock_or_recover(&self.memtable).set_auto_build_quiver(enabled);
+    }
+
     /// 启动后台自动 Compaction 线程
-    pub fn enable_auto_compaction(&mut self, interval: Duration) {
+    pub fn enable_auto_compaction(&mut self, interval: Duration) -> Result<()> {
+        if interval.is_zero() {
+            return Err(TriviumError::InvalidInput(
+                "自动压缩间隔必须大于 0 秒".into(),
+            ));
+        }
         self.compaction.take();
         let ct = CompactionThread::spawn(
             interval,
@@ -300,6 +314,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             self.storage_mode,
         );
         self.compaction = Some(ct);
+        Ok(())
     }
 
     pub fn disable_auto_compaction(&mut self) {

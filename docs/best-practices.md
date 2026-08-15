@@ -65,7 +65,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.7.3" 
+triviumdb = "0.7.4"
 ```
 
 ### 30 秒入门模板
@@ -235,7 +235,9 @@ db.set_memory_limit(mb=512)  # 超过 512MB 自动触发 flush
 
 | 参数 | 调大效果 | 调小效果 |
 |------|----------|----------|
-| `top_k` | 更多候选 → 更高召回率 | 更少候选 → 更快响应 |
+| `top_k` | 最终返回更多结果 | 最终响应更精简 |
+| `recall_k` | 更宽初始候选池，提升召回 | 更低ANN与文本召回开销 |
+| `rerank_k` | 更多候选进入SA-PPR/FISTA/DPP | 更低高级管线开销 |
 | `expand_depth` | 更深扩散 → 发现更远关联 | 更浅扩散 → 避免噪声 |
 | `min_score` | 更严格 → 结果更精准 | 更宽松 → 结果更多 |
 
@@ -621,12 +623,15 @@ TriviumDB v0.7.0 起采用自研的 **QuIVer**（Quantized Indexed Vector Retrie
 ### 快速达到 QuIVer 激活
 
 ```python
-# 1. 打开数据库
-with triviumdb.TriviumDB("data.tdb", dim=1536) as db:
-    # 2. 导入 >= 1 万条数据
-    db.batch_insert(vectors_10k, payloads_10k)
-    # 3. flush —— QuIVer 索引将在首次查询时自动构建
+with triviumdb.TriviumDB(
+    "data.tdb",
+    dim=1536,
+    sync_mode="off",
+    auto_build_quiver=False,
+) as db:
+    db.batch_insert(vectors, payloads)
     db.flush()
+    db.set_auto_build_quiver(True)
 ```
 
 ### 高精度场景：强制绕过 QuIVer
@@ -899,13 +904,13 @@ anchor_id = db.search(encode("小明的工作关系"), top_k=1)[0].id
 rows = db.tql(f'MATCH (a {{id: {anchor_id}}})-[:colleague]->(b) RETURN b')
 ```
 
-对于需要复杂图算法（最短路径、社区发现、PageRank）的场景，TriviumDB 内置的**扩散激活（Spreading Activation）+ PPR（Personalized PageRank）**认知管线已覆盖了 AI 场景下最实用的图语义传播需求，且比纯 TQL 查询更具 AI 语义感知能力：
+对于需要复杂图算法（最短路径、社区发现、PageRank）的场景，TriviumDB 的 **SA-PPR** 是有限深度扩散激活，不等同于收敛式 PageRank；它适合记忆关联传播，但标准 PageRank 分析仍应使用专用图算法：
 
 ```python
 results = db.search_advanced(
     query_vector=vec,
     expand_depth=3,
-    teleport_alpha=0.15,   # PPR 回跳概率，等效于图算法中的 PageRank 阻尼因子
+    teleport_alpha=0.15,   # SA-PPR每层按初始种子分布回注的能量比例
     enable_advanced_pipeline=True,
 )
 ```

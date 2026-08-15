@@ -48,6 +48,8 @@ pub mod nodejs {
     pub struct JsSearchConfig {
         /// top_k 用 i64 承载：u32 会把 JS 负数无符号化成超大值（静默返回全库）
         pub top_k: Option<i64>,
+        pub recall_k: Option<i64>,
+        pub rerank_k: Option<i64>,
         pub expand_depth: Option<u32>,
         pub min_score: Option<f64>,
         pub teleport_alpha: Option<f64>,
@@ -111,6 +113,8 @@ pub mod nodejs {
     pub struct JsHookContext {
         /// 各管线阶段的耗时统计（JSON 对象, 单位: 毫秒）
         pub timings: serde_json::Value,
+        /// 每阶段候选数量
+        pub counts: serde_json::Value,
         /// Hook 注入的自定义数据
         pub custom_data: serde_json::Value,
         /// 管线是否被 Hook 提前终止
@@ -226,6 +230,8 @@ pub mod nodejs {
         ) -> napi::Result<JsSearchWithContextResult> {
             let cfg = config.unwrap_or(JsSearchConfig {
                 top_k: None,
+                recall_k: None,
+                rerank_k: None,
                 expand_depth: None,
                 min_score: None,
                 teleport_alpha: None,
@@ -251,6 +257,8 @@ pub mod nodejs {
             }
             let core_config = crate::database::SearchConfig {
                 top_k: top_k as usize,
+                recall_k: cfg.recall_k.unwrap_or(0).max(0) as usize,
+                rerank_k: cfg.rerank_k.unwrap_or(0).max(0) as usize,
                 expand_depth: cfg.expand_depth.unwrap_or(2) as usize,
                 min_score: cfg.min_score.unwrap_or(0.1) as f32,
                 teleport_alpha: cfg.teleport_alpha.unwrap_or(0.0) as f32,
@@ -310,8 +318,14 @@ pub mod nodejs {
                 );
             }
 
+            let counts = hook_ctx
+                .stage_counts
+                .iter()
+                .map(|(stage, count)| (stage.clone(), serde_json::json!(count)))
+                .collect();
             let context = JsHookContext {
                 timings: serde_json::Value::Object(timings_map),
+                counts: serde_json::Value::Object(counts),
                 custom_data: hook_ctx.custom_data,
                 aborted: hook_ctx.abort,
             };
@@ -684,7 +698,7 @@ pub mod nodejs {
                 .collect())
         }
 
-        /// 认知检索引擎：完全参数化暴露的高级功能 (FISTA, DPP, PPR)
+        /// 认知检索引擎：完全参数化暴露的高级功能 (FISTA, DPP, SA-PPR)
         #[napi]
         pub fn search_advanced(
             &self,
@@ -693,6 +707,8 @@ pub mod nodejs {
         ) -> napi::Result<Vec<JsSearchHit>> {
             let cfg = config.unwrap_or(JsSearchConfig {
                 top_k: None,
+                recall_k: None,
+                rerank_k: None,
                 expand_depth: None,
                 min_score: None,
                 teleport_alpha: None,
@@ -718,6 +734,8 @@ pub mod nodejs {
             }
             let core_config = crate::database::SearchConfig {
                 top_k: top_k as usize,
+                recall_k: cfg.recall_k.unwrap_or(0).max(0) as usize,
+                rerank_k: cfg.rerank_k.unwrap_or(0).max(0) as usize,
                 expand_depth: cfg.expand_depth.unwrap_or(2) as usize,
                 min_score: cfg.min_score.unwrap_or(0.1) as f32,
                 teleport_alpha: cfg.teleport_alpha.unwrap_or(0.0) as f32,
@@ -979,12 +997,23 @@ pub mod nodejs {
 
         /// 启动后台自动压缩（每 interval_secs 秒落盘一次，默认 2 小时=7200秒）
         #[napi]
-        pub fn enable_auto_compaction(&mut self, interval_secs: Option<u32>) {
-            let secs = interval_secs.unwrap_or(7200) as u64;
-            dispatch!(self, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(secs)));
+        pub fn enable_auto_compaction(&mut self, interval_secs: Option<u32>) -> napi::Result<()> {
+            let secs = interval_secs.unwrap_or(7200);
+            dispatch!(self, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(secs as u64)))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
+        #[napi]
+        pub fn set_auto_build_quiver(&mut self, enabled: bool) {
+            dispatch!(self, mut db => db.set_auto_build_quiver(enabled));
         }
 
         /// 停止后台自动压缩
+        #[napi]
+        pub fn clear_search_state(&self) {
+            dispatch!(self, db => db.clear_search_state());
+        }
+
         #[napi]
         pub fn disable_auto_compaction(&mut self) {
             dispatch!(self, mut db => db.disable_auto_compaction());

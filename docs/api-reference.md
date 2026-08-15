@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.7.3
+> **版本**: v0.7.4
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -40,8 +40,10 @@ db = triviumdb.TriviumDB("my_data.tdb", dim=1536)
 db = triviumdb.TriviumDB(
     path="my_data.tdb",    # 文件路径（不存在则新建）
     dim=1536,              # 向量维度（一旦创建不可更改）
-    dtype="f32",           # 向量类型："f32" | "f16" | "u64"
-    sync_mode="normal"     # WAL 同步模式："full" | "normal" | "off"
+    dtype="f32",             # 向量类型："f32" | "f16" | "u64"
+    sync_mode="normal",      # WAL 同步模式："full" | "normal" | "off"
+    load_text_index=False,    # 打开时是否加载持久化全文索引
+    auto_build_quiver=True,   # 是否允许查询/flush 自动构建 QuIVer
 )
 
 # 推荐：使用上下文管理器（退出时自动 flush 落盘）
@@ -387,16 +389,18 @@ for hit in &results {
 
 ### search_advanced — 认知管线检索
 
-内置九层认知管线的全功能入口。通过 `SearchConfig` 参数化控制 FISTA 残差寻隐、PPR 图扩散、DPP 多样性采样等高级特性。
+内置认知管线的全功能入口。通过 `SearchConfig` 参数化控制 FISTA 残差寻隐、SA-PPR 有限深度扩散、DPP 多样性采样等高级特性。SA-PPR 是带个性化重启的有限深度 Spreading Activation，不是迭代至收敛的标准 PageRank。
 
 **Python：**
 ```python
 results = db.search_advanced(
     query_vector=[0.10, -0.48, 0.80, ...],
     top_k=10,
+    recall_k=200,                   # 初始稠密/稀疏召回池
+    rerank_k=50,                    # SA-PPR/FISTA/DPP 前候选池
     expand_depth=2,
     min_score=0.1,
-    teleport_alpha=0.15,          # PPR 回跳概率
+    teleport_alpha=0.15,            # SA-PPR 个性化重启比例
     enable_advanced_pipeline=True, # 总开关
     enable_sparse_residual=True,   # FISTA 影子查询
     fista_lambda=0.1,
@@ -444,7 +448,9 @@ let results = db.search_advanced(&query_vec, &config)?;
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `top_k` | `usize` | `5` | 最终返回的结果数量 |
-| `expand_depth` | `usize` | `2` | 图谱扩散跳数 |
+| `recall_k` | `usize` | `0`（自动） | 初始召回池；自动值为 `max(top_k × 8, 64)` |
+| `rerank_k` | `usize` | `0`（自动） | 高级处理候选池；自动值为 `max(top_k × 4, 32)`，且不超过 `recall_k` |
+| `expand_depth` | `usize` | `2` | SA-PPR 有限深度扩散跳数 |
 | `min_score` | `f32` | `0.1` | 余弦相似度下限 |
 | `teleport_alpha` | `f32` | `0.0` | PPR 回跳概率 (0.0~1.0)，越高越抑制深层扩散 |
 | `enable_advanced_pipeline` | `bool` | `false` | 认知管线总开关，关闭时退化为普通检索 |
@@ -454,7 +460,7 @@ let results = db.search_advanced(&query_vec, &config)?;
 | `enable_dpp` | `bool` | `false` | 启用 DPP 多样性采样 |
 | `dpp_quality_weight` | `f32` | `1.0` | DPP 质量权重幂次 |
 | `enable_text_hybrid_search`| `bool`| `false`| 是否开启 BM25/AC 双路混合搜索 |
-| `text_boost` | `f32` | `1.5` | 文本混合查询分数提权倍率 |
+| `text_boost` | `f32` | `1.5` | 加权 RRF 中的稀疏排名权重；不再与余弦分数直接相加 |
 | `hybrid_alpha` | `f32` | `0.7` | 混合检索中向量权重 (0~1)，(1-alpha) 为稀疏文本权重 |
 | `custom_query_text` | `str`| `None` | (可选) 手动传入用于文本匹配的原始文本 |
 | `force_brute_force` | `bool` | `false`| 强制使用暴力搜索，禁用 QuIVer 图索引（用于基准测试和需要精确结果的场景） |
@@ -489,7 +495,7 @@ TriviumDB v0.6.0 新增的检索管线 Hook 系统，允许开发者在 6 个关
   🔌 #4 on_pre_graph_expand  — 图扩散前拦截
       │
   ┌── 图谱扩散 ──────┐
-  │  L6 PPR 扩散      │
+  │  L6 SA-PPR 扩散   │
   │  L7 不应期/抑制    │
   └──────────────────┘
       │
@@ -884,7 +890,8 @@ db.set_sync_mode("off")    # 批量导入时临时提速
 
 **Python：**
 ```python
-db.enable_auto_compaction(interval_secs=30)  # 每 30 秒后台自动落盘
+db.enable_auto_compaction(interval_secs=30)  # 间隔必须大于 0
+# db.enable_auto_compaction(interval_secs=0)  # ValueError：拒绝忙循环
 db.disable_auto_compaction()                 # 停止后台压缩线程
 ```
 
@@ -988,7 +995,9 @@ TriviumDB v0.7.0 起采用自研的 **QuIVer** SOTA 级 ANN 图索引，全自�
 | < 1 万节点 或 QuIVer 未就绪 | **BruteForce** | 100% 精确召回，零误差 |
 | ≥ 1 万节点 + 索引就绪 | **QuIVer (BQ + Vamana)** | BQ 签名 + 图导航 + f32 精排，Recall@10 > 97% |
 
-QuIVer 索引支持增量 Insert/Delete/Update，无需全量重建。索引以独立的 `.tdb.quiver` 文件持久化，重启后零延迟恢复。
+QuIVer 索引支持增量 Insert/Delete/Update，无需全量重建。索引以 `.tdb.quiver` 持久化，并通过 `.tdb.quiver.meta` 的主数据代际、文件尺寸、节点数、维度与 CRC 校验后 mmap 加载。TextIndex 对应 `.tdb.text` 和 `.tdb.text.meta`。
+
+批量导入可在构造时设置 `auto_build_quiver=False`，或运行时调用 `set_auto_build_quiver(False)`，避免中途 flush 构建索引；导入完成后重新开启并执行一次查询/flush。无状态评测或独立查询之间可调用 `clear_search_state()` 清空疲劳状态。
 
 > 💡 如果你的业务对 100% 召回率有强需求（如金融/医疗），可以通过 `force_brute_force: true` 强制使用 BruteForce。
 

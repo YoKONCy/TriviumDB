@@ -410,7 +410,7 @@ TriviumDB's cognitive retrieval pipeline implements the following academic works
 
 1. **FISTA**: Beck & Teboulle, 2009, _SIAM J. Imaging Sciences_
 2. **DPP**: Kulesza & Taskar, 2012, _Foundations and Trends in ML_
-3. **PPR**: Haveliwala, 2002, _WWW Conference_
+3. **SA-PPR**: finite-depth Spreading Activation with Personalized Restart; it does not iterate to PageRank convergence
 4. **Spreading Activation**: Anderson, 1983, _The Architecture of Cognition_
 5. **BM25**: Robertson & Zaragoza, 2009
 6. **Vamana Graph**: Subramanya et al., 2019, _DiskANN_, NeurIPS 2019

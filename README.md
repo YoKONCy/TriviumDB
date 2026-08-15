@@ -194,7 +194,7 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 | 特性                   | 说明                                                                                                                             |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | 🔍 **混合检索**        | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序                                                                    |
-| 🧠 **认知管线**        | 内置多层认知检索管线（本项目自研分层设计）：FISTA 残差寻隐 / PPR 图扩散 / DPP 多样性采样 / 疲劳不应期，运行时可自适应开关        |
+| 🧠 **认知管线**        | FISTA 残差寻隐 / SA-PPR 有限深度扩散 / DPP 多样性采样 / 疲劳不应期，运行时可独立开关                                         |
 | 🔌 **Hook 扩展系统**   | 6 个管线关键阶段的自定义注入点：查询预处理 / 自定义召回 / 召回后处理 / 图扩散前 / 重排序 / 最终后处理，支持 C/C++ FFI 动态库插件 |
 | 📦 **三位一体 O(1)**   | 自动增量 O(1) FreeList 墓碑空洞复用；删节点 O(1) 反向边哈希表（本项目称 Reverse Hash Net），彻底杜绝盘面膨胀与图谱雪崩           |
 | ⚡ **QuIVer ANN 索引** | 自研 SOTA 级近似最近邻图索引：BQ 签名 + Vamana 图导航，冷热分离架构，增量 Insert/Delete/Update 无需重建                          |
@@ -275,7 +275,7 @@ TriviumDB/
 │   │   ├── bq.rs           # BQ 二进制量化签名（QuIVer 基础层）
 │   │   └── quiver.rs       # 🚀 QuIVer ANN 索引（BQ + Vamana 图导航 + 冷热分离）
 │   ├── graph/
-│   │   ├── traversal.rs    # PPR 图扩散 (Spreading Activation)
+│   │   ├── traversal.rs    # SA-PPR 有限深度图扩散
 │   │   └── leiden.rs       # Leiden 社区发现算法
 │   └── bindings/           # FFI 绑定层（公共逻辑已提取至核心模块）
 │       ├── mod.rs          # 统一入口（feature-gated）
@@ -411,7 +411,7 @@ TriviumDB 的认知检索管线借鉴并实现了以下学术成果（均为本�
 
 1. **FISTA** (Fast Iterative Shrinkage-Thresholding Algorithm)：Beck & Teboulle, 2009, _"A Fast Iterative Shrinkage-Thresholding Algorithm for Linear Inverse Problems"_, SIAM J. Imaging Sciences
 2. **DPP** (Determinantal Point Process)：Kulesza & Taskar, 2012, _"Determinantal Point Processes for Machine Learning"_, Foundations and Trends in Machine Learning
-3. **PPR** (Personalized PageRank)：Haveliwala, 2002, _"Topic-Sensitive PageRank"_, WWW Conference
+3. **SA-PPR**（有限深度 Spreading Activation with Personalized Restart）：结合个性化重启思想与扩散激活；本实现不迭代至 PageRank 收敛
 4. **Spreading Activation**：灵感来源于 Anderson, 1983, _"The Architecture of Cognition"_ 中的扩散激活理论
 5. **BM25**：Robertson & Zaragoza, 2009, _"The Probabilistic Relevance Framework: BM25 and Beyond"_
 6. **Vamana Graph**：Subramanya et al., 2019, _"DiskANN: Fast Accurate Billion-point Nearest Neighbor Search on a Single Node"_, NeurIPS 2019（QuIVer 的图导航层基于 Vamana 剪枝策略的独立 Rust 实现）

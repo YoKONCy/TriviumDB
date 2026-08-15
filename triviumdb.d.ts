@@ -82,6 +82,10 @@ export type FilterCondition = {
 export interface JsSearchConfig {
   /** 最终返回结果数量 (默认 5) */
   topK?: number;
+  /** 初始稠密/稀疏召回池；0表示自动 */
+  recallK?: number;
+  /** SA-PPR/FISTA/DPP前候选池；0表示自动 */
+  rerankK?: number;
   /** 图谱扩散跳数 (默认 2) */
   expandDepth?: number;
   /** 余弦相似度下限 (默认 0.1) */
@@ -147,6 +151,8 @@ export interface JsLeidenConfig {
 export interface JsHookContext {
   /** 各管线阶段的耗时统计（JSON 对象, 单位: 毫秒） */
   timings: any;
+  /** 每阶段候选数量 */
+  counts: any;
   /** Hook 注入的自定义数据 */
   customData: any;
   /** 管线是否被 Hook 提前终止 */

@@ -373,7 +373,7 @@ TriviumDB 内置了一套多层认知检索管线（本项目自研的功能性�
 | **L1/L2** | 意图拆分 + 向量召回 | 外部客户端 + MemTable 向量池 |
 | **L3** | NMF 语义分解分析 | `cognitive.rs` · `nmf_multiplicative_update` |
 | **L4/L5** | FISTA 稀疏残差 + 影子查询 | `cognitive.rs` · `fista_solve` + `database.rs` 自动触发 |
-| **L6/L7** | PPR 图扩散 + 边特异性强化 + 不应期抑制 | `graph/traversal.rs` · `teleport_alpha` + `powf(0.55)` 入度惩罚 + 疲劳不应期 |
+| **L6/L7** | SA-PPR 有限深度扩散 + 边特异性强化 + 不应期抑制 | `graph/traversal.rs` · 个性化重启 + 出边能量归一化 + 入度惩罚 + 疲劳不应期 |
 | **L8** | 时间/重要性重排 | 主动向业务侧让权，不侵入底层 |
 | **L9** | DPP 多样性采样 | `cognitive.rs` · `dpp_greedy` + Cholesky 行列式 |
 

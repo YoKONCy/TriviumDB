@@ -22,6 +22,10 @@ pub struct Config {
     pub dim: usize,
     pub sync_mode: SyncMode,
     pub storage_mode: StorageMode,
+    /// 是否在首次查询/flush 时自动构建 QuIVer。批量导入可关闭以避免中途构建峰值。
+    pub auto_build_quiver: bool,
+    /// 是否在打开时加载持久化全文索引。纯向量数据库默认关闭以降低启动内存。
+    pub load_text_index: bool,
 }
 
 impl Default for Config {
@@ -30,6 +34,8 @@ impl Default for Config {
             dim: 1536,
             sync_mode: SyncMode::default(),
             storage_mode: StorageMode::default(),
+            auto_build_quiver: true,
+            load_text_index: false,
         }
     }
 }
@@ -37,10 +43,15 @@ impl Default for Config {
 /// 基于外部参数化配置的查询配置参数矩阵
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
+    /// 最终返回数量。
     pub top_k: usize,
+    /// 初始召回池大小；0 表示自动取 `max(top_k * 8, 64)`。
+    pub recall_k: usize,
+    /// SA-PPR/FISTA/DPP 前的重排池大小；0 表示自动取 `max(top_k * 4, 32)`。
+    pub rerank_k: usize,
     pub expand_depth: usize,
     pub min_score: f32,
-    pub teleport_alpha: f32, // L6 PPR 阻尼因子/回家概率
+    pub teleport_alpha: f32, // L6 SA-PPR 个性化重启比例
 
     // 认知层统开开关 (当为 false 时，管线完全退化为最极简的传统检索引擎)
     pub enable_advanced_pipeline: bool,
@@ -81,10 +92,10 @@ pub struct SearchConfig {
     // --- 上下文条件扩散 (Context-Conditioned Spreading Activation) ---
     /// 扩散方向偏置向量：当提供时，图扩散优先沿着与此向量语义相近的节点方向传播。
     ///
-    /// 在 PPR 扩散的每条边上施加 attention gate: `gate_j = σ(bias · v_j / √dim)`，
+    /// 在 SA-PPR 扩散的每条边上施加 attention gate: `gate_j = σ(bias · v_j / √dim)`，
     /// 其中 `v_j` 为目标节点的 embedding。gate ∈ (0, 1) 调制能量传导强度。
     ///
-    /// 不提供时退化为标准 PPR（向后兼容）。
+    /// 不提供时退化为无上下文门控的 SA-PPR（向后兼容）。
     ///
     /// 典型用途：
     /// - 对话系统：传入 RNN 隐状态的投影向量，让扩散感知对话方向
@@ -97,6 +108,8 @@ impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             top_k: 5,
+            recall_k: 0,
+            rerank_k: 0,
             expand_depth: 2,
             min_score: 0.1,
             teleport_alpha: 0.0,
