@@ -30,6 +30,10 @@ pub enum TriviumError {
     #[error("数据库已锁定 (Database locked): {0}")]
     DatabaseLocked(String),
 
+    /// 数据库已关闭（close/release_lock 后不可再执行写入，防止无锁双写）
+    #[error("数据库已关闭 (Database closed): 关闭后不能再执行写入操作")]
+    DatabaseClosed,
+
     /// 数据库文件格式损坏或不兼容
     #[error("文件损坏 (Corrupted file): {0}")]
     CorruptedFile(String),

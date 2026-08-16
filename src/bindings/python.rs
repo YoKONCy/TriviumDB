@@ -1027,7 +1027,10 @@ pub mod python {
             _exc_val: Option<&Bound<'_, PyAny>>,
             _exc_tb: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<bool> {
+            // 与 close() 对齐：flush 后显式释放文件锁，避免 with 块退出后
+            // 同进程重开报 Database locked
             self.flush()?;
+            dispatch!(self, mut db => db.release_lock());
             Ok(false)
         }
 

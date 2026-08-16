@@ -598,7 +598,23 @@ pub fn load<T: VectorType>(
                     as usize;
             if bq_count > 0 {
                 let sig_size = std::mem::size_of::<BqSignature>();
-                let expected_bq_end = bq_offset + 8 + bq_count * sig_size;
+                // 防整数溢出：bq_count × sig_size 在 64 位下可回绕为小值，
+                // 绕过下方截断校验后触发巨型分配（恶意/损坏文件 DoS）。
+                let Some(sig_bytes) = bq_count.checked_mul(sig_size) else {
+                    return Err(TriviumError::CorruptedFile(format!(
+                        "BQ 块长度溢出 (BQ block size overflow): {} 个签名 × {} 字节",
+                        bq_count, sig_size
+                    )));
+                };
+                let Some(expected_bq_end) = bq_offset
+                    .checked_add(8)
+                    .and_then(|v| v.checked_add(sig_bytes))
+                else {
+                    return Err(TriviumError::CorruptedFile(format!(
+                        "BQ 块偏移溢出 (BQ block offset overflow): offset {} + {} 字节",
+                        bq_offset, sig_bytes
+                    )));
+                };
                 if expected_bq_end > file_len {
                     return Err(TriviumError::CorruptedFile(format!(
                         "BQ 块被截断 (BQ block truncated): 期望 {} 字节 (offset {} + 8 + {} × {})，\
@@ -900,13 +916,24 @@ fn load_bq_block<T: VectorType>(
     }
 
     let sig_size = std::mem::size_of::<BqSignature>();
-    let data_start = bq_offset + 8;
-    let data_end = data_start + bq_count * sig_size;
+    // 防整数溢出：checked 乘法/加法，回绕即视为数据不完整（恶意/损坏文件），
+    // 避免 bq_count 被回绕后绕过 file_len 校验并触发巨型 Vec::with_capacity。
+    let Some(sig_bytes) = bq_count.checked_mul(sig_size) else {
+        tracing::warn!("BQ Block 长度溢出 (BQ Block size overflow): {} 个签名", bq_count);
+        return;
+    };
+    let Some(data_start) = bq_offset.checked_add(8) else {
+        return;
+    };
+    let Some(data_end) = data_start.checked_add(sig_bytes) else {
+        tracing::warn!("BQ Block 偏移溢出 (BQ Block offset overflow)");
+        return;
+    };
 
     if data_end > file_len {
         tracing::warn!(
             "BQ Block 数据不完整 (BQ Block data incomplete)（需要 {} 字节，文件仅剩 {} 字节），跳过恢复",
-            bq_count * sig_size,
+            sig_bytes,
             file_len.saturating_sub(data_start)
         );
         return;

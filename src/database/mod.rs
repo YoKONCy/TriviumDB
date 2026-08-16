@@ -46,6 +46,8 @@ pub struct Database<T: VectorType> {
     /// 文件锁：防止多进程同时打开同一个数据库
     /// Option 化以便 close() 时显式 take 释放（否则锁要等对象 Drop，JS GC 时机不可控）
     _lock_file: Option<std::fs::File>,
+    /// 关闭标记：release_lock()/close() 后置位，写操作拒绝（防止释放锁后无保护双写）
+    closed: bool,
     /// 内存上限（字节），0 = 无限制
     memory_limit: usize,
     /// 存储模式
@@ -167,6 +169,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             wal: Arc::new(Mutex::new(wal)),
             compaction: None,
             _lock_file: Some(lock_file),
+            closed: false,
             memory_limit: 0,
             storage_mode: config.storage_mode,
             hook: Arc::new(NoopHook),
@@ -323,6 +326,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     /// 主动触发全量重写与压实（Manual Compaction）
     pub fn compact(&mut self) -> Result<()> {
+        if self.closed {
+            return Err(TriviumError::DatabaseClosed);
+        }
         {
             let mut mt = lock_or_recover(&self.memtable);
             tracing::info!("手动压实开始 (Manual compaction started): {}", self.db_path);
@@ -350,6 +356,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     // ════════════════════════════════════════════════════════
 
     pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) -> Result<NodeId> {
+        if self.closed {
+            return Err(TriviumError::DatabaseClosed);
+        }
         let payload_str = payload.to_string();
         if payload_str.len() > 8 * 1024 * 1024 {
             return Err(crate::error::TriviumError::PayloadTooLarge {
@@ -381,6 +390,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         vector: &[T],
         payload: serde_json::Value,
     ) -> Result<()> {
+        if self.closed {
+            return Err(TriviumError::DatabaseClosed);
+        }
         let payload_str = payload.to_string();
         if payload_str.len() > 8 * 1024 * 1024 {
             return Err(crate::error::TriviumError::PayloadTooLarge {
@@ -405,6 +417,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) -> Result<()> {
+        if self.closed {
+            return Err(TriviumError::DatabaseClosed);
+        }
         {
             let mut mt = lock_or_recover(&self.memtable);
             mt.validate_link(src, dst)?;
@@ -421,6 +436,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn delete(&mut self, id: NodeId) -> Result<()> {
+        if self.closed {
+            return Err(TriviumError::DatabaseClosed);
+        }
         {
             let mut mt = lock_or_recover(&self.memtable);
             mt.validate_delete(id)?;
@@ -433,6 +451,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn unlink(&mut self, src: NodeId, dst: NodeId) -> Result<()> {
+        if self.closed {
+            return Err(TriviumError::DatabaseClosed);
+        }
         {
             let mut mt = lock_or_recover(&self.memtable);
             mt.validate_unlink(src)?;
@@ -444,6 +465,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
+        if self.closed {
+            return Err(TriviumError::DatabaseClosed);
+        }
         let payload_str = payload.to_string();
         if payload_str.len() > 8 * 1024 * 1024 {
             return Err(crate::error::TriviumError::PayloadTooLarge {
@@ -481,6 +505,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// db.patch_payload(id, serde_json::json!({"name": "Bob"}))?;
     /// ```
     pub fn patch_payload(&mut self, id: NodeId, patch: serde_json::Value) -> Result<()> {
+        if self.closed {
+            return Err(TriviumError::DatabaseClosed);
+        }
         let final_payload = {
             let mt = lock_or_recover(&self.memtable);
             mt.preview_patch_payload(id, &patch)?
@@ -507,6 +534,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn update_vector(&mut self, id: NodeId, vector: &[T]) -> Result<()> {
+        if self.closed {
+            return Err(TriviumError::DatabaseClosed);
+        }
         {
             let mut mt = lock_or_recover(&self.memtable);
             mt.validate_update_vector(id, vector)?;
@@ -915,6 +945,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ///   1. 原子写入 .tdb（写 .tmp → fsync → rename）
     ///   2. 确认 .tdb 写入成功后，才清除 WAL
     pub fn flush(&mut self) -> Result<()> {
+        if self.closed {
+            return Err(TriviumError::DatabaseClosed);
+        }
         {
             let mut mt = lock_or_recover(&self.memtable);
             file_format::save(&mut mt, &self.db_path, self.storage_mode)?;
@@ -937,8 +970,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ///
     /// 锁文件必须保留在固定路径上：删除后其他进程可以创建同名新文件并锁住
     /// 不同的文件实体，从而绕过现有锁。句柄释放后，空的 `.lock` 文件留存是正常现象。
+    ///
+    /// 释放锁后数据库即进入关闭状态（`closed = true`）：后续写操作将被拒绝，
+    /// 防止无锁保护下的多进程双写导致文件撕裂。
     pub fn release_lock(&mut self) {
         self._lock_file.take();
+        self.closed = true;
     }
 
     pub fn node_count(&self) -> usize {
