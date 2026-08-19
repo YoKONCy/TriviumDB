@@ -23,7 +23,7 @@ pub use database::Database;
 pub use error::{Result, TriviumError};
 pub use filter::Filter;
 pub use hook::{CompositeHook, FfiHook, HookContext, NoopHook, SearchHook};
-pub use node::{Edge, NodeId, NodeView, SearchHit};
+pub use node::{Edge, IncomingEdge, NodeId, NodeView, SearchHit};
 pub mod vector;
 pub use vector::VectorType;
 

@@ -267,6 +267,30 @@ fn get_in_degree_和_incoming_sources() {
 }
 
 #[test]
+fn get_incoming_edges_含label和weight() {
+    let mut mt = make_mt();
+    for i in 1..=3 {
+        mt.insert_with_id(i, &[i as f32, 0.0, 0.0], json!({}))
+            .unwrap();
+    }
+    mt.link(1, 3, "about".into(), 0.9).unwrap();
+    mt.link(1, 3, "in_workspace".into(), 1.0).unwrap();
+    mt.link(2, 3, "decided".into(), 0.5).unwrap();
+
+    let all = mt.get_incoming_edges(3, None);
+    assert_eq!(all.len(), 3);
+
+    let about = mt.get_incoming_edges(3, Some("about"));
+    assert_eq!(about.len(), 1);
+    assert_eq!(about[0].source_id, 1);
+    assert_eq!(about[0].label, "about");
+    assert!((about[0].weight - 0.9).abs() < 1e-6);
+
+    let none = mt.get_incoming_edges(3, Some("missing"));
+    assert!(none.is_empty());
+}
+
+#[test]
 fn get_edges_by_label() {
     let mut mt = make_mt();
     for i in 1..=3 {

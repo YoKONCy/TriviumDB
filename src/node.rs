@@ -12,6 +12,17 @@ pub struct Edge {
     pub weight: Weight,
 }
 
+/// 入边视图：指向当前节点的有向带权边。
+///
+/// 存储层只维护 `incoming_edges: dst → [src]`（Reverse Hash Net），
+/// label / weight 从源节点出边表解析，避免另建一份边存储。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IncomingEdge {
+    pub source_id: NodeId,
+    pub label: Label,
+    pub weight: Weight,
+}
+
 /// 用户在查询时返回的统一节点数据视图
 #[derive(Debug, Clone)]
 pub struct NodeView<T> {

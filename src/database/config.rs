@@ -102,6 +102,13 @@ pub struct SearchConfig {
     /// - RAG 应用：传入查询向量本身，让扩散偏向查询语义方向
     /// - 推荐系统：传入用户偏好向量，让扩散偏向用户兴趣方向
     pub diffusion_bias: Option<Vec<f32>>,
+
+    /// 图扩散 / SA-PPR 边标签白名单。
+    ///
+    /// `None`（默认）沿全部出边扩散，与历史行为一致。
+    /// `Some(labels)` 时只沿这些 label 传播能量；未列出的边（如 `in_workspace`）
+    /// 既不成为邻居，也不占用归一化能量预算。
+    pub expand_labels: Option<Vec<String>>,
 }
 
 impl Default for SearchConfig {
@@ -129,6 +136,7 @@ impl Default for SearchConfig {
             bm25_b: 0.75,
             payload_filter: None,
             diffusion_bias: None,
+            expand_labels: None,
         }
     }
 }

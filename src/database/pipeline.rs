@@ -249,7 +249,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     //  L6 + L7: SA-PPR 有限深度图谱扩散 + 不应期/侧向抑制
     // ═══════════════════════════════════════════════════════
     let t_graph = std::time::Instant::now();
-    let mut expanded = crate::graph::traversal::expand_graph(
+    let mut expanded = crate::graph::traversal::expand_graph_with_labels(
         &mt,
         seeds,
         config.expand_depth,
@@ -258,6 +258,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
         config.lateral_inhibition_threshold,
         config.enable_refractory_fatigue,
         config.diffusion_bias.as_deref(), // CCSA: 传递扩散偏置向量
+        config.expand_labels.as_deref(),
     );
     ctx.record_timing("graph_expand", t_graph.elapsed());
 

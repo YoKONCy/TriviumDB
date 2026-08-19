@@ -57,6 +57,17 @@ pub mod python {
         pub weight: f32,
     }
 
+    #[pyclass(name = "IncomingEdge")]
+    #[derive(Clone)]
+    pub struct PyIncomingEdge {
+        #[pyo3(get)]
+        pub source_id: u64,
+        #[pyo3(get)]
+        pub label: String,
+        #[pyo3(get)]
+        pub weight: f32,
+    }
+
     /// Python 侧的节点完整视图
     #[pyclass(name = "NodeView")]
     pub struct PyNodeView {
@@ -329,7 +340,7 @@ pub mod python {
         /// print(ctx.timings)   # {'hook_pre_search': 0.1, 'graph_expand': 2.3, ...}
         /// print(ctx.custom_data)  # Hook 注入的自定义数据
         /// ```
-        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None))]
+        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None, expand_labels=None))]
         fn search_with_context(
             &self,
             py: Python<'_>,
@@ -340,6 +351,7 @@ pub mod python {
             expand_depth: usize,
             min_score: f32,
             payload_filter: Option<&Bound<'_, PyDict>>,
+            expand_labels: Option<Vec<String>>,
         ) -> PyResult<(Vec<PySearchHit>, PyHookContext)> {
             let rust_filter = match payload_filter {
                 Some(dict) => Some(dict_to_filter(py, dict)?),
@@ -352,6 +364,7 @@ pub mod python {
                 expand_depth,
                 min_score,
                 payload_filter: rust_filter,
+                expand_labels,
                 ..Default::default()
             };
 
@@ -479,7 +492,7 @@ pub mod python {
             )
         }
 
-        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, payload_filter=None))]
+        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, payload_filter=None, expand_labels=None))]
         fn search(
             &self,
             py: Python<'_>,
@@ -490,6 +503,7 @@ pub mod python {
             expand_depth: usize,
             min_score: f32,
             payload_filter: Option<&Bound<'_, PyDict>>,
+            expand_labels: Option<Vec<String>>,
         ) -> PyResult<Vec<PySearchHit>> {
             let rust_filter = match payload_filter {
                 Some(dict) => Some(dict_to_filter(py, dict)?),
@@ -504,6 +518,7 @@ pub mod python {
                 min_score,
                 enable_advanced_pipeline: false,
                 payload_filter: rust_filter,
+                expand_labels,
                 ..Default::default()
             };
 
@@ -555,7 +570,8 @@ pub mod python {
             text_boost=1.5,
             custom_query_text=None,
             payload_filter=None,
-            force_brute_force=false
+            force_brute_force=false,
+            expand_labels=None
         ))]
         fn search_advanced(
             &self,
@@ -579,6 +595,7 @@ pub mod python {
             custom_query_text: Option<String>,
             payload_filter: Option<&Bound<'_, PyDict>>,
             force_brute_force: bool,
+            expand_labels: Option<Vec<String>>,
         ) -> PyResult<Vec<PySearchHit>> {
             // 解析 payload_filter（类 MongoDB 语法的 dict -> Rust Filter）
             let rust_filter = match payload_filter {
@@ -604,6 +621,7 @@ pub mod python {
                 text_boost,
                 force_brute_force,
                 payload_filter: rust_filter,
+                expand_labels,
                 ..Default::default()
             };
 
@@ -638,7 +656,7 @@ pub mod python {
                 .collect())
         }
 
-        #[pyo3(signature = (query_vector, query_text, top_k=5, expand_depth=2, min_score=0.1, hybrid_alpha=0.7, payload_filter=None))]
+        #[pyo3(signature = (query_vector, query_text, top_k=5, expand_depth=2, min_score=0.1, hybrid_alpha=0.7, payload_filter=None, expand_labels=None))]
         fn search_hybrid(
             &self,
             py: Python<'_>,
@@ -649,6 +667,7 @@ pub mod python {
             min_score: f32,
             hybrid_alpha: f32,
             payload_filter: Option<&Bound<'_, PyDict>>,
+            expand_labels: Option<Vec<String>>,
         ) -> PyResult<Vec<PySearchHit>> {
             let rust_filter = match payload_filter {
                 Some(dict) => Some(dict_to_filter(py, dict)?),
@@ -665,6 +684,7 @@ pub mod python {
                 enable_text_hybrid_search: true,
                 text_boost: boost,
                 payload_filter: rust_filter,
+                expand_labels,
                 ..Default::default()
             };
             let results = match &self.inner {
@@ -831,6 +851,19 @@ pub mod python {
                 .collect()
         }
 
+        /// 获取指向该节点的入边（Reverse Hash Net）。label 可选过滤。
+        #[pyo3(signature = (id, label=None))]
+        fn get_incoming_edges(&self, id: u64, label: Option<&str>) -> Vec<PyIncomingEdge> {
+            dispatch!(self, db => db.get_incoming_edges(id, label))
+                .into_iter()
+                .map(|e| PyIncomingEdge {
+                    source_id: e.source_id,
+                    label: e.label,
+                    weight: e.weight,
+                })
+                .collect()
+        }
+
         fn get(&self, py: Python<'_>, id: u64) -> PyResult<Option<PyNodeView>> {
             match &self.inner {
                 DbBackend::F32(db) => {
@@ -895,9 +928,9 @@ pub mod python {
             Ok(None)
         }
 
-        #[pyo3(signature = (id, depth=1))]
-        fn neighbors(&self, id: u64, depth: usize) -> Vec<u64> {
-            dispatch!(self, db => db.neighbors(id, depth))
+        #[pyo3(signature = (id, depth=1, labels=None))]
+        fn neighbors(&self, id: u64, depth: usize, labels: Option<Vec<String>>) -> Vec<u64> {
+            dispatch!(self, db => db.neighbors_with_labels(id, depth, labels.as_deref()))
         }
 
         fn node_count(&self) -> usize {

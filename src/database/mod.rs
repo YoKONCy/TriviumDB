@@ -609,6 +609,17 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         mt.get_edges(id).map(|e| e.to_vec()).unwrap_or_default()
     }
 
+    /// 获取指向 `id` 的入边（Reverse Hash Net，O(in_degree)）。
+    /// `label` 为 Some 时只返回该标签。
+    pub fn get_incoming_edges(
+        &self,
+        id: NodeId,
+        label: Option<&str>,
+    ) -> Vec<crate::node::IncomingEdge> {
+        let mt = lock_or_recover(&self.memtable);
+        mt.get_incoming_edges(id, label)
+    }
+
     pub fn get_all_ids(&self) -> Vec<NodeId> {
         let mt = lock_or_recover(&self.memtable);
         mt.get_all_ids()
@@ -704,6 +715,16 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn neighbors(&self, id: NodeId, depth: usize) -> Vec<NodeId> {
+        self.neighbors_with_labels(id, depth, None)
+    }
+
+    /// N 跳 BFS。`labels` 为 Some 时只沿白名单标签扩散；None 保持原行为（全 label）。
+    pub fn neighbors_with_labels(
+        &self,
+        id: NodeId,
+        depth: usize,
+        labels: Option<&[String]>,
+    ) -> Vec<NodeId> {
         use std::collections::{HashSet, VecDeque};
         let mt = lock_or_recover(&self.memtable);
         let mut visited = HashSet::new();
@@ -716,6 +737,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
             if let Some(edges) = mt.get_edges(curr) {
                 for edge in edges {
+                    if let Some(whitelist) = labels
+                        && !whitelist.iter().any(|l| l == &edge.label)
+                    {
+                        continue;
+                    }
                     if visited.insert(edge.target_id) {
                         queue.push_back((edge.target_id, d + 1));
                     }

@@ -210,3 +210,25 @@ fn expand_空seeds() {
     let result = expand_graph(&mt, vec![], 2, 0.0, false, 0, false, None);
     assert!(result.is_empty());
 }
+
+#[test]
+fn expand_labels_白名单不沿其他边扩散() {
+    let mt = build_graph();
+    let seeds = vec![seed(1, 1.0)];
+    let labels = ["knows".to_string()];
+    let result = triviumdb::graph::traversal::expand_graph_with_labels(
+        &mt,
+        seeds,
+        1,
+        0.0,
+        false,
+        0,
+        false,
+        None,
+        Some(&labels),
+    );
+    let ids: Vec<u64> = result.iter().map(|h| h.id).collect();
+    assert!(ids.contains(&1));
+    assert!(ids.contains(&2), "应沿 knows 扩到节点 2");
+    assert!(!ids.contains(&4), "不应沿 works 扩到节点 4");
+}

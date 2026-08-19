@@ -392,6 +392,44 @@ fn neighbors_基础() {
 }
 
 #[test]
+fn neighbors_with_labels_过滤非业务边() {
+    let mut db = open_db("neighbors_labels");
+    let mem = db.insert(&[1.0, 0.0, 0.0], json!({"kind": "memory"})).unwrap();
+    let entity = db.insert(&[0.0, 1.0, 0.0], json!({"kind": "entity"})).unwrap();
+    let ws = db.insert(&[0.0, 0.0, 1.0], json!({"kind": "workspace"})).unwrap();
+    db.link(mem, entity, "about", 1.0).unwrap();
+    db.link(mem, ws, "in_workspace", 1.0).unwrap();
+
+    let all = db.neighbors(mem, 1);
+    assert!(all.contains(&entity));
+    assert!(all.contains(&ws), "不传 labels 应仍沿全部出边");
+
+    let business = db.neighbors_with_labels(mem, 1, Some(&["about".into()]));
+    assert!(business.contains(&entity));
+    assert!(!business.contains(&ws), "白名单不应顺着 in_workspace 扩散");
+}
+
+#[test]
+fn get_incoming_edges_从entity找到about过来的preference() {
+    let mut db = open_db("incoming_about");
+    let pref = db.insert(&[1.0, 0.0, 0.0], json!({"kind": "preference"})).unwrap();
+    let entity = db.insert(&[0.0, 1.0, 0.0], json!({"kind": "entity"})).unwrap();
+    let ws = db.insert(&[0.0, 0.0, 1.0], json!({"kind": "workspace"})).unwrap();
+    db.link(pref, entity, "about", 1.0).unwrap();
+    db.link(pref, ws, "in_workspace", 1.0).unwrap();
+
+    let incoming = db.get_incoming_edges(entity, Some("about"));
+    assert_eq!(incoming.len(), 1);
+    assert_eq!(incoming[0].source_id, pref);
+    assert_eq!(incoming[0].label, "about");
+
+    let ws_in = db.get_incoming_edges(ws, None);
+    assert_eq!(ws_in.len(), 1);
+    assert_eq!(ws_in[0].source_id, pref);
+    assert_eq!(ws_in[0].label, "in_workspace");
+}
+
+#[test]
 fn dim_和_all_node_ids() {
     let mut db = open_db("dim_ids");
     assert_eq!(db.dim(), 3);

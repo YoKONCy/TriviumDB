@@ -241,6 +241,30 @@ const edges = db.getEdges(42)
 edges.forEach(e => console.log(`${e.targetId} (${e.label})`))
 ```
 
+### get_incoming_edges — 获取入边列表
+
+获取指向该节点的所有入边（含 `source_id` / `label` / `weight`）。实现走 Reverse Hash Net：只遍历该节点的入度来源，再读取各源节点出边，**不会全表扫**。`label` 可选，传入则只返回该标签。
+
+**Python：**
+```python
+incoming = db.get_incoming_edges(42)
+about = db.get_incoming_edges(42, label="about")
+for e in about:
+    print(f"{e.source_id} -[:{e.label}]-> 42  w={e.weight}")
+```
+
+**Node.js：**
+```js
+const incoming = db.getIncomingEdges(42)
+const about = db.getIncomingEdges(42, 'about')
+```
+
+**Rust：**
+```rust
+let incoming = db.get_incoming_edges(42, None);
+let about = db.get_incoming_edges(42, Some("about"));
+```
+
 ### contains — 节点存在检查
 
 **Python：**
@@ -299,16 +323,24 @@ db.unlink(1, 2)?;
 
 ### neighbors — N 跳邻居
 
-从指定节点出发，沿有向边进行广度优先遍历（BFS），返回 N 跳以内所有可达节点的 ID。
+从指定节点出发，沿有向边进行广度优先遍历（BFS），返回 N 跳以内所有可达节点的 ID。`labels` 为可选边标签白名单；省略时沿**全部**出边（与历史行为一致）。
 
 **Python：**
 ```python
 neighbor_ids = db.neighbors(id=1, depth=2)  # 2 跳以内的所有邻居
+business = db.neighbors(id=1, depth=1, labels=["about", "decided", "broke", "fixed"])
+```
+
+**Node.js：**
+```js
+db.neighbors(1, 2)
+db.neighbors(1, 1, ['about', 'decided', 'broke', 'fixed'])
 ```
 
 **Rust：**
 ```rust
 let ids = db.neighbors(1, 2);
+let business = db.neighbors_with_labels(1, 1, Some(&["about".into(), "decided".into()]));
 ```
 
 ---
@@ -464,10 +496,13 @@ let results = db.search_advanced(&query_vec, &config)?;
 | `hybrid_alpha` | `f32` | `0.7` | 混合检索中向量权重 (0~1)，(1-alpha) 为稀疏文本权重 |
 | `custom_query_text` | `str`| `None` | (可选) 手动传入用于文本匹配的原始文本 |
 | `force_brute_force` | `bool` | `false`| 强制使用暴力搜索，禁用 QuIVer 图索引（用于基准测试和需要精确结果的场景） |
+| `expand_labels` | `list[str]` / `None` | `None` | 图扩散边标签白名单。`None` 沿全部出边；传入后只沿这些 label 传播，未列出的边（如 `in_workspace`）既不扩散也不占用能量预算 |
 
 > 💡 所有参数均内置安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]。传入越界值不会崩溃，而是被静默钳平。
 
 > 💡 当 `enable_advanced_pipeline = false` 时，`search_advanced` 的行为与 `search` 完全一致。
+
+> 💡 **SA-PPR 与边权（已有行为，本版本未改默认排序）**：扩散按出边 `weight` 的**绝对值**做单层能量归一化，符号决定能量正负（负权抑制）。`label == "inhibition"` 的边强制按负能量传播。`expand_labels` 过滤发生在归一化之前。
 
 ---
 

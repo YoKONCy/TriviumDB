@@ -3,7 +3,7 @@ use crate::error::{Result, TriviumError};
 use crate::index::bq::BqSignature;
 use crate::index::quiver::{QuIVer, QuIVerConfig};
 use crate::index::text::TextIndex;
-use crate::node::{Edge, NodeId};
+use crate::node::{Edge, IncomingEdge, NodeId};
 use crate::storage::vec_pool::VecPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -869,6 +869,39 @@ impl<T: VectorType> MemTable<T> {
             .get(&id)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// 获取指向 id 的入边（含 label / weight）。
+    ///
+    /// 利用 Reverse Hash Net 只遍历入度来源，再读取各源节点出边；
+    /// `label` 为 Some 时只返回该标签。多标签平行边会分别返回。
+    pub fn get_incoming_edges(&self, id: NodeId, label: Option<&str>) -> Vec<IncomingEdge> {
+        let mut seen_src = HashSet::new();
+        let mut result = Vec::new();
+        for &src in self.get_incoming_sources(id) {
+            if !seen_src.insert(src) {
+                continue;
+            }
+            let Some(edges) = self.get_edges(src) else {
+                continue;
+            };
+            for edge in edges {
+                if edge.target_id != id {
+                    continue;
+                }
+                if let Some(want) = label
+                    && edge.label != want
+                {
+                    continue;
+                }
+                result.push(IncomingEdge {
+                    source_id: src,
+                    label: edge.label.clone(),
+                    weight: edge.weight,
+                });
+            }
+        }
+        result
     }
 
     /// 按标签查询所有边 (src, dst) 对，O(1) 查找

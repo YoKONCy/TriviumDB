@@ -19,6 +19,39 @@ pub fn expand_graph<T: crate::VectorType>(
     enable_refractory_fatigue: bool,
     diffusion_bias: Option<&[f32]>,
 ) -> Vec<SearchHit> {
+    expand_graph_with_labels(
+        db,
+        seeds,
+        max_depth,
+        restart_alpha,
+        enable_inverse_inhibition,
+        lateral_inhibition_threshold,
+        enable_refractory_fatigue,
+        diffusion_bias,
+        None,
+    )
+}
+
+/// 与 [`expand_graph`] 相同，但可限制只沿 `expand_labels` 白名单扩散。
+///
+/// `expand_labels = None` 时行为与历史 `expand_graph` 完全一致。
+/// 白名单过滤发生在能量归一化之前：未列出的边既不传播、也不占用预算。
+///
+/// 边权语义（本函数不改变默认排序，仅如实使用已有规则）：
+/// - 有效边权取 `weight` 的绝对值参与单层能量归一化；
+/// - `weight` 的符号决定能量正负（负权抑制）；
+/// - `label == "inhibition"` 强制按负能量传播，与 `weight` 符号无关。
+pub fn expand_graph_with_labels<T: crate::VectorType>(
+    db: &MemTable<T>,
+    seeds: Vec<SearchHit>,
+    max_depth: usize,
+    restart_alpha: f32,
+    enable_inverse_inhibition: bool,
+    lateral_inhibition_threshold: usize,
+    enable_refractory_fatigue: bool,
+    diffusion_bias: Option<&[f32]>,
+    expand_labels: Option<&[String]>,
+) -> Vec<SearchHit> {
     if max_depth == 0 || seeds.is_empty() {
         return seeds;
     }
@@ -88,6 +121,11 @@ pub fn expand_graph<T: crate::VectorType>(
             let mut weighted_edges = Vec::with_capacity(edges.len());
             let mut normalizer = 0.0f32;
             for edge in edges {
+                if let Some(whitelist) = expand_labels
+                    && !whitelist.iter().any(|l| l == &edge.label)
+                {
+                    continue;
+                }
                 if !edge.weight.is_finite() || edge.weight == 0.0 {
                     continue;
                 }

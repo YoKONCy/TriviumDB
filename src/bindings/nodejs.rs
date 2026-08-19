@@ -66,12 +66,22 @@ pub mod nodejs {
         pub custom_query_text: Option<String>,
         /// CCSA: 扩散方向偏置向量，让图扩散优先沿语义相近的节点方向传播
         pub diffusion_bias: Option<Vec<f64>>,
+        /// 图扩散边标签白名单；省略时沿全部出边（与历史行为一致）
+        pub expand_labels: Option<Vec<String>>,
     }
 
     /// 节点关系边
     #[napi(object)]
     pub struct JsEdge {
         pub target_id: f64,
+        pub label: String,
+        pub weight: f64,
+    }
+
+    /// 指向当前节点的入边
+    #[napi(object)]
+    pub struct JsIncomingEdge {
+        pub source_id: f64,
         pub label: String,
         pub weight: f64,
     }
@@ -247,6 +257,7 @@ pub mod nodejs {
                 text_boost: None,
                 force_brute_force: None,
                 diffusion_bias: None,
+                expand_labels: None,
             });
 
             let top_k = cfg.top_k.unwrap_or(5);
@@ -275,6 +286,7 @@ pub mod nodejs {
                 diffusion_bias: cfg
                     .diffusion_bias
                     .map(|v| v.iter().map(|&x| x as f32).collect()),
+                expand_labels: cfg.expand_labels.clone(),
                 ..Default::default()
             };
 
@@ -576,11 +588,16 @@ pub mod nodejs {
                 .map_err(|e| napi::Error::from_reason(e.to_string()))
         }
 
-        /// 获取 N 跳邻居节点 ID 列表
+        /// 获取 N 跳邻居节点 ID 列表。`labels` 为边标签白名单，省略则沿全部出边。
         #[napi]
-        pub fn neighbors(&self, id: f64, depth: Option<u32>) -> Vec<f64> {
+        pub fn neighbors(
+            &self,
+            id: f64,
+            depth: Option<u32>,
+            labels: Option<Vec<String>>,
+        ) -> Vec<f64> {
             let depth = depth.unwrap_or(1) as usize;
-            dispatch!(self, db => db.neighbors(id as u64, depth))
+            dispatch!(self, db => db.neighbors_with_labels(id as u64, depth, labels.as_deref()))
                 .into_iter()
                 .map(|id| id as f64)
                 .collect()
@@ -658,6 +675,7 @@ pub mod nodejs {
             top_k: Option<i64>,
             expand_depth: Option<u32>,
             min_score: Option<f64>,
+            expand_labels: Option<Vec<String>>,
         ) -> napi::Result<Vec<JsSearchHit>> {
             let top_k = top_k.unwrap_or(5);
             if top_k <= 0 {
@@ -669,21 +687,30 @@ pub mod nodejs {
             let expand_depth = expand_depth.unwrap_or(0) as usize;
             let min_score = min_score.unwrap_or(0.5) as f32;
 
+            let core_config = crate::database::SearchConfig {
+                top_k,
+                expand_depth,
+                min_score,
+                enable_advanced_pipeline: false,
+                expand_labels,
+                ..Default::default()
+            };
+
             let hits = match &self.inner {
                 DbBackend::F32(db) => {
                     let v: Vec<f32> = query_vector.iter().map(|&x| x as f32).collect();
-                    db.search(&v, top_k, expand_depth, min_score)
+                    db.search_hybrid(None, Some(&v), &core_config)
                 }
                 DbBackend::F16(db) => {
                     let v: Vec<half::f16> = query_vector
                         .iter()
                         .map(|&x| half::f16::from_f64(x))
                         .collect();
-                    db.search(&v, top_k, expand_depth, min_score)
+                    db.search_hybrid(None, Some(&v), &core_config)
                 }
                 DbBackend::U64(db) => {
                     let v: Vec<u64> = query_vector.iter().map(|&x| x as u64).collect();
-                    db.search(&v, top_k, expand_depth, min_score)
+                    db.search_hybrid(None, Some(&v), &core_config)
                 }
             }
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
@@ -724,6 +751,7 @@ pub mod nodejs {
                 text_boost: None,
                 force_brute_force: None,
                 diffusion_bias: None,
+                expand_labels: None,
             });
 
             let top_k = cfg.top_k.unwrap_or(5);
@@ -752,6 +780,7 @@ pub mod nodejs {
                 diffusion_bias: cfg
                     .diffusion_bias
                     .map(|v| v.iter().map(|&x| x as f32).collect()),
+                expand_labels: cfg.expand_labels.clone(),
                 ..Default::default()
             };
 
@@ -796,6 +825,7 @@ pub mod nodejs {
             expand_depth: Option<u32>,
             min_score: Option<f64>,
             hybrid_alpha: Option<f64>,
+            expand_labels: Option<Vec<String>>,
         ) -> napi::Result<Vec<JsSearchHit>> {
             let top_k = top_k.unwrap_or(5);
             if top_k <= 0 {
@@ -816,6 +846,7 @@ pub mod nodejs {
                 min_score,
                 enable_text_hybrid_search: true,
                 text_boost: boost,
+                expand_labels,
                 ..Default::default()
             };
 
@@ -903,6 +934,20 @@ pub mod nodejs {
                 .into_iter()
                 .map(|e| JsEdge {
                     target_id: e.target_id as f64,
+                    label: e.label,
+                    weight: e.weight as f64,
+                })
+                .collect()
+        }
+
+        /// 获取指向该节点的入边（Reverse Hash Net，O(入度)）。
+        /// `label` 可选，传入则只返回该标签。
+        #[napi]
+        pub fn get_incoming_edges(&self, id: f64, label: Option<String>) -> Vec<JsIncomingEdge> {
+            dispatch!(self, db => db.get_incoming_edges(id as u64, label.as_deref()))
+                .into_iter()
+                .map(|e| JsIncomingEdge {
+                    source_id: e.source_id as f64,
                     label: e.label,
                     weight: e.weight as f64,
                 })

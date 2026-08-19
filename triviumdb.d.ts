@@ -31,6 +31,15 @@ export interface JsEdge {
   weight: number;
 }
 
+export interface JsIncomingEdge {
+  /** 源节点 ID */
+  sourceId: number;
+  /** 边的分组类型或者名称 */
+  label: string;
+  /** 边权重 */
+  weight: number;
+}
+
 export interface JsNodeView<T = any> {
   /** 节点 ID */
   id: number;
@@ -127,6 +136,11 @@ export interface JsSearchConfig {
    * - 推荐系统: 传入用户偏好向量，让扩散偏向用户兴趣方向
    */
   diffusionBias?: number[];
+  /**
+   * 图扩散边标签白名单。省略时沿全部出边（与历史行为一致）。
+   * 传入如 `['about','decided','broke','fixed']` 时不会顺着 `in_workspace` 扩散。
+   */
+  expandLabels?: string[];
 }
 
 export interface JsClusterResult {
@@ -331,9 +345,10 @@ export class TriviumDB {
    * 图谱上的 N 跳搜索 (广度优先遍历)
    * @param id    起始点
    * @param depth 跳数 (默认 1)
+   * @param labels 边标签白名单；省略则沿全部出边
    * @returns 深度之内的所有不重复的周边点 ID
    */
-  neighbors(id: number, depth?: number): number[];
+  neighbors(id: number, depth?: number, labels?: string[]): number[];
 
   /**
    * 获取节点的出边列表
@@ -341,6 +356,13 @@ export class TriviumDB {
    * @returns 该节点出发的所有有向边
    */
   getEdges(id: number): JsEdge[];
+
+  /**
+   * 获取指向该节点的入边（Reverse Hash Net，O(入度)）
+   * @param id 节点 ID
+   * @param label 可选标签过滤
+   */
+  getIncomingEdges(id: number, label?: string): JsIncomingEdge[];
 
   // ── 检索与查询 ──
 
@@ -350,8 +372,9 @@ export class TriviumDB {
    * @param topK        向外找多少个最相似锚点向量 (默认 5)
    * @param expandDepth 获取到上述锚点后，在图谱里扩散的跳跃深度 (默认 0，纯粹退化为向量相似度检索)
    * @param minScore    只接受相似度大于这个阈值的搜索命中 (默认 0.5)
+   * @param expandLabels 图扩散边标签白名单；省略则沿全部出边
    */
-  search(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number): JsSearchHit[];
+  search(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number, expandLabels?: string[]): JsSearchHit[];
 
   /**
    * 认知管线检索：向量锚定 + FISTA 残差寻隐 + PPR 图扩散 + DPP 多样性采样
@@ -368,8 +391,9 @@ export class TriviumDB {
    * @param expandDepth 扩散深度
    * @param minScore    最小分数
    * @param hybridAlpha 混合权重 (0.0~1.0)，越大向量占比越高。默认 0.7
+   * @param expandLabels 图扩散边标签白名单；省略则沿全部出边
    */
-  searchHybrid(queryVector: Vector, queryText: string, topK?: number, expandDepth?: number, minScore?: number, hybridAlpha?: number): JsSearchHit[];
+  searchHybrid(queryVector: Vector, queryText: string, topK?: number, expandDepth?: number, minScore?: number, hybridAlpha?: number, expandLabels?: string[]): JsSearchHit[];
 
   /**
    * 建立用于双路召回的长文本 BM25 索引
