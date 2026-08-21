@@ -1239,9 +1239,13 @@ impl QuIVer {
             }
             self.beam_search_l0(&q_sig, cur_node, config.ef_search, &mut visited)
         });
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::QuiverCandidateProduced);
 
         // Stage 2: f32 按需精排（跳过 tombstone，通过 slot_indices 映射到冷存储）
         // 复用单个缓冲区，避免每个候选 heap alloc；冷向量按需取回仅触达 ~ef 个候选。
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeVectorRerank);
         let rerank_limit = config.rerank_limit().min(bq_candidates.len());
         let mut buf: Vec<f32> = Vec::with_capacity(dim);
         let mut scored: Vec<(f32, u32)> = Vec::with_capacity(rerank_limit);
@@ -1482,30 +1486,15 @@ impl QuIVer {
         self.batch_build_experimental_v2_impl(vectors, ids, slot_idxs, false);
     }
 
-    // ── 实验代码路径 (feature = "ablation") ────────────────────────
-    // 以下方法仅用于论文 encoding ablation 实验，不属于生产 API。
-    // 正常构建不会编译此段代码。
-    // 对应 bench: benches/bench_encoding_ablation.rs
-    // ──────────────────────────────────────────────────────────────
-
-    /// 使用外部预构建的 Bq2Store 构建图（**仅限实验**）。
-    ///
-    /// 与 `batch_build_experimental_v2` 逻辑完全相同，但跳过内部
-    /// `push_from_vector` 编码步骤，直接使用传入的 `store`。
-    /// 用于对比不同编码方案（1-bit sign / 2-bit SM）对图拓扑的影响。
-    ///
-    /// 调用方需保证 `store.len() == ids.len()`。
-    #[cfg(feature = "ablation")]
-    pub fn batch_build_with_store(
+    /// 使用外部流式编码得到的 BQ2 签名构建图，不保留全量 FP32 向量副本。
+    pub(crate) fn batch_build_from_store(
         &mut self,
-        vectors: &[f32],
         ids: &[u64],
         slot_idxs: &[usize],
         store: Bq2Store,
     ) {
         let n = ids.len();
         let dim = self.dim;
-        assert_eq!(vectors.len(), n * dim);
         assert_eq!(slot_idxs.len(), n);
         assert_eq!(store.len(), n, "Bq2Store 长度必须与 ids 长度一致");
         if n == 0 {
@@ -1580,6 +1569,18 @@ impl QuIVer {
         );
 
         concurrent_adj.freeze_into_flat(&mut self.layer0);
+    }
+
+    /// 使用外部预构建签名的实验兼容入口。
+    #[cfg(feature = "ablation")]
+    pub fn batch_build_with_store(
+        &mut self,
+        _vectors: &[f32],
+        ids: &[u64],
+        slot_idxs: &[usize],
+        store: Bq2Store,
+    ) {
+        self.batch_build_from_store(ids, slot_idxs, store);
     }
 
     /// 获取 Layer 0 节点的邻居列表（**仅限实验**）。

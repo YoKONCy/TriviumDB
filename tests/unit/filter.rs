@@ -284,16 +284,48 @@ fn bloom_mask_gt等返回零() {
 // ════════════════════════════════════════════════════════════════
 
 #[test]
-fn from_json_gt_非数字报错() {
-    let r = Filter::from_json(&json!({"age": {"$gt": "not_a_number"}}));
+fn from_json_字符串范围按字典序且类型严格() {
+    let filter = Filter::from_json(&json!({"name": {"$gte": "Bob", "$lt": "David"}})).unwrap();
+    assert!(filter.matches(&json!({"name": "Carol"})));
+    assert!(filter.matches(&json!({"name": "Bob"})));
+    assert!(!filter.matches(&json!({"name": "David"})));
+    assert!(!filter.matches(&json!({"name": 123})));
+}
+
+#[test]
+fn from_json_RFC3339按绝对时间比较并忽略脏字段() {
+    let filter = Filter::from_json(&json!({
+        "createdAt": {
+            "$afterEq": "2026-08-21T08:00:00Z",
+            "$before": "2026-08-21T09:00:00Z"
+        }
+    }))
+    .unwrap();
+    assert!(filter.matches(&json!({"createdAt": "2026-08-21T16:00:00+08:00"})));
+    assert!(filter.matches(&json!({"createdAt": "2026-08-21T08:30:00.123Z"})));
+    assert!(!filter.matches(&json!({"createdAt": "2026-08-21T09:00:00Z"})));
+    assert!(!filter.matches(&json!({"createdAt": "不是时间"})));
+    assert!(!filter.matches(&json!({"createdAt": 123})));
+}
+
+#[test]
+fn from_json_RFC3339非法查询操作数报错() {
+    assert!(Filter::from_json(&json!({"createdAt": {"$before": "2026-99-99"}})).is_err());
+    assert!(Filter::from_json(&json!({"createdAt": {"$after": 123}})).is_err());
+}
+
+#[test]
+fn from_json_gt_布尔值报错() {
+    let r = Filter::from_json(&json!({"age": {"$gt": true}}));
     assert!(r.is_err());
     assert!(r.unwrap_err().contains("$gt"));
 }
 
 #[test]
-fn from_json_gte_非数字报错() {
-    let r = Filter::from_json(&json!({"age": {"$gte": "x"}}));
-    assert!(r.is_err());
+fn from_json_gte_字符串合法() {
+    let filter = Filter::from_json(&json!({"age": {"$gte": "x"}})).unwrap();
+    assert!(filter.matches(&json!({"age": "z"})));
+    assert!(!filter.matches(&json!({"age": 100})));
 }
 
 #[test]

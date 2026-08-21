@@ -174,6 +174,8 @@ maturin develop --features python
 ### Installation
 
 > 💡 TriviumDB core is written in Rust, but we've pre-compiled binaries for all platforms in the cloud — **no local build toolchain needed, instant install!**
+>
+> **Linux ARM64 / Kunpeng support:** TriviumDB supports Linux AArch64 with ARM NEON optimizations, ARM64 CI, Python manylinux ARM64 wheels, and a Node.js ARM64 addon build pipeline. It can run on Kunpeng server operating systems based on Linux AArch64.
 
 ### 🐍 Python Users
 
@@ -223,6 +225,52 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 ```
 
 > 📖 Full API reference, advanced usage, and Rust examples: **[API Reference](docs/api-reference.md)**
+
+---
+
+## Store Once, Query Many Ways
+
+Every TriviumDB node can carry a **vector, JSON document, sparse text, and graph relationships** at the same time. They share one NodeId space, transaction boundary, WAL, and lifecycle, so applications do not need to synchronize copies across a vector database, document store, and graph database. Write the data once, then choose the query path that matches each question.
+
+### TQL: One Unified Query Language
+
+**TQL (Trivium Query Language)** unifies document filtering, graph pattern matching, vector search, and GraphFirst constrained ranking in a lightweight DSL:
+
+```sql
+-- Document query: filter JSON fields
+FIND {type: "paper", year: {$gte: 2024}} RETURN * LIMIT 10
+
+-- Graph query: match structural relationships
+MATCH (author)-[:wrote]->(paper)
+WHERE author.name == "Alice"
+RETURN paper
+
+-- Locate vector anchors, then deterministically expand over incoming and outgoing edges
+SEARCH VECTOR [0.12, -0.45, 0.78] TOP 5
+EXPAND BOTH [:cites|related*1..2]
+RETURN *
+
+-- GraphFirst: constrain candidates by graph structure, then rank exactly by vector
+MATCH (paper)-[:belongs_to]->(topic)
+WHERE topic.name == "Database"
+RANK paper BY VECTOR [0.12, -0.45, 0.78] TOP 10
+RETURN paper
+```
+
+TQL also supports `WHERE`, `RETURN`, `ORDER BY`, `LIMIT/OFFSET`, aggregation, `OPTIONAL MATCH`, and DML. See the **[TQL Reference](docs/tql-reference.md)** for the complete syntax.
+
+### Graph and Hybrid Query Modes
+
+| Query Mode | Core Semantics | Typical Uses |
+| ---------- | -------------- | ------------ |
+| **Graph pattern matching (MATCH)** | Match structure by node properties, edge direction, labels, and path patterns | Knowledge graph queries, relationship filtering, structured joins |
+| **Reachability** | Run direction-, label-, and depth-aware BFS and return deterministic shortest paths with per-hop labels | Dependency chains, authorization paths, lineage, reachability analysis |
+| **GraphFirst (MATCH + RANK)** | Produce valid anchors from graph structure, then compute exact vector Top-K within that set | “Find the most similar objects only within this relationship constraint” |
+| **Vector + structural expansion (SEARCH + EXPAND)** | Locate semantic anchors, then collect structural candidates through `OUTGOING`, `INCOMING`, or `BOTH` edges | Add upstream or downstream context after semantic retrieval |
+| **SA-PPR graph diffusion** | Propagate relevance energy from vector/text anchors over weighted edges, with optional inhibition, fatigue, and restart | Agent associative memory, RAG context expansion, recommendation recall |
+| **Hybrid retrieval (`search_hybrid`)** | Combine Aho-Corasick, BM25 sparse text, and dense vectors before graph diffusion and reranking | Production retrieval balancing exact terminology and semantic similarity |
+
+These modes are complementary rather than interchangeable: **Reachability answers “is it structurally reachable?”**, **GraphFirst answers “which item is most similar within this structural constraint?”**, and **SA-PPR answers “which related nodes deserve more relevance?”** Applications can choose among them over the same `.tdb` data or combine document, graph, and vector conditions in one TQL query.
 
 ---
 

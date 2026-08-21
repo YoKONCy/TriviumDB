@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> **版本**: v0.7.4
+> **版本**: v0.7.5
 > **定位**: 统一查询 DSL — 融合文档过滤、图模式匹配、向量检索于一体  
 > **前置依赖**: 零外部依赖，纯 Rust 实现
 
@@ -87,9 +87,14 @@ LIMIT 20 OFFSET 10
 
 -- 向量检索 + 图扩散 + 过滤
 SEARCH VECTOR [0.1, -0.2, 0.8, ...] TOP 10
-EXPAND [:related*1..2]
+EXPAND BOTH [:related*1..2]
 WHERE {type: "event"}
 RETURN *
+
+-- GraphFirst：先匹配合法图结构，再在 doc 集合内精确向量排名
+MATCH (doc)-[:cites]->(ref)
+RANK doc BY VECTOR [0.1, -0.2, 0.8, ...] TOP 10
+RETURN doc, ref
 ```
 
 > 💡 TQL 支持行注释：以 `--` 开头的内容到行尾会被忽略。
@@ -332,7 +337,19 @@ RETURN *
 SEARCH VECTOR [0.1, 0.2] TOP 3
 EXPAND [:knows|works_with*1..3]
 RETURN *
+
+-- 反向遍历入边
+SEARCH VECTOR [0.1, 0.2] TOP 3
+EXPAND INCOMING [:cites*1..2]
+RETURN *
+
+-- 同时遍历出边和入边
+SEARCH VECTOR [0.1, 0.2] TOP 3
+EXPAND BOTH [*1..2]
+RETURN *
 ```
+
+方向可为 `OUTGOING`、`INCOMING` 或 `BOTH`；省略时默认 `OUTGOING`。标签列表支持 `|` 分隔，省略标签表示全部边。EXPAND 使用确定性最短路径 Reachability 收集候选；候选或访问预算超限时明确报错，不静默截断。
 
 **EXPAND 执行流程**：
 
@@ -340,7 +357,7 @@ RETURN *
 查询向量 → T::similarity 全量打分 → Top-K 锚点
                                        │
                                        ▼
-                              k_hop_neighbors 图扩散
+                              确定性 Reachability
                                        │
                                        ▼
                               候选集去重 → WHERE 过滤 → 返回
@@ -363,6 +380,31 @@ RETURN *
 > 💡 `SEARCH` 的 WHERE 过滤在向量打分和 EXPAND 之后执行，作为最终的候选集筛选。
 
 > ⚠️ 当前 `SEARCH` 使用全量 brute-force 打分。对于大规模数据集，建议使用 `db.search_advanced()` 走 QuIVer ANN 图索引加速管线。
+
+---
+
+## MATCH + RANK — GraphFirst 约束检索
+
+`RANK` 将 `MATCH` 产生的某个绑定变量视为 anchor，在去重后的 anchor 集合内执行精确向量评分：
+
+```sql
+MATCH (doc)-[:cites|mentions]->(ref)
+WHERE ref.type == "paper"
+RANK doc BY VECTOR [0.1, 0.2, 0.3] TOP 20
+RETURN doc, ref
+LIMIT 10 OFFSET 5
+```
+
+执行语义固定为：
+
+1. `MATCH` 与 `WHERE` 先生成合法绑定行；
+2. 按 `RANK` 变量的 NodeId 去重，同一 anchor 的多条路径只保留变量名顺序下 NodeId 元组最小的规范行；
+3. 在 anchor 集合内精确评分，按 score 降序、NodeId 升序稳定取 Top-K；
+4. 执行聚合或 DISTINCT、显式 `ORDER BY`、`OFFSET`、`LIMIT` 和投影裁剪。
+
+因此显式 `ORDER BY` 会覆盖向量排名顺序；不写 `ORDER BY` 时保留 RANK 顺序。RANK score 当前仅用于排序，不作为可投影字段暴露。anchor 超过 100,000 个、变量未绑定或向量维度不匹配时明确报错。
+
+`EXPLAIN MATCH ... RANK ...` 会在 `optimizations` 中报告 `GraphFirst exact anchor ranking`。
 
 ---
 
@@ -459,7 +501,7 @@ LIMIT 10              -- 最多返回 10 条
 LIMIT 10 OFFSET 20    -- 跳过前 20 条，返回 10 条
 ```
 
-**执行顺序**：`WHERE 过滤 → ORDER BY 排序 → OFFSET 偏移 → LIMIT 截断`
+**执行顺序**：`WHERE 过滤 → RANK（如有）→ 聚合/DISTINCT → ORDER BY → OFFSET → LIMIT`
 
 ---
 
@@ -499,7 +541,7 @@ LIMIT 10 OFFSET 20    -- 跳过前 20 条，返回 10 条
 ## 形式语法 (EBNF)
 
 ```ebnf
-Query       := Entry (WHERE Predicate)? RETURN ReturnClause
+Query       := Entry (WHERE Predicate)? (RankClause)? RETURN ReturnClause
                (ORDER BY OrderList)? (LIMIT Int)? (OFFSET Int)?
 
 Entry       := MatchEntry | FindEntry | SearchEntry
@@ -519,7 +561,9 @@ LogicOp     := ('$and' | '$or') ':' '[' DocFilter (',' DocFilter)* ']'
 FieldEntry  := FieldName ':' (Value | OpObject)
 OpObject    := '{' '$op' ':' Value (',' '$op' ':' Value)* '}'
 
-ExpandClause := EXPAND '[' (':' LabelList)? '*' Int '..' Int ']'
+RankClause   := RANK Ident BY VECTOR '[' NumList ']' TOP Int
+ExpandClause := EXPAND (OUTGOING | INCOMING | BOTH)?
+                '[' (':' LabelList)? '*' Int '..' Int ']'
 
 Predicate   := PredOr
 PredOr      := PredAnd (OR PredAnd)*
@@ -567,7 +611,8 @@ TqlParser::parse_query()  →  TqlQuery (AST)
 execute_tql(&query, &memtable)
     ├── FIND  → 全表扫描 + Filter::matches
     ├── MATCH → DFS 图遍历 + Predicate 评估
-    └── SEARCH → T::similarity + EXPAND + WHERE
+    └── SEARCH → T::similarity + Reachability EXPAND + WHERE
+    └── MATCH + RANK → 图 anchor 去重 + 集合内精确向量评分
     │
     ▼
 ORDER BY → OFFSET → LIMIT → TqlResult<T>
@@ -584,7 +629,7 @@ ORDER BY → OFFSET → LIMIT → TqlResult<T>
 | 维度 | `db.search*()` 管线 | `db.tql("SEARCH ...")` |
 |------|---------------------|------------------------|
 | 向量索引 | QuIVer ANN 图索引 + rayon 并行 | brute-force 全扫 |
-| 图扩散 | Spreading Activation（热度传播 + 边权衰减） | 简单 k-hop 邻居收集 |
+| 图扩散 | Spreading Activation（热度传播 + 边权衰减） | 确定性 Reachability 候选收集 |
 | 文本混合 | BM25 + AC 自动机双路召回 | 不支持 |
 | 认知管线 | FISTA / DPP / NMF | 不支持 |
 | Hook 注入 | 6 阶段管线 Hook | 不支持 |
@@ -593,18 +638,13 @@ ORDER BY → OFFSET → LIMIT → TqlResult<T>
 - **FIND / MATCH**：✅ 设计目标是完全替代 `db.filter_where()` / `db.query()`
 - **SEARCH**：定位为补充，不替代现有管线。两者长期共存
 
-### 当前限制 (Phase 2a)
+### 当前限制
 
 | 限制 | 说明 | 计划 |
 |------|------|------|
-| 仅有向边 | 仅支持 `-[]->`，不支持反向或无向匹配 | Phase 3 |
-| 无聚合函数 | 不支持 COUNT / AVG / SUM / GROUP BY | Phase 3 |
-| 无子查询 | 不支持 SEARCH 结果输入 MATCH | Phase 3 |
-| 无 OPTIONAL MATCH | 所有模式匹配均为内连接语义 | Phase 3 |
-| 无 CREATE / SET / DELETE | TQL 当前为只读查询语言 | Phase 4 |
+| MATCH 模式方向 | MATCH 边模式仍以显式有向模式为主；SEARCH EXPAND 已支持 OUTGOING/INCOMING/BOTH | 后续扩展 |
+| RANK score 投影 | GraphFirst score 仅参与排序，不作为 RETURN 字段暴露 | 后续扩展 |
+| 子查询组合 | 不支持将任意 SEARCH 结果作为 MATCH 子查询输入 | 后续扩展 |
+| GraphFirst 大集合 ANN | RANK 对合法 anchor 集合执行精确评分，不切换 bitmap-filtered ANN | 按真实需求评估 |
 
-### 路线图
-
-- **Phase 2b**：旧 `db.query()` / `db.filter_where()` 标记 deprecated，引导迁移至 TQL
-- **Phase 3**：聚合函数、子查询、OPTIONAL MATCH、反向边匹配
-- **Phase 4**：DML 写入支持（CREATE / SET / DELETE）
+TQL 已支持聚合、OPTIONAL MATCH 与 DML；后续工作聚焦子查询组合、更多 MATCH 方向表达式和可选的排名分数投影。

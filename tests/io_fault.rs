@@ -469,8 +469,8 @@ fn IO_09_SyncMode_Off未flush_writer时允许WAL不可见() {
             .map(|meta| meta.len())
             .unwrap_or(0);
         assert_eq!(
-            wal_size, 0,
-            "SyncMode::Off 在 writer 未 drop/flush 前允许 WAL 仍停留在用户态缓冲"
+            wal_size, 6,
+            "SyncMode::Off 在 writer 未 drop/flush 前只应写入固定 WAL 版本头"
         );
     }
 

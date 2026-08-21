@@ -151,6 +151,7 @@ fn tql_statement_变体() {
             filter: Filter::eq("x", serde_json::json!(1)),
         },
         predicate: None,
+        rank: None,
         returns: ReturnClause::All,
         order_by: vec![],
         limit: Some(10),
@@ -174,6 +175,7 @@ fn expand_clause() {
         labels: vec!["knows".into()],
         min_depth: 1,
         max_depth: 3,
+        direction: EdgeDirection::Forward,
     };
 }
 

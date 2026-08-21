@@ -50,6 +50,29 @@ pub enum TriviumError {
     #[error("WAL 写入器已关闭，无法执行写操作 (WAL writer is closed)")]
     WalClosed,
 
+    /// 容量预留会突破显式内存预算，未执行任何逻辑数据修改
+    #[error(
+        "容量预留被拒绝 (Capacity reservation rejected): 请求新增 {requested_nodes} 个节点，预计新增 {estimated_bytes} 字节，当前估算 {current_bytes} 字节，内存上限 {memory_limit} 字节"
+    )]
+    CapacityReservationRejected {
+        requested_nodes: usize,
+        estimated_bytes: usize,
+        current_bytes: usize,
+        memory_limit: usize,
+    },
+
+    /// 容量计算溢出或底层分配器拒绝预留
+    #[error("容量预留失败 (Capacity allocation failed): {reason}")]
+    CapacityAllocationFailed { reason: String },
+
+    /// 数据库已经关闭或正在关闭。
+    #[error("数据库已关闭 (Database closed)")]
+    DatabaseClosed,
+
+    /// WAL 格式版本高于当前内核支持范围。
+    #[error("不支持的 WAL 版本 (Unsupported WAL version): 发现 {found}，当前支持 {supported}")]
+    UnsupportedWalVersion { found: u16, supported: u16 },
+
     /// 输入参数无效（维度越界、非法配置等）
     #[error("无效输入 (Invalid input): {0}")]
     InvalidInput(String),

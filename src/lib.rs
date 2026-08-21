@@ -14,6 +14,9 @@ pub mod node;
 pub mod query;
 pub mod storage;
 
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks;
+
 pub mod cognitive;
 
 /// FFI 绑定层（Python / Node.js）

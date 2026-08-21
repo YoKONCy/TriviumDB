@@ -26,6 +26,10 @@ pub struct Config {
     pub auto_build_quiver: bool,
     /// 是否在打开时加载持久化全文索引。纯向量数据库默认关闭以降低启动内存。
     pub load_text_index: bool,
+    /// 预计总节点数，仅用于本次进程的核心容器容量预留，不持久化且不是硬上限。
+    pub expected_nodes: Option<usize>,
+    /// TriviumDB 内核内存预算（字节），0 表示不限制。
+    pub memory_limit: usize,
 }
 
 impl Default for Config {
@@ -36,6 +40,8 @@ impl Default for Config {
             storage_mode: StorageMode::default(),
             auto_build_quiver: true,
             load_text_index: false,
+            expected_nodes: None,
+            memory_limit: 0,
         }
     }
 }
@@ -50,6 +56,8 @@ pub struct SearchConfig {
     /// SA-PPR/FISTA/DPP 前的重排池大小；0 表示自动取 `max(top_k * 4, 32)`。
     pub rerank_k: usize,
     pub expand_depth: usize,
+    /// 图扩散允许的边标签；None 表示全部，Some(empty) 表示禁止扩散。
+    pub expand_labels: Option<Vec<String>>,
     pub min_score: f32,
     pub teleport_alpha: f32, // L6 SA-PPR 个性化重启比例
 
@@ -111,6 +119,7 @@ impl Default for SearchConfig {
             recall_k: 0,
             rerank_k: 0,
             expand_depth: 2,
+            expand_labels: None,
             min_score: 0.1,
             teleport_alpha: 0.0,
             enable_advanced_pipeline: false,

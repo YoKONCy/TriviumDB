@@ -31,6 +31,41 @@ export interface JsEdge {
   weight: number;
 }
 
+export interface JsIncomingEdge {
+  /** 源节点 ID */
+  sourceId: number;
+  /** 目标节点 ID */
+  targetId: number;
+  /** 边标签 */
+  label: string;
+  /** 边权重 */
+  weight: number;
+}
+
+export type ReachabilityDirection = 'outgoing' | 'incoming' | 'both';
+
+export interface JsReachabilityOptions {
+  minDepth?: number;
+  maxDepth?: number;
+  labels?: string[];
+  direction?: ReachabilityDirection;
+  maxVisitedNodes?: number;
+}
+
+export interface JsReachabilityStep {
+  from: number;
+  to: number;
+  label: string;
+}
+
+export interface JsReachabilityResult {
+  sourceId: number;
+  targetId: number;
+  depth: number;
+  path: number[];
+  steps: JsReachabilityStep[];
+}
+
 export interface JsNodeView<T = any> {
   /** 节点 ID */
   id: number;
@@ -62,10 +97,14 @@ export type FilterOperator<T> =
   | T
   | { $eq?: T }
   | { $ne?: T }
-  | { $gt?: number }
-  | { $gte?: number }
-  | { $lt?: number }
-  | { $lte?: number }
+  | { $gt?: number | string }
+  | { $gte?: number | string }
+  | { $lt?: number | string }
+  | { $lte?: number | string }
+  | { $before?: string }
+  | { $beforeEq?: string }
+  | { $after?: string }
+  | { $afterEq?: string }
   | { $in?: T[] };
 
 export type FilterCondition = {
@@ -108,7 +147,7 @@ export interface JsSearchConfig {
   enableRefractoryFatigue?: boolean;
   /** 启用文本/关键词混合检索 (默认 false) */
   enableTextHybridSearch?: boolean;
-  /** 文本分数的加权系数 (默认 1.5) */
+  /** 加权RRF中的稀疏排名权重 (默认 1.5) */
   textBoost?: number;
   /** 自定义检索文本（用于跨模态或覆盖 payload 文本） */
   customQueryText?: string;
@@ -119,7 +158,7 @@ export interface JsSearchConfig {
    *
    * 当提供时，图扩散优先沿着与此向量语义相近的节点方向传播。
    * gate_j = σ(bias · v_j / √dim)，gate ∈ (0, 1) 调制能量传导强度。
-   * 不提供时退化为标准 PPR（向后兼容）。
+   * 不提供时退化为无上下文门控的 SA-PPR。
    *
    * 典型用途:
    * - 对话系统: 传入 RNN 隐状态的投影向量，让扩散感知对话方向
@@ -127,6 +166,8 @@ export interface JsSearchConfig {
    * - 推荐系统: 传入用户偏好向量，让扩散偏向用户兴趣方向
    */
   diffusionBias?: number[];
+  /** 图扩散允许的边标签；省略表示全部，空数组表示禁止扩散 */
+  expandLabels?: string[];
 }
 
 export interface JsClusterResult {
@@ -175,6 +216,25 @@ export interface JsSearchWithContextResult {
  * TriviumDB 实例。
  * 每个 `.tdb` 文件同一时刻仅能被一个进程的 TriviumDB 实例打开锁定。
  */
+export interface TriviumDBOptions {
+  /** 向量维度，默认 1536 */
+  dim?: number;
+  /** 向量数据类型，默认 f32 */
+  dtype?: DType;
+  /** WAL 同步模式，默认 normal */
+  syncMode?: SyncMode;
+  /** 存储模式，默认 mmap */
+  storageMode?: 'mmap' | 'rom';
+  /** 是否自动构建 QuIVer，默认 true */
+  autoBuildQuiver?: boolean;
+  /** 是否在打开时加载全文索引，默认 false */
+  loadTextIndex?: boolean;
+  /** 预计总节点数，仅用于本次进程预留核心容器，不是硬上限且不会持久化 */
+  expectedNodes?: number;
+  /** TriviumDB 内核内存预算（MiB），0 或省略表示不限制 */
+  memoryLimitMb?: number;
+}
+
 export class TriviumDB {
   /**
    * 打开或创建数据库
@@ -183,6 +243,7 @@ export class TriviumDB {
    * @param dtype        数据类型设定: "f32" | "f16" | "u64", 默认为 "f32"
    * @param syncMode     WAL 同步模式设定: "full" | "normal" | "off", 默认为 "normal"
    */
+  constructor(path: string, options?: TriviumDBOptions);
   constructor(path: string, dim?: number, dtype?: DType, syncMode?: SyncMode);
 
   // ── Hook 管理 ──
@@ -234,6 +295,12 @@ export class TriviumDB {
    * @param payload 挂载 payload
    */
   insertWithId(id: number, vector: Vector, payload: any): void;
+
+  /**
+   * 为后续插入主动预留额外节点容量。
+   * 受 memoryLimitMb 约束；失败不会写 WAL 或修改节点数据。
+   */
+  reserveNodes(additional: number): void;
 
   /**
    * 批量插入节点（自动生成 ID）
@@ -325,7 +392,7 @@ export class TriviumDB {
    * @param src 源节点 ID
    * @param dst 目标节点 ID
    */
-  unlink(src: number, dst: number): void;
+  unlink(src: number, dst: number, label?: string): void;
 
   /**
    * 图谱上的 N 跳搜索 (广度优先遍历)
@@ -333,7 +400,7 @@ export class TriviumDB {
    * @param depth 跳数 (默认 1)
    * @returns 深度之内的所有不重复的周边点 ID
    */
-  neighbors(id: number, depth?: number): number[];
+  neighbors(id: number, depth?: number, labels?: string[]): number[];
 
   /**
    * 获取节点的出边列表
@@ -341,6 +408,15 @@ export class TriviumDB {
    * @returns 该节点出发的所有有向边
    */
   getEdges(id: number): JsEdge[];
+
+  /** 获取节点的完整入边，可按标签过滤 */
+  getIncomingEdges(id: number, label?: string): JsIncomingEdge[];
+
+  /** 按方向、标签和深度执行确定性可达性查询，预算超限时抛出错误 */
+  reachable(id: number, options?: JsReachabilityOptions): JsReachabilityResult[];
+
+  /** 只在给定 anchor 集合内执行精确向量 Top-K */
+  searchGraphFirst(queryVector: Vector, anchorIds: number[], topK: number, maxAnchorNodes?: number): JsSearchHit[];
 
   // ── 检索与查询 ──
 
@@ -354,7 +430,7 @@ export class TriviumDB {
   search(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number): JsSearchHit[];
 
   /**
-   * 认知管线检索：向量锚定 + FISTA 残差寻隐 + PPR 图扩散 + DPP 多样性采样
+   * 认知管线检索：向量锚定 + FISTA残差 + SA-PPR有限深度扩散 + DPP多样性采样
    * @param queryVector 查询向量
    * @param config      管线配置（所有字段均可选，有安全默认值）
    */
@@ -453,8 +529,14 @@ export class TriviumDB {
   /** 动态在运行时调整同步安全性 */
   setSyncMode(mode: SyncMode): void;
 
-  /** 无人值守: 后台每隔 x 秒去自动压缩落排 (如果数据正在高频大吞吐) */
+  /** 无人值守后台压缩；间隔必须大于0秒 */
   enableAutoCompaction(intervalSecs?: number): void;
+
+  /** 控制查询或flush是否允许自动构建QuIVer */
+  setAutoBuildQuiver(enabled: boolean): void;
+
+  /** 清空疲劳等跨查询检索状态 */
+  clearSearchState(): void;
 
   /** 关闭后台的定期压缩 */
   disableAutoCompaction(): void;
@@ -486,7 +568,7 @@ export class TriviumDB {
   /** 返回存储内的所有活跃点数量 */
   nodeCount(): number;
 
-  /** 显式关闭数据库（落盘后释放资源） */
+  /** 显式关闭数据库（落盘后释放资源）；关闭后该对象的后续数据库操作会抛出错误 */
   close(): void;
 
   /** 获取设置的浮点格式 (f32, f16, u64) */

@@ -99,8 +99,11 @@ fn validate_flush_marker(marker_path: &str, tdb_path: &str, vec_path: &str) -> b
 /// 不得触发 panic 导致进程终止。
 #[inline]
 fn read_u16_le(bytes: &[u8], offset: usize, field: &str) -> Result<u16> {
+    let end = offset.checked_add(2).ok_or_else(|| {
+        TriviumError::CorruptedFile(format!("{} offset overflow at {}", field, offset))
+    })?;
     bytes
-        .get(offset..offset + 2)
+        .get(offset..end)
         .and_then(|s| s.try_into().ok())
         .map(u16::from_le_bytes)
         .ok_or_else(|| TriviumError::CorruptedFile(format!("{} at offset {}", field, offset)))
@@ -126,8 +129,11 @@ fn read_u64_le(bytes: &[u8], offset: usize, field: &str) -> Result<u64> {
 
 #[inline]
 fn read_f32_le(bytes: &[u8], offset: usize, field: &str) -> Result<f32> {
+    let end = offset.checked_add(4).ok_or_else(|| {
+        TriviumError::CorruptedFile(format!("{} offset overflow at {}", field, offset))
+    })?;
     bytes
-        .get(offset..offset + 4)
+        .get(offset..end)
         .and_then(|s| s.try_into().ok())
         .map(f32::from_le_bytes)
         .ok_or_else(|| TriviumError::CorruptedFile(format!("{} at offset {}", field, offset)))
@@ -364,8 +370,8 @@ fn save_mmap<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()
 
 /// Rom 模式保存：把向量合并，写单文件，抛弃 .vec
 fn save_rom<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()> {
-    // 1. 确保在纯内存中获取到完整的合并数组（Rom 单文件持久化必须物化 flat）
-    memtable.ensure_vectors_cache(true);
+    // 1. Rom 单文件持久化必须物化完整 flat，但不得隐式构建 ANN。
+    memtable.prepare_persistence_cache(true);
     let total_vectors = memtable.internal_indices().len();
 
     // 2. 将数据合并写入单文件
@@ -394,10 +400,9 @@ fn save_tdb<T: VectorType>(
     vec_count: usize,
     is_mmap_mode: bool,
 ) -> Result<()> {
-    // 始终确保 BQ 签名和向量缓存已构建（v5 持久化需要写入 BQ Block）。
-    // 仅 Rom 单文件模式（!is_mmap_mode）需要写出连续 flat 向量块，才物化 merged；
+    // 持久化只准备磁盘格式需要的数据，禁止隐式触发 ANN 构建。
     // Mmap 分离模式下向量已在 .vec 文件，无需把整库复制入堆。
-    memtable.ensure_vectors_cache(!is_mmap_mode);
+    memtable.prepare_persistence_cache(!is_mmap_mode);
 
     let tmp_path = format!("{}.tmp", path);
     let file = File::create(&tmp_path)?;
@@ -592,21 +597,34 @@ pub fn load<T: VectorType>(
             )));
         }
         // BQ Block 完整性：读取 bq_count 并验证整个 Block 未被截断
-        if bq_offset + 8 <= file_len {
-            let bq_count =
-                u64::from_le_bytes(bytes[bq_offset..bq_offset + 8].try_into().unwrap_or([0; 8]))
-                    as usize;
-            if bq_count > 0 {
-                let sig_size = std::mem::size_of::<BqSignature>();
-                let expected_bq_end = bq_offset + 8 + bq_count * sig_size;
-                if expected_bq_end > file_len {
-                    return Err(TriviumError::CorruptedFile(format!(
-                        "BQ 块被截断 (BQ block truncated): 期望 {} 字节 (offset {} + 8 + {} × {})，\
-                         实际文件大小 {} 字节",
-                        expected_bq_end, bq_offset, bq_count, sig_size, file_len
-                    )));
-                }
-            }
+        let count_end = bq_offset.checked_add(8).ok_or_else(|| {
+            TriviumError::CorruptedFile("BQ 块计数偏移溢出 (BQ count offset overflow)".into())
+        })?;
+        if count_end > file_len {
+            return Err(TriviumError::CorruptedFile(
+                "BQ 块缺少计数字段 (BQ count field truncated)".into(),
+            ));
+        }
+        let bq_count_u64 = read_u64_le(bytes, bq_offset, "BQ count")?;
+        let bq_count = usize::try_from(bq_count_u64).map_err(|_| {
+            TriviumError::CorruptedFile(format!(
+                "BQ 签名数量超出平台寻址范围 (BQ count out of range): {bq_count_u64}"
+            ))
+        })?;
+        let sig_size = std::mem::size_of::<BqSignature>();
+        let block_bytes = bq_count.checked_mul(sig_size).ok_or_else(|| {
+            TriviumError::CorruptedFile(format!(
+                "BQ 块长度溢出 (BQ block size overflow): {bq_count} 个签名 × {sig_size} 字节"
+            ))
+        })?;
+        let expected_bq_end = count_end.checked_add(block_bytes).ok_or_else(|| {
+            TriviumError::CorruptedFile("BQ 块结束偏移溢出 (BQ end offset overflow)".into())
+        })?;
+        if expected_bq_end > file_len {
+            return Err(TriviumError::CorruptedFile(format!(
+                "BQ 块被截断 (BQ block truncated): 期望 {} 字节 (offset {} + 8 + {} × {})，实际文件大小 {} 字节",
+                expected_bq_end, bq_offset, bq_count, sig_size, file_len
+            )));
         }
     }
 
@@ -771,9 +789,21 @@ fn load_v1_rom<T: VectorType>(
 ) -> Result<MemTable<T>> {
     let mut memtable = MemTable::new_with_next_id(dim, next_id);
     let vector_bytes_per_elem = std::mem::size_of::<T>();
-    let expected_vec_size = node_count * dim * vector_bytes_per_elem;
+    let vector_elements = node_count.checked_mul(dim).ok_or_else(|| {
+        TriviumError::CorruptedFile("向量元素数量溢出 (Vector element count overflow)".into())
+    })?;
+    let expected_vec_size = vector_elements
+        .checked_mul(vector_bytes_per_elem)
+        .ok_or_else(|| {
+            TriviumError::CorruptedFile("向量块长度溢出 (Vector block size overflow)".into())
+        })?;
+    let vector_end = vector_offset
+        .checked_add(expected_vec_size)
+        .ok_or_else(|| {
+            TriviumError::CorruptedFile("向量块结束偏移溢出 (Vector block end overflow)".into())
+        })?;
 
-    if vector_offset + expected_vec_size > tdb_mmap.len() {
+    if vector_end > tdb_mmap.len() {
         return Err(TriviumError::CorruptedFile(
             "向量块超出文件大小 (Vector block exceeds file size)".into(),
         ));
@@ -788,20 +818,29 @@ fn load_v1_rom<T: VectorType>(
         vector_offset,
     )?;
 
-    let vec_block = &bytes[vector_offset..vector_offset + expected_vec_size];
+    let vec_block = &bytes[vector_offset..vector_end];
     let is_aligned = (vec_block.as_ptr() as usize).is_multiple_of(std::mem::align_of::<T>());
 
     // 因为 load_payloads 已经按内部索引位置推了占位符（包含 Tombstone），
     // 接下来我们只需要把所有的 vector_block 推入 VecPool！
     if is_aligned {
         let t_slice =
-            unsafe { std::slice::from_raw_parts(vec_block.as_ptr() as *const T, node_count * dim) };
+            unsafe { std::slice::from_raw_parts(vec_block.as_ptr() as *const T, vector_elements) };
         memtable.vec_pool_mut().push(t_slice);
     } else {
         // 不对齐
-        let mut v = Vec::with_capacity(node_count * dim);
-        for i in 0..(node_count * dim) {
-            let off = i * vector_bytes_per_elem;
+        let mut v = Vec::new();
+        v.try_reserve_exact(vector_elements).map_err(|_| {
+            TriviumError::CorruptedFile(
+                "向量块声明的元素数量无法安全分配 (Vector block allocation rejected)".into(),
+            )
+        })?;
+        for i in 0..vector_elements {
+            let off = i.checked_mul(vector_bytes_per_elem).ok_or_else(|| {
+                TriviumError::CorruptedFile(
+                    "向量元素偏移溢出 (Vector element offset overflow)".into(),
+                )
+            })?;
             let chunk = &vec_block[off..off + vector_bytes_per_elem];
             let elem: T = bytemuck::pod_read_unaligned(chunk);
             v.push(elem);
@@ -888,25 +927,40 @@ fn load_bq_block<T: VectorType>(
     bq_offset: usize,
     file_len: usize,
 ) {
-    if bq_offset == 0 || bq_offset + 8 > file_len {
-        return; // 无 BQ Block 或文件不完整
+    let Some(count_end) = bq_offset.checked_add(8) else {
+        tracing::warn!("BQ 块计数偏移溢出，跳过恢复");
+        return;
+    };
+    if bq_offset == 0 || count_end > file_len {
+        return;
     }
 
-    let bq_count =
-        u64::from_le_bytes(bytes[bq_offset..bq_offset + 8].try_into().unwrap_or([0; 8])) as usize;
-
+    let Ok(bq_count_u64) = read_u64_le(bytes, bq_offset, "BQ count") else {
+        return;
+    };
+    let Ok(bq_count) = usize::try_from(bq_count_u64) else {
+        tracing::warn!("BQ 签名数量超出平台寻址范围，跳过恢复");
+        return;
+    };
     if bq_count == 0 {
         return;
     }
 
     let sig_size = std::mem::size_of::<BqSignature>();
-    let data_start = bq_offset + 8;
-    let data_end = data_start + bq_count * sig_size;
+    let Some(block_bytes) = bq_count.checked_mul(sig_size) else {
+        tracing::warn!("BQ 块长度溢出，跳过恢复");
+        return;
+    };
+    let data_start = count_end;
+    let Some(data_end) = data_start.checked_add(block_bytes) else {
+        tracing::warn!("BQ 块结束偏移溢出，跳过恢复");
+        return;
+    };
 
     if data_end > file_len {
         tracing::warn!(
             "BQ Block 数据不完整 (BQ Block data incomplete)（需要 {} 字节，文件仅剩 {} 字节），跳过恢复",
-            bq_count * sig_size,
+            block_bytes,
             file_len.saturating_sub(data_start)
         );
         return;

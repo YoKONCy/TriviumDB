@@ -1,4 +1,5 @@
 #[cfg(feature = "python")]
+#[allow(clippy::module_inception)]
 pub mod python {
     use crate::database::Database as GenericDatabase;
     use pyo3::prelude::*;
@@ -35,6 +36,26 @@ pub mod python {
         };
     }
 
+    fn to_py_reachability(
+        result: crate::graph::reachability::ReachabilityResult,
+    ) -> PyReachabilityResult {
+        PyReachabilityResult {
+            source_id: result.source_id,
+            target_id: result.target_id,
+            depth: result.depth,
+            path: result.path,
+            steps: result
+                .steps
+                .into_iter()
+                .map(|step| PyReachabilityStep {
+                    from_id: step.from,
+                    to_id: step.to,
+                    label: step.label,
+                })
+                .collect(),
+        }
+    }
+
     /// Python 侧的查询命中结果
     #[pyclass(name = "SearchHit")]
     pub struct PySearchHit {
@@ -46,9 +67,47 @@ pub mod python {
         pub payload: PyObject,
     }
 
+    #[pyclass(name = "ReachabilityStep")]
+    #[derive(Clone)]
+    pub struct PyReachabilityStep {
+        #[pyo3(get)]
+        pub from_id: u64,
+        #[pyo3(get)]
+        pub to_id: u64,
+        #[pyo3(get)]
+        pub label: String,
+    }
+
+    #[pyclass(name = "ReachabilityResult")]
+    pub struct PyReachabilityResult {
+        #[pyo3(get)]
+        pub source_id: u64,
+        #[pyo3(get)]
+        pub target_id: u64,
+        #[pyo3(get)]
+        pub depth: usize,
+        #[pyo3(get)]
+        pub path: Vec<u64>,
+        #[pyo3(get)]
+        pub steps: Vec<PyReachabilityStep>,
+    }
+
     #[pyclass(name = "Edge")]
     #[derive(Clone)]
     pub struct PyEdge {
+        #[pyo3(get)]
+        pub target_id: u64,
+        #[pyo3(get)]
+        pub label: String,
+        #[pyo3(get)]
+        pub weight: f32,
+    }
+
+    #[pyclass(name = "IncomingEdge")]
+    #[derive(Clone)]
+    pub struct PyIncomingEdge {
+        #[pyo3(get)]
+        pub source_id: u64,
         #[pyo3(get)]
         pub target_id: u64,
         #[pyo3(get)]
@@ -167,7 +226,7 @@ pub mod python {
         }
     }
 
-    fn pyobject_to_json(py: Python<'_>, obj: &Bound<'_, PyAny>) -> serde_json::Value {
+    fn pyobject_to_json(obj: &Bound<'_, PyAny>) -> serde_json::Value {
         if obj.is_none() {
             serde_json::Value::Null
         } else if let Ok(b) = obj.extract::<bool>() {
@@ -182,15 +241,13 @@ pub mod python {
             let mut map = serde_json::Map::new();
             for (k, v) in dict.iter() {
                 if let Ok(key) = k.extract::<String>() {
-                    map.insert(key, pyobject_to_json(py, &v));
+                    map.insert(key, pyobject_to_json(&v));
                 }
             }
             serde_json::Value::Object(map)
         } else if let Ok(list) = obj.downcast::<PyList>() {
-            let arr: Vec<serde_json::Value> = list
-                .iter()
-                .map(|item| pyobject_to_json(py, &item))
-                .collect();
+            let arr: Vec<serde_json::Value> =
+                list.iter().map(|item| pyobject_to_json(&item)).collect();
             serde_json::Value::Array(arr)
         } else {
             serde_json::Value::Null
@@ -199,21 +256,20 @@ pub mod python {
 
     use crate::filter::Filter;
 
-    fn dict_to_filter(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<Filter> {
+    fn dict_to_filter(_py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<Filter> {
         // 将 PyDict 转为 serde_json::Value，再统一调用 Filter::from_json
-        let json_val = pyobject_to_json(py, &dict.clone().into_any());
-        Filter::from_json(&json_val).map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+        let json_val = pyobject_to_json(&dict.clone().into_any());
+        Filter::from_json(&json_val).map_err(pyo3::exceptions::PyValueError::new_err)
     }
 
     fn parse_sync_mode(s: &str) -> PyResult<crate::storage::wal::SyncMode> {
-        crate::storage::wal::SyncMode::parse(s)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))
+        crate::storage::wal::SyncMode::parse(s).map_err(pyo3::exceptions::PyValueError::new_err)
     }
 
     #[pymethods]
     impl PyTriviumDB {
         #[new]
-        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true))]
+        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0))]
         fn new(
             path: &str,
             dim: usize,
@@ -221,25 +277,32 @@ pub mod python {
             sync_mode: &str,
             load_text_index: bool,
             auto_build_quiver: bool,
+            expected_nodes: Option<usize>,
+            memory_limit_mb: usize,
         ) -> PyResult<Self> {
             let sm = parse_sync_mode(sync_mode)?;
+            let memory_limit = memory_limit_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("memory_limit_mb 换算字节时溢出")
+            })?;
             let config = crate::database::Config {
                 dim,
                 sync_mode: sm,
                 load_text_index,
                 auto_build_quiver,
+                expected_nodes,
+                memory_limit,
                 ..Default::default()
             };
             let inner = match dtype {
                 "f32" => DbBackend::F32(
-                    GenericDatabase::<f32>::open_with_config(path, config.clone()).map_err(
+                    GenericDatabase::<f32>::open_with_config(path, config).map_err(
                         |e: crate::error::TriviumError| {
                             pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
                         },
                     )?,
                 ),
                 "f16" => DbBackend::F16(
-                    GenericDatabase::<half::f16>::open_with_config(path, config.clone()).map_err(
+                    GenericDatabase::<half::f16>::open_with_config(path, config).map_err(
                         |e: crate::error::TriviumError| {
                             pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
                         },
@@ -358,16 +421,16 @@ pub mod python {
             let (results, hook_ctx) = match &self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
-                    db.search_hybrid_with_context(None, Some(&vec), &config)
+                    py.allow_threads(|| db.search_hybrid_with_context(None, Some(&vec), &config))
                 }
                 DbBackend::F16(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
-                    db.search_hybrid_with_context(None, Some(&vec16), &config)
+                    py.allow_threads(|| db.search_hybrid_with_context(None, Some(&vec16), &config))
                 }
                 DbBackend::U64(db) => {
                     let vec: Vec<u64> = query_vector.extract()?;
-                    db.search_hybrid_with_context(None, Some(&vec), &config)
+                    py.allow_threads(|| db.search_hybrid_with_context(None, Some(&vec), &config))
                 }
             }
             .map_err(|e: crate::error::TriviumError| {
@@ -405,11 +468,11 @@ pub mod python {
 
         fn insert(
             &mut self,
-            py: Python<'_>,
+            _py: Python<'_>,
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<u64> {
-            let json = pyobject_to_json(py, payload);
+            let json = pyobject_to_json(payload);
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = vector.extract()?;
@@ -438,12 +501,12 @@ pub mod python {
 
         fn insert_with_id(
             &mut self,
-            py: Python<'_>,
+            _py: Python<'_>,
             id: u64,
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let json = pyobject_to_json(py, payload);
+            let json = pyobject_to_json(payload);
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = vector.extract()?;
@@ -510,16 +573,16 @@ pub mod python {
             let results = match &self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
-                    db.search_hybrid(None, Some(&vec), &config)
+                    py.allow_threads(|| db.search_hybrid(None, Some(&vec), &config))
                 }
                 DbBackend::F16(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
-                    db.search_hybrid(None, Some(&vec16), &config)
+                    py.allow_threads(|| db.search_hybrid(None, Some(&vec16), &config))
                 }
                 DbBackend::U64(db) => {
                     let vec: Vec<u64> = query_vector.extract()?;
-                    db.search_hybrid(None, Some(&vec), &config)
+                    py.allow_threads(|| db.search_hybrid(None, Some(&vec), &config))
                 }
             }
             .map_err(|e: crate::error::TriviumError| {
@@ -555,7 +618,8 @@ pub mod python {
             text_boost=1.5,
             custom_query_text=None,
             payload_filter=None,
-            force_brute_force=false
+            force_brute_force=false,
+            expand_labels=None
         ))]
         fn search_advanced(
             &self,
@@ -579,6 +643,7 @@ pub mod python {
             custom_query_text: Option<String>,
             payload_filter: Option<&Bound<'_, PyDict>>,
             force_brute_force: bool,
+            expand_labels: Option<Vec<String>>,
         ) -> PyResult<Vec<PySearchHit>> {
             // 解析 payload_filter（类 MongoDB 语法的 dict -> Rust Filter）
             let rust_filter = match payload_filter {
@@ -603,6 +668,7 @@ pub mod python {
                 enable_text_hybrid_search,
                 text_boost,
                 force_brute_force,
+                expand_labels,
                 payload_filter: rust_filter,
                 ..Default::default()
             };
@@ -612,16 +678,16 @@ pub mod python {
             let results = match &self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
-                    db.search_hybrid(q_text, Some(&vec), &config)
+                    py.allow_threads(|| db.search_hybrid(q_text, Some(&vec), &config))
                 }
                 DbBackend::F16(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
-                    db.search_hybrid(q_text, Some(&vec16), &config)
+                    py.allow_threads(|| db.search_hybrid(q_text, Some(&vec16), &config))
                 }
                 DbBackend::U64(db) => {
                     let vec: Vec<u64> = query_vector.extract()?;
-                    db.search_hybrid(q_text, Some(&vec), &config)
+                    py.allow_threads(|| db.search_hybrid(q_text, Some(&vec), &config))
                 }
             }
             .map_err(|e: crate::error::TriviumError| {
@@ -667,19 +733,20 @@ pub mod python {
                 payload_filter: rust_filter,
                 ..Default::default()
             };
+            let query_text = query_text.to_owned();
             let results = match &self.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
-                    db.search_hybrid(Some(query_text), Some(&vec), &config)
+                    py.allow_threads(|| db.search_hybrid(Some(&query_text), Some(&vec), &config))
                 }
                 DbBackend::F16(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
-                    db.search_hybrid(Some(query_text), Some(&vec16), &config)
+                    py.allow_threads(|| db.search_hybrid(Some(&query_text), Some(&vec16), &config))
                 }
                 DbBackend::U64(db) => {
                     let vec: Vec<u64> = query_vector.extract()?;
-                    db.search_hybrid(Some(query_text), Some(&vec), &config)
+                    py.allow_threads(|| db.search_hybrid(Some(&query_text), Some(&vec), &config))
                 }
             }
             .map_err(|e: crate::error::TriviumError| {
@@ -701,21 +768,24 @@ pub mod python {
             })
         }
 
-        fn unlink(&mut self, src: u64, dst: u64) -> PyResult<()> {
-            dispatch!(self, mut db => db.unlink(src, dst)).map_err(
-                |e: crate::error::TriviumError| {
-                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                },
-            )
+        #[pyo3(signature = (src, dst, label=None))]
+        fn unlink(&mut self, src: u64, dst: u64, label: Option<&str>) -> PyResult<()> {
+            match label {
+                Some(label) => dispatch!(self, mut db => db.unlink_label(src, dst, label)),
+                None => dispatch!(self, mut db => db.unlink(src, dst)),
+            }
+            .map_err(|e: crate::error::TriviumError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })
         }
 
         fn update_payload(
             &mut self,
-            py: Python<'_>,
+            _py: Python<'_>,
             id: u64,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let json = pyobject_to_json(py, payload);
+            let json = pyobject_to_json(payload);
             dispatch!(self, mut db => db.update_payload(id, json)).map_err(
                 |e: crate::error::TriviumError| {
                     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
@@ -736,11 +806,11 @@ pub mod python {
         /// ```
         fn patch_payload(
             &mut self,
-            py: Python<'_>,
+            _py: Python<'_>,
             id: u64,
             patch: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let json = pyobject_to_json(py, patch);
+            let json = pyobject_to_json(patch);
             dispatch!(self, mut db => db.patch_payload(id, json)).map_err(
                 |e: crate::error::TriviumError| {
                     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
@@ -831,6 +901,19 @@ pub mod python {
                 .collect()
         }
 
+        #[pyo3(signature = (id, label=None))]
+        fn get_incoming_edges(&self, id: u64, label: Option<&str>) -> Vec<PyIncomingEdge> {
+            dispatch!(self, db => db.get_incoming_edges(id, label))
+                .into_iter()
+                .map(|edge| PyIncomingEdge {
+                    source_id: edge.source_id,
+                    target_id: edge.target_id,
+                    label: edge.label,
+                    weight: edge.weight,
+                })
+                .collect()
+        }
+
         fn get(&self, py: Python<'_>, id: u64) -> PyResult<Option<PyNodeView>> {
             match &self.inner {
                 DbBackend::F32(db) => {
@@ -895,9 +978,77 @@ pub mod python {
             Ok(None)
         }
 
-        #[pyo3(signature = (id, depth=1))]
-        fn neighbors(&self, id: u64, depth: usize) -> Vec<u64> {
-            dispatch!(self, db => db.neighbors(id, depth))
+        #[pyo3(signature = (id, depth=1, labels=None))]
+        fn neighbors(&self, id: u64, depth: usize, labels: Option<Vec<String>>) -> Vec<u64> {
+            dispatch!(self, db => db.neighbors_with_labels(id, depth, labels.as_deref()))
+        }
+
+        #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000))]
+        fn reachable(
+            &self,
+            id: u64,
+            min_depth: usize,
+            max_depth: usize,
+            labels: Option<Vec<String>>,
+            direction: &str,
+            max_visited_nodes: usize,
+        ) -> PyResult<Vec<PyReachabilityResult>> {
+            let direction = match direction {
+                "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
+                "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
+                "both" => crate::graph::reachability::ReachabilityDirection::Both,
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "direction 必须是 outgoing / incoming / both",
+                    ));
+                }
+            };
+            let config = crate::graph::reachability::ReachabilityConfig {
+                min_depth,
+                max_depth,
+                labels,
+                direction,
+                max_visited_nodes,
+            };
+            dispatch!(self, db => db.reachable(id, &config))
+                .map(|results| results.into_iter().map(to_py_reachability).collect())
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+        }
+
+        #[pyo3(signature = (query_vector, anchor_ids, top_k, max_anchor_nodes=100_000))]
+        fn search_graph_first(
+            &self,
+            py: Python<'_>,
+            query_vector: Bound<'_, PyAny>,
+            anchor_ids: Vec<u64>,
+            top_k: usize,
+            max_anchor_nodes: usize,
+        ) -> PyResult<Vec<PySearchHit>> {
+            let hits = match &self.inner {
+                DbBackend::F32(db) => {
+                    let query: Vec<f32> = query_vector.extract()?;
+                    db.search_graph_first(&query, &anchor_ids, top_k, max_anchor_nodes)
+                }
+                DbBackend::F16(db) => {
+                    let query: Vec<f32> = query_vector.extract()?;
+                    let query: Vec<half::f16> =
+                        query.into_iter().map(half::f16::from_f32).collect();
+                    db.search_graph_first(&query, &anchor_ids, top_k, max_anchor_nodes)
+                }
+                DbBackend::U64(db) => {
+                    let query: Vec<u64> = query_vector.extract()?;
+                    db.search_graph_first(&query, &anchor_ids, top_k, max_anchor_nodes)
+                }
+            }
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(hits
+                .into_iter()
+                .map(|hit| PySearchHit {
+                    id: hit.id,
+                    score: hit.score,
+                    payload: json_to_pyobject(py, &hit.payload),
+                })
+                .collect())
         }
 
         fn node_count(&self) -> usize {
@@ -986,12 +1137,25 @@ pub mod python {
             })
         }
 
-        /// 设置内存上限（MB），超出时自动 flush
-        /// 设为 0 表示无限制
+        /// 为后续插入主动预留额外节点容量。
+        fn reserve_nodes(&mut self, additional: usize) -> PyResult<()> {
+            dispatch!(self, db => db.reserve_nodes(additional)).map_err(|error| match error {
+                crate::error::TriviumError::CapacityReservationRejected { .. }
+                | crate::error::TriviumError::CapacityAllocationFailed { .. } => {
+                    pyo3::exceptions::PyMemoryError::new_err(error.to_string())
+                }
+                _ => pyo3::exceptions::PyValueError::new_err(error.to_string()),
+            })
+        }
+
+        /// 设置内核内存预算（MiB），0 表示不限制。
         #[pyo3(signature = (mb=0))]
-        fn set_memory_limit(&mut self, mb: usize) {
-            let bytes = mb * 1024 * 1024;
+        fn set_memory_limit(&mut self, mb: usize) -> PyResult<()> {
+            let bytes = mb.checked_mul(1024 * 1024).ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("内存上限换算字节时溢出")
+            })?;
             dispatch!(self, mut db => db.set_memory_limit(bytes));
+            Ok(())
         }
 
         /// 查询当前估算内存占用（字节）
@@ -1033,7 +1197,7 @@ pub mod python {
 
         fn batch_insert(
             &mut self,
-            py: Python<'_>,
+            _py: Python<'_>,
             vectors: Bound<'_, PyList>,
             payloads: &Bound<'_, PyList>,
         ) -> PyResult<Vec<u64>> {
@@ -1044,58 +1208,46 @@ pub mod python {
             }
             match &mut self.inner {
                 DbBackend::F32(db) => {
-                    let mut ids = Vec::with_capacity(vectors.len());
+                    let mut tx = crate::database::TxBuilder::new();
                     for (i, payload_obj) in payloads.iter().enumerate() {
                         let vec_obj = vectors.get_item(i)?;
                         let vec: Vec<f32> = vec_obj.extract()?;
-                        let json = pyobject_to_json(py, &payload_obj);
-                        let id =
-                            db.insert(&vec, json)
-                                .map_err(|e: crate::error::TriviumError| {
-                                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                                })?;
-                        ids.push(id);
+                        tx.insert(&vec, pyobject_to_json(&payload_obj));
                     }
-                    Ok(ids)
+                    db.commit_tx(tx).map_err(|error| {
+                        pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                    })
                 }
                 DbBackend::F16(db) => {
-                    let mut ids = Vec::with_capacity(vectors.len());
+                    let mut tx = crate::database::TxBuilder::new();
                     for (i, payload_obj) in payloads.iter().enumerate() {
                         let vec_obj = vectors.get_item(i)?;
                         let vec: Vec<f32> = vec_obj.extract()?;
                         let vec16: Vec<half::f16> =
                             vec.into_iter().map(half::f16::from_f32).collect();
-                        let json = pyobject_to_json(py, &payload_obj);
-                        let id =
-                            db.insert(&vec16, json)
-                                .map_err(|e: crate::error::TriviumError| {
-                                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                                })?;
-                        ids.push(id);
+                        tx.insert(&vec16, pyobject_to_json(&payload_obj));
                     }
-                    Ok(ids)
+                    db.commit_tx(tx).map_err(|error| {
+                        pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                    })
                 }
                 DbBackend::U64(db) => {
-                    let mut ids = Vec::with_capacity(vectors.len());
+                    let mut tx = crate::database::TxBuilder::new();
                     for (i, payload_obj) in payloads.iter().enumerate() {
                         let vec_obj = vectors.get_item(i)?;
                         let vec: Vec<u64> = vec_obj.extract()?;
-                        let json = pyobject_to_json(py, &payload_obj);
-                        let id =
-                            db.insert(&vec, json)
-                                .map_err(|e: crate::error::TriviumError| {
-                                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                                })?;
-                        ids.push(id);
+                        tx.insert(&vec, pyobject_to_json(&payload_obj));
                     }
-                    Ok(ids)
+                    db.commit_tx(tx).map_err(|error| {
+                        pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                    })
                 }
             }
         }
 
         fn batch_insert_with_ids(
             &mut self,
-            py: Python<'_>,
+            _py: Python<'_>,
             ids: Vec<u64>,
             vectors: Bound<'_, PyList>,
             payloads: &Bound<'_, PyList>,
@@ -1108,45 +1260,36 @@ pub mod python {
 
             match &mut self.inner {
                 DbBackend::F32(db) => {
+                    let mut tx = crate::database::TxBuilder::new();
                     for (i, payload_obj) in payloads.iter().enumerate() {
-                        let vec_obj = vectors.get_item(i)?;
-                        let vec: Vec<f32> = vec_obj.extract()?;
-                        let json = pyobject_to_json(py, &payload_obj);
-                        db.insert_with_id(ids[i], &vec, json).map_err(
-                            |e: crate::error::TriviumError| {
-                                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                            },
-                        )?;
+                        let vec: Vec<f32> = vectors.get_item(i)?.extract()?;
+                        tx.insert_with_id(ids[i], &vec, pyobject_to_json(&payload_obj));
                     }
-                    Ok(())
+                    db.commit_tx(tx).map(|_| ()).map_err(|error| {
+                        pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                    })
                 }
                 DbBackend::F16(db) => {
+                    let mut tx = crate::database::TxBuilder::new();
                     for (i, payload_obj) in payloads.iter().enumerate() {
-                        let vec_obj = vectors.get_item(i)?;
-                        let vec: Vec<f32> = vec_obj.extract()?;
+                        let vec: Vec<f32> = vectors.get_item(i)?.extract()?;
                         let vec16: Vec<half::f16> =
                             vec.into_iter().map(half::f16::from_f32).collect();
-                        let json = pyobject_to_json(py, &payload_obj);
-                        db.insert_with_id(ids[i], &vec16, json).map_err(
-                            |e: crate::error::TriviumError| {
-                                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                            },
-                        )?;
+                        tx.insert_with_id(ids[i], &vec16, pyobject_to_json(&payload_obj));
                     }
-                    Ok(())
+                    db.commit_tx(tx).map(|_| ()).map_err(|error| {
+                        pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                    })
                 }
                 DbBackend::U64(db) => {
+                    let mut tx = crate::database::TxBuilder::new();
                     for (i, payload_obj) in payloads.iter().enumerate() {
-                        let vec_obj = vectors.get_item(i)?;
-                        let vec: Vec<u64> = vec_obj.extract()?;
-                        let json = pyobject_to_json(py, &payload_obj);
-                        db.insert_with_id(ids[i], &vec, json).map_err(
-                            |e: crate::error::TriviumError| {
-                                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                            },
-                        )?;
+                        let vec: Vec<u64> = vectors.get_item(i)?.extract()?;
+                        tx.insert_with_id(ids[i], &vec, pyobject_to_json(&payload_obj));
                     }
-                    Ok(())
+                    db.commit_tx(tx).map(|_| ()).map_err(|error| {
+                        pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+                    })
                 }
             }
         }
@@ -1338,9 +1481,9 @@ pub mod python {
 
         /// 显式关闭数据库（落盘后释放资源）
         fn close(&mut self) -> PyResult<()> {
-            self.flush()?;
-            dispatch!(self, mut db => db.release_lock());
-            Ok(())
+            dispatch!(self, mut db => db.close()).map_err(|e: crate::error::TriviumError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })
         }
     }
 
@@ -1382,12 +1525,12 @@ pub mod python {
         /// 缓冲一个插入操作
         fn insert(
             &mut self,
-            py: Python<'_>,
+            _py: Python<'_>,
             vector: Vec<f64>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
             check_finished!(self);
-            let json = pyobject_to_json(py, payload);
+            let json = pyobject_to_json(payload);
             match self.builder.as_mut().expect("TxBuilder missing") {
                 TxBuilderBackend::F32(b) => {
                     let v: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
@@ -1411,13 +1554,13 @@ pub mod python {
         /// 缓冲一个带自定义 ID 的插入操作
         fn insert_with_id(
             &mut self,
-            py: Python<'_>,
+            _py: Python<'_>,
             id: u64,
             vector: Vec<f64>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
             check_finished!(self);
-            let json = pyobject_to_json(py, payload);
+            let json = pyobject_to_json(payload);
             match self.builder.as_mut().expect("TxBuilder missing") {
                 TxBuilderBackend::F32(b) => {
                     let v: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
@@ -1462,12 +1605,16 @@ pub mod python {
         }
 
         /// 缓冲一个断边操作
-        fn unlink(&mut self, src: u64, dst: u64) -> PyResult<()> {
+        #[pyo3(signature = (src, dst, label=None))]
+        fn unlink(&mut self, src: u64, dst: u64, label: Option<&str>) -> PyResult<()> {
             check_finished!(self);
-            match self.builder.as_mut().expect("TxBuilder missing") {
-                TxBuilderBackend::F32(b) => b.unlink(src, dst),
-                TxBuilderBackend::F16(b) => b.unlink(src, dst),
-                TxBuilderBackend::U64(b) => b.unlink(src, dst),
+            match (self.builder.as_mut().expect("TxBuilder missing"), label) {
+                (TxBuilderBackend::F32(b), Some(label)) => b.unlink_label(src, dst, label),
+                (TxBuilderBackend::F16(b), Some(label)) => b.unlink_label(src, dst, label),
+                (TxBuilderBackend::U64(b), Some(label)) => b.unlink_label(src, dst, label),
+                (TxBuilderBackend::F32(b), None) => b.unlink(src, dst),
+                (TxBuilderBackend::F16(b), None) => b.unlink(src, dst),
+                (TxBuilderBackend::U64(b), None) => b.unlink(src, dst),
             }
             Ok(())
         }
@@ -1475,12 +1622,12 @@ pub mod python {
         /// 缓冲一个更新 payload 操作
         fn update_payload(
             &mut self,
-            py: Python<'_>,
+            _py: Python<'_>,
             id: u64,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
             check_finished!(self);
-            let json = pyobject_to_json(py, payload);
+            let json = pyobject_to_json(payload);
             match self.builder.as_mut().expect("TxBuilder missing") {
                 TxBuilderBackend::F32(b) => b.update_payload(id, json),
                 TxBuilderBackend::F16(b) => b.update_payload(id, json),
@@ -1652,7 +1799,7 @@ pub mod python {
                             .get_item("payload")
                             .ok()
                             .flatten()
-                            .map(|v| pyobject_to_json(py, &v))
+                            .map(|v| pyobject_to_json(&v))
                             .unwrap_or(serde_json::Value::Null);
                         hits.push(crate::node::SearchHit { id, score, payload });
                     }
@@ -1671,24 +1818,23 @@ pub mod python {
         ) {
             pyo3::Python::with_gil(|py| {
                 let hook = self.py_hook.bind(py);
-                if let Ok(method) = hook.getattr("on_pre_search") {
-                    if let Ok(py_vec) = pyo3::types::PyList::new(py, query_vector.iter()) {
-                        let py_ctx = PyDict::new(py);
-                        let _ =
-                            py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
-                        let _ = py_ctx.set_item("abort", ctx.abort);
+                if let Ok(method) = hook.getattr("on_pre_search")
+                    && let Ok(py_vec) = pyo3::types::PyList::new(py, query_vector.iter())
+                {
+                    let py_ctx = PyDict::new(py);
+                    let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
+                    let _ = py_ctx.set_item("abort", ctx.abort);
 
-                        if let Ok(result) = method.call1((&py_vec, &py_ctx)) {
-                            // 如果返回了新向量，替换之
-                            if let Ok(new_vec) = result.extract::<Vec<f32>>() {
-                                *query_vector = new_vec;
-                            }
-                            // 检查 ctx.abort 是否被修改
-                            if let Ok(Some(abort_val)) = py_ctx.get_item("abort") {
-                                if let Ok(ab) = abort_val.extract::<bool>() {
-                                    ctx.abort = ab;
-                                }
-                            }
+                    if let Ok(result) = method.call1((&py_vec, &py_ctx)) {
+                        // 如果返回了新向量，替换之
+                        if let Ok(new_vec) = result.extract::<Vec<f32>>() {
+                            *query_vector = new_vec;
+                        }
+                        // 检查 ctx.abort 是否被修改
+                        if let Ok(Some(abort_val)) = py_ctx.get_item("abort")
+                            && let Ok(ab) = abort_val.extract::<bool>()
+                        {
+                            ctx.abort = ab;
                         }
                     }
                 }
@@ -1730,11 +1876,11 @@ pub mod python {
                     let py_ctx = PyDict::new(py);
                     let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
 
-                    if let Ok(result) = method.call1((&py_hits, &py_ctx)) {
-                        if !result.is_none() {
-                            let obj = result.unbind();
-                            return Some(Self::py_to_hits(py, &obj));
-                        }
+                    if let Ok(result) = method.call1((&py_hits, &py_ctx))
+                        && !result.is_none()
+                    {
+                        let obj = result.unbind();
+                        return Some(Self::py_to_hits(py, &obj));
                     }
                 }
                 None
@@ -1753,11 +1899,11 @@ pub mod python {
                     let py_ctx = PyDict::new(py);
                     let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
 
-                    if let Ok(result) = method.call1((&py_hits, &py_ctx)) {
-                        if !result.is_none() {
-                            let obj = result.unbind();
-                            *hits = Self::py_to_hits(py, &obj);
-                        }
+                    if let Ok(result) = method.call1((&py_hits, &py_ctx))
+                        && !result.is_none()
+                    {
+                        let obj = result.unbind();
+                        *hits = Self::py_to_hits(py, &obj);
                     }
                 }
             });
@@ -1778,6 +1924,10 @@ pub mod python {
     pub fn triviumdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<PyTriviumDB>()?;
         m.add_class::<PySearchHit>()?;
+        m.add_class::<PyReachabilityStep>()?;
+        m.add_class::<PyReachabilityResult>()?;
+        m.add_class::<PyEdge>()?;
+        m.add_class::<PyIncomingEdge>()?;
         m.add_class::<PyNodeView>()?;
         m.add_class::<PyQueryRow>()?;
         m.add_class::<PyHookContext>()?;

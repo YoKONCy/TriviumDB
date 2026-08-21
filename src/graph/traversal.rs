@@ -19,6 +19,31 @@ pub fn expand_graph<T: crate::VectorType>(
     enable_refractory_fatigue: bool,
     diffusion_bias: Option<&[f32]>,
 ) -> Vec<SearchHit> {
+    expand_graph_with_labels(
+        db,
+        seeds,
+        max_depth,
+        restart_alpha,
+        enable_inverse_inhibition,
+        lateral_inhibition_threshold,
+        enable_refractory_fatigue,
+        diffusion_bias,
+        None,
+    )
+}
+
+/// 执行可按标签限制的有限深度 SA-PPR。
+pub fn expand_graph_with_labels<T: crate::VectorType>(
+    db: &MemTable<T>,
+    seeds: Vec<SearchHit>,
+    max_depth: usize,
+    restart_alpha: f32,
+    enable_inverse_inhibition: bool,
+    lateral_inhibition_threshold: usize,
+    enable_refractory_fatigue: bool,
+    diffusion_bias: Option<&[f32]>,
+    expand_labels: Option<&[String]>,
+) -> Vec<SearchHit> {
     if max_depth == 0 || seeds.is_empty() {
         return seeds;
     }
@@ -88,6 +113,11 @@ pub fn expand_graph<T: crate::VectorType>(
             let mut weighted_edges = Vec::with_capacity(edges.len());
             let mut normalizer = 0.0f32;
             for edge in edges {
+                if expand_labels
+                    .is_some_and(|labels| !labels.iter().any(|label| label == &edge.label))
+                {
+                    continue;
+                }
                 if !edge.weight.is_finite() || edge.weight == 0.0 {
                     continue;
                 }

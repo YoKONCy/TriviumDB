@@ -73,7 +73,8 @@ pub fn execute_tql<T: VectorType>(
         return Ok(generate_explain_plan(query, memtable));
     }
 
-    let requires_full_input = !query.order_by.is_empty()
+    let requires_full_input = query.rank.is_some()
+        || !query.order_by.is_empty()
         || matches!(&query.returns, ReturnClause::Expressions(exprs) if exprs.iter().any(|expr| is_aggregate(&expr.kind) || expr.distinct));
     let row_limit = if requires_full_input {
         DEFAULT_ROW_LIMIT
@@ -85,18 +86,36 @@ pub fn execute_tql<T: VectorType>(
             .min(DEFAULT_ROW_LIMIT)
     };
 
+    let execution_row_limit = if query.rank.is_some() {
+        MAX_BUDGET.saturating_add(1)
+    } else {
+        row_limit
+    };
     let mut results = match &query.entry {
-        QueryEntry::Find { filter } => execute_find(filter, query, memtable, row_limit)?,
-        QueryEntry::Match { pattern } => execute_match(pattern, query, memtable, row_limit, false)?,
+        QueryEntry::Find { filter } => execute_find(filter, query, memtable, execution_row_limit)?,
+        QueryEntry::Match { pattern } => {
+            execute_match(pattern, query, memtable, execution_row_limit, false)?
+        }
         QueryEntry::OptionalMatch { pattern } => {
-            execute_match(pattern, query, memtable, row_limit, true)?
+            execute_match(pattern, query, memtable, execution_row_limit, true)?
         }
         QueryEntry::Search {
             vector,
             top_k,
             expand,
-        } => execute_search(vector, *top_k, expand.as_ref(), query, memtable, row_limit)?,
+        } => execute_search(
+            vector,
+            *top_k,
+            expand.as_ref(),
+            query,
+            memtable,
+            execution_row_limit,
+        )?,
     };
+
+    if let Some(rank) = &query.rank {
+        results = apply_graph_first_rank(results, rank, memtable)?;
+    }
 
     results = apply_aggregation_and_distinct(
         &query.returns,
@@ -126,6 +145,69 @@ pub fn execute_tql<T: VectorType>(
     apply_projection_pruning(&query.returns, &mut results);
 
     Ok(results)
+}
+
+fn apply_graph_first_rank<T: VectorType>(
+    rows: TqlResult<T>,
+    rank: &RankClause,
+    mt: &MemTable<T>,
+) -> Result<TqlResult<T>, TriviumError> {
+    let query_vector: Vec<T> = rank
+        .vector
+        .iter()
+        .map(|value| T::from_f32(*value as f32))
+        .collect();
+    if query_vector.len() != mt.dim() {
+        return Err(TriviumError::DimensionMismatch {
+            expected: mt.dim(),
+            got: query_vector.len(),
+        });
+    }
+    let mut canonical = BTreeMap::<NodeId, (Vec<NodeId>, HashMap<String, Node<T>>)>::new();
+    for row in rows {
+        let anchor = row.get(&rank.var).ok_or_else(|| {
+            TriviumError::QueryExecution(format!("RANK 变量 {} 未在 MATCH 中绑定", rank.var))
+        })?;
+        let mut bindings: Vec<(&str, NodeId)> = row
+            .iter()
+            .map(|(var, node)| (var.as_str(), node.id))
+            .collect();
+        bindings.sort_unstable();
+        let binding_key: Vec<NodeId> = bindings.into_iter().map(|(_, id)| id).collect();
+        match canonical.entry(anchor.id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((binding_key, row));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if binding_key < entry.get().0 {
+                    entry.insert((binding_key, row));
+                }
+            }
+        }
+    }
+    if canonical.len() > MAX_BUDGET {
+        return Err(TriviumError::QueryExecution(format!(
+            "GraphFirst anchor 数量超过预算 {MAX_BUDGET}"
+        )));
+    }
+    let mut ranked = Vec::with_capacity(canonical.len());
+    for (anchor_id, (_, row)) in canonical {
+        let vector = mt.get_vector(anchor_id).ok_or_else(|| {
+            TriviumError::QueryExecution(format!("RANK anchor {anchor_id} 缺少向量"))
+        })?;
+        let score = T::similarity(&query_vector, vector);
+        if score.is_finite() {
+            ranked.push((score, anchor_id, row));
+        }
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    ranked.truncate(rank.top_k);
+    Ok(ranked.into_iter().map(|(_, _, row)| row).collect())
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -565,32 +647,42 @@ fn execute_search<T: VectorType>(
 
     let mut candidates: Vec<NodeId> = scored.iter().map(|s| s.0).collect();
 
-    // EXPAND: 图扩散
+    // EXPAND: 确定性 Reachability
     if let Some(ex) = expand {
-        let mut expanded = HashSet::new();
+        let mut expanded = BTreeMap::<NodeId, usize>::new();
         for &seed in &candidates {
-            expanded.insert(seed);
+            expanded.insert(seed, 0);
         }
-
-        for &seed in &candidates.clone() {
-            let neighbors = crate::graph::pathfinding::k_hop_neighbors(
-                mt,
-                seed,
-                ex.max_depth,
-                if ex.labels.len() == 1 {
-                    Some(ex.labels[0].as_str())
-                } else {
-                    None
-                },
-            );
-            for (&nid, &dist) in &neighbors {
-                if dist >= ex.min_depth {
-                    expanded.insert(nid);
+        for &seed in &candidates {
+            let direction = match ex.direction {
+                EdgeDirection::Forward => {
+                    crate::graph::reachability::ReachabilityDirection::Outgoing
+                }
+                EdgeDirection::Backward => {
+                    crate::graph::reachability::ReachabilityDirection::Incoming
+                }
+                EdgeDirection::Both => crate::graph::reachability::ReachabilityDirection::Both,
+            };
+            let config = crate::graph::reachability::ReachabilityConfig {
+                min_depth: ex.min_depth,
+                max_depth: ex.max_depth,
+                labels: (!ex.labels.is_empty()).then(|| ex.labels.clone()),
+                direction,
+                max_visited_nodes: MAX_BUDGET,
+            };
+            for reached in crate::graph::reachability::traverse(mt, seed, &config)? {
+                expanded
+                    .entry(reached.target_id)
+                    .and_modify(|depth| *depth = (*depth).min(reached.depth))
+                    .or_insert(reached.depth);
+                if expanded.len() > MAX_BUDGET {
+                    return Err(TriviumError::QueryExecution(format!(
+                        "SEARCH EXPAND 超过候选预算 {MAX_BUDGET}"
+                    )));
                 }
             }
         }
-
-        candidates = expanded.into_iter().collect();
+        candidates = expanded.into_keys().collect();
     }
 
     // 对候选集应用 WHERE 过滤
@@ -1471,6 +1563,9 @@ fn generate_explain_plan<T: VectorType>(query: &TqlQuery, mt: &MemTable<T>) -> T
     if query.limit.is_some() {
         optimizations.push("LIMIT early termination");
     }
+    if query.rank.is_some() {
+        optimizations.push("GraphFirst exact anchor ranking");
+    }
     plan.insert("optimizations".into(), serde_json::json!(optimizations));
 
     // 统计信息
@@ -1827,6 +1922,7 @@ fn build_match_query(pattern: &TqlPattern, predicate: Option<&Predicate>) -> Tql
             pattern: pattern.clone(),
         },
         predicate: predicate.cloned(),
+        rank: None,
         returns: ReturnClause::All,
         order_by: Vec::new(),
         limit: None,

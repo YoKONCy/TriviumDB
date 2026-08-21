@@ -82,6 +82,25 @@ impl<T: VectorType> VecPool<T> {
         }
     }
 
+    /// 为尚未落盘的新向量预留额外节点容量。
+    pub(crate) fn try_reserve_nodes(&mut self, additional: usize) -> Result<()> {
+        let elements = additional.checked_mul(self.dim).ok_or_else(|| {
+            TriviumError::CapacityAllocationFailed {
+                reason: "向量容量计算溢出".into(),
+            }
+        })?;
+        self.delta
+            .try_reserve(elements)
+            .map_err(|error| TriviumError::CapacityAllocationFailed {
+                reason: format!("向量增量层预留失败: {error}"),
+            })
+    }
+
+    /// 当前增量层在不重新分配的情况下还能容纳的节点数。
+    pub(crate) fn delta_spare_nodes(&self) -> usize {
+        self.delta.capacity().saturating_sub(self.delta.len()) / self.dim
+    }
+
     /// 从 .vec 文件加载基础层（mmap），如果文件不存在则创建空池
     ///
     /// 向量文件格式：纯 SoA 二进制，无文件头，直接 bytemuck 映射。
@@ -243,6 +262,10 @@ impl<T: VectorType> VecPool<T> {
                 None
             }
         }
+    }
+
+    pub fn cache_needs_rebuild(&self) -> bool {
+        self.mmap.is_some() && self.mmap_count > 0 && !self.merged_valid
     }
 
     /// 确保合并缓存已构建（需要 &mut self）
@@ -561,6 +584,8 @@ impl<T: VectorType> VecPool<T> {
         // 追加增量层
         self.merged.extend_from_slice(&self.delta);
 
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeMergedCachePublish);
         self.merged_valid = true;
     }
 

@@ -1,5 +1,19 @@
 use serde_json::Value;
 
+#[derive(Debug, Clone)]
+pub enum ComparableValue {
+    Number(f64),
+    String(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RangeOp {
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
 /// 过滤条件表达式
 /// 支持: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $startsWith, $contains,
 ///       $exists, $size, $all, $type, $and, $or
@@ -9,14 +23,15 @@ pub enum Filter {
     Eq(String, Value),
     /// 不等于
     Ne(String, Value),
-    /// 大于 (仅数字)
+    /// 兼容公开 Rust API 的数字范围比较。
     Gt(String, f64),
-    /// 大于等于
     Gte(String, f64),
-    /// 小于
     Lt(String, f64),
-    /// 小于等于
     Lte(String, f64),
+    /// 数字或字符串的确定性范围比较。
+    Range(String, RangeOp, ComparableValue),
+    /// 严格 RFC3339 时间比较；阈值保存为 UTC 纳秒时间戳。
+    TimeRange(String, RangeOp, i64),
     /// 值在集合中: {"field": {"$in": [v1, v2]}}
     In(String, Vec<Value>),
     /// 逻辑与
@@ -47,18 +62,30 @@ impl Filter {
 
             Filter::Ne(key, val) => payload.get(key) != Some(val),
 
-            Filter::Gt(key, threshold) => {
-                extract_number(payload, key).is_some_and(|v| v > *threshold)
-            }
-            Filter::Gte(key, threshold) => {
-                extract_number(payload, key).is_some_and(|v| v >= *threshold)
-            }
-            Filter::Lt(key, threshold) => {
-                extract_number(payload, key).is_some_and(|v| v < *threshold)
-            }
-            Filter::Lte(key, threshold) => {
-                extract_number(payload, key).is_some_and(|v| v <= *threshold)
-            }
+            Filter::Gt(key, threshold) => payload
+                .get(key)
+                .and_then(Value::as_f64)
+                .is_some_and(|value| value > *threshold),
+            Filter::Gte(key, threshold) => payload
+                .get(key)
+                .and_then(Value::as_f64)
+                .is_some_and(|value| value >= *threshold),
+            Filter::Lt(key, threshold) => payload
+                .get(key)
+                .and_then(Value::as_f64)
+                .is_some_and(|value| value < *threshold),
+            Filter::Lte(key, threshold) => payload
+                .get(key)
+                .and_then(Value::as_f64)
+                .is_some_and(|value| value <= *threshold),
+            Filter::Range(key, op, threshold) => payload
+                .get(key)
+                .is_some_and(|value| compare_value(value, threshold, *op)),
+            Filter::TimeRange(key, op, threshold) => payload
+                .get(key)
+                .and_then(Value::as_str)
+                .and_then(parse_rfc3339_nanos)
+                .is_some_and(|value| compare_ordered(value, *threshold, *op)),
 
             Filter::In(key, values) => {
                 if let Some(field_val) = payload.get(key) {
@@ -226,22 +253,37 @@ impl Filter {
                             let f = match op.as_str() {
                                 "$eq" => Filter::Eq(field.to_string(), op_val.clone()),
                                 "$ne" => Filter::Ne(field.to_string(), op_val.clone()),
-                                "$gt" => Filter::Gt(
-                                    field.to_string(),
-                                    op_val.as_f64().ok_or_else(|| "$gt 需要数字".to_string())?,
-                                ),
-                                "$gte" => Filter::Gte(
-                                    field.to_string(),
-                                    op_val.as_f64().ok_or_else(|| "$gte 需要数字".to_string())?,
-                                ),
-                                "$lt" => Filter::Lt(
-                                    field.to_string(),
-                                    op_val.as_f64().ok_or_else(|| "$lt 需要数字".to_string())?,
-                                ),
-                                "$lte" => Filter::Lte(
-                                    field.to_string(),
-                                    op_val.as_f64().ok_or_else(|| "$lte 需要数字".to_string())?,
-                                ),
+                                "$gt" | "$gte" | "$lt" | "$lte" => {
+                                    let operator = op.as_str();
+                                    let range_op = match operator {
+                                        "$gt" => RangeOp::Gt,
+                                        "$gte" => RangeOp::Gte,
+                                        "$lt" => RangeOp::Lt,
+                                        _ => RangeOp::Lte,
+                                    };
+                                    Filter::Range(
+                                        field.to_string(),
+                                        range_op,
+                                        parse_comparable(op_val, operator)?,
+                                    )
+                                }
+                                "$before" | "$beforeEq" | "$after" | "$afterEq" => {
+                                    let operator = op.as_str();
+                                    let range_op = match operator {
+                                        "$before" => RangeOp::Lt,
+                                        "$beforeEq" => RangeOp::Lte,
+                                        "$after" => RangeOp::Gt,
+                                        _ => RangeOp::Gte,
+                                    };
+                                    let input = op_val
+                                        .as_str()
+                                        .ok_or_else(|| format!("{operator} 需要 RFC3339 字符串"))?;
+                                    let timestamp =
+                                        parse_rfc3339_nanos(input).ok_or_else(|| {
+                                            format!("{operator} 包含无效 RFC3339 时间: {input}")
+                                        })?;
+                                    Filter::TimeRange(field.to_string(), range_op, timestamp)
+                                }
                                 "$in" => {
                                     let arr = op_val
                                         .as_array()
@@ -314,8 +356,40 @@ impl Filter {
     }
 }
 
-fn extract_number(payload: &Value, key: &str) -> Option<f64> {
-    payload.get(key)?.as_f64()
+fn parse_comparable(value: &Value, operator: &str) -> Result<ComparableValue, String> {
+    if let Some(number) = value.as_f64() {
+        return Ok(ComparableValue::Number(number));
+    }
+    if let Some(string) = value.as_str() {
+        return Ok(ComparableValue::String(string.to_string()));
+    }
+    Err(format!("{operator} 需要数字或字符串"))
+}
+
+fn compare_ordered<T: PartialOrd>(value: T, threshold: T, op: RangeOp) -> bool {
+    match op {
+        RangeOp::Gt => value > threshold,
+        RangeOp::Gte => value >= threshold,
+        RangeOp::Lt => value < threshold,
+        RangeOp::Lte => value <= threshold,
+    }
+}
+
+fn compare_value(value: &Value, threshold: &ComparableValue, op: RangeOp) -> bool {
+    match (value, threshold) {
+        (Value::Number(number), ComparableValue::Number(expected)) => number
+            .as_f64()
+            .is_some_and(|actual| compare_ordered(actual, *expected, op)),
+        (Value::String(actual), ComparableValue::String(expected)) => {
+            compare_ordered(actual.as_str(), expected.as_str(), op)
+        }
+        _ => false,
+    }
+}
+
+fn parse_rfc3339_nanos(value: &str) -> Option<i64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value).ok()?;
+    parsed.timestamp_nanos_opt()
 }
 
 #[cfg(test)]

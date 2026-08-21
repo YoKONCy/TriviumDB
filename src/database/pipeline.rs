@@ -21,9 +21,14 @@ use crate::index::brute_force;
 use crate::index::quiver::QuIVerSearchConfig;
 use crate::node::{NodeId, SearchHit};
 use crate::storage::memtable::MemTable;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
-use super::lock_or_recover;
+use super::{HookReadScope, read_or_recover, try_start_quiver_build, write_or_recover};
+
+fn call_hook<R>(call: impl FnOnce() -> R) -> R {
+    let _scope = HookReadScope::enter();
+    call()
+}
 
 fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
     for (name, value) in [
@@ -98,16 +103,64 @@ fn validate_hooked_query(query: &[f32], dim: usize) -> Result<()> {
 ///
 /// 这是从 `Database::search_hybrid_internal` 中提取出的核心管线逻辑。
 /// 将 ~500 行的检索实现独立为专门文件，便于维护和测试。
-pub(crate) fn execute_pipeline<T: VectorType>(
-    memtable: &Arc<Mutex<MemTable<T>>>,
+pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
+    memtable: &Arc<RwLock<MemTable<T>>>,
+    quiver_builds: &Arc<(
+        std::sync::Mutex<std::collections::HashSet<u64>>,
+        std::sync::Condvar,
+    )>,
+    memory_limit: usize,
     hook: &Arc<dyn SearchHook>,
     query_text: Option<&str>,
     query_vector: Option<&[T]>,
     config: &SearchConfig,
     ctx: &mut HookContext,
 ) -> Result<Vec<SearchHit>> {
-    #[allow(unused_mut)]
-    let mut mt = lock_or_recover(memtable);
+    // Payload 过滤可能在 QuIVer 候选不足时回退精确扫描，因此准备阶段必须预先物化 flat。
+    let materialize_flat = config.force_brute_force || config.payload_filter.is_some();
+    let quiver_config = crate::index::quiver::QuIVerConfig::default();
+    let auto_build_snapshot = {
+        let mt = read_or_recover(memtable);
+        if mt.auto_quiver_build_needed() {
+            let projected = mt
+                .estimated_memory_bytes()
+                .saturating_add(mt.quiver_build_peak_bytes(&quiver_config));
+            if memory_limit > 0 && projected > memory_limit {
+                return Err(crate::error::TriviumError::InvalidInput(format!(
+                    "QuIVer 自动构建预计峰值 {}MB 超过内存上限 {}MB",
+                    projected / (1024 * 1024),
+                    memory_limit / (1024 * 1024)
+                )));
+            }
+            mt.quiver_build_snapshot()
+        } else {
+            None
+        }
+    };
+    if let Some(snapshot) = auto_build_snapshot
+        && let Some(_build_guard) = try_start_quiver_build(quiver_builds, snapshot.generation)
+    {
+        let source_generation = snapshot.generation;
+        let index = MemTable::<T>::build_quiver_snapshot(snapshot, &quiver_config);
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverPublish);
+        let _ = write_or_recover(memtable).publish_quiver_if_current(source_generation, index);
+    }
+
+    let cache_needs_prepare = {
+        let mt = read_or_recover(memtable);
+        mt.search_cache_needs_prepare(materialize_flat)
+    };
+    if cache_needs_prepare {
+        let mut mt = write_or_recover(memtable);
+        if mt.search_cache_needs_prepare(materialize_flat) {
+            mt.prepare_search_cache(materialize_flat);
+        }
+    }
+
+    let mt = read_or_recover(memtable);
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::SearchLockAcquired);
 
     // ═══════════════════════════════════════════════════════
     //  L0: 容错与防御式编程 (Sanity Checks)
@@ -143,7 +196,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
         .unwrap_or_default();
     {
         let t0 = std::time::Instant::now();
-        hook.on_pre_search(&mut query_vec_f32, &mut safe_cfg, ctx);
+        call_hook(|| hook.on_pre_search(&mut query_vec_f32, &mut safe_cfg, ctx));
         ctx.record_timing("hook_pre_search", t0.elapsed());
     }
 
@@ -172,7 +225,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     let custom_recall_result = {
         let t0 = std::time::Instant::now();
-        let result = hook.on_custom_recall(&query_vec_f32, config, ctx);
+        let result = call_hook(|| hook.on_custom_recall(&query_vec_f32, config, ctx));
         ctx.record_timing("hook_custom_recall", t0.elapsed());
         result
     };
@@ -191,11 +244,9 @@ pub(crate) fn execute_pipeline<T: VectorType>(
             *seed_map.entry(hit.id).or_insert(0.0) += hit.score;
         }
     } else {
-        // === 内置召回管线 ===
-        let need_flat = config.force_brute_force || mt.quiver().is_none();
-        mt.ensure_vectors_cache(need_flat);
+        // 准备期已保证 QuIVer、BQ 与可能的精确回退 flat cache 全部就绪。
         recall_text_ranked(&mt, config, query_text, &mut sparse_ranking);
-        recall_vector_ranked(&mut mt, config, query_vector, &mut dense_ranking);
+        recall_vector_ranked(&mt, config, query_vector, &mut dense_ranking);
         // FISTA 基于稠密召回候选，融合后再追加影子排名。
         fuse_rankings_rrf(
             &mut seed_map,
@@ -203,7 +254,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
             &sparse_ranking,
             config.text_boost,
         );
-        recall_residual(&mut mt, config, query_vector, &mut seed_map);
+        recall_residual(&mt, config, query_vector, &mut seed_map);
     }
 
     // 内置召回已在分支内完成 RRF；自定义召回保留调用方给出的原始分数。
@@ -219,7 +270,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     {
         let t0 = std::time::Instant::now();
-        hook.on_post_recall(&mut anchor_hits, ctx);
+        call_hook(|| hook.on_post_recall(&mut anchor_hits, ctx));
         ctx.record_timing("hook_post_recall", t0.elapsed());
     }
 
@@ -241,7 +292,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     {
         let t0 = std::time::Instant::now();
-        hook.on_pre_graph_expand(&mut seeds, ctx);
+        call_hook(|| hook.on_pre_graph_expand(&mut seeds, ctx));
         ctx.record_timing("hook_pre_graph_expand", t0.elapsed());
     }
 
@@ -249,7 +300,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     //  L6 + L7: SA-PPR 有限深度图谱扩散 + 不应期/侧向抑制
     // ═══════════════════════════════════════════════════════
     let t_graph = std::time::Instant::now();
-    let mut expanded = crate::graph::traversal::expand_graph(
+    let mut expanded = crate::graph::traversal::expand_graph_with_labels(
         &mt,
         seeds,
         config.expand_depth,
@@ -258,6 +309,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
         config.lateral_inhibition_threshold,
         config.enable_refractory_fatigue,
         config.diffusion_bias.as_deref(), // CCSA: 传递扩散偏置向量
+        config.expand_labels.as_deref(),
     );
     ctx.record_timing("graph_expand", t_graph.elapsed());
 
@@ -268,7 +320,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     {
         let t0 = std::time::Instant::now();
-        if let Some(reranked) = hook.on_rerank(&mut expanded, ctx) {
+        if let Some(reranked) = call_hook(|| hook.on_rerank(&mut expanded, ctx)) {
             expanded = reranked;
         }
         ctx.record_timing("hook_rerank", t0.elapsed());
@@ -286,7 +338,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
         // 🔌 Hook #6: on_post_search（DPP 分支）
         {
             let t0 = std::time::Instant::now();
-            hook.on_post_search(&mut final_results, ctx);
+            call_hook(|| hook.on_post_search(&mut final_results, ctx));
             ctx.record_timing("hook_post_search", t0.elapsed());
         }
         return Ok(final_results);
@@ -299,7 +351,7 @@ pub(crate) fn execute_pipeline<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     {
         let t0 = std::time::Instant::now();
-        hook.on_post_search(&mut expanded, ctx);
+        call_hook(|| hook.on_post_search(&mut expanded, ctx));
         ctx.record_timing("hook_post_search", t0.elapsed());
     }
 
@@ -367,7 +419,7 @@ fn recall_text<T: VectorType>(
 
 #[cfg(test)]
 fn recall_vector<T: VectorType>(
-    mt: &mut MemTable<T>,
+    mt: &MemTable<T>,
     config: &SearchConfig,
     query_vector: Option<&[T]>,
     seed_map: &mut std::collections::HashMap<NodeId, f32>,
@@ -407,7 +459,7 @@ fn fuse_rankings_rrf(
 
 /// L2 + L3: 向量稠密召回（自适应路由 + 布隆预过滤）
 fn recall_vector_ranked<T: VectorType>(
-    mt: &mut MemTable<T>,
+    mt: &MemTable<T>,
     config: &SearchConfig,
     query_vector: Option<&[T]>,
     ranking: &mut Vec<(NodeId, f32)>,
@@ -434,7 +486,6 @@ fn recall_vector_ranked<T: VectorType>(
                 requested = config.top_k,
                 "QuIVer 过滤结果不足，回退精确扫描"
             );
-            mt.ensure_vectors_cache(true);
             brute_force_pipeline(mt, config, query_vector, mt.flat_vectors(), dim)
         } else {
             approximate_hits
@@ -547,7 +598,7 @@ fn quiver_pipeline<T: VectorType + Sync>(
 
 /// L4 + L5: FISTA 残差搜索 + 影子查询
 fn recall_residual<T: VectorType>(
-    mt: &mut MemTable<T>,
+    mt: &MemTable<T>,
     config: &SearchConfig,
     query_vector: Option<&[T]>,
     seed_map: &mut std::collections::HashMap<NodeId, f32>,
@@ -718,6 +769,31 @@ fn apply_dpp<T: VectorType>(
     Some(final_results)
 }
 
+#[cfg(test)]
+fn execute_pipeline<T: VectorType>(
+    memtable: &Arc<RwLock<MemTable<T>>>,
+    quiver_builds: &Arc<(
+        std::sync::Mutex<std::collections::HashSet<u64>>,
+        std::sync::Condvar,
+    )>,
+    hook: &Arc<dyn SearchHook>,
+    query_text: Option<&str>,
+    query_vector: Option<&[T]>,
+    config: &SearchConfig,
+    ctx: &mut HookContext,
+) -> Result<Vec<SearchHit>> {
+    execute_pipeline_with_limit(
+        memtable,
+        quiver_builds,
+        0,
+        hook,
+        query_text,
+        query_vector,
+        config,
+        ctx,
+    )
+}
+
 // ═══════════════════════════════════════════════════════════
 //  单元测试
 // ═══════════════════════════════════════════════════════════
@@ -730,7 +806,7 @@ mod tests {
     use crate::hook::{HookContext, NoopHook, SearchHook};
     use crate::node::SearchHit;
     use crate::storage::memtable::MemTable;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     /// 构建一个包含若干 f32 节点的内存 MemTable（无磁盘 IO）
     fn make_memtable(dim: usize, nodes: &[(u64, Vec<f32>, serde_json::Value)]) -> MemTable<f32> {
@@ -741,8 +817,18 @@ mod tests {
         mt
     }
 
-    fn wrap(mt: MemTable<f32>) -> Arc<Mutex<MemTable<f32>>> {
-        Arc::new(Mutex::new(mt))
+    fn wrap(mt: MemTable<f32>) -> Arc<RwLock<MemTable<f32>>> {
+        Arc::new(RwLock::new(mt))
+    }
+
+    fn builds() -> Arc<(
+        std::sync::Mutex<std::collections::HashSet<u64>>,
+        std::sync::Condvar,
+    )> {
+        Arc::new((
+            std::sync::Mutex::new(std::collections::HashSet::new()),
+            std::sync::Condvar::new(),
+        ))
     }
 
     fn default_config() -> SearchConfig {
@@ -901,7 +987,7 @@ mod tests {
         let query: Vec<f32> = vec![1.0, 0.0, 0.0];
         let mut seed_map = std::collections::HashMap::new();
 
-        recall_vector(&mut mt, &cfg, Some(&query), &mut seed_map);
+        recall_vector(&mt, &cfg, Some(&query), &mut seed_map);
 
         assert!(!seed_map.is_empty(), "应召回至少一个节点");
         // 节点 1 与 query 完全对齐，得分最高
@@ -919,7 +1005,7 @@ mod tests {
         mt.ensure_vectors_cache(true);
         let cfg = default_config();
         let mut seed_map = std::collections::HashMap::new();
-        recall_vector(&mut mt, &cfg, None, &mut seed_map);
+        recall_vector(&mt, &cfg, None, &mut seed_map);
         assert!(seed_map.is_empty());
     }
 
@@ -942,7 +1028,7 @@ mod tests {
         };
         let query = vec![1.0, 0.0, 0.0];
         let mut seed_map = std::collections::HashMap::new();
-        recall_vector(&mut mt, &cfg, Some(&query), &mut seed_map);
+        recall_vector(&mt, &cfg, Some(&query), &mut seed_map);
 
         assert!(seed_map.contains_key(&1));
         assert!(
@@ -974,7 +1060,7 @@ mod tests {
             ..Default::default()
         };
         let mut seed_map = std::collections::HashMap::new();
-        recall_vector(&mut mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
+        recall_vector(&mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
 
         assert_eq!(seed_map.len(), 2);
         assert!(seed_map.contains_key(&3));
@@ -1003,7 +1089,7 @@ mod tests {
             ..Default::default()
         };
         let mut seed_map = std::collections::HashMap::new();
-        recall_vector(&mut mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
+        recall_vector(&mt, &cfg, Some(&[1.0, 0.0]), &mut seed_map);
 
         assert_eq!(seed_map.len(), 2);
         assert!(seed_map.contains_key(&100));
@@ -1056,7 +1142,7 @@ mod tests {
         let mut seed_map = std::collections::HashMap::new();
         seed_map.insert(1u64, 0.9f32);
         let before = seed_map.clone();
-        recall_residual(&mut mt, &cfg, Some(&query), &mut seed_map);
+        recall_residual(&mt, &cfg, Some(&query), &mut seed_map);
         assert_eq!(seed_map, before, "disabled 时 seed_map 不应变化");
     }
 
@@ -1071,7 +1157,7 @@ mod tests {
         };
         let query = vec![1.0, 0.0, 0.0];
         let mut seed_map = std::collections::HashMap::new();
-        recall_residual(&mut mt, &cfg, Some(&query), &mut seed_map);
+        recall_residual(&mt, &cfg, Some(&query), &mut seed_map);
         assert!(seed_map.is_empty());
     }
 
@@ -1172,7 +1258,15 @@ mod tests {
         let bad_query = vec![1.0, 0.0]; // dim=2, 期望 dim=3
         let mut ctx = HookContext::new();
 
-        let result = execute_pipeline(&mt, &hook, None, Some(&bad_query), &cfg, &mut ctx);
+        let result = execute_pipeline(
+            &mt,
+            &builds(),
+            &hook,
+            None,
+            Some(&bad_query),
+            &cfg,
+            &mut ctx,
+        );
         assert!(result.is_err(), "维度不匹配应返回错误");
     }
 
@@ -1187,7 +1281,15 @@ mod tests {
         let nan_query = vec![f32::NAN, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let result = execute_pipeline(&mt, &hook, None, Some(&nan_query), &cfg, &mut ctx);
+        let result = execute_pipeline(
+            &mt,
+            &builds(),
+            &hook,
+            None,
+            Some(&nan_query),
+            &cfg,
+            &mut ctx,
+        );
         assert!(result.is_err(), "NaN 查询向量应被拒绝");
     }
 
@@ -1202,7 +1304,15 @@ mod tests {
         let inf_query = vec![f32::INFINITY, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let result = execute_pipeline(&mt, &hook, None, Some(&inf_query), &cfg, &mut ctx);
+        let result = execute_pipeline(
+            &mt,
+            &builds(),
+            &hook,
+            None,
+            Some(&inf_query),
+            &cfg,
+            &mut ctx,
+        );
         assert!(result.is_err(), "Infinity 查询向量应被拒绝");
     }
 
@@ -1214,7 +1324,8 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        let results =
+            execute_pipeline(&mt, &builds(), &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         assert!(results.is_empty(), "空库应返回空结果");
     }
 
@@ -1238,7 +1349,8 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        let results =
+            execute_pipeline(&mt, &builds(), &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].id, 1, "最相似节点应排第一");
     }
@@ -1265,7 +1377,8 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        let results =
+            execute_pipeline(&mt, &builds(), &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         assert!(results.len() <= 3, "结果数不应超过 top_k");
     }
 
@@ -1280,7 +1393,8 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let _ = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        let _ =
+            execute_pipeline(&mt, &builds(), &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         assert!(!ctx.stage_timings.is_empty(), "管线应记录阶段计时");
         let stage_names: Vec<&str> = ctx.stage_timings.iter().map(|(n, _)| n.as_str()).collect();
         assert!(stage_names.contains(&"hook_pre_search"));
@@ -1295,6 +1409,39 @@ mod tests {
     }
 
     // ════════ Hook 集成 ════════
+
+    #[test]
+    fn test_hook回调期间写重入保护已激活() {
+        struct ProbeHook(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl SearchHook for ProbeHook {
+            fn on_pre_search(&self, _: &mut Vec<f32>, _: &mut SearchConfig, _: &mut HookContext) {
+                self.0.store(
+                    super::super::reject_hook_reentrant_write().is_err(),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            }
+        }
+
+        let blocked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook: Arc<dyn SearchHook> = Arc::new(ProbeHook(std::sync::Arc::clone(&blocked)));
+        let mt = wrap(make_memtable(
+            3,
+            &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))],
+        ));
+        let mut ctx = HookContext::new();
+        execute_pipeline(
+            &mt,
+            &builds(),
+            &hook,
+            None,
+            Some(&[1.0, 0.0, 0.0]),
+            &default_config(),
+            &mut ctx,
+        )
+        .unwrap();
+        assert!(blocked.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(super::super::reject_hook_reentrant_write().is_ok());
+    }
 
     #[test]
     fn test_hook_abort_returns_empty() {
@@ -1314,7 +1461,8 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        let results =
+            execute_pipeline(&mt, &builds(), &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         assert!(results.is_empty(), "abort=true 时应返回空结果");
     }
 
@@ -1357,7 +1505,8 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        let results =
+            execute_pipeline(&mt, &builds(), &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, 999, "自定义召回应覆盖内置召回");
     }
@@ -1389,7 +1538,8 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        let results =
+            execute_pipeline(&mt, &builds(), &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         for r in &results {
             assert!(
                 r.score > 0.5,
@@ -1431,7 +1581,8 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        let results =
+            execute_pipeline(&mt, &builds(), &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         assert!(results.len() >= 2);
         // rerank hook 反转了顺序，原本分低的现在排前面
         assert_eq!(results[0].id, 2, "rerank 反转后 node 2 应排第一");
@@ -1456,7 +1607,7 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx);
+        let results = execute_pipeline(&mt, &builds(), &hook, None, Some(&query), &cfg, &mut ctx);
         assert!(results.is_ok(), "极端参数不应 panic");
     }
 
@@ -1488,7 +1639,8 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut ctx = HookContext::new();
 
-        let results = execute_pipeline(&mt, &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
+        let results =
+            execute_pipeline(&mt, &builds(), &hook, None, Some(&query), &cfg, &mut ctx).unwrap();
         let ids: Vec<u64> = results.iter().map(|h| h.id).collect();
         assert!(ids.contains(&2), "图扩散应将邻居节点 2 纳入结果");
     }

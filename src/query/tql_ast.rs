@@ -16,6 +16,8 @@ pub struct TqlQuery {
     pub entry: QueryEntry,
     /// WHERE 过滤（统一谓词）
     pub predicate: Option<Predicate>,
+    /// MATCH 产生 anchor 后，在指定变量集合内执行精确向量排序。
+    pub rank: Option<RankClause>,
     /// RETURN 投影
     pub returns: ReturnClause,
     /// ORDER BY
@@ -24,6 +26,13 @@ pub struct TqlQuery {
     pub limit: Option<usize>,
     /// OFFSET
     pub offset: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RankClause {
+    pub var: String,
+    pub vector: Vec<f64>,
+    pub top_k: usize,
 }
 
 /// 查询入口类型
@@ -101,6 +110,8 @@ pub struct ExpandClause {
     /// 跳数范围
     pub min_depth: usize,
     pub max_depth: usize,
+    /// 默认正向；可显式指定反向或双向。
+    pub direction: EdgeDirection,
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -61,6 +61,35 @@ fn COV2_01_get_node_view() {
     cleanup(&path);
 }
 
+#[test]
+fn COV2_02b_标签邻居稳定排序与完整入边() {
+    let path = tmp_db("neighbors_labels");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let a = db.insert(&[1.0; DIM], serde_json::json!({})).unwrap();
+    let b = db.insert(&[2.0; DIM], serde_json::json!({})).unwrap();
+    let c = db.insert(&[3.0; DIM], serde_json::json!({})).unwrap();
+    let d = db.insert(&[4.0; DIM], serde_json::json!({})).unwrap();
+    db.link(a, c, "works", 2.0).unwrap();
+    db.link(a, b, "knows", 1.0).unwrap();
+    db.link(b, d, "knows", 3.0).unwrap();
+
+    assert_eq!(db.neighbors_with_labels(a, 2, None), vec![b, c, d]);
+    assert_eq!(
+        db.neighbors_with_labels(a, 2, Some(&["knows".to_string()])),
+        vec![b, d]
+    );
+    assert!(db.neighbors_with_labels(a, 2, Some(&[])).is_empty());
+
+    let incoming = db.get_incoming_edges(b, None);
+    assert_eq!(incoming.len(), 1);
+    assert_eq!(incoming[0].source_id, a);
+    assert_eq!(incoming[0].target_id, b);
+    assert_eq!(incoming[0].label, "knows");
+    assert_eq!(incoming[0].weight, 1.0);
+    cleanup(&path);
+}
+
 /// neighbors() — BFS 邻居发现
 #[test]
 fn COV2_02_neighbors() {

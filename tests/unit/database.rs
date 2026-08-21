@@ -359,7 +359,7 @@ fn patch_payload_WAL持久化() {
 
 #[test]
 fn update_vector_不存在() {
-    let mut db = open_db("vec_404");
+    let db = open_db("vec_404");
     assert!(db.update_vector(999, &[1.0, 0.0, 0.0]).is_err());
 }
 

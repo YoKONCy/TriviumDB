@@ -74,6 +74,137 @@ fn build_test_db(name: &str) -> (Database<f32>, String) {
     (db, path)
 }
 
+#[test]
+fn GraphFirst在图匹配集合内精确排序并去重Anchor() {
+    let path = tmp_db("graph_first_rank");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let near_without_edge = db
+        .insert(&[1.0, 0.0], serde_json::json!({"name": "near"}))
+        .unwrap();
+    let anchor_a = db
+        .insert(&[0.8, 0.2], serde_json::json!({"name": "a"}))
+        .unwrap();
+    let anchor_b = db
+        .insert(&[0.5, 0.5], serde_json::json!({"name": "b"}))
+        .unwrap();
+    let target = db
+        .insert(&[-1.0, 0.0], serde_json::json!({"name": "target"}))
+        .unwrap();
+    db.link(anchor_a, target, "CITES", 1.0).unwrap();
+    db.link(anchor_a, target, "MENTIONS", 1.0).unwrap();
+    db.link(anchor_b, target, "CITES", 1.0).unwrap();
+
+    let rows = db
+        .tql("MATCH (doc)-[:CITES|MENTIONS]->(ref) RANK doc BY VECTOR [1.0, 0.0] TOP 2 RETURN doc")
+        .unwrap();
+    let ids: Vec<u64> = rows.iter().map(|row| row["doc"].id).collect();
+    assert_eq!(ids, vec![anchor_a, anchor_b]);
+    assert!(!ids.contains(&near_without_edge));
+    cleanup(&path);
+}
+
+#[test]
+fn GraphFirst未绑定Rank变量明确报错() {
+    let (db, path) = build_test_db("graph_first_unbound");
+    let result = db.tql("MATCH (a)-[:knows]->(b) RANK missing BY VECTOR [1.0, 0.0] TOP 1 RETURN a");
+    assert!(result.is_err());
+    cleanup(&path);
+}
+
+#[test]
+fn GraphFirst分页在排名后执行且显式排序可覆盖排名() {
+    let (db, path) = build_test_db("graph_first_paging");
+    let ranked = db
+        .tql("MATCH (a)-[:knows]->(b) RANK b BY VECTOR [1.0, 0.0] TOP 2 RETURN b LIMIT 1 OFFSET 1")
+        .unwrap();
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0]["b"].payload["name"], "Bob");
+
+    let ordered = db
+        .tql("MATCH (a)-[:knows]->(b) RANK b BY VECTOR [1.0, 0.0] TOP 2 RETURN b ORDER BY b.name ASC")
+        .unwrap();
+    assert_eq!(ordered[0]["b"].payload["name"], "Bob");
+    assert_eq!(ordered[1]["b"].payload["name"], "Carol");
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
+fn GraphFirst_EXPLAIN报告精确Anchor排序() {
+    let (db, path) = build_test_db("graph_first_explain");
+    let rows = db
+        .tql("EXPLAIN MATCH (a)-[:knows]->(b) RANK b BY VECTOR [1.0, 0.0] TOP 2 RETURN b")
+        .unwrap();
+    let optimizations = rows[0]["plan"].payload["optimizations"].as_array().unwrap();
+    assert!(
+        optimizations
+            .iter()
+            .any(|item| item == "GraphFirst exact anchor ranking")
+    );
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
+fn SEARCH_EXPAND多标签与空标签语义正确() {
+    let path = tmp_db("search_expand_labels");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let seed = db.insert(&[1.0, 0.0], serde_json::json!({})).unwrap();
+    let knows = db.insert(&[0.0, 1.0], serde_json::json!({})).unwrap();
+    let works = db.insert(&[-1.0, 0.0], serde_json::json!({})).unwrap();
+    db.link(seed, knows, "KNOWS", 1.0).unwrap();
+    db.link(seed, works, "WORKS", 1.0).unwrap();
+
+    let rows = db
+        .tql("SEARCH VECTOR [1.0, 0.0] TOP 1 EXPAND [:KNOWS|WORKS*1..1] RETURN *")
+        .unwrap();
+    let ids: std::collections::HashSet<u64> = rows.iter().map(|row| row["_"].id).collect();
+    assert_eq!(ids, [seed, knows, works].into_iter().collect());
+
+    let rows = db
+        .tql("SEARCH VECTOR [1.0, 0.0] TOP 1 EXPAND [*1..1] RETURN *")
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    cleanup(&path);
+}
+
+#[test]
+fn SEARCH_EXPAND支持Incoming和Both方向() {
+    let path = tmp_db("search_expand_direction");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let source = db.insert(&[0.0, 1.0], serde_json::json!({})).unwrap();
+    let seed = db.insert(&[1.0, 0.0], serde_json::json!({})).unwrap();
+    let target = db.insert(&[-1.0, 0.0], serde_json::json!({})).unwrap();
+    db.link(source, seed, "REL", 1.0).unwrap();
+    db.link(seed, target, "REL", 1.0).unwrap();
+
+    let incoming = db
+        .tql("SEARCH VECTOR [1.0, 0.0] TOP 1 EXPAND INCOMING [:REL*1..1] RETURN *")
+        .unwrap();
+    assert_eq!(
+        incoming
+            .iter()
+            .map(|row| row["_"].id)
+            .collect::<std::collections::HashSet<_>>(),
+        [seed, source].into_iter().collect()
+    );
+
+    let both = db
+        .tql("SEARCH VECTOR [1.0, 0.0] TOP 1 EXPAND BOTH [:REL*1..1] RETURN *")
+        .unwrap();
+    assert_eq!(
+        both.iter()
+            .map(|row| row["_"].id)
+            .collect::<std::collections::HashSet<_>>(),
+        [source, seed, target].into_iter().collect()
+    );
+    drop(db);
+    cleanup(&path);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 //  FIND 端到端
 // ═══════════════════════════════════════════════════════════════════════

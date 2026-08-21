@@ -12,6 +12,15 @@ pub struct Edge {
     pub weight: Weight,
 }
 
+/// 指向目标节点的完整入边视图。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IncomingEdge {
+    pub source_id: NodeId,
+    pub target_id: NodeId,
+    pub label: Label,
+    pub weight: Weight,
+}
+
 /// 用户在查询时返回的统一节点数据视图
 #[derive(Debug, Clone)]
 pub struct NodeView<T> {

@@ -186,15 +186,67 @@ fn MATCH_任意边() {
 }
 
 #[test]
+fn FIND_RFC3339操作符() {
+    let query = parse_tql(
+        r#"FIND {createdAt: {$afterEq: "2026-08-21T08:00:00Z", $before: "2026-08-22T00:00:00Z"}} RETURN *"#,
+    )
+    .unwrap();
+    if let QueryEntry::Find { filter } = query.entry {
+        assert!(filter.matches(&serde_json::json!({
+            "createdAt": "2026-08-21T16:30:00+08:00"
+        })));
+        assert!(!filter.matches(&serde_json::json!({
+            "createdAt": "2026-08-22T00:00:00Z"
+        })));
+    } else {
+        panic!("应解析为 FIND");
+    }
+}
+
+#[test]
 fn MATCH_内联Mongo操作符() {
     // Q1 决策 B: 内联属性支持 Mongo 操作符
     let q = parse_tql(r#"MATCH (a {age: {$gt: 18}}) RETURN a"#).unwrap();
     if let QueryEntry::Match { pattern } = &q.entry {
         assert!(pattern.nodes[0].filter.is_some());
         let f = pattern.nodes[0].filter.as_ref().unwrap();
-        assert!(matches!(f, Filter::Gt(_, _)));
+        assert!(matches!(f, Filter::Range(_, _, _)));
     } else {
         panic!("Expected Match entry");
+    }
+}
+
+#[test]
+fn MATCH_RANK解析() {
+    let query =
+        parse_tql(r#"MATCH (doc)-[:CITES]->(ref) RANK doc BY VECTOR [1.0, 0.0] TOP 3 RETURN doc"#)
+            .unwrap();
+    let rank = query.rank.unwrap();
+    assert_eq!(rank.var, "doc");
+    assert_eq!(rank.vector, vec![1.0, 0.0]);
+    assert_eq!(rank.top_k, 3);
+}
+
+#[test]
+fn RANK关键字仍可作为Payload字段名() {
+    let query =
+        parse_tql("FIND {rank: {$gte: 2}} WHERE _.rank > 2 RETURN _.rank ORDER BY _.rank DESC")
+            .unwrap();
+    assert!(query.rank.is_none());
+    assert_eq!(query.order_by.len(), 1);
+}
+
+#[test]
+fn SEARCH_EXPAND方向解析() {
+    let query =
+        parse_tql(r#"SEARCH VECTOR [1.0, 0.0] TOP 3 EXPAND INCOMING [:CITES*1..2] RETURN *"#)
+            .unwrap();
+    if let QueryEntry::Search { expand, .. } = query.entry {
+        let expand = expand.unwrap();
+        assert_eq!(expand.direction, EdgeDirection::Backward);
+        assert_eq!(expand.labels, vec!["CITES"]);
+    } else {
+        panic!("应解析为 SEARCH");
     }
 }
 

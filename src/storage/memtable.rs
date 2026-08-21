@@ -1,6 +1,6 @@
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
-use crate::index::bq::BqSignature;
+use crate::index::bq::{Bq2Store, BqSignature};
 use crate::index::quiver::{QuIVer, QuIVerConfig};
 use crate::index::text::TextIndex;
 use crate::node::{Edge, NodeId};
@@ -125,6 +125,14 @@ fn flatten_and_hash_json(prefix: &str, value: &serde_json::Value, sig: &mut u64)
     }
 }
 
+pub(crate) struct QuiverBuildSnapshot {
+    pub generation: u64,
+    pub dim: usize,
+    pub signatures: Bq2Store,
+    pub ids: Vec<u64>,
+    pub slots: Vec<usize>,
+}
+
 /// 内存工作区，扮演类似 LSM Tree 中 MemTable 的角色。
 ///
 /// v0.4 改进：向量存储委托给 VecPool（分层 mmap + 内存增量），
@@ -132,6 +140,8 @@ fn flatten_and_hash_json(prefix: &str, value: &serde_json::Value, sig: &mut u64)
 pub struct MemTable<T: VectorType> {
     dim: usize,
     next_id: NodeId,
+    generation: u64,
+    vector_generation: u64,
 
     // --- 三位一体的核心存储 ---
 
@@ -218,6 +228,8 @@ impl<T: VectorType> MemTable<T> {
         Self {
             dim,
             next_id: 1, // 从 1 开始，保留 0 作为特殊标记
+            generation: 0,
+            vector_generation: 0,
             vec_pool: VecPool::new(dim),
             bq_signatures: Vec::new(),
             bq_dirty: false,
@@ -252,6 +264,8 @@ impl<T: VectorType> MemTable<T> {
         Self {
             dim,
             next_id,
+            generation: 0,
+            vector_generation: 0,
             vec_pool,
             bq_signatures: Vec::new(),
             bq_dirty: false,
@@ -279,12 +293,110 @@ impl<T: VectorType> MemTable<T> {
         self.next_id
     }
 
+    #[inline]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[inline]
+    pub fn vector_generation(&self) -> u64 {
+        self.vector_generation
+    }
+
+    #[inline]
+    fn mark_changed(&mut self, vectors_changed: bool) {
+        self.generation = self.generation.wrapping_add(1);
+        if vectors_changed {
+            self.vector_generation = self.vector_generation.wrapping_add(1);
+        }
+    }
+
     /// 将 next_id 推进到至少 candidate 值（WAL 回放时防止 ID 复用）
     #[inline]
     pub fn advance_next_id(&mut self, candidate: NodeId) {
         if candidate > self.next_id {
             self.next_id = candidate;
         }
+    }
+
+    /// 估算为额外节点预留核心容器容量所需的新增堆内存。
+    pub(crate) fn estimate_reserve_bytes(&self, additional: usize) -> Result<usize> {
+        let checked = |value: Option<usize>, label: &str| {
+            value.ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                reason: format!("{label}容量计算溢出"),
+            })
+        };
+        let missing_vec = additional.saturating_sub(self.vec_pool.delta_spare_nodes());
+        let vector_bytes = checked(
+            missing_vec
+                .checked_mul(self.dim)
+                .and_then(|n| n.checked_mul(std::mem::size_of::<T>())),
+            "向量增量层",
+        )?;
+        let missing_payload =
+            additional.saturating_sub(self.payloads.capacity().saturating_sub(self.payloads.len()));
+        let payload_bytes = checked(
+            missing_payload
+                .checked_mul(std::mem::size_of::<(NodeId, PayloadEntry)>() + 32)
+                .and_then(|n| n.checked_mul(2)),
+            "Payload 映射",
+        )?;
+        let missing_id_map = additional.saturating_sub(
+            self.ids_to_indices
+                .capacity()
+                .saturating_sub(self.ids_to_indices.len()),
+        );
+        let id_map_bytes = checked(
+            missing_id_map
+                .checked_mul(std::mem::size_of::<(NodeId, usize)>() + 16)
+                .and_then(|n| n.checked_mul(2)),
+            "ID 映射",
+        )?;
+        let missing_slots = additional.saturating_sub(
+            self.indices_to_ids
+                .capacity()
+                .saturating_sub(self.indices_to_ids.len()),
+        );
+        let slot_bytes = checked(
+            missing_slots.checked_mul(std::mem::size_of::<NodeId>() + std::mem::size_of::<u64>()),
+            "槽位数组",
+        )?;
+        checked(
+            vector_bytes
+                .checked_add(payload_bytes)
+                .and_then(|n| n.checked_add(id_map_bytes))
+                .and_then(|n| n.checked_add(slot_bytes)),
+            "核心容器",
+        )
+    }
+
+    /// 为后续插入预留核心容器容量。失败时不修改任何逻辑数据。
+    pub(crate) fn try_reserve_for_insert(&mut self, additional: usize) -> Result<()> {
+        if additional == 0 {
+            return Ok(());
+        }
+        self.vec_pool.try_reserve_nodes(additional)?;
+        self.payloads.try_reserve(additional).map_err(|error| {
+            TriviumError::CapacityAllocationFailed {
+                reason: format!("Payload 映射预留失败: {error}"),
+            }
+        })?;
+        self.ids_to_indices
+            .try_reserve(additional)
+            .map_err(|error| TriviumError::CapacityAllocationFailed {
+                reason: format!("ID 映射预留失败: {error}"),
+            })?;
+        self.indices_to_ids
+            .try_reserve(additional)
+            .map_err(|error| TriviumError::CapacityAllocationFailed {
+                reason: format!("槽位数组预留失败: {error}"),
+            })?;
+        self.fast_tags.try_reserve(additional).map_err(|error| {
+            TriviumError::CapacityAllocationFailed {
+                reason: format!("快速标签数组预留失败: {error}"),
+            }
+        })?;
+        Ok(())
     }
 
     /// 暴露 VecPool 的可变引用（供 flush 时持久化向量池）
@@ -331,6 +443,7 @@ impl<T: VectorType> MemTable<T> {
         self.add_to_property_index(id, &payload);
         self.payloads.insert(id, PayloadEntry::from_value(payload));
         self.ids_to_indices.insert(id, idx);
+        self.mark_changed(true);
         Ok(())
     }
 
@@ -409,6 +522,7 @@ impl<T: VectorType> MemTable<T> {
             }
         }
 
+        self.mark_changed(true);
         Ok(id)
     }
 
@@ -463,6 +577,7 @@ impl<T: VectorType> MemTable<T> {
             }
         }
 
+        self.mark_changed(true);
         Ok(())
     }
 
@@ -529,24 +644,38 @@ impl<T: VectorType> MemTable<T> {
         self.validate_delete(id)
     }
 
-    /// 在两节点间建立图谱边
+    /// 在两节点间建立图谱边；(src, dst, label) 三元组唯一，重复 link 更新权重。
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: String, weight: f32) -> Result<()> {
         self.validate_link(src, dst)?;
+        if !weight.is_finite() {
+            return Err(TriviumError::InvalidInput(
+                "边权重必须是有限浮点数 (Edge weight must be finite)".into(),
+            ));
+        }
 
-        let edge = Edge {
+        let outgoing = self.edges.entry(src).or_default();
+        if let Some(edge) = outgoing
+            .iter_mut()
+            .find(|edge| edge.target_id == dst && edge.label == label)
+        {
+            if edge.weight != weight {
+                edge.weight = weight;
+                self.mark_changed(false);
+            }
+            return Ok(());
+        }
+
+        outgoing.push(Edge {
             target_id: dst,
             label: label.clone(),
             weight,
-        };
-        self.edges.entry(src).or_default().push(edge);
-
-        // 增加目标节点的入度计数与反向哈希网记录
+        });
         *self.in_degrees.entry(dst).or_insert(0) += 1;
-        self.incoming_edges.entry(dst).or_default().push(src);
-
-        // 维护边标签倒排索引
+        if !self.incoming_edges.entry(dst).or_default().contains(&src) {
+            self.incoming_edges.entry(dst).or_default().push(src);
+        }
         self.label_index.entry(label).or_default().push((src, dst));
-
+        self.mark_changed(false);
         Ok(())
     }
 
@@ -597,6 +726,72 @@ impl<T: VectorType> MemTable<T> {
         }
     }
 
+    pub fn auto_quiver_build_needed(&self) -> bool {
+        self.auto_build_quiver && self.payloads.len() >= 10_000 && self.quiver_index.is_none()
+    }
+
+    pub fn search_cache_needs_prepare(&self, materialize_flat: bool) -> bool {
+        let total = self.vec_pool.total_count();
+        let bq_needed = self.bq_signatures.len() != total || self.bq_dirty;
+        let flat_needed = (materialize_flat || self.quiver_index.is_none())
+            && self.vec_pool.cache_needs_rebuild();
+        bq_needed || flat_needed
+    }
+
+    pub fn prepare_search_cache(&mut self, materialize_flat: bool) {
+        let total = self.vec_pool.total_count();
+        if self.bq_signatures.len() != total || self.bq_dirty {
+            self.rebuild_bq_signatures(total);
+            self.bq_dirty = false;
+        }
+        if materialize_flat || self.quiver_index.is_none() {
+            self.vec_pool.ensure_cache();
+        }
+    }
+
+    pub fn search_needs_prepare(&self, materialize_flat: bool) -> bool {
+        self.auto_quiver_build_needed() || self.search_cache_needs_prepare(materialize_flat)
+    }
+
+    /// 估算一次 QuIVer 全量构建相对当前常驻结构的额外峰值。
+    pub(crate) fn quiver_build_peak_bytes(&self, config: &QuIVerConfig) -> usize {
+        let nodes = self.payloads.len();
+        let chunks = self.dim.div_ceil(64).max(1);
+        let stride = config.m.saturating_mul(4).saturating_add(1);
+        let signatures = nodes
+            .saturating_mul(chunks)
+            .saturating_mul(std::mem::size_of::<u64>())
+            .saturating_mul(2);
+        let adjacency = nodes
+            .saturating_mul(stride)
+            .saturating_mul(std::mem::size_of::<u32>())
+            .saturating_mul(2);
+        let mappings = nodes.saturating_mul(
+            std::mem::size_of::<u64>()
+                + std::mem::size_of::<usize>()
+                + std::mem::size_of::<u32>()
+                + std::mem::size_of::<u8>()
+                + 24,
+        );
+        let worker_bitsets = nodes.div_ceil(8).saturating_mul(64);
+        signatures
+            .saturating_add(adjacency)
+            .saturating_add(mappings)
+            .saturating_add(worker_bitsets)
+    }
+
+    /// 仅准备持久化需要的 BQ 与连续向量缓存，不触发 ANN 构建。
+    pub fn prepare_persistence_cache(&mut self, materialize_flat: bool) {
+        let total = self.vec_pool.total_count();
+        if self.bq_signatures.len() != total || self.bq_dirty {
+            self.rebuild_bq_signatures(total);
+            self.bq_dirty = false;
+        }
+        if materialize_flat {
+            self.vec_pool.ensure_cache();
+        }
+    }
+
     /// 确保 BQ 签名/向量缓存已就绪，并自动管理 QuIVer 索引生命周期
     ///
     /// # 冷热分离与内存控制
@@ -631,17 +826,17 @@ impl<T: VectorType> MemTable<T> {
         }
     }
 
-    /// 流式重建 BQ 签名：按 slot 逐条从 mmap 零拷贝读取，不物化全量 merged 缓存。
+    /// 原位重建 BQ 签名，复用旧容量，避免新旧完整数组同时驻留。
     fn rebuild_bq_signatures(&mut self, total: usize) {
-        let mut new_bq = Vec::with_capacity(total);
+        self.bq_signatures.clear();
+        self.bq_signatures.reserve(total);
         for i in 0..total {
             match self.vec_pool.get(i) {
-                Some(v) => new_bq.push(BqSignature::from_vector(v)),
+                Some(v) => self.bq_signatures.push(BqSignature::from_vector(v)),
                 // 兜底以防向量池维度异常或越界
-                None => new_bq.push(BqSignature::empty()),
+                None => self.bq_signatures.push(BqSignature::empty()),
             }
         }
-        self.bq_signatures = new_bq;
     }
 
     /// 获取 BQ 量化初筛签名
@@ -709,6 +904,57 @@ impl<T: VectorType> MemTable<T> {
         self.build_quiver_impl(config);
     }
 
+    pub(crate) fn quiver_build_snapshot(&self) -> Option<QuiverBuildSnapshot> {
+        if self.vec_pool.total_count() == 0 || self.payloads.is_empty() {
+            return None;
+        }
+        let mut signatures = Bq2Store::new(self.dim);
+        signatures.reserve(self.payloads.len());
+        let mut ids = Vec::with_capacity(self.payloads.len());
+        let mut slots = Vec::with_capacity(self.payloads.len());
+        for (slot, &node_id) in self.indices_to_ids.iter().enumerate() {
+            if node_id == 0 || !self.payloads.contains_key(&node_id) {
+                continue;
+            }
+            if let Some(vector) = self.vec_pool.get(slot) {
+                signatures.push_from_vector(vector);
+                ids.push(node_id);
+                slots.push(slot);
+            }
+        }
+        (!ids.is_empty()).then_some(QuiverBuildSnapshot {
+            generation: self.vector_generation,
+            dim: self.dim,
+            signatures,
+            ids,
+            slots,
+        })
+    }
+
+    pub(crate) fn build_quiver_snapshot(
+        snapshot: QuiverBuildSnapshot,
+        config: &QuIVerConfig,
+    ) -> QuIVer {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::QuiverBuildStarted);
+        let mut index = QuIVer::new(snapshot.dim, config);
+        index.batch_build_from_store(&snapshot.ids, &snapshot.slots, snapshot.signatures);
+        index
+    }
+
+    pub(crate) fn publish_quiver_if_current(
+        &mut self,
+        source_generation: u64,
+        index: QuIVer,
+    ) -> bool {
+        if self.vector_generation != source_generation {
+            return false;
+        }
+        self.quiver_index = Some(index);
+        self.vec_pool.advise_random();
+        true
+    }
+
     /// QuIVer 构建的内部实现（不调用 ensure_vectors_cache，避免递归）
     ///
     /// 按 slot 流式从 mmap 零拷贝读取向量并转 f32，不物化全量 merged 缓存，
@@ -747,6 +993,8 @@ impl<T: VectorType> MemTable<T> {
 
         let mut index = QuIVer::new(dim, config);
         index.batch_build_experimental_v2(&vecs_f32, &ids, &slot_idxs);
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverPublish);
         self.quiver_index = Some(index);
 
         // QuIVer 精排按 slot 随机读取冷向量，提示 OS 关闭顺序预读以降低 PageCache 占用
@@ -869,6 +1117,39 @@ impl<T: VectorType> MemTable<T> {
             .get(&id)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// 获取指向 id 的完整入边，可选按标签过滤。
+    pub fn get_incoming_edges(
+        &self,
+        id: NodeId,
+        label: Option<&str>,
+    ) -> Vec<crate::node::IncomingEdge> {
+        let mut result = Vec::new();
+        for &source_id in self.get_incoming_sources(id) {
+            if let Some(edges) = self.get_edges(source_id) {
+                result.extend(
+                    edges
+                        .iter()
+                        .filter(|edge| {
+                            edge.target_id == id
+                                && label.is_none_or(|expected| edge.label == expected)
+                        })
+                        .map(|edge| crate::node::IncomingEdge {
+                            source_id,
+                            target_id: id,
+                            label: edge.label.clone(),
+                            weight: edge.weight,
+                        }),
+                );
+            }
+        }
+        result.sort_by(|a, b| {
+            a.source_id
+                .cmp(&b.source_id)
+                .then_with(|| a.label.cmp(&b.label))
+        });
+        result
     }
 
     /// 按标签查询所有边 (src, dst) 对，O(1) 查找
@@ -1053,11 +1334,37 @@ impl<T: VectorType> MemTable<T> {
         if !self.quiver_sync_paused {
             self.invalidate_quiver_for_delete(id);
         }
+        self.mark_changed(true);
 
         Ok(())
     }
 
-    /// 断开两个节点之间的指定边
+    /// 断开两个节点之间的指定标签边（幂等）。
+    pub fn unlink_label(&mut self, src: NodeId, dst: NodeId, label: &str) -> Result<()> {
+        let Some(edge_list) = self.edges.get_mut(&src) else {
+            return self.validate_unlink(src);
+        };
+        let before = edge_list.len();
+        edge_list.retain(|edge| !(edge.target_id == dst && edge.label == label));
+        let removed = before - edge_list.len();
+        if removed == 0 {
+            return Ok(());
+        }
+        if let Some(in_deg) = self.in_degrees.get_mut(&dst) {
+            *in_deg = in_deg.saturating_sub(removed);
+        }
+        if let Some(pairs) = self.label_index.get_mut(label) {
+            pairs.retain(|&(source, target)| !(source == src && target == dst));
+        }
+        let still_connected = edge_list.iter().any(|edge| edge.target_id == dst);
+        if !still_connected && let Some(incoming) = self.incoming_edges.get_mut(&dst) {
+            incoming.retain(|&source| source != src);
+        }
+        self.mark_changed(false);
+        Ok(())
+    }
+
+    /// 断开两个节点之间的所有标签边（幂等）。
     pub fn unlink(&mut self, src: NodeId, dst: NodeId) -> Result<()> {
         let Some(edge_list) = self.edges.get_mut(&src) else {
             // src 没有出边：只要节点本身存在，断开不存在的边应视为幂等无操作，
@@ -1086,6 +1393,7 @@ impl<T: VectorType> MemTable<T> {
                 if let Some(incoming) = self.incoming_edges.get_mut(&dst) {
                     incoming.retain(|&id| id != src);
                 }
+                self.mark_changed(false);
             }
             Ok(())
         }
@@ -1107,6 +1415,7 @@ impl<T: VectorType> MemTable<T> {
                 self.remove_from_property_index(id, &old_payload);
                 self.add_to_property_index(id, &payload);
                 self.payloads.insert(id, PayloadEntry::from_value(payload));
+                self.mark_changed(false);
                 Ok(())
             }
             None => Err(TriviumError::NodeNotFound(id)),
@@ -1235,6 +1544,7 @@ impl<T: VectorType> MemTable<T> {
                         );
                     }
                 }
+                self.mark_changed(true);
                 Ok(())
             }
             None => Err(TriviumError::NodeNotFound(id)),

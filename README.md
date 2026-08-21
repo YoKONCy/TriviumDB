@@ -137,6 +137,8 @@ flowchart TD
 ### 安装
 
 > 💡 TriviumDB 核心使用 Rust 编写，但我们已经在云端为您提前交叉编译了所有平台的二进制，**无需在本地安装任何编译环境即可秒速安装！**
+>
+> **Linux ARM64 / 鲲鹏支持：** TriviumDB 支持 Linux AArch64，包含 ARM NEON 优化、ARM64 CI、Python manylinux ARM64 wheel 和 Node.js ARM64 addon 构建链路，可运行于基于 Linux AArch64 的鲲鹏服务器系统。
 
 ### 🐍 Python 用户
 
@@ -186,6 +188,52 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
 ```
 
 > 📖 完整 API 参考、高级用法和 Rust 示例请查看 **[API 参考文档](docs/api-reference.md)**。
+
+---
+
+## 一次存储，多种查询
+
+TriviumDB 中的一个节点可以同时拥有**向量、JSON 文档、稀疏文本和图关系**。这些数据共享同一个 NodeId、事务、WAL 与生命周期，因此无需在向量库、文档库和图库之间同步副本。同一份数据写入一次，即可按业务问题选择不同的查询路径。
+
+### TQL：统一查询语言
+
+**TQL（Trivium Query Language）** 将文档过滤、图模式匹配、向量检索和 GraphFirst 约束排名统一在一套轻量 DSL 中：
+
+```sql
+-- 文档查询：按 JSON 字段过滤
+FIND {type: "paper", year: {$gte: 2024}} RETURN * LIMIT 10
+
+-- 图查询：匹配结构关系
+MATCH (author)-[:wrote]->(paper)
+WHERE author.name == "Alice"
+RETURN paper
+
+-- 向量锚定后，沿入边与出边做确定性结构扩展
+SEARCH VECTOR [0.12, -0.45, 0.78] TOP 5
+EXPAND BOTH [:cites|related*1..2]
+RETURN *
+
+-- GraphFirst：先由图模式限定合法候选，再在候选集内精确向量排名
+MATCH (paper)-[:belongs_to]->(topic)
+WHERE topic.name == "Database"
+RANK paper BY VECTOR [0.12, -0.45, 0.78] TOP 10
+RETURN paper
+```
+
+TQL 同时支持 `WHERE`、`RETURN`、`ORDER BY`、`LIMIT/OFFSET`、聚合、`OPTIONAL MATCH` 和 DML。详细语法参见 **[TQL 查询语言参考](docs/tql-reference.md)**。
+
+### 多种图谱与混合查询
+
+| 查询方式 | 核心语义 | 典型用途 |
+| -------- | -------- | -------- |
+| **图模式匹配（MATCH）** | 按节点属性、边方向、label 和路径模式匹配结构 | 知识图谱查询、关系筛选、结构化联结 |
+| **Reachability** | 按方向、label 和深度执行 BFS，返回确定性最短路径与逐跳 label | 依赖链、权限链、数据血缘、可达性分析 |
+| **GraphFirst（MATCH + RANK）** | 先由图结构产生合法 anchor，再在候选集合内精确向量 Top-K | “只在某类关系约束内找最相似对象” |
+| **向量 + 结构扩展（SEARCH + EXPAND）** | 先用向量定位语义锚点，再沿 `OUTGOING`、`INCOMING` 或 `BOTH` 收集结构候选 | 语义检索后补充上下游上下文 |
+| **SA-PPR 图谱扩散** | 从向量/文本锚点沿带权边传播相关性能量，可启用抑制、疲劳和重启 | Agent 联想记忆、RAG 上下文扩展、推荐召回 |
+| **混合检索（search_hybrid）** | AC 自动机 + BM25 稀疏文本 + Dense Vector 多路召回，再进行图扩散与重排 | 专有名词与语义兼顾的生产级检索 |
+
+这些能力不是互相替代的查询模式：**Reachability 回答“结构上能否到达”**，**GraphFirst 回答“结构约束内谁最相似”**，**SA-PPR 回答“哪些关联节点应获得更高相关性”**。应用可以在同一份 `.tdb` 数据上按场景自由选择，也可以通过 TQL 将文档、图和向量条件组合在一次查询中。
 
 ---
 

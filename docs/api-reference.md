@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.7.4
+> **版本**: v0.7.5
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -43,7 +43,9 @@ db = triviumdb.TriviumDB(
     dtype="f32",             # 向量类型："f32" | "f16" | "u64"
     sync_mode="normal",      # WAL 同步模式："full" | "normal" | "off"
     load_text_index=False,    # 打开时是否加载持久化全文索引
-    auto_build_quiver=True,   # 是否允许查询/flush 自动构建 QuIVer
+    auto_build_quiver=True,   # 是否允许查询自动构建 QuIVer；flush 不会触发 ANN 构建
+    expected_nodes=3_600_000, # 预计总节点数，仅本次进程预留，不是硬上限
+    memory_limit_mb=28_672,   # 内核内存预算，0 表示不限制
 )
 
 # 推荐：使用上下文管理器（退出时自动 flush 落盘）
@@ -60,6 +62,10 @@ with triviumdb.TriviumDB("my_data.tdb", dim=1536) as db:
 | `dim` | `int` | `1536` | 向量维度，必须与后续插入的向量长度一致 |
 | `dtype` | `str` | `"f32"` | 向量存储精度：`f32`（标准）、`f16`（省内存）、`u64`（SimHash） |
 | `sync_mode` | `str` | `"normal"` | WAL 写入安全级别，详见[持久化与压缩](#持久化与压缩) |
+| `load_text_index` | `bool` | `False` | 是否在打开时加载持久化全文索引 |
+| `auto_build_quiver` | `bool` | `True` | 是否允许查询准备阶段自动构建 QuIVer；纯 `flush()` 不构建 ANN |
+| `expected_nodes` | `int \| None` | `None` | 预计总节点数；仅预留核心容器、不持久化、不是硬上限 |
+| `memory_limit_mb` | `int` | `0` | TriviumDB 内核内存预算（MiB）；0 表示不限制 |
 
 ### Rust
 
@@ -79,11 +85,16 @@ let mut db = Database::<f32>::open_with_config("my_data.tdb", Config {
     dim: 1536,
     storage_mode: StorageMode::Rom,  // Rom：单文件便携 | Mmap：分离零拷贝（默认）
     sync_mode: SyncMode::Normal,
+    expected_nodes: Some(3_600_000),
+    memory_limit: 28 * 1024 * 1024 * 1024,
+    ..Default::default()
 })?;
 
 // 运行时切换同步模式
 db.set_sync_mode(SyncMode::Off);
 ```
+
+`close()` 会先进入 `Closing`，拒绝新操作并等待已经进入的操作结束，再执行最终 flush。只有 flush 成功后才释放文件锁并进入 `Closed`；flush 失败会恢复为 `Open` 且继续持有文件锁。关闭后的旧对象不能再次用于查询、写入或 flush。
 
 **泛型类型参数 `T`：**
 
@@ -128,9 +139,41 @@ db.insert_with_id(id=42, vector=[0.1, 0.2, 0.3, ...], payload={"source": "extern
 db.insert_with_id(42, &[0.1, 0.2, 0.3], json!({"source": "external"}))?;
 ```
 
+### reserve_nodes — 主动预留增量容量
+
+`expected_nodes` 表示目标总节点数；`reserve_nodes(additional)` 表示从当前容量再增加可插入空间。两者只覆盖向量增量层、Payload/ID 映射、槽位与快速标签，不会提前构建 BQ、QuIVer、文本索引或图边。
+
+```python
+db.reserve_nodes(200_000)
+```
+
+```rust
+db.reserve_nodes(200_000)?;
+```
+
+预留受 `memory_limit` 约束。预算不足、整数溢出或 allocator 拒绝时会在写 WAL 前失败；节点、ID、generation 和 WAL 不变。已成功取得但尚未使用的空 capacity 允许保留。
+
+### Node.js 配置对象
+
+旧位置参数构造方式继续兼容；新代码推荐配置对象：
+
+```ts
+const db = new TriviumDB('my_data.tdb', {
+  dim: 1024,
+  dtype: 'f16',
+  storageMode: 'mmap',
+  expectedNodes: 3_600_000,
+  memoryLimitMb: 28 * 1024,
+  autoBuildQuiver: false,
+})
+db.reserveNodes(200_000)
+```
+
+所有 Node 数量参数必须是 JavaScript 安全整数，负数、小数、NaN、Infinity 和超过 `Number.MAX_SAFE_INTEGER` 的值都会拒绝。
+
 ### batch_insert — 批量插入
 
-一次性插入多个节点，返回所有新 ID 的列表。
+一次性插入多个节点，返回所有新 ID 的列表。Python/Node 绑定会先转换并验证整个批次，再为整批预留核心容器，最后通过单个事务写入；任一向量、ID、容量预算或 WAL 步骤失败都不会产生半批数据。
 
 **Python：**
 ```python
@@ -260,7 +303,7 @@ if (db.contains(42)) console.log('节点存在')
 
 ### link — 建立有向边
 
-在两个节点之间建立一条有向带权边。两个端点必须已存在，否则返回错误。
+在两个节点之间建立一条有向带权边。边以 `(src, dst, label)` 三元组唯一；重复调用会更新 weight，不会增加重复边。两个端点必须已存在，weight 必须是有限 `f32`，否则在写 WAL 前返回错误。
 
 **Python：**
 ```python
@@ -290,11 +333,13 @@ db.link(1, 2, "knows", 0.95)?;
 **Python：**
 ```python
 db.unlink(src=1, dst=2)
+db.unlink(src=1, dst=2, label="knows")  # 仅删除指定标签
 ```
 
 **Rust：**
 ```rust
 db.unlink(1, 2)?;
+db.unlink_label(1, 2, "knows")?;
 ```
 
 ### neighbors — N 跳邻居
@@ -304,16 +349,110 @@ db.unlink(1, 2)?;
 **Python：**
 ```python
 neighbor_ids = db.neighbors(id=1, depth=2)  # 2 跳以内的所有邻居
+knows_only = db.neighbors(id=1, depth=2, labels=["knows"])
 ```
 
 **Rust：**
 ```rust
 let ids = db.neighbors(1, 2);
+let knows = db.neighbors_with_labels(1, 2, Some(&["knows".to_string()]));
 ```
+
+返回顺序固定为 BFS 最短距离升序、同距离 NodeId 升序。`labels=None` 表示遍历全部边，空列表表示禁止扩散。
+
+### get_incoming_edges — 获取完整入边
+
+返回 `source_id`、`target_id`、`label` 和 `weight`，可按单个标签过滤。
+
+```python
+incoming = db.get_incoming_edges(id=2, label="knows")
+```
+
+```rust
+let incoming = db.get_incoming_edges(2, Some("knows"));
+```
+
+### reachable — 确定性结构可达性
+
+`reachable` 执行纯结构 BFS，不计算相关性 score。默认沿出边遍历，也可选择入边或双向遍历；每个目标只返回一条确定性的最短路径，结果包含完整 NodeId 路径和逐跳 label。
+
+**Python：**
+```python
+paths = db.reachable(
+    id=1,
+    min_depth=1,
+    max_depth=3,
+    labels=["knows", "works_with"],
+    direction="both",
+    max_visited_nodes=10_000,
+)
+for item in paths:
+    print(item.target_id, item.depth, item.path)
+    print([(step.from_id, step.to_id, step.label) for step in item.steps])
+```
+
+**Rust：**
+```rust
+use triviumdb::graph::reachability::{ReachabilityConfig, ReachabilityDirection};
+
+let paths = db.reachable(1, &ReachabilityConfig {
+    min_depth: 1,
+    max_depth: 3,
+    labels: Some(vec!["knows".into(), "works_with".into()]),
+    direction: ReachabilityDirection::Both,
+    max_visited_nodes: 10_000,
+})?;
+```
+
+**Node.js / TypeScript：**
+```ts
+const paths = db.reachable(1, {
+  minDepth: 1,
+  maxDepth: 3,
+  labels: ['knows', 'works_with'],
+  direction: 'both',
+  maxVisitedNodes: 10_000,
+})
+```
+
+`labels=None` 或省略表示全部 label，空列表表示禁止遍历。`min_depth=0` 可让源节点作为深度 0 结果返回。源节点不存在、深度范围非法、预算为 0 或访问节点数超预算时会明确报错。
 
 ---
 
 ## 搜索与召回
+
+### search_graph_first — 图候选集内精确向量排名
+
+GraphFirst 先由业务图查询产生 anchor ID 集合，再只在该集合内进行精确向量评分。输入 anchor 会按 NodeId 去重；超过 `max_anchor_nodes` 时直接报错，不会退化为全库搜索。
+
+```python
+hits = db.search_graph_first(
+    query_vector=[0.1, 0.2, 0.3],
+    anchor_ids=[12, 18, 25],
+    top_k=5,
+    max_anchor_nodes=100_000,
+)
+```
+
+```rust
+let hits = db.search_graph_first(
+    &[0.1, 0.2, 0.3],
+    &[12, 18, 25],
+    5,
+    100_000,
+)?;
+```
+
+```ts
+const hits = db.searchGraphFirst(
+  [0.1, 0.2, 0.3],
+  [12, 18, 25],
+  5,
+  100_000,
+)
+```
+
+该 API 保证 anchor 集合内 Top-K 完备，但不会使用 QuIVer ANN。查询维度不匹配、`top_k=0`、预算为 0 或去重后的 anchor 数量超预算时返回错误；不存在的 anchor ID 会被忽略。
 
 ### search_hybrid — 双路混合认知检索 (强推)
 
@@ -407,6 +546,7 @@ results = db.search_advanced(
     fista_threshold=0.3,
     enable_dpp=True,               # DPP 多样性采样
     dpp_quality_weight=1.0,
+    expand_labels=["knows", "related"], # None=全部，[]=禁止图扩散
 )
 for hit in results:
     print(f"[{hit.id}] score={hit.score:.3f} | {hit.payload}")
@@ -421,6 +561,7 @@ const results = db.searchAdvanced(queryVector, {
     enableAdvancedPipeline: true,
     enableSparseResidual: true,
     enableDpp: true,
+    expandLabels: ['knows', 'related'],
 });
 ```
 
@@ -675,10 +816,14 @@ results = db.filter_where({
 |--------|------|--------|------|
 | `$eq` | 等于 | 任意 | `{"name": {"$eq": "Alice"}}` 或直接 `{"name": "Alice"}` |
 | `$ne` | 不等于 | 任意 | `{"status": {"$ne": "deleted"}}` |
-| `$gt` | 大于 | 数字 | `{"age": {"$gt": 18}}` |
-| `$gte` | 大于等于 | 数字 | `{"score": {"$gte": 0.8}}` |
-| `$lt` | 小于 | 数字 | `{"age": {"$lt": 30}}` |
-| `$lte` | 小于等于 | 数字 | `{"price": {"$lte": 99.9}}` |
+| `$gt` | 大于 | 数字或字符串 | `{"age": {"$gt": 18}}` |
+| `$gte` | 大于等于 | 数字或字符串 | `{"name": {"$gte": "Bob"}}` |
+| `$lt` | 小于 | 数字或字符串 | `{"age": {"$lt": 30}}` |
+| `$lte` | 小于等于 | 数字或字符串 | `{"name": {"$lte": "David"}}` |
+| `$before` | 早于 | RFC3339 字符串 | `{"createdAt": {"$before": "2026-08-22T00:00:00Z"}}` |
+| `$beforeEq` | 早于或等于 | RFC3339 字符串 | `{"createdAt": {"$beforeEq": "2026-08-22T00:00:00Z"}}` |
+| `$after` | 晚于 | RFC3339 字符串 | `{"createdAt": {"$after": "2026-08-21T00:00:00Z"}}` |
+| `$afterEq` | 晚于或等于 | RFC3339 字符串 | `{"createdAt": {"$afterEq": "2026-08-21T00:00:00Z"}}` |
 | `$in` | 包含于列表 | 数组 | `{"role": {"$in": ["admin", "mod"]}}` |
 | `$nin` | 不在列表中 | 数组 | `{"status": {"$nin": ["banned", "deleted"]}}` |
 | `$startsWith` | 前缀匹配 | 字符串 | `{"folder": {"$startsWith": "/地理"}}` |
@@ -689,6 +834,8 @@ results = db.filter_where({
 | `$type` | 字段类型 | 字符串 | `{"age": {"$type": "number"}}` |
 | `$and` | 逻辑与 | 条件数组 | `{"$and": [{...}, {...}]}` |
 | `$or` | 逻辑或 | 条件数组 | `{"$or": [{...}, {...}]}` |
+
+数字只与数字比较，字符串只与字符串按原始 Unicode 字典序比较，类型不同视为不匹配。RFC3339 操作符会解析时区并按绝对时间比较；非法查询操作数直接报错，节点中的脏时间字段视为不匹配。范围查询当前不会使用属性 Hash 索引加速。
 
 **字符串匹配示例（v0.7.2 新增）：**
 
@@ -997,7 +1144,7 @@ TriviumDB v0.7.0 起采用自研的 **QuIVer** SOTA 级 ANN 图索引，全自�
 
 QuIVer 索引支持增量 Insert/Delete/Update，无需全量重建。索引以 `.tdb.quiver` 持久化，并通过 `.tdb.quiver.meta` 的主数据代际、文件尺寸、节点数、维度与 CRC 校验后 mmap 加载。TextIndex 对应 `.tdb.text` 和 `.tdb.text.meta`。
 
-批量导入可在构造时设置 `auto_build_quiver=False`，或运行时调用 `set_auto_build_quiver(False)`，避免中途 flush 构建索引；导入完成后重新开启并执行一次查询/flush。无状态评测或独立查询之间可调用 `clear_search_state()` 清空疲劳状态。
+批量导入可在构造时设置 `auto_build_quiver=False`，或运行时调用 `set_auto_build_quiver(False)`，避免导入中途因查询触发索引构建；导入完成后重新开启并执行一次查询，或显式调用 Rust `build_quiver_index()`。`flush()` 只负责持久化，不会隐式构建 QuIVer。无状态评测或独立查询之间可调用 `clear_search_state()` 清空疲劳状态。
 
 > 💡 如果你的业务对 100% 召回率有强需求（如金融/医疗），可以通过 `force_brute_force: true` 强制使用 BruteForce。
 

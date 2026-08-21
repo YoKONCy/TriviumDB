@@ -71,6 +71,72 @@ fn 测试_人为端序颠倒污染_魔数与长度域应有效拦截不崩溃() 
 }
 
 #[test]
+fn 测试_恶意BQ计数溢出_应拒绝且不崩溃() {
+    let path = tmp_db("bq_count_overflow");
+    cleanup(&path);
+
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"test": true}))
+            .unwrap();
+        db.flush().unwrap();
+    }
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    file.seek(SeekFrom::Start(50)).unwrap();
+    let mut offset_bytes = [0u8; 8];
+    file.read_exact(&mut offset_bytes).unwrap();
+    let bq_offset = u64::from_le_bytes(offset_bytes);
+    assert!(bq_offset > 0, "测试文件必须包含 BQ 块");
+    file.seek(SeekFrom::Start(bq_offset)).unwrap();
+    file.write_all(&u64::MAX.to_le_bytes()).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    let result = catch_unwind(|| Database::<f32>::open(&path, DIM));
+    assert!(result.is_ok(), "恶意 BQ 计数不得触发 panic");
+    assert!(result.unwrap().is_err(), "恶意 BQ 计数必须被明确拒绝");
+
+    cleanup(&path);
+}
+
+#[test]
+fn 测试_恶意BQ计数字段截断_应拒绝且不崩溃() {
+    let path = tmp_db("bq_count_truncated");
+    cleanup(&path);
+
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"test": true}))
+            .unwrap();
+        db.flush().unwrap();
+    }
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    file.seek(SeekFrom::Start(50)).unwrap();
+    let mut offset_bytes = [0u8; 8];
+    file.read_exact(&mut offset_bytes).unwrap();
+    let bq_offset = u64::from_le_bytes(offset_bytes);
+    file.set_len(bq_offset + 4).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    let result = catch_unwind(|| Database::<f32>::open(&path, DIM));
+    assert!(result.is_ok(), "截断 BQ 计数字段不得触发 panic");
+    assert!(result.unwrap().is_err(), "截断 BQ 计数字段必须被明确拒绝");
+
+    cleanup(&path);
+}
+
+#[test]
 fn 测试_超大维数模拟拦截_防平台指针溢出() {
     let path = tmp_db("huge_dim");
     cleanup(&path);

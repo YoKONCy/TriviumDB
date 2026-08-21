@@ -49,6 +49,60 @@ fn 事务_基本提交_返回正确的生成ID() {
 }
 
 #[test]
+fn 事务_指定标签断边_仅删除匹配边() {
+    let path = tmp_db("unlink_label");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let a = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
+    let b = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
+    db.link(a, b, "knows", 1.0).unwrap();
+    db.link(a, b, "works", 2.0).unwrap();
+
+    {
+        let mut tx = db.begin_tx();
+        tx.unlink_label(a, b, "knows");
+        tx.commit().unwrap();
+    }
+
+    let edges = db.get_edges(a);
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].label, "works");
+    cleanup(&path);
+}
+
+#[test]
+fn 事务_非法边权在WAL前拒绝且状态不变() {
+    let path = tmp_db("non_finite_weight");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let a = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
+    let b = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({}))
+        .unwrap();
+    let wal_len = std::fs::metadata(format!("{}.wal", path)).unwrap().len();
+
+    let result = {
+        let mut tx = db.begin_tx();
+        tx.link(a, b, "bad", f32::NAN);
+        tx.commit()
+    };
+
+    assert!(result.is_err());
+    assert!(db.get_edges(a).is_empty());
+    assert_eq!(
+        std::fs::metadata(format!("{}.wal", path)).unwrap().len(),
+        wal_len
+    );
+    cleanup(&path);
+}
+
+#[test]
 fn 事务_insert_with_id_ID0拒绝且无状态残留() {
     let path = tmp_db("id_zero");
     cleanup(&path);

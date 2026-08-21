@@ -65,7 +65,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.7.4"
+triviumdb = "0.7.5"
 ```
 
 ### 30 秒入门模板
@@ -179,6 +179,18 @@ db.link(person_a, relation, label="rel_src", weight=1.0)
 db.link(relation, skill_node, label="rel_dst", weight=1.0)
 ```
 
+### 选择图查询语义
+
+不要把结构可达性、相关性扩散和候选约束混为一谈：
+
+| 目标 | 推荐能力 |
+|------|----------|
+| “从 A 沿指定关系能否到达 B，最短路径是什么” | `reachable()` 或 TQL `SEARCH ... EXPAND` |
+| “从语义锚点联想到相关邻居，并让边权影响 score” | `search_advanced()` 的 SA-PPR 扩散 |
+| “只在满足图模式的文档中寻找最相似对象” | `search_graph_first()` 或 TQL `MATCH ... RANK` |
+
+为 Reachability 设置符合业务上限的 `max_visited_nodes`，不要用极大值掩盖图建模问题。GraphFirst 的 anchor 集合应由高选择性的 label、属性或路径模式产生；显式 `ORDER BY` 会覆盖 RANK 的向量顺序，只有确实需要业务字段二次排序时才添加。
+
 ### 节点设计 Checklist
 
 | 决策点 | 建议 |
@@ -206,6 +218,31 @@ db = triviumdb.TriviumDB("data.tdb", dim=768, dtype="f16")
 db = triviumdb.TriviumDB("data.tdb", dim=64, dtype="u64")
 ```
 
+### 大规模导入的容量规划
+
+已知目标规模时，应在打开阶段同时提供预计总节点数和内核内存预算：
+
+```python
+with triviumdb.TriviumDB(
+    "data.tdb",
+    dim=1024,
+    dtype="f16",
+    sync_mode="off",
+    auto_build_quiver=False,
+    expected_nodes=3_600_000,
+    memory_limit_mb=28 * 1024,
+) as db:
+    for vectors, payloads in batches:
+        db.batch_insert(vectors, payloads)
+```
+
+- `expected_nodes` 是目标总量提示，不是硬上限，也不会写入数据库文件。
+- 未知最终规模时可分阶段调用 `db.reserve_nodes(200_000)`。
+- `batch_insert` 会在写 WAL 前为整批预留并全量验证，失败不会留下半批数据。
+- 容量预留只覆盖核心节点容器，不提前分配图边、文本索引、BQ 或 QuIVer。
+- `memory_limit_mb` 是 TriviumDB 内核预算，不包含 Python/NumPy、V8、其他线程和 OS Page Cache。
+- 大规模导入建议关闭自动 QuIVer，导入完成后显式构建；纯 `flush()` 不会隐式构建 ANN。
+
 ### 批量写入优化
 
 批量导入大量数据时，临时关闭 WAL 同步可大幅提速：
@@ -225,11 +262,13 @@ with triviumdb.TriviumDB("data.tdb", dim=768, sync_mode="off") as db:
 
 ### 内存预算控制
 
-长时间运行的服务应设置内存上限，避免 MemTable 无限膨胀：
+长时间运行的服务应设置内核内存预算，避免 MemTable 无限膨胀，并为容量预留和 QuIVer 构建提供前置门禁：
 
 ```python
-db.set_memory_limit(mb=512)  # 超过 512MB 自动触发 flush
+db.set_memory_limit(mb=512)
 ```
+
+该限制不是整个进程的 RSS 硬上限。达到预算后的普通写入仍按现有策略触发 flush；显式容量预留和 QuIVer 大分配则会在操作前返回错误。
 
 ### 搜索参数调优
 
@@ -453,20 +492,17 @@ results = db.search(encode("Python 异步编程"), top_k=5)
 rows = db.tql('MATCH (a {type: "concept"})-[:related]->(b) RETURN b')
 ```
 
-### 模式三：更新边权而非覆盖
+### 模式三：更新边权
 
-由于 `unlink` 会断开源节点到目标节点的**所有**边，更新特定类型的边权重需要谨慎：
+`(src, dst, label)` 是边的唯一键，重复 `link` 会原位更新 weight，不会创建重复边：
 
 ```python
 def update_edge_weight(db, src, dst, label, new_weight):
-    """安全地更新特定边的权重"""
-    # 先查看当前所有边（通过 get 获取 node 的 edges 信息）
-    db.unlink(src, dst)
+    """更新特定边的权重"""
     db.link(src, dst, label=label, weight=new_weight)
 ```
 
-> ⚠️ 如果同一对 (src, dst) 之间有多种 label 的边，`unlink` 会全部断开。
-> 建议同一对节点之间只建立一条边，用 label 区分类型。
+删除单一标签使用 `db.unlink(src, dst, label=label)`；省略 label 才会删除该节点对之间的全部边。weight 必须是有限浮点数，NaN/Infinity 会在 WAL 前拒绝。
 
 ### 模式四：定期清理过期数据
 
@@ -497,6 +533,7 @@ results = db.search_advanced(
     query_vector=encode("昨天那个红色头发的女孩是不是又在生气？"),
     top_k=8,
     expand_depth=2,                 # 第一步图游走深度（必须开启）
+    expand_labels=["causes", "related"], # 只沿白名单边扩散；[]=禁止扩散
     
     # 启用文本/向量双路混合召回 (防幻觉关键)
     enable_text_hybrid_search=True,
@@ -554,6 +591,12 @@ db.unlink(1, 2)  # ⚠️ 两条边都被断开了！
 ```
 
 **规则**：`unlink(src, dst)` 会移除 src → dst 之间的**全部**边，不区分 label。
+
+只删除一条标签边时使用：
+
+```python
+db.unlink(1, 2, label="friend")
+```
 
 ### ❌ 坑 5：多进程同时打开
 

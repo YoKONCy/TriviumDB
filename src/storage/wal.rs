@@ -5,6 +5,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+const WAL_MAGIC: &[u8; 4] = b"TVWL";
+const WAL_VERSION: u16 = 2;
+const WAL_HEADER_SIZE: u64 = 6;
+
 /// WAL 条目：记录每一次变更操作
 ///
 /// 注意：payload 使用 String（JSON 字符串）而非 serde_json::Value，
@@ -42,6 +46,12 @@ pub enum WalEntry<T> {
     UpdateVector {
         id: NodeId,
         vector: Vec<T>,
+    },
+    /// 仅删除指定标签边；追加在旧变体之后，保持历史 discriminant。
+    UnlinkLabel {
+        src: NodeId,
+        dst: NodeId,
+        label: String,
     },
 }
 
@@ -99,10 +109,18 @@ impl Wal {
     /// 创建或打开 WAL 文件，指定同步模式
     pub fn open_with_sync(db_path: &str, sync_mode: SyncMode) -> Result<Self> {
         let wal_path = PathBuf::from(format!("{}.wal", db_path));
-        let file = OpenOptions::new()
+        let existing_len = std::fs::metadata(&wal_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&wal_path)?;
+        if existing_len == 0 {
+            file.write_all(WAL_MAGIC)?;
+            file.write_all(&WAL_VERSION.to_le_bytes())?;
+            file.flush()?;
+        }
         Ok(Self {
             wal_path,
             writer: Some(BufWriter::new(file)),
@@ -211,9 +229,29 @@ impl Wal {
             return Ok((Vec::new(), 0));
         }
 
+        let mut file = File::open(&wal_path)?;
+        let mut prefix = [0u8; WAL_HEADER_SIZE as usize];
+        let read = file.read(&mut prefix)?;
+        if read >= 4 && &prefix[0..4] == WAL_MAGIC {
+            if read < WAL_HEADER_SIZE as usize {
+                return Err(TriviumError::CorruptedFile(
+                    "WAL 版本头被截断 (WAL header truncated)".into(),
+                ));
+            }
+            let version = u16::from_le_bytes([prefix[4], prefix[5]]);
+            if version != WAL_VERSION {
+                return Err(TriviumError::UnsupportedWalVersion {
+                    found: version,
+                    supported: WAL_VERSION,
+                });
+            }
+            let (entries, offset) = Self::read_entries_from_reader(BufReader::new(file))?;
+            return Ok((entries, offset + WAL_HEADER_SIZE));
+        }
+
+        // 兼容历史无头 WAL；新版写入会在下一次成功 flush 清空后升级为带头格式。
         let file = File::open(&wal_path)?;
-        let reader = BufReader::new(file);
-        Self::read_entries_from_reader(reader)
+        Self::read_entries_from_reader(BufReader::new(file))
     }
 
     /// 从任意 `Read` 源解析 WAL 条目流
@@ -347,10 +385,12 @@ impl Wal {
         // 截断清空 WAL（而非删除重建）
         // 对于已存在的文件，truncate 不会触发杀软的"新文件扫描"
         {
-            let file = OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .write(true)
                 .truncate(true)
                 .open(&self.wal_path)?;
+            file.write_all(WAL_MAGIC)?;
+            file.write_all(&WAL_VERSION.to_le_bytes())?;
             file.sync_all()?;
         }
 
@@ -383,9 +423,20 @@ impl Wal {
     /// WAL 文件是否存在且非空（用于判断是否需要恢复）
     pub fn needs_recovery(db_path: &str) -> bool {
         let wal_path = format!("{}.wal", db_path);
-        match std::fs::metadata(&wal_path) {
-            Ok(meta) => meta.len() > 0,
-            Err(_) => false,
+        let Ok(meta) = std::fs::metadata(&wal_path) else {
+            return false;
+        };
+        if meta.len() == 0 {
+            return false;
         }
+        if meta.len() != WAL_HEADER_SIZE {
+            return true;
+        }
+        let Ok(bytes) = std::fs::read(&wal_path) else {
+            return true;
+        };
+        bytes.len() != WAL_HEADER_SIZE as usize
+            || &bytes[0..4] != WAL_MAGIC
+            || u16::from_le_bytes([bytes[4], bytes[5]]) != WAL_VERSION
     }
 }

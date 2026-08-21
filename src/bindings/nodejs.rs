@@ -1,7 +1,7 @@
 #[cfg(feature = "nodejs")]
+#[allow(clippy::module_inception)]
 pub mod nodejs {
     use crate::database::Database as GenericDatabase;
-    use crate::filter::Filter;
     use napi_derive::napi;
 
     // ════════ 后端枚举：封装三种泛型特化 ════════
@@ -43,6 +43,44 @@ pub mod nodejs {
         pub payload: serde_json::Value,
     }
 
+    #[napi(object)]
+    pub struct JsReachabilityStep {
+        pub from: f64,
+        pub to: f64,
+        pub label: String,
+    }
+
+    #[napi(object)]
+    pub struct JsReachabilityResult {
+        pub source_id: f64,
+        pub target_id: f64,
+        pub depth: u32,
+        pub path: Vec<f64>,
+        pub steps: Vec<JsReachabilityStep>,
+    }
+
+    #[napi(object)]
+    pub struct JsReachabilityOptions {
+        pub min_depth: Option<u32>,
+        pub max_depth: Option<u32>,
+        pub labels: Option<Vec<String>>,
+        pub direction: Option<String>,
+        pub max_visited_nodes: Option<f64>,
+    }
+
+    /// 数据库打开与容量规划配置。
+    #[napi(object)]
+    pub struct JsDatabaseOptions {
+        pub dim: Option<u32>,
+        pub dtype: Option<String>,
+        pub sync_mode: Option<String>,
+        pub storage_mode: Option<String>,
+        pub auto_build_quiver: Option<bool>,
+        pub load_text_index: Option<bool>,
+        pub expected_nodes: Option<f64>,
+        pub memory_limit_mb: Option<f64>,
+    }
+
     /// 高级管线专用配置结构
     #[napi(object)]
     pub struct JsSearchConfig {
@@ -66,11 +104,22 @@ pub mod nodejs {
         pub custom_query_text: Option<String>,
         /// CCSA: 扩散方向偏置向量，让图扩散优先沿语义相近的节点方向传播
         pub diffusion_bias: Option<Vec<f64>>,
+        /// 图扩散允许的边标签；空数组表示禁止扩散。
+        pub expand_labels: Option<Vec<String>>,
     }
 
     /// 节点关系边
     #[napi(object)]
     pub struct JsEdge {
+        pub target_id: f64,
+        pub label: String,
+        pub weight: f64,
+    }
+
+    /// 完整入边视图
+    #[napi(object)]
+    pub struct JsIncomingEdge {
+        pub source_id: f64,
         pub target_id: f64,
         pub label: String,
         pub weight: f64,
@@ -130,14 +179,50 @@ pub mod nodejs {
         pub context: JsHookContext,
     }
 
-    // ════════ 辅助：JSON Value → Filter ════════
+    fn parse_safe_usize(value: f64, name: &str) -> napi::Result<usize> {
+        if !value.is_finite()
+            || value < 0.0
+            || value.fract() != 0.0
+            || value > 9_007_199_254_740_991.0
+            || value > usize::MAX as f64
+        {
+            return Err(napi::Error::from_reason(format!(
+                "{name} 必须是 JavaScript 安全范围内的非负整数"
+            )));
+        }
+        Ok(value as usize)
+    }
 
-    fn json_to_filter(val: &serde_json::Value) -> napi::Result<Filter> {
-        Filter::from_json(val).map_err(|e| napi::Error::from_reason(e))
+    fn to_js_reachability(
+        result: crate::graph::reachability::ReachabilityResult,
+    ) -> JsReachabilityResult {
+        JsReachabilityResult {
+            source_id: result.source_id as f64,
+            target_id: result.target_id as f64,
+            depth: result.depth as u32,
+            path: result.path.into_iter().map(|id| id as f64).collect(),
+            steps: result
+                .steps
+                .into_iter()
+                .map(|step| JsReachabilityStep {
+                    from: step.from as f64,
+                    to: step.to as f64,
+                    label: step.label,
+                })
+                .collect(),
+        }
+    }
+
+    fn parse_storage_mode(value: Option<&str>) -> napi::Result<crate::database::StorageMode> {
+        match value.unwrap_or("mmap") {
+            "mmap" => Ok(crate::database::StorageMode::Mmap),
+            "rom" => Ok(crate::database::StorageMode::Rom),
+            _ => Err(napi::Error::from_reason("storageMode 必须是 mmap / rom")),
+        }
     }
 
     fn parse_sync_mode(s: &str) -> napi::Result<crate::storage::wal::SyncMode> {
-        crate::storage::wal::SyncMode::parse(s).map_err(|e| napi::Error::from_reason(e))
+        crate::storage::wal::SyncMode::parse(s).map_err(napi::Error::from_reason)
     }
 
     // ════════ TriviumDB 主类 ════════
@@ -158,25 +243,80 @@ pub mod nodejs {
         #[napi(constructor)]
         pub fn new(
             path: String,
-            dim: Option<u32>,
+            dim_or_options: Option<napi::bindgen_prelude::Either<u32, JsDatabaseOptions>>,
             dtype: Option<String>,
             sync_mode: Option<String>,
         ) -> napi::Result<Self> {
-            let dim = dim.unwrap_or(1536) as usize;
-            let dtype_str = dtype.as_deref().unwrap_or("f32");
-            let sm = parse_sync_mode(sync_mode.as_deref().unwrap_or("normal"))?;
+            let (_dim, dtype, config) = match dim_or_options {
+                Some(napi::bindgen_prelude::Either::A(dim)) => {
+                    let dtype = dtype.unwrap_or_else(|| "f32".into());
+                    let sm = parse_sync_mode(sync_mode.as_deref().unwrap_or("normal"))?;
+                    (
+                        dim as usize,
+                        dtype,
+                        crate::database::Config {
+                            dim: dim as usize,
+                            sync_mode: sm,
+                            ..Default::default()
+                        },
+                    )
+                }
+                Some(napi::bindgen_prelude::Either::B(options)) => {
+                    let dim = options.dim.unwrap_or(1536) as usize;
+                    let dtype = options.dtype.unwrap_or_else(|| "f32".into());
+                    let expected_nodes = options
+                        .expected_nodes
+                        .map(|value| parse_safe_usize(value, "expectedNodes"))
+                        .transpose()?;
+                    let memory_limit_mb = options
+                        .memory_limit_mb
+                        .map(|value| parse_safe_usize(value, "memoryLimitMb"))
+                        .transpose()?
+                        .unwrap_or(0);
+                    let memory_limit = memory_limit_mb
+                        .checked_mul(1024 * 1024)
+                        .ok_or_else(|| napi::Error::from_reason("memoryLimitMb 换算字节时溢出"))?;
+                    let config = crate::database::Config {
+                        dim,
+                        sync_mode: parse_sync_mode(
+                            options.sync_mode.as_deref().unwrap_or("normal"),
+                        )?,
+                        storage_mode: parse_storage_mode(options.storage_mode.as_deref())?,
+                        auto_build_quiver: options.auto_build_quiver.unwrap_or(true),
+                        load_text_index: options.load_text_index.unwrap_or(false),
+                        expected_nodes,
+                        memory_limit,
+                    };
+                    (dim, dtype, config)
+                }
+                None => {
+                    let dim = 1536;
+                    let dtype = dtype.unwrap_or_else(|| "f32".into());
+                    let sm = parse_sync_mode(sync_mode.as_deref().unwrap_or("normal"))?;
+                    (
+                        dim,
+                        dtype,
+                        crate::database::Config {
+                            dim,
+                            sync_mode: sm,
+                            ..Default::default()
+                        },
+                    )
+                }
+            };
+            let dtype_str = dtype.as_str();
 
             let inner = match dtype_str {
                 "f32" => DbBackend::F32(
-                    GenericDatabase::<f32>::open_with_sync(&path, dim, sm)
+                    GenericDatabase::<f32>::open_with_config(&path, config)
                         .map_err(|e| napi::Error::from_reason(e.to_string()))?,
                 ),
                 "f16" => DbBackend::F16(
-                    GenericDatabase::<half::f16>::open_with_sync(&path, dim, sm)
+                    GenericDatabase::<half::f16>::open_with_config(&path, config)
                         .map_err(|e| napi::Error::from_reason(e.to_string()))?,
                 ),
                 "u64" => DbBackend::U64(
-                    GenericDatabase::<u64>::open_with_sync(&path, dim, sm)
+                    GenericDatabase::<u64>::open_with_config(&path, config)
                         .map_err(|e| napi::Error::from_reason(e.to_string()))?,
                 ),
                 _ => return Err(napi::Error::from_reason("dtype 必须是 f32 / f16 / u64")),
@@ -247,6 +387,7 @@ pub mod nodejs {
                 text_boost: None,
                 force_brute_force: None,
                 diffusion_bias: None,
+                expand_labels: None,
             });
 
             let top_k = cfg.top_k.unwrap_or(5);
@@ -274,7 +415,8 @@ pub mod nodejs {
                 force_brute_force: cfg.force_brute_force.unwrap_or(false),
                 diffusion_bias: cfg
                     .diffusion_bias
-                    .map(|v| v.iter().map(|&x| x as f32).collect()),
+                    .map(|v| v.into_iter().map(|x| x as f32).collect()),
+                expand_labels: cfg.expand_labels,
                 ..Default::default()
             };
 
@@ -375,12 +517,47 @@ pub mod nodejs {
             if vectors.len() != payloads.len() {
                 return Err(napi::Error::from_reason("向量列表与负载列表长度不一致"));
             }
-            let mut ids = Vec::with_capacity(vectors.len());
-            for (v, p) in vectors.into_iter().zip(payloads.into_iter()) {
-                let id = self.insert(v, p)?;
-                ids.push(id);
+            match &mut self.inner {
+                DbBackend::F32(db) => {
+                    let converted: Vec<Vec<f32>> = vectors
+                        .into_iter()
+                        .map(|vector| vector.into_iter().map(|value| value as f32).collect())
+                        .collect();
+                    let mut tx = crate::database::TxBuilder::new();
+                    for (vector, payload) in converted.iter().zip(payloads.into_iter()) {
+                        tx.insert(vector, payload);
+                    }
+                    db.commit_tx(tx)
+                        .map(|ids| ids.into_iter().map(|id| id as f64).collect())
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }
+                DbBackend::F16(db) => {
+                    let converted: Vec<Vec<half::f16>> = vectors
+                        .into_iter()
+                        .map(|vector| vector.into_iter().map(half::f16::from_f64).collect())
+                        .collect();
+                    let mut tx = crate::database::TxBuilder::new();
+                    for (vector, payload) in converted.iter().zip(payloads.into_iter()) {
+                        tx.insert(vector, payload);
+                    }
+                    db.commit_tx(tx)
+                        .map(|ids| ids.into_iter().map(|id| id as f64).collect())
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }
+                DbBackend::U64(db) => {
+                    let converted: Vec<Vec<u64>> = vectors
+                        .into_iter()
+                        .map(|vector| vector.into_iter().map(|value| value as u64).collect())
+                        .collect();
+                    let mut tx = crate::database::TxBuilder::new();
+                    for (vector, payload) in converted.iter().zip(payloads.into_iter()) {
+                        tx.insert(vector, payload);
+                    }
+                    db.commit_tx(tx)
+                        .map(|ids| ids.into_iter().map(|id| id as f64).collect())
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }
             }
-            Ok(ids)
         }
 
         /// 批量插入指定 ID 的节点
@@ -394,14 +571,63 @@ pub mod nodejs {
             if ids.len() != vectors.len() || vectors.len() != payloads.len() {
                 return Err(napi::Error::from_reason("ID、向量与负载列表长度不一致"));
             }
-            for ((id, v), p) in ids
+            let parsed_ids: Vec<u64> = ids
                 .into_iter()
-                .zip(vectors.into_iter())
-                .zip(payloads.into_iter())
-            {
-                self.insert_with_id(id, v, p)?;
+                .map(|id| parse_safe_usize(id, "id").map(|value| value as u64))
+                .collect::<napi::Result<_>>()?;
+            match &mut self.inner {
+                DbBackend::F32(db) => {
+                    let converted: Vec<Vec<f32>> = vectors
+                        .into_iter()
+                        .map(|vector| vector.into_iter().map(|value| value as f32).collect())
+                        .collect();
+                    let mut tx = crate::database::TxBuilder::new();
+                    for ((id, vector), payload) in parsed_ids
+                        .iter()
+                        .zip(converted.iter())
+                        .zip(payloads.into_iter())
+                    {
+                        tx.insert_with_id(*id, vector, payload);
+                    }
+                    db.commit_tx(tx)
+                        .map(|_| ())
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }
+                DbBackend::F16(db) => {
+                    let converted: Vec<Vec<half::f16>> = vectors
+                        .into_iter()
+                        .map(|vector| vector.into_iter().map(half::f16::from_f64).collect())
+                        .collect();
+                    let mut tx = crate::database::TxBuilder::new();
+                    for ((id, vector), payload) in parsed_ids
+                        .iter()
+                        .zip(converted.iter())
+                        .zip(payloads.into_iter())
+                    {
+                        tx.insert_with_id(*id, vector, payload);
+                    }
+                    db.commit_tx(tx)
+                        .map(|_| ())
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }
+                DbBackend::U64(db) => {
+                    let converted: Vec<Vec<u64>> = vectors
+                        .into_iter()
+                        .map(|vector| vector.into_iter().map(|value| value as u64).collect())
+                        .collect();
+                    let mut tx = crate::database::TxBuilder::new();
+                    for ((id, vector), payload) in parsed_ids
+                        .iter()
+                        .zip(converted.iter())
+                        .zip(payloads.into_iter())
+                    {
+                        tx.insert_with_id(*id, vector, payload);
+                    }
+                    db.commit_tx(tx)
+                        .map(|_| ())
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }
             }
-            Ok(())
         }
 
         /// 带指定 ID 插入节点
@@ -569,21 +795,114 @@ pub mod nodejs {
                 .map_err(|e| napi::Error::from_reason(e.to_string()))
         }
 
-        /// 断开两节点间的所有边
+        /// 断开两节点间的边；提供 label 时仅删除该标签。
         #[napi]
-        pub fn unlink(&mut self, src: f64, dst: f64) -> napi::Result<()> {
-            dispatch!(self, mut db => db.unlink(src as u64, dst as u64))
-                .map_err(|e| napi::Error::from_reason(e.to_string()))
+        pub fn unlink(&mut self, src: f64, dst: f64, label: Option<String>) -> napi::Result<()> {
+            match label {
+                Some(label) => {
+                    dispatch!(self, mut db => db.unlink_label(src as u64, dst as u64, &label))
+                }
+                None => dispatch!(self, mut db => db.unlink(src as u64, dst as u64)),
+            }
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
         }
 
-        /// 获取 N 跳邻居节点 ID 列表
+        /// 获取 N 跳邻居节点 ID 列表，可按标签白名单遍历。
         #[napi]
-        pub fn neighbors(&self, id: f64, depth: Option<u32>) -> Vec<f64> {
+        pub fn neighbors(
+            &self,
+            id: f64,
+            depth: Option<u32>,
+            labels: Option<Vec<String>>,
+        ) -> Vec<f64> {
             let depth = depth.unwrap_or(1) as usize;
-            dispatch!(self, db => db.neighbors(id as u64, depth))
+            dispatch!(self, db => db.neighbors_with_labels(id as u64, depth, labels.as_deref()))
                 .into_iter()
                 .map(|id| id as f64)
                 .collect()
+        }
+
+        #[napi]
+        pub fn reachable(
+            &self,
+            id: f64,
+            options: Option<JsReachabilityOptions>,
+        ) -> napi::Result<Vec<JsReachabilityResult>> {
+            let options = options.unwrap_or(JsReachabilityOptions {
+                min_depth: None,
+                max_depth: None,
+                labels: None,
+                direction: None,
+                max_visited_nodes: None,
+            });
+            let direction = match options.direction.as_deref().unwrap_or("outgoing") {
+                "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
+                "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
+                "both" => crate::graph::reachability::ReachabilityDirection::Both,
+                _ => {
+                    return Err(napi::Error::from_reason(
+                        "direction 必须是 outgoing / incoming / both",
+                    ));
+                }
+            };
+            let config = crate::graph::reachability::ReachabilityConfig {
+                min_depth: options.min_depth.unwrap_or(1) as usize,
+                max_depth: options.max_depth.unwrap_or(1) as usize,
+                labels: options.labels,
+                direction,
+                max_visited_nodes: options
+                    .max_visited_nodes
+                    .map(|value| parse_safe_usize(value, "maxVisitedNodes"))
+                    .transpose()?
+                    .unwrap_or(10_000),
+            };
+            dispatch!(self, db => db.reachable(id as u64, &config))
+                .map(|results| results.into_iter().map(to_js_reachability).collect())
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
+        #[napi]
+        pub fn search_graph_first(
+            &self,
+            query_vector: Vec<f64>,
+            anchor_ids: Vec<f64>,
+            top_k: u32,
+            max_anchor_nodes: Option<f64>,
+        ) -> napi::Result<Vec<JsSearchHit>> {
+            let anchors: Vec<u64> = anchor_ids
+                .into_iter()
+                .map(|id| parse_safe_usize(id, "anchorId").map(|id| id as u64))
+                .collect::<napi::Result<_>>()?;
+            let max_anchor_nodes = max_anchor_nodes
+                .map(|value| parse_safe_usize(value, "maxAnchorNodes"))
+                .transpose()?
+                .unwrap_or(100_000);
+            let hits = match &self.inner {
+                DbBackend::F32(db) => {
+                    let query: Vec<f32> = query_vector.iter().map(|value| *value as f32).collect();
+                    db.search_graph_first(&query, &anchors, top_k as usize, max_anchor_nodes)
+                }
+                DbBackend::F16(db) => {
+                    let query: Vec<half::f16> = query_vector
+                        .iter()
+                        .map(|value| half::f16::from_f64(*value))
+                        .collect();
+                    db.search_graph_first(&query, &anchors, top_k as usize, max_anchor_nodes)
+                }
+                DbBackend::U64(db) => {
+                    let query: Vec<u64> = query_vector.iter().map(|value| *value as u64).collect();
+                    db.search_graph_first(&query, &anchors, top_k as usize, max_anchor_nodes)
+                }
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            Ok(hits
+                .into_iter()
+                .map(|hit| JsSearchHit {
+                    id: hit.id as f64,
+                    score: hit.score as f64,
+                    payload: hit.payload,
+                })
+                .collect())
         }
 
         // ── 社区聚类 ──
@@ -724,6 +1043,7 @@ pub mod nodejs {
                 text_boost: None,
                 force_brute_force: None,
                 diffusion_bias: None,
+                expand_labels: None,
             });
 
             let top_k = cfg.top_k.unwrap_or(5);
@@ -909,6 +1229,20 @@ pub mod nodejs {
                 .collect()
         }
 
+        /// 获取节点完整入边，可按标签过滤。
+        #[napi]
+        pub fn get_incoming_edges(&self, id: f64, label: Option<String>) -> Vec<JsIncomingEdge> {
+            dispatch!(self, db => db.get_incoming_edges(id as u64, label.as_deref()))
+                .into_iter()
+                .map(|edge| JsIncomingEdge {
+                    source_id: edge.source_id as f64,
+                    target_id: edge.target_id as f64,
+                    label: edge.label,
+                    weight: edge.weight as f64,
+                })
+                .collect()
+        }
+
         // ── TQL 统一查询 ──
 
         /// 执行 TQL (Trivium Query Language) 统一查询
@@ -1026,10 +1360,23 @@ pub mod nodejs {
                 .map_err(|e| napi::Error::from_reason(e.to_string()))
         }
 
-        /// 设置内存上限（MB），0 = 无限制
+        /// 为后续插入主动预留额外节点容量。
         #[napi]
-        pub fn set_memory_limit(&mut self, mb: u32) {
-            dispatch!(self, mut db => db.set_memory_limit(mb as usize * 1024 * 1024));
+        pub fn reserve_nodes(&self, additional: f64) -> napi::Result<()> {
+            let additional = parse_safe_usize(additional, "additional")?;
+            dispatch!(self, db => db.reserve_nodes(additional))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
+        /// 设置内存上限（MiB），0 = 无限制。
+        #[napi]
+        pub fn set_memory_limit(&mut self, mb: f64) -> napi::Result<()> {
+            let mb = parse_safe_usize(mb, "memoryLimitMb")?;
+            let bytes = mb
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| napi::Error::from_reason("memoryLimitMb 换算字节时溢出"))?;
+            dispatch!(self, mut db => db.set_memory_limit(bytes));
+            Ok(())
         }
 
         /// 估算当前内存占用（字节）
@@ -1099,9 +1446,8 @@ pub mod nodejs {
         /// 显式关闭数据库（落盘后释放资源）
         #[napi]
         pub fn close(&mut self) -> napi::Result<()> {
-            self.flush()?;
-            dispatch!(self, mut db => db.release_lock());
-            Ok(())
+            dispatch!(self, mut db => db.close())
+                .map_err(|e| napi::Error::from_reason(e.to_string()))
         }
     } // impl TriviumDB
 } // mod nodejs

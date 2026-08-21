@@ -27,7 +27,7 @@ TriviumDB 采用 **五层防御式测试体系**，从函数级正确性到系�
 
 | 层级 | 类型     | 用例数            | 覆盖目标                                                           |
 | ---- | -------- | ----------------- | ------------------------------------------------------------------ |
-| L1   | 单元测试 | ~268              | 每个公开函数/方法的正确性与错误路径                                |
+| L1   | 单元测试 | 297               | 每个公开函数/方法的正确性与错误路径                                |
 | L2   | 集成测试 | ~800+             | 跨模块协作、WAL 恢复、硬件级崩溃恢复、并发安全、安全防御、TQL 全链路 |
 | L3   | 属性测试 | ~2650+（随机生成）| 数据结构不变量、数学契约、事务原子性                               |
 | L4   | 模糊测试 | 持续运行          | WAL / TQL / Filter 解析器的随机输入鲁棒性（LibFuzzer）             |
@@ -55,6 +55,13 @@ cargo test --test unit -- filter       # filter 模块
 cargo test --test unit -- database     # database 模块
 cargo test --test unit -- memtable     # memtable 模块
 
+# 运行确定性交错、并发不变量和容量安全测试
+cargo test --test deterministic_interleaving --features test-hooks
+cargo test --test concurrency_invariants --features test-hooks
+
+# 注意：不要用 --all-targets 作为普通全量测试命令；它会执行 Criterion benchmark，
+# 包括需要外部百万向量数据集的 bench_cohere1m。
+
 # 运行覆盖率报告（需要安装 cargo-llvm-cov）
 cargo llvm-cov --summary-only
 cargo llvm-cov --html --open          # 生成 HTML 可视化报告
@@ -73,7 +80,7 @@ tests/
 │   ├── main.rs                  #   统一入口
 │   ├── memtable.rs              #   MemTable CRUD、图关系、属性索引
 │   ├── database.rs              #   Database 公开 API + 事务测试
-│   ├── filter.rs                #   Filter 14 种变体 + from_json 解析
+│   ├── filter.rs                #   Filter 数字/字符串/RFC3339 + from_json 解析
 │   ├── vector.rs                #   VectorType + SIMD 标量回退
 │   ├── wal.rs                   #   WAL 序列化/反序列化/恢复
 │   ├── traversal.rs             #   图谱扩散 (PPR, 抑制, 疲劳)
@@ -136,15 +143,17 @@ fuzz/
 
 | 模块        | 测试文件            | 覆盖要点                                                       |
 | ----------- | ------------------- | -------------------------------------------------------------- |
-| `MemTable`  | `unit/memtable.rs`  | CRUD、graph link/unlink、属性索引、label 索引、in_degree 追踪  |
+| `MemTable`  | `unit/memtable.rs`  | CRUD、边三元组 upsert、标签 unlink、派生索引与 in_degree 不变量 |
 | `Database`  | `unit/database.rs`  | open/close、CRUD、search、TQL、事务（全 7 种 TxOp）、Hook 管理 |
-| `Filter`    | `unit/filter.rs`    | 14 种变体 matches、from_json 全操作符、错误路径、bloom mask    |
+| `Filter`    | `unit/filter.rs`    | 数字/字符串范围、RFC3339 时区、错误路径、bloom mask             |
 | `Vector`    | `unit/vector.rs`    | 余弦相似度、SIMD 尾部处理、标量回退、多 dtype                  |
-| `WAL`       | `unit/wal.rs`       | 序列化往返、CRC 校验、SyncMode 切换、崩溃恢复                  |
-| `Traversal` | `unit/traversal.rs` | PPR 扩散、侧向抑制、不应期疲劳、参数边界                       |
+| `WAL`       | `unit/wal.rs`       | 显式版本门禁、旧格式兼容、CRC、SyncMode、崩溃恢复               |
+| `Traversal` | `unit/traversal.rs` | PPR 扩散、Reachability 方向/最短路径/环/预算、GraphFirst 参数门禁 |
 | `TQL AST`   | `unit/tql_ast.rs`   | 语法树节点构造、枚举完整性                                     |
 | `Cognitive` | `unit/cognitive.rs` | FISTA 稀疏残差、DPP 多样性采样                                 |
 | `Index`     | `unit/index.rs`     | QuIVer/BQ 二值化、BruteForce 精确搜索                                 |
+
+TQL 集成测试还覆盖 `MATCH ... RANK` 的 anchor 去重、集合内精确排序、分页与显式排序顺序、EXPLAIN 计划，以及 `SEARCH ... EXPAND` 的 OUTGOING/INCOMING/BOTH、多标签和空标签语义。数据库生命周期测试验证 `reachable()` 与 `search_graph_first()` 在 close 后与其他可失败 API 一样返回 `DatabaseClosed`。
 
 ### 事务测试示例
 
@@ -190,8 +199,8 @@ fn tx_insert_后_在同一事务link() {
 
 ```rust
 #[test]
-fn from_json_gt_非数字报错() {
-    let r = Filter::from_json(&json!({"age": {"$gt": "not_a_number"}}));
+fn from_json_gt_非法类型报错() {
+    let r = Filter::from_json(&json!({"age": {"$gt": true}}));
     assert!(r.is_err());
 }
 
@@ -226,6 +235,8 @@ fn from_json_嵌套and_or() {
 | `unsafe_audit.rs` | 安全审计   | 针对全代码 28 处 unsafe (SIMD、mmap、FFI) 提供专门的安全契约边界验证 (GJB-5000B 条款 6.3.2) |
 | `transaction.rs`  | 事务原子性 | 多操作原子提交、NaN/维度拦截、跨事务依赖 |
 | `concurrent.rs`   | 线程安全   | 多线程并发读写、无数据竞争、Database Send+Sync 特性验证 |
+| `deterministic_interleaving.rs` | 确定性交错 | RwLock 读读并发、读写隔离、QuIVer generation/singleflight、fatigue 串行、compaction/WAL 边界 |
+| `concurrency_invariants.rs` | 并发与容量不变量 | generation、slot ABA、writer 进展、flush/QuIVer 解耦、FP16 流式构建、容量预算与 WAL 原子性 |
 | `security.rs`     | 安全防御   | NaN 注入、超大 payload(10MB)、幽灵事务截断 |
 | `stress.rs`       | 压力极限   | 高频写入、自环重边图谱震荡、空库极端操作 |
 | `tql_executor.rs` | TQL 全链路 | MATCH/FIND/SEARCH 三种入口的完整执行     |

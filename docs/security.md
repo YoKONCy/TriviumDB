@@ -40,25 +40,21 @@ lock_file.try_lock_exclusive().map_err(|_| {
 
 ---
 
-### 2. 线程级 `Arc<Mutex<T>>` + 中毒恢复
+### 2. 线程级 `Arc<RwLock<MemTable>>` / `Arc<Mutex<Wal>>` + 中毒恢复
 
-**实现位置**：`database.rs:114-121` + 全文所有读写操作
+`MemTable` 使用 `RwLock`：普通无状态查询共享读锁，写入、flush 和 compaction 获取写锁；`Wal` 使用独立 `Mutex`。两类锁均通过恢复封装处理 poison，避免单线程 panic 直接拖垮进程。
 
-```rust
-fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| {
-        tracing::warn!("Mutex was poisoned, recovering...");
-        poisoned.into_inner()
-    })
-}
+完整查询 pipeline 持同一个 MemTable read guard，候选生成、Payload 过滤、QuIVer 精排和结果组装观察同一逻辑版本。开启 fatigue 的有状态查询额外经过 `stateful_search` 串行锁。Hook 在读锁作用域内禁止同线程重入写 API，直接返回错误而不是自锁。
+
+锁顺序不变量：
+
+```text
+有状态查询：stateful_search → MemTable read
+持久化写入：MemTable write → WAL Mutex
+QuIVer 构建：不得持有 MemTable guard 等待 singleflight Condvar
 ```
 
-`MemTable` 和 `Wal` 均包装在 `Arc<Mutex<T>>` 中。任何线程 `panic` 并持有锁时，Mutex 转为"中毒"状态。`lock_or_recover` 在此情形下不会 `unwrap` 崩溃，而是**主动剥离中毒标记，恢复内部数据继续服务**。
-
-**保证**：
-- 单线程 panic 不会导致整个进程崩溃
-- 后续请求可以继续正常访问数据（数据状态由 WAL 保证一致性）
-- 所有读写操作均通过此函数获取锁，**零例外**
+确定性交错测试验证了读读并发、读写隔离、QuIVer stale generation 拒绝、singleflight、fatigue 顺序和 compaction/WAL 边界。
 
 ---
 
@@ -66,24 +62,14 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 **实现位置**：`database.rs:279-293`（以 `insert` 为例）
 
-```rust
-// 先持有 memtable 锁写内存，再持有 wal 锁写日志
-// 两把锁不同时持有，避免死锁
-let id = {
-    let mut mt = lock_or_recover(&self.memtable);
-    mt.insert(vector, payload.clone())?
-};
-{
-    let mut w = lock_or_recover(&self.wal);
-    w.append(&WalEntry::Insert { ... })?;
-}
-```
-
-`memtable` 锁和 `wal` 锁**从不同时持有**——先释放 memtable 锁，再获取 wal 锁。这是经典的锁顺序规则，消除了死锁的可能性。
+写操作保持固定顺序 `MemTable write → WAL Mutex`。事务在持有 MemTable 写锁时完成 Dry-Run、容量预算和整批预留，随后获取 WAL 锁一次性追加事务，最后执行已验证的内存应用。Compaction 同样遵循该顺序，并在主数据保存成功后才清理 WAL。
 
 **保证**：
-- 任意并发调用组合下不会发生死锁
-- 不同操作（insert、delete、link）遵循完全一致的锁获取顺序
+- 所有多锁路径遵守同一方向，禁止反向获取；
+- 容量、维度、ID、Payload 等错误发生在 WAL 之前；
+- WAL 成功后内存应用只执行已经 Dry-Run 验证的操作。
+
+数据库关闭使用 `Open → Closing → Closed` 状态机和活动操作 RAII 计数。进入 `Closing` 后新操作立即收到 `DatabaseClosed`，close 无超时等待已进入操作结束；最终 flush 失败时恢复 `Open` 并保留文件锁，成功时才释放锁。绑定层不再暴露绕过 flush 的 `release_lock`。
 
 ---
 
@@ -91,7 +77,7 @@ let id = {
 
 **实现位置**：`storage/compaction.rs`
 
-后台 Compaction 线程通过 `Arc::clone` 共享 `memtable` 和 `wal` 的引用，同样使用 `lock_or_recover` 获取锁。Compaction 操作与前台写操作在同一个 Mutex 下序列化，**不存在竞态条件**。
+后台 Compaction 线程通过 `Arc::clone` 共享 `RwLock<MemTable>` 和 `Mutex<Wal>`。准备和保存阶段获取 MemTable 写锁，因此不会与写入交错；保存成功后在同一锁顺序下清理 WAL。该设计优先保证崩溃一致性，compaction 期间前台读可能等待。
 
 ---
 
@@ -104,8 +90,11 @@ let id = {
 每条 WAL 记录的磁盘格式为：
 
 ```
+[magic: "TVWL"] [version: u16]
 [len: u32 (4B)] [bincode 序列化数据: len bytes] [crc32: u32 (4B)]
 ```
+
+历史无头 WAL 仍可回放。新版 WAL 在读取任何记录前校验显式版本；未知版本返回 `UnsupportedWalVersion`，不会被误判成可截断的损坏尾部。
 
 写入时计算，读取（崩溃恢复）时验证：
 
@@ -311,7 +300,24 @@ if offset + dim <= vectors.len() {
 
 ## 资源配额与恶意负载防御 (Anti-DoS & OOM)
 
-### 18. Cypher 引擎的 Lazy Evaluation 防 OOM 内存大爆炸
+### 18. 容量预算与原子预留
+
+`Config.expected_nodes`、`Database::reserve_nodes()`、事务和绑定层 `batch_insert` 共用容量防御：
+
+1. 使用 checked arithmetic 估算向量 delta、Payload/ID HashMap、slot 和 fast tag 的新增容量；
+2. 与当前内核估算内存及 `memory_limit` 比较；
+3. 超预算、溢出或 `try_reserve` 失败时返回结构化错误；
+4. 只有预留和全部 Dry-Run 验证成功后才写 WAL。
+
+逻辑原子性保证节点、ID、generation 和 WAL 在失败后不变。Rust 容器在后续容器失败前已经成功取得的空 capacity 可能保留，但不形成可见数据。内存预算不包含 Python/NumPy、V8、其他线程和 OS Page Cache，因此不是进程 RSS 的硬上限。
+
+QuIVer 构建有独立峰值预算，并采用流式 BQ2 编码，避免 FP16 全库临时展开为 FP32。纯 `flush()` 和 compaction 不会隐式触发 ANN 构建。
+
+结构化图查询同样采用拒绝式预算门禁：Reachability 的 `max_visited_nodes` 约束 BFS 已发现节点数；GraphFirst 的 `max_anchor_nodes` 约束去重后的 anchor 数量；TQL MATCH/RANK/EXPAND 使用 100,000 级执行预算。达到预算时返回 `QueryExecution`，不会静默截断成看似完整的结果。GraphFirst 只在预算内 anchor 集合上精确评分，不会因候选过大偷偷退化为全库检索。
+
+---
+
+### 19. Cypher 引擎的 Lazy Evaluation 防 OOM 内存大爆炸
 
 **实现位置**：`query/executor.rs:eval_expr_by_id()` 和路径扩展逻辑
 
@@ -460,7 +466,7 @@ Windows 杀毒软件在文件关闭瞬间抢占扫描，通常几毫秒后自动
 
 **实现位置**：`storage/wal.rs:307-330`
 
-`truncate(true)` 将文件截断为零字节但保留 inode，不触发杀软的"新文件扫描"，避免 WAL clear 期间再次产生文件锁冲突。
+`truncate(true)` 保留 inode，不触发杀软的"新文件扫描"；截断后立即写回固定 6 字节 WAL 版本头，避免 WAL clear 期间再次产生文件锁冲突。
 
 ---
 

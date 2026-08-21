@@ -231,6 +231,52 @@ fn link_基础() {
 }
 
 #[test]
+fn link_同三元组更新权重且索引不重复() {
+    let mut mt = make_mt();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({})).unwrap();
+    mt.insert_with_id(2, &[0.0, 1.0, 0.0], json!({})).unwrap();
+    mt.link(1, 2, "knows".into(), 0.5).unwrap();
+    mt.link(1, 2, "knows".into(), 0.9).unwrap();
+
+    let edges = mt.get_edges(1).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].weight, 0.9);
+    assert_eq!(mt.get_in_degree(2), 1);
+    assert_eq!(mt.get_incoming_sources(2), &[1]);
+    assert_eq!(mt.get_edges_by_label("knows"), vec![(1, 2)]);
+}
+
+#[test]
+fn unlink_label_保留其他标签及反向索引() {
+    let mut mt = make_mt();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({})).unwrap();
+    mt.insert_with_id(2, &[0.0, 1.0, 0.0], json!({})).unwrap();
+    mt.link(1, 2, "knows".into(), 1.0).unwrap();
+    mt.link(1, 2, "works".into(), 2.0).unwrap();
+
+    mt.unlink_label(1, 2, "knows").unwrap();
+    assert_eq!(mt.get_edges(1).unwrap().len(), 1);
+    assert_eq!(mt.get_in_degree(2), 1);
+    assert_eq!(mt.get_incoming_sources(2), &[1]);
+    assert!(mt.get_edges_by_label("knows").is_empty());
+    assert_eq!(mt.get_incoming_edges(2, Some("works")).len(), 1);
+
+    mt.unlink_label(1, 2, "works").unwrap();
+    assert_eq!(mt.get_in_degree(2), 0);
+    assert!(mt.get_incoming_sources(2).is_empty());
+}
+
+#[test]
+fn link_拒绝非有限权重() {
+    let mut mt = make_mt();
+    mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({})).unwrap();
+    mt.insert_with_id(2, &[0.0, 1.0, 0.0], json!({})).unwrap();
+    assert!(mt.link(1, 2, "bad".into(), f32::NAN).is_err());
+    assert!(mt.link(1, 2, "bad".into(), f32::INFINITY).is_err());
+    assert!(mt.get_edges(1).is_none_or(|edges| edges.is_empty()));
+}
+
+#[test]
 fn link_不存在的节点报错() {
     let mut mt = make_mt();
     mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({})).unwrap();

@@ -97,10 +97,16 @@ fn wal_所有Entry变体往返() {
             vector: vec![9.0],
         })
         .unwrap();
+        wal.append(&WalEntry::UnlinkLabel::<f32> {
+            src: 1,
+            dst: 2,
+            label: "knows".to_string(),
+        })
+        .unwrap();
     }
 
     let (entries, _) = Wal::read_entries::<f32>(&path).unwrap();
-    assert_eq!(entries.len(), 6);
+    assert_eq!(entries.len(), 7);
 
     cleanup(&path);
 }
@@ -249,6 +255,47 @@ fn wal_needs_recovery_非空文件() {
 // ════════════════════════════════════════════════════════════════
 //  read_entries_from_reader — CRC 校验
 // ════════════════════════════════════════════════════════════════
+
+#[test]
+fn wal明确拒绝不支持的版本() {
+    let path = tmp_db("unsupported_version");
+    cleanup(&path);
+    std::fs::write(
+        format!("{}.wal", path),
+        [b'T', b'V', b'W', b'L', 0xFF, 0x7F],
+    )
+    .unwrap();
+
+    let result = Wal::read_entries::<f32>(&path);
+    assert!(
+        matches!(
+            result,
+            Err(triviumdb::TriviumError::UnsupportedWalVersion { .. })
+        ),
+        "未知 WAL 版本必须明确拒绝"
+    );
+
+    cleanup(&path);
+}
+
+#[test]
+fn wal兼容历史无头记录() {
+    let path = tmp_db("legacy_headerless");
+    cleanup(&path);
+    let entry = WalEntry::Delete::<f32> { id: 9 };
+    let data = bincode::serialize(&entry).unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&data);
+    bytes.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
+    std::fs::write(format!("{}.wal", path), bytes).unwrap();
+
+    let (entries, offset) = Wal::read_entries::<f32>(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(offset > 0);
+
+    cleanup(&path);
+}
 
 #[test]
 fn wal_crc_错误时停止恢复() {

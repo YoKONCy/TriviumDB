@@ -12,7 +12,7 @@ use crate::node::NodeId;
 use crate::storage::memtable::MemTable;
 use crate::storage::wal::WalEntry;
 
-use super::lock_or_recover;
+use super::{lock_or_recover, write_or_recover};
 
 /// WAL 崩溃恢复：回放单条 WAL 记录到 MemTable
 ///
@@ -60,6 +60,11 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
                 let _ = mt.unlink(src, dst);
             }
         }
+        WalEntry::UnlinkLabel { src, dst, label } => {
+            if mt.contains(src) {
+                let _ = mt.unlink_label(src, dst, &label);
+            }
+        }
         WalEntry::UpdatePayload { id, payload } => {
             if mt.contains(id) {
                 let payload_val: serde_json::Value =
@@ -105,6 +110,11 @@ pub enum TxOp<T> {
     Unlink {
         src: NodeId,
         dst: NodeId,
+    },
+    UnlinkLabel {
+        src: NodeId,
+        dst: NodeId,
+        label: String,
     },
     UpdatePayload {
         id: NodeId,
@@ -174,6 +184,15 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
     /// 缓冲一个断边操作
     pub fn unlink(&mut self, src: NodeId, dst: NodeId) {
         self.ops.push(TxOp::Unlink { src, dst });
+    }
+
+    /// 缓冲一个指定标签断边操作
+    pub fn unlink_label(&mut self, src: NodeId, dst: NodeId, label: &str) {
+        self.ops.push(TxOp::UnlinkLabel {
+            src,
+            dst,
+            label: label.to_string(),
+        });
     }
 
     /// 缓冲一个更新 payload 操作
@@ -283,6 +302,14 @@ impl<T: VectorType> TxBuilder<T> {
         self.ops.push(TxOp::Unlink { src, dst });
     }
 
+    pub fn unlink_label(&mut self, src: NodeId, dst: NodeId, label: &str) {
+        self.ops.push(TxOp::UnlinkLabel {
+            src,
+            dst,
+            label: label.to_string(),
+        });
+    }
+
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) {
         self.ops.push(TxOp::UpdatePayload { id, payload });
     }
@@ -317,11 +344,12 @@ impl<T: VectorType> Default for TxBuilder<T> {
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T> {
     /// 原子提交一组事务操作（供 Transaction::commit 和 commit_tx 共用）
     pub(crate) fn commit_ops(&mut self, ops: Vec<TxOp<T>>) -> Result<Vec<NodeId>> {
+        let _operation = self.enter_operation()?;
         if ops.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut mt = lock_or_recover(&self.memtable);
+        let mut mt = write_or_recover(&self.memtable);
 
         // ════════ 第一阶段：预检前置 (Dry-Run) + 预分配 ID ════════
         let mut sim_next_id = mt.next_id_value();
@@ -390,12 +418,19 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         sim_next_id = *id + 1;
                     }
                 }
-                TxOp::Link { src, dst, .. } => {
+                TxOp::Link {
+                    src, dst, weight, ..
+                } => {
                     if !check_exists!(src) {
                         return Err(crate::error::TriviumError::NodeNotFound(*src));
                     }
                     if !check_exists!(dst) {
                         return Err(crate::error::TriviumError::NodeNotFound(*dst));
+                    }
+                    if !weight.is_finite() {
+                        return Err(crate::error::TriviumError::InvalidInput(
+                            "边权重必须是有限浮点数 (Edge weight must be finite)".into(),
+                        ));
                     }
                     pre_assigned_ids.push(None);
                 }
@@ -406,7 +441,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     pending_deletes.insert(*id);
                     pre_assigned_ids.push(None);
                 }
-                TxOp::Unlink { src, .. } => {
+                TxOp::Unlink { src, .. } | TxOp::UnlinkLabel { src, .. } => {
                     if !check_exists!(src) {
                         return Err(crate::error::TriviumError::NodeNotFound(*src));
                     }
@@ -442,6 +477,21 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 }
             }
         }
+
+        let insert_count = pre_assigned_ids.iter().filter(|id| id.is_some()).count();
+        let estimated_bytes = mt.estimate_reserve_bytes(insert_count)?;
+        let current_bytes = mt.estimated_memory_bytes();
+        if self.memory_limit > 0
+            && current_bytes.saturating_add(estimated_bytes) > self.memory_limit
+        {
+            return Err(crate::error::TriviumError::CapacityReservationRejected {
+                requested_nodes: insert_count,
+                estimated_bytes,
+                current_bytes,
+                memory_limit: self.memory_limit,
+            });
+        }
+        mt.try_reserve_for_insert(insert_count)?;
 
         // ════════ 第二阶段：构建 WAL 条目（不触碰 memtable） ════════
         let mut wal_entries: Vec<WalEntry<T>> = Vec::with_capacity(ops.len());
@@ -506,6 +556,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         dst: *dst,
                     });
                 }
+                TxOp::UnlinkLabel { src, dst, label } => {
+                    wal_entries.push(WalEntry::UnlinkLabel {
+                        src: *src,
+                        dst: *dst,
+                        label: label.clone(),
+                    });
+                }
                 TxOp::UpdatePayload { id, payload } => {
                     let payload_str = payload.to_string();
                     if payload_str.len() > 8 * 1024 * 1024 {
@@ -537,8 +594,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 .as_nanos() as u64;
             w.append_batch(tx_id, &wal_entries)?;
         }
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::AfterWalAppend);
 
         // ════════ 第四阶段：应用到 memtable（Infallible Apply） ════════
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeMemtableApply);
         // 暂停 QuIVer 增量同步，避免事务中途的 QuIVer 状态需要回滚
         mt.set_quiver_sync_paused(true);
 
@@ -566,6 +627,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 }
                 WalEntry::Unlink { src, dst } => {
                     let _ = mt.unlink(*src, *dst);
+                }
+                WalEntry::UnlinkLabel { src, dst, label } => {
+                    let _ = mt.unlink_label(*src, *dst, label);
                 }
                 WalEntry::UpdatePayload { id, payload } => {
                     let payload_val: serde_json::Value =

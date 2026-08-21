@@ -155,6 +155,18 @@ TriviumDB 提供两种互斥的存储模式（`StorageMode`），且**系统支�
 
 **标志位精确追踪**：`has_dirty_base` 只在 `zero_out()` 和 `update()` 操作落入 `index < mmap_count`（基础层区域）时才置 true。对 delta 层内节点的 delete/update **不会**触发全量重写——因为 delta 层本就要在追加时写入，可直接写修改后的值。
 
+### Flush 与 ANN 构建隔离
+
+持久化路径只准备磁盘格式需要的 BQ 元数据和向量块，不会隐式构建 QuIVer。自动 QuIVer 只在查询准备阶段触发，显式构建则由 `build_quiver_index()` 发起。这避免了大规模导入在定期 flush 时突然进入 CPU 密集构图。
+
+QuIVer 快照按 slot 流式读取 FP16/FP32/mmap 向量并直接编码为紧凑 `Bq2Store`，不再保留全库 `Vec<f32>`。构建前还会保守估算签名、双邻接表、ID/slot 映射和 worker bitset 峰值；设置内存预算后，超限构建会在大分配前拒绝。
+
+### 核心容器容量规划
+
+`Config.expected_nodes` 表示本次进程预计的总节点数，`Database::reserve_nodes(additional)` 表示追加预留。预留覆盖向量 delta、Payload/ID 映射、slot 和 fast tag；图边、文本索引、BQ、QuIVer 不在自动预留范围内。配置不写入 `.tdb`，超过预计规模仍可正常增长。
+
+事务和 Python/Node `batch_insert` 在 Dry-Run 后、WAL 前按整批预留。容量预算、算术溢出或 allocator 拒绝时，节点、ID、generation 和 WAL 均不变。
+
 ### 压实架构的极致安全取舍（Compaction Trade-off）
 
 由于 TriviumDB 坚持“纯正极简的单文件与单 WAL”架构，没有引入复杂的 LSM-Tree 多段日志（Segmented WAL）机制，为了保证 **100% 的绝对崩溃一致性（Crash Consistency）与 ACID 持久性**，在执行“全量重写路径”时，必须短暂阻塞（Lock）前台并发读写。
@@ -273,6 +285,16 @@ flat_vectors
 ## 图谱扩散检索
 
 TriviumDB 的核心创新——**Spreading Activation（扩散激活）**（受 Anderson, 1983, *The Architecture of Cognition* 中认知心理学扩散激活理论启发）：
+
+图能力分为三条互不混淆的语义路径：
+
+| 路径 | 语义 | 返回内容 | 适用场景 |
+|------|------|----------|----------|
+| SA-PPR / Spreading Activation | 边权驱动的软相关性能量传播 | 带 score 的检索命中 | RAG 联想与相关节点补充 |
+| Reachability | 按方向、label、深度判断结构可达性 | 确定性最短路径与逐跳 label | 权限链、依赖链、血缘与结构查询 |
+| GraphFirst | 图模式先限定合法 anchor，再做集合内精确向量 Top-K | 规范绑定行或 SearchHit | 只允许在结构合法对象中做语义排名 |
+
+Reachability 默认沿出边，可选入边或双向，并通过 `max_visited_nodes` 防止稠密图失控。GraphFirst 按 anchor NodeId 去重，超过候选预算直接报错；它不会把全库向量近邻混入图约束结果。
 
 ### 工作流程
 
@@ -405,6 +427,7 @@ TriviumDB v0.6.0 引入了 **TQL (Trivium Query Language)**，一套将图遍历
 | **MATCH** | 图谱遍历（沿边跳转） | `MATCH (a)-[:knows]->(b) RETURN b` |
 | **FIND** | 文档过滤（类 MongoDB） | `FIND {type: "event", heat: {$gte: 0.7}} RETURN *` |
 | **SEARCH** | 向量检索 | `SEARCH VECTOR [...] TOP 10 RETURN *` |
+| **MATCH + RANK** | GraphFirst 约束排名 | `MATCH (a)-[:rel]->(b) RANK a BY VECTOR [...] TOP 10 RETURN a` |
 
 ### DML 写操作（v0.6.0 新增）
 
@@ -436,7 +459,7 @@ TQL 的 FIND 入口底层采用三层加速策略：
 2. **Parallel Bit-Tag Array（布隆特征拦截）**：节点插入时自动展平 JSON 键值对，合成 64 位特征标签 `fast_tags`。过滤时引擎编译出 Must-have Mask，通过位运算 `(fast_tags[i] & mask) == mask` 在几个时钟周期内截断 99% 的不匹配节点，仅少量漏网候选进入完整 JSON 解析。
 3. **JSON 精确验证**：对通过前两层的极少数候选节点，执行完整的 `$gt` / `$in` / `$exists` 等运算符语义验证。
 
-支持的过滤运算符：`$eq` / `$ne` / `$gt` / `$gte` / `$lt` / `$lte` / `$in` / `$nin` / `$exists` / `$size` / `$all` / `$type`，以及 `$and` / `$or` 逻辑组合。
+支持的过滤运算符：`$eq` / `$ne` / `$gt` / `$gte` / `$lt` / `$lte` / `$before` / `$beforeEq` / `$after` / `$afterEq` / `$in` / `$nin` / `$exists` / `$size` / `$all` / `$type`，以及 `$and` / `$or` 逻辑组合。普通范围支持数字和原始字符串字典序且不做跨类型强制转换；时间操作符严格解析 RFC3339 并按绝对时间比较。
 
 ---
 
@@ -502,6 +525,8 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 
 ### WAL 记录类型
 
+WAL 文件以 `TVWL + u16 version` 版本头开场；历史无头 WAL 保持可读，未知版本会在任何记录回放前明确拒绝。图写入支持 `(src,dst,label)` 唯一边的 weight upsert，以及独立的指定标签 `UnlinkLabel` 记录。
+
 | 类型 | 内容 |
 |------|------|
 | `TxBegin` | 事务开始标记（含 tx_id） |
@@ -519,27 +544,23 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 
 TriviumDB 通过四层机制保障并发安全与数据完整性：
 
-### 1. 进程级互斥锁：
-- 进程级互斥死锁防穿透（通过 `fs2` 的独占文件锁避免多进程读写腐化）
-- 内存级 `Arc<Mutex>` 锁中毒恢复机制（一旦其中一个线程发生 panic，守护封装会自动剥离毒素确保后续恢复）。
+### 1. 进程与线程锁：
+- `fs2` 独占文件锁避免多进程同时打开同一数据库写入。
+- `Arc<RwLock<MemTable>>` 允许普通无状态查询共享读；写入、flush、compaction 使用写锁。
+- WAL 使用独立 `Arc<Mutex<Wal>>`，固定锁顺序为 `MemTable write → WAL Mutex`。
+- poison 通过恢复封装处理；fatigue 查询额外串行，Hook 写重入被拒绝。
 
-### 2. 独创的零开销事务（Zero-Cost Atomic Rollback）：
+### 2. 验证前置事务与容量原子性：
 
 TriviumDB 的 `begin_tx()` 提供了一种**比传统 MVCC 和 Undo Log 都轻量级得多的验证前置（Dry-Run）架构**。
 
 在调用 `tx.commit()` 后：
-1. **预检前置**：此时引擎仅用几个纳秒级的 `HashSet` 创建一张“虚拟映射网”，并在纯内存中走完所有的 10,000 条边界验证（维度是否一致？引用节点是否存在？是否冲突？）。
-2. **零伤害回滚**：如果发现哪怕一丝逻辑报错（如 `NodeNotFound`），因为整个校验没去碰底层的真实指针，它可抛弃整个事务实现 **不耗废一字节真实内存的完美 Undo / 回滚**。
-3. **霸体执行（Infallible Apply）**：验证通关且落笔 WAL 成功后，接下来的真实 MemTable 应用由于被排除了业务逻辑异常项，它具备一种在物理上不会引发中途崩溃的安全特性。一气呵成完成对引擎状态的迭代。
+1. **预检前置**：引擎在虚拟映射中验证维度、有限数值、节点存在性、ID 冲突和 Payload 上限。
+2. **容量门禁**：使用 checked arithmetic 估算整批核心容器增量，检查内存预算并调用 `try_reserve`；失败时不写 WAL、不推进 ID/generation。
+3. **WAL-first**：全部验证与预留成功后，一次性追加带事务边界的 WAL。
+4. **Infallible Apply**：应用已经验证的操作，再统一同步 QuIVer 增量状态。
 
-```rust
-fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| {
-        tracing::warn!("Mutex was poisoned, recovering...");
-        poisoned.into_inner()
-    })
-}
-```
+普通无状态查询持共享 read guard 完成整条 pipeline；generation 校验保证锁外 QuIVer 构建不会发布过期索引。
 
 ---
 

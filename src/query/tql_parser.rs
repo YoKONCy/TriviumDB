@@ -103,6 +103,12 @@ impl TqlParser {
             None
         };
 
+        let rank = if self.at(&TqlToken::Rank) {
+            Some(self.parse_rank_clause()?)
+        } else {
+            None
+        };
+
         // 3. RETURN
         self.expect(&TqlToken::Return)?;
         let returns = self.parse_return_clause()?;
@@ -136,11 +142,36 @@ impl TqlParser {
             explain,
             entry,
             predicate,
+            rank,
             returns,
             order_by,
             limit,
             offset,
         })
+    }
+
+    fn parse_rank_clause(&mut self) -> Result<RankClause, String> {
+        self.expect(&TqlToken::Rank)?;
+        let var = self.parse_ident()?;
+        self.expect(&TqlToken::By)?;
+        self.expect(&TqlToken::Vector)?;
+        self.expect(&TqlToken::LBracket)?;
+        let mut vector = Vec::new();
+        while !self.at(&TqlToken::RBracket) {
+            let value = match self.advance() {
+                TqlToken::FloatLit(value) => value,
+                TqlToken::IntLit(value) => value as f64,
+                other => return Err(format!("Expected number in RANK vector, got {other:?}")),
+            };
+            vector.push(value);
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            }
+        }
+        self.expect(&TqlToken::RBracket)?;
+        self.expect(&TqlToken::Top)?;
+        let top_k = self.parse_positive_int()?;
+        Ok(RankClause { var, vector, top_k })
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -346,8 +377,23 @@ impl TqlParser {
         })
     }
 
-    /// EXPAND [:label*min..max]
+    /// EXPAND [OUTGOING|INCOMING|BOTH] [:label*min..max]
     fn parse_expand_clause(&mut self) -> Result<ExpandClause, String> {
+        let direction = match self.peek() {
+            TqlToken::Outgoing => {
+                self.advance();
+                EdgeDirection::Forward
+            }
+            TqlToken::Incoming => {
+                self.advance();
+                EdgeDirection::Backward
+            }
+            TqlToken::Both => {
+                self.advance();
+                EdgeDirection::Both
+            }
+            _ => EdgeDirection::Forward,
+        };
         self.expect(&TqlToken::LBracket)?;
 
         let mut labels = Vec::new();
@@ -365,6 +411,11 @@ impl TqlParser {
         let min_depth = self.parse_positive_int()?;
         self.expect(&TqlToken::DotDot)?;
         let max_depth = self.parse_positive_int()?;
+        if min_depth > max_depth {
+            return Err(format!(
+                "EXPAND min depth ({min_depth}) > max depth ({max_depth})"
+            ));
+        }
 
         self.expect(&TqlToken::RBracket)?;
 
@@ -372,6 +423,7 @@ impl TqlParser {
             labels,
             min_depth,
             max_depth,
+            direction,
         })
     }
 
@@ -422,7 +474,7 @@ impl TqlParser {
                     filters.push(combined);
                 }
 
-                TqlToken::Ident(_) | TqlToken::StringLit(_) => {
+                TqlToken::Ident(_) | TqlToken::StringLit(_) | TqlToken::Rank => {
                     let field = self.parse_field_name()?;
                     self.expect(&TqlToken::Colon)?;
 
@@ -478,10 +530,11 @@ impl TqlParser {
         match op {
             "$eq" => Ok(Filter::Eq(field.into(), self.parse_json_value()?)),
             "$ne" => Ok(Filter::Ne(field.into(), self.parse_json_value()?)),
-            "$gt" => Ok(Filter::Gt(field.into(), self.parse_json_number()?)),
-            "$gte" => Ok(Filter::Gte(field.into(), self.parse_json_number()?)),
-            "$lt" => Ok(Filter::Lt(field.into(), self.parse_json_number()?)),
-            "$lte" => Ok(Filter::Lte(field.into(), self.parse_json_number()?)),
+            "$gt" | "$gte" | "$lt" | "$lte" | "$before" | "$beforeEq" | "$after" | "$afterEq" => {
+                let value = self.parse_json_value()?;
+                let json = serde_json::json!({field: {op: value}});
+                Filter::from_json(&json)
+            }
             "$in" => Ok(Filter::In(field.into(), self.parse_json_array()?)),
             "$nin" => Ok(Filter::Nin(field.into(), self.parse_json_array()?)),
             "$exists" => {
@@ -582,16 +635,8 @@ impl TqlParser {
         }
 
         // var MATCHES {doc_filter} 或 Cypher 比较: a.field op literal
-        if let TqlToken::Ident(_) = self.peek() {
-            // 先记录位置，探测是 MATCHES 还是比较
-            let ident = match self.advance() {
-                TqlToken::Ident(s) => s,
-                _ => {
-                    return Err(
-                        "BUG: peek() was Ident but advance() returned different token".into(),
-                    );
-                }
-            };
+        if matches!(self.peek(), TqlToken::Ident(_) | TqlToken::Rank) {
+            let ident = self.parse_ident()?;
 
             // var MATCHES {doc_filter}
             if self.at(&TqlToken::Matches) {
@@ -776,15 +821,8 @@ impl TqlParser {
 
     fn parse_expr(&mut self) -> Result<TqlExpr, String> {
         match self.peek().clone() {
-            TqlToken::Ident(_) => {
-                let ident = match self.advance() {
-                    TqlToken::Ident(s) => s,
-                    _ => {
-                        return Err(
-                            "BUG: peek() was Ident but advance() returned different token".into(),
-                        );
-                    }
-                };
+            TqlToken::Ident(_) | TqlToken::Rank => {
+                let ident = self.parse_ident()?;
                 if self.at(&TqlToken::Dot) {
                     self.advance();
                     let field = self.parse_ident()?;
@@ -832,6 +870,7 @@ impl TqlParser {
     fn parse_ident(&mut self) -> Result<String, String> {
         match self.advance() {
             TqlToken::Ident(s) => Ok(s),
+            TqlToken::Rank => Ok("rank".into()),
             other => Err(format!("Expected identifier, got {:?}", other)),
         }
     }
@@ -847,6 +886,7 @@ impl TqlParser {
         match self.advance() {
             TqlToken::Ident(s) => Ok(s),
             TqlToken::StringLit(s) => Ok(s),
+            TqlToken::Rank => Ok("rank".into()),
             other => Err(format!("Expected field name, got {:?}", other)),
         }
     }
