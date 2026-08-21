@@ -17,6 +17,7 @@ license = "Apache-2.0"
 keywords = ["vector-database", "graph-database", "hybrid-search", "rag", "mmap"]
 categories = ["database", "data-structures", "algorithms"]
 readme = "README.md"
+exclude = ["docs/TEMP-todo/**"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
