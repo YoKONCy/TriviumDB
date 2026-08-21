@@ -2194,12 +2194,16 @@ impl QuIVer {
             ));
         }
         let pos_data: Vec<u64> = bytes[off..pos_end]
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk))
             .collect();
         let strong_data: Vec<u64> = bytes[pos_end..strong_end]
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk))
             .collect();
         let bq_store = Bq2Store::from_raw(pos_data, strong_data, chunks);
         off = strong_end;
@@ -2215,8 +2219,10 @@ impl QuIVer {
             ));
         }
         let l0_data: Vec<u32> = bytes[off..l0_end]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| u32::from_le_bytes(*chunk))
             .collect();
         off = l0_end;
 
@@ -2240,8 +2246,10 @@ impl QuIVer {
             ));
         }
         let ids: Vec<u64> = bytes[off..ids_end]
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk))
             .collect();
         off = ids_end;
 
@@ -2254,8 +2262,10 @@ impl QuIVer {
             ));
         }
         let slot_indices: Vec<usize> = bytes[off..si_end]
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()) as usize)
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk) as usize)
             .collect();
         off = si_end;
 

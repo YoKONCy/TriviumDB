@@ -36,8 +36,10 @@ fn read_f32_bin(path: &str) -> Vec<f32> {
     file.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes.len() % 4, 0);
     bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect()
 }
 
@@ -47,8 +49,10 @@ fn read_i32_bin(path: &str) -> Vec<i32> {
     file.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes.len() % 4, 0);
     bytes
-        .chunks_exact(4)
-        .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| i32::from_le_bytes(*bytes))
         .collect()
 }
 

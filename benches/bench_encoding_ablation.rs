@@ -173,8 +173,10 @@ fn load_or_generate_data() -> (Vec<f32>, usize, String) {
         let use_n = n_vecs.min(100_000);
         let bytes = &data[..use_n * DIM * 4];
         let vecs: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
             .collect();
         eprintln!("  ✅ 已加载 {} 个向量 (dim={})", use_n, DIM);
         (vecs, use_n, format!("Cohere-{}K", use_n / 1000))

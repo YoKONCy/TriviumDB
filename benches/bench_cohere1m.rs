@@ -183,8 +183,10 @@ fn read_f32_bin(path: &str) -> Vec<f32> {
     assert_eq!(bytes.len() % 4, 0, "{} 的字节长度不是 4 的倍数", path);
 
     bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect()
 }
 
@@ -195,8 +197,10 @@ fn read_i32_bin(path: &str) -> Vec<i32> {
     assert_eq!(bytes.len() % 4, 0, "{} 的字节长度不是 4 的倍数", path);
 
     bytes
-        .chunks_exact(4)
-        .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| i32::from_le_bytes(*bytes))
         .collect()
 }
 

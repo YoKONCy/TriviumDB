@@ -127,8 +127,10 @@ fn read_f32_bin(path: &str) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("无法读取 {}: {}", path, e));
     assert_eq!(bytes.len() % 4, 0);
     bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect()
 }
 

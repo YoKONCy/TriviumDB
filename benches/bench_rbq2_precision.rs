@@ -22,8 +22,10 @@ fn read_f32_bin(path: &str) -> Vec<f32> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).unwrap();
     bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect()
 }
 
