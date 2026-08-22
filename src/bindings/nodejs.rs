@@ -12,6 +12,79 @@ pub mod nodejs {
         U64(GenericDatabase<u64>),
     }
 
+    #[derive(Clone)]
+    enum SearchBackendHandle {
+        F32(crate::database::SearchHandle<f32>),
+        F16(crate::database::SearchHandle<half::f16>),
+        U64(crate::database::SearchHandle<u64>),
+    }
+
+    pub struct BatchSearchTask {
+        backend: SearchBackendHandle,
+        queries: Vec<Vec<f64>>,
+        search_config: crate::database::SearchConfig,
+        batch_config: crate::database::BatchSearchConfig,
+    }
+
+    impl napi::Task for BatchSearchTask {
+        type Output = Vec<Vec<crate::node::SearchHit>>;
+        type JsValue = Vec<Vec<JsSearchHit>>;
+
+        fn compute(&mut self) -> napi::Result<Self::Output> {
+            match &self.backend {
+                SearchBackendHandle::F32(db) => {
+                    let queries = self
+                        .queries
+                        .iter()
+                        .map(|query| query.iter().map(|value| *value as f32).collect())
+                        .collect::<Vec<Vec<f32>>>();
+                    db.search_batch(&queries, &self.search_config, &self.batch_config)
+                }
+                SearchBackendHandle::F16(db) => {
+                    let queries = self
+                        .queries
+                        .iter()
+                        .map(|query| {
+                            query
+                                .iter()
+                                .map(|value| half::f16::from_f64(*value))
+                                .collect()
+                        })
+                        .collect::<Vec<Vec<half::f16>>>();
+                    db.search_batch(&queries, &self.search_config, &self.batch_config)
+                }
+                SearchBackendHandle::U64(db) => {
+                    let queries = self
+                        .queries
+                        .iter()
+                        .map(|query| query.iter().map(|value| *value as u64).collect())
+                        .collect::<Vec<Vec<u64>>>();
+                    db.search_batch(&queries, &self.search_config, &self.batch_config)
+                }
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
+        fn resolve(
+            &mut self,
+            _env: napi::Env,
+            output: Self::Output,
+        ) -> napi::Result<Self::JsValue> {
+            Ok(output
+                .into_iter()
+                .map(|hits| {
+                    hits.into_iter()
+                        .map(|hit| JsSearchHit {
+                            id: hit.id as f64,
+                            score: hit.score as f64,
+                            payload: hit.payload,
+                        })
+                        .collect()
+                })
+                .collect())
+        }
+    }
+
     /// 统一分发宏：对三种后端执行相同的表达式
     macro_rules! dispatch {
         ($self:expr, $db:ident => $expr:expr) => {
@@ -524,7 +597,7 @@ pub mod nodejs {
                         .map(|vector| vector.into_iter().map(|value| value as f32).collect())
                         .collect();
                     let mut tx = crate::database::TxBuilder::new();
-                    for (vector, payload) in converted.iter().zip(payloads.into_iter()) {
+                    for (vector, payload) in converted.iter().zip(payloads) {
                         tx.insert(vector, payload);
                     }
                     db.commit_tx(tx)
@@ -537,7 +610,7 @@ pub mod nodejs {
                         .map(|vector| vector.into_iter().map(half::f16::from_f64).collect())
                         .collect();
                     let mut tx = crate::database::TxBuilder::new();
-                    for (vector, payload) in converted.iter().zip(payloads.into_iter()) {
+                    for (vector, payload) in converted.iter().zip(payloads) {
                         tx.insert(vector, payload);
                     }
                     db.commit_tx(tx)
@@ -550,7 +623,7 @@ pub mod nodejs {
                         .map(|vector| vector.into_iter().map(|value| value as u64).collect())
                         .collect();
                     let mut tx = crate::database::TxBuilder::new();
-                    for (vector, payload) in converted.iter().zip(payloads.into_iter()) {
+                    for (vector, payload) in converted.iter().zip(payloads) {
                         tx.insert(vector, payload);
                     }
                     db.commit_tx(tx)
@@ -582,10 +655,8 @@ pub mod nodejs {
                         .map(|vector| vector.into_iter().map(|value| value as f32).collect())
                         .collect();
                     let mut tx = crate::database::TxBuilder::new();
-                    for ((id, vector), payload) in parsed_ids
-                        .iter()
-                        .zip(converted.iter())
-                        .zip(payloads.into_iter())
+                    for ((id, vector), payload) in
+                        parsed_ids.iter().zip(converted.iter()).zip(payloads)
                     {
                         tx.insert_with_id(*id, vector, payload);
                     }
@@ -599,10 +670,8 @@ pub mod nodejs {
                         .map(|vector| vector.into_iter().map(half::f16::from_f64).collect())
                         .collect();
                     let mut tx = crate::database::TxBuilder::new();
-                    for ((id, vector), payload) in parsed_ids
-                        .iter()
-                        .zip(converted.iter())
-                        .zip(payloads.into_iter())
+                    for ((id, vector), payload) in
+                        parsed_ids.iter().zip(converted.iter()).zip(payloads)
                     {
                         tx.insert_with_id(*id, vector, payload);
                     }
@@ -616,10 +685,8 @@ pub mod nodejs {
                         .map(|vector| vector.into_iter().map(|value| value as u64).collect())
                         .collect();
                     let mut tx = crate::database::TxBuilder::new();
-                    for ((id, vector), payload) in parsed_ids
-                        .iter()
-                        .zip(converted.iter())
-                        .zip(payloads.into_iter())
+                    for ((id, vector), payload) in
+                        parsed_ids.iter().zip(converted.iter()).zip(payloads)
                     {
                         tx.insert_with_id(*id, vector, payload);
                     }
@@ -905,6 +972,40 @@ pub mod nodejs {
                 .collect())
         }
 
+        #[napi]
+        pub fn search_exact(
+            &self,
+            query_vector: Vec<f64>,
+            top_k: u32,
+        ) -> napi::Result<Vec<JsSearchHit>> {
+            let hits = match &self.inner {
+                DbBackend::F32(db) => {
+                    let query: Vec<f32> = query_vector.iter().map(|value| *value as f32).collect();
+                    db.search_exact(&query, top_k as usize)
+                }
+                DbBackend::F16(db) => {
+                    let query: Vec<half::f16> = query_vector
+                        .iter()
+                        .map(|value| half::f16::from_f64(*value))
+                        .collect();
+                    db.search_exact(&query, top_k as usize)
+                }
+                DbBackend::U64(db) => {
+                    let query: Vec<u64> = query_vector.iter().map(|value| *value as u64).collect();
+                    db.search_exact(&query, top_k as usize)
+                }
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            Ok(hits
+                .into_iter()
+                .map(|hit| JsSearchHit {
+                    id: hit.id as f64,
+                    score: hit.score as f64,
+                    payload: hit.payload,
+                })
+                .collect())
+        }
+
         // ── 社区聚类 ──
 
         /// 基于物理记忆图谱进行 Leiden 社区发现
@@ -1015,6 +1116,41 @@ pub mod nodejs {
                     payload: h.payload,
                 })
                 .collect())
+        }
+
+        #[napi]
+        pub fn search_batch(
+            &self,
+            query_vectors: Vec<Vec<f64>>,
+            top_k: Option<i64>,
+            parallelism: Option<u32>,
+            min_score: Option<f64>,
+        ) -> napi::Result<napi::bindgen_prelude::AsyncTask<BatchSearchTask>> {
+            let top_k = top_k.unwrap_or(5);
+            if top_k <= 0 {
+                return Err(napi::Error::from_reason(format!(
+                    "top_k 必须为正整数，收到 {top_k}"
+                )));
+            }
+            let backend = match &self.inner {
+                DbBackend::F32(db) => SearchBackendHandle::F32(db.search_handle()),
+                DbBackend::F16(db) => SearchBackendHandle::F16(db.search_handle()),
+                DbBackend::U64(db) => SearchBackendHandle::U64(db.search_handle()),
+            };
+            Ok(napi::bindgen_prelude::AsyncTask::new(BatchSearchTask {
+                backend,
+                queries: query_vectors,
+                search_config: crate::database::SearchConfig {
+                    top_k: top_k as usize,
+                    expand_depth: 0,
+                    min_score: min_score.unwrap_or(0.5) as f32,
+                    enable_advanced_pipeline: false,
+                    ..Default::default()
+                },
+                batch_config: crate::database::BatchSearchConfig {
+                    parallelism: parallelism.unwrap_or(0) as usize,
+                },
+            }))
         }
 
         /// 认知检索引擎：完全参数化暴露的高级功能 (FISTA, DPP, SA-PPR)

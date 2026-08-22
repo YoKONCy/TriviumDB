@@ -187,6 +187,22 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
         print(f"[{hit.id}] score={hit.score:.3f} | {hit.payload}")
 ```
 
+批量 ANN 查询由 Rust 共享线程池并行执行；Python 整批释放 GIL，Node.js 返回 Promise 且不阻塞事件循环。同一路径只需打开一个数据库实例：
+
+```python
+batch_results = db.search_batch(
+    [[0.10, -0.48, 0.80], [0.72, 0.11, -0.35]],
+    top_k=10,
+    parallelism=0,
+)
+```
+
+```javascript
+const batchResults = await db.searchBatch(queryVectors, 10, 0, 0.0)
+```
+
+`parallelism=0` 表示自动选择并发度，最大允许值为 64；结果外层顺序严格对应输入查询。批量 API 仅支持无状态查询，不允许 fatigue 语义。
+
 > 📖 完整 API 参考、高级用法和 Rust 示例请查看 **[API 参考文档](docs/api-reference.md)**。
 
 ---

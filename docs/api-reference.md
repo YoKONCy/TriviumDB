@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.7.5
+> **版本**: v0.7.6
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -512,6 +512,56 @@ for hit in &results {
 | `id` | `u64` | 命中节点的 ID |
 | `score` | `f32` | 相似度得分（余弦相似度或扩散热度） |
 | `payload` | `dict` | 节点的 JSON 元数据 |
+
+### search_batch — 批量并行 ANN 检索
+
+同一个数据库实例一次接收多条向量查询，由 Rust 共享线程池并行执行。所有查询在执行前完成整批校验；任一向量维度错误或包含 NaN/Infinity 时整批失败，不返回部分结果。外层结果顺序严格对应输入顺序。
+
+**Python：**
+```python
+results = db.search_batch(
+    query_vectors=[[0.10, -0.48, 0.80], [0.72, 0.11, -0.35]],
+    top_k=10,
+    recall_k=0,
+    rerank_k=0,
+    expand_depth=0,
+    min_score=0.0,
+    parallelism=0,
+)
+```
+
+Python 在整个 Rust 查询阶段释放 GIL，避免逐条 FFI 调用造成的吞吐损失。
+
+**Node.js：**
+```javascript
+const results = await db.searchBatch(queryVectors, 10, 0, 0.0)
+```
+
+Node.js 接口返回 Promise，ANN 工作在后台线程执行，不阻塞事件循环。参数依次为 `queryVectors`、`topK`、`parallelism`、`minScore`。
+
+**Rust：**
+```rust
+let results = db.search_batch(
+    &queries,
+    &SearchConfig {
+        top_k: 10,
+        expand_depth: 0,
+        min_score: 0.0,
+        ..Default::default()
+    },
+    &BatchSearchConfig { parallelism: 0 },
+)?;
+```
+
+| 约束 | 语义 |
+|------|------|
+| `parallelism = 0` | 自动选择并发度 |
+| `parallelism = 1..64` | 指定批内最大并发度 |
+| `parallelism > 64` | 明确拒绝，防止过度并行 |
+| 空查询批次 | 返回空列表 |
+| `top_k = 0` | 明确拒绝 |
+| fatigue | 明确拒绝，批量 API 仅支持无状态查询 |
+| 生命周期 | close 阻止新批次，并等待已进入批次完成 |
 
 **检索流程：**
 ```

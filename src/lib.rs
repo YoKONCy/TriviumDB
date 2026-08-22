@@ -23,6 +23,7 @@ pub mod cognitive;
 pub mod bindings;
 
 pub use database::Database;
+pub use database::{BatchSearchConfig, SearchConfig};
 pub use error::{Result, TriviumError};
 pub use filter::Filter;
 pub use hook::{CompositeHook, FfiHook, HookContext, NoopHook, SearchHook};

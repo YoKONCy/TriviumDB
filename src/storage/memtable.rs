@@ -1569,6 +1569,14 @@ impl<T: VectorType> MemTable<T> {
         self.indices_to_ids.len()
     }
 
+    pub(crate) fn active_vector_at_slot(&self, slot: usize) -> Option<(NodeId, &[T])> {
+        let id = *self.indices_to_ids.get(slot)?;
+        if id == 0 || !self.payloads.contains_key(&id) {
+            return None;
+        }
+        self.vec_pool.get(slot).map(|vector| (id, vector))
+    }
+
     /// 获取节点的入度数（若不存在则返回0）
     pub fn get_in_degree(&self, id: NodeId) -> usize {
         self.in_degrees.get(&id).copied().unwrap_or(0)

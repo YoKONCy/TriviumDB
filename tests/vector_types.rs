@@ -12,7 +12,7 @@
 //! - 精度边界与极端值
 
 use half::f16;
-use triviumdb::Database;
+use triviumdb::{BatchSearchConfig, Database, SearchConfig};
 
 // ════════════════════════════════════════════════════════════════
 //  公共基础设施
@@ -111,6 +111,64 @@ fn F16_搜索_余弦相似度正确排序() {
     // 第二名应是 near_target（余弦相似度 ≈ 0.99），不是 orthogonal（余弦 = 0）
     assert_eq!(results[1].payload["label"], "near_target");
 
+    cleanup(&path);
+}
+
+#[test]
+fn F16_批量搜索_保持输入顺序() {
+    let path = tmp_db("f16_batch_search");
+    cleanup(&path);
+    let mut db = Database::<f16>::open(&path, F16_DIM).unwrap();
+    let first = db
+        .insert(&f16_vec(&[1.0, 0.0, 0.0, 0.0]), serde_json::json!({}))
+        .unwrap();
+    let second = db
+        .insert(&f16_vec(&[0.0, 1.0, 0.0, 0.0]), serde_json::json!({}))
+        .unwrap();
+    let queries = vec![
+        f16_vec(&[0.0, 1.0, 0.0, 0.0]),
+        f16_vec(&[1.0, 0.0, 0.0, 0.0]),
+    ];
+    let config = SearchConfig {
+        top_k: 1,
+        expand_depth: 0,
+        min_score: -1.0,
+        ..Default::default()
+    };
+
+    let results = db
+        .search_batch(&queries, &config, &BatchSearchConfig { parallelism: 2 })
+        .unwrap();
+    assert_eq!(results[0][0].id, second);
+    assert_eq!(results[1][0].id, first);
+    cleanup(&path);
+}
+
+#[test]
+fn F16_精确搜索_使用半精度存储值排序() {
+    let path = tmp_db("f16_exact_search");
+    cleanup(&path);
+    let mut db = Database::<f16>::open(&path, F16_DIM).unwrap();
+    let first = db
+        .insert(
+            &f16_vec(&[0.33331, 0.66663, 0.12503, 0.25007]),
+            serde_json::json!({"rank": 1}),
+        )
+        .unwrap();
+    let second = db
+        .insert(
+            &f16_vec(&[0.30001, 0.70003, 0.10001, 0.20003]),
+            serde_json::json!({"rank": 2}),
+        )
+        .unwrap();
+    let query = f16_vec(&[0.33331, 0.66663, 0.12503, 0.25007]);
+
+    let hits = db.search_exact(&query, 10).unwrap();
+
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].id, first);
+    assert_eq!(hits[1].id, second);
+    assert!((hits[0].score - 1.0).abs() < 1e-6);
     cleanup(&path);
 }
 
@@ -329,6 +387,34 @@ fn U64_搜索_汉明相似度正确排序() {
         "1 位差异的哈希应排第二（汉明距离 = 1）"
     );
 
+    cleanup(&path);
+}
+
+#[test]
+fn U64_批量搜索_汉明结果正确() {
+    let path = tmp_db("u64_batch_search");
+    cleanup(&path);
+    let mut db = Database::<u64>::open(&path, U64_DIM).unwrap();
+    let zero = db.insert(&[0, 0], serde_json::json!({})).unwrap();
+    let ones = db
+        .insert(&[u64::MAX, u64::MAX], serde_json::json!({}))
+        .unwrap();
+    let config = SearchConfig {
+        top_k: 1,
+        expand_depth: 0,
+        min_score: -1.0,
+        ..Default::default()
+    };
+
+    let results = db
+        .search_batch(
+            &[vec![u64::MAX, u64::MAX], vec![0, 0]],
+            &config,
+            &BatchSearchConfig { parallelism: 2 },
+        )
+        .unwrap();
+    assert_eq!(results[0][0].id, ones);
+    assert_eq!(results[1][0].id, zero);
     cleanup(&path);
 }
 

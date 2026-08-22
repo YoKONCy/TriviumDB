@@ -224,6 +224,22 @@ with triviumdb.TriviumDB("memory.tdb", dim=3) as db:
         print(f"[{hit.id}] score={hit.score:.3f} | {hit.payload}")
 ```
 
+Batch ANN queries run concurrently on a shared Rust thread pool. Python releases the GIL for the entire batch, while Node.js returns a Promise without blocking the event loop. Only one database instance needs to open a path:
+
+```python
+batch_results = db.search_batch(
+    [[0.10, -0.48, 0.80], [0.72, 0.11, -0.35]],
+    top_k=10,
+    parallelism=0,
+)
+```
+
+```javascript
+const batchResults = await db.searchBatch(queryVectors, 10, 0, 0.0)
+```
+
+`parallelism=0` selects concurrency automatically, with a maximum accepted value of 64. Outer result order always matches input query order. The batch API supports stateless queries only and rejects fatigue semantics.
+
 > 📖 Full API reference, advanced usage, and Rust examples: **[API Reference](docs/api-reference.md)**
 
 ---

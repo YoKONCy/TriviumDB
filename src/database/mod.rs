@@ -11,7 +11,7 @@ pub(crate) mod pipeline;
 pub mod transaction;
 
 // 从子模块重导出公开类型，保持对外 API 不变
-pub use config::{Config, SearchConfig, StorageMode};
+pub use config::{BatchSearchConfig, Config, SearchConfig, StorageMode};
 pub use transaction::{Transaction, TxBuilder};
 
 use crate::VectorType;
@@ -24,8 +24,11 @@ use crate::storage::file_format;
 use crate::storage::memtable::MemTable;
 use crate::storage::wal::{SyncMode, Wal, WalEntry};
 use fs2::FileExt;
+use rayon::prelude::*;
 
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{
+    Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 use std::time::Duration;
 
 /// 安全获取 Mutex 锁：如果锁中毒（某个线程 panic 持有锁），
@@ -49,6 +52,23 @@ pub(crate) fn write_or_recover<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
         tracing::warn!("读写锁中毒，正在恢复写访问 (RwLock was poisoned, recovering write...)");
         poisoned.into_inner()
     })
+}
+
+fn batch_search_pool() -> Result<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<std::result::Result<rayon::ThreadPool, String>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let parallelism = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1)
+            .min(64);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(parallelism)
+            .thread_name(|index| format!("triviumdb-query-{index}"))
+            .build()
+            .map_err(|error| error.to_string())
+    })
+    .as_ref()
+    .map_err(|error| TriviumError::InvalidInput(format!("创建批量查询线程池失败: {error}")))
 }
 
 thread_local! {
@@ -159,6 +179,127 @@ pub struct Database<T: VectorType> {
     quiver_builds: Arc<(Mutex<std::collections::HashSet<u64>>, std::sync::Condvar)>,
     /// 生命周期和已进入操作计数；Closing 阻止新操作并等待现有操作退出。
     lifecycle: Arc<(Mutex<LifecycleState>, Condvar)>,
+}
+
+pub(crate) struct SearchHandle<T: VectorType> {
+    memtable: Arc<RwLock<MemTable<T>>>,
+    memory_limit: usize,
+    hook: Arc<dyn SearchHook>,
+    quiver_builds: Arc<(Mutex<std::collections::HashSet<u64>>, Condvar)>,
+    lifecycle: Arc<(Mutex<LifecycleState>, Condvar)>,
+}
+
+impl<T: VectorType> Clone for SearchHandle<T> {
+    fn clone(&self) -> Self {
+        Self {
+            memtable: Arc::clone(&self.memtable),
+            memory_limit: self.memory_limit,
+            hook: Arc::clone(&self.hook),
+            quiver_builds: Arc::clone(&self.quiver_builds),
+            lifecycle: Arc::clone(&self.lifecycle),
+        }
+    }
+}
+
+impl<T: VectorType> SearchHandle<T> {
+    fn enter_operation(&self) -> Result<OperationGuard> {
+        let mut state = lock_or_recover(&self.lifecycle.0);
+        if state.lifecycle != DatabaseLifecycle::Open {
+            return Err(TriviumError::DatabaseClosed);
+        }
+        state.active_operations = state
+            .active_operations
+            .checked_add(1)
+            .ok_or_else(|| TriviumError::InvalidInput("数据库活动操作计数溢出".into()))?;
+        drop(state);
+        Ok(OperationGuard {
+            lifecycle: Arc::clone(&self.lifecycle),
+        })
+    }
+
+    pub(crate) fn search_batch(
+        &self,
+        query_vectors: &[Vec<T>],
+        search_config: &SearchConfig,
+        batch_config: &BatchSearchConfig,
+    ) -> Result<Vec<Vec<SearchHit>>> {
+        let _operation = self.enter_operation()?;
+        if search_config.enable_refractory_fatigue {
+            return Err(TriviumError::InvalidInput(
+                "批量并行查询不支持 enable_refractory_fatigue".into(),
+            ));
+        }
+        if search_config.top_k == 0 {
+            return Err(TriviumError::InvalidInput(
+                "批量查询 top_k 必须大于 0".into(),
+            ));
+        }
+        if batch_config.parallelism > 64 {
+            return Err(TriviumError::InvalidInput(
+                "批量查询 parallelism 不得超过 64".into(),
+            ));
+        }
+        if query_vectors.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dim = read_or_recover(&self.memtable).dim();
+        for query in query_vectors {
+            if query.len() != dim {
+                return Err(TriviumError::DimensionMismatch {
+                    expected: dim,
+                    got: query.len(),
+                });
+            }
+            if query.iter().any(|value| !value.to_f32().is_finite()) {
+                return Err(TriviumError::InvalidVector {
+                    reason: "查询向量包含 NaN 或 Infinity (Query vector contains NaN or Infinity)"
+                        .into(),
+                });
+            }
+        }
+
+        let search_one = |query: &Vec<T>| {
+            let mut ctx = HookContext::new();
+            pipeline::execute_pipeline_with_limit(
+                &self.memtable,
+                &self.quiver_builds,
+                self.memory_limit,
+                &self.hook,
+                None,
+                Some(query),
+                search_config,
+                &mut ctx,
+            )
+        };
+        let first = search_one(&query_vectors[0])?;
+        if query_vectors.len() == 1 {
+            return Ok(vec![first]);
+        }
+
+        let available = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        let parallelism = if batch_config.parallelism == 0 {
+            available
+        } else {
+            batch_config.parallelism
+        }
+        .min(query_vectors.len() - 1)
+        .max(1);
+        let pool = batch_search_pool()?;
+        let remaining_count = query_vectors.len() - 1;
+        let chunk_size = remaining_count.div_ceil(parallelism);
+        let chunks = pool.install(|| {
+            query_vectors[1..]
+                .par_chunks(chunk_size)
+                .map(|chunk| chunk.iter().map(search_one).collect::<Result<Vec<_>>>())
+                .collect::<Result<Vec<_>>>()
+        })?;
+        let mut results = Vec::with_capacity(query_vectors.len());
+        results.push(first);
+        results.extend(chunks.into_iter().flatten());
+        Ok(results)
+    }
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T> {
@@ -919,6 +1060,31 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         self.search_hybrid(None, Some(query_vector), &config)
     }
 
+    pub fn search_batch(
+        &self,
+        query_vectors: &[Vec<T>],
+        search_config: &SearchConfig,
+        batch_config: &BatchSearchConfig,
+    ) -> Result<Vec<Vec<SearchHit>>> {
+        self.search_handle()
+            .search_batch(query_vectors, search_config, batch_config)
+    }
+
+    pub(crate) fn search_handle(&self) -> SearchHandle<T> {
+        SearchHandle {
+            memtable: Arc::clone(&self.memtable),
+            memory_limit: self.memory_limit,
+            hook: Arc::clone(&self.hook),
+            quiver_builds: Arc::clone(&self.quiver_builds),
+            lifecycle: Arc::clone(&self.lifecycle),
+        }
+    }
+
+    pub fn search_exact(&self, query_vector: &[T], top_k: usize) -> Result<Vec<SearchHit>> {
+        let _operation = self.enter_operation()?;
+        crate::index::exact::search(&read_or_recover(&self.memtable), query_vector, top_k)
+    }
+
     pub fn search_advanced(
         &self,
         query_vector: &[T],
@@ -1469,6 +1635,10 @@ mod tests {
         ));
         assert!(matches!(
             db.search(&[1.0, 0.0, 0.0], 1, 0, 0.0),
+            Err(TriviumError::DatabaseClosed)
+        ));
+        assert!(matches!(
+            db.search_exact(&[1.0, 0.0, 0.0], 1),
             Err(TriviumError::DatabaseClosed)
         ));
         assert!(matches!(

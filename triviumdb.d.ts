@@ -418,6 +418,9 @@ export class TriviumDB {
   /** 只在给定 anchor 集合内执行精确向量 Top-K */
   searchGraphFirst(queryVector: Vector, anchorIds: number[], topK: number, maxAnchorNodes?: number): JsSearchHit[];
 
+  /** 全库精确向量 Top-K，用于 ANN 质量基准和小规模精确检索 */
+  searchExact(queryVector: Vector, topK: number): JsSearchHit[];
+
   // ── 检索与查询 ──
 
   /**
@@ -428,6 +431,7 @@ export class TriviumDB {
    * @param minScore    只接受相似度大于这个阈值的搜索命中 (默认 0.5)
    */
   search(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number): JsSearchHit[];
+  searchBatch(queryVectors: Vector[], topK?: number, parallelism?: number, minScore?: number): Promise<JsSearchHit[][]>;
 
   /**
    * 认知管线检索：向量锚定 + FISTA残差 + SA-PPR有限深度扩散 + DPP多样性采样

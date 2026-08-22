@@ -599,6 +599,62 @@ pub mod python {
                 .collect())
         }
 
+        #[pyo3(signature = (query_vectors, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, parallelism=0))]
+        fn search_batch(
+            &self,
+            py: Python<'_>,
+            query_vectors: Bound<'_, PyAny>,
+            top_k: usize,
+            recall_k: usize,
+            rerank_k: usize,
+            expand_depth: usize,
+            min_score: f32,
+            parallelism: usize,
+        ) -> PyResult<Vec<Vec<PySearchHit>>> {
+            let config = crate::database::SearchConfig {
+                top_k,
+                recall_k,
+                rerank_k,
+                expand_depth,
+                min_score,
+                enable_advanced_pipeline: false,
+                ..Default::default()
+            };
+            let batch_config = crate::database::BatchSearchConfig { parallelism };
+            let results = match &self.inner {
+                DbBackend::F32(db) => {
+                    let queries: Vec<Vec<f32>> = query_vectors.extract()?;
+                    py.allow_threads(|| db.search_batch(&queries, &config, &batch_config))
+                }
+                DbBackend::F16(db) => {
+                    let queries: Vec<Vec<f32>> = query_vectors.extract()?;
+                    let queries: Vec<Vec<half::f16>> = queries
+                        .into_iter()
+                        .map(|query| query.into_iter().map(half::f16::from_f32).collect())
+                        .collect();
+                    py.allow_threads(|| db.search_batch(&queries, &config, &batch_config))
+                }
+                DbBackend::U64(db) => {
+                    let queries: Vec<Vec<u64>> = query_vectors.extract()?;
+                    py.allow_threads(|| db.search_batch(&queries, &config, &batch_config))
+                }
+            }
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+
+            Ok(results
+                .into_iter()
+                .map(|hits| {
+                    hits.into_iter()
+                        .map(|hit| PySearchHit {
+                            id: hit.id,
+                            score: hit.score,
+                            payload: json_to_pyobject(py, &hit.payload),
+                        })
+                        .collect()
+                })
+                .collect())
+        }
+
         #[pyo3(signature = (
             query_vector,
             top_k=5,
@@ -1038,6 +1094,40 @@ pub mod python {
                 DbBackend::U64(db) => {
                     let query: Vec<u64> = query_vector.extract()?;
                     db.search_graph_first(&query, &anchor_ids, top_k, max_anchor_nodes)
+                }
+            }
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(hits
+                .into_iter()
+                .map(|hit| PySearchHit {
+                    id: hit.id,
+                    score: hit.score,
+                    payload: json_to_pyobject(py, &hit.payload),
+                })
+                .collect())
+        }
+
+        #[pyo3(signature = (query_vector, top_k))]
+        fn search_exact(
+            &self,
+            py: Python<'_>,
+            query_vector: Bound<'_, PyAny>,
+            top_k: usize,
+        ) -> PyResult<Vec<PySearchHit>> {
+            let hits = match &self.inner {
+                DbBackend::F32(db) => {
+                    let query: Vec<f32> = query_vector.extract()?;
+                    db.search_exact(&query, top_k)
+                }
+                DbBackend::F16(db) => {
+                    let query: Vec<f32> = query_vector.extract()?;
+                    let query: Vec<half::f16> =
+                        query.into_iter().map(half::f16::from_f32).collect();
+                    db.search_exact(&query, top_k)
+                }
+                DbBackend::U64(db) => {
+                    let query: Vec<u64> = query_vector.extract()?;
+                    db.search_exact(&query, top_k)
                 }
             }
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;

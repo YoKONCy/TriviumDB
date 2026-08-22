@@ -65,7 +65,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.7.5"
+triviumdb = "0.7.6"
 ```
 
 ### 30 秒入门模板
