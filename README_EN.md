@@ -510,6 +510,12 @@ Apache-2.0
 
 **Creator**: [YoKONCy](https://github.com/YoKONCy)
 
+---
+
+## Community
+
+This project is linked to and recognizes the [LINUX DO community](https://linux.do/).
+
 <br/>
 
 ## 🌟 Star History

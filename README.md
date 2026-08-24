@@ -512,6 +512,12 @@ Apache-2.0
 
 **创造者**: [YoKONCy](https://github.com/YoKONCy)
 
+---
+
+## 社区
+
+本项目已链接并认可 [LINUX DO 社区](https://linux.do/)。
+
 <br/>
 
 ## 🌟 Star History
