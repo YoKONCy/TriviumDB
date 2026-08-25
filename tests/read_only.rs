@@ -46,7 +46,18 @@ fn 两个独立进程可以共享只读锁并查询() {
     create_clean_database(&path);
     let ready = format!("{path}.child-ready");
     std::fs::remove_file(&ready).ok();
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let executable = std::env::current_exe().unwrap();
+    let mut command = if std::env::var_os("TRIVIUM_TEST_QEMU_AARCH64").is_some() {
+        let mut command = Command::new("qemu-aarch64");
+        command
+            .arg("-L")
+            .arg("/usr/aarch64-linux-gnu")
+            .arg(executable);
+        command
+    } else {
+        Command::new(executable)
+    };
+    let mut child = command
         .arg("--exact")
         .arg("只读跨进程辅助进程")
         .arg("--nocapture")
