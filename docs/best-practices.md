@@ -65,7 +65,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.7.6"
+triviumdb = "0.8.0"
 ```
 
 ### 30 秒入门模板
@@ -98,6 +98,8 @@ TriviumDB v0.4 引入了 **Rom / Mmap 双存储引擎**，在打开数据库时�
 |------|----------|----------|----------|----------|
 | **Rom（单文件）** | O(N) 全量加载 | = 数据体积 | 单一 `.tdb` | 知识库 < 50 万节点、需要一键打包转移 |
 | **Mmap（分离，默认）** | ~O(1) 映射 | ≈ 增量 + 工作集 | `.tdb` + `.vec` | 超大规模数据、追求冷启动性能 |
+
+> 表中的“工作集”由 OS PageCache 管理，不受 `memory_limit` 直接控制。数据文件大于 RAM 并不等于不可用，但均匀随机访问可能形成 Major Fault 和 SSD 队列压力。生产容量评估应同时观察 p99/p999、主缺页速率、RSS/RssFile、swap/pagefile 和磁盘 `await`，不能只看平均 QPS。
 
 ```rust
 use triviumdb::database::{Database, Config, StorageMode};
@@ -271,6 +273,28 @@ db.set_memory_limit(mb=512)
 该限制不是整个进程的 RSS 硬上限。达到预算后的普通写入仍按现有策略触发 flush；显式容量预留和 QuIVer 大分配则会在操作前返回错误。
 
 ### 搜索参数调优
+
+### 向量维度选择
+
+**强烈建议使用不超过 3072 维的向量。** 这是 QuIVer BQ 签名的安全能力边界，也是当前百万级基准覆盖的最高维度。
+
+| 维度范围 | 检索行为 | 建议 |
+|----------|----------|------|
+| `1..=3072` | 小数据走精确 BruteForce；达到阈值后可自动切换 QuIVer | 推荐用于生产 |
+| `3073..=65536` | 存储、写入与精确 BruteForce 可用；QuIVer 自动构建被跳过 | 仅在确有高维需求且可接受全量扫描成本时使用 |
+| `> 65536` | 建库时拒绝 | 不支持 |
+
+如果模型原始输出超过 3072 维，优先在应用层使用受验证的降维、池化或更低维 embedding 模型。不要依赖“先以高维建库，数据增长后再自动获得 QuIVer 加速”，因为高维库会始终保持 BruteForce 路由。
+
+### 多 Reader Generation 发布
+
+- Writer 始终在独立 generation 目录构建，不原地覆盖 Reader 正在 mmap 的文件。
+- 发布前调用 `publish_generation_manifest()`，再由 `GenerationStore::publish_current()` 原子切换。
+- Reader 使用 `GenerationStore::open_current()`，生命周期内持有外部 runtime 租约。
+- 回收旧代使用 `reclaim_generation()`；current 损坏、当前代或存在活跃 Reader 时均会拒绝。
+- 生产环境显式指定持久、可写且仅本机共享的 runtime lock 目录，不要把租约放在只读制品目录。
+- 多 Worker 默认使用无状态查询；ReadOnly/Immutable 会拒绝 refractory fatigue。
+- CRC32 仅用于损坏检测；跨主机不可信分发需在外层签名 manifest。
 
 | 参数 | 调大效果 | 调小效果 |
 |------|----------|----------|

@@ -15,27 +15,38 @@ pub fn check(path: &str) -> CliResult {
     let tdb_exists = Path::new(path).exists();
     let wal_exists = Path::new(&wal_path).exists();
 
-    println!("{} {}", "扫描数据库环境:".bold(), path);
-    println!("   ├─ WAL 日志文件存在: {wal_exists}");
-    println!("   ├─ TDB 主库文件存在: {tdb_exists}");
+    println!(
+        "{} {}",
+        "扫描数据库环境 / Scanning database environment:".bold(),
+        path
+    );
+    println!("   ├─ WAL 日志文件存在 / WAL file exists: {wal_exists}");
+    println!("   ├─ TDB 主库文件存在 / TDB database file exists: {tdb_exists}");
 
     if tdb_exists {
         match sniff_header(path) {
             Ok(h) => {
                 println!(
-                    "   └─ 架构参数 => Version: v{}, Dimension: {}",
+                    "   └─ 架构参数 / Schema => 版本 / Version: v{}, 维度 / Dimension: {}",
                     h.version, h.dim
                 );
-                println!("{}", "数据库头部完好，可安全挂载。".green());
+                println!(
+                    "{}",
+                    "数据库头部完好，可安全挂载。/ Database header is intact and safe to open."
+                        .green()
+                );
             }
             Err(e) => {
-                println!("{} {e}", "头部探查失败 (主库可能已物理损坏):".red());
+                println!(
+                    "{} {e}",
+                    "头部探查失败（主库可能已物理损坏）/ Header inspection failed (database may be physically corrupted):".red()
+                );
             }
         }
     } else {
         println!(
             "{}",
-            "警告: 主库文件不存在！若仅有 WAL，下次启动会尝试纯靠 WAL 追平数据。".yellow()
+            "警告：主库文件不存在！若仅有 WAL，下次启动会尝试仅依靠 WAL 恢复数据。/ Warning: The database file is missing. If only the WAL exists, the next startup will attempt WAL-only recovery.".yellow()
         );
     }
 
@@ -45,12 +56,14 @@ pub fn check(path: &str) -> CliResult {
 /// 强制挂载并导出全部节点（维度从文件头嗅探，缺省回退为 4 以防 panic）。
 pub fn dump(path: &str, dtype: DType, format: OutputFormat) -> CliResult {
     let dim = sniff_header(path).map(|h| h.dim).unwrap_or(4);
-    println!("尝试以维度 {dim} 强制挂载数据库...");
+    println!(
+        "尝试以维度 {dim} 强制挂载数据库 / Attempting forced database open with dimension {dim}..."
+    );
 
     let handle = DbHandle::open(path, dim, dtype)?;
     println!(
-        "{} 存活节点总数: {}",
-        "挂载成功！".green(),
+        "{} 存活节点总数 / Live nodes: {}",
+        "挂载成功 / Open succeeded!".green(),
         handle.node_count()
     );
     println!("{}", "─".repeat(50));

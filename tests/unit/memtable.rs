@@ -247,6 +247,21 @@ fn link_同三元组更新权重且索引不重复() {
 }
 
 #[test]
+fn 节点ID耗尽时拒绝且不修改状态() {
+    let mut mt = MemTable::<f32>::new_with_next_id(1, u64::MAX);
+    let result = mt.insert(&[1.0], json!({"value": 1}));
+    assert!(result.is_err());
+    assert_eq!(mt.node_count(), 0);
+    assert_eq!(mt.next_id_value(), u64::MAX);
+
+    let mut mt = MemTable::<f32>::new(1);
+    let result = mt.insert_with_id(u64::MAX, &[1.0], json!({"value": 1}));
+    assert!(result.is_err());
+    assert_eq!(mt.node_count(), 0);
+    assert_eq!(mt.next_id_value(), 1);
+}
+
+#[test]
 fn unlink_label_保留其他标签及反向索引() {
     let mut mt = make_mt();
     mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({})).unwrap();

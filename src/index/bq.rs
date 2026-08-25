@@ -4,10 +4,14 @@ use bytemuck::{Pod, Zeroable};
 /// 环境变量 `TRIVIUM_NO_AVX512=1` 时强制禁用 AVX-512 路径（用于消融实验）
 pub(crate) static FORCE_NO_AVX512: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| std::env::var("TRIVIUM_NO_AVX512").is_ok_and(|v| v == "1"));
+pub(crate) static FORCE_NO_384_KERNEL: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    std::env::var("TRIVIUM_DISABLE_384_KERNEL").is_ok_and(|value| value == "1")
+});
 
 /// BQ 签名最大 chunks 数量（每个 u64 chunk 覆盖 64 维）
 /// 48 chunks × 64 bits = 3072 维上限
 const MAX_BQ_CHUNKS: usize = 48;
+pub const MAX_BQ_DIM: usize = MAX_BQ_CHUNKS * 64;
 
 /// 二进制量化指纹 (Binary Quantization Fingerprint)
 ///
@@ -369,6 +373,53 @@ fn bq2_distance_raw(
     }
     #[allow(unreachable_code)]
     bq2_distance_raw_scalar(pos_a, strong_a, pos_b, strong_b, dim)
+}
+
+#[cfg(all(target_arch = "x86_64", test))]
+#[target_feature(enable = "popcnt")]
+unsafe fn bq2_distance_raw_popcnt_384(
+    pos_a: *const u64,
+    strong_a: *const u64,
+    pos_b: *const u64,
+    strong_b: *const u64,
+) -> u32 {
+    let mut dot = 0i32;
+    for index in 0..6 {
+        let a1 = unsafe { *pos_a.add(index) };
+        let b1 = unsafe { *strong_a.add(index) };
+        let a2 = unsafe { *pos_b.add(index) };
+        let b2 = unsafe { *strong_b.add(index) };
+        let diff = a1 ^ a2;
+        let same = !diff;
+        let both_strong = b1 & b2;
+        let one_strong = b1 ^ b2;
+        let both_weak = !(b1 | b2);
+        dot += 4 * (same & both_strong).count_ones() as i32;
+        dot -= 4 * (diff & both_strong).count_ones() as i32;
+        dot += 2 * (same & one_strong).count_ones() as i32;
+        dot -= 2 * (diff & one_strong).count_ones() as i32;
+        dot += (same & both_weak).count_ones() as i32;
+        dot -= (diff & both_weak).count_ones() as i32;
+    }
+
+    (1536 - dot) as u32
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "popcnt")]
+unsafe fn bq2_distance_cheap_popcnt_384(
+    pos_a: *const u64,
+    strong_a: *const u64,
+    pos_b: *const u64,
+    strong_b: *const u64,
+) -> u32 {
+    let mut distance = 0u32;
+    for index in 0..6 {
+        distance += (unsafe { *pos_a.add(index) } ^ unsafe { *pos_b.add(index) }).count_ones();
+        distance +=
+            (unsafe { *strong_a.add(index) } ^ unsafe { *strong_b.add(index) }).count_ones();
+    }
+    distance
 }
 
 #[inline]
@@ -1011,6 +1062,20 @@ impl Bq2Store {
         acc
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    pub(crate) fn distance_to_sig_cheap_384(&self, idx: usize, other: &Bq2Signature) -> u32 {
+        let off = idx * 6;
+        unsafe {
+            bq2_distance_cheap_popcnt_384(
+                self.pos.as_ptr().add(off),
+                self.strong.as_ptr().add(off),
+                other.pos.as_ptr(),
+                other.strong.as_ptr(),
+            )
+        }
+    }
+
     /// 计算两个存储中签名的距离（零拷贝）
     #[inline]
     pub fn distance(&self, i: usize, j: usize, dim: usize) -> u32 {
@@ -1055,6 +1120,13 @@ impl Bq2Store {
 mod tests {
     use super::*;
 
+    fn next_u64(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
     #[test]
     fn test_bq2_signature_creation() {
         let vec = vec![0.0f32, 1.0, -1.0, 2.0, -2.0, 0.5, -0.5];
@@ -1098,6 +1170,141 @@ mod tests {
             4,
         );
         assert_eq!(dist, raw_dist);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn dim384专用完整距离与通用标量位级一致() {
+        if !is_x86_feature_detected!("popcnt") {
+            return;
+        }
+        let mut state = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..100_000 {
+            let mut pos_a = [0u64; 6];
+            let mut strong_a = [0u64; 6];
+            let mut pos_b = [0u64; 6];
+            let mut strong_b = [0u64; 6];
+            for index in 0..6 {
+                pos_a[index] = next_u64(&mut state);
+                strong_a[index] = next_u64(&mut state);
+                pos_b[index] = next_u64(&mut state);
+                strong_b[index] = next_u64(&mut state);
+            }
+            let expected = bq2_distance_raw_scalar(
+                pos_a.as_ptr(),
+                strong_a.as_ptr(),
+                pos_b.as_ptr(),
+                strong_b.as_ptr(),
+                384,
+            );
+            let actual = unsafe {
+                bq2_distance_raw_popcnt_384(
+                    pos_a.as_ptr(),
+                    strong_a.as_ptr(),
+                    pos_b.as_ptr(),
+                    strong_b.as_ptr(),
+                )
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn dim384专用廉价距离与通用循环位级一致() {
+        if !is_x86_feature_detected!("popcnt") {
+            return;
+        }
+        let mut state = 0xD1B5_4A32_D192_ED03;
+        for _ in 0..100_000 {
+            let mut pos_a = [0u64; 6];
+            let mut strong_a = [0u64; 6];
+            let mut pos_b = [0u64; 6];
+            let mut strong_b = [0u64; 6];
+            for index in 0..6 {
+                pos_a[index] = next_u64(&mut state);
+                strong_a[index] = next_u64(&mut state);
+                pos_b[index] = next_u64(&mut state);
+                strong_b[index] = next_u64(&mut state);
+            }
+            let expected = (0..6)
+                .map(|index| {
+                    (pos_a[index] ^ pos_b[index]).count_ones()
+                        + (strong_a[index] ^ strong_b[index]).count_ones()
+                })
+                .sum::<u32>();
+            let actual = unsafe {
+                bq2_distance_cheap_popcnt_384(
+                    pos_a.as_ptr(),
+                    strong_a.as_ptr(),
+                    pos_b.as_ptr(),
+                    strong_b.as_ptr(),
+                )
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn dim384紧凑存储最后节点距离安全() {
+        let vectors = (0..7)
+            .map(|row| {
+                (0..384)
+                    .map(|column| (((row * 389 + column * 17) % 101) as f32 - 50.0) / 50.0)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut store = Bq2Store::new(384);
+        for vector in &vectors {
+            store.push_from_vector(vector);
+        }
+        let query = Bq2Signature::from_vector(&vectors[0]);
+        let expected = bq2_distance_raw_scalar(
+            store.pos_data()[36..].as_ptr(),
+            store.strong_data()[36..].as_ptr(),
+            query.pos.as_ptr(),
+            query.strong.as_ptr(),
+            384,
+        );
+        assert_eq!(store.distance_to_sig(6, &query, 384), expected);
+        let expected_cheap = (0..6)
+            .map(|index| {
+                (store.pos_data()[36 + index] ^ query.pos[index]).count_ones()
+                    + (store.strong_data()[36 + index] ^ query.strong[index]).count_ones()
+            })
+            .sum::<u32>();
+        assert_eq!(store.distance_to_sig_cheap(6, &query, 384), expected_cheap);
+    }
+
+    #[test]
+    fn 非384维保持通用距离语义() {
+        for dim in [383, 385, 512, 768, 1024, 1536] {
+            let left = (0..dim)
+                .map(|index| (index as f32 * 0.17).sin())
+                .collect::<Vec<_>>();
+            let right = (0..dim)
+                .map(|index| (index as f32 * 0.31).cos())
+                .collect::<Vec<_>>();
+            let left = Bq2Signature::from_vector(&left);
+            let right = Bq2Signature::from_vector(&right);
+            let expected = bq2_distance_raw_scalar(
+                left.pos.as_ptr(),
+                left.strong.as_ptr(),
+                right.pos.as_ptr(),
+                right.strong.as_ptr(),
+                dim,
+            );
+            assert_eq!(
+                bq2_distance_raw(
+                    left.pos.as_ptr(),
+                    left.strong.as_ptr(),
+                    right.pos.as_ptr(),
+                    right.strong.as_ptr(),
+                    dim,
+                ),
+                expected
+            );
+        }
     }
 
     #[test]

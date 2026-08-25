@@ -42,6 +42,8 @@ pub struct HookContext {
     /// 每阶段候选数量，便于分析召回、扩散、重排和多样性阶段的增删。
     pub stage_counts: Vec<(String, usize)>,
 
+    pub observations: Vec<(String, u64)>,
+
     /// 当前查询是否被 Hook 提前终止
     ///
     /// 若在 `on_pre_search` 中设为 `true`，管线将跳过后续所有阶段，
@@ -61,6 +63,7 @@ impl HookContext {
             custom_data: serde_json::Value::Null,
             stage_timings: Vec::new(),
             stage_counts: Vec::new(),
+            observations: Vec::new(),
             abort: false,
         }
     }
@@ -72,6 +75,10 @@ impl HookContext {
 
     pub fn record_count(&mut self, stage: impl Into<String>, count: usize) {
         self.stage_counts.push((stage.into(), count));
+    }
+
+    pub fn record_observation(&mut self, name: impl Into<String>, value: u64) {
+        self.observations.push((name.into(), value));
     }
 }
 
@@ -368,6 +375,10 @@ pub type FfiRecallFn = unsafe extern "C" fn(
 /// ```
 pub type FfiRerankFn = unsafe extern "C" fn(hits_ptr: *mut FfiSearchHit, hits_count: usize) -> i32;
 
+fn valid_ffi_hit(hit: &FfiSearchHit) -> bool {
+    hit.id != 0 && hit.score.is_finite()
+}
+
 /// FFI Hook：通过动态库加载 C/C++ 扩展模块
 ///
 /// # 使用方法
@@ -475,7 +486,7 @@ impl SearchHook for FfiHook {
         // 转换 FFI 结构体为 Rust SearchHit
         let hits: Vec<SearchHit> = buf[..count.min(buf_size)]
             .iter()
-            .filter(|h| h.id != 0)
+            .filter(|h| valid_ffi_hit(h))
             .map(|h| SearchHit {
                 id: h.id,
                 score: h.score,
@@ -517,6 +528,7 @@ impl SearchHook for FfiHook {
         let mut reranked: Vec<SearchHit> = hits
             .iter()
             .zip(ffi_hits.iter())
+            .filter(|(_, ffi)| valid_ffi_hit(ffi))
             .map(|(original, ffi)| SearchHit {
                 id: original.id,
                 score: ffi.score,
@@ -542,6 +554,20 @@ impl SearchHook for FfiHook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ffi命中校验拒绝保留_id和非有限分数() {
+        assert!(!valid_ffi_hit(&FfiSearchHit { id: 0, score: 1.0 }));
+        assert!(!valid_ffi_hit(&FfiSearchHit {
+            id: 1,
+            score: f32::NAN
+        }));
+        assert!(!valid_ffi_hit(&FfiSearchHit {
+            id: 1,
+            score: f32::INFINITY
+        }));
+        assert!(valid_ffi_hit(&FfiSearchHit { id: 1, score: 0.5 }));
+    }
 
     #[test]
     fn test_noop_hook_is_default() {

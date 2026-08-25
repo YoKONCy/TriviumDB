@@ -197,6 +197,7 @@ jobs:
           - fuzz_wal_parse
           - fuzz_query_parse
           - fuzz_filter_parse
+          - fuzz_quiver_parse
 
     steps:
       - uses: actions/checkout@v4
@@ -329,6 +330,39 @@ jobs:
 
       - name: 静态分析 (Clippy)
         run: cargo clippy --all-targets -- -D warnings
+
+  memory-pressure-observation:
+    name: Memory Pressure Observation
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: memory-pressure
+
+      - name: 运行超内存稳态观测
+        continue-on-error: true
+        env:
+          TRIVIUM_PRESSURE_NODES: '20000'
+          TRIVIUM_PRESSURE_DIM: '128'
+          TRIVIUM_PRESSURE_QUERIES: '500'
+          TRIVIUM_PRESSURE_SECONDS: '15'
+        run: cargo bench --bench bench_memory_pressure
+
+      - name: 上传内存压力报告
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-pressure-report-${{ github.sha }}
+          path: memory-pressure-report.json
+          if-no-files-found: ignore
 
   # ═══════════════════════════════════════════
   #  Job 7: 突变测试（手动触发）

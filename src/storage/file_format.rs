@@ -299,7 +299,10 @@ pub fn save<T: VectorType>(
                 e
             );
         } else if let Err(error) = write_quiver_meta(memtable, path) {
-            tracing::warn!("QuIVer 元数据持久化失败: {}", error);
+            tracing::warn!(
+                "QuIVer 元数据持久化失败 (QuIVer metadata persistence failed): {}",
+                error
+            );
         }
     } else {
         // QuIVer 不存在时清理残留文件
@@ -322,7 +325,10 @@ pub fn save<T: VectorType>(
         );
     } else if std::path::Path::new(&text_path).exists() {
         if let Err(error) = write_text_index_meta(path) {
-            tracing::warn!("TextIndex 元数据持久化失败: {}", error);
+            tracing::warn!(
+                "TextIndex 元数据持久化失败 (TextIndex metadata persistence failed): {}",
+                error
+            );
         }
     } else {
         std::fs::remove_file(text_index_meta_path_from_db(path)).ok();
@@ -537,6 +543,8 @@ pub fn load<T: VectorType>(
     path: &str,
     _mode: StorageMode,
     load_text_sidecar: bool,
+    repair_sidecars: bool,
+    missing_index_policy: crate::database::MissingIndexPolicy,
 ) -> Result<MemTable<T>> {
     let file = File::open(path).map_err(TriviumError::Io)?;
 
@@ -670,12 +678,17 @@ pub fn load<T: VectorType>(
             )?;
             // 尝试从 BQ Block 恢复签名
             load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
-            load_quiver_index(&mut mt, path);
+            load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             if load_text_sidecar {
-                load_text_index(&mut mt, path);
+                load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             }
             Ok(mt)
         } else {
+            if !repair_sidecars {
+                return Err(TriviumError::CorruptedFile(
+                    "只读打开拒绝不完整的 .tdb/.vec generation：.flush_ok 缺失或不匹配".into(),
+                ));
+            }
             // marker 缺失或不匹配：直接安全降级，仅加载 .tdb 元数据，依赖 WAL 回放
             tracing::warn!(
                 "检测到 .tdb/.vec 跨文件撕裂 (Cross-file tear detected)（.flush_ok 标记缺失或不匹配），\
@@ -691,9 +704,9 @@ pub fn load<T: VectorType>(
                 edge_limit_offset,
             )?;
             load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
-            load_quiver_index(&mut mt, path);
+            load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             if load_text_sidecar {
-                load_text_index(&mut mt, path);
+                load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             }
             Ok(mt)
         }
@@ -712,9 +725,9 @@ pub fn load<T: VectorType>(
         // 尝试从 BQ Block 恢复签名
         load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
         // 尝试加载 QuIVer 索引
-        load_quiver_index(&mut mt, path);
+        load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
         if load_text_sidecar {
-            load_text_index(&mut mt, path);
+            load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
         }
         Ok(mt)
     }
@@ -905,7 +918,9 @@ fn load_edges<T: VectorType>(
         let label_len = read_u16_le(bytes, cursor, "edge label_len")? as usize;
         cursor += 2;
         if cursor.saturating_add(label_len).saturating_add(4) > file_len {
-            break;
+            return Err(TriviumError::CorruptedFile(
+                "边记录被截断 (Edge record truncated)".into(),
+            ));
         }
         let label = String::from_utf8(bytes[cursor..cursor + label_len].to_vec()).map_err(|e| {
             TriviumError::CorruptedFile(format!("标签解码错误 (Label decode error): {}", e))
@@ -913,7 +928,17 @@ fn load_edges<T: VectorType>(
         cursor += label_len;
         let weight = read_f32_le(bytes, cursor, "edge weight")?;
         cursor += 4;
+        if !weight.is_finite() {
+            return Err(TriviumError::CorruptedFile(
+                "边权重不是有限浮点数 (Edge weight is not finite)".into(),
+            ));
+        }
         memtable.link(src_id, dst_id, label, weight)?;
+    }
+    if cursor != file_len {
+        return Err(TriviumError::CorruptedFile(
+            "边块尾部存在不完整数据 (Incomplete edge block tail)".into(),
+        ));
     }
     Ok(())
 }
@@ -928,7 +953,9 @@ fn load_bq_block<T: VectorType>(
     file_len: usize,
 ) {
     let Some(count_end) = bq_offset.checked_add(8) else {
-        tracing::warn!("BQ 块计数偏移溢出，跳过恢复");
+        tracing::warn!(
+            "BQ 块计数偏移溢出，跳过恢复 (BQ block count offset overflow, skipping recovery)"
+        );
         return;
     };
     if bq_offset == 0 || count_end > file_len {
@@ -939,7 +966,9 @@ fn load_bq_block<T: VectorType>(
         return;
     };
     let Ok(bq_count) = usize::try_from(bq_count_u64) else {
-        tracing::warn!("BQ 签名数量超出平台寻址范围，跳过恢复");
+        tracing::warn!(
+            "BQ 签名数量超出平台寻址范围，跳过恢复 (BQ signature count exceeds platform address range, skipping recovery)"
+        );
         return;
     };
     if bq_count == 0 {
@@ -948,12 +977,14 @@ fn load_bq_block<T: VectorType>(
 
     let sig_size = std::mem::size_of::<BqSignature>();
     let Some(block_bytes) = bq_count.checked_mul(sig_size) else {
-        tracing::warn!("BQ 块长度溢出，跳过恢复");
+        tracing::warn!("BQ 块长度溢出，跳过恢复 (BQ block length overflow, skipping recovery)");
         return;
     };
     let data_start = count_end;
     let Some(data_end) = data_start.checked_add(block_bytes) else {
-        tracing::warn!("BQ 块结束偏移溢出，跳过恢复");
+        tracing::warn!(
+            "BQ 块结束偏移溢出，跳过恢复 (BQ block end offset overflow, skipping recovery)"
+        );
         return;
     };
 
@@ -995,17 +1026,37 @@ fn load_bq_block<T: VectorType>(
     );
 }
 
-fn load_text_index<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) {
+fn load_text_index<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    db_path: &str,
+    repair_sidecars: bool,
+    policy: crate::database::MissingIndexPolicy,
+) -> Result<()> {
     let text_path = text_index_path_from_db(db_path);
     let path = std::path::Path::new(&text_path);
     if !path.exists() {
-        return;
+        if policy == crate::database::MissingIndexPolicy::Error {
+            return Err(TriviumError::ImmutableArtifactInvalid {
+                reason: "TextIndex sidecar 缺失".into(),
+            });
+        }
+        return Ok(());
     }
     if !validate_text_index_meta(db_path) {
-        tracing::warn!("TextIndex sidecar 元数据缺失或不匹配，已拒绝并清理");
-        std::fs::remove_file(path).ok();
-        std::fs::remove_file(text_index_meta_path_from_db(db_path)).ok();
-        return;
+        tracing::warn!(
+            repair = repair_sidecars,
+            "TextIndex sidecar 元数据缺失或不匹配，已拒绝 (TextIndex sidecar metadata missing or mismatched, rejected)"
+        );
+        if repair_sidecars {
+            std::fs::remove_file(path).ok();
+            std::fs::remove_file(text_index_meta_path_from_db(db_path)).ok();
+        }
+        if policy == crate::database::MissingIndexPolicy::Error {
+            return Err(TriviumError::ImmutableArtifactInvalid {
+                reason: "TextIndex sidecar 元数据不匹配".into(),
+            });
+        }
+        return Ok(());
     }
     match crate::index::text::TextIndex::load_from_file(path) {
         Ok(index) => memtable.set_text_index(index),
@@ -1014,27 +1065,57 @@ fn load_text_index<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) {
                 "TextIndex 加载失败，已忽略 sidecar (TextIndex load failed): {}",
                 error
             );
+            if repair_sidecars {
+                std::fs::remove_file(path).ok();
+                std::fs::remove_file(text_index_meta_path_from_db(db_path)).ok();
+            }
+            if policy == crate::database::MissingIndexPolicy::Error {
+                return Err(TriviumError::ImmutableArtifactInvalid {
+                    reason: format!("TextIndex sidecar 损坏: {error}"),
+                });
+            }
         }
     }
+    Ok(())
 }
 
 /// 尝试从 .tdb.quiver 文件加载 QuIVer 索引
 ///
 /// 如果文件不存在或加载失败，静默跳过（首次查询时惰性重建）。
-fn load_quiver_index<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) {
+fn load_quiver_index<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    db_path: &str,
+    repair_sidecars: bool,
+    policy: crate::database::MissingIndexPolicy,
+) -> Result<()> {
     use crate::index::quiver::QuIVer;
 
     let quiver_path = quiver_path_from_db(db_path);
     let qp = std::path::Path::new(&quiver_path);
     if !qp.exists() {
-        return;
+        if policy == crate::database::MissingIndexPolicy::Error {
+            return Err(TriviumError::ImmutableArtifactInvalid {
+                reason: "QuIVer sidecar 缺失".into(),
+            });
+        }
+        return Ok(());
     }
 
     if !validate_quiver_meta(memtable, db_path) {
-        tracing::warn!("QuIVer sidecar 元数据缺失或不匹配，已拒绝并清理，将在查询时重建");
-        std::fs::remove_file(qp).ok();
-        std::fs::remove_file(quiver_meta_path_from_db(db_path)).ok();
-        return;
+        tracing::warn!(
+            repair = repair_sidecars,
+            "QuIVer sidecar 元数据缺失或不匹配，已拒绝 (QuIVer sidecar metadata missing or mismatched, rejected)"
+        );
+        if repair_sidecars {
+            std::fs::remove_file(qp).ok();
+            std::fs::remove_file(quiver_meta_path_from_db(db_path)).ok();
+        }
+        if policy == crate::database::MissingIndexPolicy::Error {
+            return Err(TriviumError::ImmutableArtifactInvalid {
+                reason: "QuIVer sidecar 元数据不匹配".into(),
+            });
+        }
+        return Ok(());
     }
 
     match QuIVer::load_from_file(qp) {
@@ -1048,7 +1129,15 @@ fn load_quiver_index<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) {
                 e
             );
             // 删除损坏的文件
-            std::fs::remove_file(qp).ok();
+            if repair_sidecars {
+                std::fs::remove_file(qp).ok();
+            }
+            if policy == crate::database::MissingIndexPolicy::Error {
+                return Err(TriviumError::ImmutableArtifactInvalid {
+                    reason: format!("QuIVer sidecar 损坏: {e}"),
+                });
+            }
         }
     }
+    Ok(())
 }

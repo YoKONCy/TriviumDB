@@ -96,6 +96,12 @@ impl<T: VectorType> VecPool<T> {
             })
     }
 
+    pub fn mmap_bytes(&self) -> usize {
+        self.mmap_count
+            .saturating_mul(self.dim)
+            .saturating_mul(std::mem::size_of::<T>())
+    }
+
     /// 当前增量层在不重新分配的情况下还能容纳的节点数。
     pub(crate) fn delta_spare_nodes(&self) -> usize {
         self.delta.capacity().saturating_sub(self.delta.len()) / self.dim
@@ -424,7 +430,9 @@ impl<T: VectorType> VecPool<T> {
         self.invalidate_cache();
 
         tracing::debug!(
-            "[VecPool] 追加写入 (appended): +{} 向量, 累计 {} 向量",
+            "[VecPool] 追加写入：新增 {} 个向量，累计 {} 个向量 ([VecPool] append completed: {} vectors added, {} vectors total)",
+            append_count,
+            new_total,
             append_count,
             new_total
         );
@@ -490,7 +498,11 @@ impl<T: VectorType> VecPool<T> {
         self.has_dirty_base = false;
         self.invalidate_cache();
 
-        tracing::debug!("[VecPool] 全量重写 (full rewrite): {} 向量", total);
+        tracing::debug!(
+            "[VecPool] 全量重写：{} 个向量 ([VecPool] full rewrite: {} vectors)",
+            total,
+            total
+        );
         Ok(total)
     }
 

@@ -108,6 +108,45 @@ fn P0_TextIndex精确持久化_重启后不从Payload猜测重建() {
 }
 
 #[test]
+fn TextIndex_sidecar损坏时安全清理并降级为空索引() {
+    let path = tmp_db("text_sidecar_corrupt");
+    cleanup(&path);
+    {
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        let id = db
+            .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
+        db.index_text(id, "安全目标词").unwrap();
+        db.build_text_index().unwrap();
+        db.flush().unwrap();
+    }
+    std::fs::write(format!("{}.text", path), b"corrupt").unwrap();
+    let config = Config {
+        dim: DIM,
+        load_text_index: true,
+        ..Default::default()
+    };
+    let result = std::panic::catch_unwind(|| Database::<f32>::open_with_config(&path, config));
+    assert!(result.is_ok());
+    let db = result.unwrap().unwrap();
+    let search_config = triviumdb::database::SearchConfig {
+        top_k: 5,
+        expand_depth: 0,
+        min_score: -1.0,
+        enable_text_hybrid_search: true,
+        ..Default::default()
+    };
+    assert!(
+        db.search_hybrid(Some("安全目标词"), None, &search_config)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!Path::new(&format!("{}.text", path)).exists());
+    assert!(!Path::new(&format!("{}.text.meta", path)).exists());
+    cleanup(&path);
+}
+
+#[test]
 fn P0_TextIndex缺失时打开不扫描Payload自动重建() {
     let path = tmp_db("text_missing");
     cleanup(&path);
@@ -385,7 +424,7 @@ fn P0_2_WAL恢复后_新插入不复用已有ID() {
     let last_id;
     {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
-        db.set_sync_mode(SyncMode::Full);
+        db.set_sync_mode(SyncMode::Full).unwrap();
         db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"seq": 1}))
             .unwrap();
         db.flush().unwrap(); // id=1 落盘，WAL 被清除

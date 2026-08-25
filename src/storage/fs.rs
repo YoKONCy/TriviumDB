@@ -74,7 +74,7 @@ pub(crate) fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
                     let os_error = error.raw_os_error();
                     if os_error == Some(5) || os_error == Some(32) {
                         tracing::debug!(
-                            "原子重命名第 {} 次失败，系统错误 {:?}，将在 {:?} 后重试",
+                            "原子重命名第 {} 次失败，系统错误 {:?}，将在 {:?} 后重试 (Atomic rename attempt failed; retrying after delay)",
                             attempt + 1,
                             os_error,
                             delay

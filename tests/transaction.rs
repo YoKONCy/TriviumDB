@@ -28,6 +28,21 @@ fn cleanup(path: &str) {
 // ════════ 基础事务提交 ════════
 
 #[test]
+fn 事务_ID耗尽预检失败且不写入状态() {
+    let path = tmp_db("id_exhausted");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let result = {
+        let mut tx = db.begin_tx();
+        tx.insert_with_id(u64::MAX, &[1.0, 0.0, 0.0, 0.0], serde_json::json!({}));
+        tx.commit()
+    };
+    assert!(result.is_err());
+    assert_eq!(db.node_count(), 0);
+    cleanup(&path);
+}
+
+#[test]
 fn 事务_基本提交_返回正确的生成ID() {
     let path = tmp_db("basic_commit");
     cleanup(&path);

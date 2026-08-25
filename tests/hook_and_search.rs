@@ -99,6 +99,26 @@ fn COV3_01_composite_hook_all_stages() {
         hits.len(),
         ctx.custom_data
     );
+    assert!(
+        ctx.observations
+            .iter()
+            .any(|(name, _)| name == "estimated_heap_bytes")
+    );
+    assert!(
+        ctx.observations
+            .iter()
+            .any(|(name, _)| name == "mmap_vector_bytes")
+    );
+    assert!(
+        ctx.observations
+            .iter()
+            .any(|(name, _)| name == "vector_route_quiver")
+    );
+    assert!(
+        ctx.stage_timings
+            .iter()
+            .any(|(name, _)| name == "vector_recall")
+    );
 
     cleanup(&path);
 }
@@ -615,6 +635,65 @@ fn payload_filter_applies_before_top_k() {
     assert_eq!(hits.len(), 2);
     assert!(hits.iter().all(|hit| hit.payload["group"] == "keep"));
 
+    cleanup(&path);
+}
+
+#[test]
+fn payload_filter同时约束图扩散结果() {
+    let path = tmp_db("payload_filter_graph");
+    let mut db = Database::<f32>::open(&path, 2).unwrap();
+    let seed = db
+        .insert(&[1.0, 0.0], serde_json::json!({"group": "keep"}))
+        .unwrap();
+    let rejected = db
+        .insert(&[0.0, 1.0], serde_json::json!({"group": "drop"}))
+        .unwrap();
+    db.link(seed, rejected, "related", 1.0).unwrap();
+
+    let config = SearchConfig {
+        top_k: 5,
+        expand_depth: 1,
+        min_score: 0.0,
+        force_brute_force: true,
+        payload_filter: Some(triviumdb::Filter::eq("group", "keep".into())),
+        ..Default::default()
+    };
+    let hits = db.search_advanced(&[1.0, 0.0], &config).unwrap();
+
+    assert!(hits.iter().any(|hit| hit.id == seed));
+    assert!(hits.iter().all(|hit| hit.id != rejected));
+    cleanup(&path);
+}
+
+#[test]
+fn 分组检索独立保留语义与图扩散结果() {
+    let path = tmp_db("grouped_search");
+    let mut db = Database::<f32>::open(&path, 2).unwrap();
+    let semantic = db
+        .insert(&[1.0, 0.0], serde_json::json!({"kind": "semantic"}))
+        .unwrap();
+    let graph = db
+        .insert(&[0.0, 1.0], serde_json::json!({"kind": "graph"}))
+        .unwrap();
+    db.link(semantic, graph, "related", 1.0).unwrap();
+
+    let config = SearchConfig {
+        top_k: 1,
+        recall_k: 1,
+        rerank_k: 1,
+        expand_depth: 1,
+        min_score: 0.5,
+        force_brute_force: true,
+        ..Default::default()
+    };
+    let result = db
+        .search_hybrid_grouped(None, Some(&[1.0, 0.0]), &config)
+        .unwrap();
+
+    assert_eq!(result.semantic_hits.len(), 1);
+    assert_eq!(result.semantic_hits[0].id, semantic);
+    assert_eq!(result.graph_hits.len(), 1);
+    assert_eq!(result.graph_hits[0].id, graph);
     cleanup(&path);
 }
 

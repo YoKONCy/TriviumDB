@@ -85,6 +85,59 @@ fn BND_03_dim等于65537_超限拒绝() {
     cleanup(&path);
 }
 
+#[test]
+fn BND_03A_超3072维手动QuIVer构建安全拒绝并保持可检索() {
+    let path = tmp_db("bnd_quiver_dim3073");
+    let mut db = Database::<f32>::open(&path, 3073).unwrap();
+    let vector = vec![1.0f32; 3073];
+    let id = db
+        .insert(&vector, serde_json::json!({"high_dim": true}))
+        .unwrap();
+
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.build_quiver_index(None)));
+    assert!(result.is_ok(), "高维 QuIVer 构建不得 panic");
+    let error = result.unwrap().unwrap_err().to_string();
+    assert!(error.contains("3072"));
+
+    let hits = db.search(&vector, 1, 0, 0.0).unwrap();
+    assert_eq!(hits[0].id, id);
+    cleanup(&path);
+}
+
+#[test]
+fn BND_03B_3072维QuIVer可构建且3073维自动路由保持暴力检索() {
+    let path_3072 = tmp_db("bnd_quiver_dim3072");
+    let mut db_3072 = Database::<f32>::open(&path_3072, 3072).unwrap();
+    let vector_3072 = vec![1.0f32; 3072];
+    let id_3072 = db_3072.insert(&vector_3072, serde_json::json!({})).unwrap();
+    db_3072.build_quiver_index(None).unwrap();
+    assert_eq!(
+        db_3072.search(&vector_3072, 1, 0, 0.0).unwrap()[0].id,
+        id_3072
+    );
+
+    let path_3073 = tmp_db("bnd_quiver_auto_dim3073");
+    let mut db_3073 = Database::<f32>::open(&path_3073, 3073).unwrap();
+    let vector_3073 = vec![1.0f32; 3073];
+    let id_3073 = db_3073.insert(&vector_3073, serde_json::json!({})).unwrap();
+    assert_eq!(
+        db_3073.search(&vector_3073, 1, 0, 0.0).unwrap()[0].id,
+        id_3073
+    );
+    db_3073.flush().unwrap();
+    assert!(!std::path::Path::new(&format!("{}.quiver", path_3073)).exists());
+    drop(db_3073);
+    let db_3073 = Database::<f32>::open(&path_3073, 3073).unwrap();
+    assert_eq!(
+        db_3073.search(&vector_3073, 1, 0, 0.0).unwrap()[0].id,
+        id_3073
+    );
+
+    cleanup(&path_3072);
+    cleanup(&path_3073);
+}
+
 // ════════════════════════════════════════════════════════════════
 //  节点数边界
 // ════════════════════════════════════════════════════════════════

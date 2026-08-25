@@ -267,11 +267,11 @@ fn main() {
     let bench = bench_config();
     let dim = bench.dim;
 
-    println!("加载 {} 数据集...", bench.name);
-    println!("训练集文件: {}", bench.train_path);
-    println!("测试集文件: {}", bench.test_path);
-    println!("GroundTruth 文件: {}", bench.gt_path);
-    println!("向量维度: {}", dim);
+    println!("加载数据集 / Loading dataset: {}...", bench.name);
+    println!("训练集文件 / Training file: {}", bench.train_path);
+    println!("测试集文件 / Test file: {}", bench.test_path);
+    println!("GroundTruth 文件 / Ground-truth file: {}", bench.gt_path);
+    println!("向量维度 / Vector dimension: {}", dim);
 
     let t0 = Instant::now();
     let train_data = read_f32_bin(&bench.train_path);
@@ -308,19 +308,22 @@ fn main() {
     );
     let use_original_gt = n_train == full_n_train && k_gt >= EXACT_TOP_K;
 
-    println!("加载完成! 耗时: {:.2}s", t0.elapsed().as_secs_f64());
     println!(
-        "训练集: {} x {} (原始 {} x {})",
+        "加载完成 / Loading completed! 耗时 / Elapsed: {:.2}s",
+        t0.elapsed().as_secs_f64()
+    );
+    println!(
+        "训练集 / Training set: {} x {}（原始 / original {} x {}）",
         n_train, dim, full_n_train, dim
     );
-    println!("测试集: {} x {}", n_test, dim);
-    println!("原始 GroundTruth K: {}", k_gt);
+    println!("测试集 / Test set: {} x {}", n_test, dim);
+    println!("原始 GroundTruth K / Original ground-truth K: {}", k_gt);
     if use_original_gt {
-        println!("使用原始 1M GroundTruth Top-10");
+        println!("使用原始 1M GroundTruth Top-10 / Using original 1M ground-truth Top-10");
     } else {
         println!(
-            "子集 GroundTruth: 对前 {} 条训练数据重新计算 Top-10",
-            n_train
+            "子集 GroundTruth：对前 {} 条训练数据重新计算 Top-10 / Subset ground truth: recomputing Top-10 over the first {} training vectors",
+            n_train, n_train
         );
     }
 
@@ -336,7 +339,7 @@ fn main() {
     };
 
     println!(
-        "\n开始构建 BQ-Vamana (m={}, ef_c={}, alpha={})...",
+        "\n开始构建 BQ-Vamana / Starting BQ-Vamana build (m={}, ef_c={}, alpha={})...",
         config.m, config.ef_construction, config.alpha
     );
     let mut index = QuIVer::new(dim, &config);
@@ -358,7 +361,7 @@ fn main() {
     let batch_slots = &slot_idxs[..batch_n];
     if batch_n < n_train {
         println!(
-            "增量模式: 批量构建前 {}% ({} 条) + 增量插入剩余 {} 条",
+            "增量模式 / Incremental mode: 批量构建前 / batch first {}%（{} 条 / vectors）+ 增量插入剩余 / incrementally insert remaining {} 条 / vectors",
             incr_frac,
             batch_n,
             n_train - batch_n
@@ -367,19 +370,25 @@ fn main() {
 
     match std::env::var("TRIVIUM_BQ_HNSW_EXPERIMENTAL").as_deref() {
         Ok("2-checked") => {
-            println!("使用类型化校验并发构图路径");
+            println!(
+                "使用类型化校验并发构图路径 / Using typed checked concurrent graph-build path"
+            );
             index.batch_build_experimental_v2_checked(batch_data, batch_ids, batch_slots);
         }
         Ok("1") => {
-            println!("使用早期反向剪枝并行构图路径（旧版）");
+            println!(
+                "使用早期反向剪枝并行构图路径（旧版）/ Using legacy early reverse-pruning parallel graph-build path"
+            );
             index.batch_build_experimental(batch_data, batch_ids, batch_slots);
         }
         Ok("serial") => {
-            println!("使用串行构图路径（旧版，仅用于对照）");
+            println!(
+                "使用串行构图路径（旧版，仅用于对照）/ Using legacy serial graph-build path for comparison"
+            );
             index.batch_build(batch_data, batch_ids, batch_slots);
         }
         _ => {
-            println!("使用并发构图路径（默认）");
+            println!("使用并发构图路径（默认）/ Using default concurrent graph-build path");
             index.batch_build_experimental_v2(batch_data, batch_ids, batch_slots);
         }
     }
@@ -398,7 +407,7 @@ fn main() {
         }
         let incr_time = t_incr.elapsed().as_secs_f64();
         println!(
-            "增量插入完成! {} 条耗时: {:.2}s ({:.0} vecs/s, 单线程)",
+            "增量插入完成 / Incremental insertion completed! {} 条 / vectors，耗时 / elapsed: {:.2}s ({:.0} vecs/s，单线程 / single-threaded)",
             n_train - batch_n,
             incr_time,
             (n_train - batch_n) as f64 / incr_time
@@ -408,16 +417,22 @@ fn main() {
     let build_time = t_build.elapsed().as_secs_f64();
     let build_vecs_per_sec = n_train as f64 / build_time;
     println!(
-        "构建完成! 耗时: {:.2}s ({:.0} vecs/s)",
+        "构建完成 / Build completed! 耗时 / Elapsed: {:.2}s ({:.0} vecs/s)",
         build_time, build_vecs_per_sec
     );
 
     let stats = index.stats();
-    println!("内存统计: Hot {} MB", stats.hot_bytes / 1024 / 1024);
+    println!(
+        "内存统计 / Memory statistics: Hot {} MB",
+        stats.hot_bytes / 1024 / 1024
+    );
 
     let top_k = 10;
     let eval_gts: Vec<Vec<u64>> = if use_original_gt {
-        println!("\n加载原始 GroundTruth Top-{} 用于 1M 标准评测...", top_k);
+        println!(
+            "\n加载原始 GroundTruth Top-{} 用于 1M 标准评测 / Loading original ground-truth Top-{} for the standard 1M evaluation...",
+            top_k, top_k
+        );
         (0..n_test)
             .map(|i| {
                 gt_data[i * k_gt..i * k_gt + top_k]
@@ -428,8 +443,8 @@ fn main() {
             .collect()
     } else {
         println!(
-            "\n重新计算 {} 条测试查询在 {} 条训练子集上的精确 Top-{}...",
-            n_test, n_train, top_k
+            "\n重新计算 {} 条测试查询在 {} 条训练子集上的精确 Top-{} / Recomputing exact Top-{} for {} test queries over a {}-vector training subset...",
+            n_test, n_train, top_k, top_k, n_test, n_train
         );
         let t_gt = Instant::now();
         let subset_gts: Vec<Vec<u64>> = (0..n_test)
@@ -440,7 +455,7 @@ fn main() {
             })
             .collect();
         println!(
-            "子集 GroundTruth 计算完成! 耗时: {:.2}s",
+            "子集 GroundTruth 计算完成 / Subset ground truth completed! 耗时 / Elapsed: {:.2}s",
             t_gt.elapsed().as_secs_f64()
         );
         subset_gts
@@ -448,7 +463,7 @@ fn main() {
 
     // ── 先测 Exact Flat 基准 ──
     println!(
-        "\n计算 Exact Flat Cosine 基准 (Top-{}, {} 条查询)...",
+        "\n计算 Exact Flat Cosine 基准 / Running Exact Flat Cosine baseline (Top-{}, {} 条查询 / queries)...",
         EXACT_TOP_K,
         BRUTE_FORCE_QUERIES.min(n_test)
     );
@@ -457,7 +472,7 @@ fn main() {
     let train_norm = normalize_vectors(train_data, dim);
     let query_norm = normalize_vectors(&test_data[..exact_queries * dim], dim);
     let norm_time = t_norm.elapsed().as_secs_f64();
-    println!("归一化耗时: {:.2}s", norm_time);
+    println!("归一化耗时 / Normalization elapsed: {:.2}s", norm_time);
 
     let t_exact_single = Instant::now();
     for i in 0..exact_queries {
@@ -479,10 +494,13 @@ fn main() {
     let exact_parallel_qps = exact_queries as f64 / exact_parallel_time;
 
     println!(
-        "Exact Flat 单线程: QPS={:.1}, latency={:.2}ms/q",
+        "Exact Flat 单线程 / single-threaded: QPS={:.1}, latency={:.2}ms/q",
         exact_single_qps, exact_single_lat_ms
     );
-    println!("Exact Flat 多线程: QPS={:.1}", exact_parallel_qps);
+    println!(
+        "Exact Flat 多线程 / multi-threaded: QPS={:.1}",
+        exact_parallel_qps
+    );
 
     // ── QuIVer 搜索 ──
     let ef_values = std::env::var("TRIVIUM_ANN_EF")
@@ -569,9 +587,12 @@ fn main() {
         }
     }
 
-    println!("\n构图速率: {:.0} vecs/s", build_vecs_per_sec);
     println!(
-        "Exact Flat 基准 QPS: {:.1} (单线程) / {:.1} (多线程)",
+        "\n构图速率 / Graph-build throughput: {:.0} vecs/s",
+        build_vecs_per_sec
+    );
+    println!(
+        "Exact Flat 基准 / baseline QPS: {:.1}（单线程 / single-threaded）/ {:.1}（多线程 / multi-threaded）",
         exact_single_qps, exact_parallel_qps
     );
 
@@ -617,6 +638,9 @@ fn main() {
             std::fs::remove_file(path).expect("无法替换已有结果文件");
         }
         std::fs::rename(&temporary, path).expect("无法保存结果文件");
-        println!("结构化结果已写入: {}", path.display());
+        println!(
+            "结构化结果已写入 / Structured results written to: {}",
+            path.display()
+        );
     }
 }

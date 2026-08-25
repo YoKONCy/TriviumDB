@@ -41,7 +41,10 @@ pub fn run(handle: &DbHandle, db_path: &str, output: &str) -> CliResult {
     pb.finish_and_clear();
     w.flush()?;
 
-    println!("{} 导出 {count} 个节点 -> {output}", "✓".green().bold());
+    println!(
+        "{} 已导出 {count} 个节点 / Exported {count} nodes -> {output}",
+        "✓".green().bold()
+    );
     Ok(())
 }
 
@@ -50,7 +53,7 @@ fn validate_output_path(db_path: &str, output: &str) -> CliResult {
     for protected in protected_paths(db_path) {
         if paths_equal(&output_path, &normalized_path(&protected)?) {
             return Err(format!(
-                "拒绝导出到数据库相关文件: {}（会覆盖或破坏数据库文件）",
+                "拒绝导出到数据库相关文件 / Refusing to export to a database-related file: {}（可能覆盖或破坏数据库文件 / This could overwrite or corrupt database files）",
                 output
             )
             .into());

@@ -23,6 +23,22 @@ use crate::node::{NodeId, SearchHit};
 use crate::storage::memtable::MemTable;
 use std::sync::{Arc, RwLock};
 
+pub(crate) struct PipelineOutput {
+    pub combined_hits: Vec<SearchHit>,
+    pub semantic_hits: Vec<SearchHit>,
+    pub graph_hits: Vec<SearchHit>,
+}
+
+impl PipelineOutput {
+    fn empty() -> Self {
+        Self {
+            combined_hits: Vec::new(),
+            semantic_hits: Vec::new(),
+            graph_hits: Vec::new(),
+        }
+    }
+}
+
 use super::{HookReadScope, read_or_recover, try_start_quiver_build, write_or_recover};
 
 fn call_hook<R>(call: impl FnOnce() -> R) -> R {
@@ -115,7 +131,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     query_vector: Option<&[T]>,
     config: &SearchConfig,
     ctx: &mut HookContext,
-) -> Result<Vec<SearchHit>> {
+) -> Result<PipelineOutput> {
     // Payload 过滤可能在 QuIVer 候选不足时回退精确扫描，因此准备阶段必须预先物化 flat。
     let materialize_flat = config.force_brute_force || config.payload_filter.is_some();
     let quiver_config = crate::index::quiver::QuIVerConfig::default();
@@ -202,7 +218,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
 
     // 如果 Hook 请求提前终止管线，直接返回空结果
     if ctx.abort {
-        return Ok(vec![]);
+        return Ok(PipelineOutput::empty());
     }
 
     sanitize_config(&mut safe_cfg, dim)?;
@@ -219,6 +235,14 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     };
 
     let config = &safe_cfg;
+    ctx.record_observation("estimated_heap_bytes", mt.estimated_memory_bytes() as u64);
+    ctx.record_observation("mmap_vector_bytes", mt.mmap_vector_bytes() as u64);
+    ctx.record_observation("node_count", mt.node_count() as u64);
+    if let Some(metrics) = crate::observability::process_memory_snapshot() {
+        ctx.record_observation("process_rss_bytes", metrics.rss_bytes);
+        ctx.record_observation("process_major_faults", metrics.major_faults);
+        ctx.record_observation("process_minor_faults", metrics.minor_faults);
+    }
 
     // ═══════════════════════════════════════════════════════
     // 🔌 Hook #2: on_custom_recall — 自定义召回
@@ -246,7 +270,20 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     } else {
         // 准备期已保证 QuIVer、BQ 与可能的精确回退 flat cache 全部就绪。
         recall_text_ranked(&mt, config, query_text, &mut sparse_ranking);
+        let vector_recall_started = std::time::Instant::now();
+        let route = if !config.force_brute_force && mt.quiver().is_some() {
+            1
+        } else {
+            0
+        };
         recall_vector_ranked(&mt, config, query_vector, &mut dense_ranking);
+        ctx.record_timing("vector_recall", vector_recall_started.elapsed());
+        ctx.record_observation("vector_route_quiver", route);
+        ctx.record_observation("vector_recall_candidates", dense_ranking.len() as u64);
+        ctx.record_observation(
+            "quiver_ef_search",
+            (effective_recall_k(config).max(1) * 8) as u64,
+        );
         // FISTA 基于稠密召回候选，融合后再追加影子排名。
         fuse_rankings_rrf(
             &mut seed_map,
@@ -275,7 +312,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     }
 
     if anchor_hits.is_empty() {
-        return Ok(vec![]);
+        return Ok(PipelineOutput::empty());
     }
 
     // 补充 Payload 并构建种子集
@@ -295,6 +332,10 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         call_hook(|| hook.on_pre_graph_expand(&mut seeds, ctx));
         ctx.record_timing("hook_pre_graph_expand", t0.elapsed());
     }
+
+    let mut semantic_hits = seeds.clone();
+    semantic_hits.truncate(config.top_k);
+    let semantic_ids: std::collections::HashSet<NodeId> = seeds.iter().map(|hit| hit.id).collect();
 
     // ═══════════════════════════════════════════════════════
     //  L6 + L7: SA-PPR 有限深度图谱扩散 + 不应期/侧向抑制
@@ -327,6 +368,17 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         ctx.record_count("rerank", expanded.len());
     }
 
+    if config.payload_filter.is_some() {
+        expanded.retain(|hit| matches_payload_filter(&mt, config.payload_filter.as_ref(), hit.id));
+    }
+
+    let mut graph_hits: Vec<SearchHit> = expanded
+        .iter()
+        .filter(|hit| !semantic_ids.contains(&hit.id))
+        .cloned()
+        .collect();
+    graph_hits.truncate(config.top_k);
+
     // ═══════════════════════════════════════════════════════
     //  L9: DPP 多样性采样
     // ═══════════════════════════════════════════════════════
@@ -341,7 +393,11 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             call_hook(|| hook.on_post_search(&mut final_results, ctx));
             ctx.record_timing("hook_post_search", t0.elapsed());
         }
-        return Ok(final_results);
+        return Ok(PipelineOutput {
+            combined_hits: final_results,
+            semantic_hits,
+            graph_hits,
+        });
     }
 
     expanded.truncate(config.top_k);
@@ -355,7 +411,11 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         ctx.record_timing("hook_post_search", t0.elapsed());
     }
 
-    Ok(expanded)
+    Ok(PipelineOutput {
+        combined_hits: expanded,
+        semantic_hits,
+        graph_hits,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -484,7 +544,7 @@ fn recall_vector_ranked<T: VectorType>(
             tracing::debug!(
                 returned = approximate_hits.len(),
                 requested = config.top_k,
-                "QuIVer 过滤结果不足，回退精确扫描"
+                "QuIVer 过滤结果不足，回退精确扫描 (Insufficient filtered QuIVer results, falling back to exact scan)"
             );
             brute_force_pipeline(mt, config, query_vector, mt.flat_vectors(), dim)
         } else {
@@ -792,6 +852,7 @@ fn execute_pipeline<T: VectorType>(
         config,
         ctx,
     )
+    .map(|output| output.combined_hits)
 }
 
 // ═══════════════════════════════════════════════════════════

@@ -189,6 +189,96 @@ unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn norm_squared_avx2_384(vector: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
+    for offset in (0..384).step_by(32) {
+        let v0 = unsafe { _mm256_loadu_ps(vector.as_ptr().add(offset)) };
+        let v1 = unsafe { _mm256_loadu_ps(vector.as_ptr().add(offset + 8)) };
+        let v2 = unsafe { _mm256_loadu_ps(vector.as_ptr().add(offset + 16)) };
+        let v3 = unsafe { _mm256_loadu_ps(vector.as_ptr().add(offset + 24)) };
+        acc0 = _mm256_fmadd_ps(v0, v0, acc0);
+        acc1 = _mm256_fmadd_ps(v1, v1, acc1);
+        acc2 = _mm256_fmadd_ps(v2, v2, acc2);
+        acc3 = _mm256_fmadd_ps(v3, v3, acc3);
+    }
+    unsafe {
+        horizontal_sum_avx2(_mm256_add_ps(
+            _mm256_add_ps(acc0, acc1),
+            _mm256_add_ps(acc2, acc3),
+        ))
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn cosine_similarity_avx2_384_with_query_norm(
+    query: &[f32],
+    vector: &[f32],
+    query_norm_squared: f32,
+) -> f32 {
+    use std::arch::x86_64::*;
+    let mut dot0 = _mm256_setzero_ps();
+    let mut dot1 = _mm256_setzero_ps();
+    let mut dot2 = _mm256_setzero_ps();
+    let mut dot3 = _mm256_setzero_ps();
+    let mut norm0 = _mm256_setzero_ps();
+    let mut norm1 = _mm256_setzero_ps();
+    let mut norm2 = _mm256_setzero_ps();
+    let mut norm3 = _mm256_setzero_ps();
+    for offset in (0..384).step_by(32) {
+        let q0 = unsafe { _mm256_loadu_ps(query.as_ptr().add(offset)) };
+        let q1 = unsafe { _mm256_loadu_ps(query.as_ptr().add(offset + 8)) };
+        let q2 = unsafe { _mm256_loadu_ps(query.as_ptr().add(offset + 16)) };
+        let q3 = unsafe { _mm256_loadu_ps(query.as_ptr().add(offset + 24)) };
+        let v0 = unsafe { _mm256_loadu_ps(vector.as_ptr().add(offset)) };
+        let v1 = unsafe { _mm256_loadu_ps(vector.as_ptr().add(offset + 8)) };
+        let v2 = unsafe { _mm256_loadu_ps(vector.as_ptr().add(offset + 16)) };
+        let v3 = unsafe { _mm256_loadu_ps(vector.as_ptr().add(offset + 24)) };
+        dot0 = _mm256_fmadd_ps(q0, v0, dot0);
+        dot1 = _mm256_fmadd_ps(q1, v1, dot1);
+        dot2 = _mm256_fmadd_ps(q2, v2, dot2);
+        dot3 = _mm256_fmadd_ps(q3, v3, dot3);
+        norm0 = _mm256_fmadd_ps(v0, v0, norm0);
+        norm1 = _mm256_fmadd_ps(v1, v1, norm1);
+        norm2 = _mm256_fmadd_ps(v2, v2, norm2);
+        norm3 = _mm256_fmadd_ps(v3, v3, norm3);
+    }
+    let dot = unsafe {
+        horizontal_sum_avx2(_mm256_add_ps(
+            _mm256_add_ps(dot0, dot1),
+            _mm256_add_ps(dot2, dot3),
+        ))
+    };
+    let vector_norm_squared = unsafe {
+        horizontal_sum_avx2(_mm256_add_ps(
+            _mm256_add_ps(norm0, norm1),
+            _mm256_add_ps(norm2, norm3),
+        ))
+    };
+    if query_norm_squared == 0.0 || vector_norm_squared == 0.0 {
+        return 0.0;
+    }
+    dot / (query_norm_squared.sqrt() * vector_norm_squared.sqrt())
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn horizontal_sum_avx2(value: std::arch::x86_64::__m256) -> f32 {
+    use std::arch::x86_64::*;
+    let sum = _mm_add_ps(
+        _mm256_castps256_ps128(value),
+        _mm256_extractf128_ps(value, 1),
+    );
+    let sum = _mm_hadd_ps(sum, sum);
+    _mm_cvtss_f32(_mm_hadd_ps(sum, sum))
+}
+
 /// SSE3 加速路径：每次并行处理 4 个 f32（为无 AVX2 的老 x86_64 CPU 兜底）
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse3")]
@@ -306,6 +396,35 @@ pub fn cosine_similarity_f32(a: &[f32], b: &[f32]) -> f32 {
     cosine_similarity_scalar(a, b)
 }
 
+pub(crate) fn cosine_query_norm_f32_384(query: &[f32]) -> Option<f32> {
+    if query.len() != 384 {
+        return None;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        return Some(unsafe { norm_squared_avx2_384(query) });
+    }
+    None
+}
+
+pub(crate) fn cosine_similarity_f32_384_with_query_norm(
+    query: &[f32],
+    vector: &[f32],
+    query_norm_squared: f32,
+) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if query.len() == 384
+        && vector.len() == 384
+        && is_x86_feature_detected!("avx2")
+        && is_x86_feature_detected!("fma")
+    {
+        return unsafe {
+            cosine_similarity_avx2_384_with_query_norm(query, vector, query_norm_squared)
+        };
+    }
+    cosine_similarity_f32(query, vector)
+}
+
 // ════════ f32：普通高精度向量（余弦相似度） ════════
 impl VectorType for f32 {
     #[inline]
@@ -418,6 +537,36 @@ mod tests {
         // 边界情况：零向量
         let zeros = vec![0.0; 20];
         assert_eq!(f32::similarity(&zeros, &a), 0.0);
+    }
+
+    #[test]
+    fn dim384专用余弦与通用路径误差受控() {
+        let query = (0..384)
+            .map(|index| (index as f32 * 0.017).sin())
+            .collect::<Vec<_>>();
+        let query_norm = cosine_query_norm_f32_384(&query);
+        if let Some(query_norm) = query_norm {
+            for row in 0..1000 {
+                let vector = (0..384)
+                    .map(|index| ((row * 389 + index * 17) as f32 * 0.013).cos())
+                    .collect::<Vec<_>>();
+                let expected = cosine_similarity_f32(&query, &vector);
+                let actual = cosine_similarity_f32_384_with_query_norm(&query, &vector, query_norm);
+                assert!((actual - expected).abs() < 2e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn dim384专用余弦处理零向量() {
+        let query = vec![0.0f32; 384];
+        let vector = vec![1.0f32; 384];
+        if let Some(query_norm) = cosine_query_norm_f32_384(&query) {
+            assert_eq!(
+                cosine_similarity_f32_384_with_query_norm(&query, &vector, query_norm),
+                0.0
+            );
+        }
     }
 
     #[test]

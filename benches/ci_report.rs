@@ -214,8 +214,8 @@ fn build_report_db(path: &str) -> (Database<f32>, VectorCorpus, QueryVectors) {
             .unwrap();
     }
 
-    db.create_index("type");
-    db.create_index("cluster");
+    db.create_index("type").unwrap();
+    db.create_index("cluster").unwrap();
     db.build_text_index().unwrap();
     db.flush().unwrap();
 
@@ -567,9 +567,9 @@ fn main() {
         path,
         db.estimated_memory(),
         || {
-            db.create_index("active");
+            db.create_index("active").unwrap();
             let rows = db.tql(r#"FIND {active: true} RETURN * LIMIT 20"#).unwrap();
-            db.drop_index("active");
+            db.drop_index("active").unwrap();
             format!("rows={}", rows.len())
         },
     );

@@ -480,7 +480,9 @@ impl<T: VectorType> MemTable<T> {
         self.validate_insert(vector)?;
 
         let id = self.next_id;
-        self.next_id += 1;
+        let next_id = id
+            .checked_add(1)
+            .ok_or_else(|| TriviumError::InvalidInput("节点 ID 空间已耗尽".into()))?;
 
         // 1. 记录向量（优先尝试从空闲槽复活，否则推入尾部增量层）
         let sig = calculate_json_signature(&payload);
@@ -517,12 +519,13 @@ impl<T: VectorType> MemTable<T> {
             if quiver.needs_rebuild() {
                 self.quiver_index = None;
                 tracing::debug!(
-                    "QuIVer 索引增量变更超过 25%，已丢弃 (QuIVer index >25% dirty, discarded)，下次搜索前将自动重建"
+                    "QuIVer 索引增量变更超过 25%，已丢弃，下次搜索前将自动重建 (QuIVer index exceeded 25% dirty changes and was discarded; it will rebuild before the next search)"
                 );
             }
         }
 
         self.mark_changed(true);
+        self.next_id = next_id;
         Ok(id)
     }
 
@@ -535,6 +538,14 @@ impl<T: VectorType> MemTable<T> {
         payload: serde_json::Value,
     ) -> Result<()> {
         self.validate_insert_with_id(id, vector)?;
+        let advanced_next_id = if id >= self.next_id {
+            Some(
+                id.checked_add(1)
+                    .ok_or_else(|| TriviumError::InvalidInput("节点 ID 空间已耗尽".into()))?,
+            )
+        } else {
+            None
+        };
 
         // 优先从空闲槽复活
         let sig = calculate_json_signature(&payload);
@@ -557,8 +568,8 @@ impl<T: VectorType> MemTable<T> {
         // 属性索引已在 Payload 转入冷存储前维护
 
         // 防御性推进分配器指针，避免后续普通 insert 撞车
-        if id >= self.next_id {
-            self.next_id = id + 1;
+        if let Some(next_id) = advanced_next_id {
+            self.next_id = next_id;
         }
 
         // 增量更新 QuIVer 索引（如果已构建且未暂停同步）
@@ -572,7 +583,7 @@ impl<T: VectorType> MemTable<T> {
             if quiver.needs_rebuild() {
                 self.quiver_index = None;
                 tracing::debug!(
-                    "QuIVer 索引增量变更超过 25%，已丢弃 (QuIVer index >25% dirty, discarded)，下次搜索前将自动重建"
+                    "QuIVer 索引增量变更超过 25%，已丢弃，下次搜索前将自动重建 (QuIVer index exceeded 25% dirty changes and was discarded; it will rebuild before the next search)"
                 );
             }
         }
@@ -727,7 +738,10 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub fn auto_quiver_build_needed(&self) -> bool {
-        self.auto_build_quiver && self.payloads.len() >= 10_000 && self.quiver_index.is_none()
+        self.dim <= crate::index::bq::MAX_BQ_DIM
+            && self.auto_build_quiver
+            && self.payloads.len() >= 10_000
+            && self.quiver_index.is_none()
     }
 
     pub fn search_cache_needs_prepare(&self, materialize_flat: bool) -> bool {
@@ -814,7 +828,11 @@ impl<T: VectorType> MemTable<T> {
 
         // 2. QuIVer 自动构建：当数据量 >= 10,000 且索引不存在时自动触发
         let active = self.payloads.len();
-        if self.auto_build_quiver && active >= 10_000 && self.quiver_index.is_none() {
+        if self.dim <= crate::index::bq::MAX_BQ_DIM
+            && self.auto_build_quiver
+            && active >= 10_000
+            && self.quiver_index.is_none()
+        {
             self.build_quiver_impl(&QuIVerConfig::default());
         }
 
@@ -864,7 +882,9 @@ impl<T: VectorType> MemTable<T> {
 
     /// 从持久化文件恢复 QuIVer 索引（跳过重建）
     pub fn set_quiver_index(&mut self, quiver: QuIVer) {
-        self.quiver_index = Some(quiver);
+        if self.dim <= crate::index::bq::MAX_BQ_DIM {
+            self.quiver_index = Some(quiver);
+        }
     }
 
     /// 设置 QuIVer 同步暂停标记（事务 commit 期间暂停，commit 后恢复）
@@ -895,6 +915,10 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub fn build_quiver(&mut self, config: &QuIVerConfig) {
+        if self.dim > crate::index::bq::MAX_BQ_DIM {
+            self.quiver_index = None;
+            return;
+        }
         // 确保 BQ 签名就绪（流式，不物化 merged），然后构建索引
         let total = self.vec_pool.total_count();
         if self.bq_signatures.len() != total || self.bq_dirty {
@@ -905,7 +929,10 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub(crate) fn quiver_build_snapshot(&self) -> Option<QuiverBuildSnapshot> {
-        if self.vec_pool.total_count() == 0 || self.payloads.is_empty() {
+        if self.dim > crate::index::bq::MAX_BQ_DIM
+            || self.vec_pool.total_count() == 0
+            || self.payloads.is_empty()
+        {
             return None;
         }
         let mut signatures = Bq2Store::new(self.dim);
@@ -1017,7 +1044,7 @@ impl<T: VectorType> MemTable<T> {
             if quiver.needs_rebuild() {
                 self.quiver_index = None;
                 tracing::debug!(
-                    "QuIVer 索引退化超过 25%，已丢弃 (QuIVer index >25% degraded, discarded)，下次搜索前将自动重建"
+                    "QuIVer 索引退化超过 25%，已丢弃，下次搜索前将自动重建 (QuIVer index exceeded 25% degradation and was discarded; it will rebuild before the next search)"
                 );
             }
         }
@@ -1063,7 +1090,7 @@ impl<T: VectorType> MemTable<T> {
                     {
                         self.quiver_index = None;
                         tracing::debug!(
-                            "QuIVer 索引退化超过 25%，已丢弃 (QuIVer index >25% degraded, discarded)，下次搜索前将自动重建"
+                            "QuIVer 索引退化超过 25%，已丢弃，下次搜索前将自动重建 (QuIVer index exceeded 25% degradation and was discarded; it will rebuild before the next search)"
                         );
                     }
                 }
@@ -1540,7 +1567,7 @@ impl<T: VectorType> MemTable<T> {
                     if quiver.needs_rebuild() {
                         self.quiver_index = None;
                         tracing::debug!(
-                            "QuIVer 索引增量变更超过 25%，已丢弃 (QuIVer index >25% dirty, discarded)，下次搜索前将自动重建"
+                            "QuIVer 索引增量变更超过 25%，已丢弃，下次搜索前将自动重建 (QuIVer index exceeded 25% dirty changes and was discarded; it will rebuild before the next search)"
                         );
                     }
                 }
@@ -1640,6 +1667,14 @@ impl<T: VectorType> MemTable<T> {
             + label_index_bytes
             + quiver_bytes
             + text_bytes
+    }
+
+    pub(crate) fn advise_cold_vectors_dontneed(&self) {
+        self.vec_pool.advise_dontneed();
+    }
+
+    pub(crate) fn mmap_vector_bytes(&self) -> usize {
+        self.vec_pool.mmap_bytes()
     }
 
     // --- 文本引擎接口 ---

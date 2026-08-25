@@ -4,6 +4,18 @@ pub mod nodejs {
     use crate::database::Database as GenericDatabase;
     use napi_derive::napi;
 
+    fn to_napi_error(error: crate::error::TriviumError) -> napi::Error {
+        let code = match &error {
+            crate::error::TriviumError::ReadOnlyViolation { .. } => "TDB_READ_ONLY",
+            crate::error::TriviumError::RecoveryRequired { .. } => "TDB_RECOVERY_REQUIRED",
+            crate::error::TriviumError::ImmutableArtifactInvalid { .. } => "TDB_IMMUTABLE_ARTIFACT",
+            crate::error::TriviumError::GenerationBusy { .. } => "TDB_GENERATION_BUSY",
+            crate::error::TriviumError::InvalidInput(_) => "TDB_INVALID_INPUT",
+            _ => "TDB_ERROR",
+        };
+        napi::Error::new(napi::Status::GenericFailure, format!("{code}: {error}"))
+    }
+
     // ════════ 后端枚举：封装三种泛型特化 ════════
 
     enum DbBackend {
@@ -117,6 +129,35 @@ pub mod nodejs {
     }
 
     #[napi(object)]
+    pub struct JsGroupedSearchResult {
+        pub semantic_hits: Vec<JsSearchHit>,
+        pub graph_hits: Vec<JsSearchHit>,
+    }
+
+    fn round_api_f32(value: f32) -> f64 {
+        ((value as f64) * 1_000_000.0).round() / 1_000_000.0
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::round_api_f32;
+
+        #[test]
+        fn 边权重_api舍入到六位小数() {
+            assert_eq!(round_api_f32(0.9f32), 0.9);
+            assert_eq!(round_api_f32(0.12345678f32), 0.123457);
+        }
+    }
+
+    fn search_hit_to_js(hit: crate::node::SearchHit) -> JsSearchHit {
+        JsSearchHit {
+            id: hit.id as f64,
+            score: hit.score as f64,
+            payload: hit.payload,
+        }
+    }
+
+    #[napi(object)]
     pub struct JsReachabilityStep {
         pub from: f64,
         pub to: f64,
@@ -152,6 +193,8 @@ pub mod nodejs {
         pub load_text_index: Option<bool>,
         pub expected_nodes: Option<f64>,
         pub memory_limit_mb: Option<f64>,
+        pub access_mode: Option<String>,
+        pub missing_index_policy: Option<String>,
     }
 
     /// 高级管线专用配置结构
@@ -239,6 +282,7 @@ pub mod nodejs {
         pub counts: serde_json::Value,
         /// Hook 注入的自定义数据
         pub custom_data: serde_json::Value,
+        pub observations: serde_json::Value,
         /// 管线是否被 Hook 提前终止
         pub aborted: bool,
     }
@@ -291,6 +335,30 @@ pub mod nodejs {
             "mmap" => Ok(crate::database::StorageMode::Mmap),
             "rom" => Ok(crate::database::StorageMode::Rom),
             _ => Err(napi::Error::from_reason("storageMode 必须是 mmap / rom")),
+        }
+    }
+
+    fn parse_access_mode(value: Option<&str>) -> napi::Result<crate::database::AccessMode> {
+        match value.unwrap_or("readWrite") {
+            "readWrite" => Ok(crate::database::AccessMode::ReadWrite),
+            "readOnly" => Ok(crate::database::AccessMode::ReadOnly),
+            "immutable" => Ok(crate::database::AccessMode::Immutable),
+            _ => Err(napi::Error::from_reason(
+                "accessMode 必须是 readWrite / readOnly / immutable",
+            )),
+        }
+    }
+
+    fn parse_missing_index_policy(
+        value: Option<&str>,
+    ) -> napi::Result<crate::database::MissingIndexPolicy> {
+        match value.unwrap_or("fallback") {
+            "fallback" => Ok(crate::database::MissingIndexPolicy::Fallback),
+            "buildInMemory" => Ok(crate::database::MissingIndexPolicy::BuildInMemory),
+            "error" => Ok(crate::database::MissingIndexPolicy::Error),
+            _ => Err(napi::Error::from_reason(
+                "missingIndexPolicy 必须是 fallback / buildInMemory / error",
+            )),
         }
     }
 
@@ -359,6 +427,10 @@ pub mod nodejs {
                         load_text_index: options.load_text_index.unwrap_or(false),
                         expected_nodes,
                         memory_limit,
+                        access_mode: parse_access_mode(options.access_mode.as_deref())?,
+                        missing_index_policy: parse_missing_index_policy(
+                            options.missing_index_policy.as_deref(),
+                        )?,
                     };
                     (dim, dtype, config)
                 }
@@ -382,15 +454,15 @@ pub mod nodejs {
             let inner = match dtype_str {
                 "f32" => DbBackend::F32(
                     GenericDatabase::<f32>::open_with_config(&path, config)
-                        .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+                        .map_err(to_napi_error)?,
                 ),
                 "f16" => DbBackend::F16(
                     GenericDatabase::<half::f16>::open_with_config(&path, config)
-                        .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+                        .map_err(to_napi_error)?,
                 ),
                 "u64" => DbBackend::U64(
                     GenericDatabase::<u64>::open_with_config(&path, config)
-                        .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+                        .map_err(to_napi_error)?,
                 ),
                 _ => return Err(napi::Error::from_reason("dtype 必须是 f32 / f16 / u64")),
             };
@@ -542,6 +614,13 @@ pub mod nodejs {
                 timings: serde_json::Value::Object(timings_map),
                 counts: serde_json::Value::Object(counts),
                 custom_data: hook_ctx.custom_data,
+                observations: serde_json::Value::Object(
+                    hook_ctx
+                        .observations
+                        .iter()
+                        .map(|(name, value)| (name.clone(), serde_json::json!(value)))
+                        .collect(),
+                ),
                 aborted: hook_ctx.abort,
             };
 
@@ -739,7 +818,7 @@ pub mod nodejs {
                         .map(|e| JsEdge {
                             target_id: e.target_id as f64,
                             label: e.label.clone(),
-                            weight: e.weight as f64,
+                            weight: round_api_f32(e.weight),
                         })
                         .collect();
                     JsNodeView {
@@ -758,7 +837,7 @@ pub mod nodejs {
                         .map(|e| JsEdge {
                             target_id: e.target_id as f64,
                             label: e.label.clone(),
-                            weight: e.weight as f64,
+                            weight: round_api_f32(e.weight),
                         })
                         .collect();
                     JsNodeView {
@@ -777,7 +856,7 @@ pub mod nodejs {
                         .map(|e| JsEdge {
                             target_id: e.target_id as f64,
                             label: e.label.clone(),
-                            weight: e.weight as f64,
+                            weight: round_api_f32(e.weight),
                         })
                         .collect();
                     JsNodeView {
@@ -1119,6 +1198,58 @@ pub mod nodejs {
         }
 
         #[napi]
+        pub fn search_grouped(
+            &self,
+            query_vector: Vec<f64>,
+            top_k: Option<i64>,
+            expand_depth: Option<u32>,
+            min_score: Option<f64>,
+        ) -> napi::Result<JsGroupedSearchResult> {
+            let top_k = top_k.unwrap_or(5);
+            if top_k <= 0 {
+                return Err(napi::Error::from_reason(format!(
+                    "top_k 必须为正整数，收到 {top_k}"
+                )));
+            }
+            let config = crate::database::SearchConfig {
+                top_k: top_k as usize,
+                expand_depth: expand_depth.unwrap_or(2) as usize,
+                min_score: min_score.unwrap_or(0.1) as f32,
+                ..Default::default()
+            };
+            let result = match &self.inner {
+                DbBackend::F32(db) => {
+                    let vector: Vec<f32> = query_vector.iter().map(|&value| value as f32).collect();
+                    db.search_hybrid_grouped(None, Some(&vector), &config)
+                }
+                DbBackend::F16(db) => {
+                    let vector: Vec<half::f16> = query_vector
+                        .iter()
+                        .map(|&value| half::f16::from_f64(value))
+                        .collect();
+                    db.search_hybrid_grouped(None, Some(&vector), &config)
+                }
+                DbBackend::U64(db) => {
+                    let vector: Vec<u64> = query_vector.iter().map(|&value| value as u64).collect();
+                    db.search_hybrid_grouped(None, Some(&vector), &config)
+                }
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            Ok(JsGroupedSearchResult {
+                semantic_hits: result
+                    .semantic_hits
+                    .into_iter()
+                    .map(search_hit_to_js)
+                    .collect(),
+                graph_hits: result
+                    .graph_hits
+                    .into_iter()
+                    .map(search_hit_to_js)
+                    .collect(),
+            })
+        }
+
+        #[napi]
         pub fn search_batch(
             &self,
             query_vectors: Vec<Vec<f64>>,
@@ -1208,6 +1339,7 @@ pub mod nodejs {
                 diffusion_bias: cfg
                     .diffusion_bias
                     .map(|v| v.iter().map(|&x| x as f32).collect()),
+                expand_labels: cfg.expand_labels,
                 ..Default::default()
             };
 
@@ -1334,14 +1466,16 @@ pub mod nodejs {
         /// db.createIndex('name')   // 之后 tql('FIND {name: "Alice"} RETURN *') 使用 O(1) 索引
         /// ```
         #[napi]
-        pub fn create_index(&mut self, field: String) {
-            dispatch!(self, mut db => db.create_index(&field));
+        pub fn create_index(&mut self, field: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.create_index(&field))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
         }
 
         /// 删除属性索引（查询仍可用，退化为全扫描）
         #[napi]
-        pub fn drop_index(&mut self, field: String) {
-            dispatch!(self, mut db => db.drop_index(&field));
+        pub fn drop_index(&mut self, field: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.drop_index(&field))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
         }
 
         // ── 轻量级单字段查询 ──
@@ -1360,7 +1494,7 @@ pub mod nodejs {
                 .map(|e| JsEdge {
                     target_id: e.target_id as f64,
                     label: e.label,
-                    weight: e.weight as f64,
+                    weight: round_api_f32(e.weight),
                 })
                 .collect()
         }
@@ -1374,7 +1508,7 @@ pub mod nodejs {
                     source_id: edge.source_id as f64,
                     target_id: edge.target_id as f64,
                     label: edge.label,
-                    weight: edge.weight as f64,
+                    weight: round_api_f32(edge.weight),
                 })
                 .collect()
         }
@@ -1457,12 +1591,24 @@ pub mod nodejs {
                 .map_err(|e| napi::Error::from_reason(e.to_string()))
         }
 
+        #[napi]
+        pub fn publish_generation_manifest(
+            &mut self,
+            generation_id: String,
+        ) -> napi::Result<serde_json::Value> {
+            let manifest =
+                dispatch!(self, mut db => db.publish_generation_manifest(&generation_id))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            serde_json::to_value(manifest)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
         /// 运行时切换 WAL 同步模式
         #[napi]
         pub fn set_sync_mode(&mut self, mode: String) -> napi::Result<()> {
             let sm = parse_sync_mode(&mode)?;
-            dispatch!(self, mut db => db.set_sync_mode(sm));
-            Ok(())
+            dispatch!(self, mut db => db.set_sync_mode(sm))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
         }
 
         /// 启动后台自动压缩（每 interval_secs 秒落盘一次，默认 2 小时=7200秒）
@@ -1474,8 +1620,9 @@ pub mod nodejs {
         }
 
         #[napi]
-        pub fn set_auto_build_quiver(&mut self, enabled: bool) {
-            dispatch!(self, mut db => db.set_auto_build_quiver(enabled));
+        pub fn set_auto_build_quiver(&mut self, enabled: bool) -> napi::Result<()> {
+            dispatch!(self, mut db => db.set_auto_build_quiver(enabled))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
         }
 
         /// 停止后台自动压缩

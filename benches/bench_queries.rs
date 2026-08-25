@@ -140,7 +140,7 @@ fn bench_tql_find_with_index(c: &mut Criterion) {
     }
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
-    db.create_index("type");
+    db.create_index("type").unwrap();
 
     c.bench_function("tql_find_eq_with_index_5k", |b| {
         b.iter(|| {
@@ -264,8 +264,8 @@ fn bench_create_index(c: &mut Criterion) {
 
     c.bench_function("create_index_5k_nodes", |b| {
         b.iter(|| {
-            db.create_index(black_box("category"));
-            db.drop_index("category");
+            db.create_index(black_box("category")).unwrap();
+            db.drop_index("category").unwrap();
         })
     });
 
@@ -397,7 +397,7 @@ fn bench_index_vs_no_index(c: &mut Criterion) {
         })
     });
 
-    db.create_index("type");
+    db.create_index("type").unwrap();
 
     group.bench_function("find_type_with_index", |b| {
         b.iter(|| {

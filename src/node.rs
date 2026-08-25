@@ -40,3 +40,9 @@ pub struct SearchHit {
     pub score: f32, // 查询得分（例如 Cosine Similarity 或图扩散热度）
     pub payload: serde_json::Value,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct GroupedSearchResult {
+    pub semantic_hits: Vec<SearchHit>,
+    pub graph_hits: Vec<SearchHit>,
+}

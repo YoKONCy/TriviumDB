@@ -5,6 +5,44 @@ pub mod python {
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyList};
 
+    pyo3::create_exception!(triviumdb, ReadOnlyError, pyo3::exceptions::PyRuntimeError);
+    pyo3::create_exception!(
+        triviumdb,
+        RecoveryRequiredError,
+        pyo3::exceptions::PyRuntimeError
+    );
+    pyo3::create_exception!(
+        triviumdb,
+        ImmutableArtifactError,
+        pyo3::exceptions::PyRuntimeError
+    );
+    pyo3::create_exception!(
+        triviumdb,
+        GenerationBusyError,
+        pyo3::exceptions::PyRuntimeError
+    );
+
+    fn to_py_error(error: crate::error::TriviumError) -> PyErr {
+        match error {
+            crate::error::TriviumError::ReadOnlyViolation { .. } => {
+                ReadOnlyError::new_err(error.to_string())
+            }
+            crate::error::TriviumError::RecoveryRequired { .. } => {
+                RecoveryRequiredError::new_err(error.to_string())
+            }
+            crate::error::TriviumError::ImmutableArtifactInvalid { .. } => {
+                ImmutableArtifactError::new_err(error.to_string())
+            }
+            crate::error::TriviumError::GenerationBusy { .. } => {
+                GenerationBusyError::new_err(error.to_string())
+            }
+            crate::error::TriviumError::InvalidInput(message) => {
+                pyo3::exceptions::PyValueError::new_err(message)
+            }
+            _ => pyo3::exceptions::PyRuntimeError::new_err(error.to_string()),
+        }
+    }
+
     enum DbBackend {
         F32(GenericDatabase<f32>),
         F16(GenericDatabase<half::f16>),
@@ -67,6 +105,14 @@ pub mod python {
         pub payload: PyObject,
     }
 
+    #[pyclass(name = "GroupedSearchResult")]
+    pub struct PyGroupedSearchResult {
+        #[pyo3(get)]
+        pub semantic_hits: PyObject,
+        #[pyo3(get)]
+        pub graph_hits: PyObject,
+    }
+
     #[pyclass(name = "ReachabilityStep")]
     #[derive(Clone)]
     pub struct PyReachabilityStep {
@@ -100,7 +146,7 @@ pub mod python {
         #[pyo3(get)]
         pub label: String,
         #[pyo3(get)]
-        pub weight: f32,
+        pub weight: f64,
     }
 
     #[pyclass(name = "IncomingEdge")]
@@ -113,7 +159,19 @@ pub mod python {
         #[pyo3(get)]
         pub label: String,
         #[pyo3(get)]
-        pub weight: f32,
+        pub weight: f64,
+    }
+
+    fn round_api_f32(value: f32) -> f64 {
+        ((value as f64) * 1_000_000.0).round() / 1_000_000.0
+    }
+
+    fn search_hit_to_python(py: Python<'_>, hit: crate::node::SearchHit) -> PySearchHit {
+        PySearchHit {
+            id: hit.id,
+            score: hit.score,
+            payload: json_to_pyobject(py, &hit.payload),
+        }
     }
 
     /// Python 侧的节点完整视图
@@ -154,6 +212,8 @@ pub mod python {
         /// Hook 注入的自定义数据
         #[pyo3(get)]
         pub custom_data: PyObject,
+        #[pyo3(get)]
+        pub observations: PyObject,
         /// 管线是否被 Hook 提前终止
         #[pyo3(get)]
         pub aborted: bool,
@@ -266,10 +326,32 @@ pub mod python {
         crate::storage::wal::SyncMode::parse(s).map_err(pyo3::exceptions::PyValueError::new_err)
     }
 
+    fn parse_access_mode(s: &str) -> PyResult<crate::database::AccessMode> {
+        match s {
+            "read_write" => Ok(crate::database::AccessMode::ReadWrite),
+            "read_only" => Ok(crate::database::AccessMode::ReadOnly),
+            "immutable" => Ok(crate::database::AccessMode::Immutable),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                "access_mode 必须是 read_write / read_only / immutable",
+            )),
+        }
+    }
+
+    fn parse_missing_index_policy(value: &str) -> PyResult<crate::database::MissingIndexPolicy> {
+        match value {
+            "fallback" => Ok(crate::database::MissingIndexPolicy::Fallback),
+            "build_in_memory" => Ok(crate::database::MissingIndexPolicy::BuildInMemory),
+            "error" => Ok(crate::database::MissingIndexPolicy::Error),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                "missing_index_policy 必须是 fallback / build_in_memory / error",
+            )),
+        }
+    }
+
     #[pymethods]
     impl PyTriviumDB {
         #[new]
-        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0))]
+        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0, access_mode="read_write", missing_index_policy="fallback"))]
         fn new(
             path: &str,
             dim: usize,
@@ -279,6 +361,8 @@ pub mod python {
             auto_build_quiver: bool,
             expected_nodes: Option<usize>,
             memory_limit_mb: usize,
+            access_mode: &str,
+            missing_index_policy: &str,
         ) -> PyResult<Self> {
             let sm = parse_sync_mode(sync_mode)?;
             let memory_limit = memory_limit_mb.checked_mul(1024 * 1024).ok_or_else(|| {
@@ -291,29 +375,20 @@ pub mod python {
                 auto_build_quiver,
                 expected_nodes,
                 memory_limit,
+                access_mode: parse_access_mode(access_mode)?,
+                missing_index_policy: parse_missing_index_policy(missing_index_policy)?,
                 ..Default::default()
             };
             let inner = match dtype {
                 "f32" => DbBackend::F32(
-                    GenericDatabase::<f32>::open_with_config(path, config).map_err(
-                        |e: crate::error::TriviumError| {
-                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                        },
-                    )?,
+                    GenericDatabase::<f32>::open_with_config(path, config).map_err(to_py_error)?,
                 ),
                 "f16" => DbBackend::F16(
-                    GenericDatabase::<half::f16>::open_with_config(path, config).map_err(
-                        |e: crate::error::TriviumError| {
-                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                        },
-                    )?,
+                    GenericDatabase::<half::f16>::open_with_config(path, config)
+                        .map_err(to_py_error)?,
                 ),
                 "u64" => DbBackend::U64(
-                    GenericDatabase::<u64>::open_with_config(path, config).map_err(
-                        |e: crate::error::TriviumError| {
-                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                        },
-                    )?,
+                    GenericDatabase::<u64>::open_with_config(path, config).map_err(to_py_error)?,
                 ),
                 _ => {
                     return Err(pyo3::exceptions::PyValueError::new_err(
@@ -330,8 +405,8 @@ pub mod python {
         /// 运行时切换 WAL 同步模式: "full" / "normal" / "off"
         fn set_sync_mode(&mut self, mode: &str) -> PyResult<()> {
             let sm = parse_sync_mode(mode)?;
-            dispatch!(self, mut db => db.set_sync_mode(sm));
-            Ok(())
+            dispatch!(self, mut db => db.set_sync_mode(sm))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
         }
 
         // ════════ Hook 管理 ════════
@@ -460,6 +535,15 @@ pub mod python {
                 timings: timings_dict.into_any().unbind(),
                 counts: counts_dict.into_any().unbind(),
                 custom_data: json_to_pyobject(py, &hook_ctx.custom_data),
+                observations: hook_ctx
+                    .observations
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value))
+                    .collect::<std::collections::HashMap<_, _>>()
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind(),
                 aborted: hook_ctx.abort,
             };
 
@@ -597,6 +681,69 @@ pub mod python {
                     payload: json_to_pyobject(py, &h.payload),
                 })
                 .collect())
+        }
+
+        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None))]
+        fn search_grouped(
+            &self,
+            py: Python<'_>,
+            query_vector: Bound<'_, PyAny>,
+            top_k: usize,
+            recall_k: usize,
+            rerank_k: usize,
+            expand_depth: usize,
+            min_score: f32,
+            payload_filter: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<PyGroupedSearchResult> {
+            let rust_filter = payload_filter
+                .map(|dict| dict_to_filter(py, dict))
+                .transpose()?;
+            let config = crate::database::SearchConfig {
+                top_k,
+                recall_k,
+                rerank_k,
+                expand_depth,
+                min_score,
+                payload_filter: rust_filter,
+                ..Default::default()
+            };
+            let result = match &self.inner {
+                DbBackend::F32(db) => {
+                    let vector: Vec<f32> = query_vector.extract()?;
+                    py.allow_threads(|| db.search_hybrid_grouped(None, Some(&vector), &config))
+                }
+                DbBackend::F16(db) => {
+                    let vector: Vec<f32> = query_vector.extract()?;
+                    let vector: Vec<half::f16> =
+                        vector.into_iter().map(half::f16::from_f32).collect();
+                    py.allow_threads(|| db.search_hybrid_grouped(None, Some(&vector), &config))
+                }
+                DbBackend::U64(db) => {
+                    let vector: Vec<u64> = query_vector.extract()?;
+                    py.allow_threads(|| db.search_hybrid_grouped(None, Some(&vector), &config))
+                }
+            }
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(PyGroupedSearchResult {
+                semantic_hits: result
+                    .semantic_hits
+                    .into_iter()
+                    .map(|hit| search_hit_to_python(py, hit))
+                    .collect::<Vec<_>>()
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind(),
+                graph_hits: result
+                    .graph_hits
+                    .into_iter()
+                    .map(|hit| search_hit_to_python(py, hit))
+                    .collect::<Vec<_>>()
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind(),
+            })
         }
 
         #[pyo3(signature = (query_vectors, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, parallelism=0))]
@@ -929,13 +1076,15 @@ pub mod python {
         /// db.create_index("name")    # 之后 tql('FIND {name: "Alice"} RETURN *') 使用 O(1) 索引
         /// db.create_index("type")
         /// ```
-        fn create_index(&mut self, field: &str) {
-            dispatch!(self, mut db => db.create_index(field));
+        fn create_index(&mut self, field: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.create_index(field))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
         }
 
         /// 删除属性索引（查询仍可用，退化为全扫描）
-        fn drop_index(&mut self, field: &str) {
-            dispatch!(self, mut db => db.drop_index(field));
+        fn drop_index(&mut self, field: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.drop_index(field))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
         }
 
         // ════════ 轻量级单字段查询 ════════
@@ -952,7 +1101,7 @@ pub mod python {
                 .map(|e| PyEdge {
                     target_id: e.target_id,
                     label: e.label,
-                    weight: e.weight,
+                    weight: round_api_f32(e.weight),
                 })
                 .collect()
         }
@@ -965,7 +1114,7 @@ pub mod python {
                     source_id: edge.source_id,
                     target_id: edge.target_id,
                     label: edge.label,
-                    weight: edge.weight,
+                    weight: round_api_f32(edge.weight),
                 })
                 .collect()
         }
@@ -984,7 +1133,7 @@ pub mod python {
                                 .map(|e| PyEdge {
                                     target_id: e.target_id,
                                     label: e.label.clone(),
-                                    weight: e.weight,
+                                    weight: round_api_f32(e.weight),
                                 })
                                 .collect(),
                             num_edges: n.edges.len(),
@@ -1004,7 +1153,7 @@ pub mod python {
                                 .map(|e| PyEdge {
                                     target_id: e.target_id,
                                     label: e.label.clone(),
-                                    weight: e.weight,
+                                    weight: round_api_f32(e.weight),
                                 })
                                 .collect(),
                             num_edges: n.edges.len(),
@@ -1023,7 +1172,7 @@ pub mod python {
                                 .map(|e| PyEdge {
                                     target_id: e.target_id,
                                     label: e.label.clone(),
-                                    weight: e.weight,
+                                    weight: round_api_f32(e.weight),
                                 })
                                 .collect(),
                             num_edges: n.edges.len(),
@@ -1151,6 +1300,14 @@ pub mod python {
             })
         }
 
+        fn publish_generation_manifest(&mut self, generation_id: &str) -> PyResult<PyObject> {
+            let manifest = dispatch!(self, mut db => db.publish_generation_manifest(generation_id))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            let value = serde_json::to_value(manifest)
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(Python::with_gil(|py| json_to_pyobject(py, &value)))
+        }
+
         fn dim(&self) -> usize {
             dispatch!(self, db => db.dim())
         }
@@ -1209,8 +1366,9 @@ pub mod python {
                 .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
         }
 
-        fn set_auto_build_quiver(&mut self, enabled: bool) {
-            dispatch!(self, mut db => db.set_auto_build_quiver(enabled));
+        fn set_auto_build_quiver(&mut self, enabled: bool) -> PyResult<()> {
+            dispatch!(self, mut db => db.set_auto_build_quiver(enabled))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
         }
 
         fn clear_search_state(&self) {
@@ -2012,8 +2170,22 @@ pub mod python {
 
     #[pymodule]
     pub fn triviumdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        m.add("ReadOnlyError", m.py().get_type::<ReadOnlyError>())?;
+        m.add(
+            "RecoveryRequiredError",
+            m.py().get_type::<RecoveryRequiredError>(),
+        )?;
+        m.add(
+            "ImmutableArtifactError",
+            m.py().get_type::<ImmutableArtifactError>(),
+        )?;
+        m.add(
+            "GenerationBusyError",
+            m.py().get_type::<GenerationBusyError>(),
+        )?;
         m.add_class::<PyTriviumDB>()?;
         m.add_class::<PySearchHit>()?;
+        m.add_class::<PyGroupedSearchResult>()?;
         m.add_class::<PyReachabilityStep>()?;
         m.add_class::<PyReachabilityResult>()?;
         m.add_class::<PyEdge>()?;
@@ -2024,5 +2196,16 @@ pub mod python {
         m.add_class::<PyTransaction>()?;
         m.add_function(wrap_pyfunction!(init_logger, m)?)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::round_api_f32;
+
+        #[test]
+        fn 边权重_api舍入到六位小数() {
+            assert_eq!(round_api_f32(0.9f32), 0.9);
+            assert_eq!(round_api_f32(0.12345678f32), 0.123457);
+        }
     }
 }

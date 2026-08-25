@@ -345,6 +345,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 原子提交一组事务操作（供 Transaction::commit 和 commit_tx 共用）
     pub(crate) fn commit_ops(&mut self, ops: Vec<TxOp<T>>) -> Result<Vec<NodeId>> {
         let _operation = self.enter_operation()?;
+        self.require_write_access("transaction commit")?;
         if ops.is_empty() {
             return Ok(Vec::new());
         }
@@ -385,7 +386,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     }
                     pre_assigned_ids.push(Some(sim_next_id));
                     pending_ids.insert(sim_next_id);
-                    sim_next_id += 1;
+                    sim_next_id = sim_next_id.checked_add(1).ok_or_else(|| {
+                        crate::error::TriviumError::InvalidInput("节点 ID 空间已耗尽".into())
+                    })?;
                 }
                 TxOp::InsertWithId { id, vector, .. } => {
                     if *id == 0 {
@@ -415,7 +418,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     pre_assigned_ids.push(Some(*id));
                     pending_ids.insert(*id);
                     if *id >= sim_next_id {
-                        sim_next_id = *id + 1;
+                        sim_next_id = id.checked_add(1).ok_or_else(|| {
+                            crate::error::TriviumError::InvalidInput("节点 ID 空间已耗尽".into())
+                        })?;
                     }
                 }
                 TxOp::Link {

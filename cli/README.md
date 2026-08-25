@@ -55,6 +55,8 @@ tdb ui mydata.tdb
 - **`--dtype <f32|f16|u64>`**：控制数据库向量元素类型。
 - **`--dim <N>`**：创建新库或无法嗅探文件头时指定向量维度。
 
+> ⚠️ **强烈建议 `--dim` 不超过 3072。** 更高维度仍可使用精确 BruteForce 检索，但不会启用 QuIVer ANN 加速；显式构建 QuIVer 会被安全拒绝。
+
 ## JSONL 导入/导出格式
 
 `tdb export` 每行输出一个 JSON 对象：

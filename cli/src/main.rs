@@ -139,7 +139,7 @@ fn main() {
 
     let result = run(cli, cfg);
     if let Err(e) = result {
-        eprintln!("{} {}", "error:".red().bold(), e);
+        eprintln!("{} {}", "错误 / Error:".red().bold(), e);
         std::process::exit(1);
     }
 }

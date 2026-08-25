@@ -66,7 +66,7 @@ impl CompactionThread {
 
                 // 3. 次级落盘锁阶段（用于写文件和热插拔指针）
                 let mut mt = memtable.write().unwrap_or_else(|p| {
-                    tracing::warn!("Compaction thread: MemTable Mutex poisoned, recovering...");
+                    tracing::warn!("Compaction 线程：MemTable 互斥锁中毒，正在恢复 (Compaction thread: MemTable mutex poisoned, recovering)");
                     p.into_inner()
                 });
                 tracing::info!(

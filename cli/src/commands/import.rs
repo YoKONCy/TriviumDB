@@ -30,8 +30,13 @@ pub fn run(handle: &mut DbHandle, input: &str) -> CliResult {
         if trimmed.is_empty() {
             continue;
         }
-        let v: Value = serde_json::from_str(trimmed)
-            .map_err(|e| format!("第 {} 行 JSON 解析失败: {e}", lineno + 1))?;
+        let v: Value = serde_json::from_str(trimmed).map_err(|e| {
+            format!(
+                "第 {} 行 JSON 解析失败 / Failed to parse JSON at line {}: {e}",
+                lineno + 1,
+                lineno + 1
+            )
+        })?;
         records.push(parse_record(&v, lineno + 1)?);
     }
 
@@ -67,7 +72,7 @@ pub fn run(handle: &mut DbHandle, input: &str) -> CliResult {
                     Err(e) => {
                         failed_edges += 1;
                         eprintln!(
-                            "warning: 边导入失败 src={src} target={target} label={label}: {e}"
+                            "警告 / Warning: 边导入失败 / Failed to import edge src={src} target={target} label={label}: {e}"
                         );
                     }
                 }
@@ -80,12 +85,12 @@ pub fn run(handle: &mut DbHandle, input: &str) -> CliResult {
     handle.flush()?;
     if failed_edges == 0 {
         println!(
-            "{} 导入 {inserted} 个节点, {linked} 条边 <- {input}",
+            "{} 已导入 {inserted} 个节点、{linked} 条边 / Imported {inserted} nodes and {linked} edges <- {input}",
             "✓".green().bold()
         );
     } else {
         println!(
-            "{} 导入 {inserted} 个节点, {linked} 条边, {failed_edges} 条边失败 <- {input}",
+            "{} 已导入 {inserted} 个节点、{linked} 条边，{failed_edges} 条边失败 / Imported {inserted} nodes and {linked} edges; {failed_edges} edges failed <- {input}",
             "✓".green().bold()
         );
     }

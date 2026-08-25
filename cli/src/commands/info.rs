@@ -68,25 +68,29 @@ pub fn print_info(handle: &DbHandle, path: &str, format: OutputFormat) -> CliRes
                 "{}{}",
                 human_bytes_opt(wal_size),
                 if wal_size.unwrap_or(0) > 0 {
-                    " (pending)"
+                    "（待处理 / pending）"
                 } else {
                     ""
                 }
             );
-            let quiver_str = if quiver_exists { "present" } else { "—" };
+            let quiver_str = if quiver_exists {
+                "存在 / present"
+            } else {
+                "—"
+            };
 
             let mut b = Builder::default();
             b.push_record(["字段 (Field)", "值 (Value)"]);
-            b.push_record(["Path", path]);
-            b.push_record(["File Version", version_str.as_str()]);
-            b.push_record(["Dimension", dim_str.as_str()]);
-            b.push_record(["Data Type", dtype.as_str()]);
-            b.push_record(["Node Count", nodes_str.as_str()]);
-            b.push_record(["Estimated Memory", mem_str.as_str()]);
-            b.push_record(["File .tdb", tdb_str.as_str()]);
-            b.push_record(["File .vec", vec_str.as_str()]);
+            b.push_record(["路径 / Path", path]);
+            b.push_record(["文件版本 / File Version", version_str.as_str()]);
+            b.push_record(["维度 / Dimension", dim_str.as_str()]);
+            b.push_record(["数据类型 / Data Type", dtype.as_str()]);
+            b.push_record(["节点数 / Node Count", nodes_str.as_str()]);
+            b.push_record(["预估内存 / Estimated Memory", mem_str.as_str()]);
+            b.push_record(["文件 / File .tdb", tdb_str.as_str()]);
+            b.push_record(["文件 / File .vec", vec_str.as_str()]);
             b.push_record(["WAL", wal_str.as_str()]);
-            b.push_record(["QuIVer Index", quiver_str]);
+            b.push_record(["QuIVer 索引 / QuIVer Index", quiver_str]);
 
             let mut table = b.build();
             table.with(Style::rounded());

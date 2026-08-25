@@ -137,6 +137,90 @@ fn 测试_恶意BQ计数字段截断_应拒绝且不崩溃() {
 }
 
 #[test]
+fn 测试_损坏Edge标签和非有限权重_应拒绝且不崩溃() {
+    for corrupt_weight in [false, true] {
+        let path = tmp_db(if corrupt_weight {
+            "edge_nan"
+        } else {
+            "edge_utf8"
+        });
+        cleanup(&path);
+        {
+            let config = Config {
+                dim: DIM,
+                storage_mode: triviumdb::database::StorageMode::Rom,
+                ..Default::default()
+            };
+            let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
+            let a = db
+                .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+                .unwrap();
+            let b = db
+                .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({}))
+                .unwrap();
+            db.link(a, b, "x", 0.5).unwrap();
+            db.flush().unwrap();
+        }
+        std::fs::remove_file(format!("{}.wal", path)).ok();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(42)).unwrap();
+        let mut offset = [0u8; 8];
+        file.read_exact(&mut offset).unwrap();
+        let edge_offset = u64::from_le_bytes(offset);
+        if corrupt_weight {
+            file.seek(SeekFrom::Start(edge_offset + 19)).unwrap();
+            file.write_all(&f32::NAN.to_le_bytes()).unwrap();
+        } else {
+            file.seek(SeekFrom::Start(edge_offset + 18)).unwrap();
+            file.write_all(&[0xff]).unwrap();
+        }
+        file.sync_all().unwrap();
+        drop(file);
+        let result = catch_unwind(|| Database::<f32>::open(&path, DIM));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
+        cleanup(&path);
+    }
+}
+
+#[test]
+fn 测试_恢复next_id耗尽后插入应返回错误而非回绕() {
+    let path = tmp_db("next_id_exhausted");
+    cleanup(&path);
+    {
+        let config = Config {
+            dim: DIM,
+            storage_mode: triviumdb::database::StorageMode::Rom,
+            ..Default::default()
+        };
+        let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
+        db.flush().unwrap();
+    }
+    std::fs::remove_file(format!("{}.wal", path)).ok();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    file.seek(SeekFrom::Start(10)).unwrap();
+    file.write_all(&u64::MAX.to_le_bytes()).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
+    }));
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_err());
+    assert_eq!(db.node_count(), 0);
+    cleanup(&path);
+}
+
+#[test]
 fn 测试_超大维数模拟拦截_防平台指针溢出() {
     let path = tmp_db("huge_dim");
     cleanup(&path);

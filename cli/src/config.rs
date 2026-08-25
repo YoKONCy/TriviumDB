@@ -53,7 +53,7 @@ impl Config {
             Ok(cfg) => cfg,
             Err(e) => {
                 eprintln!(
-                    "warning: 配置解析失败 {}: {e}（已忽略，使用默认）",
+                    "警告 / Warning: 配置解析失败 / Failed to parse configuration {}: {e}（已忽略并使用默认值 / Ignored; using defaults）",
                     path.display()
                 );
                 Self::default()

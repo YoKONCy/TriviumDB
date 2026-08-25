@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.7.6
+> **版本**: v0.8.0
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -59,13 +59,146 @@ with triviumdb.TriviumDB("my_data.tdb", dim=1536) as db:
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `path` | `str` | *必填* | `.tdb` 文件路径，不存在时自动创建 |
-| `dim` | `int` | `1536` | 向量维度，必须与后续插入的向量长度一致 |
+| `dim` | `int` | `1536` | 向量维度，必须与后续插入的向量长度一致；强烈建议不超过 3072 |
 | `dtype` | `str` | `"f32"` | 向量存储精度：`f32`（标准）、`f16`（省内存）、`u64`（SimHash） |
 | `sync_mode` | `str` | `"normal"` | WAL 写入安全级别，详见[持久化与压缩](#持久化与压缩) |
 | `load_text_index` | `bool` | `False` | 是否在打开时加载持久化全文索引 |
 | `auto_build_quiver` | `bool` | `True` | 是否允许查询准备阶段自动构建 QuIVer；纯 `flush()` 不构建 ANN |
 | `expected_nodes` | `int \| None` | `None` | 预计总节点数；仅预留核心容器、不持久化、不是硬上限 |
 | `memory_limit_mb` | `int` | `0` | TriviumDB 内核内存预算（MiB）；0 表示不限制 |
+| `access_mode` | `str` | `"read_write"` | `read_write` 使用排他锁；`read_only` 使用共享锁；`immutable` 验证 manifest 后无锁打开 |
+
+`search_with_context` / `searchWithContext` 返回的上下文除阶段耗时和候选数外，还包含 `observations`：`estimated_heap_bytes`、`mmap_vector_bytes`、`node_count`、查询路由与 QuIVer `ef_search`；Linux 额外提供进程 RSS、累计主缺页和次缺页。缺页计数是进程累计值，调用方应计算相邻采样差值。
+
+> ⚠️ **强烈建议 `dim <= 3072`。** 数据库存储和精确 BruteForce 检索支持 3073–65536 维，但 QuIVer 仅支持 1–3072 维。高于 3072 维时，自动 QuIVer 构建会被安全跳过，搜索回退到 BruteForce；显式构建 QuIVer 会返回错误，不会 panic。若数据规模可能达到 1 万节点以上并依赖 ANN 性能，请在建库前选择不超过 3072 维的 embedding 模型或先做降维。
+
+### 只读访问模式
+
+只读模式面向已完成 `flush()` 的不可变数据库代际。多个进程可以同时以共享锁打开同一路径，但同路径 Reader 与 Writer 互斥：
+
+```python
+db = TriviumDB("generation-42/data.tdb", dim=768, access_mode="read_only")
+```
+
+```typescript
+const db = new TriviumDB("generation-42/data.tdb", {
+  dim: 768,
+  accessMode: "readOnly",
+})
+```
+
+Rust 可使用 `Database::<f32>::open_read_only(path, dim)`，或在 `Config` 中设置 `AccessMode::ReadOnly`。
+
+只读句柄具有以下安全语义：
+
+- 不创建数据库、WAL、sidecar 或一致性标记；
+- 不截断、回放或清理 WAL；检测到待恢复 WAL 时返回 `RecoveryRequired`；
+- 不删除损坏或错配的 TextIndex/QuIVer sidecar；
+- `.tdb/.vec/.flush_ok` 代际不完整时拒绝打开，不执行 metadata-only 降级；
+- 禁止 CRUD、事务提交、TQL mutation、索引修改、QuIVer 构建、flush 和 compact；
+- `close()` 和 Drop 不执行持久化；
+- QuIVer 不可用时保持内存只读并走安全检索路径，不写回磁盘。
+
+发布只读代际前必须由 Writer 完成 `flush()` 或 `close()`，并保留相邻 `.lock` 文件供 Reader 获取共享锁。不要在仍有进程持锁时删除 `.lock` 文件。
+
+### 不可变 Generation
+
+Writer 可在完成持久化后原子生成 generation manifest：
+
+```rust
+db.publish_generation_manifest("generation-42")?;
+```
+
+Python 使用 `db.publish_generation_manifest("generation-42")`，Node.js 使用 `db.publishGenerationManifest("generation-42")`。该操作会先执行安全 `flush()`，随后为当前 `.tdb`、`.vec`、`.flush_ok` 及已存在的 TextIndex/QuIVer sidecar 记录文件大小和 CRC32，并最后原子发布 `<path>.manifest.json`。
+
+发布完成后可在不需要 `.lock` 和 `.wal` 的部署目录中使用：
+
+```rust
+let db = Database::<f32>::open_immutable(path, 768)?;
+```
+
+```python
+db = TriviumDB(path, dim=768, access_mode="immutable")
+```
+
+```typescript
+const db = new TriviumDB(path, { dim: 768, accessMode: "immutable" })
+```
+
+Immutable 会在加载前验证 manifest 版本、完成状态、dtype、维度、文件存在性、大小和 CRC32，不创建锁文件或 WAL，也不修复任何文件。句柄存活期间禁止原地修改、覆盖或删除 generation 中的文件；正确发布方式是构建新目录或新路径，然后由应用原子切换 `current` 指针。
+
+`Config.missing_index_policy` 控制 Reader 遇到 QuIVer/TextIndex 缺失、错配或损坏时的行为：
+
+| 策略 | 行为 |
+|---|---|
+| `Fallback` | 默认；忽略不可用 sidecar，QuIVer 回退安全检索路径 |
+| `BuildInMemory` | 允许当前进程在内存中惰性构建 QuIVer，但绝不写回 sidecar |
+| `Error` | 严格模式；立即返回 `ImmutableArtifactInvalid`，不修改任何文件 |
+
+Python 使用 `missing_index_policy="fallback|build_in_memory|error"`；Node.js 使用 `missingIndexPolicy: "fallback" | "buildInMemory" | "error"`。ReadOnly/Immutable Reader 禁止启用 `enable_refractory_fatigue`，避免不同 Worker 因进程本地疲劳状态产生不一致结果。
+
+### Rust 类型化门面
+
+Rust 应用可以使用类型化门面，让只读代码在编译期无法调用写 API：
+
+```rust
+use triviumdb::{DatabaseReader, DatabaseWriter};
+
+let mut writer = DatabaseWriter::<f32>::open("data.tdb", 768)?;
+writer.insert(&vector, payload)?;
+writer.publish_generation_manifest("generation-42")?;
+
+let reader = DatabaseReader::<f32>::open_read_only("data.tdb", 768)?;
+let hits = reader.search(&query, 10, 0, 0.0)?;
+
+let immutable = DatabaseReader::<f32>::open_immutable("data.tdb", 768)?;
+let hits = immutable.search_exact(&query, 10)?;
+```
+
+`DatabaseReader<T>` 只暴露查询、节点读取、图遍历、TQL 只读查询、统计和关闭能力，不实现 `Deref<Target = Database<T>>`，因此无法绕过门面访问 `insert`、事务、索引修改、flush 或 compact。`DatabaseWriter<T>` 保留完整 `Database<T>` 能力，并通过 `Deref/DerefMut` 保持使用体验。
+
+原有 `Database<T>` API 继续保留，用于动态语言绑定和需要运行时切换访问模式的兼容场景。
+
+### Generation Store
+
+服务端或多 Worker 应使用 `GenerationStore` 管理不可变代际，不要原地覆盖 Reader 正在 mmap 的文件：
+
+```rust
+use triviumdb::{DatabaseWriter, GenerationStore};
+
+let store = GenerationStore::new("./generations");
+let path = store.prepare_generation("generation-42", "data.tdb")?;
+
+let mut writer = DatabaseWriter::<f32>::open(path.to_str().unwrap(), 768)?;
+writer.insert(&vector, payload)?;
+writer.publish_generation_manifest("generation-42")?;
+drop(writer);
+
+store.publish_current("generation-42", "data.tdb")?;
+
+let reader = store.open_current::<f32>(768)?;
+assert_eq!(reader.generation_id(), "generation-42");
+```
+
+目录结构：
+
+```text
+generations/
+├── current.json
+├── current.json
+├── generation-41/
+│   └── data.tdb...
+└── generation-42/
+    └── data.tdb...
+```
+
+`publish_current()` 使用临时文件、文件 `fsync`、原子 rename 和父目录同步，并在切换前完整验证 manifest、文件 checksum、generation ID 与实际 node count。`open_current()` 在解析 current 与获取 generation 共享租约期间持有管理共享锁，避免与切代或回收竞态。`GenerationReader` 在整个生命周期持有外部 runtime 共享租约；`reclaim_generation()` 只有取得排他租约后才删除旧代际，并且在 current 损坏时 fail closed。
+
+租约不会写入不可变 generation。默认 runtime 目录位于系统临时目录的 `triviumdb-runtime/store-<hash>`，也可以使用 `GenerationStore::with_runtime_dir(root, runtime_dir)` 指定可写位置。generation root 因此可以保持只读。
+
+generation ID 和数据库文件名必须是单一安全路径组件，`..`、绝对路径和路径分隔符都会被拒绝。旧 Reader 在切代后继续读取原 generation，新 Reader 读取新的 current。调用方应在 Writer 关闭并移除非制品 `.wal/.lock` 后再分发 generation。
+
+CRC32 用于检测随机损坏，不提供对抗性防篡改或来源认证。不可信分发应由外层对 manifest 使用 SHA-256/BLAKE3 并进行数字签名。
 
 ### Rust
 

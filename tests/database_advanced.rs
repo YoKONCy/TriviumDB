@@ -200,8 +200,8 @@ fn COV2_06_property_index() {
     let path = tmp_db("prop_idx");
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
-    db.create_index("name");
-    db.create_index("age");
+    db.create_index("name").unwrap();
+    db.create_index("age").unwrap();
 
     for i in 0..10u32 {
         db.insert(
@@ -218,7 +218,7 @@ fn COV2_06_property_index() {
     assert_eq!(node.payload.get("name"), Some(&serde_json::json!("user_5")));
     assert_eq!(node.payload.get("age"), Some(&serde_json::json!(5)));
 
-    db.drop_index("name");
+    db.drop_index("name").unwrap();
 
     cleanup(&path);
 }

@@ -31,3 +31,8 @@ doc = false
 name = "fuzz_filter_parse"
 path = "fuzz_targets/fuzz_filter_parse.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_quiver_parse"
+path = "fuzz_targets/fuzz_quiver_parse.rs"
+doc = false

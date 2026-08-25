@@ -33,7 +33,7 @@ pub fn run(handle: &mut DbHandle, query: &str, mutate: bool, format: OutputForma
         handle.flush()?;
         let elapsed = start.elapsed();
         println!(
-            "{} affected={}, created_ids={:?} ({:.2?})",
+            "{} 影响行数 / affected={}, 新建 ID / created_ids={:?} ({:.2?})",
             "OK".green().bold(),
             summary.affected,
             summary.created_ids,
@@ -45,7 +45,10 @@ pub fn run(handle: &mut DbHandle, query: &str, mutate: bool, format: OutputForma
         println!("{}", format_rows(&rows, format));
         let elapsed = start.elapsed();
         // 计时信息走 stderr，避免污染管道 / JSON 输出
-        eprintln!("{}", format!("{n} row(s) in {elapsed:.2?}").dimmed());
+        eprintln!(
+            "{}",
+            format!("{n} 行 / row(s)，耗时 / elapsed {elapsed:.2?}").dimmed()
+        );
     }
 
     Ok(())

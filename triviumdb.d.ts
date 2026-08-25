@@ -22,6 +22,11 @@ export interface JsSearchHit<T = any> {
   payload: T;
 }
 
+export interface JsGroupedSearchResult<T = any> {
+  semanticHits: JsSearchHit<T>[];
+  graphHits: JsSearchHit<T>[];
+}
+
 export interface JsEdge {
   /** 目标节点 ID */
   targetId: number;
@@ -196,6 +201,8 @@ export interface JsHookContext {
   counts: any;
   /** Hook 注入的自定义数据 */
   customData: any;
+  /** 进程内存、缺页、检索路由与候选规模观测值 */
+  observations: Record<string, number>;
   /** 管线是否被 Hook 提前终止 */
   aborted: boolean;
 }
@@ -214,7 +221,7 @@ export interface JsSearchWithContextResult {
 
 /**
  * TriviumDB 实例。
- * 每个 `.tdb` 文件同一时刻仅能被一个进程的 TriviumDB 实例打开锁定。
+ * 读写实例使用排他锁；多个只读实例可使用共享锁并发打开。
  */
 export interface TriviumDBOptions {
   /** 向量维度，默认 1536 */
@@ -233,6 +240,10 @@ export interface TriviumDBOptions {
   expectedNodes?: number;
   /** TriviumDB 内核内存预算（MiB），0 或省略表示不限制 */
   memoryLimitMb?: number;
+  /** 访问模式；readOnly 不创建 WAL、不会修改任何数据库文件 */
+  accessMode?: 'readWrite' | 'readOnly' | 'immutable';
+  /** Reader 遇到缺失或损坏 sidecar 时的行为 */
+  missingIndexPolicy?: 'fallback' | 'buildInMemory' | 'error';
 }
 
 export class TriviumDB {
@@ -245,6 +256,16 @@ export class TriviumDB {
    */
   constructor(path: string, options?: TriviumDBOptions);
   constructor(path: string, dim?: number, dtype?: DType, syncMode?: SyncMode);
+
+  publishGenerationManifest(generationId: string): {
+    formatVersion: number;
+    generationId: string;
+    dtype: string;
+    dim: number;
+    nodeCount: number;
+    files: Array<{ suffix: string; size: number; crc32: number }>;
+    complete: boolean;
+  };
 
   // ── Hook 管理 ──
 
@@ -431,6 +452,8 @@ export class TriviumDB {
    * @param minScore    只接受相似度大于这个阈值的搜索命中 (默认 0.5)
    */
   search(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number): JsSearchHit[];
+
+  searchGrouped(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number): JsGroupedSearchResult;
   searchBatch(queryVectors: Vector[], topK?: number, parallelism?: number, minScore?: number): Promise<JsSearchHit[][]>;
 
   /**

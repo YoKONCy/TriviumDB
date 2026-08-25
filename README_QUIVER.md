@@ -1,6 +1,8 @@
 # QuIVer — Artifact Documentation
 
 > **Paper**: [QuIVer: Rethinking ANN Graph Topology via Training-Free Binary Quantization](https://arxiv.org/abs/2605.02171)
+
+> **Dimension limit**: QuIVer supports 1–3072 dimensions. Keeping TriviumDB databases at or below 3072 dimensions is strongly recommended when ANN acceleration is required. Higher-dimensional databases safely fall back to exact BruteForce search and cannot build or load QuIVer indexes.
 >
 > **Venue**: PVLDB Vol. 20, 2027
 
@@ -342,6 +344,7 @@ cargo bench --bench bench_ssd_cold_hot --features ablation
 > ⚠️ **Windows**: Run as Administrator for `NtSetSystemInformation` page cache clearing.
 > **Linux**: Run as root for `/proc/sys/vm/drop_caches`.
 > The benchmark exits with a non-zero status instead of reporting invalid SSD-cold measurements when page-cache clearing fails.
+> This experiment measures first-touch cold reads on Cohere-1M. It is not evidence of stable throughput under sustained reclaim when the random-access working set exceeds RAM. The observational memory-pressure CI benchmark reports this separately and intentionally has no pass/fail performance threshold.
 
 ---
 

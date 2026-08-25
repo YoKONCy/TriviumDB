@@ -30,6 +30,18 @@ pub enum TriviumError {
     #[error("数据库已锁定 (Database locked): {0}")]
     DatabaseLocked(String),
 
+    #[error("只读数据库不允许执行操作 (Read-only database operation denied): {operation}")]
+    ReadOnlyViolation { operation: &'static str },
+
+    #[error("数据库需要由可写句柄先完成 WAL 恢复 (Database recovery required): {wal_path}")]
+    RecoveryRequired { wal_path: String },
+
+    #[error("不可变 generation 不完整或校验失败 (Immutable generation invalid): {reason}")]
+    ImmutableArtifactInvalid { reason: String },
+
+    #[error("generation 仍被 Reader 使用 (Generation is busy): {generation_id}")]
+    GenerationBusy { generation_id: String },
+
     /// 数据库文件格式损坏或不兼容
     #[error("文件损坏 (Corrupted file): {0}")]
     CorruptedFile(String),

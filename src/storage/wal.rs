@@ -101,6 +101,13 @@ pub struct Wal {
 }
 
 impl Wal {
+    pub fn disabled(db_path: &str, sync_mode: SyncMode) -> Self {
+        Self {
+            wal_path: PathBuf::from(format!("{}.wal", db_path)),
+            writer: None,
+            sync_mode,
+        }
+    }
     /// 创建或打开 WAL 文件（追加模式）
     pub fn open(db_path: &str) -> Result<Self> {
         Self::open_with_sync(db_path, SyncMode::default())

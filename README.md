@@ -45,6 +45,9 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 - 🐍 **Python / Node.js 原生** —— `pip install` 或 `npm install` 后直接使用，类 MongoDB 查询语法
 - ⚡ **高性能检索** —— rayon 并行暴力搜索（小规模 100% 精确）+ 自研 SOTA 级 ANN 索引 **QuIVer**（1 万节点以上自动激活），无需手动配置
 - 💾 **SSD 友好** —— Append-Only WAL + 后台 Compaction 线程 + QuIVer 索引独立持久化，杜绝随机写入磨损
+- 🔒 **共享只读打开** —— 多进程 Reader 共享锁并发查询已完成代际，Writer 继续保持排他锁与 WAL 安全边界
+- 🧩 **类型化访问能力** —— Rust `DatabaseReader` 在编译期隐藏写 API，`DatabaseWriter` 保留完整嵌入式写能力
+- 🔄 **不可变代际切换** —— `GenerationStore` 原子发布 current，跨进程 Reader 租约保护旧代安全回收，且不写入只读制品目录
 
 ---
 
@@ -284,16 +287,20 @@ TQL 同时支持 `WHERE`、`RETURN`、`ORDER BY`、`LIMIT/OFFSET`、聚合、`OP
 >
 > 在 12 个百万级数据集（384-d 至 3072-d）上验证，QuIVer 以 \<1.3 GB 热内存实现 ≥88% Recall@10 @ 13-41K QPS，多线程吞吐量超 DiskANN Rust 2.5-3.3×、hnswlib 3.6-4.7×、FAISS HNSW 3.8-4.9×。
 
+> ⚠️ **维度建议：强烈建议数据库向量维度不超过 3072。** TriviumDB 的通用存储与精确 BruteForce 检索允许更高维度，但 QuIVer 的 BQ 签名安全上限是 3072 维。超过该维度时引擎不会自动构建 QuIVer，检索会稳定回退到 BruteForce；手动构建 QuIVer 会返回明确错误。高维数据库仍可使用，但无法获得 QuIVer ANN 加速，内存和计算开销也会显著增加。
+
 TriviumDB 采用**智能自适应双引擎**向量索引，全程自动路由，无需手动配置：
 
 | 阶段           | 引擎       | 激活条件                         | 特点                                         |
 | -------------- | ---------- | -------------------------------- | -------------------------------------------- |
 | **小规模热区** | BruteForce | < 1 万节点（或 QuIVer 未就绪）   | 100% 精确召回，rayon 多核，延迟极低          |
-| **大规模冷区** | **QuIVer** | ≥ 1 万节点时自动构建，独立持久化 | BQ 签名 + Vamana 图导航 + f32 精排，冷热分离 |
+| **大规模冷区** | **QuIVer** | 维度 ≤ 3072 且 ≥ 1 万节点时自动构建，独立持久化 | BQ 签名 + Vamana 图导航 + f32 精排，冷热分离 |
 
 ### QuIVer 的核心创新
 
 **冷热分离架构**：QuIVer 内部仅存储 BQ 签名（hot）和图拓扑，f32 原始向量留在 MemTable 中（cold），精排时按需读取，**内存占用减半**。
+
+> Mmap 消除的是全量载入和重复拷贝，并不会消除磁盘 I/O。冷向量页未驻留时仍会产生 Major Page Fault；当随机查询工作集超过物理内存时，吞吐和尾延迟取决于 PageCache 命中率、存储设备随机读能力及系统回收压力。QuIVer 热索引位于匿名堆内存，并非文件 PageCache；当前内存预算统计也不包含 OS PageCache。
 
 **增量图维护**：与传统 HNSW 不同，QuIVer 支持真正的增量操作：
 

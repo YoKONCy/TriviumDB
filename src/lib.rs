@@ -11,6 +11,7 @@ pub mod graph;
 pub mod hook;
 pub mod index;
 pub mod node;
+pub mod observability;
 pub mod query;
 pub mod storage;
 
@@ -22,12 +23,13 @@ pub mod cognitive;
 /// FFI 绑定层（Python / Node.js）
 pub mod bindings;
 
-pub use database::Database;
 pub use database::{BatchSearchConfig, SearchConfig};
+pub use database::{Database, DatabaseReader, DatabaseWriter};
 pub use error::{Result, TriviumError};
 pub use filter::Filter;
 pub use hook::{CompositeHook, FfiHook, HookContext, NoopHook, SearchHook};
-pub use node::{Edge, NodeId, NodeView, SearchHit};
+pub use node::{Edge, GroupedSearchResult, NodeId, NodeView, SearchHit};
+pub use storage::generation::{CurrentGeneration, GenerationReader, GenerationStore};
 pub mod vector;
 pub use vector::VectorType;
 

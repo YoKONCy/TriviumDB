@@ -18,7 +18,7 @@ pub fn run(handle: &mut DbHandle) -> CliResult {
 
     let after = handle.estimated_memory();
     println!(
-        "{} 压实完成: {nodes} 节点 | 内存 {} -> {} | 耗时 {elapsed:.2?}",
+        "{} 压实完成 / Compaction completed: {nodes} 节点 / nodes | 内存 / memory {} -> {} | 耗时 / elapsed {elapsed:.2?}",
         "✓".green().bold(),
         human_bytes(before as u64),
         human_bytes(after as u64),

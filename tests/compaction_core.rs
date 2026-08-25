@@ -479,10 +479,12 @@ fn COV_08_set_sync_mode() {
     let path = tmp_db("sync_mode");
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
-    db.set_sync_mode(triviumdb::storage::wal::SyncMode::Full);
+    db.set_sync_mode(triviumdb::storage::wal::SyncMode::Full)
+        .unwrap();
     db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
         .unwrap();
-    db.set_sync_mode(triviumdb::storage::wal::SyncMode::Normal);
+    db.set_sync_mode(triviumdb::storage::wal::SyncMode::Normal)
+        .unwrap();
     db.insert(&[2.0, 0.0, 0.0, 0.0], serde_json::json!({}))
         .unwrap();
     assert_eq!(db.node_count(), 2);

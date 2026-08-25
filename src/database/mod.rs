@@ -7,11 +7,15 @@
 //! - `mod.rs`（本文件）: Database 结构体 + CRUD + 生命周期管理
 
 pub mod config;
+pub mod facade;
 pub(crate) mod pipeline;
 pub mod transaction;
 
 // 从子模块重导出公开类型，保持对外 API 不变
-pub use config::{BatchSearchConfig, Config, SearchConfig, StorageMode};
+pub use config::{
+    AccessMode, BatchSearchConfig, Config, MissingIndexPolicy, SearchConfig, StorageMode,
+};
+pub use facade::{DatabaseReader, DatabaseWriter};
 pub use transaction::{Transaction, TxBuilder};
 
 use crate::VectorType;
@@ -179,6 +183,7 @@ pub struct Database<T: VectorType> {
     quiver_builds: Arc<(Mutex<std::collections::HashSet<u64>>, std::sync::Condvar)>,
     /// 生命周期和已进入操作计数；Closing 阻止新操作并等待现有操作退出。
     lifecycle: Arc<(Mutex<LifecycleState>, Condvar)>,
+    access_mode: AccessMode,
 }
 
 pub(crate) struct SearchHandle<T: VectorType> {
@@ -270,6 +275,7 @@ impl<T: VectorType> SearchHandle<T> {
                 search_config,
                 &mut ctx,
             )
+            .map(|output| output.combined_hits)
         };
         let first = search_one(&query_vectors[0])?;
         if query_vectors.len() == 1 {
@@ -364,7 +370,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         }
 
         // ═══ 自动递归创建上层目录 ═══
-        if let Some(parent_dir) = std::path::Path::new(path).parent()
+        if config.access_mode == AccessMode::ReadWrite
+            && let Some(parent_dir) = std::path::Path::new(path).parent()
             && !parent_dir.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent_dir)?;
@@ -372,24 +379,55 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         // ═══ 文件锁：防止多进程并发写同一个数据库 ═══
         let lock_path = format!("{}.lock", path);
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&lock_path)?;
-        lock_file.try_lock_exclusive().map_err(|_| {
-            TriviumError::DatabaseLocked(format!(
-                "Database '{}' is already opened by another process. \
-                 If this is unexpected, delete '{}'",
-                path, lock_path
-            ))
-        })?;
+        if config.access_mode != AccessMode::ReadWrite && !std::path::Path::new(path).exists() {
+            return Err(TriviumError::InvalidInput(format!(
+                "只读模式要求数据库文件已存在: {path}"
+            )));
+        }
+        let lock_file = match config.access_mode {
+            AccessMode::ReadWrite => Some(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(&lock_path)?,
+            ),
+            AccessMode::ReadOnly => Some(std::fs::OpenOptions::new().read(true).open(&lock_path)?),
+            AccessMode::Immutable => None,
+        };
+        let locked = match (config.access_mode, lock_file.as_ref()) {
+            (AccessMode::ReadWrite, Some(file)) => file.try_lock_exclusive().is_ok(),
+            (AccessMode::ReadOnly, Some(file)) => file.try_lock_shared().is_ok(),
+            (AccessMode::Immutable, None) => true,
+            _ => false,
+        };
+        if !locked {
+            return Err(TriviumError::DatabaseLocked(format!(
+                "Database '{}' is already opened with an incompatible access mode",
+                path
+            )));
+        }
 
+        if config.access_mode == AccessMode::Immutable {
+            crate::storage::snapshot::validate_manifest(path, std::any::type_name::<T>(), dim)?;
+        }
         let mut memtable = if std::path::Path::new(path).exists() {
-            file_format::load(path, config.storage_mode, config.load_text_index)?
+            file_format::load(
+                path,
+                config.storage_mode,
+                config.load_text_index,
+                config.access_mode == AccessMode::ReadWrite,
+                config.missing_index_policy,
+            )?
         } else {
             MemTable::new(dim)
         };
 
+        if Wal::needs_recovery(path) && config.access_mode != AccessMode::ReadWrite {
+            return Err(TriviumError::RecoveryRequired {
+                wal_path: format!("{}.wal", path),
+            });
+        }
         if Wal::needs_recovery(path) {
             let (entries, valid_offset) = Wal::read_entries::<T>(path)?;
 
@@ -421,7 +459,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         // TextIndex 由 sidecar 精确恢复；缺失时保持为空，避免打开数据库时
         // 无条件扫描全部 Payload 并改变用户显式 index_text() 的索引语义。
-        memtable.set_auto_build_quiver(config.auto_build_quiver);
+        memtable.set_auto_build_quiver(
+            config.auto_build_quiver
+                && (config.access_mode == AccessMode::ReadWrite
+                    || config.missing_index_policy == MissingIndexPolicy::BuildInMemory),
+        );
 
         if let Some(expected_nodes) = config.expected_nodes {
             let additional = expected_nodes.saturating_sub(memtable.node_count());
@@ -440,13 +482,16 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             memtable.try_reserve_for_insert(additional)?;
         }
 
-        let wal = Wal::open_with_sync(path, config.sync_mode)?;
+        let wal = match config.access_mode {
+            AccessMode::ReadWrite => Wal::open_with_sync(path, config.sync_mode)?,
+            AccessMode::ReadOnly | AccessMode::Immutable => Wal::disabled(path, config.sync_mode),
+        };
         Ok(Self {
             db_path: path.to_string(),
             memtable: Arc::new(RwLock::new(memtable)),
             wal: Arc::new(Mutex::new(wal)),
             compaction: None,
-            _lock_file: Some(lock_file),
+            _lock_file: lock_file,
             memory_limit: config.memory_limit,
             storage_mode: config.storage_mode,
             hook: Arc::new(NoopHook),
@@ -462,7 +507,48 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 }),
                 Condvar::new(),
             )),
+            access_mode: config.access_mode,
         })
+    }
+
+    pub fn open_read_only(path: &str, dim: usize) -> Result<Self> {
+        Self::open_with_config(
+            path,
+            Config {
+                dim,
+                access_mode: AccessMode::ReadOnly,
+                auto_build_quiver: false,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn open_immutable(path: &str, dim: usize) -> Result<Self> {
+        Self::open_with_config(
+            path,
+            Config {
+                dim,
+                access_mode: AccessMode::Immutable,
+                auto_build_quiver: false,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub(crate) fn require_write_access(&self, operation: &'static str) -> Result<()> {
+        if self.access_mode != AccessMode::ReadWrite {
+            return Err(TriviumError::ReadOnlyViolation { operation });
+        }
+        Ok(())
+    }
+
+    fn require_reader_determinism(&self, config: &SearchConfig) -> Result<()> {
+        if self.access_mode != AccessMode::ReadWrite && config.enable_refractory_fatigue {
+            return Err(TriviumError::InvalidInput(
+                "ReadOnly/Immutable Reader 禁止启用进程本地 refractory fatigue".into(),
+            ));
+        }
+        Ok(())
     }
 
     // ════════════════════════════════════════════════════════
@@ -470,9 +556,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     // ════════════════════════════════════════════════════════
 
     /// 运行时切换 WAL 同步模式
-    pub fn set_sync_mode(&mut self, mode: SyncMode) {
+    pub fn set_sync_mode(&mut self, mode: SyncMode) -> Result<()> {
+        self.require_write_access("set_sync_mode")?;
         let mut w = lock_or_recover(&self.wal);
         w.set_sync_mode(mode);
+        Ok(())
     }
 
     // ════════════════════════════════════════════════════════
@@ -536,10 +624,18 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         &self,
         config: Option<crate::index::quiver::QuIVerConfig>,
     ) -> Result<()> {
+        self.require_write_access("build_quiver_index")?;
         let _operation = self.enter_operation()?;
         let cfg = config.unwrap_or_default();
         {
             let mt = read_or_recover(&self.memtable);
+            if mt.dim() > crate::index::bq::MAX_BQ_DIM {
+                return Err(TriviumError::InvalidInput(format!(
+                    "QuIVer 最高支持 {} 维，当前数据库为 {} 维",
+                    crate::index::bq::MAX_BQ_DIM,
+                    mt.dim()
+                )));
+            }
             let projected = mt
                 .estimated_memory_bytes()
                 .saturating_add(mt.quiver_build_peak_bytes(&cfg));
@@ -600,6 +696,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ///
     /// 预留受内核内存预算约束；失败不会修改 WAL、节点、ID 或 generation。
     pub fn reserve_nodes(&self, additional: usize) -> Result<()> {
+        self.require_write_access("reserve_nodes")?;
         reject_hook_reentrant_write()?;
         if additional == 0 {
             return Err(TriviumError::InvalidInput(
@@ -663,12 +760,15 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         read_or_recover(&self.memtable).clear_fatigue();
     }
 
-    pub fn set_auto_build_quiver(&mut self, enabled: bool) {
+    pub fn set_auto_build_quiver(&mut self, enabled: bool) -> Result<()> {
+        self.require_write_access("set_auto_build_quiver")?;
         write_or_recover(&self.memtable).set_auto_build_quiver(enabled);
+        Ok(())
     }
 
     /// 启动后台自动 Compaction 线程
     pub fn enable_auto_compaction(&mut self, interval: Duration) -> Result<()> {
+        self.require_write_access("enable_auto_compaction")?;
         if interval.is_zero() {
             return Err(TriviumError::InvalidInput(
                 "自动压缩间隔必须大于 0 秒".into(),
@@ -692,6 +792,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     /// 主动触发全量重写与压实（Manual Compaction）
     pub fn compact(&mut self) -> Result<()> {
+        self.require_write_access("compact")?;
         reject_hook_reentrant_write()?;
         {
             let mut mt = write_or_recover(&self.memtable);
@@ -709,6 +810,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             #[cfg(feature = "test-hooks")]
             crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeWalClear);
             w.clear()?;
+            mt.advise_cold_vectors_dontneed();
         }
 
         tracing::info!(
@@ -723,6 +825,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     // ════════════════════════════════════════════════════════
 
     pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) -> Result<NodeId> {
+        self.require_write_access("insert")?;
         let _operation = self.enter_operation()?;
         reject_hook_reentrant_write()?;
         let payload_str = payload.to_string();
@@ -756,6 +859,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         vector: &[T],
         payload: serde_json::Value,
     ) -> Result<()> {
+        self.require_write_access("insert_with_id")?;
         let _operation = self.enter_operation()?;
         let payload_str = payload.to_string();
         reject_hook_reentrant_write()?;
@@ -782,6 +886,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) -> Result<()> {
+        self.require_write_access("link")?;
         let _operation = self.enter_operation()?;
         reject_hook_reentrant_write()?;
         {
@@ -805,6 +910,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn delete(&mut self, id: NodeId) -> Result<()> {
+        self.require_write_access("delete")?;
         let _operation = self.enter_operation()?;
         reject_hook_reentrant_write()?;
         {
@@ -819,6 +925,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn unlink(&mut self, src: NodeId, dst: NodeId) -> Result<()> {
+        self.require_write_access("unlink")?;
         reject_hook_reentrant_write()?;
         {
             let mut mt = write_or_recover(&self.memtable);
@@ -831,6 +938,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn unlink_label(&mut self, src: NodeId, dst: NodeId, label: &str) -> Result<()> {
+        self.require_write_access("unlink_label")?;
         reject_hook_reentrant_write()?;
         let mut mt = write_or_recover(&self.memtable);
         mt.validate_unlink(src)?;
@@ -844,6 +952,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
+        self.require_write_access("update_payload")?;
         reject_hook_reentrant_write()?;
         let payload_str = payload.to_string();
         if payload_str.len() > 8 * 1024 * 1024 {
@@ -882,6 +991,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// db.patch_payload(id, serde_json::json!({"name": "Bob"}))?;
     /// ```
     pub fn patch_payload(&mut self, id: NodeId, patch: serde_json::Value) -> Result<()> {
+        self.require_write_access("patch_payload")?;
         let _operation = self.enter_operation()?;
         reject_hook_reentrant_write()?;
         let final_payload = {
@@ -910,6 +1020,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn update_vector(&self, id: NodeId, vector: &[T]) -> Result<()> {
+        self.require_write_access("update_vector")?;
         let _operation = self.enter_operation()?;
         reject_hook_reentrant_write()?;
         #[cfg(feature = "test-hooks")]
@@ -994,6 +1105,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     // ════════════════════════════════════════════════════════
 
     pub fn index_keyword(&mut self, id: NodeId, keyword: &str) -> Result<()> {
+        self.require_write_access("index_keyword")?;
         let _operation = self.enter_operation()?;
         reject_hook_reentrant_write()?;
         let mut mt = write_or_recover(&self.memtable);
@@ -1002,6 +1114,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn index_text(&mut self, id: NodeId, text: &str) -> Result<()> {
+        self.require_write_access("index_text")?;
         reject_hook_reentrant_write()?;
         let mut mt = write_or_recover(&self.memtable);
         mt.index_text(id, text);
@@ -1009,6 +1122,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn build_text_index(&mut self) -> Result<()> {
+        self.require_write_access("build_text_index")?;
         let _operation = self.enter_operation()?;
         reject_hook_reentrant_write()?;
         let mut mt = write_or_recover(&self.memtable);
@@ -1066,6 +1180,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         search_config: &SearchConfig,
         batch_config: &BatchSearchConfig,
     ) -> Result<Vec<Vec<SearchHit>>> {
+        self.require_reader_determinism(search_config)?;
         self.search_handle()
             .search_batch(query_vectors, search_config, batch_config)
     }
@@ -1103,6 +1218,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         query_vector: Option<&[T]>,
         config: &SearchConfig,
     ) -> Result<(Vec<SearchHit>, HookContext)> {
+        self.require_reader_determinism(config)?;
         let _operation = self.enter_operation()?;
         #[cfg(feature = "test-hooks")]
         if config.enable_refractory_fatigue {
@@ -1126,7 +1242,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             config,
             &mut ctx,
         )?;
-        Ok((results, ctx))
+        Ok((results.combined_hits, ctx))
     }
 
     /// 全能混合检索核心引擎 (Hybrid Advanced Pipeline)
@@ -1139,6 +1255,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         query_vector: Option<&[T]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchHit>> {
+        self.require_reader_determinism(config)?;
         let _operation = self.enter_operation()?;
         #[cfg(feature = "test-hooks")]
         if config.enable_refractory_fatigue {
@@ -1162,6 +1279,35 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             config,
             &mut ctx,
         )
+        .map(|output| output.combined_hits)
+    }
+
+    pub fn search_hybrid_grouped(
+        &self,
+        query_text: Option<&str>,
+        query_vector: Option<&[T]>,
+        config: &SearchConfig,
+    ) -> Result<crate::node::GroupedSearchResult> {
+        self.require_reader_determinism(config)?;
+        let _operation = self.enter_operation()?;
+        let _stateful_guard = config
+            .enable_refractory_fatigue
+            .then(|| lock_or_recover(&self.stateful_search));
+        let mut ctx = HookContext::new();
+        pipeline::execute_pipeline_with_limit(
+            &self.memtable,
+            &self.quiver_builds,
+            self.memory_limit,
+            &self.hook,
+            query_text,
+            query_vector,
+            config,
+            &mut ctx,
+        )
+        .map(|output| crate::node::GroupedSearchResult {
+            semantic_hits: output.semantic_hits,
+            graph_hits: output.graph_hits,
+        })
     }
 
     // ════════════════════════════════════════════════════════
@@ -1263,15 +1409,19 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// db.create_index("name");   // 之后 MATCH (a {name: "Alice"}) 将使用 O(1) 索引
     /// db.create_index("type");   // FIND {type: "event"} 同样受益
     /// ```
-    pub fn create_index(&mut self, field: &str) {
+    pub fn create_index(&mut self, field: &str) -> Result<()> {
+        self.require_write_access("create_index")?;
         let mut mt = write_or_recover(&self.memtable);
         mt.register_property_index(field);
+        Ok(())
     }
 
     /// 删除属性索引
-    pub fn drop_index(&mut self, field: &str) {
+    pub fn drop_index(&mut self, field: &str) -> Result<()> {
+        self.require_write_access("drop_index")?;
         let mut mt = write_or_recover(&self.memtable);
         mt.drop_property_index(field);
+        Ok(())
     }
 
     // ════════════════════════════════════════════════════════
@@ -1311,6 +1461,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// assert_eq!(result.created_ids.len(), 1);
     /// ```
     pub fn tql_mut(&mut self, input: &str) -> Result<crate::query::tql_executor::TqlMutResult> {
+        self.require_write_access("tql_mut")?;
         let _operation = self.enter_operation()?;
         use crate::query::tql_ast::TqlStatement;
         use crate::query::tql_executor::{MutationOp, TqlMutResult};
@@ -1444,11 +1595,28 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ///   1. 原子写入 .tdb（写 .tmp → fsync → rename）
     ///   2. 确认 .tdb 写入成功后，才清除 WAL
     pub fn flush(&mut self) -> Result<()> {
+        self.require_write_access("flush")?;
         let _operation = self.enter_operation()?;
         self.flush_inner()
     }
 
+    pub fn publish_generation_manifest(
+        &mut self,
+        generation_id: &str,
+    ) -> Result<crate::storage::snapshot::GenerationManifest> {
+        self.require_write_access("publish_generation_manifest")?;
+        self.flush()?;
+        crate::storage::snapshot::write_manifest(
+            &self.db_path,
+            generation_id,
+            std::any::type_name::<T>(),
+            self.dim(),
+            self.node_count(),
+        )
+    }
+
     fn flush_inner(&self) -> Result<()> {
+        self.require_write_access("flush")?;
         reject_hook_reentrant_write()?;
         {
             let mut mt = write_or_recover(&self.memtable);
@@ -1458,6 +1626,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             let mut w = lock_or_recover(&self.wal);
             w.clear()?;
         }
+        read_or_recover(&self.memtable).advise_cold_vectors_dontneed();
         Ok(())
     }
 
@@ -1484,7 +1653,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
         }
 
-        if let Err(error) = self.flush_inner() {
+        if self.access_mode == AccessMode::ReadWrite
+            && let Err(error) = self.flush_inner()
+        {
             let mut state = lock_or_recover(&self.lifecycle.0);
             state.lifecycle = DatabaseLifecycle::Open;
             self.lifecycle.1.notify_all();
@@ -1592,7 +1763,9 @@ impl<T: VectorType> Drop for Database<T> {
         self.compaction.take();
 
         // 2. 显式 flush WAL BufWriter 到磁盘
-        if let Ok(mut w) = self.wal.lock() {
+        if self.access_mode == AccessMode::ReadWrite
+            && let Ok(mut w) = self.wal.lock()
+        {
             w.flush_writer();
         }
     }

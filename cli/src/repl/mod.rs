@@ -50,7 +50,7 @@ pub fn run(mut handle: DbHandle, path: &str, format: OutputFormat) -> CliResult 
             Err(ReadlineError::Interrupted) => continue, // Ctrl-C：取消当前行
             Err(ReadlineError::Eof) => break,            // Ctrl-D：退出
             Err(e) => {
-                eprintln!("{} {e}", "error:".red());
+                eprintln!("{} {e}", "错误 / Error:".red());
                 break;
             }
         }
@@ -59,7 +59,7 @@ pub fn run(mut handle: DbHandle, path: &str, format: OutputFormat) -> CliResult 
     if let Some(h) = &hist {
         let _ = rl.save_history(h);
     }
-    println!("bye");
+    println!("再见 / Bye");
     Ok(())
 }
 
@@ -73,7 +73,7 @@ fn banner(handle: &DbHandle, path: &str) {
     println!("{}", line.cyan().bold());
     println!(
         "{}",
-        "直接输入 TQL 执行，或用 .help 查看元命令，.quit 退出。".dimmed()
+        "直接输入 TQL 执行，或用 .help 查看元命令，.quit 退出。/ Enter TQL directly, use .help for meta commands, or .quit to exit.".dimmed()
     );
 }
 
@@ -95,17 +95,20 @@ fn run_tql(input: &str, handle: &mut DbHandle, format: OutputFormat) {
             Ok(s) => {
                 let flush = handle.flush();
                 println!(
-                    "{} affected={}, created_ids={:?} ({:.2?})",
+                    "{} 影响行数 / affected={}, 新建 ID / created_ids={:?} ({:.2?})",
                     "OK".green().bold(),
                     s.affected,
                     s.created_ids,
                     start.elapsed()
                 );
                 if let Err(e) = flush {
-                    eprintln!("{} 写入成功但 flush 失败: {e}", "warning:".yellow());
+                    eprintln!(
+                        "{} 写入成功但落盘失败 / Write succeeded but flush failed: {e}",
+                        "警告 / Warning:".yellow()
+                    );
                 }
             }
-            Err(e) => eprintln!("{} {e}", "error:".red()),
+            Err(e) => eprintln!("{} {e}", "错误 / Error:".red()),
         }
     } else {
         if let Err(err) = triviumdb::query::tql_parser::parse_tql_with_pos(query) {
@@ -121,10 +124,10 @@ fn run_tql(input: &str, handle: &mut DbHandle, format: OutputFormat) {
                 println!("{}", format_rows(&rows, format));
                 println!(
                     "{}",
-                    format!("{n} row(s) in {:.2?}", start.elapsed()).dimmed()
+                    format!("{n} 行 / row(s)，耗时 / elapsed {:.2?}", start.elapsed()).dimmed()
                 );
             }
-            Err(e) => eprintln!("{} {e}", "error:".red()),
+            Err(e) => eprintln!("{} {e}", "错误 / Error:".red()),
         }
     }
 }
@@ -151,15 +154,15 @@ fn handle_meta(input: &str, handle: &mut DbHandle, path: &str, format: &mut Outp
         }
         ".stats" => print_stats(handle),
         ".flush" => match handle.flush() {
-            Ok(_) => println!("{} flushed", "✓".green()),
-            Err(e) => eprintln!("{} {e}", "error:".red()),
+            Ok(_) => println!("{} 已落盘 / Flushed", "✓".green()),
+            Err(e) => eprintln!("{} {e}", "错误 / Error:".red()),
         },
         ".compact" => {
             let _ = commands::compact::run(handle);
         }
         ".export" => {
             if arg.is_empty() {
-                eprintln!("用法: .export <file.jsonl>");
+                eprintln!("用法 / Usage: .export <file.jsonl>");
             } else {
                 let _ = commands::export::run(handle, path, arg);
             }
@@ -167,12 +170,14 @@ fn handle_meta(input: &str, handle: &mut DbHandle, path: &str, format: &mut Outp
         ".format" => match OutputFormat::parse(arg) {
             Ok(f) => {
                 *format = f;
-                println!("输出格式已切换为: {arg}");
+                println!("输出格式已切换为 / Output format changed to: {arg}");
             }
-            Err(e) => eprintln!("{} {e}", "error:".red()),
+            Err(e) => eprintln!("{} {e}", "错误 / Error:".red()),
         },
         ".schema" => print_schema(handle),
-        other => eprintln!("未知命令: {other}（输入 .help 查看帮助）"),
+        other => eprintln!(
+            "未知命令 / Unknown command: {other}（输入 .help 查看帮助 / Enter .help for help）"
+        ),
     }
     false
 }
@@ -181,22 +186,37 @@ fn print_help() {
     let lines = [
         (
             ".info",
-            "数据库元信息（维度、节点数、文件大小、WAL、QuIVer）",
+            "数据库元信息（维度、节点数、文件大小、WAL、QuIVer）/ Database metadata (dimension, nodes, file size, WAL, QuIVer)",
         ),
-        (".stats", "实时统计（节点数、内存占用）"),
-        (".schema", "采样 payload 字段分布"),
-        (".flush", "手动落盘"),
-        (".compact", "触发压缩"),
-        (".export <file>", "导出全部节点为 JSONL"),
-        (".format <table|json|csv>", "切换输出格式"),
-        (".help", "显示本帮助"),
-        (".quit / .exit", "退出 REPL"),
+        (
+            ".stats",
+            "实时统计（节点数、内存占用）/ Live statistics (nodes, memory)",
+        ),
+        (
+            ".schema",
+            "采样 payload 字段分布 / Sample payload field distribution",
+        ),
+        (".flush", "手动落盘 / Flush manually"),
+        (".compact", "触发压实 / Trigger compaction"),
+        (
+            ".export <file>",
+            "导出全部节点为 JSONL / Export all nodes as JSONL",
+        ),
+        (
+            ".format <table|json|csv>",
+            "切换输出格式 / Change output format",
+        ),
+        (".help", "显示本帮助 / Show this help"),
+        (".quit / .exit", "退出 REPL / Exit REPL"),
     ];
-    println!("{}", "元命令:".bold());
+    println!("{}", "元命令 / Meta commands:".bold());
     for (cmd, desc) in lines {
         println!("  {:<28} {}", cmd.cyan(), desc);
     }
-    println!("{}", "其余输入按 TQL 解析执行。".dimmed());
+    println!(
+        "{}",
+        "其余输入按 TQL 解析执行。/ Other input is parsed and executed as TQL.".dimmed()
+    );
 }
 
 fn print_stats(handle: &DbHandle) {
@@ -227,11 +247,16 @@ fn print_schema(handle: &DbHandle) {
     }
 
     if fields.is_empty() {
-        println!("(无 payload 字段，采样 {sampled} 个节点)");
+        println!(
+            "（无 payload 字段，采样 {sampled} 个节点 / No payload fields; sampled {sampled} nodes）"
+        );
         return;
     }
 
-    println!("{} (采样 {sampled} 个节点)", "Payload Schema:".bold());
+    println!(
+        "{}（采样 {sampled} 个节点 / sampled {sampled} nodes）",
+        "Payload 结构 / Payload Schema:".bold()
+    );
     for (field, (count, types)) in &fields {
         let types: Vec<&str> = types.iter().copied().collect();
         println!(

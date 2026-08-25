@@ -173,8 +173,10 @@ fn set_hook_和_clear_hook() {
 #[test]
 fn set_sync_mode() {
     let mut db = open_db("sync_mode");
-    db.set_sync_mode(triviumdb::storage::wal::SyncMode::Full);
-    db.set_sync_mode(triviumdb::storage::wal::SyncMode::Normal);
+    db.set_sync_mode(triviumdb::storage::wal::SyncMode::Full)
+        .unwrap();
+    db.set_sync_mode(triviumdb::storage::wal::SyncMode::Normal)
+        .unwrap();
 }
 
 #[test]
@@ -195,7 +197,7 @@ fn set_memory_limit_和_estimated_memory() {
 #[test]
 fn create_index_和_drop_index() {
     let mut db = open_db("prop_idx");
-    db.create_index("role");
+    db.create_index("role").unwrap();
     db.insert(&[1.0, 0.0, 0.0], json!({"role": "admin"}))
         .unwrap();
     db.insert(&[0.0, 1.0, 0.0], json!({"role": "user"}))
@@ -205,7 +207,7 @@ fn create_index_和_drop_index() {
     let result = db.tql("FIND {role: \"admin\"} RETURN *");
     assert!(result.is_ok());
 
-    db.drop_index("role");
+    db.drop_index("role").unwrap();
 }
 
 // ═══════════════════════════════════════════════════════════════

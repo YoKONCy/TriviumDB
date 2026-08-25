@@ -45,6 +45,9 @@ Our goal: **SQLite for AI applications.**
 - 🐍 **Python / Node.js native** — `pip install` or `npm install`, MongoDB-style query syntax
 - ⚡ **High-performance search** — rayon parallel brute-force (100% exact at small scale) + in-house SOTA ANN index **QuIVer** (auto-activates above 10K nodes)
 - 💾 **SSD-friendly** — Append-only WAL + background compaction + independent QuIVer persistence
+- 🔒 **Shared read-only opens** — Multiple reader processes can query a completed generation under shared locks while writers retain exclusive WAL ownership
+- 🧩 **Typed access capabilities** — Rust `DatabaseReader` hides mutation APIs at compile time while `DatabaseWriter` retains the complete embedded write surface
+- 🔄 **Immutable generation switching** — `GenerationStore` atomically publishes current generations and uses cross-process runtime leases to protect safe reclamation without modifying read-only artifacts
 
 ---
 
@@ -142,16 +145,20 @@ Suppose you're building an **AI conversation memory system** and the user says "
 >
 > Validated on 12 million-scale datasets (384-d to 3072-d): ≥88% Recall@10 at 13–41K multi-threaded QPS with <1.3 GB hot memory — outperforming DiskANN Rust by 2.5–3.3×, hnswlib by 3.6–4.7×, and FAISS HNSW by 3.8–4.9× in multi-threaded throughput at matched recall.
 
+> ⚠️ **Dimension guidance: keeping database vectors at or below 3072 dimensions is strongly recommended.** TriviumDB storage and exact BruteForce retrieval support higher dimensions, but QuIVer's BQ signature safety limit is 3072 dimensions. Above this limit, automatic QuIVer construction is disabled and search safely falls back to BruteForce; manual QuIVer construction returns an explicit error. Higher-dimensional databases remain usable, but do not receive QuIVer ANN acceleration and incur substantially higher memory and compute costs.
+
 TriviumDB uses an **intelligent auto-routing dual engine** for vector indexing — fully automatic, zero configuration:
 
 | Phase                     | Engine     | Activation Condition                                | Characteristics                                                   |
 | ------------------------- | ---------- | --------------------------------------------------- | ----------------------------------------------------------------- |
 | **Small-scale hot zone**  | BruteForce | < 10K nodes (or QuIVer not ready)                   | 100% exact recall, rayon multi-core, ultra-low latency            |
-| **Large-scale cold zone** | **QuIVer** | Auto-builds at ≥ 10K nodes, independently persisted | BQ signatures + Vamana graph + f32 reranking, hot/cold separation |
+| **Large-scale cold zone** | **QuIVer** | Auto-builds at ≥ 10K nodes when dimension ≤ 3072, independently persisted | BQ signatures + Vamana graph + f32 reranking, hot/cold separation |
 
 ### Key Innovations
 
 **Hot/cold memory separation**: QuIVer internally stores only BQ signatures (hot) and graph topology; f32 raw vectors remain in MemTable (cold), accessed on-demand for reranking — **halving memory usage**.
+
+> Mmap removes eager full loading and duplicate copies; it does not remove storage I/O. Non-resident cold-vector pages still cause major page faults. When a random-access working set exceeds physical memory, throughput and tail latency depend on page-cache hit rate, storage random-read capability, and reclaim pressure. QuIVer's hot index is anonymous heap memory rather than file page cache, and the configured memory budget does not include OS page cache.
 
 **Incremental graph maintenance**: Unlike traditional HNSW, QuIVer supports true incremental operations:
 

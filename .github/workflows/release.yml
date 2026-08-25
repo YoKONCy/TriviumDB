@@ -261,7 +261,7 @@ jobs:
             else if (platform === 'linux' && arch === 'arm64') { nativeBinding = require('./triviumdb.linux-arm64-gnu.node'); }
             else { nativeBinding = require('./triviumdb.linux-x64-gnu.node'); }
           } catch (e) {
-            console.error(`TriviumDB failed to load native binding for ${platform} ${arch}`, e);
+            console.error(`TriviumDB 原生绑定加载失败 / Failed to load native binding for ${platform} ${arch}`, e);
             throw e;
           }
           module.exports = nativeBinding;

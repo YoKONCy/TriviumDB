@@ -130,6 +130,10 @@ TriviumDB 提供两种互斥的存储模式（`StorageMode`），且**系统支�
 - **MAP_PRIVATE (COW)**：通过 `memmap2` 库将数 GB 的向量文件映射到操作系统的虚拟内存中。进程不会真的霸占物理内存，而是由 OS 根据查询压力按需（Page Fault）换入换出。
 - **分层向量池（VecPool）**：内存中维护 `基础层（mmap）+ 增量层（Vec）` 两段结构。新插入的向量只进增量层；delete/update 操作对基础层做 COW 写入，产生进程私有脏页，不改变磁盘文件。直到显式 `flush()` 时才统一持久化。
 
+Mmap 的能力边界必须明确：它降低启动和复制成本，但不把 SSD 变成内存。非驻留页首次访问仍需要磁盘 fault-in；当随机访问工作集超过可用 PageCache 时，可能出现持续回收、Major Fault 和尾延迟上升。`Config.memory_limit` 只约束 TDB 可估算的堆分配，不包含 mmap 映射的驻留页、OS PageCache、pagefile/swap 和其他进程占用。
+
+QuIVer 的 BQ 签名与图拓扑位于匿名堆内存，原始向量位于 mmap 冷层。前者不会作为文件 PageCache 页被直接丢弃，但在启用 swap/pagefile 的系统上仍可能被换出。TDB 不承诺超内存随机工作集下的固定 QPS；应结合查询上下文中的阶段耗时、候选数和进程/系统缺页指标持续观测。
+
 ### VecPool 混合 Flush 策略
 
 `flush()` 会根据内部 `has_dirty_base` 标志自动选择最优写入路径，无需用户干预：

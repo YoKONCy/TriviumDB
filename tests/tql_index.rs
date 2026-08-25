@@ -53,7 +53,7 @@ fn 测试_创建索引后_FIND加速() {
     .unwrap();
 
     // 创建索引（会回填已有数据）
-    db.create_index("type");
+    db.create_index("type").unwrap();
 
     // 使用索引加速的 FIND
     let results = db.tql(r#"FIND {type: "person"} RETURN *"#).unwrap();
@@ -81,7 +81,7 @@ fn 测试_创建索引后_MATCH加速() {
     db.link(alice, bob, "knows", 1.0).unwrap();
 
     // 创建 name 索引
-    db.create_index("name");
+    db.create_index("name").unwrap();
 
     // MATCH 使用索引定位起点
     let results = db
@@ -113,7 +113,7 @@ fn 测试_新插入节点自动进入索引() {
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
     // 先创建索引
-    db.create_index("name");
+    db.create_index("name").unwrap();
 
     // 之后插入的节点应自动进入索引
     db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
@@ -137,7 +137,7 @@ fn 测试_更新后索引同步() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    db.create_index("status");
+    db.create_index("status").unwrap();
 
     db.insert(
         &[1.0, 0.0, 0.0, 0.0],
@@ -167,7 +167,7 @@ fn 测试_删除后索引清理() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    db.create_index("name");
+    db.create_index("name").unwrap();
 
     db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
         .unwrap();
@@ -199,7 +199,7 @@ fn 测试_删除索引后仍可查询() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    db.create_index("name");
+    db.create_index("name").unwrap();
     db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
         .unwrap();
 
@@ -208,7 +208,7 @@ fn 测试_删除索引后仍可查询() {
     assert_eq!(results.len(), 1);
 
     // 删除索引
-    db.drop_index("name");
+    db.drop_index("name").unwrap();
 
     // 仍可查（退化为全扫描）
     let results = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
@@ -228,8 +228,8 @@ fn 测试_多字段索引() {
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
-    db.create_index("name");
-    db.create_index("type");
+    db.create_index("name").unwrap();
+    db.create_index("type").unwrap();
 
     db.insert(
         &[1.0, 0.0, 0.0, 0.0],
