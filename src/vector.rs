@@ -1,3 +1,4 @@
+#[cfg(target_arch = "x86_64")]
 use crate::index::bq::FORCE_NO_AVX512;
 use half::f16;
 use std::fmt::Debug;
@@ -422,6 +423,8 @@ pub(crate) fn cosine_similarity_f32_384_with_query_norm(
             cosine_similarity_avx2_384_with_query_norm(query, vector, query_norm_squared)
         };
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = query_norm_squared;
     cosine_similarity_f32(query, vector)
 }
 

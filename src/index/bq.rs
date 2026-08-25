@@ -2,6 +2,7 @@ use crate::VectorType;
 use bytemuck::{Pod, Zeroable};
 
 /// 环境变量 `TRIVIUM_NO_AVX512=1` 时强制禁用 AVX-512 路径（用于消融实验）
+#[cfg(target_arch = "x86_64")]
 pub(crate) static FORCE_NO_AVX512: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| std::env::var("TRIVIUM_NO_AVX512").is_ok_and(|v| v == "1"));
 pub(crate) static FORCE_NO_384_KERNEL: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
@@ -164,7 +165,7 @@ impl Bq2Signature {
         }
         #[cfg(all(target_arch = "aarch64", not(coverage)))]
         {
-            return unsafe {
+            unsafe {
                 bq2_distance_raw_neon(
                     self.pos.as_ptr(),
                     self.strong.as_ptr(),
@@ -172,13 +173,15 @@ impl Bq2Signature {
                     other.strong.as_ptr(),
                     dim,
                 )
-            };
+            }
         }
+        #[cfg(any(not(target_arch = "aarch64"), coverage))]
         self.distance_scalar(other, dim)
     }
 
     /// 标量回退路径（所有平台通用）
     #[inline]
+    #[cfg(any(not(target_arch = "aarch64"), coverage))]
     fn distance_scalar(&self, other: &Self, dim: usize) -> u32 {
         let chunks = dim.div_ceil(64);
         let valid_bits_last = if dim.is_multiple_of(64) {
@@ -731,7 +734,7 @@ unsafe fn bq2_distance_raw_neon(
         };
 
         let mut dot = 0i64;
-        let valid_bits_last = if dim % 64 == 0 {
+        let valid_bits_last = if dim.is_multiple_of(64) {
             !0u64
         } else {
             (1u64 << (dim % 64)) - 1
@@ -1062,17 +1065,23 @@ impl Bq2Store {
         acc
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[inline]
     pub(crate) fn distance_to_sig_cheap_384(&self, idx: usize, other: &Bq2Signature) -> u32 {
-        let off = idx * 6;
-        unsafe {
-            bq2_distance_cheap_popcnt_384(
-                self.pos.as_ptr().add(off),
-                self.strong.as_ptr().add(off),
-                other.pos.as_ptr(),
-                other.strong.as_ptr(),
-            )
+        #[cfg(target_arch = "x86_64")]
+        {
+            let off = idx * 6;
+            unsafe {
+                bq2_distance_cheap_popcnt_384(
+                    self.pos.as_ptr().add(off),
+                    self.strong.as_ptr().add(off),
+                    other.pos.as_ptr(),
+                    other.strong.as_ptr(),
+                )
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            self.distance_to_sig_cheap(idx, other, 384)
         }
     }
 
