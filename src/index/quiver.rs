@@ -2403,7 +2403,7 @@ impl QuIVer {
                 .ok_or_else(|| invalid(format!("{name} 长度溢出")))
         }
 
-        if bytes.len() < 48 {
+        if bytes.len() < 52 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "QuIVer 文件太小 (QuIVer file too small)",
@@ -3062,6 +3062,38 @@ mod tests {
         bytes[24..28].copy_from_slice(&128u32.to_le_bytes());
         bytes[28..32].copy_from_slice(&1.2f32.to_le_bytes());
         bytes[48..52].copy_from_slice(&1u32.to_le_bytes());
+        let result = std::panic::catch_unwind(|| QuIVer::load_from_bytes(&bytes));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn sidecar固定头部逐字节截断不得触发panic() {
+        let mut bytes = [0u8; 52];
+        bytes[0..4].copy_from_slice(QuIVer::QUIVER_MAGIC);
+        bytes[4..8].copy_from_slice(&QuIVer::QUIVER_VERSION.to_le_bytes());
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&1u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
+        bytes[24..28].copy_from_slice(&1u32.to_le_bytes());
+        bytes[28..32].copy_from_slice(&1.0f32.to_le_bytes());
+        bytes[48..52].copy_from_slice(&1u32.to_le_bytes());
+
+        for length in 0..52 {
+            let result = std::panic::catch_unwind(|| QuIVer::load_from_bytes(&bytes[..length]));
+            assert!(result.is_ok(), "固定头部截断至 {length} 字节时发生 panic");
+            assert!(result.unwrap().is_err());
+        }
+    }
+
+    #[test]
+    fn fuzz发现的四十八字节样本不得触发panic() {
+        let bytes = [
+            81, 85, 73, 86, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 130, 130, 130, 130, 130, 130, 81, 85,
+            73, 86, 1, 0, 142, 0, 1, 99, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 153,
+            93,
+        ];
         let result = std::panic::catch_unwind(|| QuIVer::load_from_bytes(&bytes));
         assert!(result.is_ok());
         assert!(result.unwrap().is_err());

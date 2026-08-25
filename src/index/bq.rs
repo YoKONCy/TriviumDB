@@ -741,7 +741,11 @@ unsafe fn bq2_distance_raw_neon(
         };
 
         // 每次处理 2 个 u64 chunk
-        let full_rounds = chunks / 2;
+        let full_rounds = if dim.is_multiple_of(64) {
+            chunks / 2
+        } else {
+            chunks.saturating_sub(1) / 2
+        };
         let mut acc_w4_pos = vdupq_n_s64(0);
         let mut acc_w4_neg = vdupq_n_s64(0);
         let mut acc_w2_pos = vdupq_n_s64(0);
@@ -1129,6 +1133,7 @@ impl Bq2Store {
 mod tests {
     use super::*;
 
+    #[cfg(target_arch = "x86_64")]
     fn next_u64(state: &mut u64) -> u64 {
         *state ^= *state << 13;
         *state ^= *state >> 7;
@@ -1313,6 +1318,35 @@ mod tests {
                 ),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn 非完整尾块在所有奇偶chunk组合下保持标量语义() {
+        for dim in [1, 2, 63, 65, 127, 129, 191, 193, 255, 257, 319, 383, 385] {
+            let left = (0..dim)
+                .map(|index| (index as f32 * 0.13).sin())
+                .collect::<Vec<_>>();
+            let right = (0..dim)
+                .map(|index| (index as f32 * 0.29).cos())
+                .collect::<Vec<_>>();
+            let left = Bq2Signature::from_vector(&left);
+            let right = Bq2Signature::from_vector(&right);
+            let expected = bq2_distance_raw_scalar(
+                left.pos.as_ptr(),
+                left.strong.as_ptr(),
+                right.pos.as_ptr(),
+                right.strong.as_ptr(),
+                dim,
+            );
+            let actual = bq2_distance_raw(
+                left.pos.as_ptr(),
+                left.strong.as_ptr(),
+                right.pos.as_ptr(),
+                right.strong.as_ptr(),
+                dim,
+            );
+            assert_eq!(actual, expected, "维度 {dim} 的尾块掩码语义不一致");
         }
     }
 

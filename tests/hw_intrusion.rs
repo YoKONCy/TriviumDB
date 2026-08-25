@@ -152,15 +152,20 @@ fn asm_make_nan_vector() -> [f32; DIM] {
 
 /// 非 x86 平台的回退实现
 #[cfg(not(target_arch = "x86_64"))]
+#[allow(dead_code)]
 unsafe fn asm_bit_flip(ptr: *mut u8, bit_offset: u32) {
     let byte_idx = (bit_offset / 8) as usize;
     let bit_idx = bit_offset % 8;
-    *ptr.add(byte_idx) ^= 1 << bit_idx;
+    unsafe {
+        *ptr.add(byte_idx) ^= 1 << bit_idx;
+    }
 }
 
 #[cfg(not(target_arch = "x86_64"))]
 unsafe fn asm_nontemporal_poison(ptr: *mut u8, poison: u64) {
-    std::ptr::write_unaligned(ptr as *mut u64, poison);
+    unsafe {
+        std::ptr::write_unaligned(ptr as *mut u64, poison);
+    }
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -507,6 +512,7 @@ fn INTRUDE_05_文件头Magic全覆写_格式校验拦截() {
     file.seek(SeekFrom::Start(0)).unwrap();
 
     // 用 asm 构造毒 magic
+    #[cfg(target_arch = "x86_64")]
     let mut poison = [0u8; 8];
     #[cfg(target_arch = "x86_64")]
     unsafe {
@@ -518,9 +524,7 @@ fn INTRUDE_05_文件头Magic全覆写_格式校验拦截() {
         );
     }
     #[cfg(not(target_arch = "x86_64"))]
-    {
-        poison = [0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD];
-    }
+    let poison = [0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD, 0xDE, 0xAD];
 
     file.write_all(&poison).unwrap();
     drop(file);
