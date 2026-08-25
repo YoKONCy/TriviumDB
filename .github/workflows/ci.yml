@@ -173,6 +173,8 @@ jobs:
         run: cargo test --target aarch64-unknown-linux-gnu --lib --tests --no-run
 
       - name: 运行测试 (aarch64 via QEMU, 跳过硬件测试)
+        env:
+          TRIVIUM_TEST_QEMU_AARCH64: "1"
         run: |
           cargo test --target aarch64-unknown-linux-gnu --lib --tests -- \
             --test-threads=1 \

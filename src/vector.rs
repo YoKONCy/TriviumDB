@@ -1,4 +1,4 @@
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(coverage)))]
 use crate::index::bq::FORCE_NO_AVX512;
 use half::f16;
 use std::fmt::Debug;

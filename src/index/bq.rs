@@ -2,7 +2,7 @@ use crate::VectorType;
 use bytemuck::{Pod, Zeroable};
 
 /// 环境变量 `TRIVIUM_NO_AVX512=1` 时强制禁用 AVX-512 路径（用于消融实验）
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(coverage)))]
 pub(crate) static FORCE_NO_AVX512: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| std::env::var("TRIVIUM_NO_AVX512").is_ok_and(|v| v == "1"));
 pub(crate) static FORCE_NO_384_KERNEL: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
@@ -142,6 +142,9 @@ impl Bq2Signature {
     ///   ARM: NEON (vcntq_u8) → 标量
     #[inline]
     pub fn distance(&self, other: &Self, dim: usize) -> u32 {
+        if !dim.is_multiple_of(64) {
+            return self.distance_scalar(other, dim);
+        }
         #[cfg(target_arch = "x86_64")]
         {
             #[cfg(not(coverage))]
@@ -181,7 +184,6 @@ impl Bq2Signature {
 
     /// 标量回退路径（所有平台通用）
     #[inline]
-    #[cfg(any(not(target_arch = "aarch64"), coverage))]
     fn distance_scalar(&self, other: &Self, dim: usize) -> u32 {
         let chunks = dim.div_ceil(64);
         let valid_bits_last = if dim.is_multiple_of(64) {
@@ -357,6 +359,9 @@ fn bq2_distance_raw(
     strong_b: *const u64,
     dim: usize,
 ) -> u32 {
+    if !dim.is_multiple_of(64) {
+        return bq2_distance_raw_scalar(pos_a, strong_a, pos_b, strong_b, dim);
+    }
     #[cfg(target_arch = "x86_64")]
     {
         #[cfg(not(coverage))]

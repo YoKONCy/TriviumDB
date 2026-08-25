@@ -327,7 +327,18 @@ fn 真实跨进程reader阻止回收且异常退出后租约自动释放() {
     publish(&store, "generation-2", 0.0);
     store.publish_current("generation-1", "data.tdb").unwrap();
     let ready = root.join("child-ready");
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let executable = std::env::current_exe().unwrap();
+    let mut command = if std::env::var_os("TRIVIUM_TEST_QEMU_AARCH64").is_some() {
+        let mut command = std::process::Command::new("qemu-aarch64");
+        command
+            .arg("-L")
+            .arg("/usr/aarch64-linux-gnu")
+            .arg(executable);
+        command
+    } else {
+        std::process::Command::new(executable)
+    };
+    let mut child = command
         .arg("--exact")
         .arg("generation跨进程租约辅助进程")
         .arg("--nocapture")
