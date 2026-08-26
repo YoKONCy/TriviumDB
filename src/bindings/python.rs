@@ -1439,8 +1439,12 @@ pub mod python {
             _exc_val: Option<&Bound<'_, PyAny>>,
             _exc_tb: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<bool> {
-            self.flush()?;
-            Ok(false)
+            // 上下文管理器退出时关闭数据库并释放单写锁，
+            // 若块内已显式 close()（数据库已关闭）则视为无操作。
+            match dispatch!(self, mut db => db.close()) {
+                Ok(()) | Err(crate::error::TriviumError::DatabaseClosed) => Ok(false),
+                Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string())),
+            }
         }
 
         fn batch_insert(
