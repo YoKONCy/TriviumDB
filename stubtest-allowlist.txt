@@ -1,0 +1,17 @@
+# Allowlist for `python -m mypy.stubtest triviumdb`.
+#
+# Each line is a regex matching a runtime name that stubtest should skip. See:
+# https://mypy.readthedocs.io/en/stable/stubtest.html
+#
+# We run stubtest in its STRICT mode (no --ignore-missing-stub) so it also flags
+# a newly added Rust method that was forgotten in the stub. That strict mode
+# would otherwise complain about the single item below, so we ignore just that
+# one — and nothing else.
+#
+# In maturin's pure-Rust layout the compiled extension lives at the private
+# inner module `triviumdb.triviumdb` (triviumdb/triviumdb.abi3.so). Its members
+# are all re-exported to the top-level `triviumdb` package via
+# `from .triviumdb import *` and are fully described in `triviumdb/__init__.pyi`,
+# so the inner module needs no stub of its own. Ignoring it lets stubtest check
+# the entire public surface strictly while skipping only this layout artifact.
+triviumdb\.triviumdb
