@@ -207,6 +207,10 @@ db.link(relation, skill_node, label="rel_dst", weight=1.0)
 
 ## 性能调优
 
+### 高出度图扩散
+
+GraphRAG 中的枢纽节点可能拥有数百条边。使用 `max_edges_per_node` 限制每跳扫描的强边数量，使用 `min_edge_weight` 在归一化前移除弱边，并按业务语义选择 `edge_direction="out" | "in" | "both"`。限制后的传播预算会重新归一化，不会被已过滤边稀释。若图中使用负权或 `inhibition` 边，阈值按绝对权重判断。
+
 ### 选择合适的 dtype
 
 ```python
@@ -358,14 +362,32 @@ results = db.search_advanced(
 # ✅ 推荐：使用 with 语句
 with triviumdb.TriviumDB("data.tdb", dim=768) as db:
     # ... 操作 ...
-    pass  # 退出时自动 flush
+    pass  # 退出时自动 close：先 flush，成功后释放文件锁
 
 # ✅ 手动关闭
 db = triviumdb.TriviumDB("data.tdb", dim=768)
 # ... 操作 ...
-db.flush()  # 必须手动调用！
+db.close()  # 必须手动关闭；成功后才释放文件锁
 
 # ❌ 错误：不调用 flush 就退出 → WAL 里的数据下次重启才会回放
+```
+
+Node.js 22+ 可使用 Explicit Resource Management；作用域退出时会调用幂等的 `close()`：
+
+```typescript
+using db = new TriviumDB("data.tdb", { dim: 768 })
+db.insert([0.1, 0.2], { text: "example" })
+```
+
+不支持 `using` 的运行时必须使用 `try/finally`，不能依赖 GC 的不确定回收时机：
+
+```javascript
+const db = new TriviumDB("data.tdb", { dim: 768 })
+try {
+  // ... 操作 ...
+} finally {
+  db.close()
+}
 ```
 
 ### 文件锁冲突处理
@@ -374,21 +396,22 @@ TriviumDB 使用独占文件锁防止多进程并发写入。如果遇到锁冲�
 
 ```
 RuntimeError: Database 'data.tdb' is already opened by another process.
-If this is unexpected, delete 'data.tdb.lock'
 ```
 
 **解决方法：**
-1. 确认没有其他进程在使用该数据库
-2. 如果进程异常退出残留了锁文件，手动删除 `data.tdb.lock`
+1. 确认没有其他进程正在以不兼容的模式使用该数据库
+2. 等待持锁进程正常关闭，或确认异常进程已经完全退出后重试
 
-### 为什么采用全独占锁定（Exclusive Lock）？
+不要删除正在使用的 `.lock` 文件。锁由操作系统绑定到已打开的文件对象，进程退出后会自动释放；在 Unix 上删除仍被持有的锁文件并重建同名文件，反而可能让两个 Writer 锁住不同 inode，绕过单写保护。
+
+### 为什么 Writer 采用独占锁定（Exclusive Lock）？
 
 这主要是由于 TriviumDB 的底层架构定位与内存特性决定的：
 
 1. **Agent 私有记忆仓库的定位**：TriviumDB 的核心使用场景是为每一个 AI Agent 或本地应用分配独立专属的“记忆仓库”。在绝大多数情况下，一个 Agent 不会在文件级别与外部毫无关联的进程“共享同一个脑子”。
 2. **Mmap 内存映射的一致性边界**：由于底层采用了 `Mmap` 模式将多达 GB 级的向量文件直接映射入进程的虚拟内存空间，如果在缺乏复杂协调中心的情况下允许多个进程同时改写同一物理文件，要保持它们之间的内存状态完全同步（例如让进程 B 实时知晓进程 A 刚更新了某一块页表内存）工程复杂度将会呈指数级上升。
 
-相比引入重型的跨进程内存通信与多版本控制架构（这会使其直接变成一头 MySQL 级别的庞然大物），TriviumDB 选择了**“极其精简与安全第一”**的全文件级独占锁定策略，以换取极小的二进制体积、极速的启动加载与随手拷贝的零运维体验。
+相比引入重型的跨进程内存通信与多版本控制架构，TriviumDB 选择 Writer 全文件级独占锁定：同一数据库同一时刻只允许一个 Writer。ReadOnly 使用共享锁并允许多个独立 Reader 并发；Immutable 用于经过 manifest 校验、生命周期内绝不原地修改的不可变 generation。
 
 **如果确实存在多端读写或高并发共享的需求，请遵循嵌入式数据库的最佳实践：多线程调度、读写仲裁、锁的抢占等复杂机制，应由外部业务逻辑或应用服务进行设计（如通过单例模式封装连接池，或在应用程序外层架设统一的 RESTful API 网关代理）。存储引擎本身的职责是坚守绝对的数据一致性边界。**
 
@@ -622,7 +645,7 @@ db.unlink(1, 2)  # ⚠️ 两条边都被断开了！
 db.unlink(1, 2, label="friend")
 ```
 
-### ❌ 坑 5：多进程同时打开
+### ❌ 坑 5：多个进程同时以 Writer 打开
 
 ```python
 # 进程 A
@@ -632,11 +655,21 @@ db_a = triviumdb.TriviumDB("shared.tdb", dim=768)
 db_b = triviumdb.TriviumDB("shared.tdb", dim=768)  # 💥 文件锁冲突!
 ```
 
-**规则**：TriviumDB 是嵌入式数据库，同一个 `.tdb` 文件同一时刻只能被一个进程打开。如需多进程访问，请在应用层实现读写代理。
+**规则**：同一个 `.tdb` 文件同一时刻只能有一个 Writer。并发查询应使用 `access_mode="read_only"`；只读部署且制品通过 manifest 发布时可使用 `access_mode="immutable"`。Writer 与 ReadOnly 共享同一规范路径锁身份，不能并存。
 
 ---
 
 ## 模型升级与维度迁移
+
+### 数据库文件版本策略
+
+- TriviumDB 保证从 `0.7.0` 开始的已发布数据库文件可由后续版本读取并迁移。
+- `0.7.0` 的 v5/32-chunk BQ 和 `0.7.1–0.8.0` 的 v5/48-chunk BQ 会被自动识别；可写句柄下一次 `flush()` 或 `close()` 原子升级为自描述 v6。
+- ReadOnly 可以读取受支持旧格式，但不会原地升级；Immutable 的 manifest 必须与现有文件字节匹配。
+- 不对 `0.7.0` 以前的数据库文件提供自动兼容保证。需要保留历史数据时，请使用对应旧版导出 JSONL，再用当前版本导入；不要直接修改文件头版本号。
+- 当前内核遇到低于最低支持版本或高于当前版本的文件会明确返回版本错误并保持文件不变，不会猜测解析。
+
+文件格式升级与下文的 Embedding 维度迁移是两件不同的事：前者保留现有向量并由内核自动完成，后者用于更换向量模型和维度。
 
 当你需要切换 Embedding 模型（导致向量维度变化）时，不必重建整个数据库——使用 `migrate()` 保留全部 Payload 和图谱结构。
 

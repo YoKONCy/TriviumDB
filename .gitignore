@@ -24,7 +24,6 @@ node_modules/
 npm-debug.log
 *.node
 index.d.ts
-index.js
 yarn-error.log
 test.js
 package-lock.json

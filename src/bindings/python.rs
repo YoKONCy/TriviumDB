@@ -21,6 +21,11 @@ pub mod python {
         GenerationBusyError,
         pyo3::exceptions::PyRuntimeError
     );
+    pyo3::create_exception!(
+        triviumdb,
+        UnsupportedDatabaseVersionError,
+        pyo3::exceptions::PyRuntimeError
+    );
 
     fn to_py_error(error: crate::error::TriviumError) -> PyErr {
         match error {
@@ -35,6 +40,9 @@ pub mod python {
             }
             crate::error::TriviumError::GenerationBusy { .. } => {
                 GenerationBusyError::new_err(error.to_string())
+            }
+            crate::error::TriviumError::UnsupportedDatabaseVersion { .. } => {
+                UnsupportedDatabaseVersionError::new_err(error.to_string())
             }
             crate::error::TriviumError::InvalidInput(message) => {
                 pyo3::exceptions::PyValueError::new_err(message)
@@ -348,6 +356,17 @@ pub mod python {
         }
     }
 
+    fn parse_edge_direction(value: &str) -> PyResult<crate::database::EdgeDirection> {
+        match value {
+            "out" | "outgoing" => Ok(crate::database::EdgeDirection::Outgoing),
+            "in" | "incoming" => Ok(crate::database::EdgeDirection::Incoming),
+            "both" => Ok(crate::database::EdgeDirection::Both),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                "edge_direction 必须是 out / in / both",
+            )),
+        }
+    }
+
     #[pymethods]
     impl PyTriviumDB {
         #[new]
@@ -508,9 +527,7 @@ pub mod python {
                     py.allow_threads(|| db.search_hybrid_with_context(None, Some(&vec), &config))
                 }
             }
-            .map_err(|e: crate::error::TriviumError| {
-                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-            })?;
+            .map_err(to_py_error)?;
 
             // 转换搜索结果
             let hits: Vec<PySearchHit> = results
@@ -626,7 +643,7 @@ pub mod python {
             )
         }
 
-        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, payload_filter=None))]
+        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction="out"))]
         fn search(
             &self,
             py: Python<'_>,
@@ -637,6 +654,9 @@ pub mod python {
             expand_depth: usize,
             min_score: f32,
             payload_filter: Option<&Bound<'_, PyDict>>,
+            max_edges_per_node: usize,
+            min_edge_weight: f32,
+            edge_direction: &str,
         ) -> PyResult<Vec<PySearchHit>> {
             let rust_filter = match payload_filter {
                 Some(dict) => Some(dict_to_filter(py, dict)?),
@@ -651,6 +671,9 @@ pub mod python {
                 min_score,
                 enable_advanced_pipeline: false,
                 payload_filter: rust_filter,
+                max_edges_per_node,
+                min_edge_weight,
+                edge_direction: parse_edge_direction(edge_direction)?,
                 ..Default::default()
             };
 
@@ -669,9 +692,7 @@ pub mod python {
                     py.allow_threads(|| db.search_hybrid(None, Some(&vec), &config))
                 }
             }
-            .map_err(|e: crate::error::TriviumError| {
-                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-            })?;
+            .map_err(to_py_error)?;
 
             Ok(results
                 .into_iter()
@@ -683,7 +704,7 @@ pub mod python {
                 .collect())
         }
 
-        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None))]
+        #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction="out"))]
         fn search_grouped(
             &self,
             py: Python<'_>,
@@ -694,6 +715,9 @@ pub mod python {
             expand_depth: usize,
             min_score: f32,
             payload_filter: Option<&Bound<'_, PyDict>>,
+            max_edges_per_node: usize,
+            min_edge_weight: f32,
+            edge_direction: &str,
         ) -> PyResult<PyGroupedSearchResult> {
             let rust_filter = payload_filter
                 .map(|dict| dict_to_filter(py, dict))
@@ -705,6 +729,9 @@ pub mod python {
                 expand_depth,
                 min_score,
                 payload_filter: rust_filter,
+                max_edges_per_node,
+                min_edge_weight,
+                edge_direction: parse_edge_direction(edge_direction)?,
                 ..Default::default()
             };
             let result = match &self.inner {
@@ -822,7 +849,10 @@ pub mod python {
             custom_query_text=None,
             payload_filter=None,
             force_brute_force=false,
-            expand_labels=None
+            expand_labels=None,
+            max_edges_per_node=0,
+            min_edge_weight=0.0,
+            edge_direction="out"
         ))]
         fn search_advanced(
             &self,
@@ -847,6 +877,9 @@ pub mod python {
             payload_filter: Option<&Bound<'_, PyDict>>,
             force_brute_force: bool,
             expand_labels: Option<Vec<String>>,
+            max_edges_per_node: usize,
+            min_edge_weight: f32,
+            edge_direction: &str,
         ) -> PyResult<Vec<PySearchHit>> {
             // 解析 payload_filter（类 MongoDB 语法的 dict -> Rust Filter）
             let rust_filter = match payload_filter {
@@ -872,6 +905,9 @@ pub mod python {
                 text_boost,
                 force_brute_force,
                 expand_labels,
+                max_edges_per_node,
+                min_edge_weight,
+                edge_direction: parse_edge_direction(edge_direction)?,
                 payload_filter: rust_filter,
                 ..Default::default()
             };
@@ -893,9 +929,7 @@ pub mod python {
                     py.allow_threads(|| db.search_hybrid(q_text, Some(&vec), &config))
                 }
             }
-            .map_err(|e: crate::error::TriviumError| {
-                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-            })?;
+            .map_err(to_py_error)?;
 
             Ok(results
                 .into_iter()
@@ -1439,7 +1473,7 @@ pub mod python {
             _exc_val: Option<&Bound<'_, PyAny>>,
             _exc_tb: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<bool> {
-            self.flush()?;
+            self.close()?;
             Ok(false)
         }
 
@@ -1729,9 +1763,10 @@ pub mod python {
 
         /// 显式关闭数据库（落盘后释放资源）
         fn close(&mut self) -> PyResult<()> {
-            dispatch!(self, mut db => db.close()).map_err(|e: crate::error::TriviumError| {
-                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-            })
+            match dispatch!(self, mut db => db.close()) {
+                Ok(()) | Err(crate::error::TriviumError::DatabaseClosed) => Ok(()),
+                Err(error) => Err(to_py_error(error)),
+            }
         }
     }
 
@@ -2182,6 +2217,10 @@ pub mod python {
         m.add(
             "GenerationBusyError",
             m.py().get_type::<GenerationBusyError>(),
+        )?;
+        m.add(
+            "UnsupportedDatabaseVersionError",
+            m.py().get_type::<UnsupportedDatabaseVersionError>(),
         )?;
         m.add_class::<PyTriviumDB>()?;
         m.add_class::<PySearchHit>()?;

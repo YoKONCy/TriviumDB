@@ -31,12 +31,16 @@ lock_file.try_lock_exclusive().map_err(|_| {
 })?;
 ```
 
-通过 `fs2::FileExt::try_lock_exclusive` 在 `<db_path>.lock` 文件上持有独占锁。锁由 `Database` 结构体的 `_lock_file` 字段持有，在 `Database` drop 时自动释放。
+数据库先将现有主文件或其父目录规范化为绝对路径，再从该规范身份派生 `<db_path>.lock`。Writer 通过 `try_lock_exclusive` 获取排他锁，ReadOnly 通过 `try_lock_shared` 获取共享锁，Immutable 不创建锁文件。锁由 `_lock_file` 持有，`close()` 成功或对象 drop 后释放。
 
 **保证**：
 - 同一数据库文件**不可能**被两个进程同时写入
+- 相对路径、绝对路径、`..` 和符号链接别名不能生成独立锁身份
+- Unix 检测到主数据库硬链接时拒绝打开，避免同一 inode 搭配不同 sidecar/WAL/锁前缀
 - 锁文件在进程异常退出后由 OS 自动释放（不同于 PID 文件，不会产生死锁残留）
 - 在 Linux/macOS（`flock`）和 Windows（`LockFileEx`）上均有效
+
+不得删除仍可能被进程持有的 `.lock` 文件。Unix advisory lock 绑定 inode，删除活跃锁文件后重建同名文件可能绕过原锁。
 
 ---
 

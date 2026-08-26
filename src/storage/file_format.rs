@@ -13,8 +13,12 @@ use std::path::Path;
 
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
-const VERSION: u16 = 5; // v5: 新增 BQ Metadata Block 持久化，header 扩展至 58 字节
+pub const CURRENT_VERSION: u16 = 6;
+pub const MINIMUM_SUPPORTED_VERSION: u16 = 5;
 const HEADER_SIZE: u64 = 58;
+const BQ_BLOCK_MAGIC: &[u8; 4] = b"TBQF";
+const BQ_BLOCK_VERSION: u16 = 1;
+const BQ_BLOCK_HEADER_SIZE: usize = 16;
 
 // ══════ flush_ok 提交标记常量 ══════
 /// 标记魔数：Trivium Flush Marker
@@ -466,9 +470,9 @@ fn save_tdb<T: VectorType>(
     }
     let bq_offset = edge_offset + edge_block_size;
 
-    // 1. Header (v5: 58 字节)
+    // 1. Header
     w.write_all(MAGIC)?;
-    w.write_all(&VERSION.to_le_bytes())?;
+    w.write_all(&CURRENT_VERSION.to_le_bytes())?;
     w.write_all(&(dim as u32).to_le_bytes())?;
     w.write_all(&memtable.next_id_value().to_le_bytes())?;
     w.write_all(&node_count.to_le_bytes())?;
@@ -508,15 +512,17 @@ fn save_tdb<T: VectorType>(
         w.write_all(&edge.weight.to_le_bytes())?;
     }
 
-    // 5. BQ Metadata Block（v5 新增）
-    //    确保 BQ 签名已构建，然后 bytemuck 零拷贝写入
+    // 5. BQ Metadata Block
     let bq_sigs = memtable.bq_signatures_slice();
     let bq_count = bq_sigs.len() as u64;
-    w.write_all(&bq_count.to_le_bytes())?; // 8 字节：签名数量
-    if !bq_sigs.is_empty() {
-        // SAFETY: BqSignature 实现了 Pod + Zeroable，且为 #[repr(C)]，
-        // bytemuck::cast_slice 保证合法的字节级重新解释
-        w.write_all(bytemuck::cast_slice(bq_sigs))?;
+    w.write_all(BQ_BLOCK_MAGIC)?;
+    w.write_all(&BQ_BLOCK_VERSION.to_le_bytes())?;
+    w.write_all(&(BqSignature::MAX_CHUNKS as u16).to_le_bytes())?;
+    w.write_all(&bq_count.to_le_bytes())?;
+    for signature in bq_sigs {
+        for chunk in signature.data {
+            w.write_all(&chunk.to_le_bytes())?;
+        }
     }
 
     w.flush()?;
@@ -565,6 +571,13 @@ pub fn load<T: VectorType>(
     }
 
     let version = read_u16_le(bytes, 4, "header version")?;
+    if !(MINIMUM_SUPPORTED_VERSION..=CURRENT_VERSION).contains(&version) {
+        return Err(TriviumError::UnsupportedDatabaseVersion {
+            found: version,
+            minimum_supported: MINIMUM_SUPPORTED_VERSION,
+            current: CURRENT_VERSION,
+        });
+    }
     let dim = read_u32_le(bytes, 6, "header dim")? as usize;
     let next_id = read_u64_le(bytes, 10, "header next_id")?;
     let node_count = read_u64_le(bytes, 18, "header node_count")? as usize;
@@ -572,12 +585,7 @@ pub fn load<T: VectorType>(
     let vector_offset = read_u64_le(bytes, 34, "header vector_offset")? as usize;
     let edge_offset = read_u64_le(bytes, 42, "header edge_offset")? as usize;
 
-    // v5: 新增 BQ Block offset；v4 及以下兼容旧格式
-    let bq_offset = if version >= 5 && mmap.len() >= 58 {
-        read_u64_le(bytes, 50, "header bq_offset")? as usize
-    } else {
-        0 // 0 表示无 BQ Block
-    };
+    let bq_offset = read_u64_le(bytes, 50, "header bq_offset")? as usize;
 
     // ═══ 文件结构完整性校验 ═══
     // 防止引擎静默加载被截断的 .tdb 文件（扇区撕裂 / 断电 / 外部篡改）。
@@ -597,44 +605,7 @@ pub fn load<T: VectorType>(
             edge_offset, file_len
         )));
     }
-    if bq_offset > 0 {
-        if bq_offset > file_len {
-            return Err(TriviumError::CorruptedFile(format!(
-                "bq_offset ({}) 超出文件大小 ({})，文件被截断 (file truncated)",
-                bq_offset, file_len
-            )));
-        }
-        // BQ Block 完整性：读取 bq_count 并验证整个 Block 未被截断
-        let count_end = bq_offset.checked_add(8).ok_or_else(|| {
-            TriviumError::CorruptedFile("BQ 块计数偏移溢出 (BQ count offset overflow)".into())
-        })?;
-        if count_end > file_len {
-            return Err(TriviumError::CorruptedFile(
-                "BQ 块缺少计数字段 (BQ count field truncated)".into(),
-            ));
-        }
-        let bq_count_u64 = read_u64_le(bytes, bq_offset, "BQ count")?;
-        let bq_count = usize::try_from(bq_count_u64).map_err(|_| {
-            TriviumError::CorruptedFile(format!(
-                "BQ 签名数量超出平台寻址范围 (BQ count out of range): {bq_count_u64}"
-            ))
-        })?;
-        let sig_size = std::mem::size_of::<BqSignature>();
-        let block_bytes = bq_count.checked_mul(sig_size).ok_or_else(|| {
-            TriviumError::CorruptedFile(format!(
-                "BQ 块长度溢出 (BQ block size overflow): {bq_count} 个签名 × {sig_size} 字节"
-            ))
-        })?;
-        let expected_bq_end = count_end.checked_add(block_bytes).ok_or_else(|| {
-            TriviumError::CorruptedFile("BQ 块结束偏移溢出 (BQ end offset overflow)".into())
-        })?;
-        if expected_bq_end > file_len {
-            return Err(TriviumError::CorruptedFile(format!(
-                "BQ 块被截断 (BQ block truncated): 期望 {} 字节 (offset {} + 8 + {} × {})，实际文件大小 {} 字节",
-                expected_bq_end, bq_offset, bq_count, sig_size, file_len
-            )));
-        }
-    }
+    let bq_layout = parse_bq_layout(bytes, version, bq_offset, file_len)?;
 
     // 兼容旧版 V3 及以下的冗余区块
     let edge_limit_offset = if version >= 4 {
@@ -677,7 +648,7 @@ pub fn load<T: VectorType>(
                 &mmap,
             )?;
             // 尝试从 BQ Block 恢复签名
-            load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+            load_bq_block(&mut mt, bytes, bq_layout)?;
             load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             if load_text_sidecar {
                 load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
@@ -703,7 +674,7 @@ pub fn load<T: VectorType>(
                 edge_offset,
                 edge_limit_offset,
             )?;
-            load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+            load_bq_block(&mut mt, bytes, bq_layout)?;
             load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             if load_text_sidecar {
                 load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
@@ -723,7 +694,7 @@ pub fn load<T: VectorType>(
             &mmap,
         )?;
         // 尝试从 BQ Block 恢复签名
-        load_bq_block(&mut mt, bytes, bq_offset, mmap.len());
+        load_bq_block(&mut mt, bytes, bq_layout)?;
         // 尝试加载 QuIVer 索引
         load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
         if load_text_sidecar {
@@ -943,87 +914,155 @@ fn load_edges<T: VectorType>(
     Ok(())
 }
 
-/// 从 .tdb 的 BQ Block 中恢复 BQ 签名数组（v5+ 格式）
-///
-/// 如果 bq_offset 为 0 或数据不完整，静默跳过（首次查询时惰性重建）。
+#[derive(Clone, Copy)]
+struct BqDiskLayout {
+    count: usize,
+    chunks_per_signature: usize,
+    data_start: usize,
+}
+
+fn parse_bq_layout(
+    bytes: &[u8],
+    version: u16,
+    bq_offset: usize,
+    file_len: usize,
+) -> Result<Option<BqDiskLayout>> {
+    if bq_offset > file_len {
+        return Err(TriviumError::CorruptedFile(format!(
+            "bq_offset ({bq_offset}) 超出文件大小 ({file_len})，文件被截断 (file truncated)"
+        )));
+    }
+    if version == 5 {
+        let count_end = bq_offset.checked_add(8).ok_or_else(|| {
+            TriviumError::CorruptedFile("BQ 块计数偏移溢出 (BQ count offset overflow)".into())
+        })?;
+        if count_end > file_len {
+            return Err(TriviumError::CorruptedFile(
+                "BQ 块缺少计数字段 (BQ count field truncated)".into(),
+            ));
+        }
+        let count_u64 = read_u64_le(bytes, bq_offset, "BQ count")?;
+        let count = usize::try_from(count_u64).map_err(|_| {
+            TriviumError::CorruptedFile(format!(
+                "BQ 签名数量超出平台寻址范围 (BQ count out of range): {count_u64}"
+            ))
+        })?;
+        if count == 0 {
+            if count_end != file_len {
+                return Err(TriviumError::CorruptedFile(
+                    "v5 BQ 空块后存在多余数据 (Trailing data after empty v5 BQ block)".into(),
+                ));
+            }
+            return Ok(None);
+        }
+        let data_bytes = file_len - count_end;
+        let signature_bytes = data_bytes
+            .checked_div(count)
+            .ok_or_else(|| TriviumError::CorruptedFile("v5 BQ 签名大小无法推导".into()))?;
+        if !data_bytes.is_multiple_of(count)
+            || signature_bytes == 0
+            || !signature_bytes.is_multiple_of(8)
+        {
+            return Err(TriviumError::CorruptedFile(format!(
+                "v5 BQ 块长度与签名数量不匹配 (Invalid v5 BQ block geometry): {data_bytes} / {count}"
+            )));
+        }
+        let chunks_per_signature = signature_bytes / 8;
+        if !matches!(chunks_per_signature, 32 | 48) {
+            return Err(TriviumError::CorruptedFile(format!(
+                "v5 BQ 签名布局未知 (Unknown v5 BQ signature layout): {chunks_per_signature} chunks"
+            )));
+        }
+        return Ok(Some(BqDiskLayout {
+            count,
+            chunks_per_signature,
+            data_start: count_end,
+        }));
+    }
+
+    let header_end = bq_offset
+        .checked_add(BQ_BLOCK_HEADER_SIZE)
+        .ok_or_else(|| TriviumError::CorruptedFile("BQ 块头偏移溢出".into()))?;
+    if header_end > file_len {
+        return Err(TriviumError::CorruptedFile(
+            "BQ 格式头被截断 (BQ format header truncated)".into(),
+        ));
+    }
+    if &bytes[bq_offset..bq_offset + 4] != BQ_BLOCK_MAGIC {
+        return Err(TriviumError::CorruptedFile(
+            "BQ 格式魔数无效 (Invalid BQ format magic)".into(),
+        ));
+    }
+    let block_version = read_u16_le(bytes, bq_offset + 4, "BQ block version")?;
+    if block_version != BQ_BLOCK_VERSION {
+        return Err(TriviumError::CorruptedFile(format!(
+            "不支持的 BQ 块版本 (Unsupported BQ block version): {block_version}"
+        )));
+    }
+    let chunks_per_signature = read_u16_le(bytes, bq_offset + 6, "BQ chunks")? as usize;
+    if chunks_per_signature == 0 || chunks_per_signature > BqSignature::MAX_CHUNKS {
+        return Err(TriviumError::CorruptedFile(format!(
+            "BQ chunks 超出范围 (BQ chunks out of range): {chunks_per_signature}"
+        )));
+    }
+    let count_u64 = read_u64_le(bytes, bq_offset + 8, "BQ count")?;
+    let count = usize::try_from(count_u64)
+        .map_err(|_| TriviumError::CorruptedFile(format!("BQ count 超出范围: {count_u64}")))?;
+    let data_bytes = count
+        .checked_mul(chunks_per_signature)
+        .and_then(|value| value.checked_mul(8))
+        .ok_or_else(|| TriviumError::CorruptedFile("BQ 块长度溢出".into()))?;
+    let expected_end = header_end
+        .checked_add(data_bytes)
+        .ok_or_else(|| TriviumError::CorruptedFile("BQ 块结束偏移溢出".into()))?;
+    if expected_end != file_len {
+        return Err(TriviumError::CorruptedFile(format!(
+            "BQ 块长度不匹配 (BQ block length mismatch): 期望 {expected_end}，实际 {file_len}"
+        )));
+    }
+    if count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(BqDiskLayout {
+        count,
+        chunks_per_signature,
+        data_start: header_end,
+    }))
+}
+
 fn load_bq_block<T: VectorType>(
     memtable: &mut MemTable<T>,
     bytes: &[u8],
-    bq_offset: usize,
-    file_len: usize,
-) {
-    let Some(count_end) = bq_offset.checked_add(8) else {
-        tracing::warn!(
-            "BQ 块计数偏移溢出，跳过恢复 (BQ block count offset overflow, skipping recovery)"
-        );
-        return;
+    layout: Option<BqDiskLayout>,
+) -> Result<()> {
+    let Some(layout) = layout else {
+        return Ok(());
     };
-    if bq_offset == 0 || count_end > file_len {
-        return;
-    }
-
-    let Ok(bq_count_u64) = read_u64_le(bytes, bq_offset, "BQ count") else {
-        return;
-    };
-    let Ok(bq_count) = usize::try_from(bq_count_u64) else {
-        tracing::warn!(
-            "BQ 签名数量超出平台寻址范围，跳过恢复 (BQ signature count exceeds platform address range, skipping recovery)"
-        );
-        return;
-    };
-    if bq_count == 0 {
-        return;
-    }
-
-    let sig_size = std::mem::size_of::<BqSignature>();
-    let Some(block_bytes) = bq_count.checked_mul(sig_size) else {
-        tracing::warn!("BQ 块长度溢出，跳过恢复 (BQ block length overflow, skipping recovery)");
-        return;
-    };
-    let data_start = count_end;
-    let Some(data_end) = data_start.checked_add(block_bytes) else {
-        tracing::warn!(
-            "BQ 块结束偏移溢出，跳过恢复 (BQ block end offset overflow, skipping recovery)"
-        );
-        return;
-    };
-
-    if data_end > file_len {
-        tracing::warn!(
-            "BQ Block 数据不完整 (BQ Block data incomplete)（需要 {} 字节，文件仅剩 {} 字节），跳过恢复",
-            block_bytes,
-            file_len.saturating_sub(data_start)
-        );
-        return;
-    }
-
-    let bq_bytes = &bytes[data_start..data_end];
-
-    // 检查对齐（BqSignature 为 [u64; 32]，需要 8 字节对齐）
-    let is_aligned =
-        (bq_bytes.as_ptr() as usize).is_multiple_of(std::mem::align_of::<BqSignature>());
-
-    let sigs: Vec<BqSignature> = if is_aligned {
-        // SAFETY: BqSignature: Pod + Zeroable + #[repr(C)]，对齐已验证，长度精确
-        let slice: &[BqSignature] = bytemuck::cast_slice(bq_bytes);
-        slice.to_vec()
-    } else {
-        // 不对齐时逐个 pod_read_unaligned
-        let mut v = Vec::with_capacity(bq_count);
-        for i in 0..bq_count {
-            let off = i * sig_size;
-            let sig: BqSignature = bytemuck::pod_read_unaligned(&bq_bytes[off..off + sig_size]);
-            v.push(sig);
+    let mut sigs = Vec::new();
+    sigs.try_reserve_exact(layout.count).map_err(|error| {
+        TriviumError::CapacityAllocationFailed {
+            reason: format!("恢复 BQ 签名时分配失败: {error}"),
         }
-        v
-    };
+    })?;
+    let signature_bytes = layout.chunks_per_signature * 8;
+    for index in 0..layout.count {
+        let mut signature = BqSignature::empty();
+        let start = layout.data_start + index * signature_bytes;
+        for chunk in 0..layout.chunks_per_signature {
+            signature.data[chunk] = read_u64_le(bytes, start + chunk * 8, "BQ chunk")?;
+        }
+        sigs.push(signature);
+    }
 
     memtable.set_bq_signatures(sigs);
     tracing::info!(
-        "从 .tdb 恢复了 {} 个 BQ 签名 (Restored {} BQ signatures from .tdb)（零拷贝加载）",
-        bq_count,
-        bq_count
+        "从 .tdb 恢复了 {} 个 BQ 签名，每个 {} chunks (Restored {} BQ signatures with {} chunks each)",
+        layout.count,
+        layout.chunks_per_signature,
+        layout.count,
+        layout.chunks_per_signature
     );
+    Ok(())
 }
 
 fn load_text_index<T: VectorType>(

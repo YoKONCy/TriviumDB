@@ -2,6 +2,14 @@ use crate::node::{NodeId, SearchHit};
 use crate::storage::memtable::MemTable;
 use std::collections::HashMap;
 
+use crate::database::EdgeDirection;
+
+struct ExpansionEdge<'a> {
+    target_id: NodeId,
+    label: &'a str,
+    weight: f32,
+}
+
 /// 执行有限深度的 SA-PPR（Spreading Activation with Personalized Restart）。
 ///
 /// 该算法保留有限深度 spreading activation，不迭代到 PageRank 收敛：
@@ -29,6 +37,9 @@ pub fn expand_graph<T: crate::VectorType>(
         enable_refractory_fatigue,
         diffusion_bias,
         None,
+        0,
+        0.0,
+        EdgeDirection::Outgoing,
     )
 }
 
@@ -43,6 +54,9 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
     enable_refractory_fatigue: bool,
     diffusion_bias: Option<&[f32]>,
     expand_labels: Option<&[String]>,
+    max_edges_per_node: usize,
+    min_edge_weight: f32,
+    edge_direction: EdgeDirection,
 ) -> Vec<SearchHit> {
     if max_depth == 0 || seeds.is_empty() {
         return seeds;
@@ -100,7 +114,58 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
             if spread_budget <= 0.0 {
                 continue;
             }
-            let Some(edges) = db.get_edges(curr_id) else {
+            let mut edges = Vec::new();
+            if matches!(
+                edge_direction,
+                EdgeDirection::Outgoing | EdgeDirection::Both
+            ) {
+                edges.extend(
+                    db.get_edges(curr_id)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|edge| ExpansionEdge {
+                            target_id: edge.target_id,
+                            label: &edge.label,
+                            weight: edge.weight,
+                        }),
+                );
+            }
+            let incoming_edges;
+            if matches!(
+                edge_direction,
+                EdgeDirection::Incoming | EdgeDirection::Both
+            ) {
+                incoming_edges = db.get_incoming_edges(curr_id, None);
+                edges.extend(incoming_edges.iter().map(|edge| ExpansionEdge {
+                    target_id: edge.source_id,
+                    label: &edge.label,
+                    weight: edge.weight,
+                }));
+            }
+            edges.retain(|edge| {
+                edge.weight.is_finite()
+                    && edge.weight != 0.0
+                    && edge.weight.abs() >= min_edge_weight
+                    && expand_labels
+                        .is_none_or(|labels| labels.iter().any(|label| label == edge.label))
+            });
+            edges.sort_by(|left, right| {
+                right
+                    .weight
+                    .abs()
+                    .total_cmp(&left.weight.abs())
+                    .then_with(|| left.target_id.cmp(&right.target_id))
+                    .then_with(|| left.label.cmp(right.label))
+            });
+            edges.dedup_by(|left, right| {
+                left.target_id == right.target_id
+                    && left.label == right.label
+                    && left.weight.to_bits() == right.weight.to_bits()
+            });
+            if max_edges_per_node > 0 {
+                edges.truncate(max_edges_per_node);
+            }
+            if edges.is_empty() {
                 // 悬挂节点没有出边，其传播预算回注到个性化种子，避免能量凭空消失。
                 for (&seed_id, &share) in &seed_distribution {
                     let injected = spread_budget * share;
@@ -108,19 +173,11 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
                     *total_activation.entry(seed_id).or_insert(0.0) += injected;
                 }
                 continue;
-            };
+            }
 
             let mut weighted_edges = Vec::with_capacity(edges.len());
             let mut normalizer = 0.0f32;
             for edge in edges {
-                if expand_labels
-                    .is_some_and(|labels| !labels.iter().any(|label| label == &edge.label))
-                {
-                    continue;
-                }
-                if !edge.weight.is_finite() || edge.weight == 0.0 {
-                    continue;
-                }
                 let inhibition_factor = if enable_inverse_inhibition {
                     let in_degree = db.get_in_degree(edge.target_id).max(1) as f32;
                     1.0 / in_degree.powf(0.55)

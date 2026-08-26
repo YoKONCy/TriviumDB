@@ -730,10 +730,15 @@ results = db.search_advanced(
     enable_dpp=True,               # DPP 多样性采样
     dpp_quality_weight=1.0,
     expand_labels=["knows", "related"], # None=全部，[]=禁止图扩散
+    max_edges_per_node=20,         # 每节点按绝对权重仅保留最强 20 条边
+    min_edge_weight=0.3,           # 过滤绝对权重低于 0.3 的弱边
+    edge_direction="both",         # out / in / both
 )
 for hit in results:
     print(f"[{hit.id}] score={hit.score:.3f} | {hit.payload}")
 ```
+
+图扩散先按方向、标签和 `abs(weight)` 阈值过滤，再按 `abs(weight)` 降序、目标 ID 升序、标签字典序稳定排序并应用 `max_edges_per_node`。传播预算只在最终保留的边之间重新归一化。`inhibition` 和负权边同样按绝对值参与阈值与强边选择，但继续传播负能量。
 
 **Node.js：**
 ```javascript
@@ -1334,6 +1339,8 @@ QuIVer 索引支持增量 Insert/Delete/Update，无需全量重建。索引以 
 ---
 
 ## 维度迁移
+
+> 文件格式兼容边界：自动迁移保证从 TriviumDB `0.7.0` 开始。0.7.x/0.8.0 的 v5 文件可直接打开，并在可写句柄下一次 `flush()`/`close()` 时原子升级为 v6；早于 0.7.0 的文件需要使用旧版 JSONL 导出后导入。未来版本文件会被当前内核明确拒绝，避免降级写坏。
 
 当需要更换 Embedding 模型（维度发生变化）时，使用 `migrate` 将旧库的结构迁移到新维度。
 

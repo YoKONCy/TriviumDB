@@ -187,7 +187,7 @@ QuIVer 快照按 slot 流式读取 FP16/FP32/mmap 向量并直接编码为紧凑
 
 ```
 ┌────────────────────────┐ offset 0
-│       File Header       │ 58 字节（v3 扩展）
+│       File Header       │ 58 字节（v6）
 │  MAGIC + VERSION + dim  │
 │  next_id + node_count   │
 │  各 block 的 offset     │
@@ -198,11 +198,11 @@ QuIVer 快照按 slot 流式读取 FP16/FP32/mmap 向量并直接编码为紧凑
 ├────────────────────────┤ edge_offset
 │       Edge Block        │ [src(8B) + dst(8B) + label_len(2B) + label + weight(4B)] × M
 ├────────────────────────┤ bq_offset
-│    BQ Metadata Block    │ BQ 参数头(16B) + 二进制指纹数组(u64[])
+│    BQ Metadata Block    │ magic + block_version + chunks + count + LE u64[]
 └────────────────────────┘
 ```
 
-> **BQ 元数据块** 通过 `bytemuck` 实现与磁盘的零拷贝读写（`#[repr(C)]` + `Pod/Zeroable`），重启时毫秒级恢复无需重算。
+> **BQ 元数据块** 从 v6 开始采用自描述、固定小端序布局，显式记录块版本、每签名 chunk 数和签名数量，不再把 Rust 内存结构直接当作永久磁盘 ABI。加载器可读取 TriviumDB 0.7.0 的 v5/32-chunk 布局，以及 0.7.1–0.8.0 的 v5/48-chunk 布局；Writer 下一次 `flush()` 或 `close()` 会原子升级为 v6。
 >
 > 此外，QuIVer 图索引以独立的 `.tdb.quiver` 文件存储，采用 POD memcpy 极速序列化，重启后零开销恢复。
 
@@ -289,6 +289,8 @@ flat_vectors
 ## 图谱扩散检索
 
 TriviumDB 的核心创新——**Spreading Activation（扩散激活）**（受 Anderson, 1983, *The Architecture of Cognition* 中认知心理学扩散激活理论启发）：
+
+高级检索可通过 `max_edges_per_node`、`min_edge_weight` 和 `edge_direction` 精细控制高出度节点：支持出边、入边或双向扩散，弱边在能量归一化前被移除，每节点边上限按确定性的绝对权重顺序选择。默认值保持历史行为：不限边数、阈值为 0、仅沿出边。
 
 图能力分为三条互不混淆的语义路径：
 

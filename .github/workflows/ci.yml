@@ -136,6 +136,72 @@ jobs:
       - name: CLI/TUI Clippy
         run: cargo clippy -p triviumdb-cli --no-deps --all-targets -- -D warnings
 
+  python-binding:
+    name: Python Binding Lifecycle
+    runs-on: ${{ matrix.runner }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, windows-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 Python 构建工具
+        run: python -m pip install maturin mypy
+
+      - name: 构建并安装 Python 绑定
+        shell: bash
+        run: |
+          python -m maturin build --release --features python -o python-dist
+          python -m pip install --force-reinstall python-dist/*.whl
+
+      - name: 验证上下文关闭与文件锁生命周期
+        run: python tests/python_context_manager.py
+
+      - name: 验证 Python 类型存根与 Wheel 内容
+        shell: bash
+        run: |
+          python -c "import pathlib,triviumdb; root=pathlib.Path(triviumdb.__file__).parent; assert (root/'py.typed').is_file(); assert (root/'__init__.pyi').is_file()"
+          python -m mypy --strict tests/python_typing_smoke.py
+          npx --yes pyright tests/python_typing_smoke.py --pythonpath "$(command -v python)"
+
+  node-binding:
+    name: Node.js Binding Lifecycle
+    runs-on: ${{ matrix.runner }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, windows-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装 Node.js 构建依赖
+        run: npm install
+
+      - name: 构建 Node.js 原生绑定
+        run: npm run build
+
+      - name: 验证关闭、资源管理与跨进程文件锁
+        run: npm run test:lifecycle
+
   # ═══════════════════════════════════════════
   #  Job 2b: ARM64 Linux 原生测试 (QEMU)
   # ═══════════════════════════════════════════

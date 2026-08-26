@@ -15,6 +15,7 @@
   "scripts": {
     "build": "napi build --platform --release --features nodejs",
     "build:debug": "napi build --platform --features nodejs",
+    "test:lifecycle": "node tests/node_lifecycle.js",
     "prepublishOnly": "napi build --platform --release --features nodejs"
   },
   "keywords": [

@@ -10,6 +10,9 @@ pub mod nodejs {
             crate::error::TriviumError::RecoveryRequired { .. } => "TDB_RECOVERY_REQUIRED",
             crate::error::TriviumError::ImmutableArtifactInvalid { .. } => "TDB_IMMUTABLE_ARTIFACT",
             crate::error::TriviumError::GenerationBusy { .. } => "TDB_GENERATION_BUSY",
+            crate::error::TriviumError::UnsupportedDatabaseVersion { .. } => {
+                "TDB_UNSUPPORTED_DATABASE_VERSION"
+            }
             crate::error::TriviumError::InvalidInput(_) => "TDB_INVALID_INPUT",
             _ => "TDB_ERROR",
         };
@@ -222,6 +225,9 @@ pub mod nodejs {
         pub diffusion_bias: Option<Vec<f64>>,
         /// 图扩散允许的边标签；空数组表示禁止扩散。
         pub expand_labels: Option<Vec<String>>,
+        pub max_edges_per_node: Option<f64>,
+        pub min_edge_weight: Option<f64>,
+        pub edge_direction: Option<String>,
     }
 
     /// 节点关系边
@@ -364,6 +370,17 @@ pub mod nodejs {
 
     fn parse_sync_mode(s: &str) -> napi::Result<crate::storage::wal::SyncMode> {
         crate::storage::wal::SyncMode::parse(s).map_err(napi::Error::from_reason)
+    }
+
+    fn parse_edge_direction(value: Option<&str>) -> napi::Result<crate::database::EdgeDirection> {
+        match value.unwrap_or("out") {
+            "out" | "outgoing" => Ok(crate::database::EdgeDirection::Outgoing),
+            "in" | "incoming" => Ok(crate::database::EdgeDirection::Incoming),
+            "both" => Ok(crate::database::EdgeDirection::Both),
+            _ => Err(napi::Error::from_reason(
+                "edgeDirection 必须是 out / in / both",
+            )),
+        }
     }
 
     // ════════ TriviumDB 主类 ════════
@@ -533,6 +550,9 @@ pub mod nodejs {
                 force_brute_force: None,
                 diffusion_bias: None,
                 expand_labels: None,
+                max_edges_per_node: None,
+                min_edge_weight: None,
+                edge_direction: None,
             });
 
             let top_k = cfg.top_k.unwrap_or(5);
@@ -562,6 +582,13 @@ pub mod nodejs {
                     .diffusion_bias
                     .map(|v| v.into_iter().map(|x| x as f32).collect()),
                 expand_labels: cfg.expand_labels,
+                max_edges_per_node: cfg
+                    .max_edges_per_node
+                    .map(|value| parse_safe_usize(value, "maxEdgesPerNode"))
+                    .transpose()?
+                    .unwrap_or(0),
+                min_edge_weight: cfg.min_edge_weight.unwrap_or(0.0) as f32,
+                edge_direction: parse_edge_direction(cfg.edge_direction.as_deref())?,
                 ..Default::default()
             };
 
@@ -1311,6 +1338,9 @@ pub mod nodejs {
                 force_brute_force: None,
                 diffusion_bias: None,
                 expand_labels: None,
+                max_edges_per_node: None,
+                min_edge_weight: None,
+                edge_direction: None,
             });
 
             let top_k = cfg.top_k.unwrap_or(5);
@@ -1340,6 +1370,13 @@ pub mod nodejs {
                     .diffusion_bias
                     .map(|v| v.iter().map(|&x| x as f32).collect()),
                 expand_labels: cfg.expand_labels,
+                max_edges_per_node: cfg
+                    .max_edges_per_node
+                    .map(|value| parse_safe_usize(value, "maxEdgesPerNode"))
+                    .transpose()?
+                    .unwrap_or(0),
+                min_edge_weight: cfg.min_edge_weight.unwrap_or(0.0) as f32,
+                edge_direction: parse_edge_direction(cfg.edge_direction.as_deref())?,
                 ..Default::default()
             };
 
@@ -1729,8 +1766,10 @@ pub mod nodejs {
         /// 显式关闭数据库（落盘后释放资源）
         #[napi]
         pub fn close(&mut self) -> napi::Result<()> {
-            dispatch!(self, mut db => db.close())
-                .map_err(|e| napi::Error::from_reason(e.to_string()))
+            match dispatch!(self, mut db => db.close()) {
+                Ok(()) | Err(crate::error::TriviumError::DatabaseClosed) => Ok(()),
+                Err(error) => Err(to_napi_error(error)),
+            }
         }
     } // impl TriviumDB
 } // mod nodejs

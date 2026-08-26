@@ -24,3 +24,5 @@ classifiers = [
 
 [tool.maturin]
 features = ["python"]
+python-source = "python"
+module-name = "triviumdb.triviumdb"

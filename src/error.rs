@@ -85,6 +85,15 @@ pub enum TriviumError {
     #[error("不支持的 WAL 版本 (Unsupported WAL version): 发现 {found}，当前支持 {supported}")]
     UnsupportedWalVersion { found: u16, supported: u16 },
 
+    #[error(
+        "不支持的数据库文件版本 (Unsupported database file version): 发现 v{found}，当前可读取 v{minimum_supported}..=v{current}；v5 对应 TriviumDB 0.7.x/0.8.0，早于 0.7.0 的文件请手动导出迁移"
+    )]
+    UnsupportedDatabaseVersion {
+        found: u16,
+        minimum_supported: u16,
+        current: u16,
+    },
+
     /// 输入参数无效（维度越界、非法配置等）
     #[error("无效输入 (Invalid input): {0}")]
     InvalidInput(String),

@@ -148,6 +148,9 @@ fuzz/
 | `Filter`    | `unit/filter.rs`    | 数字/字符串范围、RFC3339 时区、错误路径、bloom mask             |
 | `Vector`    | `unit/vector.rs`    | 余弦相似度、SIMD 尾部处理、标量回退、多 dtype                  |
 | `WAL`       | `unit/wal.rs`       | 显式版本门禁、旧格式兼容、CRC、SyncMode、崩溃恢复               |
+| `.tdb` 格式 | `format_migration.rs` | v5 32/48-chunk 自动迁移、v6 自描述布局、未来/过旧版本门禁与损坏拒绝 |
+| 图扩散参数 | `unit/traversal.rs` | 出/入/双向、强边上限、绝对权重阈值、稳定排序、自环去重与组合过滤 |
+| Python 类型 | `python_typing_smoke.py` | Wheel 内 `py.typed/.pyi`、mypy strict 与 pyright 双门禁 |
 | `Traversal` | `unit/traversal.rs` | PPR 扩散、Reachability 方向/最短路径/环/预算、GraphFirst 参数门禁 |
 | `TQL AST`   | `unit/tql_ast.rs`   | 语法树节点构造、枚举完整性                                     |
 | `Cognitive` | `unit/cognitive.rs` | FISTA 稀疏残差、DPP 多样性采样                                 |

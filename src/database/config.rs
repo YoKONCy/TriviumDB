@@ -33,6 +33,14 @@ pub enum MissingIndexPolicy {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EdgeDirection {
+    #[default]
+    Outgoing,
+    Incoming,
+    Both,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub dim: usize,
@@ -78,6 +86,12 @@ pub struct SearchConfig {
     pub expand_depth: usize,
     /// 图扩散允许的边标签；None 表示全部，Some(empty) 表示禁止扩散。
     pub expand_labels: Option<Vec<String>>,
+    /// 每个扩散节点最多选择的边数；0 表示不限制。
+    pub max_edges_per_node: usize,
+    /// 仅传播绝对权重大于等于该阈值的边。
+    pub min_edge_weight: f32,
+    /// 图扩散使用出边、入边或双向边。
+    pub edge_direction: EdgeDirection,
     pub min_score: f32,
     pub teleport_alpha: f32, // L6 SA-PPR 个性化重启比例
 
@@ -140,6 +154,9 @@ impl Default for SearchConfig {
             rerank_k: 0,
             expand_depth: 2,
             expand_labels: None,
+            max_edges_per_node: 0,
+            min_edge_weight: 0.0,
+            edge_direction: EdgeDirection::Outgoing,
             min_score: 0.1,
             teleport_alpha: 0.0,
             enable_advanced_pipeline: false,

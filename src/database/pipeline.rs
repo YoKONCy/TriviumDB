@@ -56,6 +56,7 @@ fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
         ("text_boost", config.text_boost),
         ("bm25_k1", config.bm25_k1),
         ("bm25_b", config.bm25_b),
+        ("min_edge_weight", config.min_edge_weight),
     ] {
         if !value.is_finite() {
             return Err(crate::error::TriviumError::InvalidInput(format!(
@@ -96,6 +97,11 @@ fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
     config.teleport_alpha = config.teleport_alpha.clamp(0.0, 1.0);
     config.dpp_quality_weight = config.dpp_quality_weight.clamp(0.0, 10.0);
     config.fista_threshold = config.fista_threshold.clamp(0.0, f32::MAX);
+    if config.min_edge_weight < 0.0 {
+        return Err(crate::error::TriviumError::InvalidInput(
+            "min_edge_weight 不得为负数 (min_edge_weight must be non-negative)".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -351,6 +357,9 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         config.enable_refractory_fatigue,
         config.diffusion_bias.as_deref(), // CCSA: 传递扩散偏置向量
         config.expand_labels.as_deref(),
+        config.max_edges_per_node,
+        config.min_edge_weight,
+        config.edge_direction,
     );
     ctx.record_timing("graph_expand", t_graph.elapsed());
 

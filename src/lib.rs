@@ -23,7 +23,7 @@ pub mod cognitive;
 /// FFI 绑定层（Python / Node.js）
 pub mod bindings;
 
-pub use database::{BatchSearchConfig, SearchConfig};
+pub use database::{BatchSearchConfig, EdgeDirection, SearchConfig};
 pub use database::{Database, DatabaseReader, DatabaseWriter};
 pub use error::{Result, TriviumError};
 pub use filter::Filter;

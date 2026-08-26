@@ -274,6 +274,16 @@ pub fn sniff_header(tdb_path: &str) -> Result<HeaderInfo> {
     }
 
     let version = u16::from_le_bytes([header[4], header[5]]);
+    if !(triviumdb::storage::file_format::MINIMUM_SUPPORTED_VERSION
+        ..=triviumdb::storage::file_format::CURRENT_VERSION)
+        .contains(&version)
+    {
+        return Err(TriviumError::UnsupportedDatabaseVersion {
+            found: version,
+            minimum_supported: triviumdb::storage::file_format::MINIMUM_SUPPORTED_VERSION,
+            current: triviumdb::storage::file_format::CURRENT_VERSION,
+        });
+    }
     let dim = u32::from_le_bytes([header[6], header[7], header[8], header[9]]) as usize;
 
     Ok(HeaderInfo { version, dim })
@@ -428,6 +438,26 @@ mod tests {
         }
         let info = sniff_header(&path).unwrap();
         assert_eq!(info.dim, 8);
+        assert_eq!(
+            info.version,
+            triviumdb::storage::file_format::CURRENT_VERSION
+        );
+    }
+
+    #[test]
+    fn sniff_header拒绝不支持的数据库版本() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("unsupported.tdb");
+        let mut bytes = [0u8; 10];
+        bytes[0..4].copy_from_slice(b"TVDB");
+        bytes[4..6]
+            .copy_from_slice(&(triviumdb::storage::file_format::CURRENT_VERSION + 1).to_le_bytes());
+        bytes[6..10].copy_from_slice(&8u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            sniff_header(path.to_str().unwrap()),
+            Err(TriviumError::UnsupportedDatabaseVersion { .. })
+        ));
     }
 
     #[test]

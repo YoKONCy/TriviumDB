@@ -3,6 +3,7 @@
 //! 覆盖: expand_graph 的 SA-PPR/反向抑制/侧向截断/不应期疲劳 等全部参数路径
 
 use serde_json::json;
+use triviumdb::database::EdgeDirection;
 use triviumdb::graph::constrained::rank_within;
 use triviumdb::graph::reachability::{ReachabilityConfig, ReachabilityDirection, traverse};
 use triviumdb::graph::traversal::{expand_graph, expand_graph_with_labels};
@@ -227,6 +228,9 @@ fn expand_标签白名单在归一化前过滤() {
         false,
         None,
         Some(&labels),
+        0,
+        0.0,
+        EdgeDirection::Outgoing,
     );
 
     assert!((result.iter().find(|hit| hit.id == 2).unwrap().score - 1.0).abs() < 1e-5);
@@ -247,9 +251,131 @@ fn expand_空标签白名单禁止扩散() {
         false,
         None,
         Some(&labels),
+        0,
+        0.0,
+        EdgeDirection::Outgoing,
     );
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].id, 1);
+}
+
+#[test]
+fn expand_每节点边上限按绝对权重稳定选择且重新归一化() {
+    let mut mt = MemTable::new(DIM);
+    for id in 1..=4 {
+        mt.insert_with_id(id, &[id as f32, 1.0], json!({})).unwrap();
+    }
+    mt.link(1, 2, "edge".into(), 0.5).unwrap();
+    mt.link(1, 3, "edge".into(), 0.9).unwrap();
+    mt.link(1, 4, "edge".into(), 0.9).unwrap();
+    let result = expand_graph_with_labels(
+        &mt,
+        vec![seed(1, 1.0)],
+        1,
+        0.0,
+        false,
+        0,
+        false,
+        None,
+        None,
+        1,
+        0.0,
+        EdgeDirection::Outgoing,
+    );
+    assert!((result.iter().find(|hit| hit.id == 3).unwrap().score - 1.0).abs() < 1e-5);
+    assert!(result.iter().all(|hit| hit.id != 2 && hit.id != 4));
+}
+
+#[test]
+fn expand_权重阈值使用绝对值并在归一化前过滤() {
+    let mut mt = MemTable::new(DIM);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[id as f32, 1.0], json!({})).unwrap();
+    }
+    mt.link(1, 2, "weak".into(), 0.2).unwrap();
+    mt.link(1, 3, "inhibition".into(), -0.8).unwrap();
+    let result = expand_graph_with_labels(
+        &mt,
+        vec![seed(1, 1.0)],
+        1,
+        0.0,
+        false,
+        0,
+        false,
+        None,
+        None,
+        0,
+        0.5,
+        EdgeDirection::Outgoing,
+    );
+    assert!(result.iter().all(|hit| hit.id != 2));
+    assert_eq!(
+        result.iter().find(|hit| hit.id == 3).map(|hit| hit.score),
+        Some(-1.0)
+    );
+}
+
+#[test]
+fn expand_方向分别支持出边入边和双向() {
+    let mut mt = MemTable::new(DIM);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[id as f32, 1.0], json!({})).unwrap();
+    }
+    mt.link(1, 2, "out".into(), 1.0).unwrap();
+    mt.link(3, 1, "in".into(), 1.0).unwrap();
+    let run = |direction| {
+        expand_graph_with_labels(
+            &mt,
+            vec![seed(1, 1.0)],
+            1,
+            0.0,
+            false,
+            0,
+            false,
+            None,
+            None,
+            0,
+            0.0,
+            direction,
+        )
+    };
+    let outgoing = run(EdgeDirection::Outgoing);
+    assert!(outgoing.iter().any(|hit| hit.id == 2));
+    assert!(outgoing.iter().all(|hit| hit.id != 3));
+    let incoming = run(EdgeDirection::Incoming);
+    assert!(incoming.iter().any(|hit| hit.id == 3));
+    assert!(incoming.iter().all(|hit| hit.id != 2));
+    let both = run(EdgeDirection::Both);
+    assert!(both.iter().any(|hit| hit.id == 2));
+    assert!(both.iter().any(|hit| hit.id == 3));
+}
+
+#[test]
+fn expand_双向自环不重复计入且组合过滤保持确定性() {
+    let mut mt = MemTable::new(DIM);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[id as f32, 1.0], json!({})).unwrap();
+    }
+    mt.link(1, 1, "self".into(), 1.0).unwrap();
+    mt.link(1, 2, "allowed".into(), 0.8).unwrap();
+    mt.link(3, 1, "allowed".into(), 0.7).unwrap();
+    let labels = vec!["allowed".to_string()];
+    let result = expand_graph_with_labels(
+        &mt,
+        vec![seed(1, 1.0)],
+        1,
+        0.0,
+        false,
+        0,
+        false,
+        None,
+        Some(&labels),
+        1,
+        0.5,
+        EdgeDirection::Both,
+    );
+    assert!(result.iter().any(|hit| hit.id == 2));
+    assert!(result.iter().all(|hit| hit.id != 3));
 }
 
 #[test]

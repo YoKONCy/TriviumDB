@@ -173,6 +173,12 @@ export interface JsSearchConfig {
   diffusionBias?: number[];
   /** 图扩散允许的边标签；省略表示全部，空数组表示禁止扩散 */
   expandLabels?: string[];
+  /** 每个扩散节点最多选择的边数；0 或省略表示不限制 */
+  maxEdgesPerNode?: number;
+  /** 仅传播绝对权重大于等于该阈值的边 */
+  minEdgeWeight?: number;
+  /** 图扩散方向，默认 out */
+  edgeDirection?: 'out' | 'in' | 'both';
 }
 
 export interface JsClusterResult {
@@ -597,6 +603,12 @@ export class TriviumDB {
 
   /** 显式关闭数据库（落盘后释放资源）；关闭后该对象的后续数据库操作会抛出错误 */
   close(): void;
+
+  /** `close()` 的幂等资源释放别名，供不支持 Explicit Resource Management 的环境调用 */
+  dispose(): void;
+
+  /** 支持 `using db = new TriviumDB(...)`，作用域退出时自动安全关闭 */
+  [Symbol.dispose](): void;
 
   /** 获取设置的浮点格式 (f32, f16, u64) */
   get dtype(): string;

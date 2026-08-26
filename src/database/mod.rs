@@ -13,7 +13,8 @@ pub mod transaction;
 
 // 从子模块重导出公开类型，保持对外 API 不变
 pub use config::{
-    AccessMode, BatchSearchConfig, Config, MissingIndexPolicy, SearchConfig, StorageMode,
+    AccessMode, BatchSearchConfig, Config, EdgeDirection, MissingIndexPolicy, SearchConfig,
+    StorageMode,
 };
 pub use facade::{DatabaseReader, DatabaseWriter};
 pub use transaction::{Transaction, TxBuilder};
@@ -30,6 +31,7 @@ use crate::storage::wal::{SyncMode, Wal, WalEntry};
 use fs2::FileExt;
 use rayon::prelude::*;
 
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
@@ -56,6 +58,45 @@ pub(crate) fn write_or_recover<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
         tracing::warn!("读写锁中毒，正在恢复写访问 (RwLock was poisoned, recovering write...)");
         poisoned.into_inner()
     })
+}
+
+fn normalized_database_path(path: &str) -> Result<PathBuf> {
+    let requested = Path::new(path);
+    if requested.exists() {
+        let metadata = requested.metadata().map_err(TriviumError::Io)?;
+        reject_hard_link_alias(path, &metadata)?;
+        return requested.canonicalize().map_err(TriviumError::Io);
+    }
+    let file_name = requested.file_name().ok_or_else(|| {
+        TriviumError::InvalidInput(format!(
+            "数据库路径缺少文件名 (Database path has no file name): {path}"
+        ))
+    })?;
+    let parent = requested
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty());
+    let parent = match parent {
+        Some(parent) => parent.canonicalize().map_err(TriviumError::Io)?,
+        None => std::env::current_dir().map_err(TriviumError::Io)?,
+    };
+    Ok(parent.join(file_name))
+}
+
+#[cfg(unix)]
+fn reject_hard_link_alias(path: &str, metadata: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if metadata.nlink() > 1 {
+        return Err(TriviumError::InvalidInput(format!(
+            "数据库主文件不能是硬链接 (Database file must not have hard links): {path}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reject_hard_link_alias(_path: &str, _metadata: &std::fs::Metadata) -> Result<()> {
+    Ok(())
 }
 
 fn batch_search_pool() -> Result<&'static rayon::ThreadPool> {
@@ -377,6 +418,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             std::fs::create_dir_all(parent_dir)?;
         }
 
+        let normalized_path = normalized_database_path(path)?;
+        let path = normalized_path.to_str().ok_or_else(|| {
+            TriviumError::InvalidInput(
+                "数据库规范路径不是有效 UTF-8 (Canonical database path is not valid UTF-8)".into(),
+            )
+        })?;
+
         // ═══ 文件锁：防止多进程并发写同一个数据库 ═══
         let lock_path = format!("{}.lock", path);
         if config.access_mode != AccessMode::ReadWrite && !std::path::Path::new(path).exists() {
@@ -487,7 +535,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             AccessMode::ReadOnly | AccessMode::Immutable => Wal::disabled(path, config.sync_mode),
         };
         Ok(Self {
-            db_path: path.to_string(),
+            db_path: normalized_path.to_string_lossy().into_owned(),
             memtable: Arc::new(RwLock::new(memtable)),
             wal: Arc::new(Mutex::new(wal)),
             compaction: None,
