@@ -19,12 +19,10 @@ Run locally:
     pyright tests/python/test_type_stubs.py
 """
 
-from typing import Optional
-
 from typing_extensions import assert_type
 
 import triviumdb
-from triviumdb import Edge, NodeView, SearchHit, Transaction, TriviumDB
+from triviumdb import Edge, EdgeDirection, NodeView, SearchHit, Transaction, TriviumDB
 
 db = TriviumDB("app.tdb", dim=8)
 
@@ -43,7 +41,7 @@ assert_type(hits[0].id, int)
 assert_type(hits[0].score, float)
 
 # ── reads ──
-assert_type(db.get(1), Optional[NodeView])
+assert_type(db.get(1), NodeView | None)
 assert_type(db.get_edges(1), list[Edge])
 assert_type(db.node_count(), int)
 
@@ -58,9 +56,22 @@ with db.transaction() as tx:
     assert_type(tx, Transaction)
     assert_type(tx.commit(), list[int])
 
+# ── graph expansion controls ──
+direction: EdgeDirection = "both"
+assert_type(
+    db.search_advanced(
+        [0.1] * 8,
+        max_edges_per_node=5,
+        min_edge_weight=0.2,
+        edge_direction=direction,
+    ),
+    list[SearchHit],
+)
+
 # ── negative assertions: the stub MUST reject these ──
 # If a line below stops being an error, --warn-unused-ignores fails the build.
 db.insert("not-a-vector", {})  # type: ignore[arg-type]
 db.node_count("extra-arg")  # type: ignore[call-arg]
 db.nonexistent_method()  # type: ignore[attr-defined]
 takes_str: str = db.node_count()  # type: ignore[assignment]
+db.search_advanced([0.1] * 8, edge_direction="sideways")  # type: ignore[arg-type]

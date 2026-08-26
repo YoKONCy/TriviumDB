@@ -383,14 +383,14 @@ jobs:
   # ═══════════════════════════════════════════
   #  Job 5a: Python 类型存根端到端校验
   #
-  #  triviumdb.pyi 由 scripts/generate_pyi.py 反射已编译模块生成、并提交入库
+  #  python/triviumdb/__init__.pyi 由 scripts/generate_pyi.py 反射已编译模块生成、并提交入库
   #  （与 tokenizers/safetensors/dora 同模式）。本 job 构建并安装 wheel，然后：
-  #    1. --check —— 用当前绑定重新生成，若与提交的 triviumdb.pyi 不一致则失败
+  #    1. --check —— 用当前绑定重新生成，若与提交的 __init__.pyi 不一致则失败
   #       （改了 src/bindings/python.rs 却忘记重生成时报错）；
   #    2. stubtest —— 存根与运行时原生模块逐方法、逐签名严格一致；
   #    3. assert_type 端到端测试 —— 对已安装 wheel 断言各 API 的精确类型、
   #       误用被拒绝、py.typed 生效（缺失即被 mypy 判为 Any）。
-  #  第 3 步在 tests/python 下运行，避免仓库根的 triviumdb.pyi 遮蔽已安装 wheel。
+  #  第 3 步在 tests/python 下运行，确保解析的是已安装 wheel。
   # ═══════════════════════════════════════════
   python-stubs:
     name: Python Type Stubs
@@ -414,7 +414,7 @@ jobs:
         run: pip install maturin mypy pyright typing_extensions
 
       - name: 构建并安装 Python wheel
-        # 打包提交入库的 triviumdb.pyi；dev profile 避开 LTO 以加快门禁
+        # 打包提交入库的 mixed-project 存根；dev profile 避开 LTO 以加快门禁
         run: |
           maturin build --profile dev --features python -i python3 --out dist
           pip install --no-index --find-links dist triviumdb

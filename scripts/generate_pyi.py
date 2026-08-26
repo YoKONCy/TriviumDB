@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate ``triviumdb.pyi`` from the compiled ``triviumdb`` extension.
+"""Generate the packaged Python type stub from the compiled extension.
 
 The drift-prone parts of a stub — which classes/methods exist, parameter
 names, ordering and defaults — are read from the installed extension with
@@ -28,6 +28,7 @@ from pathlib import Path
 EXCEPTIONS = [
     "ReadOnlyError", "RecoveryRequiredError",
     "ImmutableArtifactError", "GenerationBusyError",
+    "UnsupportedDatabaseVersionError",
 ]
 CLASS_ORDER = [
     "SearchHit", "GroupedSearchResult", "Edge", "IncomingEdge", "NodeView",
@@ -46,25 +47,25 @@ ATTRS = {
     "GroupedSearchResult": {"semantic_hits": "list[SearchHit]", "graph_hits": "list[SearchHit]"},
     "Edge": {"target_id": "int", "label": "str", "weight": "float"},
     "IncomingEdge": {"source_id": "int", "target_id": "int", "label": "str", "weight": "float"},
-    "NodeView": {"id": "int", "vector": "list[float]", "payload": "Any",
+    "NodeView": {"id": "int", "vector": "list[float | int]", "payload": "Any",
                  "edges": "list[Edge]", "num_edges": "int"},
     "ReachabilityStep": {"from_id": "int", "to_id": "int", "label": "str"},
     "ReachabilityResult": {"source_id": "int", "target_id": "int", "depth": "int",
                            "path": "list[int]", "steps": "list[ReachabilityStep]"},
-    "QueryRow": {"row": "dict[str, dict[str, Any]]"},
+    "QueryRow": {"row": "dict[str, Any]"},
     "HookContext": {"timings": "dict[str, float]", "counts": "dict[str, int]",
-                    "custom_data": "Any", "observations": "dict[str, Any]", "aborted": "bool"},
+                    "custom_data": "dict[str, Any]", "observations": "dict[str, float]", "aborted": "bool"},
     "TriviumDB": {"dtype": "str"},
 }
 
 # Param type by name. A param whose default is None is auto-wrapped in Optional.
 PARAM_TYPES = {
-    "vector": "Sequence[float]", "query_vector": "Sequence[float]",
-    "vectors": "Sequence[Sequence[float]]", "query_vectors": "Sequence[Sequence[float]]",
+    "vector": "Vector", "query_vector": "Vector",
+    "vectors": "Sequence[Vector]", "query_vectors": "Sequence[Vector]",
     "ids": "Sequence[int]", "anchor_ids": "Sequence[int]",
     "payload": "Any", "payloads": "Sequence[Any]", "patch": "Mapping[str, Any]",
-    "payload_filter": "Optional[Mapping[str, Any]]",
-    "labels": "Optional[Sequence[str]]", "expand_labels": "Optional[Sequence[str]]",
+    "payload_filter": "Mapping[str, Any]",
+    "labels": "Sequence[str]", "expand_labels": "Sequence[str]",
     "hook": "Any",
     "exc_type": "object", "_exc_type": "object", "_exc_val": "object", "_exc_tb": "object",
 }
@@ -72,9 +73,10 @@ PARAM_TYPES = {
 for _t, _names in {
     "int": "id src dst key depth expand_depth min_depth max_depth max_visited_nodes "
            "max_anchor_nodes parallelism additional mb interval_secs min_community_size "
-           "max_iterations dim new_dim memory_limit_mb expected_nodes top_k recall_k rerank_k",
+           "max_iterations dim new_dim memory_limit_mb expected_nodes top_k recall_k rerank_k "
+           "max_edges_per_node seed",
     "float": "weight min_score teleport_alpha fista_lambda fista_threshold "
-             "dpp_quality_weight text_boost hybrid_alpha",
+             "dpp_quality_weight text_boost hybrid_alpha min_edge_weight resolution",
     "str": "text keyword field query query_text mode lib_path path new_path generation_id "
            "dtype sync_mode access_mode missing_index_policy direction label custom_query_text",
     "bool": "load_text_index auto_build_quiver enabled compute_centroids "
@@ -82,6 +84,18 @@ for _t, _names in {
             "enable_refractory_fatigue enable_text_hybrid_search force_brute_force",
 }.items():
     PARAM_TYPES.update(dict.fromkeys(_names.split(), _t))
+
+QUALIFIED_PARAM_TYPES = {
+    "TriviumDB.__new__.dtype": "DType",
+    "TriviumDB.__new__.sync_mode": "SyncMode",
+    "TriviumDB.__new__.access_mode": "AccessMode",
+    "TriviumDB.__new__.missing_index_policy": "MissingIndexPolicy",
+    "TriviumDB.set_sync_mode.mode": "SyncMode",
+    "TriviumDB.search.edge_direction": "EdgeDirection",
+    "TriviumDB.search_grouped.edge_direction": "EdgeDirection",
+    "TriviumDB.search_advanced.edge_direction": "EdgeDirection",
+    "TriviumDB.reachable.direction": "ReachabilityDirection",
+}
 
 # Return type → space-separated "Class.method" (or bare function). Any method
 # not listed emits Any plus a warning, so a new Rust method is loud, not silent.
@@ -114,8 +128,8 @@ for _ret, _quals in {
     "dict[str, Any]": "TriviumDB.tql_mut TriviumDB.leiden_cluster",
     "GroupedSearchResult": "TriviumDB.search_grouped",
     "tuple[list[SearchHit], HookContext]": "TriviumDB.search_with_context",
-    "Optional[NodeView]": "TriviumDB.get",
-    "Optional[Any]": "TriviumDB.get_payload",
+    "NodeView | None": "TriviumDB.get",
+    "Any | None": "TriviumDB.get_payload",
     "Transaction": "TriviumDB.transaction",
     "Any": "TriviumDB.publish_generation_manifest",
     "str": "TriviumDB.__repr__ Transaction.__repr__ QueryRow.__repr__ HookContext.__repr__",
@@ -134,24 +148,32 @@ HEADER = '''\
 # PEP 561: maturin renames this to triviumdb/__init__.pyi and adds py.typed.
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Optional, final
+from typing import Any, Literal, final
+
+Vector = Sequence[float | int]
+DType = Literal["f32", "f16", "u64"]
+SyncMode = Literal["full", "normal", "off"]
+AccessMode = Literal["read_write", "read_only", "immutable"]
+MissingIndexPolicy = Literal["fallback", "build_in_memory", "error"]
+EdgeDirection = Literal["out", "in", "both"]
+ReachabilityDirection = Literal["outgoing", "incoming", "both"]
 '''
 
 _EMPTY = inspect.Parameter.empty
 
 
-def param_type(name: str, default) -> str:
-    t = PARAM_TYPES.get(name, "Any")
-    return f"Optional[{t}]" if default is None and not t.startswith("Optional") else t
+def param_type(qual: str, name: str, default) -> str:
+    t = QUALIFIED_PARAM_TYPES.get(f"{qual}.{name}", PARAM_TYPES.get(name, "Any"))
+    return f"{t} | None" if default is None and not t.endswith(" | None") else t
 
 
-def render_params(sig: inspect.Signature, receiver: str) -> str:
+def render_params(qual: str, sig: inspect.Signature, receiver: str) -> str:
     parts = [receiver] if receiver else []
     params = [p for p in sig.parameters.values()
               if p.name not in ("self", "cls")
               and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)]
     for i, p in enumerate(params):
-        piece = f"{p.name}: {param_type(p.name, p.default)}"
+        piece = f"{p.name}: {param_type(qual, p.name, p.default)}"
         if p.default is not _EMPTY:
             piece += f" = {p.default!r}"
         parts.append(piece)
@@ -174,7 +196,7 @@ def render_def(qual: str, name: str, obj, receiver: str) -> str:
         sig = inspect.signature(obj)
     except (TypeError, ValueError):
         return ""
-    return f"    def {name}({render_params(sig, receiver)}) -> {return_type(qual)}: ..."
+    return f"    def {name}({render_params(qual, sig, receiver)}) -> {return_type(qual)}: ..."
 
 
 def class_methods(cls_obj) -> list[str]:
@@ -210,7 +232,7 @@ def build_stub(mod) -> str:
         "# Classes",
         *(render_class(mod, c) for c in CLASS_ORDER),
         "# Functions",
-        *(f"def {f}({render_params(inspect.signature(getattr(mod, f)), '')}) "
+        *(f"def {f}({render_params(f, inspect.signature(getattr(mod, f)), '')}) "
           f"-> {return_type(f)}: ..." for f in FUNCTIONS),
     ]
     return "\n\n".join(blocks) + "\n"
@@ -220,7 +242,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="fail if the stub is stale")
     ap.add_argument("--output", type=Path,
-                    default=Path(__file__).resolve().parent.parent / "triviumdb.pyi")
+                    default=Path(__file__).resolve().parent.parent
+                    / "python" / "triviumdb" / "__init__.pyi")
     args = ap.parse_args()
 
     try:
@@ -232,7 +255,7 @@ def main() -> int:
 
     stub = build_stub(mod)
     if args.check:
-        current = args.output.read_text() if args.output.exists() else ""
+        current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""
         if current != stub:
             print(f"error: {args.output} is out of date. Run: python scripts/generate_pyi.py",
                   file=sys.stderr)
@@ -240,7 +263,7 @@ def main() -> int:
         print(f"ok: {args.output} is up to date")
         return 0
 
-    args.output.write_text(stub)
+    args.output.write_text(stub, encoding="utf-8")
     print(f"wrote {args.output} ({stub.count(chr(10))} lines)")
     return 0
 
