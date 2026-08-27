@@ -45,11 +45,13 @@ KEEP_DUNDERS = ["__len__", "__contains__", "__repr__", "__enter__", "__exit__"]
 ATTRS = {
     "SearchHit": {"id": "int", "score": "float", "payload": "Any"},
     "GroupedSearchResult": {"semantic_hits": "list[SearchHit]", "graph_hits": "list[SearchHit]"},
-    "Edge": {"target_id": "int", "label": "str", "weight": "float"},
-    "IncomingEdge": {"source_id": "int", "target_id": "int", "label": "str", "weight": "float"},
+    "Edge": {"target_id": "int", "label": "str", "weight": "float", "metadata": "Any"},
+    "IncomingEdge": {"source_id": "int", "target_id": "int", "label": "str", "weight": "float",
+                     "metadata": "Any"},
     "NodeView": {"id": "int", "vector": "list[float | int]", "payload": "Any",
                  "edges": "list[Edge]", "num_edges": "int"},
-    "ReachabilityStep": {"from_id": "int", "to_id": "int", "label": "str"},
+    "ReachabilityStep": {"from_id": "int", "to_id": "int", "label": "str",
+                         "weight": "float", "metadata": "Any"},
     "ReachabilityResult": {"source_id": "int", "target_id": "int", "depth": "int",
                            "path": "list[int]", "steps": "list[ReachabilityStep]"},
     "QueryRow": {"row": "dict[str, Any]"},
@@ -64,6 +66,7 @@ PARAM_TYPES = {
     "vectors": "Sequence[Vector]", "query_vectors": "Sequence[Vector]",
     "ids": "Sequence[int]", "anchor_ids": "Sequence[int]",
     "payload": "Any", "payloads": "Sequence[Any]", "patch": "Mapping[str, Any]",
+    "metadata": "Any",
     "payload_filter": "Mapping[str, Any]",
     "labels": "Sequence[str]", "expand_labels": "Sequence[str]",
     "hook": "Any",
@@ -74,7 +77,7 @@ for _t, _names in {
     "int": "id src dst key depth expand_depth min_depth max_depth max_visited_nodes "
            "max_anchor_nodes parallelism additional mb interval_secs min_community_size "
            "max_iterations dim new_dim memory_limit_mb expected_nodes top_k recall_k rerank_k "
-           "max_edges_per_node seed",
+           "max_edges_per_node max_edges max_results seed",
     "float": "weight min_score teleport_alpha fista_lambda fista_threshold "
              "dpp_quality_weight text_boost hybrid_alpha min_edge_weight resolution",
     "str": "text keyword field query query_text mode lib_path path new_path generation_id "
@@ -95,6 +98,8 @@ QUALIFIED_PARAM_TYPES = {
     "TriviumDB.search_grouped.edge_direction": "EdgeDirection",
     "TriviumDB.search_advanced.edge_direction": "EdgeDirection",
     "TriviumDB.reachable.direction": "ReachabilityDirection",
+    "TriviumDB.reachable_detailed.direction": "ReachabilityDirection",
+    "TriviumDB.query_subgraph.direction": "ReachabilityDirection",
 }
 
 # Return type → space-separated "Class.method" (or bare function). Any method
@@ -103,9 +108,11 @@ RETURNS = {}
 for _ret, _quals in {
     "None": "init_logger "
             "TriviumDB.set_sync_mode TriviumDB.load_ffi_hook TriviumDB.clear_hook "
-            "TriviumDB.set_hook TriviumDB.insert_with_id TriviumDB.batch_insert_with_ids "
+            "TriviumDB.set_hook TriviumDB.insert_with_id TriviumDB.upsert_with_id "
+            "TriviumDB.batch_insert_with_ids "
             "TriviumDB.update_payload TriviumDB.patch_payload TriviumDB.update_vector "
-            "TriviumDB.delete TriviumDB.link TriviumDB.unlink TriviumDB.index_text "
+            "TriviumDB.delete TriviumDB.link TriviumDB.upsert_edge TriviumDB.update_edge "
+            "TriviumDB.unlink TriviumDB.index_text "
             "TriviumDB.index_keyword TriviumDB.build_text_index TriviumDB.create_index "
             "TriviumDB.drop_index TriviumDB.flush TriviumDB.compact "
             "TriviumDB.enable_auto_compaction TriviumDB.disable_auto_compaction "
@@ -122,10 +129,13 @@ for _ret, _quals in {
                        "TriviumDB.search_graph_first TriviumDB.search_exact",
     "list[list[SearchHit]]": "TriviumDB.search_batch",
     "list[Edge]": "TriviumDB.get_edges",
+    "Edge | None": "TriviumDB.get_edge",
     "list[IncomingEdge]": "TriviumDB.get_incoming_edges",
     "list[ReachabilityResult]": "TriviumDB.reachable",
     "list[QueryRow]": "TriviumDB.tql",
-    "dict[str, Any]": "TriviumDB.tql_mut TriviumDB.leiden_cluster",
+    "dict[str, Any]": "TriviumDB.tql_mut TriviumDB.leiden_cluster TriviumDB.graph_stats "
+                      "TriviumDB.validate_graph TriviumDB.repair_graph_indexes "
+                      "TriviumDB.reachable_detailed TriviumDB.query_subgraph",
     "GroupedSearchResult": "TriviumDB.search_grouped",
     "tuple[list[SearchHit], HookContext]": "TriviumDB.search_with_context",
     "NodeView | None": "TriviumDB.get",

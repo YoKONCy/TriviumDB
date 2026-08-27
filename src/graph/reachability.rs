@@ -240,20 +240,20 @@ fn collect_steps<T: VectorType>(
     c: &ReachabilityConfig,
 ) -> Vec<ReachabilityStep> {
     let mut steps = vec![];
-    if c.direction != ReachabilityDirection::Incoming {
-        if let Some(edges) = db.get_edges(current) {
-            for edge in edges {
-                if allowed(&edge.label, c.labels.as_deref()) {
-                    steps.push(ReachabilityStep {
-                        from: current,
-                        to: edge.target_id,
-                        edge_source: current,
-                        edge_target: edge.target_id,
-                        label: edge.label.clone(),
-                        weight: edge.weight,
-                        metadata: edge.metadata.clone(),
-                    })
-                }
+    if c.direction != ReachabilityDirection::Incoming
+        && let Some(edges) = db.get_edges(current)
+    {
+        for edge in edges {
+            if allowed(&edge.label, c.labels.as_deref()) {
+                steps.push(ReachabilityStep {
+                    from: current,
+                    to: edge.target_id,
+                    edge_source: current,
+                    edge_target: edge.target_id,
+                    label: edge.label.clone(),
+                    weight: edge.weight,
+                    metadata: edge.metadata.clone(),
+                })
             }
         }
     }
