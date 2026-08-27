@@ -83,6 +83,7 @@ pub mod python {
     }
 
     fn to_py_reachability(
+        py: Python<'_>,
         result: crate::graph::reachability::ReachabilityResult,
     ) -> PyReachabilityResult {
         PyReachabilityResult {
@@ -97,6 +98,8 @@ pub mod python {
                     from_id: step.from,
                     to_id: step.to,
                     label: step.label,
+                    weight: round_api_f32(step.weight),
+                    metadata: json_to_pyobject(py, &step.metadata),
                 })
                 .collect(),
         }
@@ -122,7 +125,6 @@ pub mod python {
     }
 
     #[pyclass(name = "ReachabilityStep")]
-    #[derive(Clone)]
     pub struct PyReachabilityStep {
         #[pyo3(get)]
         pub from_id: u64,
@@ -130,6 +132,22 @@ pub mod python {
         pub to_id: u64,
         #[pyo3(get)]
         pub label: String,
+        #[pyo3(get)]
+        pub weight: f64,
+        #[pyo3(get)]
+        pub metadata: PyObject,
+    }
+
+    impl Clone for PyReachabilityStep {
+        fn clone(&self) -> Self {
+            Python::with_gil(|py| Self {
+                from_id: self.from_id,
+                to_id: self.to_id,
+                label: self.label.clone(),
+                weight: self.weight,
+                metadata: self.metadata.clone_ref(py),
+            })
+        }
     }
 
     #[pyclass(name = "ReachabilityResult")]
@@ -147,7 +165,6 @@ pub mod python {
     }
 
     #[pyclass(name = "Edge")]
-    #[derive(Clone)]
     pub struct PyEdge {
         #[pyo3(get)]
         pub target_id: u64,
@@ -155,10 +172,22 @@ pub mod python {
         pub label: String,
         #[pyo3(get)]
         pub weight: f64,
+        #[pyo3(get)]
+        pub metadata: PyObject,
+    }
+
+    impl Clone for PyEdge {
+        fn clone(&self) -> Self {
+            Python::with_gil(|py| Self {
+                target_id: self.target_id,
+                label: self.label.clone(),
+                weight: self.weight,
+                metadata: self.metadata.clone_ref(py),
+            })
+        }
     }
 
     #[pyclass(name = "IncomingEdge")]
-    #[derive(Clone)]
     pub struct PyIncomingEdge {
         #[pyo3(get)]
         pub source_id: u64,
@@ -168,6 +197,8 @@ pub mod python {
         pub label: String,
         #[pyo3(get)]
         pub weight: f64,
+        #[pyo3(get)]
+        pub metadata: PyObject,
     }
 
     fn round_api_f32(value: f32) -> f64 {
@@ -612,26 +643,40 @@ pub mod python {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = vector.extract()?;
                     db.insert_with_id(id, &vec, json)
-                        .map_err(|e: crate::error::TriviumError| {
-                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                        })
                 }
                 DbBackend::F16(db) => {
                     let vec: Vec<f32> = vector.extract()?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
                     db.insert_with_id(id, &vec16, json)
-                        .map_err(|e: crate::error::TriviumError| {
-                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                        })
                 }
                 DbBackend::U64(db) => {
                     let vec: Vec<u64> = vector.extract()?;
                     db.insert_with_id(id, &vec, json)
-                        .map_err(|e: crate::error::TriviumError| {
-                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                        })
                 }
             }
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+        }
+
+        fn upsert_with_id(
+            &mut self,
+            id: u64,
+            vector: Bound<'_, PyAny>,
+            payload: &Bound<'_, PyAny>,
+        ) -> PyResult<()> {
+            let json = pyobject_to_json(payload);
+            match &mut self.inner {
+                DbBackend::F32(db) => db.upsert_with_id(id, &vector.extract::<Vec<f32>>()?, json),
+                DbBackend::F16(db) => {
+                    let vector = vector
+                        .extract::<Vec<f32>>()?
+                        .into_iter()
+                        .map(half::f16::from_f32)
+                        .collect::<Vec<_>>();
+                    db.upsert_with_id(id, &vector, json)
+                }
+                DbBackend::U64(db) => db.upsert_with_id(id, &vector.extract::<Vec<u64>>()?, json),
+            }
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
         }
 
         #[pyo3(signature = (src, dst, label="related", weight=1.0))]
@@ -641,6 +686,50 @@ pub mod python {
                     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
                 },
             )
+        }
+
+        fn get_edge(&self, py: Python<'_>, src: u64, dst: u64, label: &str) -> Option<PyEdge> {
+            dispatch!(self, db => db.get_edge(src, dst, label)).map(|edge| PyEdge {
+                target_id: edge.target_id,
+                label: edge.label,
+                weight: round_api_f32(edge.weight),
+                metadata: json_to_pyobject(py, &edge.metadata),
+            })
+        }
+
+        #[pyo3(signature = (src, dst, label, weight=1.0, metadata=None))]
+        fn upsert_edge(
+            &mut self,
+            src: u64,
+            dst: u64,
+            label: &str,
+            weight: f32,
+            metadata: Option<&Bound<'_, PyAny>>,
+        ) -> PyResult<()> {
+            let metadata = metadata
+                .map(pyobject_to_json)
+                .unwrap_or(serde_json::Value::Null);
+            dispatch!(self, mut db => db.upsert_edge(src, dst, label, weight, metadata))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+        }
+
+        #[pyo3(signature = (src, dst, label, weight=None, metadata=None))]
+        fn update_edge(
+            &mut self,
+            src: u64,
+            dst: u64,
+            label: &str,
+            weight: Option<f32>,
+            metadata: Option<&Bound<'_, PyAny>>,
+        ) -> PyResult<()> {
+            dispatch!(self, mut db => db.update_edge(
+                src,
+                dst,
+                label,
+                weight,
+                metadata.map(pyobject_to_json),
+            ))
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
         }
 
         #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction="out"))]
@@ -1129,19 +1218,25 @@ pub mod python {
         }
 
         /// 获取节点的出边列表
-        fn get_edges(&self, id: u64) -> Vec<PyEdge> {
+        fn get_edges(&self, py: Python<'_>, id: u64) -> Vec<PyEdge> {
             dispatch!(self, db => db.get_edges(id))
                 .into_iter()
                 .map(|e| PyEdge {
                     target_id: e.target_id,
                     label: e.label,
                     weight: round_api_f32(e.weight),
+                    metadata: json_to_pyobject(py, &e.metadata),
                 })
                 .collect()
         }
 
         #[pyo3(signature = (id, label=None))]
-        fn get_incoming_edges(&self, id: u64, label: Option<&str>) -> Vec<PyIncomingEdge> {
+        fn get_incoming_edges(
+            &self,
+            py: Python<'_>,
+            id: u64,
+            label: Option<&str>,
+        ) -> Vec<PyIncomingEdge> {
             dispatch!(self, db => db.get_incoming_edges(id, label))
                 .into_iter()
                 .map(|edge| PyIncomingEdge {
@@ -1149,6 +1244,7 @@ pub mod python {
                     target_id: edge.target_id,
                     label: edge.label,
                     weight: round_api_f32(edge.weight),
+                    metadata: json_to_pyobject(py, &edge.metadata),
                 })
                 .collect()
         }
@@ -1168,6 +1264,7 @@ pub mod python {
                                     target_id: e.target_id,
                                     label: e.label.clone(),
                                     weight: round_api_f32(e.weight),
+                                    metadata: json_to_pyobject(py, &e.metadata),
                                 })
                                 .collect(),
                             num_edges: n.edges.len(),
@@ -1188,6 +1285,7 @@ pub mod python {
                                     target_id: e.target_id,
                                     label: e.label.clone(),
                                     weight: round_api_f32(e.weight),
+                                    metadata: json_to_pyobject(py, &e.metadata),
                                 })
                                 .collect(),
                             num_edges: n.edges.len(),
@@ -1207,6 +1305,7 @@ pub mod python {
                                     target_id: e.target_id,
                                     label: e.label.clone(),
                                     weight: round_api_f32(e.weight),
+                                    metadata: json_to_pyobject(py, &e.metadata),
                                 })
                                 .collect(),
                             num_edges: n.edges.len(),
@@ -1222,15 +1321,18 @@ pub mod python {
             dispatch!(self, db => db.neighbors_with_labels(id, depth, labels.as_deref()))
         }
 
-        #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000))]
+        #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000, max_results=10_000, max_edges=50_000))]
         fn reachable(
             &self,
+            py: Python<'_>,
             id: u64,
             min_depth: usize,
             max_depth: usize,
             labels: Option<Vec<String>>,
             direction: &str,
             max_visited_nodes: usize,
+            max_results: usize,
+            max_edges: usize,
         ) -> PyResult<Vec<PyReachabilityResult>> {
             let direction = match direction {
                 "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
@@ -1248,10 +1350,95 @@ pub mod python {
                 labels,
                 direction,
                 max_visited_nodes,
+                max_results,
+                max_edges,
             };
             dispatch!(self, db => db.reachable(id, &config))
-                .map(|results| results.into_iter().map(to_py_reachability).collect())
+                .map(|results| {
+                    results
+                        .into_iter()
+                        .map(|result| to_py_reachability(py, result))
+                        .collect()
+                })
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+        }
+
+        #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000, max_results=10_000, max_edges=50_000))]
+        fn reachable_detailed(
+            &self,
+            py: Python<'_>,
+            id: u64,
+            min_depth: usize,
+            max_depth: usize,
+            labels: Option<Vec<String>>,
+            direction: &str,
+            max_visited_nodes: usize,
+            max_results: usize,
+            max_edges: usize,
+        ) -> PyResult<PyObject> {
+            let direction = match direction {
+                "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
+                "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
+                "both" => crate::graph::reachability::ReachabilityDirection::Both,
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "direction 必须是 outgoing / incoming / both",
+                    ));
+                }
+            };
+            let config = crate::graph::reachability::ReachabilityConfig {
+                min_depth,
+                max_depth,
+                labels,
+                direction,
+                max_visited_nodes,
+                max_results,
+                max_edges,
+            };
+            let output = dispatch!(self, db => db.reachable_detailed(id, &config))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            let value = serde_json::to_value(output)
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(json_to_pyobject(py, &value))
+        }
+
+        #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000, max_results=10_000, max_edges=50_000))]
+        fn query_subgraph(
+            &self,
+            py: Python<'_>,
+            id: u64,
+            min_depth: usize,
+            max_depth: usize,
+            labels: Option<Vec<String>>,
+            direction: &str,
+            max_visited_nodes: usize,
+            max_results: usize,
+            max_edges: usize,
+        ) -> PyResult<PyObject> {
+            let direction = match direction {
+                "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
+                "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
+                "both" => crate::graph::reachability::ReachabilityDirection::Both,
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "direction 必须是 outgoing / incoming / both",
+                    ));
+                }
+            };
+            let config = crate::graph::reachability::ReachabilityConfig {
+                min_depth,
+                max_depth,
+                labels,
+                direction,
+                max_visited_nodes,
+                max_results,
+                max_edges,
+            };
+            let output = dispatch!(self, db => db.query_subgraph(id, &config))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            let value = serde_json::to_value(output)
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(json_to_pyobject(py, &value))
         }
 
         #[pyo3(signature = (query_vector, anchor_ids, top_k, max_anchor_nodes=100_000))]
@@ -1322,6 +1509,26 @@ pub mod python {
                     payload: json_to_pyobject(py, &hit.payload),
                 })
                 .collect())
+        }
+
+        fn graph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+            let value = serde_json::to_value(dispatch!(self, db => db.graph_stats()))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(json_to_pyobject(py, &value))
+        }
+
+        fn validate_graph(&self, py: Python<'_>) -> PyResult<PyObject> {
+            let value = serde_json::to_value(dispatch!(self, db => db.validate_graph()))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(json_to_pyobject(py, &value))
+        }
+
+        fn repair_graph_indexes(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+            let report = dispatch!(self, mut db => db.repair_graph_indexes())
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            let value = serde_json::to_value(report)
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(json_to_pyobject(py, &value))
         }
 
         fn node_count(&self) -> usize {

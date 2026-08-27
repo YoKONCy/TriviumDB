@@ -48,6 +48,7 @@ fn build_valid_wal_bytes() -> Vec<u8> {
             dst: 2,
             label: "knows".to_string(),
             weight: 1.0,
+            metadata: "null".to_string(),
         },
         WalEntry::Insert {
             id: 3,

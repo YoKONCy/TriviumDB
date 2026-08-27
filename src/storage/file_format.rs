@@ -13,7 +13,7 @@ use std::path::Path;
 
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
-pub const CURRENT_VERSION: u16 = 6;
+pub const CURRENT_VERSION: u16 = 7;
 pub const MINIMUM_SUPPORTED_VERSION: u16 = 5;
 const HEADER_SIZE: u64 = 58;
 const BQ_BLOCK_MAGIC: &[u8; 4] = b"TBQF";
@@ -465,8 +465,16 @@ fn save_tdb<T: VectorType>(
     // 预计算 Edge Block 大小，以便确定 BQ Block 的 offset
     let mut edge_block_size: u64 = 0;
     for (_src_id, edge) in &all_edges {
-        // src(8) + dst(8) + label_len(2) + label_bytes + weight(4)
-        edge_block_size += 8 + 8 + 2 + edge.label.len() as u64 + 4;
+        let label_len = u16::try_from(edge.label.len()).map_err(|_| {
+            TriviumError::InvalidInput("边标签 UTF-8 长度不能超过 65535 字节".into())
+        })?;
+        let metadata = edge.metadata.to_string();
+        let metadata_len = u32::try_from(metadata.len())
+            .map_err(|_| TriviumError::InvalidInput("单条边元数据不能超过 4 GiB".into()))?;
+        // src(8) + dst(8) + label_len(2) + label + weight(4) + metadata_len(4) + metadata
+        edge_block_size = edge_block_size
+            .checked_add(8 + 8 + 2 + u64::from(label_len) + 4 + 4 + u64::from(metadata_len))
+            .ok_or_else(|| TriviumError::InvalidInput("边块大小溢出".into()))?;
     }
     let bq_offset = edge_offset + edge_block_size;
 
@@ -507,9 +515,17 @@ fn save_tdb<T: VectorType>(
         w.write_all(&src_id.to_le_bytes())?;
         w.write_all(&edge.target_id.to_le_bytes())?;
         let label_bytes = edge.label.as_bytes();
-        w.write_all(&(label_bytes.len() as u16).to_le_bytes())?;
+        let label_len = u16::try_from(label_bytes.len()).map_err(|_| {
+            TriviumError::InvalidInput("边标签 UTF-8 长度不能超过 65535 字节".into())
+        })?;
+        w.write_all(&label_len.to_le_bytes())?;
         w.write_all(label_bytes)?;
         w.write_all(&edge.weight.to_le_bytes())?;
+        let metadata = edge.metadata.to_string();
+        let metadata_len = u32::try_from(metadata.len())
+            .map_err(|_| TriviumError::InvalidInput("单条边元数据不能超过 4 GiB".into()))?;
+        w.write_all(&metadata_len.to_le_bytes())?;
+        w.write_all(metadata.as_bytes())?;
     }
 
     // 5. BQ Metadata Block
@@ -644,6 +660,7 @@ pub fn load<T: VectorType>(
                 payload_offset,
                 edge_offset,
                 edge_limit_offset,
+                version,
                 &vec_file_path,
                 &mmap,
             )?;
@@ -673,6 +690,7 @@ pub fn load<T: VectorType>(
                 payload_offset,
                 edge_offset,
                 edge_limit_offset,
+                version,
             )?;
             load_bq_block(&mut mt, bytes, bq_layout)?;
             load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
@@ -691,6 +709,7 @@ pub fn load<T: VectorType>(
             vector_offset,
             edge_offset,
             edge_limit_offset,
+            version,
             &mmap,
         )?;
         // 尝试从 BQ Block 恢复签名
@@ -713,6 +732,7 @@ fn load_v2<T: VectorType>(
     payload_offset: usize,
     edge_offset: usize,
     edge_limit_offset: usize,
+    version: u16,
     vec_file_path: &str,
     _tdb_mmap: &Mmap,
 ) -> Result<MemTable<T>> {
@@ -725,7 +745,13 @@ fn load_v2<T: VectorType>(
         payload_offset,
         edge_offset,
     )?;
-    load_edges(&mut memtable, bytes, edge_offset, edge_limit_offset)?;
+    load_edges(
+        &mut memtable,
+        bytes,
+        edge_offset,
+        edge_limit_offset,
+        version,
+    )?;
     Ok(memtable)
 }
 
@@ -738,6 +764,7 @@ fn load_v2_metadata_only<T: VectorType>(
     payload_offset: usize,
     edge_offset: usize,
     edge_limit_offset: usize,
+    version: u16,
 ) -> Result<MemTable<T>> {
     let mut memtable = MemTable::new_with_next_id(dim, next_id);
     load_payloads(
@@ -755,7 +782,13 @@ fn load_v2_metadata_only<T: VectorType>(
     for _ in 0..slot_count {
         memtable.vec_pool_mut().push(&zero);
     }
-    load_edges(&mut memtable, bytes, edge_offset, edge_limit_offset)?;
+    load_edges(
+        &mut memtable,
+        bytes,
+        edge_offset,
+        edge_limit_offset,
+        version,
+    )?;
     Ok(memtable)
 }
 
@@ -769,6 +802,7 @@ fn load_v1_rom<T: VectorType>(
     vector_offset: usize,
     edge_offset: usize,
     edge_limit_offset: usize,
+    version: u16,
     tdb_mmap: &Mmap,
 ) -> Result<MemTable<T>> {
     let mut memtable = MemTable::new_with_next_id(dim, next_id);
@@ -832,7 +866,13 @@ fn load_v1_rom<T: VectorType>(
         memtable.vec_pool_mut().push(&v);
     }
 
-    load_edges(&mut memtable, bytes, edge_offset, edge_limit_offset)?;
+    load_edges(
+        &mut memtable,
+        bytes,
+        edge_offset,
+        edge_limit_offset,
+        version,
+    )?;
     Ok(memtable)
 }
 
@@ -879,6 +919,7 @@ fn load_edges<T: VectorType>(
     bytes: &[u8],
     edge_offset: usize,
     file_len: usize,
+    version: u16,
 ) -> Result<()> {
     let mut cursor = edge_offset;
     while cursor.saturating_add(18) <= file_len {
@@ -904,7 +945,22 @@ fn load_edges<T: VectorType>(
                 "边权重不是有限浮点数 (Edge weight is not finite)".into(),
             ));
         }
-        memtable.link(src_id, dst_id, label, weight)?;
+        let metadata = if version >= 7 {
+            let metadata_len = read_u32_le(bytes, cursor, "edge metadata_len")? as usize;
+            cursor += 4;
+            if cursor.saturating_add(metadata_len) > file_len {
+                return Err(TriviumError::CorruptedFile("边元数据被截断".into()));
+            }
+            let value =
+                serde_json::from_slice(&bytes[cursor..cursor + metadata_len]).map_err(|error| {
+                    TriviumError::CorruptedFile(format!("边元数据解析失败: {error}"))
+                })?;
+            cursor += metadata_len;
+            value
+        } else {
+            serde_json::Value::Null
+        };
+        memtable.upsert_edge(src_id, dst_id, label, weight, metadata)?;
     }
     if cursor != file_len {
         return Err(TriviumError::CorruptedFile(

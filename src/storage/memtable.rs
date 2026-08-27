@@ -5,7 +5,33 @@ use crate::index::quiver::{QuIVer, QuIVerConfig};
 use crate::index::text::TextIndex;
 use crate::node::{Edge, NodeId};
 use crate::storage::vec_pool::VecPool;
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphStats {
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub isolated_node_count: usize,
+    pub label_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphIntegrityReport {
+    pub dangling_edges: usize,
+    pub duplicate_edges: usize,
+    pub incoming_index_mismatches: usize,
+    pub degree_index_mismatches: usize,
+    pub label_index_mismatches: usize,
+    pub valid: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphRepairReport {
+    pub removed_dangling_edges: usize,
+    pub removed_duplicate_edges: usize,
+    pub rebuilt_indexes: bool,
+}
 use std::sync::OnceLock;
 
 struct PayloadEntry {
@@ -657,6 +683,17 @@ impl<T: VectorType> MemTable<T> {
 
     /// 在两节点间建立图谱边；(src, dst, label) 三元组唯一，重复 link 更新权重。
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: String, weight: f32) -> Result<()> {
+        self.upsert_edge(src, dst, label, weight, serde_json::Value::Null)
+    }
+
+    pub fn upsert_edge(
+        &mut self,
+        src: NodeId,
+        dst: NodeId,
+        label: String,
+        weight: f32,
+        metadata: serde_json::Value,
+    ) -> Result<()> {
         self.validate_link(src, dst)?;
         if !weight.is_finite() {
             return Err(TriviumError::InvalidInput(
@@ -669,9 +706,17 @@ impl<T: VectorType> MemTable<T> {
             .iter_mut()
             .find(|edge| edge.target_id == dst && edge.label == label)
         {
+            let mut changed = false;
             if edge.weight != weight {
                 edge.weight = weight;
-                self.mark_changed(false);
+                changed = true;
+            }
+            if edge.metadata != metadata {
+                edge.metadata = metadata;
+                changed = true;
+            }
+            if changed {
+                self.generation = self.generation.wrapping_add(1);
             }
             return Ok(());
         }
@@ -680,6 +725,7 @@ impl<T: VectorType> MemTable<T> {
             target_id: dst,
             label: label.clone(),
             weight,
+            metadata,
         });
         *self.in_degrees.entry(dst).or_insert(0) += 1;
         if !self.incoming_edges.entry(dst).or_default().contains(&src) {
@@ -688,6 +734,150 @@ impl<T: VectorType> MemTable<T> {
         self.label_index.entry(label).or_default().push((src, dst));
         self.mark_changed(false);
         Ok(())
+    }
+
+    pub fn get_edge(&self, src: NodeId, dst: NodeId, label: &str) -> Option<&Edge> {
+        self.get_edges(src)?
+            .iter()
+            .find(|edge| edge.target_id == dst && edge.label == label)
+    }
+
+    pub fn graph_stats(&self) -> GraphStats {
+        let edge_count = self.edges.values().map(Vec::len).sum();
+        let isolated_node_count = self
+            .payloads
+            .keys()
+            .filter(|id| {
+                self.edges.get(id).is_none_or(Vec::is_empty)
+                    && self.in_degrees.get(id).copied().unwrap_or_default() == 0
+            })
+            .count();
+        GraphStats {
+            node_count: self.payloads.len(),
+            edge_count,
+            isolated_node_count,
+            label_count: self.label_index.len(),
+        }
+    }
+
+    pub fn validate_graph(&self) -> GraphIntegrityReport {
+        let mut expected_incoming: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
+        let mut expected_degrees: HashMap<NodeId, usize> = HashMap::new();
+        let mut expected_labels: HashMap<String, HashSet<(NodeId, NodeId)>> = HashMap::new();
+        let mut dangling_edges = 0;
+        let mut duplicate_edges = 0;
+
+        for (&src, edges) in &self.edges {
+            let mut seen = HashSet::new();
+            for edge in edges {
+                if !self.payloads.contains_key(&src) || !self.payloads.contains_key(&edge.target_id)
+                {
+                    dangling_edges += 1;
+                    continue;
+                }
+                if !seen.insert((edge.target_id, edge.label.as_str())) {
+                    duplicate_edges += 1;
+                    continue;
+                }
+                expected_incoming
+                    .entry(edge.target_id)
+                    .or_default()
+                    .insert(src);
+                *expected_degrees.entry(edge.target_id).or_default() += 1;
+                expected_labels
+                    .entry(edge.label.clone())
+                    .or_default()
+                    .insert((src, edge.target_id));
+            }
+        }
+
+        let actual_incoming: HashMap<NodeId, HashSet<NodeId>> = self
+            .incoming_edges
+            .iter()
+            .map(|(&id, sources)| (id, sources.iter().copied().collect()))
+            .filter(|(_, sources): &(NodeId, HashSet<NodeId>)| !sources.is_empty())
+            .collect();
+        let actual_labels: HashMap<String, HashSet<(NodeId, NodeId)>> = self
+            .label_index
+            .iter()
+            .map(|(label, pairs)| {
+                (
+                    label.clone(),
+                    pairs.iter().copied().collect::<HashSet<(NodeId, NodeId)>>(),
+                )
+            })
+            .filter(|(_, pairs)| !pairs.is_empty())
+            .collect();
+        let incoming_index_mismatches = usize::from(actual_incoming != expected_incoming);
+        let degree_index_mismatches = usize::from(self.in_degrees != expected_degrees);
+        let label_index_mismatches = usize::from(actual_labels != expected_labels);
+        GraphIntegrityReport {
+            dangling_edges,
+            duplicate_edges,
+            incoming_index_mismatches,
+            degree_index_mismatches,
+            label_index_mismatches,
+            valid: dangling_edges == 0
+                && duplicate_edges == 0
+                && incoming_index_mismatches == 0
+                && degree_index_mismatches == 0
+                && label_index_mismatches == 0,
+        }
+    }
+
+    pub fn repair_graph_indexes(&mut self) -> GraphRepairReport {
+        let payloads = &self.payloads;
+        let mut removed_dangling_edges = 0;
+        let mut removed_duplicate_edges = 0;
+        self.edges.retain(|src, edges| {
+            if !payloads.contains_key(src) {
+                removed_dangling_edges += edges.len();
+                return false;
+            }
+            let mut seen = HashSet::new();
+            edges.retain(|edge| {
+                if !payloads.contains_key(&edge.target_id) {
+                    removed_dangling_edges += 1;
+                    return false;
+                }
+                if !seen.insert((edge.target_id, edge.label.clone())) {
+                    removed_duplicate_edges += 1;
+                    return false;
+                }
+                true
+            });
+            !edges.is_empty()
+        });
+
+        self.incoming_edges.clear();
+        self.in_degrees.clear();
+        self.label_index.clear();
+        for (&src, edges) in &self.edges {
+            for edge in edges {
+                *self.in_degrees.entry(edge.target_id).or_default() += 1;
+                let sources = self.incoming_edges.entry(edge.target_id).or_default();
+                if !sources.contains(&src) {
+                    sources.push(src);
+                }
+                self.label_index
+                    .entry(edge.label.clone())
+                    .or_default()
+                    .push((src, edge.target_id));
+            }
+        }
+        for sources in self.incoming_edges.values_mut() {
+            sources.sort_unstable();
+        }
+        for pairs in self.label_index.values_mut() {
+            pairs.sort_unstable();
+            pairs.dedup();
+        }
+        self.mark_changed(false);
+        GraphRepairReport {
+            removed_dangling_edges,
+            removed_duplicate_edges,
+            rebuilt_indexes: true,
+        }
     }
 
     // ── 节点不应期（疲劳）接口 ────────────────────────────────────────────────
@@ -1167,6 +1357,7 @@ impl<T: VectorType> MemTable<T> {
                             target_id: id,
                             label: edge.label.clone(),
                             weight: edge.weight,
+                            metadata: edge.metadata.clone(),
                         }),
                 );
             }

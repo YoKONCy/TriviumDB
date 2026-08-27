@@ -55,12 +55,16 @@ export interface JsReachabilityOptions {
   labels?: string[];
   direction?: ReachabilityDirection;
   maxVisitedNodes?: number;
+  maxResults?: number;
+  maxEdges?: number;
 }
 
 export interface JsReachabilityStep {
   from: number;
   to: number;
   label: string;
+  weight: number;
+  metadata: any;
 }
 
 export interface JsReachabilityResult {
@@ -69,6 +73,66 @@ export interface JsReachabilityResult {
   depth: number;
   path: number[];
   steps: JsReachabilityStep[];
+}
+
+export interface JsReachabilityOutput {
+  results: JsReachabilityResult[];
+  visitedNodes: number;
+  traversedEdges: number;
+  truncated: boolean;
+}
+
+export interface JsSubgraphNode<T = any> {
+  id: number;
+  payload: T;
+}
+
+export interface JsSubgraphEdge {
+  sourceId: number;
+  targetId: number;
+  label: string;
+  weight: number;
+  metadata: any;
+}
+
+export interface JsSubgraphResult<T = any> {
+  nodes: JsSubgraphNode<T>[];
+  edges: JsSubgraphEdge[];
+  visitedNodes: number;
+  traversedEdges: number;
+  truncated: boolean;
+}
+
+export type TransactionOperation =
+  | { type: 'insert'; vector: Vector; payload?: any }
+  | { type: 'insertWithId'; id: number; vector: Vector; payload?: any }
+  | { type: 'delete'; id: number }
+  | { type: 'updatePayload'; id: number; payload: any }
+  | { type: 'updateVector'; id: number; vector: Vector }
+  | { type: 'link' | 'upsertEdge'; src: number; dst: number; label?: string; weight?: number; metadata?: any }
+  | { type: 'unlink'; src: number; dst: number }
+  | { type: 'unlinkLabel'; src: number; dst: number; label: string };
+
+export interface GraphStats {
+  nodeCount: number;
+  edgeCount: number;
+  isolatedNodeCount: number;
+  labelCount: number;
+}
+
+export interface GraphIntegrityReport {
+  danglingEdges: number;
+  duplicateEdges: number;
+  incomingIndexMismatches: number;
+  degreeIndexMismatches: number;
+  labelIndexMismatches: number;
+  valid: boolean;
+}
+
+export interface GraphRepairReport {
+  removedDanglingEdges: number;
+  removedDuplicateEdges: number;
+  rebuiltIndexes: boolean;
 }
 
 export interface JsNodeView<T = any> {
@@ -323,6 +387,21 @@ export class TriviumDB {
    */
   insertWithId(id: number, vector: Vector, payload: any): void;
 
+  /** 使用自定义 ID 插入或原子覆盖节点 */
+  upsertWithId(id: number, vector: Vector, payload: any): void;
+
+  /** 原子提交一组异构写操作，返回事务内插入节点的 ID */
+  commitTransaction(operations: TransactionOperation[]): number[];
+
+  /** 返回图节点、边、孤立节点及标签统计 */
+  graphStats(): GraphStats;
+
+  /** 校验悬空边、重复边和派生图索引 */
+  validateGraph(): GraphIntegrityReport;
+
+  /** 清理无效边并从权威出边表重建派生索引 */
+  repairGraphIndexes(): GraphRepairReport;
+
   /**
    * 为后续插入主动预留额外节点容量。
    * 受 memoryLimitMb 约束；失败不会写 WAL 或修改节点数据。
@@ -414,6 +493,15 @@ export class TriviumDB {
    */
   link(src: number, dst: number, label?: string, weight?: number): void;
 
+  /** 精确读取 (src, dst, label) 边 */
+  getEdge(src: number, dst: number, label: string): JsEdge | null;
+
+  /** 插入或覆盖唯一边三元组的权重与元数据 */
+  upsertEdge(src: number, dst: number, label: string, weight: number, metadata?: any): void;
+
+  /** 更新已存在边的部分字段 */
+  updateEdge(src: number, dst: number, label: string, weight?: number, metadata?: any): void;
+
   /**
    * 移除这亮点之间的所有边
    * @param src 源节点 ID
@@ -439,8 +527,14 @@ export class TriviumDB {
   /** 获取节点的完整入边，可按标签过滤 */
   getIncomingEdges(id: number, label?: string): JsIncomingEdge[];
 
-  /** 按方向、标签和深度执行确定性可达性查询，预算超限时抛出错误 */
+  /** 按方向、标签和深度执行确定性可达性查询 */
   reachable(id: number, options?: JsReachabilityOptions): JsReachabilityResult[];
+
+  /** 返回部分结果、预算统计及 truncated 标记 */
+  reachableDetailed(id: number, options?: JsReachabilityOptions): JsReachabilityOutput;
+
+  /** 返回确定性最短路径并集子图 */
+  querySubgraph<T = any>(id: number, options?: JsReachabilityOptions): JsSubgraphResult<T>;
 
   /** 只在给定 anchor 集合内执行精确向量 Top-K */
   searchGraphFirst(queryVector: Vector, anchorIds: number[], topK: number, maxAnchorNodes?: number): JsSearchHit[];

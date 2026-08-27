@@ -933,6 +933,24 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         Ok(())
     }
 
+    /// 使用自定义 ID 原子插入或覆盖节点的向量与 Payload。
+    pub fn upsert_with_id(
+        &mut self,
+        id: NodeId,
+        vector: &[T],
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        self.require_write_access("upsert_with_id")?;
+        let mut tx = transaction::TxBuilder::new();
+        if self.contains(id) {
+            tx.update_vector(id, vector);
+            tx.update_payload(id, payload);
+        } else {
+            tx.insert_with_id(id, vector, payload);
+        }
+        self.commit_tx(tx).map(|_| ())
+    }
+
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) -> Result<()> {
         self.require_write_access("link")?;
         let _operation = self.enter_operation()?;
@@ -951,10 +969,66 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 dst,
                 label: label.to_string(),
                 weight,
+                metadata: "null".to_string(),
             })?;
             mt.link(src, dst, label.to_string(), weight)?;
         }
         Ok(())
+    }
+
+    pub fn get_edge(&self, src: NodeId, dst: NodeId, label: &str) -> Option<crate::node::Edge> {
+        read_or_recover(&self.memtable)
+            .get_edge(src, dst, label)
+            .cloned()
+    }
+
+    pub fn graph_stats(&self) -> crate::storage::memtable::GraphStats {
+        read_or_recover(&self.memtable).graph_stats()
+    }
+
+    pub fn validate_graph(&self) -> crate::storage::memtable::GraphIntegrityReport {
+        read_or_recover(&self.memtable).validate_graph()
+    }
+
+    pub fn repair_graph_indexes(&mut self) -> Result<crate::storage::memtable::GraphRepairReport> {
+        self.require_write_access("repair_graph_indexes")?;
+        let report = write_or_recover(&self.memtable).repair_graph_indexes();
+        self.flush()?;
+        Ok(report)
+    }
+
+    pub fn upsert_edge(
+        &mut self,
+        src: NodeId,
+        dst: NodeId,
+        label: &str,
+        weight: f32,
+        metadata: serde_json::Value,
+    ) -> Result<()> {
+        self.require_write_access("upsert_edge")?;
+        let mut tx = transaction::TxBuilder::new();
+        tx.upsert_edge(src, dst, label, weight, metadata);
+        self.commit_tx(tx).map(|_| ())
+    }
+
+    pub fn update_edge(
+        &mut self,
+        src: NodeId,
+        dst: NodeId,
+        label: &str,
+        weight: Option<f32>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let edge = self
+            .get_edge(src, dst, label)
+            .ok_or_else(|| TriviumError::InvalidInput("指定边不存在".into()))?;
+        self.upsert_edge(
+            src,
+            dst,
+            label,
+            weight.unwrap_or(edge.weight),
+            metadata.unwrap_or(edge.metadata),
+        )
     }
 
     pub fn delete(&mut self, id: NodeId) -> Result<()> {
@@ -1430,6 +1504,24 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         crate::graph::reachability::traverse(&read_or_recover(&self.memtable), id, config)
     }
 
+    pub fn reachable_detailed(
+        &self,
+        id: NodeId,
+        config: &crate::graph::reachability::ReachabilityConfig,
+    ) -> Result<crate::graph::reachability::ReachabilityOutput> {
+        let _operation = self.enter_operation()?;
+        crate::graph::reachability::traverse_detailed(&read_or_recover(&self.memtable), id, config)
+    }
+
+    pub fn query_subgraph(
+        &self,
+        id: NodeId,
+        config: &crate::graph::reachability::ReachabilityConfig,
+    ) -> Result<crate::graph::reachability::SubgraphResult> {
+        let _operation = self.enter_operation()?;
+        crate::graph::reachability::query_subgraph(&read_or_recover(&self.memtable), id, config)
+    }
+
     pub fn search_graph_first(
         &self,
         query: &[T],
@@ -1591,6 +1683,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                                 dst,
                                 label,
                                 weight,
+                                metadata: serde_json::Value::Null,
                             });
                             affected += 1;
                         }
@@ -1763,7 +1856,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             if let Some(edges) = mt.get_edges(nid) {
                 for edge in edges {
                     if mt.get_payload(edge.target_id).is_some() {
-                        new_db.link(nid, edge.target_id, &edge.label, edge.weight)?;
+                        new_db.upsert_edge(
+                            nid,
+                            edge.target_id,
+                            &edge.label,
+                            edge.weight,
+                            edge.metadata.clone(),
+                        )?;
                     }
                 }
             }

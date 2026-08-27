@@ -82,6 +82,7 @@ fn wal_所有Entry变体往返() {
             dst: 2,
             label: "knows".to_string(),
             weight: 0.5,
+            metadata: "null".to_string(),
         })
         .unwrap();
         wal.append(&WalEntry::Delete::<f32> { id: 3 }).unwrap();

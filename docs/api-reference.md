@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.8.1
+> **版本**: v0.8.2
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -459,6 +459,29 @@ db.link(1, 2, "knows", 0.95)?;
 
 > 💡 边是**有向**的。如需双向关系，需调用两次 `link()`：`link(A, B)` + `link(B, A)`。
 
+### 精确边读取与 Upsert
+
+边的唯一键是 `(src, dst, label)`。`get_edge/getEdge` 精确读取单边；`upsert_edge/upsertEdge` 创建或覆盖 `weight` 与任意 JSON `metadata`；`update_edge/updateEdge` 只更新已存在边的指定字段。边元数据会贯穿 WAL、v7 `.tdb` 文件、迁移和各语言绑定。
+
+```rust
+let metadata = serde_json::json!({"confidence": 0.98});
+db.upsert_edge(1, 2, "knows", 0.95, metadata)?;
+let edge = db.get_edge(1, 2, "knows");
+db.update_edge(1, 2, "knows", Some(0.9), None)?;
+```
+
+```python
+db.upsert_edge(1, 2, "knows", 0.95, {"confidence": 0.98})
+edge = db.get_edge(1, 2, "knows")
+db.update_edge(1, 2, "knows", weight=0.9)
+```
+
+```ts
+db.upsertEdge(1, 2, 'knows', 0.95, { confidence: 0.98 })
+const edge = db.getEdge(1, 2, 'knows')
+db.updateEdge(1, 2, 'knows', 0.9)
+```
+
 ### unlink — 断开边
 
 移除从 `src` 到 `dst` 的**所有**边（无论 label 是什么）。
@@ -548,7 +571,21 @@ const paths = db.reachable(1, {
 })
 ```
 
-`labels=None` 或省略表示全部 label，空列表表示禁止遍历。`min_depth=0` 可让源节点作为深度 0 结果返回。源节点不存在、深度范围非法、预算为 0 或访问节点数超预算时会明确报错。
+`labels=None` 或省略表示全部 label，空列表表示禁止遍历。`min_depth=0` 可让源节点作为深度 0 结果返回。三个预算分别限制访问节点、结果和扫描边；详细接口在超限时保留已完成结果并设置 `truncated=true`。
+
+- Rust：`reachable_detailed()`、`query_subgraph()`
+- Python：`reachable_detailed()`、`query_subgraph()`
+- Node.js：`reachableDetailed()`、`querySubgraph()`
+
+详细可达性同时返回 `visited_nodes/visitedNodes`、`traversed_edges/traversedEdges` 与 `truncated`。逐跳结果包含遍历方向的 `from/to`、原始边权重和元数据。子图按 NodeId 和原始 `(source, target, label)` 确定性排序，并保持入边的原始方向。
+
+### 图统计、校验与修复
+
+`graph_stats/graphStats` 返回节点数、边数、孤立节点数和标签数。`validate_graph/validateGraph` 检查悬空边、重复三元组以及入边、入度、标签派生索引。Writer 可调用 `repair_graph_indexes/repairGraphIndexes` 清理无效边、从权威出边表重建派生索引并立即持久化。
+
+### 自定义 ID Upsert 与 Node.js 原子事务
+
+`upsert_with_id/upsertWithId` 在 ID 不存在时插入，存在时原子覆盖向量和 Payload。Node.js 的 `commitTransaction(operations)` 可在同一个 WAL-first 事务中混合 `insert`、`insertWithId`、`delete`、`updatePayload`、`updateVector`、`link/upsertEdge`、`unlink` 和 `unlinkLabel`；任何预检失败都不会应用部分操作。
 
 ---
 

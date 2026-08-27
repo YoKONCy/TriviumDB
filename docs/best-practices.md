@@ -65,7 +65,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.8.1"
+triviumdb = "0.8.2"
 ```
 
 ### 30 秒入门模板
@@ -87,6 +87,16 @@ with triviumdb.TriviumDB("my_app.tdb", dim=768) as db:
         print(f"[{hit.id}] {hit.score:.3f} | {hit.payload}")
 # 退出 with 块时自动 flush 落盘
 ```
+
+---
+
+## 图查询预算与维护
+
+确定性图查询应优先调用 `reachable_detailed/reachableDetailed`，并始终检查 `truncated`。同时设置 `max_visited_nodes`、`max_results` 和 `max_edges`，避免高出度节点或环图占用无界 CPU/内存。需要结构快照时使用 `query_subgraph/querySubgraph`，不要用概率扩散检索代替确定性遍历。
+
+边上只存放关系本身的轻量 JSON 属性；同一 `(src, dst, label)` 使用 Upsert，避免先删后建造成事务窗口。多步节点和边写入在 Rust 使用 `TxBuilder`，在 Node.js 使用 `commitTransaction()`。
+
+生产环境建议在导入后及定期维护时执行 `validate_graph/validateGraph`。报告无效时只由 Writer 调用 `repair_graph_indexes/repairGraphIndexes`；该操作会清理悬空/重复边、重建派生索引并落盘，Reader 不执行自动修复。
 
 ---
 

@@ -27,9 +27,14 @@ pub use database::{BatchSearchConfig, EdgeDirection, SearchConfig};
 pub use database::{Database, DatabaseReader, DatabaseWriter};
 pub use error::{Result, TriviumError};
 pub use filter::Filter;
+pub use graph::reachability::{
+    ReachabilityConfig, ReachabilityDirection, ReachabilityOutput, ReachabilityResult,
+    ReachabilityStep, SubgraphEdge, SubgraphNode, SubgraphResult,
+};
 pub use hook::{CompositeHook, FfiHook, HookContext, NoopHook, SearchHook};
 pub use node::{Edge, GroupedSearchResult, NodeId, NodeView, SearchHit};
 pub use storage::generation::{CurrentGeneration, GenerationReader, GenerationStore};
+pub use storage::memtable::{GraphIntegrityReport, GraphRepairReport, GraphStats};
 pub mod vector;
 pub use vector::VectorType;
 

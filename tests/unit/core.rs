@@ -112,6 +112,7 @@ fn edge_创建和克隆() {
         target_id: 42,
         label: "knows".to_string(),
         weight: 0.8,
+        metadata: serde_json::Value::Null,
     };
     assert_eq!(edge.target_id, 42);
     assert_eq!(edge.label, "knows");
@@ -127,6 +128,7 @@ fn edge_序列化反序列化() {
         target_id: 1,
         label: "likes".into(),
         weight: 1.0,
+        metadata: serde_json::json!({"source": "test"}),
     };
     let json = serde_json::to_string(&edge).unwrap();
     let restored: Edge = serde_json::from_str(&json).unwrap();
@@ -143,6 +145,7 @@ fn nodeview_创建() {
             target_id: 2,
             label: "knows".into(),
             weight: 0.5,
+            metadata: serde_json::Value::Null,
         }],
     };
     assert_eq!(node.id, 1);

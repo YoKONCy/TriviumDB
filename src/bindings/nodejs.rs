@@ -165,6 +165,8 @@ pub mod nodejs {
         pub from: f64,
         pub to: f64,
         pub label: String,
+        pub weight: f64,
+        pub metadata: serde_json::Value,
     }
 
     #[napi(object)]
@@ -177,12 +179,46 @@ pub mod nodejs {
     }
 
     #[napi(object)]
+    pub struct JsReachabilityOutput {
+        pub results: Vec<JsReachabilityResult>,
+        pub visited_nodes: f64,
+        pub traversed_edges: f64,
+        pub truncated: bool,
+    }
+
+    #[napi(object)]
+    pub struct JsSubgraphNode {
+        pub id: f64,
+        pub payload: serde_json::Value,
+    }
+
+    #[napi(object)]
+    pub struct JsSubgraphEdge {
+        pub source_id: f64,
+        pub target_id: f64,
+        pub label: String,
+        pub weight: f64,
+        pub metadata: serde_json::Value,
+    }
+
+    #[napi(object)]
+    pub struct JsSubgraphResult {
+        pub nodes: Vec<JsSubgraphNode>,
+        pub edges: Vec<JsSubgraphEdge>,
+        pub visited_nodes: f64,
+        pub traversed_edges: f64,
+        pub truncated: bool,
+    }
+
+    #[napi(object)]
     pub struct JsReachabilityOptions {
         pub min_depth: Option<u32>,
         pub max_depth: Option<u32>,
         pub labels: Option<Vec<String>>,
         pub direction: Option<String>,
         pub max_visited_nodes: Option<f64>,
+        pub max_results: Option<f64>,
+        pub max_edges: Option<f64>,
     }
 
     /// 数据库打开与容量规划配置。
@@ -236,6 +272,7 @@ pub mod nodejs {
         pub target_id: f64,
         pub label: String,
         pub weight: f64,
+        pub metadata: serde_json::Value,
     }
 
     /// 完整入边视图
@@ -245,6 +282,7 @@ pub mod nodejs {
         pub target_id: f64,
         pub label: String,
         pub weight: f64,
+        pub metadata: serde_json::Value,
     }
 
     /// 节点完整视图
@@ -316,6 +354,130 @@ pub mod nodejs {
         Ok(value as usize)
     }
 
+    fn parse_reachability_options(
+        options: Option<JsReachabilityOptions>,
+    ) -> napi::Result<crate::graph::reachability::ReachabilityConfig> {
+        let options = options.unwrap_or(JsReachabilityOptions {
+            min_depth: None,
+            max_depth: None,
+            labels: None,
+            direction: None,
+            max_visited_nodes: None,
+            max_results: None,
+            max_edges: None,
+        });
+        let direction = match options.direction.as_deref().unwrap_or("outgoing") {
+            "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
+            "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
+            "both" => crate::graph::reachability::ReachabilityDirection::Both,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "direction 必须是 outgoing / incoming / both",
+                ));
+            }
+        };
+        Ok(crate::graph::reachability::ReachabilityConfig {
+            min_depth: options.min_depth.unwrap_or(1) as usize,
+            max_depth: options.max_depth.unwrap_or(1) as usize,
+            labels: options.labels,
+            direction,
+            max_visited_nodes: options
+                .max_visited_nodes
+                .map(|value| parse_safe_usize(value, "maxVisitedNodes"))
+                .transpose()?
+                .unwrap_or(10_000),
+            max_results: options
+                .max_results
+                .map(|value| parse_safe_usize(value, "maxResults"))
+                .transpose()?
+                .unwrap_or(10_000),
+            max_edges: options
+                .max_edges
+                .map(|value| parse_safe_usize(value, "maxEdges"))
+                .transpose()?
+                .unwrap_or(50_000),
+        })
+    }
+
+    fn build_transaction<T: crate::VectorType>(
+        operations: &[serde_json::Value],
+        convert: fn(f64) -> T,
+    ) -> napi::Result<crate::database::TxBuilder<T>> {
+        let mut tx = crate::database::TxBuilder::new();
+        for operation in operations {
+            let kind = operation
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| napi::Error::from_reason("事务操作缺少 type"))?;
+            let id = |name: &str| -> napi::Result<u64> {
+                let value = operation
+                    .get(name)
+                    .and_then(serde_json::Value::as_f64)
+                    .ok_or_else(|| napi::Error::from_reason(format!("事务操作缺少 {name}")))?;
+                Ok(parse_safe_usize(value, name)? as u64)
+            };
+            let vector = || -> napi::Result<Vec<T>> {
+                operation
+                    .get("vector")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| napi::Error::from_reason("事务操作缺少 vector"))?
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_f64()
+                            .map(convert)
+                            .ok_or_else(|| napi::Error::from_reason("vector 必须是数字数组"))
+                    })
+                    .collect()
+            };
+            match kind {
+                "insert" => tx.insert(
+                    &vector()?,
+                    operation.get("payload").cloned().unwrap_or_default(),
+                ),
+                "insertWithId" => tx.insert_with_id(
+                    id("id")?,
+                    &vector()?,
+                    operation.get("payload").cloned().unwrap_or_default(),
+                ),
+                "delete" => tx.delete(id("id")?),
+                "updatePayload" => tx.update_payload(
+                    id("id")?,
+                    operation.get("payload").cloned().unwrap_or_default(),
+                ),
+                "updateVector" => tx.update_vector(id("id")?, &vector()?),
+                "upsertEdge" | "link" => tx.upsert_edge(
+                    id("src")?,
+                    id("dst")?,
+                    operation
+                        .get("label")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("related"),
+                    operation
+                        .get("weight")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(1.0) as f32,
+                    operation.get("metadata").cloned().unwrap_or_default(),
+                ),
+                "unlink" => tx.unlink(id("src")?, id("dst")?),
+                "unlinkLabel" => tx.unlink_label(
+                    id("src")?,
+                    id("dst")?,
+                    operation
+                        .get("label")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| napi::Error::from_reason("事务操作缺少 label"))?,
+                ),
+                _ => {
+                    return Err(napi::Error::from_reason(format!(
+                        "不支持的事务操作类型: {kind}"
+                    )));
+                }
+            }
+        }
+        Ok(tx)
+    }
+
     fn to_js_reachability(
         result: crate::graph::reachability::ReachabilityResult,
     ) -> JsReachabilityResult {
@@ -331,6 +493,8 @@ pub mod nodejs {
                     from: step.from as f64,
                     to: step.to as f64,
                     label: step.label,
+                    weight: round_api_f32(step.weight),
+                    metadata: step.metadata,
                 })
                 .collect(),
         }
@@ -811,7 +975,7 @@ pub mod nodejs {
             vector: Vec<f64>,
             payload: serde_json::Value,
         ) -> napi::Result<()> {
-            let id = id as u64;
+            let id = parse_safe_usize(id, "id")? as u64;
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     let v: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
@@ -832,7 +996,82 @@ pub mod nodejs {
             }
         }
 
+        /// 使用自定义 ID 插入或覆盖节点。
+        #[napi]
+        pub fn upsert_with_id(
+            &mut self,
+            id: f64,
+            vector: Vec<f64>,
+            payload: serde_json::Value,
+        ) -> napi::Result<()> {
+            let id = parse_safe_usize(id, "id")? as u64;
+            match &mut self.inner {
+                DbBackend::F32(db) => {
+                    let vector = vector
+                        .into_iter()
+                        .map(|value| value as f32)
+                        .collect::<Vec<_>>();
+                    db.upsert_with_id(id, &vector, payload)
+                }
+                DbBackend::F16(db) => {
+                    let vector = vector
+                        .into_iter()
+                        .map(half::f16::from_f64)
+                        .collect::<Vec<_>>();
+                    db.upsert_with_id(id, &vector, payload)
+                }
+                DbBackend::U64(db) => {
+                    let vector = vector
+                        .into_iter()
+                        .map(|value| value as u64)
+                        .collect::<Vec<_>>();
+                    db.upsert_with_id(id, &vector, payload)
+                }
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
         /// 按 ID 获取节点，不存在时返回 null
+        #[napi]
+        pub fn commit_transaction(
+            &mut self,
+            operations: Vec<serde_json::Value>,
+        ) -> napi::Result<Vec<f64>> {
+            let ids = match &mut self.inner {
+                DbBackend::F32(db) => {
+                    db.commit_tx(build_transaction(&operations, |value| value as f32)?)
+                }
+                DbBackend::F16(db) => {
+                    db.commit_tx(build_transaction(&operations, half::f16::from_f64)?)
+                }
+                DbBackend::U64(db) => {
+                    db.commit_tx(build_transaction(&operations, |value| value as u64)?)
+                }
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            Ok(ids.into_iter().map(|id| id as f64).collect())
+        }
+
+        #[napi]
+        pub fn graph_stats(&self) -> napi::Result<serde_json::Value> {
+            serde_json::to_value(dispatch!(self, db => db.graph_stats()))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
+        #[napi]
+        pub fn validate_graph(&self) -> napi::Result<serde_json::Value> {
+            serde_json::to_value(dispatch!(self, db => db.validate_graph()))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
+        #[napi]
+        pub fn repair_graph_indexes(&mut self) -> napi::Result<serde_json::Value> {
+            let report = dispatch!(self, mut db => db.repair_graph_indexes())
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            serde_json::to_value(report)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
         #[napi]
         pub fn get(&self, id: f64) -> Option<JsNodeView> {
             let id = id as u64;
@@ -846,6 +1085,7 @@ pub mod nodejs {
                             target_id: e.target_id as f64,
                             label: e.label.clone(),
                             weight: round_api_f32(e.weight),
+                            metadata: e.metadata.clone(),
                         })
                         .collect();
                     JsNodeView {
@@ -865,6 +1105,7 @@ pub mod nodejs {
                             target_id: e.target_id as f64,
                             label: e.label.clone(),
                             weight: round_api_f32(e.weight),
+                            metadata: e.metadata.clone(),
                         })
                         .collect();
                     JsNodeView {
@@ -884,6 +1125,7 @@ pub mod nodejs {
                             target_id: e.target_id as f64,
                             label: e.label.clone(),
                             weight: round_api_f32(e.weight),
+                            metadata: e.metadata.clone(),
                         })
                         .collect();
                     JsNodeView {
@@ -968,6 +1210,54 @@ pub mod nodejs {
                 .map_err(|e| napi::Error::from_reason(e.to_string()))
         }
 
+        #[napi]
+        pub fn get_edge(&self, src: f64, dst: f64, label: String) -> Option<JsEdge> {
+            dispatch!(self, db => db.get_edge(src as u64, dst as u64, &label)).map(|edge| JsEdge {
+                target_id: edge.target_id as f64,
+                label: edge.label,
+                weight: round_api_f32(edge.weight),
+                metadata: edge.metadata,
+            })
+        }
+
+        #[napi]
+        pub fn upsert_edge(
+            &mut self,
+            src: f64,
+            dst: f64,
+            label: String,
+            weight: f64,
+            metadata: Option<serde_json::Value>,
+        ) -> napi::Result<()> {
+            dispatch!(self, mut db => db.upsert_edge(
+                src as u64,
+                dst as u64,
+                &label,
+                weight as f32,
+                metadata.unwrap_or(serde_json::Value::Null),
+            ))
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
+        #[napi]
+        pub fn update_edge(
+            &mut self,
+            src: f64,
+            dst: f64,
+            label: String,
+            weight: Option<f64>,
+            metadata: Option<serde_json::Value>,
+        ) -> napi::Result<()> {
+            dispatch!(self, mut db => db.update_edge(
+                src as u64,
+                dst as u64,
+                &label,
+                weight.map(|value| value as f32),
+                metadata,
+            ))
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
         /// 断开两节点间的边；提供 label 时仅删除该标签。
         #[napi]
         pub fn unlink(&mut self, src: f64, dst: f64, label: Option<String>) -> napi::Result<()> {
@@ -1001,37 +1291,62 @@ pub mod nodejs {
             id: f64,
             options: Option<JsReachabilityOptions>,
         ) -> napi::Result<Vec<JsReachabilityResult>> {
-            let options = options.unwrap_or(JsReachabilityOptions {
-                min_depth: None,
-                max_depth: None,
-                labels: None,
-                direction: None,
-                max_visited_nodes: None,
-            });
-            let direction = match options.direction.as_deref().unwrap_or("outgoing") {
-                "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
-                "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
-                "both" => crate::graph::reachability::ReachabilityDirection::Both,
-                _ => {
-                    return Err(napi::Error::from_reason(
-                        "direction 必须是 outgoing / incoming / both",
-                    ));
-                }
-            };
-            let config = crate::graph::reachability::ReachabilityConfig {
-                min_depth: options.min_depth.unwrap_or(1) as usize,
-                max_depth: options.max_depth.unwrap_or(1) as usize,
-                labels: options.labels,
-                direction,
-                max_visited_nodes: options
-                    .max_visited_nodes
-                    .map(|value| parse_safe_usize(value, "maxVisitedNodes"))
-                    .transpose()?
-                    .unwrap_or(10_000),
-            };
+            let config = parse_reachability_options(options)?;
             dispatch!(self, db => db.reachable(id as u64, &config))
                 .map(|results| results.into_iter().map(to_js_reachability).collect())
                 .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
+        #[napi]
+        pub fn reachable_detailed(
+            &self,
+            id: f64,
+            options: Option<JsReachabilityOptions>,
+        ) -> napi::Result<JsReachabilityOutput> {
+            let config = parse_reachability_options(options)?;
+            let output = dispatch!(self, db => db.reachable_detailed(id as u64, &config))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            Ok(JsReachabilityOutput {
+                results: output.results.into_iter().map(to_js_reachability).collect(),
+                visited_nodes: output.visited_nodes as f64,
+                traversed_edges: output.traversed_edges as f64,
+                truncated: output.truncated,
+            })
+        }
+
+        #[napi]
+        pub fn query_subgraph(
+            &self,
+            id: f64,
+            options: Option<JsReachabilityOptions>,
+        ) -> napi::Result<JsSubgraphResult> {
+            let config = parse_reachability_options(options)?;
+            let output = dispatch!(self, db => db.query_subgraph(id as u64, &config))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            Ok(JsSubgraphResult {
+                nodes: output
+                    .nodes
+                    .into_iter()
+                    .map(|node| JsSubgraphNode {
+                        id: node.id as f64,
+                        payload: node.payload,
+                    })
+                    .collect(),
+                edges: output
+                    .edges
+                    .into_iter()
+                    .map(|edge| JsSubgraphEdge {
+                        source_id: edge.source_id as f64,
+                        target_id: edge.target_id as f64,
+                        label: edge.label,
+                        weight: round_api_f32(edge.weight),
+                        metadata: edge.metadata,
+                    })
+                    .collect(),
+                visited_nodes: output.visited_nodes as f64,
+                traversed_edges: output.traversed_edges as f64,
+                truncated: output.truncated,
+            })
         }
 
         #[napi]
@@ -1532,6 +1847,7 @@ pub mod nodejs {
                     target_id: e.target_id as f64,
                     label: e.label,
                     weight: round_api_f32(e.weight),
+                    metadata: e.metadata,
                 })
                 .collect()
         }
@@ -1546,6 +1862,7 @@ pub mod nodejs {
                     target_id: edge.target_id as f64,
                     label: edge.label,
                     weight: round_api_f32(edge.weight),
+                    metadata: edge.metadata,
                 })
                 .collect()
         }

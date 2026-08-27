@@ -10,6 +10,8 @@ pub struct Edge {
     pub target_id: NodeId,
     pub label: Label,
     pub weight: Weight,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 /// 指向目标节点的完整入边视图。
@@ -19,6 +21,7 @@ pub struct IncomingEdge {
     pub target_id: NodeId,
     pub label: Label,
     pub weight: Weight,
+    pub metadata: serde_json::Value,
 }
 
 /// 用户在查询时返回的统一节点数据视图

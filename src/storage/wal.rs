@@ -6,7 +6,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 const WAL_MAGIC: &[u8; 4] = b"TVWL";
-const WAL_VERSION: u16 = 2;
+const WAL_VERSION: u16 = 3;
 const WAL_HEADER_SIZE: u64 = 6;
 
 /// WAL 条目：记录每一次变更操作
@@ -31,6 +31,8 @@ pub enum WalEntry<T> {
         dst: NodeId,
         label: String,
         weight: f32,
+        #[serde(default)]
+        metadata: String,
     },
     Delete {
         id: NodeId,

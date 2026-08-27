@@ -48,20 +48,34 @@ fn seed_v6(path: &Path, mode: StorageMode, dim: usize) {
 }
 
 fn rewrite_v6_as_v5(path: &Path, chunks: usize) {
-    let mut bytes = std::fs::read(path).unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let edge_offset = u64::from_le_bytes(bytes[42..50].try_into().unwrap()) as usize;
     let bq_offset = u64::from_le_bytes(bytes[50..58].try_into().unwrap()) as usize;
     assert_eq!(&bytes[bq_offset..bq_offset + 4], b"TBQF");
     let count = u64::from_le_bytes(bytes[bq_offset + 8..bq_offset + 16].try_into().unwrap());
-    let mut legacy = Vec::new();
-    legacy.extend_from_slice(&count.to_le_bytes());
+
+    let mut rewritten = bytes[..edge_offset].to_vec();
+    let mut cursor = edge_offset;
+    while cursor < bq_offset {
+        let record_start = cursor;
+        cursor += 16;
+        let label_len = u16::from_le_bytes(bytes[cursor..cursor + 2].try_into().unwrap()) as usize;
+        cursor += 2 + label_len + 4;
+        rewritten.extend_from_slice(&bytes[record_start..cursor]);
+        let metadata_len =
+            u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4 + metadata_len;
+    }
+
+    let legacy_bq_offset = rewritten.len() as u64;
+    rewritten[4..6].copy_from_slice(&5u16.to_le_bytes());
+    rewritten[50..58].copy_from_slice(&legacy_bq_offset.to_le_bytes());
+    rewritten.extend_from_slice(&count.to_le_bytes());
     for index in 0..count as usize {
         let source = bq_offset + 16 + index * V5_CURRENT_CHUNKS * 8;
-        legacy.extend_from_slice(&bytes[source..source + chunks * 8]);
+        rewritten.extend_from_slice(&bytes[source..source + chunks * 8]);
     }
-    bytes[4..6].copy_from_slice(&5u16.to_le_bytes());
-    bytes.truncate(bq_offset);
-    bytes.extend_from_slice(&legacy);
-    std::fs::write(path, bytes).unwrap();
+    std::fs::write(path, rewritten).unwrap();
     refresh_flush_marker(path);
 }
 

@@ -45,9 +45,11 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
             dst,
             label,
             weight,
+            metadata,
         } => {
             if mt.contains(src) && mt.contains(dst) {
-                let _ = mt.link(src, dst, label, weight);
+                let metadata = serde_json::from_str(&metadata).unwrap_or(serde_json::Value::Null);
+                let _ = mt.upsert_edge(src, dst, label, weight, metadata);
             }
         }
         WalEntry::Delete { id } => {
@@ -103,6 +105,7 @@ pub enum TxOp<T> {
         dst: NodeId,
         label: String,
         weight: f32,
+        metadata: serde_json::Value,
     },
     Delete {
         id: NodeId,
@@ -168,11 +171,23 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
 
     /// 缓冲一个连边操作
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) {
+        self.upsert_edge(src, dst, label, weight, serde_json::Value::Null);
+    }
+
+    pub fn upsert_edge(
+        &mut self,
+        src: NodeId,
+        dst: NodeId,
+        label: &str,
+        weight: f32,
+        metadata: serde_json::Value,
+    ) {
         self.ops.push(TxOp::Link {
             src,
             dst,
             label: label.to_string(),
             weight,
+            metadata,
         });
     }
 
@@ -286,11 +301,23 @@ impl<T: VectorType> TxBuilder<T> {
     }
 
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) {
+        self.upsert_edge(src, dst, label, weight, serde_json::Value::Null);
+    }
+
+    pub fn upsert_edge(
+        &mut self,
+        src: NodeId,
+        dst: NodeId,
+        label: &str,
+        weight: f32,
+        metadata: serde_json::Value,
+    ) {
         self.ops.push(TxOp::Link {
             src,
             dst,
             label: label.to_string(),
             weight,
+            metadata,
         });
     }
 
@@ -544,12 +571,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     dst,
                     label,
                     weight,
+                    metadata,
                 } => {
                     wal_entries.push(WalEntry::Link {
                         src: *src,
                         dst: *dst,
                         label: label.clone(),
                         weight: *weight,
+                        metadata: metadata.to_string(),
                     });
                 }
                 TxOp::Delete { id } => {
@@ -624,8 +653,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     dst,
                     label,
                     weight,
+                    metadata,
                 } => {
-                    let _ = mt.link(*src, *dst, label.clone(), *weight);
+                    let metadata =
+                        serde_json::from_str(metadata).unwrap_or(serde_json::Value::Null);
+                    let _ = mt.upsert_edge(*src, *dst, label.clone(), *weight, metadata);
                 }
                 WalEntry::Delete { id } => {
                     let _ = mt.delete(*id);

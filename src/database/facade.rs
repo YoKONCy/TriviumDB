@@ -1,7 +1,9 @@
 use super::{AccessMode, BatchSearchConfig, Config, Database, SearchConfig};
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
-use crate::graph::reachability::{ReachabilityConfig, ReachabilityResult};
+use crate::graph::reachability::{
+    ReachabilityConfig, ReachabilityOutput, ReachabilityResult, SubgraphResult,
+};
 use crate::hook::HookContext;
 use crate::node::{Edge, GroupedSearchResult, IncomingEdge, NodeId, NodeView, SearchHit};
 use crate::query::tql_executor::TqlResult;
@@ -115,6 +117,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
         self.inner.get_edges(id)
     }
 
+    pub fn get_edge(&self, src: NodeId, dst: NodeId, label: &str) -> Option<Edge> {
+        self.inner.get_edge(src, dst, label)
+    }
+
     pub fn get_incoming_edges(&self, id: NodeId, label: Option<&str>) -> Vec<IncomingEdge> {
         self.inner.get_incoming_edges(id, label)
     }
@@ -138,6 +144,22 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
         config: &ReachabilityConfig,
     ) -> Result<Vec<ReachabilityResult>> {
         self.inner.reachable(id, config)
+    }
+
+    pub fn reachable_detailed(
+        &self,
+        id: NodeId,
+        config: &ReachabilityConfig,
+    ) -> Result<ReachabilityOutput> {
+        self.inner.reachable_detailed(id, config)
+    }
+
+    pub fn query_subgraph(
+        &self,
+        id: NodeId,
+        config: &ReachabilityConfig,
+    ) -> Result<SubgraphResult> {
+        self.inner.query_subgraph(id, config)
     }
 
     pub fn tql(&self, input: &str) -> Result<TqlResult<T>> {

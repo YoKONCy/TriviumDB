@@ -669,6 +669,8 @@ fn execute_search<T: VectorType>(
                 labels: (!ex.labels.is_empty()).then(|| ex.labels.clone()),
                 direction,
                 max_visited_nodes: MAX_BUDGET,
+                max_results: MAX_BUDGET,
+                max_edges: MAX_BUDGET,
             };
             for reached in crate::graph::reachability::traverse(mt, seed, &config)? {
                 expanded
@@ -958,16 +960,23 @@ fn try_property_index_lookup<T: VectorType>(
             mt.find_by_property_index(key, val).map(|ids| ids.to_vec())
         }
         Filter::And(filters) => {
-            // 在 AND 条件中找第一个可以使用索引的条件（选择性最强的）
+            let mut indexed_sets = Vec::new();
             for f in filters {
                 if let Filter::Eq(key, val) = f
                     && key != "id"
                     && let Some(ids) = mt.find_by_property_index(key, val)
                 {
-                    return Some(ids.to_vec());
+                    indexed_sets.push(ids);
                 }
             }
-            None
+            indexed_sets.sort_by_key(|ids| ids.len());
+            let first = indexed_sets.first()?;
+            let mut intersection: Vec<NodeId> = first.to_vec();
+            for ids in indexed_sets.iter().skip(1) {
+                let set: HashSet<NodeId> = ids.iter().copied().collect();
+                intersection.retain(|id| set.contains(id));
+            }
+            Some(intersection)
         }
         _ => None,
     }

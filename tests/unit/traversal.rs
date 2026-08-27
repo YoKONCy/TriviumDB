@@ -425,14 +425,17 @@ fn reachability_支持反向和多标签过滤() {
 }
 
 #[test]
-fn reachability_预算超限明确报错() {
+fn reachability_预算超限返回部分结果和截断标记() {
     let mt = build_graph();
     let config = ReachabilityConfig {
         max_depth: 2,
         max_visited_nodes: 1,
         ..Default::default()
     };
-    assert!(traverse(&mt, 1, &config).is_err());
+    let output = triviumdb::graph::reachability::traverse_detailed(&mt, 1, &config).unwrap();
+    assert!(output.truncated);
+    assert_eq!(output.visited_nodes, 1);
+    assert!(traverse(&mt, 1, &config).is_ok());
 }
 
 #[test]
