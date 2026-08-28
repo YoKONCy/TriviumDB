@@ -249,10 +249,18 @@ impl Wal {
             }
             let version = u16::from_le_bytes([prefix[4], prefix[5]]);
             if version != WAL_VERSION {
-                return Err(TriviumError::UnsupportedWalVersion {
-                    found: version,
-                    supported: WAL_VERSION,
-                });
+                // 空 WAL（只有头部、没有任何待回放记录）不存在条目格式差异，
+                // 版本不兼容不会影响数据完整性 —— 按空 WAL 处理，
+                // 让下一次写入以新版本头重建，避免旧库升级后彻底打不开。
+                // 只要 WAL 里还有哪怕一条记录，就仍然严格拒绝，
+                // 防止用新格式去回放旧格式条目造成数据损坏。
+                if file.metadata()?.len() != WAL_HEADER_SIZE {
+                    return Err(TriviumError::UnsupportedWalVersion {
+                        found: version,
+                        supported: WAL_VERSION,
+                    });
+                }
+                return Ok((Vec::new(), WAL_HEADER_SIZE));
             }
             let (entries, offset) = Self::read_entries_from_reader(BufReader::new(file))?;
             return Ok((entries, offset + WAL_HEADER_SIZE));
