@@ -1,3 +1,8 @@
+//! Python PyO3 公共绑定。
+//!
+//! 负责 Python 值转换、GIL 释放、上下文管理器和异常映射，不复制核心查询逻辑。批量
+//! 计算在进入 Rust 后释放 GIL；`.pyi` 由已编译模块生成并通过 stubtest 防止签名漂移。
+
 #[cfg(feature = "python")]
 #[allow(clippy::module_inception)]
 pub mod python {
@@ -44,6 +49,13 @@ pub mod python {
             crate::error::TriviumError::UnsupportedDatabaseVersion { .. } => {
                 UnsupportedDatabaseVersionError::new_err(error.to_string())
             }
+            crate::error::TriviumError::ApiMigrationRequired { .. }
+            | crate::error::TriviumError::UnsupportedSidecarVersion { .. }
+            | crate::error::TriviumError::UnsupportedWalVersion { .. }
+            | crate::error::TriviumError::QueryParse(_)
+            | crate::error::TriviumError::QueryExecution(_) => {
+                pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+            }
             crate::error::TriviumError::InvalidInput(message) => {
                 pyo3::exceptions::PyValueError::new_err(message)
             }
@@ -55,6 +67,47 @@ pub mod python {
         F32(GenericDatabase<f32>),
         F16(GenericDatabase<half::f16>),
         U64(GenericDatabase<u64>),
+    }
+
+    fn tql_row_to_json<T: crate::VectorType>(
+        row: std::collections::HashMap<String, crate::query::tql_executor::TqlValue<T>>,
+    ) -> serde_json::Value {
+        use crate::query::tql_executor::TqlValue;
+        let mut output = serde_json::Map::new();
+        for (name, value) in row {
+            let value = match value {
+                TqlValue::Node(node) => serde_json::json!({
+                    "id": node.id,
+                    "payload": node.payload,
+                    "num_edges": node.edges.len(),
+                }),
+                TqlValue::Int(value) => serde_json::json!(value),
+                TqlValue::Float(value) => serde_json::json!(value),
+                TqlValue::String(value) => serde_json::json!(value),
+                TqlValue::Bool(value) => serde_json::json!(value),
+                TqlValue::Path(value) => serde_json::json!(value),
+                TqlValue::List(value) => serde_json::Value::Array(value),
+                TqlValue::Null => serde_json::Value::Null,
+            };
+            output.insert(name, value);
+        }
+        serde_json::Value::Object(output)
+    }
+
+    #[pyclass(name = "PreparedTql")]
+    pub struct PyPreparedTql {
+        inner: crate::query::tql_prepared::PreparedTql,
+    }
+
+    #[pymethods]
+    impl PyPreparedTql {
+        fn parameter_names(&self) -> Vec<String> {
+            self.inner
+                .parameter_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        }
     }
 
     /// Python 侧的 TriviumDB 包装器
@@ -1200,14 +1253,48 @@ pub mod python {
         /// db.create_index("type")
         /// ```
         fn create_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.create_index(field))
-                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+            dispatch!(self, mut db => db.create_index(field)).map_err(to_py_error)
+        }
+
+        fn create_ordered_index(&mut self, field: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.create_ordered_index(field)).map_err(to_py_error)
+        }
+
+        fn create_composite_index(&mut self, fields: Vec<String>) -> PyResult<()> {
+            dispatch!(self, mut db => db.create_composite_index(&fields)).map_err(to_py_error)
+        }
+
+        fn create_bitmap_index(&mut self, field: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.create_bitmap_index(field)).map_err(to_py_error)
         }
 
         /// 删除属性索引（查询仍可用，退化为全扫描）
         fn drop_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.drop_index(field))
-                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+            dispatch!(self, mut db => db.drop_index(field)).map_err(to_py_error)
+        }
+
+        fn drop_ordered_index(&mut self, field: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.drop_ordered_index(field)).map_err(to_py_error)
+        }
+
+        fn drop_composite_index(&mut self, fields: Vec<String>) -> PyResult<()> {
+            dispatch!(self, mut db => db.drop_composite_index(&fields)).map_err(to_py_error)
+        }
+
+        fn drop_bitmap_index(&mut self, field: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.drop_bitmap_index(field)).map_err(to_py_error)
+        }
+
+        fn index_info(&self, py: Python<'_>) -> PyResult<PyObject> {
+            let value = dispatch!(self, db => serde_json::to_value(db.index_info()))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(json_to_pyobject(py, &value))
+        }
+
+        fn storage_info(&self, py: Python<'_>) -> PyResult<PyObject> {
+            let value = dispatch!(self, db => serde_json::to_value(db.storage_info()))
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            Ok(json_to_pyobject(py, &value))
         }
 
         // ════════ 轻量级单字段查询 ════════
@@ -1352,6 +1439,8 @@ pub mod python {
                 max_visited_nodes,
                 max_results,
                 max_edges,
+                max_frontier_size: 10_000,
+                exhaustion_policy: crate::graph::budget::BudgetExhaustionPolicy::Partial,
             };
             dispatch!(self, db => db.reachable(id, &config))
                 .map(|results| {
@@ -1394,6 +1483,8 @@ pub mod python {
                 max_visited_nodes,
                 max_results,
                 max_edges,
+                max_frontier_size: 10_000,
+                exhaustion_policy: crate::graph::budget::BudgetExhaustionPolicy::Partial,
             };
             let output = dispatch!(self, db => db.reachable_detailed(id, &config))
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
@@ -1433,6 +1524,8 @@ pub mod python {
                 max_visited_nodes,
                 max_results,
                 max_edges,
+                max_frontier_size: 10_000,
+                exhaustion_policy: crate::graph::budget::BudgetExhaustionPolicy::Partial,
             };
             let output = dispatch!(self, db => db.query_subgraph(id, &config))
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
@@ -1800,17 +1893,47 @@ pub mod python {
         fn tql(&self, py: Python<'_>, query: &str) -> PyResult<Vec<PyQueryRow>> {
             fn convert_rows<T: crate::VectorType>(
                 py: Python<'_>,
-                rows: Vec<std::collections::HashMap<String, crate::node::Node<T>>>,
+                rows: crate::query::tql_executor::TqlValueResult<T>,
             ) -> PyResult<Vec<PyQueryRow>> {
+                use crate::query::tql_executor::TqlValue;
                 let mut out = Vec::with_capacity(rows.len());
                 for row in rows {
                     let py_row = PyDict::new(py);
-                    for (var_name, node) in &row {
-                        let node_dict = PyDict::new(py);
-                        let _ = node_dict.set_item("id", node.id);
-                        let _ = node_dict.set_item("payload", json_to_pyobject(py, &node.payload));
-                        let _ = node_dict.set_item("num_edges", node.edges.len());
-                        let _ = py_row.set_item(var_name, node_dict);
+                    for (name, value) in row {
+                        match value {
+                            TqlValue::Node(node) => {
+                                let node_dict = PyDict::new(py);
+                                let _ = node_dict.set_item("id", node.id);
+                                let _ = node_dict
+                                    .set_item("payload", json_to_pyobject(py, &node.payload));
+                                let _ = node_dict.set_item("num_edges", node.edges.len());
+                                let _ = py_row.set_item(name, node_dict);
+                            }
+                            TqlValue::Int(value) => {
+                                let _ = py_row.set_item(name, value);
+                            }
+                            TqlValue::Float(value) => {
+                                let _ = py_row.set_item(name, value);
+                            }
+                            TqlValue::String(value) => {
+                                let _ = py_row.set_item(name, value);
+                            }
+                            TqlValue::Bool(value) => {
+                                let _ = py_row.set_item(name, value);
+                            }
+                            TqlValue::Path(value) => {
+                                let _ = py_row.set_item(name, value);
+                            }
+                            TqlValue::List(value) => {
+                                let _ = py_row.set_item(
+                                    name,
+                                    json_to_pyobject(py, &serde_json::Value::Array(value)),
+                                );
+                            }
+                            TqlValue::Null => {
+                                let _ = py_row.set_item(name, py.None());
+                            }
+                        }
                     }
                     out.push(PyQueryRow {
                         row: py_row.into_any().unbind(),
@@ -1821,24 +1944,72 @@ pub mod python {
 
             match &self.inner {
                 DbBackend::F32(db) => {
-                    let rows = db.tql(query).map_err(|e: crate::error::TriviumError| {
-                        pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                    })?;
+                    let rows = db
+                        .tql_values(query)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })?;
                     convert_rows(py, rows)
                 }
                 DbBackend::F16(db) => {
-                    let rows = db.tql(query).map_err(|e: crate::error::TriviumError| {
-                        pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                    })?;
+                    let rows = db
+                        .tql_values(query)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })?;
                     convert_rows(py, rows)
                 }
                 DbBackend::U64(db) => {
-                    let rows = db.tql(query).map_err(|e: crate::error::TriviumError| {
-                        pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                    })?;
+                    let rows = db
+                        .tql_values(query)
+                        .map_err(|e: crate::error::TriviumError| {
+                            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                        })?;
                     convert_rows(py, rows)
                 }
             }
+        }
+
+        fn prepare_tql(&self, query: &str) -> PyResult<PyPreparedTql> {
+            dispatch!(self, db => db.prepare_tql(query))
+                .map(|inner| PyPreparedTql { inner })
+                .map_err(to_py_error)
+        }
+
+        fn execute_prepared_tql(
+            &self,
+            py: Python<'_>,
+            prepared: &PyPreparedTql,
+            parameters: &Bound<'_, PyDict>,
+        ) -> PyResult<Vec<PyQueryRow>> {
+            let mut values = std::collections::HashMap::new();
+            for (key, value) in parameters.iter() {
+                let name: String = key.extract()?;
+                let json = pyobject_to_json(&value);
+                values.insert(
+                    name,
+                    crate::query::tql_prepared::TqlParamValue::from_json(&json)
+                        .map_err(to_py_error)?,
+                );
+            }
+            let rows = match &self.inner {
+                DbBackend::F32(db) => db
+                    .execute_prepared_tql(&prepared.inner, &values)
+                    .map(|rows| rows.into_iter().map(tql_row_to_json).collect::<Vec<_>>()),
+                DbBackend::F16(db) => db
+                    .execute_prepared_tql(&prepared.inner, &values)
+                    .map(|rows| rows.into_iter().map(tql_row_to_json).collect::<Vec<_>>()),
+                DbBackend::U64(db) => db
+                    .execute_prepared_tql(&prepared.inner, &values)
+                    .map(|rows| rows.into_iter().map(tql_row_to_json).collect::<Vec<_>>()),
+            }
+            .map_err(to_py_error)?;
+            rows.into_iter()
+                .map(|row| {
+                    let value = json_to_pyobject(py, &row);
+                    Ok(PyQueryRow { row: value })
+                })
+                .collect()
         }
 
         /// 执行 TQL 写操作（CREATE / SET / DELETE / DETACH DELETE）
@@ -2429,6 +2600,7 @@ pub mod python {
             "UnsupportedDatabaseVersionError",
             m.py().get_type::<UnsupportedDatabaseVersionError>(),
         )?;
+        m.add_class::<PyPreparedTql>()?;
         m.add_class::<PyTriviumDB>()?;
         m.add_class::<PySearchHit>()?;
         m.add_class::<PyGroupedSearchResult>()?;

@@ -22,9 +22,10 @@ use std::cell::UnsafeCell;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct NonNanF32(pub f32);
 
 impl Eq for NonNanF32 {}
@@ -38,6 +39,26 @@ impl Ord for NonNanF32 {
         self.0
             .partial_cmp(&other.0)
             .unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
+/// 查询时导航评分器。评分越小，候选越优先；该抽象不参与 QuIVer 建图或裁边。
+pub trait NavigationScorer {
+    fn score(&mut self, node_id: u64, bq_distance: u32) -> u32;
+
+    fn accept_result(&mut self, _node_id: u64) -> bool {
+        true
+    }
+}
+
+/// 与历史 QuIVer 查询完全等价的纯 BQ 导航评分器。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BqNavigationScorer;
+
+impl NavigationScorer for BqNavigationScorer {
+    #[inline(always)]
+    fn score(&mut self, _node_id: u64, bq_distance: u32) -> u32 {
+        bq_distance
     }
 }
 
@@ -304,12 +325,12 @@ impl BuildProfile {
             + ms(&self.fwd_ns)
             + ms(&self.rev_wait_ns)
             + ms(&self.rev_work_ns);
-        eprintln!(
-            "================ 构图性能探针 / Graph Build Profiler (TRIVIUM_BUILD_PROFILE) ================"
-        );
-        eprintln!(
-            "节点数/Nodes={nodes}  线程数/Threads={threads}  墙钟/Wall={wall_secs:.2}s  累计CPU时间/Total CPU={:.1}ms",
-            total_cpu_ms
+        tracing::info!(
+            nodes,
+            threads,
+            wall_seconds = wall_secs,
+            total_cpu_ms,
+            "构图性能探针完成 (Graph build profiler completed)"
         );
         let line = |name: &str, c: &AtomicU64| {
             let cpu_ms = ms(c);
@@ -318,9 +339,12 @@ impl BuildProfile {
             } else {
                 0.0
             };
-            eprintln!(
-                "  {name:<22} 累计CPU/CPU {cpu_ms:>10.1}ms ({pct:>5.1}%)  每节点/Per-node {:>8.1}ns",
-                per(c)
+            tracing::info!(
+                stage = name,
+                cpu_ms,
+                percent = pct,
+                per_node_ns = per(c),
+                "构图阶段性能 (Graph build stage profile)"
             );
         };
         line("Bitset分配/allocate", &self.bitset_ns);
@@ -328,7 +352,6 @@ impl BuildProfile {
         line("前向选边/forward select", &self.fwd_ns);
         line("反向剪枝锁等待/reverse wait", &self.rev_wait_ns);
         line("反向剪枝工作/reverse work", &self.rev_work_ns);
-        eprintln!("====================================================================");
     }
 }
 
@@ -810,6 +833,85 @@ impl ExperimentalBuildView<'_> {
     }
 }
 
+const DEFAULT_PREFILTER_SLOT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+type PrefilterSlotPosting = Arc<Vec<(u64, u32)>>;
+
+struct PrefilterSlotCacheEntry {
+    posting: PrefilterSlotPosting,
+    bytes: usize,
+    last_used: u64,
+}
+
+struct PrefilterSlotCacheState {
+    entries: std::collections::HashMap<(u64, u64), PrefilterSlotCacheEntry>,
+    bytes: usize,
+    max_bytes: usize,
+    clock: u64,
+}
+
+impl PrefilterSlotCacheState {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+
+    fn get(&mut self, key: (u64, u64)) -> Option<PrefilterSlotPosting> {
+        self.clock = self.clock.wrapping_add(1);
+        let entry = self.entries.get_mut(&key)?;
+        entry.last_used = self.clock;
+        Some(Arc::clone(&entry.posting))
+    }
+
+    fn insert(&mut self, key: (u64, u64), posting: PrefilterSlotPosting) {
+        let bytes = posting
+            .len()
+            .saturating_mul(std::mem::size_of::<(u64, u32)>());
+        if bytes > self.max_bytes {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous.bytes);
+        }
+        while self.bytes.saturating_add(bytes) > self.max_bytes {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(removed.bytes);
+            }
+        }
+        self.clock = self.clock.wrapping_add(1);
+        self.entries.insert(
+            key,
+            PrefilterSlotCacheEntry {
+                posting,
+                bytes,
+                last_used: self.clock,
+            },
+        );
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+}
+
+impl Default for PrefilterSlotCacheState {
+    fn default() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            bytes: 0,
+            max_bytes: DEFAULT_PREFILTER_SLOT_CACHE_BYTES,
+            clock: 0,
+        }
+    }
+}
+
+type PrefilterSlotCache = Mutex<PrefilterSlotCacheState>;
+
 pub struct QuIVer {
     dim: usize,
     n: usize,
@@ -837,6 +939,10 @@ pub struct QuIVer {
     tombstones: Vec<bool>, // internal_index → 是否已删除
     dirty_count: usize,    // 增量变更计数（tombstone + 追加节点）
 
+    // 当前 QuIVer 实例范围内的属性 posting → internal slot 派生缓存。
+    // QuIVer 重建会替换整个实例；增量变更会清空缓存，不参与持久化或建图。
+    prefilter_slot_cache: PrefilterSlotCache,
+
     visited: Bitset, // 建图期间复用，搜索时每次新建
 }
 
@@ -861,6 +967,20 @@ pub struct QuIVerSearchConfig {
     pub top_k: usize,
     pub ef_search: usize,
     pub rerank_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QuIVerPrefilterMetrics {
+    pub posting_lookup_ns: u64,
+    pub node_mapping_ns: u64,
+    pub bq_heap_scan_ns: u64,
+    pub output_sort_ns: u64,
+    pub cache_hit: bool,
+    pub mapped_candidates: usize,
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
 impl QuIVerSearchConfig {
@@ -897,6 +1017,7 @@ impl QuIVer {
             max_level: 0,
             tombstones: Vec::new(),
             dirty_count: 0,
+            prefilter_slot_cache: Mutex::new(PrefilterSlotCacheState::default()),
             visited: Bitset::new(0),
         }
     }
@@ -1109,22 +1230,35 @@ impl QuIVer {
         ef: usize,
         visited: &mut V,
     ) -> Vec<(NonNanF32, u32)> {
-        #[cfg(target_arch = "x86_64")]
-        if self.dim == 384
-            && !*crate::index::bq::FORCE_NO_384_KERNEL
-            && is_x86_feature_detected!("popcnt")
-        {
-            return self.beam_search_l0_impl::<true, V>(q_sig, entry, ef, visited);
-        }
-        self.beam_search_l0_impl::<false, V>(q_sig, entry, ef, visited)
+        let mut scorer = BqNavigationScorer;
+        self.beam_search_l0_with_scorer(q_sig, entry, ef, visited, &mut scorer)
     }
 
-    fn beam_search_l0_impl<const DIM_384: bool, V: SearchVisited>(
+    fn beam_search_l0_with_scorer<V: SearchVisited, S: NavigationScorer>(
         &self,
         q_sig: &Bq2Signature,
         entry: u32,
         ef: usize,
         visited: &mut V,
+        scorer: &mut S,
+    ) -> Vec<(NonNanF32, u32)> {
+        #[cfg(target_arch = "x86_64")]
+        if self.dim == 384
+            && !*crate::index::bq::FORCE_NO_384_KERNEL
+            && is_x86_feature_detected!("popcnt")
+        {
+            return self.beam_search_l0_impl::<true, V, S>(q_sig, entry, ef, visited, scorer);
+        }
+        self.beam_search_l0_impl::<false, V, S>(q_sig, entry, ef, visited, scorer)
+    }
+
+    fn beam_search_l0_impl<const DIM_384: bool, V: SearchVisited, S: NavigationScorer>(
+        &self,
+        q_sig: &Bq2Signature,
+        entry: u32,
+        ef: usize,
+        visited: &mut V,
+        scorer: &mut S,
     ) -> Vec<(NonNanF32, u32)> {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
@@ -1145,7 +1279,7 @@ impl QuIVer {
             self.bq_store
                 .distance_to_sig_cheap(node as usize, q_sig, self.dim)
         };
-        let d = NonNanF32(cheap_distance(entry) as f32);
+        let d = NonNanF32(scorer.score(self.ids[entry as usize], cheap_distance(entry)) as f32);
         visited.set(entry as usize);
         candidates.push(Reverse((d, entry)));
         results.push((d, entry));
@@ -1169,7 +1303,7 @@ impl QuIVer {
                 }
                 visited.set(nb as usize);
 
-                let nd = NonNanF32(cheap_distance(nb) as f32);
+                let nd = NonNanF32(scorer.score(self.ids[nb as usize], cheap_distance(nb)) as f32);
                 if results.len() < ef || nd < results.peek().unwrap().0 {
                     candidates.push(Reverse((nd, nb)));
                     results.push((nd, nb));
@@ -1191,12 +1325,184 @@ impl QuIVer {
         res
     }
 
-    fn beam_search_l0_384(
+    fn beam_search_l0_dual<S: NavigationScorer>(
+        &self,
+        q_sig: &Bq2Signature,
+        entry: u32,
+        ef: usize,
+        scorer: &mut S,
+        signal_quota_ppm: u32,
+        signal_seed_ids: &[u64],
+    ) -> Vec<(NonNanF32, u32)> {
+        let mut discovered = Bitset::new(self.n);
+        let mut expanded = Bitset::new(self.n);
+        let mut vector_queue = BinaryHeap::with_capacity(ef.saturating_mul(2));
+        let mut signal_queue = BinaryHeap::with_capacity(ef.saturating_mul(2));
+        let mut vector_results = BinaryHeap::with_capacity(ef.saturating_add(1));
+        let mut signal_results = BinaryHeap::with_capacity(ef.saturating_add(1));
+        let distance = |node: u32| {
+            self.bq_store
+                .distance_to_sig_cheap(node as usize, q_sig, self.dim)
+        };
+        let add = |node: u32,
+                   discovered: &mut Bitset,
+                   vector_queue: &mut BinaryHeap<Reverse<(NonNanF32, u32)>>,
+                   signal_queue: &mut BinaryHeap<Reverse<(NonNanF32, u32)>>,
+                   vector_results: &mut BinaryHeap<(NonNanF32, u32)>,
+                   signal_results: &mut BinaryHeap<(NonNanF32, u32)>,
+                   scorer: &mut S| {
+            if discovered.test(node as usize) {
+                return;
+            }
+            discovered.set(node as usize);
+            let vector_distance = NonNanF32(distance(node) as f32);
+            let signal_distance =
+                NonNanF32(scorer.score(self.ids[node as usize], vector_distance.0 as u32) as f32);
+            vector_queue.push(Reverse((vector_distance, node)));
+            signal_queue.push(Reverse((signal_distance, node)));
+            vector_results.push((vector_distance, node));
+            signal_results.push((signal_distance, node));
+            if vector_results.len() > ef {
+                vector_results.pop();
+            }
+            if signal_results.len() > ef {
+                signal_results.pop();
+            }
+        };
+        add(
+            entry,
+            &mut discovered,
+            &mut vector_queue,
+            &mut signal_queue,
+            &mut vector_results,
+            &mut signal_results,
+            scorer,
+        );
+        for &id in signal_seed_ids {
+            if let Some(&node) = self.id_to_internal.get(&id)
+                && !self.tombstones[node as usize]
+            {
+                add(
+                    node,
+                    &mut discovered,
+                    &mut vector_queue,
+                    &mut signal_queue,
+                    &mut vector_results,
+                    &mut signal_results,
+                    scorer,
+                );
+            }
+        }
+
+        let mut quota_accumulator = 0u64;
+        loop {
+            while vector_queue
+                .peek()
+                .is_some_and(|Reverse((_, node))| expanded.test(*node as usize))
+            {
+                vector_queue.pop();
+            }
+            while signal_queue
+                .peek()
+                .is_some_and(|Reverse((_, node))| expanded.test(*node as usize))
+            {
+                signal_queue.pop();
+            }
+            let vector_available = vector_queue.peek().is_some_and(|Reverse((score, _))| {
+                vector_results.len() < ef || *score <= vector_results.peek().unwrap().0
+            });
+            let signal_available = signal_queue.peek().is_some_and(|Reverse((score, _))| {
+                signal_results.len() < ef || *score <= signal_results.peek().unwrap().0
+            });
+            if !vector_available && !signal_available {
+                break;
+            }
+            quota_accumulator = quota_accumulator.saturating_add(u64::from(signal_quota_ppm));
+            let prefer_signal = quota_accumulator >= 1_000_000;
+            if prefer_signal {
+                quota_accumulator -= 1_000_000;
+            }
+            let current = if prefer_signal && signal_available || !vector_available {
+                signal_queue.pop().map(|Reverse((_, node))| node)
+            } else {
+                vector_queue.pop().map(|Reverse((_, node))| node)
+            };
+            let Some(current) = current else {
+                break;
+            };
+            if expanded.test(current as usize) {
+                continue;
+            }
+            expanded.set(current as usize);
+            let neighbors = self.layer0.neighbors(current);
+            for &neighbor in neighbors {
+                if !discovered.test(neighbor as usize) {
+                    self.bq_store.prefetch_sig(neighbor as usize);
+                }
+            }
+            for &neighbor in neighbors {
+                add(
+                    neighbor,
+                    &mut discovered,
+                    &mut vector_queue,
+                    &mut signal_queue,
+                    &mut vector_results,
+                    &mut signal_results,
+                    scorer,
+                );
+            }
+        }
+
+        let mut vector = vector_results.into_vec();
+        let mut signal = signal_results.into_vec();
+        vector.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        signal.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let mut selected = Bitset::new(self.n);
+        let mut candidates = Vec::with_capacity(ef);
+        let mut vector_index = 0usize;
+        let mut signal_index = 0usize;
+        let mut merge_accumulator = 0u64;
+        while candidates.len() < ef && (vector_index < vector.len() || signal_index < signal.len())
+        {
+            merge_accumulator = merge_accumulator.saturating_add(u64::from(signal_quota_ppm));
+            let prefer_signal = merge_accumulator >= 1_000_000;
+            if prefer_signal {
+                merge_accumulator -= 1_000_000;
+            }
+            let source =
+                if prefer_signal && signal_index < signal.len() || vector_index >= vector.len() {
+                    let item = signal[signal_index];
+                    signal_index += 1;
+                    item
+                } else {
+                    let item = vector[vector_index];
+                    vector_index += 1;
+                    item
+                };
+            if selected.test(source.1 as usize) {
+                continue;
+            }
+            selected.set(source.1 as usize);
+            candidates.push(source);
+        }
+        for candidate in &mut candidates {
+            candidate.0 = NonNanF32(self.bq_store.distance_to_sig(
+                candidate.1 as usize,
+                q_sig,
+                self.dim,
+            ) as f32);
+        }
+        candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        candidates
+    }
+
+    fn beam_search_l0_384_with_scorer<S: NavigationScorer>(
         &self,
         q_sig: &Bq2Signature,
         entry: u32,
         ef: usize,
         scratch: &mut SearchScratch384,
+        scorer: &mut S,
     ) -> Vec<(NonNanF32, u32)> {
         scratch.visited.begin();
         scratch.candidates.clear();
@@ -1204,13 +1510,13 @@ impl QuIVer {
         scratch.candidates.reserve(ef.saturating_mul(2));
         scratch.results.reserve(ef.saturating_add(1));
 
-        let distance = |node: u32| -> NonNanF32 {
-            NonNanF32(
-                self.bq_store
-                    .distance_to_sig_cheap_384(node as usize, q_sig) as f32,
-            )
+        let distance = |scorer: &mut S, node: u32| -> NonNanF32 {
+            let bq_distance = self
+                .bq_store
+                .distance_to_sig_cheap_384(node as usize, q_sig);
+            NonNanF32(scorer.score(self.ids[node as usize], bq_distance) as f32)
         };
-        let initial_distance = distance(entry);
+        let initial_distance = distance(scorer, entry);
         scratch.visited.set(entry as usize);
         scratch.candidates.push(Reverse((initial_distance, entry)));
         scratch.results.push((initial_distance, entry));
@@ -1231,7 +1537,7 @@ impl QuIVer {
                     continue;
                 }
                 scratch.visited.set(neighbor as usize);
-                let neighbor_distance = distance(neighbor);
+                let neighbor_distance = distance(scorer, neighbor);
                 if scratch.results.len() < ef
                     || neighbor_distance < scratch.results.peek().unwrap().0
                 {
@@ -1378,11 +1684,270 @@ impl QuIVer {
     pub fn search<F>(
         &self,
         query: &[f32],
-        mut get_vec_f32: F,
+        get_vec_f32: F,
         config: &QuIVerSearchConfig,
     ) -> Vec<(u64, f32)>
     where
         F: FnMut(usize, &mut Vec<f32>) -> bool,
+    {
+        let mut scorer = BqNavigationScorer;
+        self.search_with_scorer(query, get_vec_f32, config, &mut scorer)
+    }
+
+    /// 估算指定属性候选在 BQ2 空间中的相对密度。
+    ///
+    /// 返回“候选集合平均成对距离 / 全局平均成对距离”。小于 1 表示候选更聚集。
+    /// 采样按排序后等距抽取，且仅比较相邻样本，保证成本有界与结果确定。
+    pub fn vector_density_skew(
+        &self,
+        candidate_ids: &[u64],
+        max_samples: usize,
+    ) -> Option<(f64, usize)> {
+        fn sample_slots(index: &QuIVer, ids: &[u64], limit: usize) -> Vec<usize> {
+            let mut slots = ids
+                .iter()
+                .filter_map(|id| index.id_to_internal.get(id).copied())
+                .map(|slot| slot as usize)
+                .filter(|slot| !index.tombstones.get(*slot).copied().unwrap_or(true))
+                .collect::<Vec<_>>();
+            slots.sort_unstable();
+            slots.dedup();
+            if slots.len() > limit {
+                let last = slots.len() - 1;
+                slots = (0..limit)
+                    .map(|position| slots[position * last / (limit - 1)])
+                    .collect();
+            }
+            slots
+        }
+
+        fn mean_adjacent_distance(index: &QuIVer, slots: &[usize]) -> Option<f64> {
+            let (sum, count) = slots.windows(2).fold((0u64, 0usize), |(sum, count), pair| {
+                (
+                    sum.saturating_add(u64::from(
+                        index.bq_store.distance(pair[0], pair[1], index.dim),
+                    )),
+                    count + 1,
+                )
+            });
+            (count > 0).then_some(sum as f64 / count as f64)
+        }
+
+        let limit = max_samples.clamp(2, 256);
+        let candidate_slots = sample_slots(self, candidate_ids, limit);
+        let all_ids = self
+            .ids
+            .iter()
+            .copied()
+            .filter(|id| self.id_to_internal.contains_key(id))
+            .collect::<Vec<_>>();
+        let global_slots = sample_slots(self, &all_ids, limit);
+        let candidate_mean = mean_adjacent_distance(self, &candidate_slots)?;
+        let global_mean = mean_adjacent_distance(self, &global_slots)?;
+        if global_mean <= f64::EPSILON {
+            return Some((1.0, candidate_slots.len()));
+        }
+        Some((
+            (candidate_mean / global_mean).clamp(0.25, 4.0),
+            candidate_slots.len(),
+        ))
+    }
+
+    /// 对指定 NodeId 候选集合执行纯 BQ2 粗排，不访问原始向量。
+    ///
+    /// 该接口仅复用现有 BQ2 签名和 NodeId 映射，不修改 Vamana 图或建边语义。
+    pub fn prefilter_candidates(
+        &self,
+        query: &[f32],
+        candidate_ids: &[u64],
+        limit: usize,
+    ) -> Vec<(u64, u32)> {
+        self.prefilter_candidates_profiled(query, candidate_ids, 0, 0, limit)
+            .0
+    }
+
+    /// 使用当前 QuIVer 实例范围内的 internal slot posting 缓存执行 BQ2 粗排，
+    /// 并返回可供 benchmark 分解的阶段耗时。缓存不落盘，也不参与 Vamana 建图。
+    pub fn prefilter_candidates_profiled(
+        &self,
+        query: &[f32],
+        candidate_ids: &[u64],
+        posting_identity: u64,
+        property_generation: u64,
+        limit: usize,
+    ) -> (Vec<(u64, u32)>, QuIVerPrefilterMetrics) {
+        if query.len() != self.dim || limit == 0 {
+            return (Vec::new(), QuIVerPrefilterMetrics::default());
+        }
+        let lookup_started = Instant::now();
+        let cache_key = (posting_identity, property_generation);
+        let cached = self
+            .prefilter_slot_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(cache_key);
+        let posting_lookup_ns = elapsed_ns(lookup_started);
+        let cache_hit = cached.is_some();
+        let mapping_started = Instant::now();
+        let slots = cached.unwrap_or_else(|| {
+            let mapped = candidate_ids
+                .iter()
+                .map(|id| {
+                    (
+                        *id,
+                        self.id_to_internal.get(id).copied().unwrap_or(u32::MAX),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mapped = Arc::new(mapped);
+            self.prefilter_slot_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(cache_key, Arc::clone(&mapped));
+            mapped
+        });
+        let node_mapping_ns = elapsed_ns(mapping_started);
+        let signature = Bq2Signature::from_vector(query);
+        let scan_started = Instant::now();
+        let mut best = BinaryHeap::with_capacity(limit.min(slots.len()));
+        let mut mapped_candidates = 0usize;
+        for &(id, internal) in slots.iter() {
+            let internal = internal as usize;
+            if internal == u32::MAX as usize
+                || self.tombstones.get(internal).copied().unwrap_or(true)
+            {
+                continue;
+            }
+            mapped_candidates += 1;
+            let candidate = (
+                self.bq_store
+                    .distance_to_sig(internal, &signature, self.dim),
+                id,
+            );
+            if best.len() < limit {
+                best.push(candidate);
+            } else if best.peek().is_some_and(|worst| candidate < *worst) {
+                best.pop();
+                best.push(candidate);
+            }
+        }
+        let bq_heap_scan_ns = elapsed_ns(scan_started);
+        let sort_started = Instant::now();
+        let mut scored = best
+            .into_iter()
+            .map(|(distance, id)| (id, distance))
+            .collect::<Vec<_>>();
+        scored.sort_unstable_by(|left, right| {
+            left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0))
+        });
+        let output_sort_ns = elapsed_ns(sort_started);
+        (
+            scored,
+            QuIVerPrefilterMetrics {
+                posting_lookup_ns,
+                node_mapping_ns,
+                bq_heap_scan_ns,
+                output_sort_ns,
+                cache_hit,
+                mapped_candidates,
+            },
+        )
+    }
+
+    /// 实验性双队列联合导航。纯向量入口不会调用此方法。
+    pub fn search_dual_queue<F, S>(
+        &self,
+        query: &[f32],
+        mut get_vec_f32: F,
+        config: &QuIVerSearchConfig,
+        scorer: &mut S,
+        signal_quota_ppm: u32,
+        signal_seed_ids: &[u64],
+    ) -> Vec<(u64, f32)>
+    where
+        F: FnMut(usize, &mut Vec<f32>) -> bool,
+        S: NavigationScorer,
+    {
+        if self.n == 0 {
+            return Vec::new();
+        }
+        assert_eq!(query.len(), self.dim);
+        let query_signature = Bq2Signature::from_vector(query);
+        let mut entry = self.entry_point;
+        for layer in (1..=self.max_level).rev() {
+            let upper = layer - 1;
+            if upper >= self.upper_layers.len() {
+                continue;
+            }
+            loop {
+                let mut changed = false;
+                let mut best =
+                    self.bq_store
+                        .distance_to_sig(entry as usize, &query_signature, self.dim);
+                for &neighbor in &self.upper_layers[upper][entry as usize] {
+                    let distance = self.bq_store.distance_to_sig(
+                        neighbor as usize,
+                        &query_signature,
+                        self.dim,
+                    );
+                    if distance < best {
+                        entry = neighbor;
+                        best = distance;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+        }
+        let candidates = self.beam_search_l0_dual(
+            &query_signature,
+            entry,
+            config.ef_search,
+            scorer,
+            signal_quota_ppm,
+            signal_seed_ids,
+        );
+        let rerank_limit = config.rerank_limit().min(candidates.len());
+        let mut buffer = Vec::with_capacity(self.dim);
+        let mut scored = Vec::with_capacity(rerank_limit);
+        for &(_, internal) in candidates.iter().take(rerank_limit) {
+            if self.tombstones[internal as usize]
+                || !scorer.accept_result(self.ids[internal as usize])
+            {
+                continue;
+            }
+            let slot = self.slot_indices[internal as usize];
+            if get_vec_f32(slot, &mut buffer) && buffer.len() == self.dim {
+                scored.push((cosine_similarity_f32(query, &buffer), internal));
+            }
+        }
+        scored.sort_unstable_by(|left, right| {
+            right
+                .0
+                .partial_cmp(&left.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.1.cmp(&right.1))
+        });
+        scored
+            .into_iter()
+            .take(config.top_k)
+            .map(|(score, internal)| (self.ids[internal as usize], score))
+            .collect()
+    }
+
+    /// 使用自定义查询时评分器搜索。仅显式联合查询应调用此入口。
+    pub fn search_with_scorer<F, S>(
+        &self,
+        query: &[f32],
+        mut get_vec_f32: F,
+        config: &QuIVerSearchConfig,
+        scorer: &mut S,
+    ) -> Vec<(u64, f32)>
+    where
+        F: FnMut(usize, &mut Vec<f32>) -> bool,
+        S: NavigationScorer,
     {
         if self.n == 0 {
             return Vec::new();
@@ -1430,8 +1995,13 @@ impl QuIVer {
             return SCRATCH_384.with(|cell| {
                 let mut scratch = cell.borrow_mut();
                 scratch.visited.grow(self.n);
-                let bq_candidates =
-                    self.beam_search_l0_384(&q_sig, cur_node, config.ef_search, &mut scratch);
+                let bq_candidates = self.beam_search_l0_384_with_scorer(
+                    &q_sig,
+                    cur_node,
+                    config.ef_search,
+                    &mut scratch,
+                    scorer,
+                );
                 #[cfg(feature = "test-hooks")]
                 crate::test_hooks::hit(
                     crate::test_hooks::ConcurrencyPoint::QuiverCandidateProduced,
@@ -1444,6 +2014,7 @@ impl QuIVer {
                     config,
                     &mut get_vec_f32,
                     &mut scratch,
+                    scorer,
                 )
             });
         }
@@ -1452,7 +2023,13 @@ impl QuIVer {
             if visited.len < self.n {
                 visited.grow(self.n);
             }
-            self.beam_search_l0(&q_sig, cur_node, config.ef_search, &mut *visited)
+            self.beam_search_l0_with_scorer(
+                &q_sig,
+                cur_node,
+                config.ef_search,
+                &mut *visited,
+                scorer,
+            )
         });
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::QuiverCandidateProduced);
@@ -1465,7 +2042,7 @@ impl QuIVer {
         let mut buf: Vec<f32> = Vec::with_capacity(dim);
         let mut scored: Vec<(f32, u32)> = Vec::with_capacity(rerank_limit);
         for &(_, nid) in bq_candidates.iter().take(rerank_limit) {
-            if self.tombstones[nid as usize] {
+            if self.tombstones[nid as usize] || !scorer.accept_result(self.ids[nid as usize]) {
                 continue;
             }
             let slot = self.slot_indices[nid as usize];
@@ -1482,16 +2059,18 @@ impl QuIVer {
             .collect()
     }
 
-    fn rerank_candidates_384<F>(
+    fn rerank_candidates_384<F, S>(
         &self,
         query: &[f32],
         bq_candidates: &[(NonNanF32, u32)],
         config: &QuIVerSearchConfig,
         get_vec_f32: &mut F,
         scratch: &mut SearchScratch384,
+        scorer: &mut S,
     ) -> Vec<(u64, f32)>
     where
         F: FnMut(usize, &mut Vec<f32>) -> bool,
+        S: NavigationScorer,
     {
         let rerank_limit = config.rerank_limit().min(bq_candidates.len());
         scratch.scored.clear();
@@ -1502,7 +2081,7 @@ impl QuIVer {
         }
         let query_norm = cosine_query_norm_f32_384(query).unwrap_or_default();
         for &(_, nid) in bq_candidates.iter().take(rerank_limit) {
-            if self.tombstones[nid as usize] {
+            if self.tombstones[nid as usize] || !scorer.accept_result(self.ids[nid as usize]) {
                 continue;
             }
             let slot = self.slot_indices[nid as usize];
@@ -2198,9 +2777,12 @@ impl QuIVer {
             min_deg = min_deg.min(d);
             max_deg = max_deg.max(d);
         }
-        eprintln!(
-            "      [调试/debug] L0 度数/Degree: min={} max={} 孤立节点/Isolated={}/{}",
-            min_deg, max_deg, deg0, self.n
+        tracing::debug!(
+            min_degree = min_deg,
+            max_degree = max_deg,
+            isolated_nodes = deg0,
+            nodes = self.n,
+            "QuIVer L0 度数诊断 (QuIVer L0 degree diagnostics)"
         );
 
         // BFS 从入口点测可达性
@@ -2218,18 +2800,18 @@ impl QuIVer {
                 }
             }
         }
-        eprintln!(
-            "      [调试/debug] BFS 从入口点可达/Reachable from entry: {}/{} ({:.1}%)",
+        tracing::debug!(
             reached,
-            self.n,
-            100.0 * reached as f64 / self.n as f64
+            nodes = self.n,
+            reachable_percent = 100.0 * reached as f64 / self.n as f64,
+            "QuIVer 入口点可达性 (QuIVer entry-point reachability)"
         );
 
         // 入口点邻居数
-        eprintln!(
-            "      [调试/debug] 入口点/Entry={} 度数/Degree={}",
-            self.entry_point,
-            self.layer0.degree(self.entry_point)
+        tracing::debug!(
+            entry_point = self.entry_point,
+            degree = self.layer0.degree(self.entry_point),
+            "QuIVer 入口点诊断 (QuIVer entry-point diagnostics)"
         );
     }
 
@@ -2241,6 +2823,10 @@ impl QuIVer {
             if !self.tombstones[idx as usize] {
                 self.tombstones[idx as usize] = true;
                 self.dirty_count += 1;
+                self.prefilter_slot_cache
+                    .get_mut()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clear();
             }
             true
         } else {
@@ -2275,7 +2861,7 @@ impl QuIVer {
     // ── 持久化 ──
 
     const QUIVER_MAGIC: &'static [u8; 4] = b"QUIV";
-    const QUIVER_VERSION: u32 = 1;
+    pub const QUIVER_VERSION: u32 = 1;
 
     /// 将 QuIVer 索引保存到文件（POD memcpy 格式）
     ///
@@ -2710,6 +3296,7 @@ impl QuIVer {
             max_level,
             tombstones,
             dirty_count,
+            prefilter_slot_cache: Mutex::new(PrefilterSlotCacheState::default()),
             visited: Bitset::new(n),
         })
     }
@@ -2760,6 +3347,273 @@ mod tests {
         vecs
     }
 
+    #[derive(Default)]
+    struct RecordingBqScorer {
+        visited_ids: Vec<u64>,
+    }
+
+    impl NavigationScorer for RecordingBqScorer {
+        fn score(&mut self, node_id: u64, bq_distance: u32) -> u32 {
+            self.visited_ids.push(node_id);
+            bq_distance
+        }
+    }
+
+    fn legacy_beam_search_l0(
+        index: &QuIVer,
+        q_sig: &Bq2Signature,
+        entry: u32,
+        ef: usize,
+    ) -> (Vec<(NonNanF32, u32)>, Vec<u64>) {
+        let mut visited = Bitset::new(index.n);
+        visited.clear();
+        let mut candidates = BinaryHeap::with_capacity(ef * 2);
+        let mut results = BinaryHeap::with_capacity(ef + 1);
+        let distance = |node: u32| {
+            index
+                .bq_store
+                .distance_to_sig_cheap(node as usize, q_sig, index.dim)
+        };
+        let mut sequence = vec![index.ids[entry as usize]];
+        let initial = NonNanF32(distance(entry) as f32);
+        visited.set(entry as usize);
+        candidates.push(Reverse((initial, entry)));
+        results.push((initial, entry));
+        while let Some(Reverse((candidate_distance, current))) = candidates.pop() {
+            if results.len() >= ef && candidate_distance > results.peek().unwrap().0 {
+                break;
+            }
+            for &neighbor in index.layer0.neighbors(current) {
+                if visited.test(neighbor as usize) {
+                    continue;
+                }
+                visited.set(neighbor as usize);
+                sequence.push(index.ids[neighbor as usize]);
+                let neighbor_distance = NonNanF32(distance(neighbor) as f32);
+                if results.len() < ef || neighbor_distance < results.peek().unwrap().0 {
+                    candidates.push(Reverse((neighbor_distance, neighbor)));
+                    results.push((neighbor_distance, neighbor));
+                    if results.len() > ef {
+                        results.pop();
+                    }
+                }
+            }
+        }
+        let mut output = results.into_vec();
+        for item in &mut output {
+            item.0 = NonNanF32(
+                index
+                    .bq_store
+                    .distance_to_sig(item.1 as usize, q_sig, index.dim) as f32,
+            );
+        }
+        output.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        (output, sequence)
+    }
+
+    #[test]
+    fn bq_有界预筛与全量排序结果逐项一致() {
+        for dim in [64, 400, 768] {
+            let n = 257;
+            let vectors = make_random_vectors(n, dim, 0xB0_0DED + dim as u64);
+            let ids = (20_000..20_000 + n as u64).collect::<Vec<_>>();
+            let slots = (0..n).collect::<Vec<_>>();
+            let mut index = QuIVer::new(dim, &QuIVerConfig::default());
+            index.batch_build(&vectors, &ids, &slots);
+            index.soft_delete(ids[31]);
+
+            let query = &vectors[17 * dim..18 * dim];
+            let signature = Bq2Signature::from_vector(query);
+            let candidates = ids
+                .iter()
+                .rev()
+                .copied()
+                .chain([u64::MAX])
+                .collect::<Vec<_>>();
+            let mut expected = candidates
+                .iter()
+                .filter_map(|id| {
+                    let internal = *index.id_to_internal.get(id)? as usize;
+                    (!index.tombstones[internal]).then(|| {
+                        (
+                            *id,
+                            index
+                                .bq_store
+                                .distance_to_sig(internal, &signature, index.dim),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            expected.sort_unstable_by(|left, right| {
+                left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0))
+            });
+
+            for limit in [1, 7, 64, n, n + 20] {
+                let mut wanted = expected.clone();
+                wanted.truncate(limit);
+                assert_eq!(
+                    index.prefilter_candidates(query, &candidates, limit),
+                    wanted
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bq_internal_slot_cache_严格遵守字节预算并按最近使用淘汰() {
+        let posting = |start: u64| {
+            Arc::new(
+                (0..4)
+                    .map(|offset| (start + offset, offset as u32))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let entry_bytes = 4 * std::mem::size_of::<(u64, u32)>();
+        let mut cache = PrefilterSlotCacheState {
+            max_bytes: entry_bytes * 2,
+            ..PrefilterSlotCacheState::default()
+        };
+        cache.insert((1, 1), posting(10));
+        cache.insert((2, 1), posting(20));
+        assert!(cache.get((1, 1)).is_some());
+        cache.insert((3, 1), posting(30));
+        assert!(cache.bytes <= cache.max_bytes);
+        assert!(cache.get((1, 1)).is_some());
+        assert!(cache.get((2, 1)).is_none());
+        assert!(cache.get((3, 1)).is_some());
+
+        let oversized = Arc::new(vec![(1, 1); 9]);
+        cache.insert((4, 1), oversized);
+        assert!(cache.get((4, 1)).is_none());
+        assert!(cache.bytes <= cache.max_bytes);
+    }
+
+    #[test]
+    fn bq_internal_slot_posting_命中缓存且增量变更后安全失效() {
+        let dim = 64;
+        let vectors = make_random_vectors(24, dim, 0x5107_CA5E);
+        let ids = (500..524).collect::<Vec<_>>();
+        let slots = (0..24).collect::<Vec<_>>();
+        let mut index = QuIVer::new(dim, &QuIVerConfig::default());
+        index.batch_build(&vectors, &ids, &slots);
+        let query = &vectors[..dim];
+
+        let (cold, cold_metrics) = index.prefilter_candidates_profiled(query, &ids, 11, 1, 8);
+        let (warm, warm_metrics) = index.prefilter_candidates_profiled(query, &ids, 11, 1, 8);
+        assert_eq!(cold, warm);
+        assert!(!cold_metrics.cache_hit);
+        assert!(warm_metrics.cache_hit);
+        assert_eq!(warm_metrics.mapped_candidates, ids.len());
+
+        index.soft_delete(ids[3]);
+        let (after_delete, delete_metrics) =
+            index.prefilter_candidates_profiled(query, &ids, 11, 2, 8);
+        assert!(!delete_metrics.cache_hit);
+        assert_eq!(delete_metrics.mapped_candidates, ids.len() - 1);
+        assert!(after_delete.iter().all(|(id, _)| *id != ids[3]));
+
+        let new_id = 900;
+        let mut lcg = 7;
+        index.insert(&vectors[dim..dim * 2], new_id, 24, &mut lcg);
+        let mut extended = ids.clone();
+        extended.push(new_id);
+        let (_, insert_metrics) = index.prefilter_candidates_profiled(query, &extended, 11, 3, 8);
+        assert!(!insert_metrics.cache_hit);
+        assert_eq!(insert_metrics.mapped_candidates, ids.len());
+    }
+
+    #[test]
+    fn bq_有界预筛边界输入安全且排序确定() {
+        let dim = 64;
+        let vectors = make_random_vectors(8, dim, 0xB0_0E00);
+        let ids = (100..108).collect::<Vec<_>>();
+        let slots = (0..8).collect::<Vec<_>>();
+        let mut index = QuIVer::new(dim, &QuIVerConfig::default());
+        index.batch_build(&vectors, &ids, &slots);
+        let query = &vectors[..dim];
+
+        assert!(index.prefilter_candidates(query, &ids, 0).is_empty());
+        assert!(
+            index
+                .prefilter_candidates(&query[..dim - 1], &ids, 4)
+                .is_empty()
+        );
+        let first = index.prefilter_candidates(query, &ids, 4);
+        let second = index.prefilter_candidates(query, &ids, 4);
+        assert_eq!(first, second);
+        assert!(first.windows(2).all(|pair| {
+            pair[0].1 < pair[1].1 || (pair[0].1 == pair[1].1 && pair[0].0 < pair[1].0)
+        }));
+    }
+
+    #[test]
+    fn c1a_bq_scorer_与历史算法访问序列和候选逐项一致() {
+        for dim in [64, 384, 768, 1536, 3072] {
+            let n = 96;
+            let vectors = make_random_vectors(n, dim, 0xC1A0_0000 + dim as u64);
+            let ids = (10_000..10_000 + n as u64).collect::<Vec<_>>();
+            let slots = (0..n).collect::<Vec<_>>();
+            let mut index = QuIVer::new(
+                dim,
+                &QuIVerConfig {
+                    m: 12,
+                    ef_construction: 32,
+                    alpha: 1.2,
+                },
+            );
+            index.batch_build(&vectors, &ids, &slots);
+            let query = &vectors[17 * dim..18 * dim];
+            let query_signature = Bq2Signature::from_vector(query);
+            let (legacy, legacy_sequence) =
+                legacy_beam_search_l0(&index, &query_signature, index.entry_point, 48);
+            let mut visited = Bitset::new(n);
+            let mut scorer = RecordingBqScorer::default();
+            let scored = index.beam_search_l0_impl::<false, Bitset, RecordingBqScorer>(
+                &query_signature,
+                index.entry_point,
+                48,
+                &mut visited,
+                &mut scorer,
+            );
+            assert_eq!(scorer.visited_ids, legacy_sequence, "维度 {dim}");
+            assert_eq!(scored, legacy, "维度 {dim}");
+        }
+    }
+
+    #[test]
+    fn c1a_公开纯向量搜索与_bq_scorer_路径逐项一致() {
+        for dim in [64, 384, 768, 1536, 3072] {
+            let n = 128;
+            let vectors = make_random_vectors(n, dim, 0xC1A1_0000 + dim as u64);
+            let ids = (20_000..20_000 + n as u64).collect::<Vec<_>>();
+            let slots = (0..n).collect::<Vec<_>>();
+            let mut index = QuIVer::new(
+                dim,
+                &QuIVerConfig {
+                    m: 12,
+                    ef_construction: 32,
+                    alpha: 1.2,
+                },
+            );
+            index.batch_build(&vectors, &ids, &slots);
+            let query = &vectors[29 * dim..30 * dim];
+            let config = QuIVerSearchConfig {
+                top_k: 20,
+                ef_search: 64,
+                rerank_limit: Some(48),
+            };
+            let get_vector = |slot: usize, buffer: &mut Vec<f32>| {
+                buffer.clear();
+                buffer.extend_from_slice(&vectors[slot * dim..(slot + 1) * dim]);
+                true
+            };
+            let legacy = index.search(query, get_vector, &config);
+            let mut scorer = BqNavigationScorer;
+            let scored = index.search_with_scorer(query, get_vector, &config, &mut scorer);
+            assert_eq!(scored, legacy, "维度 {dim}");
+        }
+    }
+
     #[test]
     fn sparse_bitset跨查询不串扰并支持扩容() {
         let mut visited = SparseBitset::new(2);
@@ -2802,11 +3656,13 @@ mod tests {
         let specialized = index.search_flat(query, &vectors, &config);
         let q_sig = Bq2Signature::from_vector(query);
         let mut visited = Bitset::new(n);
-        let candidates = index.beam_search_l0_impl::<false, Bitset>(
+        let mut scorer = BqNavigationScorer;
+        let candidates = index.beam_search_l0_impl::<false, Bitset, BqNavigationScorer>(
             &q_sig,
             index.entry_point,
             config.ef_search,
             &mut visited,
+            &mut scorer,
         );
         let mut generic = candidates
             .iter()

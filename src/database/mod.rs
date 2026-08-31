@@ -203,6 +203,26 @@ impl Drop for OperationGuard {
     }
 }
 
+/// 持久化与索引状态的公共诊断快照。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StorageInfo {
+    pub package_version: &'static str,
+    pub database_format_current: u16,
+    pub database_format_minimum: u16,
+    pub wal_format: u16,
+    pub property_index_format: u16,
+    pub graph_index_format: u16,
+    pub quiver_format: u32,
+    pub text_index_format: u32,
+    pub manifest_format: u16,
+    pub dim: usize,
+    pub node_count: usize,
+    pub storage_mode: &'static str,
+    pub access_mode: &'static str,
+    pub estimated_memory_bytes: usize,
+    pub sidecars: std::collections::BTreeMap<String, bool>,
+}
+
 /// 数据库核心入口实例
 pub struct Database<T: VectorType> {
     pub(crate) db_path: String,
@@ -378,16 +398,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         Self::open_with_config(path, config)
     }
 
-    /// 打开或创建数据库，指定 WAL 同步模式 (向后兼容)
-    pub fn open_with_sync(path: &str, dim: usize, sync_mode: SyncMode) -> Result<Self> {
-        let config = Config {
-            dim,
-            sync_mode,
-            ..Default::default()
-        };
-        Self::open_with_config(path, config)
-    }
-
     /// 打开或创建数据库（高级配置入口）
     pub fn open_with_config(path: &str, config: Config) -> Result<Self> {
         let dim = config.dim;
@@ -466,10 +476,15 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 config.load_text_index,
                 config.access_mode == AccessMode::ReadWrite,
                 config.missing_index_policy,
+                config.access_mode != AccessMode::ReadWrite,
             )?
         } else {
             MemTable::new(dim)
         };
+
+        if config.access_mode == AccessMode::ReadWrite {
+            Wal::upgrade_empty_legacy_wal(path)?;
+        }
 
         if Wal::needs_recovery(path) && config.access_mode != AccessMode::ReadWrite {
             return Err(TriviumError::RecoveryRequired {
@@ -734,7 +749,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     /// 设置内存上限（字节）
     ///
-    /// 当 MemTable 估算内存超过此值时，写操作后会自动触发 flush 落盘。
+    /// 达到上限时拒绝新增内存负载；不会用频繁全量 flush 换取表面 RSS 降低。
     /// 设为 0 表示无限制（默认）。
     pub fn set_memory_limit(&mut self, bytes: usize) {
         self.memory_limit = bytes;
@@ -772,21 +787,33 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         read_or_recover(&self.memtable).estimated_memory_bytes()
     }
 
-    /// 内部方法：检查内存压力，超出上限时自动 flush
+    fn ensure_incremental_memory_budget(&self, additional_bytes: usize) -> Result<()> {
+        if self.memory_limit == 0 {
+            return Ok(());
+        }
+        let current_bytes = read_or_recover(&self.memtable).estimated_memory_bytes();
+        if current_bytes.saturating_add(additional_bytes) > self.memory_limit {
+            return Err(TriviumError::CapacityReservationRejected {
+                requested_nodes: 1,
+                estimated_bytes: additional_bytes,
+                current_bytes,
+                memory_limit: self.memory_limit,
+            });
+        }
+        Ok(())
+    }
+
+    /// 内部方法：达到预算后只释放冷 mmap 页，不触发无法降低索引堆占用的全量重写。
     fn check_memory_pressure(&mut self) {
         if self.memory_limit > 0 {
-            let usage = write_or_recover(&self.memtable).estimated_memory_bytes();
+            let usage = read_or_recover(&self.memtable).estimated_memory_bytes();
             if usage > self.memory_limit {
-                tracing::info!(
-                    "内存压力: {}MB > 上限 {}MB，自动落盘中 (Memory pressure: {}MB > limit {}MB, auto-flushing)",
-                    usage / (1024 * 1024),
-                    self.memory_limit / (1024 * 1024),
+                tracing::warn!(
+                    "内存压力超过预算，已释放冷 mmap 页且后续新增负载将被拒绝；不会自动全量重写 (Memory budget exceeded; cold mmap pages were released and subsequent growth will be rejected; automatic full rewrite is disabled): {}MB > {}MB",
                     usage / (1024 * 1024),
                     self.memory_limit / (1024 * 1024)
                 );
-                if let Err(e) = self.flush() {
-                    tracing::error!("自动落盘失败 (Auto-flush failed): {}", e);
-                }
+                read_or_recover(&self.memtable).advise_cold_vectors_dontneed();
             }
         }
     }
@@ -883,6 +910,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 max_bytes: 8 * 1024 * 1024,
             });
         }
+        self.ensure_incremental_memory_budget(
+            vector
+                .len()
+                .saturating_mul(std::mem::size_of::<T>())
+                .saturating_add(payload_str.len())
+                .saturating_add(256),
+        )?;
 
         let id = {
             let mut mt = write_or_recover(&self.memtable);
@@ -917,6 +951,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 max_bytes: 8 * 1024 * 1024,
             });
         }
+        self.ensure_incremental_memory_budget(
+            vector
+                .len()
+                .saturating_mul(std::mem::size_of::<T>())
+                .saturating_add(payload_str.len())
+                .saturating_add(256),
+        )?;
 
         {
             let mut mt = write_or_recover(&self.memtable);
@@ -955,6 +996,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         self.require_write_access("link")?;
         let _operation = self.enter_operation()?;
         reject_hook_reentrant_write()?;
+        self.ensure_incremental_memory_budget(label.len().saturating_add(256))?;
         {
             let mut mt = write_or_recover(&self.memtable);
             mt.validate_link(src, dst)?;
@@ -980,6 +1022,39 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         read_or_recover(&self.memtable)
             .get_edge(src, dst, label)
             .cloned()
+    }
+
+    pub fn shortest_path(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        max_depth: usize,
+        label: Option<&str>,
+    ) -> Option<Vec<NodeId>> {
+        crate::graph::pathfinding::shortest_path(
+            &read_or_recover(&self.memtable),
+            source,
+            target,
+            max_depth,
+            label,
+        )
+    }
+
+    pub fn shortest_path_bidirectional(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        label: Option<&str>,
+        budget: &crate::graph::budget::TraversalBudget,
+    ) -> Result<crate::graph::pathfinding::ShortestPathOutput> {
+        let _operation = self.enter_operation()?;
+        crate::graph::pathfinding::shortest_path_bidirectional(
+            &read_or_recover(&self.memtable),
+            source,
+            target,
+            label,
+            budget,
+        )
     }
 
     pub fn graph_stats(&self) -> crate::storage::memtable::GraphStats {
@@ -1084,6 +1159,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             });
         }
 
+        self.ensure_incremental_memory_budget(payload_str.len().saturating_add(128))?;
         {
             let mut mt = write_or_recover(&self.memtable);
             mt.validate_update_payload(id)?;
@@ -1145,6 +1221,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         self.require_write_access("update_vector")?;
         let _operation = self.enter_operation()?;
         reject_hook_reentrant_write()?;
+        self.ensure_incremental_memory_budget(
+            vector
+                .len()
+                .saturating_mul(std::mem::size_of::<T>())
+                .saturating_add(128),
+        )?;
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeUpdateVectorWriteLock);
         {
@@ -1522,6 +1604,87 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         crate::graph::reachability::query_subgraph(&read_or_recover(&self.memtable), id, config)
     }
 
+    pub fn tsng_ground_truth(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+    ) -> Result<crate::tsng::TsngGroundTruth> {
+        let _operation = self.enter_operation()?;
+        crate::tsng::exact_ground_truth(&read_or_recover(&self.memtable), query)
+    }
+
+    /// 实验性 TSNG 联合导航。纯向量权重会显式退化到原始 QuIVer scorer。
+    pub fn search_tsng(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+        config: crate::tsng::TsngSearchConfig,
+    ) -> Result<crate::tsng::TsngSearchResult> {
+        let _operation = self.enter_operation()?;
+        crate::tsng::approximate_search(&read_or_recover(&self.memtable), query, config)
+    }
+
+    /// TSNG 串行对照：原始 QuIVer ANN 后执行完整属性/图过滤和联合精排。
+    pub fn search_tsng_post_filter(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+        config: crate::tsng::TsngSearchConfig,
+    ) -> Result<crate::tsng::TsngSearchResult> {
+        let _operation = self.enter_operation()?;
+        crate::tsng::post_filter_search(&read_or_recover(&self.memtable), query, config)
+    }
+
+    /// 图候选并集对照：原始 ANN 候选与精确图候选直接合并后联合精排。
+    pub fn search_tsng_graph_union(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+        config: crate::tsng::TsngSearchConfig,
+    ) -> Result<crate::tsng::TsngSearchResult> {
+        let _operation = self.enter_operation()?;
+        crate::tsng::graph_union_search(&read_or_recover(&self.memtable), query, config)
+    }
+
+    /// BQ 预筛强基线：属性候选仅以 BQ2 粗排，随后读取有限原始向量精排。
+    pub fn search_tsng_bq_prefilter(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+        config: crate::tsng::IndustrialSearchConfig,
+    ) -> Result<crate::tsng::TsngSearchResult> {
+        let _operation = self.enter_operation()?;
+        crate::tsng::bq_prefilter_search(&read_or_recover(&self.memtable), query, config)
+    }
+
+    /// 工业混合查询：按选择性自动使用属性/图优先、候选并集或 ANN 后过滤。
+    pub fn search_tsng_industrial(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+        config: crate::tsng::IndustrialSearchConfig,
+    ) -> Result<crate::tsng::TsngSearchResult> {
+        let _operation = self.enter_operation()?;
+        crate::tsng::industrial_search(&read_or_recover(&self.memtable), query, config)
+    }
+
+    pub fn index_memory_stats(&self) -> crate::observability::IndexMemoryStats {
+        read_or_recover(&self.memtable).index_memory_stats()
+    }
+
+    pub fn storage_write_stats(&self) -> crate::observability::StorageWriteStats {
+        let file_len = |suffix: &str| {
+            std::fs::metadata(format!("{}{}", self.db_path, suffix))
+                .map(|metadata| metadata.len())
+                .unwrap_or_default()
+        };
+        let wal = lock_or_recover(&self.wal);
+        crate::observability::StorageWriteStats {
+            wal_bytes: wal.cumulative_written_bytes(),
+            sidecar_bytes: file_len(".pidx")
+                .saturating_add(file_len(".quiver"))
+                .saturating_add(file_len(".text"))
+                .saturating_add(file_len(".gidx")),
+            checkpoint_bytes: file_len("").saturating_add(file_len(".vec")),
+            temporary_spill_bytes: 0,
+            logical_bytes: wal.cumulative_logical_bytes(),
+        }
+    }
+
     pub fn search_graph_first(
         &self,
         query: &[T],
@@ -1556,12 +1719,128 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         Ok(())
     }
 
+    pub fn create_composite_index(&mut self, fields: &[String]) -> Result<()> {
+        self.require_write_access("create_composite_index")?;
+        if fields.len() < 2 {
+            return Err(TriviumError::InvalidInput(
+                "复合索引至少需要两个字段 (Composite index requires at least two fields)".into(),
+            ));
+        }
+        write_or_recover(&self.memtable).register_composite_property_index(fields);
+        Ok(())
+    }
+
+    pub fn create_bitmap_index(&mut self, field: &str) -> Result<()> {
+        self.require_write_access("create_bitmap_index")?;
+        write_or_recover(&self.memtable).register_bitmap_property_index(field);
+        Ok(())
+    }
+
+    pub fn drop_composite_index(&mut self, fields: &[String]) -> Result<()> {
+        self.require_write_access("drop_composite_index")?;
+        write_or_recover(&self.memtable).drop_composite_property_index(fields);
+        Ok(())
+    }
+
+    pub fn drop_bitmap_index(&mut self, field: &str) -> Result<()> {
+        self.require_write_access("drop_bitmap_index")?;
+        write_or_recover(&self.memtable).drop_bitmap_property_index(field);
+        Ok(())
+    }
+
+    pub fn create_ordered_index(&mut self, field: &str) -> Result<()> {
+        self.require_write_access("create_ordered_index")?;
+        let mut mt = write_or_recover(&self.memtable);
+        mt.register_ordered_property_index(field);
+        Ok(())
+    }
+
+    pub fn drop_ordered_index(&mut self, field: &str) -> Result<()> {
+        self.require_write_access("drop_ordered_index")?;
+        let mut mt = write_or_recover(&self.memtable);
+        mt.drop_ordered_property_index(field);
+        Ok(())
+    }
+
     /// 删除属性索引
     pub fn drop_index(&mut self, field: &str) -> Result<()> {
         self.require_write_access("drop_index")?;
         let mut mt = write_or_recover(&self.memtable);
         mt.drop_property_index(field);
         Ok(())
+    }
+
+    /// 返回已注册属性索引字段，按字段名稳定排序。
+    pub fn list_indexes(&self) -> Vec<String> {
+        let mt = read_or_recover(&self.memtable);
+        let mut fields: Vec<String> = mt
+            .indexed_field_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        fields.sort();
+        fields
+    }
+
+    /// 返回四类属性索引的完整统计，按类型和字段稳定排序。
+    pub fn index_info(&self) -> Vec<crate::index::property::PropertyIndexStats> {
+        let mut stats = read_or_recover(&self.memtable).property_index_stats();
+        stats.sort_by(|left, right| {
+            format!("{:?}", left.kind)
+                .cmp(&format!("{:?}", right.kind))
+                .then_with(|| left.fields.cmp(&right.fields))
+        });
+        stats
+    }
+
+    /// 返回当前数据库格式、模式和 sidecar 存在状态；该操作只读且不会修复文件。
+    pub fn storage_info(&self) -> StorageInfo {
+        let mt = read_or_recover(&self.memtable);
+        let suffixes = [
+            ".vec",
+            ".wal",
+            ".flush_ok",
+            ".quiver",
+            ".quiver.meta",
+            ".text",
+            ".text.meta",
+            ".pidx",
+            ".gidx",
+            ".manifest.json",
+        ];
+        let sidecars = suffixes
+            .into_iter()
+            .map(|suffix| {
+                (
+                    suffix.to_owned(),
+                    std::path::Path::new(&format!("{}{}", self.db_path, suffix)).exists(),
+                )
+            })
+            .collect();
+        StorageInfo {
+            package_version: env!("CARGO_PKG_VERSION"),
+            database_format_current: crate::storage::file_format::CURRENT_VERSION,
+            database_format_minimum: crate::storage::file_format::MINIMUM_SUPPORTED_VERSION,
+            wal_format: crate::storage::wal::WAL_VERSION,
+            property_index_format: crate::index::property::FORMAT_VERSION,
+            graph_index_format: crate::storage::graph_blocks::VERSION,
+            quiver_format: crate::index::quiver::QuIVer::QUIVER_VERSION,
+            text_index_format: crate::index::text::TEXT_INDEX_VERSION,
+            manifest_format: crate::storage::snapshot::MANIFEST_VERSION,
+            dim: mt.dim(),
+            node_count: mt.node_count(),
+            storage_mode: match self.storage_mode {
+                StorageMode::Mmap => "mmap",
+                StorageMode::Rom => "rom",
+            },
+            access_mode: match self.access_mode {
+                AccessMode::ReadWrite => "read_write",
+                AccessMode::ReadOnly => "read_only",
+                AccessMode::Immutable => "immutable",
+            },
+            estimated_memory_bytes: mt.estimated_memory_bytes(),
+            sidecars,
+        }
     }
 
     // ════════════════════════════════════════════════════════
@@ -1583,6 +1862,33 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
         let mt = read_or_recover(&self.memtable);
         crate::query::tql_executor::execute_tql(&query, &mt)
+    }
+
+    /// 执行 TQL，并返回可同时承载节点与标量列的一等值结果。
+    pub fn tql_values(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
+        let _operation = self.enter_operation()?;
+        let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
+        let mt = read_or_recover(&self.memtable);
+        crate::query::tql_executor::execute_tql_values(&query, &mt)
+    }
+
+    /// 解析并准备可重复绑定执行的只读 TQL。
+    pub fn prepare_tql(&self, input: &str) -> Result<crate::query::tql_prepared::PreparedTql> {
+        let _operation = self.enter_operation()?;
+        let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
+        Ok(crate::query::tql_prepared::PreparedTql::from_query(query))
+    }
+
+    /// 执行已准备的 TQL，并返回一等值结果。
+    pub fn execute_prepared_tql(
+        &self,
+        prepared: &crate::query::tql_prepared::PreparedTql,
+        parameters: &std::collections::HashMap<String, crate::query::tql_prepared::TqlParamValue>,
+    ) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
+        let _operation = self.enter_operation()?;
+        let query = prepared.bind(parameters)?;
+        let mt = read_or_recover(&self.memtable);
+        crate::query::tql_executor::execute_tql_values(&query, &mt)
     }
 
     /// TQL 写操作入口
@@ -1610,13 +1916,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             .map_err(TriviumError::QueryParse)?;
 
         match stmt {
-            TqlStatement::Query(_) => {
-                // 读查询降级：执行但不返回数据
-                Ok(TqlMutResult {
-                    affected: 0,
-                    created_ids: Vec::new(),
-                })
-            }
+            TqlStatement::Query(_) => Err(TriviumError::ApiMigrationRequired {
+                removed_api: "tql_mut(read query)",
+                replacement: "tql() 或 tql_values()",
+            }),
             TqlStatement::Mutation(mutation) => {
                 let (ops, mut next_id) = {
                     let mt = read_or_recover(&self.memtable);
@@ -2034,7 +2337,7 @@ mod tests {
         ));
         assert_eq!(db.get_payload(first).unwrap()["name"], "first");
         assert!(matches!(
-            db.patch_payload(first, json!({"name": "patched"})),
+            db.patch_payload(first, json!({"$set": {"name": "patched"}})),
             Err(TriviumError::WalClosed)
         ));
         assert_eq!(db.get_payload(first).unwrap()["name"], "first");

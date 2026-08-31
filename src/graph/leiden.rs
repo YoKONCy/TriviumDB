@@ -1,13 +1,16 @@
+//! 标准、确定性的加权 Leiden 社区发现实现。
+//!
+//! 输入有向业务边会转换为规范化无向权重，随后执行 local moving、refinement 和
+//! aggregation，直到收敛或达到轮次上限。所有节点/社区迭代和 tie-break 都使用稳定
+//! 顺序，保证重复运行及并行环境下结果一致；最小社区过滤和可选质心只影响输出整理。
+
 use crate::node::NodeId;
-use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 // ============================================================================
-// Leiden 社区发现 (标签传播近似)
-//
-// 设计原则:
-// 1. 不持有 MemTable 锁 — 调用方先 snapshot 邻接表再传入
-// 2. 质心由调用方在外部计算 — 聚类函数只做图划分
-// 3. 结果写回 Payload — 利用 TriviumDB 现有的 fast_tags 布隆过滤加速
+// 标准确定性 Leiden：加权无向 modularity、refinement 与 aggregation
 // ============================================================================
 
 /// 聚类配置 (全部可选，有合理默认值)
@@ -52,108 +55,248 @@ pub struct AdjacencySnapshot {
     pub node_ids: Vec<NodeId>,
 }
 
-/// 执行 Leiden/Louvain 标签传播聚类 (无锁, 纯计算)
-///
-/// 调用方负责:
-/// 1. 获取 MemTable 锁 → snapshot 邻接表 → 释放锁
-/// 2. 调用本函数 (不持有任何锁)
-/// 3. 将结果写回 Payload (可选)
+/// 执行确定性标准 Leiden 社区发现。
 pub fn run_leiden(adj: &AdjacencySnapshot, config: &LeidenConfig) -> LeidenResult {
-    let nodes = &adj.node_ids;
-
+    let mut nodes = adj.node_ids.clone();
+    nodes.sort_unstable();
+    nodes.dedup();
     if nodes.is_empty() {
-        return LeidenResult {
-            node_to_cluster: HashMap::new(),
-            cluster_sizes: HashMap::new(),
-            centroids: HashMap::new(),
-            num_clusters: 0,
-        };
+        return empty_result();
     }
 
-    // 初始化: 每个节点自成一簇 (用 NodeId 作为初始簇 ID)
-    let mut node_to_cluster: HashMap<NodeId, u32> = HashMap::with_capacity(nodes.len());
-    for (i, &n) in nodes.iter().enumerate() {
-        node_to_cluster.insert(n, i as u32);
+    let mut graph = WeightedGraph::from_snapshot(adj, &nodes);
+    let mut members = nodes.iter().map(|&node| vec![node]).collect::<Vec<_>>();
+    let mut total_iterations = 0usize;
+    for _level in 0..config.max_iterations.max(1) {
+        let (mut communities, iterations) = local_moving(&graph, config.max_iterations.max(1));
+        total_iterations = total_iterations.saturating_add(iterations);
+        communities = refine_connected(&graph, &communities);
+        let community_count = communities.iter().copied().collect::<BTreeSet<_>>().len();
+        if community_count == graph.len() {
+            break;
+        }
+        let (next_graph, remap) = aggregate(&graph, &communities);
+        let mut next_members = vec![Vec::new(); next_graph.len()];
+        for (node, &community) in remap.iter().enumerate() {
+            next_members[community].append(&mut members[node]);
+        }
+        graph = next_graph;
+        members = next_members;
+        if community_count <= 1 {
+            break;
+        }
     }
 
-    // 标签传播主循环
-    let mut changed = true;
-    let mut iters_left = config.max_iterations;
+    let mut final_groups = members
+        .into_iter()
+        .filter(|community| community.len() >= config.min_community_size)
+        .collect::<Vec<_>>();
+    for community in &mut final_groups {
+        community.sort_unstable();
+    }
+    final_groups.sort_by_key(|community| community[0]);
+    let mut node_to_cluster = HashMap::new();
+    let mut cluster_sizes = HashMap::new();
+    for (index, community) in final_groups.iter().enumerate() {
+        let cluster = index as u32 + 1;
+        cluster_sizes.insert(cluster, community.len());
+        for &node in community {
+            node_to_cluster.insert(node, cluster);
+        }
+    }
+    let _ = total_iterations;
+    LeidenResult {
+        num_clusters: cluster_sizes.len() as u32,
+        node_to_cluster,
+        cluster_sizes,
+        centroids: HashMap::new(),
+    }
+}
 
-    while changed && iters_left > 0 {
-        changed = false;
-        iters_left -= 1;
+fn empty_result() -> LeidenResult {
+    LeidenResult {
+        node_to_cluster: HashMap::new(),
+        cluster_sizes: HashMap::new(),
+        centroids: HashMap::new(),
+        num_clusters: 0,
+    }
+}
 
-        for &n in nodes {
-            let current_c = match node_to_cluster.get(&n) {
-                Some(&c) => c,
-                None => continue,
+#[derive(Debug, Clone)]
+struct WeightedGraph {
+    adjacency: Vec<Vec<(usize, f64)>>,
+    degree: Vec<f64>,
+    total_weight_twice: f64,
+}
+
+impl WeightedGraph {
+    fn len(&self) -> usize {
+        self.adjacency.len()
+    }
+
+    fn from_snapshot(snapshot: &AdjacencySnapshot, nodes: &[NodeId]) -> Self {
+        let positions = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, &node)| (node, index))
+            .collect::<HashMap<_, _>>();
+        let mut undirected = BTreeMap::<(usize, usize), f64>::new();
+        for (&source, edges) in &snapshot.edges {
+            let Some(&left) = positions.get(&source) else {
+                continue;
             };
-
-            // 统计邻居簇的加权投票
-            if let Some(neighbors) = adj.edges.get(&n) {
-                let mut votes: HashMap<u32, f32> = HashMap::new();
-                for &(target, weight) in neighbors {
-                    if let Some(&nc) = node_to_cluster.get(&target) {
-                        *votes.entry(nc).or_insert(0.0) += weight;
-                    }
+            for &(target, weight) in edges {
+                let Some(&right) = positions.get(&target) else {
+                    continue;
+                };
+                if !weight.is_finite() || weight <= 0.0 {
+                    continue;
                 }
+                let pair = if left <= right {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                undirected
+                    .entry(pair)
+                    .and_modify(|current| *current = current.max(weight as f64))
+                    .or_insert(weight as f64);
+            }
+        }
+        let mut adjacency = vec![Vec::new(); nodes.len()];
+        for ((left, right), weight) in undirected {
+            adjacency[left].push((right, weight));
+            if left != right {
+                adjacency[right].push((left, weight));
+            } else {
+                adjacency[left].push((right, weight));
+            }
+        }
+        for neighbors in &mut adjacency {
+            neighbors.sort_by_key(|(target, _)| *target);
+        }
+        Self::new(adjacency)
+    }
 
-                // 选最高票簇
-                if let Some((&best_c, _)) = votes
-                    .iter()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    && best_c != current_c
+    fn new(adjacency: Vec<Vec<(usize, f64)>>) -> Self {
+        let degree = adjacency
+            .iter()
+            .map(|neighbors| neighbors.iter().map(|(_, weight)| *weight).sum::<f64>())
+            .collect::<Vec<_>>();
+        let total_weight_twice = degree.iter().sum();
+        Self {
+            adjacency,
+            degree,
+            total_weight_twice,
+        }
+    }
+}
+
+fn local_moving(graph: &WeightedGraph, max_iterations: usize) -> (Vec<usize>, usize) {
+    let mut communities = (0..graph.len()).collect::<Vec<_>>();
+    let mut totals = graph.degree.clone();
+    if graph.total_weight_twice <= f64::EPSILON {
+        return (communities, 0);
+    }
+    for iteration in 0..max_iterations {
+        let mut changed = false;
+        for node in 0..graph.len() {
+            let current = communities[node];
+            let degree = graph.degree[node];
+            let mut weights = BTreeMap::<usize, f64>::new();
+            for &(neighbor, weight) in &graph.adjacency[node] {
+                *weights.entry(communities[neighbor]).or_default() += weight;
+            }
+            totals[current] -= degree;
+            let current_gain = weights.get(&current).copied().unwrap_or_default()
+                - degree * totals[current] / graph.total_weight_twice;
+            let mut best = current;
+            let mut best_gain = current_gain;
+            for (community, internal_weight) in weights {
+                let gain = internal_weight - degree * totals[community] / graph.total_weight_twice;
+                if gain > best_gain + 1e-12 || (gain - best_gain).abs() <= 1e-12 && community < best
                 {
-                    node_to_cluster.insert(n, best_c);
-                    changed = true;
+                    best = community;
+                    best_gain = gain;
+                }
+            }
+            communities[node] = best;
+            totals[best] += degree;
+            changed |= best != current;
+        }
+        if !changed {
+            return (communities, iteration + 1);
+        }
+    }
+    (communities, max_iterations)
+}
+
+fn refine_connected(graph: &WeightedGraph, communities: &[usize]) -> Vec<usize> {
+    let mut refined = vec![usize::MAX; graph.len()];
+    let mut next = 0usize;
+    for start in 0..graph.len() {
+        if refined[start] != usize::MAX {
+            continue;
+        }
+        let target_community = communities[start];
+        refined[start] = next;
+        let mut stack = vec![start];
+        while let Some(node) = stack.pop() {
+            for &(neighbor, weight) in &graph.adjacency[node] {
+                if weight > 0.0
+                    && communities[neighbor] == target_community
+                    && refined[neighbor] == usize::MAX
+                {
+                    refined[neighbor] = next;
+                    stack.push(neighbor);
                 }
             }
         }
+        next += 1;
     }
+    refined
+}
 
-    // 统计每簇大小
-    let mut cluster_counts: HashMap<u32, usize> = HashMap::new();
-    for &c in node_to_cluster.values() {
-        *cluster_counts.entry(c).or_insert(0) += 1;
-    }
-
-    // 过滤碎片簇 + 连续编号 (1, 2, 3...)
-    let valid_clusters: HashSet<u32> = cluster_counts
+fn aggregate(graph: &WeightedGraph, communities: &[usize]) -> (WeightedGraph, Vec<usize>) {
+    let labels = communities.iter().copied().collect::<BTreeSet<_>>();
+    let dense = labels
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| (label, index))
+        .collect::<HashMap<_, _>>();
+    let remap = communities
         .iter()
-        .filter(|(_, count)| **count >= config.min_community_size)
-        .map(|(&c, _)| c)
-        .collect();
-
-    let mut remap: HashMap<u32, u32> = HashMap::new();
-    // 排序确保确定性映射
-    let mut sorted_valid: Vec<u32> = valid_clusters.into_iter().collect();
-    sorted_valid.sort_unstable();
-    for (new_id, c) in (1u32..).zip(sorted_valid) {
-        remap.insert(c, new_id);
-    }
-
-    let mut final_map: HashMap<NodeId, u32> = HashMap::new();
-    for (&n, &c) in &node_to_cluster {
-        if let Some(&nc) = remap.get(&c) {
-            final_map.insert(n, nc);
+        .map(|community| dense[community])
+        .collect::<Vec<_>>();
+    let mut edges = BTreeMap::<(usize, usize), f64>::new();
+    for source in 0..graph.len() {
+        for &(target, weight) in &graph.adjacency[source] {
+            if source > target {
+                continue;
+            }
+            let left = remap[source];
+            let right = remap[target];
+            let pair = if left <= right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            *edges.entry(pair).or_default() += weight;
         }
     }
-
-    // 重建簇大小统计
-    let mut cluster_sizes: HashMap<u32, usize> = HashMap::new();
-    for &c in final_map.values() {
-        *cluster_sizes.entry(c).or_insert(0) += 1;
+    let mut adjacency = vec![Vec::new(); dense.len()];
+    for ((left, right), weight) in edges {
+        adjacency[left].push((right, weight));
+        if left != right {
+            adjacency[right].push((left, weight));
+        } else {
+            adjacency[left].push((right, weight));
+        }
     }
-
-    let num_clusters = cluster_sizes.len() as u32;
-
-    LeidenResult {
-        node_to_cluster: final_map,
-        cluster_sizes,
-        centroids: HashMap::new(), // 质心由调用方负责计算
-        num_clusters,
+    for neighbors in &mut adjacency {
+        neighbors.sort_by_key(|(target, _)| *target);
     }
+    (WeightedGraph::new(adjacency), remap)
 }
 
 /// 使用向量数据为聚类结果补充质心 (无锁, 纯计算)
@@ -261,6 +404,68 @@ mod tests {
         assert_eq!(result.num_clusters, 1, "碎片簇应被过滤");
         assert!(result.node_to_cluster.contains_key(&1));
         assert!(!result.node_to_cluster.contains_key(&4), "碎片节点不应出现");
+    }
+
+    #[test]
+    fn 标准_leiden_弱桥双团稳定分离且结果确定() {
+        let mut edges = vec![
+            (1, 2, 1.0),
+            (1, 3, 1.0),
+            (2, 3, 1.0),
+            (4, 5, 1.0),
+            (4, 6, 1.0),
+            (5, 6, 1.0),
+            (3, 4, 0.01),
+        ];
+        let first = run_leiden(
+            &make_snapshot(edges.clone()),
+            &LeidenConfig {
+                min_community_size: 1,
+                ..Default::default()
+            },
+        );
+        edges.reverse();
+        let second = run_leiden(
+            &make_snapshot(edges),
+            &LeidenConfig {
+                min_community_size: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(first.node_to_cluster, second.node_to_cluster);
+        assert_eq!(first.node_to_cluster[&1], first.node_to_cluster[&3]);
+        assert_eq!(first.node_to_cluster[&4], first.node_to_cluster[&6]);
+        assert_ne!(first.node_to_cluster[&1], first.node_to_cluster[&4]);
+    }
+
+    #[test]
+    fn refinement_保证每个输出社区内部连通() {
+        let snap = make_snapshot(vec![(1, 2, 1.0), (2, 3, 1.0), (4, 5, 1.0), (5, 6, 1.0)]);
+        let result = run_leiden(
+            &snap,
+            &LeidenConfig {
+                min_community_size: 1,
+                ..Default::default()
+            },
+        );
+        for cluster in 1..=result.num_clusters {
+            let members = result
+                .node_to_cluster
+                .iter()
+                .filter_map(|(&node, &value)| (value == cluster).then_some(node))
+                .collect::<HashSet<_>>();
+            let start = *members.iter().next().unwrap();
+            let mut reached = HashSet::from([start]);
+            let mut stack = vec![start];
+            while let Some(node) = stack.pop() {
+                for &(neighbor, _) in snap.edges.get(&node).into_iter().flatten() {
+                    if members.contains(&neighbor) && reached.insert(neighbor) {
+                        stack.push(neighbor);
+                    }
+                }
+            }
+            assert_eq!(reached, members);
+        }
     }
 
     #[test]

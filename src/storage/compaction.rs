@@ -1,3 +1,8 @@
+//! 后台压实调度器与生命周期控制。
+//!
+//! 调度线程只负责按阈值触发数据库提供的串行压实回调，不绕过 Writer 锁、WAL 或原子
+//! 发布协议。停止信号和 join 保证关闭时无悬挂线程；ReadOnly/Immutable 不启动该服务。
+
 use std::sync::{
     Arc, Mutex, RwLock,
     atomic::{AtomicBool, Ordering},

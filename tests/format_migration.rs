@@ -22,7 +22,27 @@ fn version(path: &PathBuf) -> u16 {
     u16::from_le_bytes([bytes[4], bytes[5]])
 }
 
+fn cleanup(path: &Path) {
+    for suffix in [
+        "",
+        ".vec",
+        ".wal",
+        ".lock",
+        ".flush_ok",
+        ".quiver",
+        ".quiver.meta",
+        ".text",
+        ".text.meta",
+        ".pidx",
+        ".gidx",
+        ".manifest.json",
+    ] {
+        std::fs::remove_file(format!("{}{suffix}", path.display())).ok();
+    }
+}
+
 fn seed_v6(path: &Path, mode: StorageMode, dim: usize) {
+    cleanup(path);
     let mut db = Database::<f32>::open_with_config(
         path.to_str().unwrap(),
         Config {

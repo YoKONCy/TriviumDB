@@ -1,3 +1,8 @@
+//! CI 稳定性能报告入口。
+//!
+//! 使用固定随机种子和小型内置数据生成可重复的延迟、吞吐与召回指标，并写入
+//! `target/bench-reports`。它用于趋势和 Gate，不代替外部百万向量质量评测。
+
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde_json::json;
@@ -226,7 +231,7 @@ fn build_report_db(path: &str) -> (Database<f32>, VectorCorpus, QueryVectors) {
 }
 
 fn write_reports(metrics: &[BenchMetric], path: &str) {
-    fs::create_dir_all("target/bench-report").unwrap();
+    fs::create_dir_all("target/bench-reports").unwrap();
     let mut md = String::new();
     md.push_str("# TriviumDB CI Benchmark Report\n\n");
     md.push_str(&format!(
@@ -252,7 +257,7 @@ fn write_reports(metrics: &[BenchMetric], path: &str) {
             metric.correctness
         ));
     }
-    fs::write("target/bench-report/ci_benchmark_report.md", md).unwrap();
+    fs::write("target/bench-reports/ci_benchmark_report.md", md).unwrap();
 
     let json = metrics
         .iter()
@@ -274,16 +279,16 @@ fn write_reports(metrics: &[BenchMetric], path: &str) {
         .collect::<Vec<_>>()
         .join(",\n");
     fs::write(
-        "target/bench-report/ci_benchmark_report.json",
+        "target/bench-reports/ci_benchmark_report.json",
         format!("[\n{}\n]\n", json),
     )
     .unwrap();
-    println!("报告已生成: target/bench-report/ci_benchmark_report.md");
+    println!("报告已生成: target/bench-reports/ci_benchmark_report.md");
     println!("数据库文件总占用: {} bytes", disk_bytes(path));
 }
 
 fn main() {
-    let path = "target/bench-report/ci_entry_coverage.tdb";
+    let path = "target/bench-reports/ci_entry_coverage.tdb";
     cleanup(path);
     let (mut db, vectors, queries) = build_report_db(path);
     let mut state = BenchState {
@@ -600,7 +605,7 @@ fn main() {
         path,
         db.estimated_memory(),
         || {
-            let migrate_path = "target/bench-report/ci_entry_coverage_migrated.tdb";
+            let migrate_path = "target/bench-reports/ci_entry_coverage_migrated.tdb";
             cleanup(migrate_path);
             let (migrated, migrated_ids) = db.migrate_to(migrate_path, 64).unwrap();
             let count = migrated.node_count();

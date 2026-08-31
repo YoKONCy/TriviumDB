@@ -418,15 +418,15 @@ fn patch_payload_unset_删除字段() {
 }
 
 #[test]
-fn patch_payload_简写模式() {
+fn patch_payload_简写模式明确拒绝() {
     let mut mt = make_mt();
     mt.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"x": 1}))
         .unwrap();
-    // 不含 $set/$inc/$unset 时，整个 patch 视为 $set
-    mt.patch_payload(1, &json!({"y": 2})).unwrap();
-    let p = mt.get_payload(1).unwrap();
-    assert_eq!(p["x"], 1, "简写模式不应删除已有字段");
-    assert_eq!(p["y"], 2, "简写模式应设置新字段");
+    let error = mt.patch_payload(1, &json!({"y": 2})).unwrap_err();
+    assert!(matches!(
+        error,
+        triviumdb::TriviumError::ApiMigrationRequired { .. }
+    ));
 }
 
 #[test]

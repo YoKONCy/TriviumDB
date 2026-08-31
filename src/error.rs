@@ -1,3 +1,8 @@
+//! TriviumDB 核心的统一结构化错误模型。
+//!
+//! 错误变体承载版本、预算、访问模式和迁移等可判定字段；Python/Node 绑定据此映射稳定
+//! 异常或错误码。控制流不得匹配中英文消息文本，面向用户的消息则保持双语。
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -54,6 +59,17 @@ pub enum TriviumError {
     #[error("查询执行错误 (Query execution error): {0}")]
     QueryExecution(String),
 
+    #[error(
+        "图遍历预算耗尽 (Graph traversal budget exceeded): {dimension:?}，visited={visited_nodes}，edges={examined_edges}，frontier={peak_frontier_size}，depth={depth_reached}"
+    )]
+    TraversalBudgetExceeded {
+        dimension: crate::graph::budget::BudgetDimension,
+        visited_nodes: usize,
+        examined_edges: usize,
+        peak_frontier_size: usize,
+        depth_reached: usize,
+    },
+
     /// 外置 Hook 动态库加载失败
     #[error("Hook 加载失败 (Hook load error): {0}")]
     HookLoadError(String),
@@ -92,6 +108,25 @@ pub enum TriviumError {
         found: u16,
         minimum_supported: u16,
         current: u16,
+    },
+
+    #[error(
+        "API 已移除 (API removed): {removed_api}；请改用 {replacement} (use {replacement} instead)"
+    )]
+    ApiMigrationRequired {
+        removed_api: &'static str,
+        replacement: &'static str,
+    },
+
+    #[error(
+        "不支持的 sidecar 版本 (Unsupported sidecar version): {component} 发现 v{found}，当前支持 v{minimum_supported}..=v{current}；{action}"
+    )]
+    UnsupportedSidecarVersion {
+        component: &'static str,
+        found: u32,
+        minimum_supported: u32,
+        current: u32,
+        action: &'static str,
     },
 
     /// 输入参数无效（维度越界、非法配置等）

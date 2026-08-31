@@ -147,9 +147,11 @@ fn mutation_action_变体() {
 fn tql_statement_变体() {
     let query = TqlQuery {
         explain: false,
+        analyze: false,
         entry: QueryEntry::Find {
             filter: Filter::eq("x", serde_json::json!(1)),
         },
+        pipeline: vec![],
         predicate: None,
         rank: None,
         returns: ReturnClause::All,

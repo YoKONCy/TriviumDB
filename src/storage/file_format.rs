@@ -1,3 +1,9 @@
+//! `.tdb` 主文件与 `.vec/.flush_ok` 一致性协议。
+//!
+//! 主文件保存 Payload、边、slot 和 BQ 元数据，向量可内嵌或分离 mmap。读取路径严格
+//! 校验魔数、版本、偏移、长度和数量关系；写入采用临时文件、fsync、原子替换，并用
+//! `.flush_ok` 将主文件与分离向量文件绑定为同一代快照。
+
 use crate::VectorType;
 use crate::database::StorageMode;
 use crate::error::{Result, TriviumError};
@@ -338,6 +344,9 @@ pub fn save<T: VectorType>(
         std::fs::remove_file(text_index_meta_path_from_db(path)).ok();
     }
 
+    crate::index::property::save_sidecar(memtable.property_indexes(), path, memtable.node_count())?;
+    crate::storage::graph_blocks::save(memtable, path)?;
+
     Ok(())
 }
 
@@ -567,6 +576,7 @@ pub fn load<T: VectorType>(
     load_text_sidecar: bool,
     repair_sidecars: bool,
     missing_index_policy: crate::database::MissingIndexPolicy,
+    mmap_property_postings: bool,
 ) -> Result<MemTable<T>> {
     let file = File::open(path).map_err(TriviumError::Io)?;
 
@@ -666,6 +676,19 @@ pub fn load<T: VectorType>(
             )?;
             // 尝试从 BQ Block 恢复签名
             load_bq_block(&mut mt, bytes, bq_layout)?;
+            load_property_indexes(
+                &mut mt,
+                path,
+                repair_sidecars,
+                missing_index_policy,
+                mmap_property_postings,
+            )?;
+            if mmap_property_postings {
+                load_mapped_graph(&mut mt, path)?;
+            }
+            if mmap_property_postings {
+                load_mapped_graph(&mut mt, path)?;
+            }
             load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             if load_text_sidecar {
                 load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
@@ -693,6 +716,16 @@ pub fn load<T: VectorType>(
                 version,
             )?;
             load_bq_block(&mut mt, bytes, bq_layout)?;
+            load_property_indexes(
+                &mut mt,
+                path,
+                repair_sidecars,
+                missing_index_policy,
+                mmap_property_postings,
+            )?;
+            if mmap_property_postings {
+                load_mapped_graph(&mut mt, path)?;
+            }
             load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             if load_text_sidecar {
                 load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
@@ -714,6 +747,13 @@ pub fn load<T: VectorType>(
         )?;
         // 尝试从 BQ Block 恢复签名
         load_bq_block(&mut mt, bytes, bq_layout)?;
+        load_property_indexes(
+            &mut mt,
+            path,
+            repair_sidecars,
+            missing_index_policy,
+            mmap_property_postings,
+        )?;
         // 尝试加载 QuIVer 索引
         load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
         if load_text_sidecar {
@@ -1119,6 +1159,45 @@ fn load_bq_block<T: VectorType>(
         layout.chunks_per_signature
     );
     Ok(())
+}
+
+fn load_mapped_graph<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) -> Result<()> {
+    if let Some(graph) =
+        crate::storage::graph_blocks::MappedGraphStore::open(db_path, memtable.node_count())?
+    {
+        memtable.set_mapped_graph(graph);
+    }
+    Ok(())
+}
+
+fn load_property_indexes<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    db_path: &str,
+    _repair_sidecars: bool,
+    missing_index_policy: crate::database::MissingIndexPolicy,
+    mmap_property_postings: bool,
+) -> Result<()> {
+    match crate::index::property::load_sidecar(
+        db_path,
+        memtable.node_count(),
+        mmap_property_postings,
+    ) {
+        Ok(Some(indexes)) => {
+            memtable.set_property_indexes(indexes);
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(error) => {
+            if missing_index_policy == crate::database::MissingIndexPolicy::Error {
+                return Err(error);
+            }
+            tracing::warn!(
+                "属性索引 sidecar 无效，已回退为无索引打开 (Invalid property index sidecar; opened without property indexes): {}",
+                error
+            );
+            Ok(())
+        }
+    }
 }
 
 fn load_text_index<T: VectorType>(

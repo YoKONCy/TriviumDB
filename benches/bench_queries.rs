@@ -1,3 +1,8 @@
+//! 数据库公共查询路径的 Criterion 微基准。
+//!
+//! 覆盖向量检索、Payload 过滤与图扩散的热路径，固定维度和数据规模以观察代码回归。
+//! 绝对数值只在相同硬件、构建配置和数据生成参数下可比较。
+
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use rand::Rng;
 use serde_json::json;

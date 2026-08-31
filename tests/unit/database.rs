@@ -32,15 +32,52 @@ fn open_新建数据库() {
 }
 
 #[test]
+fn open_空旧WAL自动升级且首次写入后二次打开成功() {
+    let path = temp_db("legacy_empty_wal_upgrade");
+    {
+        let mut db = Database::<f32>::open(&path, 3).unwrap();
+        db.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"kind": "base"}))
+            .unwrap();
+        db.flush().unwrap();
+    }
+
+    std::fs::write(format!("{}.wal", path), [b'T', b'V', b'W', b'L', 2, 0]).unwrap();
+    {
+        let mut db = Database::<f32>::open(&path, 3).unwrap();
+        db.insert_with_id(2, &[0.0, 1.0, 0.0], json!({"kind": "new"}))
+            .unwrap();
+        assert_eq!(db.node_count(), 2);
+    }
+
+    let wal = std::fs::read(format!("{}.wal", path)).unwrap();
+    assert_eq!(&wal[0..4], b"TVWL");
+    assert_eq!(
+        u16::from_le_bytes([wal[4], wal[5]]),
+        triviumdb::storage::wal::WAL_VERSION
+    );
+
+    let db = Database::<f32>::open(&path, 3).unwrap();
+    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.get_payload(2).unwrap()["kind"], "new");
+}
+
+#[test]
 fn open_维度0报错() {
     let result = Database::<f32>::open(&temp_db("dim0"), 0);
     assert!(result.is_err());
 }
 
 #[test]
-fn open_with_sync() {
+fn open_with_config_sync() {
     let path = temp_db("sync");
-    let db = Database::<f32>::open_with_sync(&path, 3, triviumdb::storage::wal::SyncMode::Full);
+    let db = Database::<f32>::open_with_config(
+        &path,
+        triviumdb::database::Config {
+            dim: 3,
+            sync_mode: triviumdb::storage::wal::SyncMode::Full,
+            ..Default::default()
+        },
+    );
     assert!(db.is_ok());
 }
 
@@ -298,13 +335,14 @@ fn patch_payload_unset_操作() {
 }
 
 #[test]
-fn patch_payload_简写模式() {
+fn patch_payload_简写模式明确拒绝() {
     let mut db = open_db("patch_short");
     let id = db.insert(&[1.0, 0.0, 0.0], json!({"x": 1})).unwrap();
-    db.patch_payload(id, json!({"y": 2})).unwrap();
-    let p = db.get_payload(id).unwrap();
-    assert_eq!(p["x"], 1, "简写不应覆盖已有字段");
-    assert_eq!(p["y"], 2);
+    let error = db.patch_payload(id, json!({"y": 2})).unwrap_err();
+    assert!(matches!(
+        error,
+        triviumdb::TriviumError::ApiMigrationRequired { .. }
+    ));
 }
 
 #[test]
@@ -653,11 +691,14 @@ fn tql_mut_create_节点() {
 }
 
 #[test]
-fn tql_mut_读查询降级() {
+fn tql_mut_读查询明确拒绝() {
     let mut db = open_db("tql_read_mut");
     db.insert(&[1.0, 0.0, 0.0], json!({"type": "x"})).unwrap();
-    let result = db.tql_mut("FIND {type: \"x\"} RETURN *").unwrap();
-    assert_eq!(result.affected, 0);
+    let error = db.tql_mut("FIND {type: \"x\"} RETURN *").unwrap_err();
+    assert!(matches!(
+        error,
+        triviumdb::TriviumError::ApiMigrationRequired { .. }
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════

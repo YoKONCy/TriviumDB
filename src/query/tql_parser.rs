@@ -80,6 +80,12 @@ impl TqlParser {
         } else {
             false
         };
+        let analyze = if explain && self.at(&TqlToken::Analyze) {
+            self.advance();
+            true
+        } else {
+            false
+        };
 
         // 1. 查询入口
         let entry = match self.peek() {
@@ -95,7 +101,10 @@ impl TqlParser {
             }
         };
 
-        // 2. WHERE (可选)
+        // 2. WITH 管线阶段
+        let pipeline = self.parse_pipeline_stages()?;
+
+        // 3. WHERE (可选)
         let predicate = if self.at(&TqlToken::Where) {
             self.advance();
             Some(self.parse_predicate()?)
@@ -138,16 +147,20 @@ impl TqlParser {
             None
         };
 
-        Ok(TqlQuery {
+        let query = TqlQuery {
             explain,
+            analyze,
             entry,
+            pipeline,
             predicate,
             rank,
             returns,
             order_by,
             limit,
             offset,
-        })
+        };
+        validate_pipeline_scope(&query)?;
+        Ok(query)
     }
 
     fn parse_rank_clause(&mut self) -> Result<RankClause, String> {
@@ -375,6 +388,260 @@ impl TqlParser {
             top_k,
             expand,
         })
+    }
+
+    fn parse_pipeline_stages(&mut self) -> Result<Vec<PipelineStage>, String> {
+        let mut stages = Vec::new();
+        while self.at(&TqlToken::As) || self.at(&TqlToken::With) {
+            // Source AS name 是首个作用域绑定，不单独形成执行阶段。
+            if self.at(&TqlToken::As) {
+                self.advance();
+                let alias = self.parse_ident()?;
+                stages.push(PipelineStage::With(WithStage {
+                    items: vec![WithItem {
+                        expr: TqlExpr::Variable("_".into()),
+                        alias,
+                    }],
+                }));
+                continue;
+            }
+            self.expect(&TqlToken::With)?;
+            let mut items = Vec::new();
+            loop {
+                let expr = self.parse_expr()?;
+                let alias = if self.at(&TqlToken::As) {
+                    self.advance();
+                    self.parse_ident()?
+                } else if let TqlExpr::Variable(var) = &expr {
+                    var.clone()
+                } else {
+                    return Err("WITH 标量表达式必须使用 AS 别名 (WITH scalar expression requires AS alias)".into());
+                };
+                items.push(WithItem { expr, alias });
+                if self.at(&TqlToken::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            stages.push(PipelineStage::With(WithStage { items }));
+
+            if self.at(&TqlToken::Expand) {
+                self.advance();
+                let input = self.parse_ident()?;
+                let expand = self.parse_expand_clause()?;
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::Expand(PipelineExpandStage {
+                    input,
+                    output,
+                    expand,
+                }));
+            }
+            if let TqlToken::Ident(name) = self.peek().clone()
+                && matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "pagerank" | "wcc" | "degree" | "label_propagation" | "leiden" | "sa_ppr"
+                )
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                let algorithm = match name.to_ascii_lowercase().as_str() {
+                    "pagerank" => GraphAlgorithmKind::PageRank,
+                    "wcc" => GraphAlgorithmKind::Wcc,
+                    "degree" => GraphAlgorithmKind::Degree,
+                    "label_propagation" => GraphAlgorithmKind::LabelPropagation,
+                    "leiden" => GraphAlgorithmKind::Leiden,
+                    "sa_ppr" => GraphAlgorithmKind::SaPpr,
+                    _ => unreachable!(),
+                };
+                stages.push(PipelineStage::GraphAlgorithm(GraphAlgorithmStage {
+                    input,
+                    output,
+                    algorithm,
+                }));
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("all_paths"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("to")?;
+                let targets = self.parse_u64_list()?;
+                self.expect_ident_keyword("depth")?;
+                let max_depth = self.parse_positive_int()?;
+                self.expect_ident_keyword("paths")?;
+                let max_paths = self.parse_positive_int()?;
+                self.expect_ident_keyword("aggregate")?;
+                let aggregation = match self.parse_ident()?.to_ascii_lowercase().as_str() {
+                    "max_product" => PathAggregation::MaxProduct,
+                    "sum_product" => PathAggregation::SumProduct,
+                    "average_weight" => PathAggregation::AverageWeight,
+                    other => {
+                        return Err(format!(
+                            "未知路径聚合方式 {other} (Unknown path aggregation {other})"
+                        ));
+                    }
+                };
+                let label_sequence = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("labels"))
+                {
+                    self.advance();
+                    Some(self.parse_ident_list()?)
+                } else {
+                    None
+                };
+                let forbidden_nodes = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("avoid"))
+                {
+                    self.advance();
+                    self.parse_u64_list()?
+                } else {
+                    Vec::new()
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::AllPaths(AllPathsStage {
+                    input,
+                    output,
+                    targets,
+                    max_depth,
+                    max_paths,
+                    aggregation,
+                    label_sequence,
+                    forbidden_nodes,
+                }));
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("shortest_paths"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("to")?;
+                let targets = self.parse_u64_list()?;
+                let label = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("label"))
+                {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::ShortestPaths(ShortestPathsStage {
+                    input,
+                    output,
+                    targets,
+                    label,
+                }));
+            }
+            if let TqlToken::Ident(name) = self.peek().clone()
+                && matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "union" | "intersect" | "except"
+                )
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("ids")?;
+                let other_ids = self.parse_u64_list()?;
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                let operation = match name.to_ascii_lowercase().as_str() {
+                    "union" => TqlSetOperation::Union,
+                    "intersect" => TqlSetOperation::Intersect,
+                    "except" => TqlSetOperation::Except,
+                    _ => unreachable!(),
+                };
+                stages.push(PipelineStage::SetCombine(SetCombineStage {
+                    input,
+                    other_ids,
+                    output,
+                    operation,
+                }));
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("iterate"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect(&TqlToken::Expand)?;
+                let expand = self.parse_expand_clause()?;
+                self.expect_ident_keyword("times")?;
+                let max_iterations = self.parse_positive_int()?;
+                let stop_on_fixed_point = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("fixed"))
+                {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::Iterate(IterateStage {
+                    input,
+                    output,
+                    expand,
+                    max_iterations,
+                    stop_on_fixed_point,
+                }));
+            }
+            if self.at(&TqlToken::Where) {
+                self.advance();
+                stages.push(PipelineStage::Filter(self.parse_predicate()?));
+            }
+            if self.at(&TqlToken::Rank) {
+                stages.push(PipelineStage::Rank(self.parse_rank_clause()?));
+            }
+        }
+        Ok(stages)
+    }
+
+    fn expect_ident_keyword(&mut self, expected: &str) -> Result<(), String> {
+        match self.advance() {
+            TqlToken::Ident(value) if value.eq_ignore_ascii_case(expected) => Ok(()),
+            other => Err(format!("Expected {expected}, got {other:?}")),
+        }
+    }
+
+    fn parse_u64_list(&mut self) -> Result<Vec<u64>, String> {
+        self.expect(&TqlToken::LBracket)?;
+        let mut values = Vec::new();
+        while !self.at(&TqlToken::RBracket) {
+            match self.advance() {
+                TqlToken::IntLit(value) if value > 0 => values.push(value as u64),
+                other => {
+                    return Err(format!(
+                        "节点 ID 必须为正整数 (Node ID must be positive), got {other:?}"
+                    ));
+                }
+            }
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(&TqlToken::RBracket)?;
+        if values.is_empty() {
+            return Err("节点 ID 列表不能为空 (Node ID list cannot be empty)".into());
+        }
+        Ok(values)
+    }
+
+    fn parse_ident_list(&mut self) -> Result<Vec<String>, String> {
+        self.expect(&TqlToken::LBracket)?;
+        let mut values = Vec::new();
+        while !self.at(&TqlToken::RBracket) {
+            values.push(self.parse_ident()?);
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(&TqlToken::RBracket)?;
+        if values.is_empty() {
+            return Err("标签列表不能为空 (Label list cannot be empty)".into());
+        }
+        Ok(values)
     }
 
     /// EXPAND [OUTGOING|INCOMING|BOTH] [:label*min..max]
@@ -634,30 +901,38 @@ impl TqlParser {
             return Ok(Predicate::DocFilter { var: None, filter });
         }
 
-        // var MATCHES {doc_filter} 或 Cypher 比较: a.field op literal
-        if matches!(self.peek(), TqlToken::Ident(_) | TqlToken::Rank) {
-            let ident = self.parse_ident()?;
-
-            // var MATCHES {doc_filter}
-            if self.at(&TqlToken::Matches) {
+        // 表达式比较或 var MATCHES 文档过滤
+        if matches!(
+            self.peek(),
+            TqlToken::Ident(_) | TqlToken::Rank | TqlToken::DollarOp(_)
+        ) {
+            let checkpoint = self.pos;
+            let left = self.parse_expr()?;
+            if let TqlExpr::Variable(ident) = &left
+                && self.at(&TqlToken::Matches)
+            {
                 self.advance();
                 let filter = self.parse_doc_filter()?;
                 return Ok(Predicate::DocFilter {
-                    var: Some(ident),
+                    var: Some(ident.clone()),
                     filter,
                 });
             }
-
-            // a.field op value (Cypher 比较)
-            if self.at(&TqlToken::Dot) {
-                self.advance();
-                let field = self.parse_ident()?;
-                let left = TqlExpr::Property { var: ident, field };
+            if matches!(
+                self.peek(),
+                TqlToken::Eq
+                    | TqlToken::Ne
+                    | TqlToken::Gt
+                    | TqlToken::Gte
+                    | TqlToken::Lt
+                    | TqlToken::Lte
+            ) {
                 let op = self.parse_comp_op()?;
                 let right = self.parse_expr()?;
                 return Ok(Predicate::Compare { left, op, right });
             }
-
+            self.pos = checkpoint;
+            let ident = self.parse_ident()?;
             return Err(format!(
                 "Unexpected token after identifier '{}': {:?}",
                 ident,
@@ -725,7 +1000,12 @@ impl TqlParser {
         // 聚合函数: count(...), sum(...), etc.
         let kind = if let Some(func) = self.try_parse_agg_func() {
             self.expect(&TqlToken::LParen)?;
-            let inner = self.parse_return_expr_kind()?;
+            let inner = if self.at(&TqlToken::Star) {
+                self.advance();
+                ReturnExprKind::Var("*".to_owned())
+            } else {
+                self.parse_return_expr_kind()?
+            };
             self.expect(&TqlToken::RParen)?;
             ReturnExprKind::Aggregate(func, Box::new(inner))
         } else {
@@ -749,14 +1029,11 @@ impl TqlParser {
 
     /// 解析 RETURN 表达式内部类型（变量或属性访问）
     fn parse_return_expr_kind(&mut self) -> Result<ReturnExprKind, String> {
-        // * 在聚合内部不合法，这里只处理 ident 和 ident.field
-        let ident = self.parse_ident()?;
-        if self.at(&TqlToken::Dot) {
-            self.advance();
-            let field = self.parse_ident()?;
-            Ok(ReturnExprKind::Property(ident, field))
-        } else {
-            Ok(ReturnExprKind::Var(ident))
+        let expr = self.parse_expr()?;
+        match expr {
+            TqlExpr::Variable(var) => Ok(ReturnExprKind::Var(var)),
+            TqlExpr::Property { var, field } => Ok(ReturnExprKind::Property(var, field)),
+            scalar => Ok(ReturnExprKind::Scalar(scalar)),
         }
     }
 
@@ -820,7 +1097,108 @@ impl TqlParser {
     // ═══════════════════════════════════════════════════════════════
 
     fn parse_expr(&mut self) -> Result<TqlExpr, String> {
+        let expr = self.parse_additive_expr()?;
+        if !self.at(&TqlToken::Is) {
+            return Ok(expr);
+        }
+        self.advance();
+        let negated = if self.at(&TqlToken::Not) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        self.expect(&TqlToken::Null)?;
+        Ok(TqlExpr::IsNull {
+            expr: Box::new(expr),
+            negated,
+        })
+    }
+
+    fn parse_additive_expr(&mut self) -> Result<TqlExpr, String> {
+        let mut left = self.parse_multiplicative_expr()?;
+        while self.at(&TqlToken::Plus) || self.at(&TqlToken::Dash) {
+            let op = if self.at(&TqlToken::Plus) {
+                TqlBinaryOp::Add
+            } else {
+                TqlBinaryOp::Subtract
+            };
+            self.advance();
+            let right = self.parse_multiplicative_expr()?;
+            left = TqlExpr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_multiplicative_expr(&mut self) -> Result<TqlExpr, String> {
+        let mut left = self.parse_primary_expr()?;
+        while self.at(&TqlToken::Star) || self.at(&TqlToken::Slash) {
+            let op = if self.at(&TqlToken::Star) {
+                TqlBinaryOp::Multiply
+            } else {
+                TqlBinaryOp::Divide
+            };
+            self.advance();
+            let right = self.parse_primary_expr()?;
+            left = TqlExpr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_primary_expr(&mut self) -> Result<TqlExpr, String> {
         match self.peek().clone() {
+            TqlToken::Ident(name)
+                if matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "similarity"
+                        | "graph_score"
+                        | "depth"
+                        | "path_strength"
+                        | "path_count"
+                        | "community"
+                        | "path"
+                        | "path_length"
+                ) =>
+            {
+                self.advance();
+                self.expect(&TqlToken::LParen)?;
+                let var = self.parse_ident()?;
+                self.expect(&TqlToken::RParen)?;
+                match name.to_ascii_lowercase().as_str() {
+                    "similarity" => Ok(TqlExpr::Similarity { var }),
+                    "graph_score" => Ok(TqlExpr::GraphScore { var }),
+                    "depth" => Ok(TqlExpr::Depth { var }),
+                    "path_strength" => Ok(TqlExpr::PathStrength { var }),
+                    "path_count" => Ok(TqlExpr::PathCount { var }),
+                    "community" => Ok(TqlExpr::Community { var }),
+                    "path" => Ok(TqlExpr::Path { var }),
+                    "path_length" => Ok(TqlExpr::PathLength { var }),
+                    _ => unreachable!(),
+                }
+            }
+            TqlToken::DollarOp(name) => {
+                self.advance();
+                Ok(TqlExpr::Parameter(name.trim_start_matches('$').to_owned()))
+            }
+            TqlToken::Ident(name) if name.eq_ignore_ascii_case("coalesce") => {
+                self.advance();
+                self.expect(&TqlToken::LParen)?;
+                let mut values = vec![self.parse_expr()?];
+                while self.at(&TqlToken::Comma) {
+                    self.advance();
+                    values.push(self.parse_expr()?);
+                }
+                self.expect(&TqlToken::RParen)?;
+                Ok(TqlExpr::Coalesce(values))
+            }
             TqlToken::Ident(_) | TqlToken::Rank => {
                 let ident = self.parse_ident()?;
                 if self.at(&TqlToken::Dot) {
@@ -828,9 +1206,14 @@ impl TqlParser {
                     let field = self.parse_ident()?;
                     Ok(TqlExpr::Property { var: ident, field })
                 } else {
-                    // 裸标识符当做字符串字面量
-                    Ok(TqlExpr::Literal(TqlLiteral::Str(ident)))
+                    Ok(TqlExpr::Variable(ident))
                 }
+            }
+            TqlToken::LParen => {
+                self.advance();
+                let expr = self.parse_expr()?;
+                self.expect(&TqlToken::RParen)?;
+                Ok(expr)
             }
             TqlToken::IntLit(_)
             | TqlToken::FloatLit(_)
@@ -1243,6 +1626,231 @@ fn merge_create_node(
         var: Some(var),
         payload,
     });
+    Ok(())
+}
+
+fn collect_return_kind_vars(kind: &ReturnExprKind, output: &mut Vec<String>) {
+    match kind {
+        ReturnExprKind::Var(var) if var != "*" => output.push(var.clone()),
+        ReturnExprKind::Property(var, _) => output.push(var.clone()),
+        ReturnExprKind::Scalar(expr) => collect_expr_vars(expr, output),
+        ReturnExprKind::Aggregate(_, inner) => collect_return_kind_vars(inner, output),
+        ReturnExprKind::Var(_) => {}
+    }
+}
+
+fn collect_expr_vars(expr: &TqlExpr, output: &mut Vec<String>) {
+    match expr {
+        TqlExpr::Variable(var)
+        | TqlExpr::Property { var, .. }
+        | TqlExpr::Similarity { var }
+        | TqlExpr::GraphScore { var }
+        | TqlExpr::Depth { var }
+        | TqlExpr::PathStrength { var }
+        | TqlExpr::PathCount { var }
+        | TqlExpr::Community { var }
+        | TqlExpr::Path { var }
+        | TqlExpr::PathLength { var } => output.push(var.clone()),
+        TqlExpr::Binary { left, right, .. } => {
+            collect_expr_vars(left, output);
+            collect_expr_vars(right, output);
+        }
+        TqlExpr::Coalesce(values) => {
+            for value in values {
+                collect_expr_vars(value, output);
+            }
+        }
+        TqlExpr::IsNull { expr, .. } => collect_expr_vars(expr, output),
+        TqlExpr::Parameter(_) | TqlExpr::Literal(_) => {}
+    }
+}
+
+fn expr_var(expr: &TqlExpr) -> Option<&str> {
+    match expr {
+        TqlExpr::Variable(var)
+        | TqlExpr::Property { var, .. }
+        | TqlExpr::Similarity { var }
+        | TqlExpr::GraphScore { var }
+        | TqlExpr::Depth { var }
+        | TqlExpr::PathStrength { var }
+        | TqlExpr::PathCount { var }
+        | TqlExpr::Community { var }
+        | TqlExpr::Path { var }
+        | TqlExpr::PathLength { var } => Some(var),
+        TqlExpr::Binary { left, right, .. } => expr_var(left).or_else(|| expr_var(right)),
+        TqlExpr::Coalesce(values) => values.iter().find_map(expr_var),
+        TqlExpr::IsNull { expr, .. } => expr_var(expr),
+        TqlExpr::Parameter(_) | TqlExpr::Literal(_) => None,
+    }
+}
+
+fn predicate_vars(predicate: &Predicate, output: &mut Vec<String>) {
+    match predicate {
+        Predicate::Compare { left, right, .. } => {
+            collect_expr_vars(left, output);
+            collect_expr_vars(right, output);
+        }
+        Predicate::DocFilter { var: Some(var), .. } => output.push(var.clone()),
+        Predicate::DocFilter { var: None, .. } => {}
+        Predicate::And(left, right) | Predicate::Or(left, right) => {
+            predicate_vars(left, output);
+            predicate_vars(right, output);
+        }
+        Predicate::Not(inner) => predicate_vars(inner, output),
+    }
+}
+
+fn validate_pipeline_scope(query: &TqlQuery) -> Result<(), String> {
+    if query.pipeline.is_empty() {
+        return Ok(());
+    }
+    let mut scope = std::collections::BTreeSet::from(["_".to_owned()]);
+    let mut scalar_aliases = std::collections::BTreeSet::new();
+    for stage in &query.pipeline {
+        match stage {
+            PipelineStage::With(with) => {
+                let mut next = std::collections::BTreeSet::new();
+                let mut next_scalars = std::collections::BTreeSet::new();
+                for item in &with.items {
+                    if let Some(var) = expr_var(&item.expr)
+                        && !scope.contains(var)
+                        && !scalar_aliases.contains(var)
+                    {
+                        return Err(format!(
+                            "WITH 引用了未定义变量 {var} (WITH references undefined variable {var})"
+                        ));
+                    }
+                    let is_node = matches!(item.expr, TqlExpr::Variable(_));
+                    let inserted = if is_node {
+                        next.insert(item.alias.clone())
+                    } else {
+                        next_scalars.insert(item.alias.clone())
+                    };
+                    if !inserted || next.contains(&item.alias) && next_scalars.contains(&item.alias)
+                    {
+                        return Err(format!(
+                            "WITH 重复定义别名 {} (Duplicate WITH alias {})",
+                            item.alias, item.alias
+                        ));
+                    }
+                }
+                scalar_aliases = with
+                    .items
+                    .iter()
+                    .filter(|item| !matches!(item.expr, TqlExpr::Variable(_)))
+                    .map(|item| item.alias.clone())
+                    .collect();
+                scope = next;
+            }
+            PipelineStage::Expand(expand) => {
+                if !scope.contains(&expand.input) {
+                    return Err(format!(
+                        "EXPAND 引用了未定义变量 {} (EXPAND references undefined variable {})",
+                        expand.input, expand.input
+                    ));
+                }
+                scope.insert(expand.output.clone());
+            }
+            PipelineStage::GraphAlgorithm(graph) => {
+                if !scope.contains(&graph.input) {
+                    return Err(format!(
+                        "图算法引用了未定义变量 {} (Graph algorithm references undefined variable {})",
+                        graph.input, graph.input
+                    ));
+                }
+                scope.insert(graph.output.clone());
+            }
+            PipelineStage::AllPaths(paths) => {
+                if !scope.contains(&paths.input) {
+                    return Err(format!(
+                        "ALL_PATHS 引用了未定义变量 {} (ALL_PATHS references undefined variable {})",
+                        paths.input, paths.input
+                    ));
+                }
+                scope.insert(paths.output.clone());
+            }
+            PipelineStage::ShortestPaths(paths) => {
+                if !scope.contains(&paths.input) {
+                    return Err(format!(
+                        "SHORTEST_PATHS 引用了未定义变量 {} (SHORTEST_PATHS references undefined variable {})",
+                        paths.input, paths.input
+                    ));
+                }
+                scope.insert(paths.output.clone());
+            }
+            PipelineStage::SetCombine(combine) => {
+                if !scope.contains(&combine.input) {
+                    return Err(format!(
+                        "集合运算引用了未定义变量 {} (Set operation references undefined variable {})",
+                        combine.input, combine.input
+                    ));
+                }
+                scope.insert(combine.output.clone());
+            }
+            PipelineStage::Iterate(iterate) => {
+                if !scope.contains(&iterate.input) {
+                    return Err(format!(
+                        "ITERATE 引用了未定义变量 {} (ITERATE references undefined variable {})",
+                        iterate.input, iterate.input
+                    ));
+                }
+                scope.insert(iterate.output.clone());
+            }
+            PipelineStage::Filter(predicate) => {
+                let mut vars = Vec::new();
+                predicate_vars(predicate, &mut vars);
+                if let Some(var) = vars
+                    .into_iter()
+                    .find(|var| !scope.contains(var) && !scalar_aliases.contains(var))
+                {
+                    return Err(format!(
+                        "WHERE 引用了作用域外变量 {var} (WHERE references out-of-scope variable {var})"
+                    ));
+                }
+            }
+            PipelineStage::Rank(rank) => {
+                if !scope.contains(&rank.var) {
+                    return Err(format!(
+                        "RANK 引用了未定义变量 {} (RANK references undefined variable {})",
+                        rank.var, rank.var
+                    ));
+                }
+            }
+        }
+    }
+    let final_scope = scope;
+    let mut referenced = Vec::new();
+    if let Some(predicate) = &query.predicate {
+        predicate_vars(predicate, &mut referenced);
+    }
+    for order in &query.order_by {
+        collect_expr_vars(&order.expr, &mut referenced);
+    }
+    match &query.returns {
+        ReturnClause::Variables(vars) => referenced.extend(vars.iter().cloned()),
+        ReturnClause::Expressions(expressions) => {
+            for expression in expressions {
+                match &expression.kind {
+                    ReturnExprKind::Var(var) | ReturnExprKind::Property(var, _) => {
+                        referenced.push(var.clone());
+                    }
+                    ReturnExprKind::Scalar(expr) => collect_expr_vars(expr, &mut referenced),
+                    ReturnExprKind::Aggregate(_, inner) => {
+                        collect_return_kind_vars(inner, &mut referenced);
+                    }
+                }
+            }
+        }
+        ReturnClause::All => {}
+    }
+    if let Some(var) = referenced
+        .into_iter()
+        .find(|var| !final_scope.contains(var) && !scalar_aliases.contains(var))
+    {
+        return Err(format!(
+            "RETURN/WHERE/ORDER BY 引用了作用域外变量 {var} (Final clause references out-of-scope variable {var})"
+        ));
+    }
     Ok(())
 }
 

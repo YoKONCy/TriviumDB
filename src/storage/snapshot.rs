@@ -1,11 +1,17 @@
+//! Immutable generation 的 manifest 构建与完整性校验。
+//!
+//! manifest 记录主文件及所有可发布 sidecar 的长度和 CRC32，发布前与打开时均按
+//! generation ID、dtype、维度和节点数校验。写入使用临时文件、fsync 和原子替换；
+//! 校验路径只读，确保 Immutable Reader 不修复、不补建、也不改变制品字节。
+
 use crate::error::{Result, TriviumError};
 use crate::storage::fs::robust_rename_and_sync;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-const MANIFEST_VERSION: u16 = 1;
-const GENERATION_SUFFIXES: [&str; 7] = [
+pub const MANIFEST_VERSION: u16 = 2;
+const GENERATION_SUFFIXES: [&str; 9] = [
     "",
     ".vec",
     ".flush_ok",
@@ -13,6 +19,8 @@ const GENERATION_SUFFIXES: [&str; 7] = [
     ".quiver.meta",
     ".text",
     ".text.meta",
+    ".pidx",
+    ".gidx",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,5 +1,8 @@
 'use strict'
 
+// Node 原生模块加载器：只按当前平台、架构和 libc 选择已发布二进制。
+// 未命中时返回包含平台信息的明确错误，不静默切换到不兼容 ABI。
+
 const path = require('node:path')
 
 const platform = process.platform

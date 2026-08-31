@@ -1,12 +1,20 @@
+//! Write-Ahead Log 的版本化格式、写入与崩溃恢复。
+//!
+//! 每条记录采用 `len + bincode + CRC32`，事务通过 Begin/Commit 封条过滤未提交操作。
+//! 恢复只消费连续且校验成功的前缀，遇到截断、CRC 或反序列化错误立即停止，绝不
+//! 跨过损坏边界猜测后续字节。空旧版本头仅允许持有 Writer 排他锁的打开流程通过
+//! fsync + 原子替换升级；非空旧 WAL 和无头 WAL 始终 fail-closed。
+
 use crate::error::{Result, TriviumError};
 use crate::node::NodeId;
+use crate::storage::fs::robust_rename_and_sync;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 const WAL_MAGIC: &[u8; 4] = b"TVWL";
-const WAL_VERSION: u16 = 3;
+pub const WAL_VERSION: u16 = 3;
 const WAL_HEADER_SIZE: u64 = 6;
 
 /// WAL 条目：记录每一次变更操作
@@ -100,6 +108,8 @@ pub struct Wal {
     wal_path: PathBuf,
     writer: Option<BufWriter<File>>,
     sync_mode: SyncMode,
+    cumulative_written_bytes: u64,
+    cumulative_logical_bytes: u64,
 }
 
 impl Wal {
@@ -108,8 +118,58 @@ impl Wal {
             wal_path: PathBuf::from(format!("{}.wal", db_path)),
             writer: None,
             sync_mode,
+            cumulative_written_bytes: 0,
+            cumulative_logical_bytes: 0,
         }
     }
+    /// 检查并升级只有版本头、没有任何待回放记录的旧 WAL。
+    ///
+    /// 必须仅由持有 Writer 排他锁的 ReadWrite 打开流程调用。非空旧 WAL
+    /// 始终拒绝，避免跨版本解释记录；空旧 WAL 则通过临时文件原子替换为
+    /// 当前版本头，确保后续追加记录不会落在旧版本头之后。
+    pub fn upgrade_empty_legacy_wal(db_path: &str) -> Result<bool> {
+        let wal_path = PathBuf::from(format!("{}.wal", db_path));
+        let Ok(metadata) = std::fs::metadata(&wal_path) else {
+            return Ok(false);
+        };
+        if metadata.len() != WAL_HEADER_SIZE {
+            return Ok(false);
+        }
+
+        let bytes = std::fs::read(&wal_path)?;
+        if bytes.len() != WAL_HEADER_SIZE as usize || &bytes[0..4] != WAL_MAGIC {
+            return Ok(false);
+        }
+        let found = u16::from_le_bytes([bytes[4], bytes[5]]);
+        if found == WAL_VERSION {
+            return Ok(false);
+        }
+
+        let tmp_path = PathBuf::from(format!("{}.upgrade.tmp", wal_path.to_string_lossy()));
+        {
+            let mut tmp = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+            tmp.write_all(WAL_MAGIC)?;
+            tmp.write_all(&WAL_VERSION.to_le_bytes())?;
+            tmp.sync_all()?;
+        }
+        if let Err(error) = robust_rename_and_sync(&tmp_path, &wal_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error.into());
+        }
+
+        tracing::info!(
+            found_version = found,
+            current_version = WAL_VERSION,
+            wal_path = %wal_path.display(),
+            "已原子升级空旧 WAL 版本头 (Atomically upgraded empty legacy WAL header)"
+        );
+        Ok(true)
+    }
+
     /// 创建或打开 WAL 文件（追加模式）
     pub fn open(db_path: &str) -> Result<Self> {
         Self::open_with_sync(db_path, SyncMode::default())
@@ -134,6 +194,12 @@ impl Wal {
             wal_path,
             writer: Some(BufWriter::new(file)),
             sync_mode,
+            cumulative_written_bytes: if existing_len == 0 {
+                WAL_HEADER_SIZE
+            } else {
+                0
+            },
+            cumulative_logical_bytes: 0,
         })
     }
 
@@ -157,6 +223,12 @@ impl Wal {
             writer.write_all(&len.to_le_bytes())?;
             writer.write_all(&data)?;
             writer.write_all(&checksum.to_le_bytes())?;
+            self.cumulative_written_bytes = self
+                .cumulative_written_bytes
+                .saturating_add(8u64.saturating_add(data.len() as u64));
+            self.cumulative_logical_bytes = self
+                .cumulative_logical_bytes
+                .saturating_add(data.len() as u64);
 
             // 根据 sync_mode 决定同步策略
             match self.sync_mode {
@@ -187,26 +259,21 @@ impl Wal {
         entries: &[WalEntry<T>],
     ) -> Result<()> {
         if let Some(ref mut writer) = self.writer {
-            let mut write_single = |entry: &WalEntry<T>| -> Result<()> {
+            let mut write_single = |entry: &WalEntry<T>| -> Result<u64> {
                 let data = bincode::serialize(entry).map_err(TriviumError::Serialization)?;
                 let checksum = crc32fast::hash(&data);
                 let len = data.len() as u32;
                 writer.write_all(&len.to_le_bytes())?;
                 writer.write_all(&data)?;
                 writer.write_all(&checksum.to_le_bytes())?;
-                Ok(())
+                Ok(8u64.saturating_add(data.len() as u64))
             };
 
-            // 1. 写 TxBegin
-            write_single(&WalEntry::TxBegin { tx_id })?;
-
-            // 2. 写实体记录
-            for e in entries {
-                write_single(e)?;
+            let mut batch_bytes = write_single(&WalEntry::TxBegin { tx_id })?;
+            for entry in entries {
+                batch_bytes = batch_bytes.saturating_add(write_single(entry)?);
             }
-
-            // 3. 写 TxCommit（封条）
-            write_single(&WalEntry::TxCommit { tx_id })?;
+            batch_bytes = batch_bytes.saturating_add(write_single(&WalEntry::TxCommit { tx_id })?);
 
             // 4. 统一同步一次（极其提升性能与保证原子性）
             match self.sync_mode {
@@ -219,6 +286,11 @@ impl Wal {
                 }
                 SyncMode::Off => {}
             }
+            self.cumulative_written_bytes =
+                self.cumulative_written_bytes.saturating_add(batch_bytes);
+            self.cumulative_logical_bytes = self
+                .cumulative_logical_bytes
+                .saturating_add(batch_bytes.saturating_sub(8 * (entries.len() as u64 + 2)));
             Ok(())
         } else {
             Err(TriviumError::WalClosed)
@@ -258,9 +330,10 @@ impl Wal {
             return Ok((entries, offset + WAL_HEADER_SIZE));
         }
 
-        // 兼容历史无头 WAL；新版写入会在下一次成功 flush 清空后升级为带头格式。
-        let file = File::open(&wal_path)?;
-        Self::read_entries_from_reader(BufReader::new(file))
+        Err(TriviumError::UnsupportedWalVersion {
+            found: 0,
+            supported: WAL_VERSION,
+        })
     }
 
     /// 从任意 `Read` 源解析 WAL 条目流
@@ -379,6 +452,14 @@ impl Wal {
         }
 
         Ok((committed, safe_commit_offset))
+    }
+
+    pub fn cumulative_written_bytes(&self) -> u64 {
+        self.cumulative_written_bytes
+    }
+
+    pub fn cumulative_logical_bytes(&self) -> u64 {
+        self.cumulative_logical_bytes
     }
 
     /// flush 成功后清除 WAL 文件

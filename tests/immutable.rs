@@ -48,6 +48,12 @@ fn 不可变模式无锁打开并保持可查询() {
     let db2 = Database::<f32>::open_immutable(&path, 2).unwrap();
     assert_eq!(db1.search(&[1.0, 0.0], 1, 0, 0.0).unwrap()[0].id, id);
     assert_eq!(db2.search(&[1.0, 0.0], 1, 0, 0.0).unwrap()[0].id, id);
+    for query in [
+        "SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed degree seed AS scored WITH scored RETURN scored, graph_score(scored) AS score",
+        "SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed iterate seed EXPAND [*1..1] times 2 fixed AS reached WITH reached RETURN reached",
+    ] {
+        db1.tql_values(query).unwrap();
+    }
     assert!(!Path::new(&format!("{path}.lock")).exists());
     assert!(!Path::new(&format!("{path}.wal")).exists());
     cleanup(&path);

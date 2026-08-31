@@ -1,6 +1,6 @@
 # TriviumDB 安全特性详解
 
-> 基于源码的完整文档，覆盖并发安全、数据完整性、内存安全、输入验证与跨平台 I/O 加固五个维度。
+> 基于 v0.8.3 当前源码的完整文档，覆盖并发安全、数据完整性、格式版本门禁、预算、ReadOnly/Immutable 零写、输入验证与跨平台 I/O 加固。
 
 ---
 
@@ -98,7 +98,7 @@ QuIVer 构建：不得持有 MemTable guard 等待 singleflight Condvar
 [len: u32 (4B)] [bincode 序列化数据: len bytes] [crc32: u32 (4B)]
 ```
 
-历史无头 WAL 仍可回放。新版 WAL 在读取任何记录前校验显式版本；未知版本返回 `UnsupportedWalVersion`，不会被误判成可截断的损坏尾部。
+WAL 必须包含 `TVWL + v3` 头。历史无头 WAL 不再自动猜测解析，返回 `UnsupportedWalVersion { found: 0 }`；带记录的旧版本 WAL 也必须使用对应旧内核恢复并 flush。只有恰好 6 字节、零记录的旧版本 WAL 可由持有排他锁的 ReadWrite 打开流程通过临时文件、fsync 与原子替换升级版本头；ReadOnly/Immutable 不执行该升级并保持字节级零写。未知未来版本同样在任何记录回放前拒绝。
 
 写入时计算，读取（崩溃恢复）时验证：
 
@@ -144,7 +144,7 @@ if len > 256 * 1024 * 1024 {
 |---|---|
 | TxBegin + 匹配 TxCommit | 全量回放 |
 | TxBegin，无 TxCommit（掉电） | **整体丢弃，并物理截断 WAL 尾部（Partial Truncation）** |
-| 无事务边界的独立操作（旧格式） | 直接回放（向后兼容），推进安全游标 |
+| 有当前版本头的独立操作 | 作为当前非事务 CRUD 记录直接回放，推进安全游标 |
 
 **极限防御：LSN (Log Sequence Number) 与物理截断**
 如果在回放时发现未闭合的事务（通常因为机器暴力断电），系统不仅在内存中丢弃它们，还会通过计算**最后一个完美闭环事务的精确物理字节偏移量 (safe_commit_offset)**，在重播前直接调用内置 `set_len()`。这彻底切断了具有传染性的“幽灵尾部”，防止系统下次启动接收正常追加后，由于 `in_tx=true` 的状态污染，将新的健康数据错吞进旧的失效事务里。
@@ -304,7 +304,7 @@ if offset + dim <= vectors.len() {
 
 ## 资源配额与恶意负载防御 (Anti-DoS & OOM)
 
-### 18. 容量预算与原子预留
+### 18. 四维查询预算与原子预留
 
 `Config.expected_nodes`、`Database::reserve_nodes()`、事务和绑定层 `batch_insert` 共用容量防御：
 
@@ -317,7 +317,7 @@ if offset + dim <= vectors.len() {
 
 QuIVer 构建有独立峰值预算，并采用流式 BQ2 编码，避免 FP16 全库临时展开为 FP32。纯 `flush()` 和 compaction 不会隐式触发 ANN 构建。
 
-结构化图查询同样采用拒绝式预算门禁：Reachability 的 `max_visited_nodes` 约束 BFS 已发现节点数；GraphFirst 的 `max_anchor_nodes` 约束去重后的 anchor 数量；TQL MATCH/RANK/EXPAND 使用 100,000 级执行预算。达到预算时返回 `QueryExecution`，不会静默截断成看似完整的结果。GraphFirst 只在预算内 anchor 集合上精确评分，不会因候选过大偷偷退化为全库检索。
+查询统一受四类预算约束：QueryMemoryBudget（候选/union/精排向量/页读取字节）、TraversalBudget（visited/edges/frontier/depth）、PipelineBudget（NodeSet 节点与字节）和 QueryParallelismBudget（线程与并行阈值）。分配前检查、按阶段切片；Error 模式 fail-closed，只有显式 Partial 策略才允许带 truncated 标记返回。GraphFirst、路径、集合、图算法和聚合不得偷偷退化为无界全库执行。
 
 ---
 
@@ -335,7 +335,7 @@ TriviumDB 执行器在整条中间路径遍历中**仅保留轻量级 `u64` IDs*
 
 ---
 
-### 19. 向量维度强校验
+### 向量维度强校验
 
 **实现位置**：`storage/memtable.rs`，`database.rs:Transaction::commit()`
 
@@ -487,7 +487,19 @@ libc::madvise(ptr, len, libc::MADV_DONTNEED);
 
 ---
 
-## FFI Hook 插件安全 (v0.6.0)
+## API 迁移与统一错误
+
+历史静默入口已移除：
+
+- `tql_mut()` 收到读查询返回 `ApiMigrationRequired`；
+- `patch_payload()` 普通对象不再等价于 `$set`；
+- Node 数字位置参数构造器返回 `TDB_API_MIGRATION_REQUIRED`；
+- Rust `Database::open_with_sync()` 已删除；
+- 无头 WAL 返回 `UnsupportedWalVersion`。
+
+Python/Node 绑定应通过中央转换器保留核心错误类别；控制流依赖枚举或稳定 code，不匹配中英文错误字符串。QuIVer profiler/连通性信息统一走 `tracing`，不直接写 stderr。
+
+## FFI Hook 插件安全
 
 ### 30. FfiHook 动态库加载的安全边界
 

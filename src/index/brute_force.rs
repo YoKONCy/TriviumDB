@@ -1,3 +1,8 @@
+//! SoA 向量池上的精确 BruteForce Top-K 基线。
+//!
+//! 实现对活跃 slot 并行评分并用有界堆控制额外内存，是小规模默认路径、ANN fallback
+//! 以及质量 ground truth。最终按 score 降序、NodeId 升序稳定排序，确保线程数不改结果。
+
 use crate::VectorType;
 use crate::node::{NodeId, SearchHit};
 use rayon::prelude::*;

@@ -258,12 +258,14 @@ fn wal_needs_recovery_非空文件() {
 // ════════════════════════════════════════════════════════════════
 
 #[test]
-fn wal明确拒绝不支持的版本() {
+fn wal明确拒绝不支持的非空版本() {
     let path = tmp_db("unsupported_version");
     cleanup(&path);
     std::fs::write(
         format!("{}.wal", path),
-        [b'T', b'V', b'W', b'L', 0xFF, 0x7F],
+        [
+            b'T', b'V', b'W', b'L', 0xFF, 0x7F, 0x01, 0x00, 0x00, 0x00, 0xAA,
+        ],
     )
     .unwrap();
 
@@ -280,7 +282,46 @@ fn wal明确拒绝不支持的版本() {
 }
 
 #[test]
-fn wal兼容历史无头记录() {
+fn wal空旧版本头只能显式升级() {
+    let path = tmp_db("legacy_empty_header");
+    cleanup(&path);
+    std::fs::write(format!("{}.wal", path), [b'T', b'V', b'W', b'L', 2, 0]).unwrap();
+
+    assert!(matches!(
+        Wal::read_entries::<f32>(&path),
+        Err(triviumdb::TriviumError::UnsupportedWalVersion { found: 2, .. })
+    ));
+    assert!(Wal::upgrade_empty_legacy_wal(&path).unwrap());
+    assert!(!Wal::upgrade_empty_legacy_wal(&path).unwrap());
+
+    let bytes = std::fs::read(format!("{}.wal", path)).unwrap();
+    assert_eq!(&bytes[0..4], b"TVWL");
+    assert_eq!(
+        u16::from_le_bytes([bytes[4], bytes[5]]),
+        triviumdb::storage::wal::WAL_VERSION
+    );
+    assert!(Wal::read_entries::<f32>(&path).unwrap().0.is_empty());
+    cleanup(&path);
+}
+
+#[test]
+fn wal非空旧版本不能升级且字节不变() {
+    let path = tmp_db("legacy_nonempty_header");
+    cleanup(&path);
+    let bytes = [b'T', b'V', b'W', b'L', 2, 0, 1, 2, 3, 4];
+    std::fs::write(format!("{}.wal", path), bytes).unwrap();
+
+    assert!(!Wal::upgrade_empty_legacy_wal(&path).unwrap());
+    assert_eq!(std::fs::read(format!("{}.wal", path)).unwrap(), bytes);
+    assert!(matches!(
+        Wal::read_entries::<f32>(&path),
+        Err(triviumdb::TriviumError::UnsupportedWalVersion { found: 2, .. })
+    ));
+    cleanup(&path);
+}
+
+#[test]
+fn wal拒绝历史无头记录并提示迁移() {
     let path = tmp_db("legacy_headerless");
     cleanup(&path);
     let entry = WalEntry::Delete::<f32> { id: 9 };
@@ -291,9 +332,10 @@ fn wal兼容历史无头记录() {
     bytes.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
     std::fs::write(format!("{}.wal", path), bytes).unwrap();
 
-    let (entries, offset) = Wal::read_entries::<f32>(&path).unwrap();
-    assert_eq!(entries.len(), 1);
-    assert!(offset > 0);
+    assert!(matches!(
+        Wal::read_entries::<f32>(&path),
+        Err(triviumdb::TriviumError::UnsupportedWalVersion { found: 0, .. })
+    ));
 
     cleanup(&path);
 }

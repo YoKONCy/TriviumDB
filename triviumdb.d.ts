@@ -220,6 +220,8 @@ export interface JsSearchConfig {
   textBoost?: number;
   /** 自定义检索文本（用于跨模态或覆盖 payload 文本） */
   customQueryText?: string;
+  /** 类 MongoDB JSON Payload 过滤器，在向量召回阶段生效 */
+  payloadFilter?: Record<string, unknown>;
   /** 强制使用暴力搜索 (默认 false) */
   forceBruteForce?: boolean;
   /**
@@ -316,6 +318,37 @@ export interface TriviumDBOptions {
   missingIndexPolicy?: 'fallback' | 'buildInMemory' | 'error';
 }
 
+export class PreparedTql {
+  parameterNames(): string[];
+}
+
+export interface PropertyIndexInfo {
+  field: string;
+  fields: string[];
+  kind: 'hash' | 'ordered' | 'composite' | 'bitmap';
+  entry_count: number;
+  distinct_count: number;
+  null_count: number;
+}
+
+export interface StorageInfo {
+  package_version: string;
+  database_format_current: number;
+  database_format_minimum: number;
+  wal_format: number;
+  property_index_format: number;
+  graph_index_format: number;
+  quiver_format: number;
+  text_index_format: number;
+  manifest_format: number;
+  dim: number;
+  node_count: number;
+  storage_mode: 'mmap' | 'rom';
+  access_mode: 'read_write' | 'read_only' | 'immutable';
+  estimated_memory_bytes: number;
+  sidecars: Record<string, boolean>;
+}
+
 export class TriviumDB {
   /**
    * 打开或创建数据库
@@ -325,7 +358,6 @@ export class TriviumDB {
    * @param syncMode     WAL 同步模式设定: "full" | "normal" | "off", 默认为 "normal"
    */
   constructor(path: string, options?: TriviumDBOptions);
-  constructor(path: string, dim?: number, dtype?: DType, syncMode?: SyncMode);
 
   publishGenerationManifest(generationId: string): {
     formatVersion: number;
@@ -551,9 +583,9 @@ export class TriviumDB {
    * @param expandDepth 获取到上述锚点后，在图谱里扩散的跳跃深度 (默认 0，纯粹退化为向量相似度检索)
    * @param minScore    只接受相似度大于这个阈值的搜索命中 (默认 0.5)
    */
-  search(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number): JsSearchHit[];
+  search(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number, payloadFilter?: Record<string, unknown>): JsSearchHit[];
 
-  searchGrouped(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number): JsGroupedSearchResult;
+  searchGrouped(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number, payloadFilter?: Record<string, unknown>): JsGroupedSearchResult;
   searchBatch(queryVectors: Vector[], topK?: number, parallelism?: number, minScore?: number): Promise<JsSearchHit[][]>;
 
   /**
@@ -572,7 +604,7 @@ export class TriviumDB {
    * @param minScore    最小分数
    * @param hybridAlpha 混合权重 (0.0~1.0)，越大向量占比越高。默认 0.7
    */
-  searchHybrid(queryVector: Vector, queryText: string, topK?: number, expandDepth?: number, minScore?: number, hybridAlpha?: number): JsSearchHit[];
+  searchHybrid(queryVector: Vector, queryText: string, topK?: number, expandDepth?: number, minScore?: number, hybridAlpha?: number, payloadFilter?: Record<string, unknown>): JsSearchHit[];
 
   /**
    * 建立用于双路召回的长文本 BM25 索引
@@ -603,9 +635,17 @@ export class TriviumDB {
    * ```
    */
   createIndex(field: string): void;
+  createOrderedIndex(field: string): void;
+  createCompositeIndex(fields: string[]): void;
+  createBitmapIndex(field: string): void;
 
   /** 删除属性索引（查询仍可用，退化为全扫描） */
   dropIndex(field: string): void;
+  dropOrderedIndex(field: string): void;
+  dropCompositeIndex(fields: string[]): void;
+  dropBitmapIndex(field: string): void;
+  indexInfo(): PropertyIndexInfo[];
+  storageInfo(): StorageInfo;
 
   // ── 轻量级单字段查询 ──
 
@@ -631,6 +671,8 @@ export class TriviumDB {
    * ```
    */
   tql(query: string): any[];
+  prepareTql(query: string): PreparedTql;
+  executePreparedTql(prepared: PreparedTql, parameters: Record<string, string | number | boolean | null>): any[];
 
   /**
    * 执行 TQL 写操作（CREATE / SET / DELETE / DETACH DELETE）

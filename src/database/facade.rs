@@ -1,3 +1,9 @@
+//! 按访问能力分离的类型化数据库门面。
+//!
+//! DatabaseReader 只暴露查询、统计和关闭能力，且不通过 Deref 泄露底层写 API；
+//! DatabaseWriter 保留完整可写接口。该分离在 Rust 编译期表达 ReadOnly/Immutable
+//! 零写边界，动态语言则由运行时 AccessMode 和稳定错误码提供同等约束。
+
 use super::{AccessMode, BatchSearchConfig, Config, Database, SearchConfig};
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
@@ -6,7 +12,7 @@ use crate::graph::reachability::{
 };
 use crate::hook::HookContext;
 use crate::node::{Edge, GroupedSearchResult, IncomingEdge, NodeId, NodeView, SearchHit};
-use crate::query::tql_executor::TqlResult;
+use crate::query::tql_executor::{TqlResult, TqlValueResult};
 use crate::storage::snapshot::GenerationManifest;
 use std::ops::{Deref, DerefMut};
 
@@ -55,6 +61,53 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
 
     pub fn search_exact(&self, query_vector: &[T], top_k: usize) -> Result<Vec<SearchHit>> {
         self.inner.search_exact(query_vector, top_k)
+    }
+
+    pub fn tsng_ground_truth(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+    ) -> Result<crate::tsng::TsngGroundTruth> {
+        self.inner.tsng_ground_truth(query)
+    }
+
+    pub fn search_tsng(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+        config: crate::tsng::TsngSearchConfig,
+    ) -> Result<crate::tsng::TsngSearchResult> {
+        self.inner.search_tsng(query, config)
+    }
+
+    pub fn search_tsng_post_filter(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+        config: crate::tsng::TsngSearchConfig,
+    ) -> Result<crate::tsng::TsngSearchResult> {
+        self.inner.search_tsng_post_filter(query, config)
+    }
+
+    pub fn search_tsng_graph_union(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+        config: crate::tsng::TsngSearchConfig,
+    ) -> Result<crate::tsng::TsngSearchResult> {
+        self.inner.search_tsng_graph_union(query, config)
+    }
+
+    pub fn search_tsng_industrial(
+        &self,
+        query: &crate::tsng::TsngQuery<'_, T>,
+        config: crate::tsng::IndustrialSearchConfig,
+    ) -> Result<crate::tsng::TsngSearchResult> {
+        self.inner.search_tsng_industrial(query, config)
+    }
+
+    pub fn index_memory_stats(&self) -> crate::observability::IndexMemoryStats {
+        self.inner.index_memory_stats()
+    }
+
+    pub fn storage_write_stats(&self) -> crate::observability::StorageWriteStats {
+        self.inner.storage_write_stats()
     }
 
     pub fn search_advanced(
@@ -138,6 +191,21 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
         self.inner.neighbors_with_labels(id, depth, labels)
     }
 
+    pub fn shortest_path_bidirectional(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        label: Option<&str>,
+        budget: &crate::graph::budget::TraversalBudget,
+    ) -> Result<crate::graph::pathfinding::ShortestPathOutput> {
+        self.inner
+            .shortest_path_bidirectional(source, target, label, budget)
+    }
+
+    pub fn graph_stats(&self) -> crate::storage::memtable::GraphStats {
+        self.inner.graph_stats()
+    }
+
     pub fn reachable(
         &self,
         id: NodeId,
@@ -166,6 +234,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
         self.inner.tql(input)
     }
 
+    pub fn tql_values(&self, input: &str) -> Result<TqlValueResult<T>> {
+        self.inner.tql_values(input)
+    }
+
     pub fn node_count(&self) -> usize {
         self.inner.node_count()
     }
@@ -180,6 +252,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
 
     pub fn all_node_ids(&self) -> Vec<NodeId> {
         self.inner.all_node_ids()
+    }
+
+    pub fn list_indexes(&self) -> Vec<String> {
+        self.inner.list_indexes()
     }
 
     pub fn estimated_memory(&self) -> usize {

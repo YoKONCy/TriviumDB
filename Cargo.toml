@@ -8,7 +8,7 @@ resolver = "2"
 
 [package]
 name = "triviumdb"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2024"
 authors = ["YoKONCy <2752026184@qq.com>"]
 description = "A high-performance memory-mmap hybrid search engine built for AI, combining dense vector, sparse text, graph relations, and JSON metadata."
@@ -17,6 +17,7 @@ license = "Apache-2.0"
 keywords = ["vector-database", "graph-database", "hybrid-search", "rag", "mmap"]
 categories = ["database", "data-structures", "algorithms"]
 readme = "README.md"
+autobenches = false
 exclude = ["docs/TEMP-todo/**"]
 
 [lib]
@@ -43,6 +44,7 @@ napi-derive = { version = "2", optional = true }
 half = { version = "2.7.1", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1.25.0", features = ["derive"] }
 crc32fast = "1.5.0"
+roaring = "0.11"
 fs2 = "0.4.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -60,22 +62,66 @@ rand = "0.8"
 instant-distance = "0.6"
 proptest = "1.11.0"
 
+# ─────────────────────────────────────────────────────────────
+# A. 日常能力基准：适合开发机和 CI 定期复现
+# ─────────────────────────────────────────────────────────────
 [[bench]]
 name = "bench_queries"
+harness = false
+
+[[bench]]
+name = "bench_indexes_and_leiden"
+harness = false
+
+[[bench]]
+name = "bench_index_graph_baseline"
+harness = false
+
+[[bench]]
+name = "bench_memory_pressure"
 harness = false
 
 [[bench]]
 name = "ci_report"
 harness = false
 
+# ─────────────────────────────────────────────────────────────
+# B. 三模管线与产品性能 Gate
+# ─────────────────────────────────────────────────────────────
 [[bench]]
-name = "bench_quiver_ablation"
+name = "bench_tsng_c0"
 harness = false
 
-[profile.release]
-lto = true
-codegen-units = 1
+[[bench]]
+name = "bench_tsng_c1"
+harness = false
 
+[[bench]]
+name = "bench_tsng_pipeline"
+harness = false
+
+[[bench]]
+name = "bench_pipeline_gate"
+harness = false
+
+# ─────────────────────────────────────────────────────────────
+# C. 图与查询并行：均包含跨线程结果哈希校验
+# ─────────────────────────────────────────────────────────────
+[[bench]]
+name = "bench_query_parallel"
+harness = false
+
+[[bench]]
+name = "bench_graph_parallel"
+harness = false
+
+[[bench]]
+name = "bench_deep_traversal"
+harness = false
+
+# ─────────────────────────────────────────────────────────────
+# D. QuIVer 规模、质量与参数研究
+# ─────────────────────────────────────────────────────────────
 [[bench]]
 name = "bench_cohere1m"
 harness = false
@@ -85,7 +131,7 @@ name = "bench_random1m"
 harness = false
 
 [[bench]]
-name = "bench_sensitivity"
+name = "bench_random_sphere"
 harness = false
 
 [[bench]]
@@ -97,9 +143,16 @@ name = "bench_rbq2_precision"
 harness = false
 
 [[bench]]
-name = "bench_random_sphere"
+name = "bench_sensitivity"
 harness = false
 
+[[bench]]
+name = "bench_quiver_ablation"
+harness = false
+
+# ─────────────────────────────────────────────────────────────
+# E. 研究与硬件消融：不会进入默认日常 benchmark
+# ─────────────────────────────────────────────────────────────
 [[bench]]
 name = "bench_encoding_ablation"
 harness = false
@@ -115,9 +168,9 @@ name = "bench_variance"
 harness = false
 required-features = ["ablation"]
 
-[[bench]]
-name = "bench_memory_pressure"
-harness = false
+[profile.release]
+lto = true
+codegen-units = 1
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }

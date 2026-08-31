@@ -1,3 +1,8 @@
+//! 内存压力场景下的检索吞吐、尾延迟与常驻内存报告。
+//!
+//! 该入口刻意使用可配置规模而非 Criterion 微基准，报告 mmap/heap 观测并验证预算不会
+//! 在高压力下退化为 OOM；结果写入统一 bench-reports 目录供 CI 上传。
+
 use serde::Serialize;
 use std::time::{Duration, Instant};
 use triviumdb::database::{Config, Database, SearchConfig, StorageMode};
@@ -120,5 +125,7 @@ fn main() {
     };
     let json = serde_json::to_string_pretty(&report).expect("序列化观测报告失败");
     println!("{json}");
-    std::fs::write("memory-pressure-report.json", &json).expect("写入观测报告失败");
+    std::fs::create_dir_all("target/bench-reports").expect("创建观测报告目录失败");
+    std::fs::write("target/bench-reports/memory-pressure-report.json", &json)
+        .expect("写入观测报告失败");
 }

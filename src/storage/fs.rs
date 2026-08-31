@@ -1,3 +1,8 @@
+//! 跨平台原子替换与目录同步辅助函数。
+//!
+//! Windows 下仅对共享冲突和访问拒绝执行有界退避，其他错误立即返回；Unix 下替换后
+//! 同步父目录，保证 rename 的目录项持久化。该层只处理文件系统语义，不吞掉最终错误。
+
 use std::path::Path;
 
 pub(crate) fn sync_parent_directory(path: &Path) -> std::io::Result<()> {

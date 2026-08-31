@@ -10,6 +10,7 @@
 pub enum TqlToken {
     // ── 关键字 (继承) ──
     Match,
+    With,
     Where,
     Return,
     Limit,
@@ -45,6 +46,7 @@ pub enum TqlToken {
     Max,
     Collect,
     Explain,
+    Analyze,
     Create,
     Set,
     Delete,
@@ -76,6 +78,9 @@ pub enum TqlToken {
     Dash,      // -
     Pipe,      // |
     Star,      // *
+    Plus,      // +
+    Slash,     // /
+    Is,
 
     // ── 比较运算符 ──
     Eq,  // ==
@@ -266,6 +271,14 @@ impl TqlLexer {
                             self.advance();
                             TqlToken::Star
                         }
+                        '+' => {
+                            self.advance();
+                            TqlToken::Plus
+                        }
+                        '/' => {
+                            self.advance();
+                            TqlToken::Slash
+                        }
 
                         '.' => {
                             self.advance();
@@ -406,12 +419,14 @@ impl TqlLexer {
                             }
                             match ident.to_uppercase().as_str() {
                                 "MATCH" => TqlToken::Match,
+                                "WITH" => TqlToken::With,
                                 "WHERE" => TqlToken::Where,
                                 "RETURN" => TqlToken::Return,
                                 "LIMIT" => TqlToken::Limit,
                                 "AND" => TqlToken::And,
                                 "OR" => TqlToken::Or,
                                 "NOT" => TqlToken::Not,
+                                "IS" => TqlToken::Is,
                                 "FIND" => TqlToken::Find,
                                 "SEARCH" => TqlToken::Search,
                                 "VECTOR" => TqlToken::Vector,
@@ -437,6 +452,7 @@ impl TqlLexer {
                                 "MAX" => TqlToken::Max,
                                 "COLLECT" => TqlToken::Collect,
                                 "EXPLAIN" => TqlToken::Explain,
+                                "ANALYZE" => TqlToken::Analyze,
                                 "CREATE" => TqlToken::Create,
                                 "SET" => TqlToken::Set,
                                 "DELETE" => TqlToken::Delete,

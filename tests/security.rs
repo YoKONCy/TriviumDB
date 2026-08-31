@@ -65,6 +65,11 @@ fn append_raw_wal_entry<T: serde::Serialize>(path: &str, entry: &WalEntry<T>, co
         .append(true)
         .open(&wal_path)
         .unwrap();
+    if file.metadata().unwrap().len() == 0 {
+        file.write_all(b"TVWL").unwrap();
+        file.write_all(&triviumdb::storage::wal::WAL_VERSION.to_le_bytes())
+            .unwrap();
+    }
 
     let data = bincode::serialize(entry).unwrap();
     let mut checksum = crc32fast::hash(&data);

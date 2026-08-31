@@ -1,3 +1,8 @@
+//! 向量标量类型抽象与跨架构相似度实现。
+//!
+//! VectorType 统一 f32、f16 与 u64 的存储、校验、序列化和距离语义；运行时 SIMD 路径
+//! 必须先检测 CPU 特性并正确处理尾部元素，任何 NaN/Infinity 都在系统边界拒绝。
+
 #[cfg(all(target_arch = "x86_64", not(coverage)))]
 use crate::index::bq::FORCE_NO_AVX512;
 use half::f16;

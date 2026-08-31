@@ -1,19 +1,56 @@
+//! 数据库的权威内存工作区与派生索引协调层。
+//!
+//! MemTable 以稳定 NodeId/slot 映射统一管理 VecPool、JSON Payload、出入边目录、
+//! Label 目录和 Fast Tags，并同步维护属性、文本、BQ 与 QuIVer 派生索引。CRUD 必须
+//! 先验证后修改，删除/slot 复用后不得留下幽灵命中；统计信息供 Planner/Cascades
+//! 使用，但任何索引候选最终仍需权威数据精确校验。
+
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
 use crate::index::bq::{Bq2Store, BqSignature};
+use crate::index::property::PropertyIndexRegistry;
 use crate::index::quiver::{QuIVer, QuIVerConfig};
 use crate::index::text::TextIndex;
 use crate::node::{Edge, NodeId};
 use crate::storage::vec_pool::VecPool;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct LabelStats {
+    pub edge_count: usize,
+    pub distinct_source_count: usize,
+    pub distinct_target_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DegreeBucket {
+    pub upper_bound: usize,
+    pub node_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GraphStats {
     pub node_count: usize,
     pub edge_count: usize,
     pub isolated_node_count: usize,
     pub label_count: usize,
+    pub avg_out_degree: f64,
+    pub avg_in_degree: f64,
+    pub max_out_degree: usize,
+    pub max_in_degree: usize,
+    pub label_stats: BTreeMap<String, LabelStats>,
+    pub out_degree_histogram: Vec<DegreeBucket>,
+    pub in_degree_histogram: Vec<DegreeBucket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CrossModalStats {
+    pub degree_skew: f64,
+    pub fanout_skew: f64,
+    pub vector_density_skew: Option<f64>,
+    pub sampled: usize,
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,6 +70,26 @@ pub struct GraphRepairReport {
     pub rebuilt_indexes: bool,
 }
 use std::sync::OnceLock;
+
+fn degree_histogram(degrees: impl Iterator<Item = usize>) -> Vec<DegreeBucket> {
+    const UPPER_BOUNDS: [usize; 8] = [0, 1, 2, 4, 8, 16, 64, usize::MAX];
+    let mut counts = [0usize; UPPER_BOUNDS.len()];
+    for degree in degrees {
+        let index = UPPER_BOUNDS
+            .iter()
+            .position(|upper| degree <= *upper)
+            .unwrap_or(UPPER_BOUNDS.len() - 1);
+        counts[index] += 1;
+    }
+    UPPER_BOUNDS
+        .into_iter()
+        .zip(counts)
+        .map(|(upper_bound, node_count)| DegreeBucket {
+            upper_bound,
+            node_count,
+        })
+        .collect()
+}
 
 struct PayloadEntry {
     raw: Box<[u8]>,
@@ -168,6 +225,7 @@ pub struct MemTable<T: VectorType> {
     next_id: NodeId,
     generation: u64,
     vector_generation: u64,
+    property_generation: u64,
 
     // --- 三位一体的核心存储 ---
 
@@ -186,8 +244,9 @@ pub struct MemTable<T: VectorType> {
     // 2. 元数据映射（文档型负载）—— 原始 JSON 紧凑存储，按访问惰性解析
     payloads: HashMap<NodeId, PayloadEntry>,
 
-    // 3. 图谱邻接表 —— 保持纯内存
+    // 3. 图谱邻接表 —— RW 使用内存 delta，ReadOnly/Immutable 可使用 mmap 基础块
     edges: HashMap<NodeId, Vec<Edge>>,
+    mapped_graph: Option<crate::storage::graph_blocks::MappedGraphStore>,
 
     // 入度统计表：用于快速查询目标节点的被连接数（支持图谱反向抑制算法）
     in_degrees: HashMap<NodeId, usize>,
@@ -198,11 +257,13 @@ pub struct MemTable<T: VectorType> {
     // 边标签倒排索引：label → [(src, dst)]，加速图谱按标签查询
     label_index: HashMap<String, Vec<(NodeId, NodeId)>>,
 
-    // 属性二级索引：field_name → (value_string → Vec<NodeId>)
-    // 按需注册，仅对已注册字段建索引
-    property_index: HashMap<String, HashMap<String, Vec<NodeId>>>,
-    /// 已注册的索引字段名集合
-    indexed_fields: HashSet<String>,
+    // 图统计缓存：generation 变化时失效，避免 Planner 每次扫描全图。
+    graph_stats_cache: std::sync::RwLock<Option<(u64, GraphStats)>>,
+    // 跨模统计按“字段 + 类型稳定 JSON 值”缓存；任意写操作后随 generation 失效。
+    cross_modal_stats_cache: std::sync::RwLock<BTreeMap<(String, Vec<u8>), CrossModalStats>>,
+
+    // 属性二级索引 Registry：字段名 → 类型稳定 Hash 索引
+    property_indexes: PropertyIndexRegistry,
 
     // 节点不应期（疲劳状态）映射表：
     // 0 = 正常；1 = 疲劳中（被激活后，下一轮扩散大幅衰减，消费一次后清零）
@@ -256,17 +317,20 @@ impl<T: VectorType> MemTable<T> {
             next_id: 1, // 从 1 开始，保留 0 作为特殊标记
             generation: 0,
             vector_generation: 0,
+            property_generation: 0,
             vec_pool: VecPool::new(dim),
             bq_signatures: Vec::new(),
             bq_dirty: false,
             text_index: TextIndex::new(),
             payloads: HashMap::new(),
             edges: HashMap::new(),
+            mapped_graph: None,
             in_degrees: HashMap::new(),
             incoming_edges: HashMap::new(),
             label_index: HashMap::new(),
-            property_index: HashMap::new(),
-            indexed_fields: HashSet::new(),
+            graph_stats_cache: std::sync::RwLock::new(None),
+            cross_modal_stats_cache: std::sync::RwLock::new(BTreeMap::new()),
+            property_indexes: PropertyIndexRegistry::default(),
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
@@ -292,17 +356,20 @@ impl<T: VectorType> MemTable<T> {
             next_id,
             generation: 0,
             vector_generation: 0,
+            property_generation: 0,
             vec_pool,
             bq_signatures: Vec::new(),
             bq_dirty: false,
             text_index: TextIndex::new(),
             payloads: HashMap::new(),
             edges: HashMap::new(),
+            mapped_graph: None,
             in_degrees: HashMap::new(),
             incoming_edges: HashMap::new(),
             label_index: HashMap::new(),
-            property_index: HashMap::new(),
-            indexed_fields: HashSet::new(),
+            graph_stats_cache: std::sync::RwLock::new(None),
+            cross_modal_stats_cache: std::sync::RwLock::new(BTreeMap::new()),
+            property_indexes: PropertyIndexRegistry::default(),
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
@@ -330,8 +397,26 @@ impl<T: VectorType> MemTable<T> {
     }
 
     #[inline]
+    pub fn property_generation(&self) -> u64 {
+        self.property_generation
+    }
+
+    #[inline]
+    fn mark_property_changed(&mut self) {
+        self.property_generation = self.property_generation.wrapping_add(1);
+    }
+
+    #[inline]
     fn mark_changed(&mut self, vectors_changed: bool) {
         self.generation = self.generation.wrapping_add(1);
+        *self
+            .graph_stats_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.cross_modal_stats_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         if vectors_changed {
             self.vector_generation = self.vector_generation.wrapping_add(1);
         }
@@ -743,21 +828,91 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub fn graph_stats(&self) -> GraphStats {
-        let edge_count = self.edges.values().map(Vec::len).sum();
+        if let Some((generation, stats)) = self
+            .graph_stats_cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            && *generation == self.generation
+        {
+            return stats.clone();
+        }
+        let node_count = self.payloads.len();
+        let mut edge_count = 0usize;
+        let mut max_out_degree = 0usize;
+        let mut label_pairs = BTreeMap::<String, Vec<(NodeId, NodeId)>>::new();
+        let mut out_degree_values = Vec::with_capacity(node_count);
+        for id in self.payloads.keys().copied() {
+            let edges = self.get_edges(id).unwrap_or_default();
+            edge_count = edge_count.saturating_add(edges.len());
+            max_out_degree = max_out_degree.max(edges.len());
+            out_degree_values.push(edges.len());
+            for edge in edges {
+                label_pairs
+                    .entry(edge.label.clone())
+                    .or_default()
+                    .push((id, edge.target_id));
+            }
+        }
         let isolated_node_count = self
             .payloads
             .keys()
             .filter(|id| {
-                self.edges.get(id).is_none_or(Vec::is_empty)
+                self.get_edges(**id).is_none_or(<[Edge]>::is_empty)
                     && self.in_degrees.get(id).copied().unwrap_or_default() == 0
             })
             .count();
-        GraphStats {
-            node_count: self.payloads.len(),
+        let max_in_degree = self.in_degrees.values().copied().max().unwrap_or(0);
+        let label_stats = label_pairs
+            .into_iter()
+            .map(|(label, pairs)| {
+                let stats = LabelStats {
+                    edge_count: pairs.len(),
+                    distinct_source_count: pairs
+                        .iter()
+                        .map(|pair| pair.0)
+                        .collect::<HashSet<_>>()
+                        .len(),
+                    distinct_target_count: pairs
+                        .iter()
+                        .map(|pair| pair.1)
+                        .collect::<HashSet<_>>()
+                        .len(),
+                };
+                (label, stats)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let in_degrees = self
+            .payloads
+            .keys()
+            .map(|id| self.in_degrees.get(id).copied().unwrap_or(0));
+        let stats = GraphStats {
+            node_count,
             edge_count,
             isolated_node_count,
-            label_count: self.label_index.len(),
-        }
+            label_count: label_stats.len(),
+            avg_out_degree: if node_count == 0 {
+                0.0
+            } else {
+                edge_count as f64 / node_count as f64
+            },
+            avg_in_degree: if node_count == 0 {
+                0.0
+            } else {
+                edge_count as f64 / node_count as f64
+            },
+            max_out_degree,
+            max_in_degree,
+            label_stats,
+            out_degree_histogram: degree_histogram(out_degree_values.into_iter()),
+            in_degree_histogram: degree_histogram(in_degrees),
+        };
+        *self
+            .graph_stats_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((self.generation, stats.clone()));
+        stats
     }
 
     pub fn validate_graph(&self) -> GraphIntegrityReport {
@@ -1064,6 +1219,15 @@ impl<T: VectorType> MemTable<T> {
         &self.fast_tags
     }
 
+    /// 按 NodeId 获取 Fast Tag，供查询时导航做近似属性信号判断。
+    #[inline]
+    pub(crate) fn fast_tag_for_id(&self, id: NodeId) -> Option<u64> {
+        self.ids_to_indices
+            .get(&id)
+            .and_then(|&slot| self.fast_tags.get(slot))
+            .copied()
+    }
+
     /// 从持久化文件恢复 BQ 签名数组（跳过重建）
     pub fn set_bq_signatures(&mut self, sigs: Vec<BqSignature>) {
         self.bq_signatures = sigs;
@@ -1325,14 +1489,38 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub fn get_edges(&self, id: NodeId) -> Option<&[Edge]> {
-        self.edges.get(&id).map(|e| e.as_slice())
+        self.edges
+            .get(&id)
+            .map(Vec::as_slice)
+            .or_else(|| self.mapped_graph.as_ref()?.edges(id))
+    }
+
+    pub fn set_mapped_graph(&mut self, graph: crate::storage::graph_blocks::MappedGraphStore) {
+        self.edges.clear();
+        self.incoming_edges.clear();
+        self.label_index.clear();
+        self.in_degrees.clear();
+        for target in self.all_node_ids() {
+            let degree = graph.incoming(target).len();
+            if degree > 0 {
+                self.in_degrees.insert(target, degree);
+            }
+        }
+        self.mapped_graph = Some(graph);
+    }
+
+    pub fn mapped_graph_bytes(&self) -> usize {
+        self.mapped_graph
+            .as_ref()
+            .map_or(0, |graph| graph.mapped_bytes())
     }
 
     /// 获取指向 id 的所有源节点（反向边）
     pub fn get_incoming_sources(&self, id: NodeId) -> &[NodeId] {
         self.incoming_edges
             .get(&id)
-            .map(|v| v.as_slice())
+            .map(Vec::as_slice)
+            .or_else(|| self.mapped_graph.as_ref().map(|graph| graph.incoming(id)))
             .unwrap_or(&[])
     }
 
@@ -1374,7 +1562,12 @@ impl<T: VectorType> MemTable<T> {
     pub fn get_edges_by_label(&self, label: &str) -> &[(NodeId, NodeId)] {
         self.label_index
             .get(label)
-            .map(|v| v.as_slice())
+            .map(Vec::as_slice)
+            .or_else(|| {
+                self.mapped_graph
+                    .as_ref()
+                    .map(|graph| graph.by_label(label))
+            })
             .unwrap_or(&[])
     }
 
@@ -1394,90 +1587,341 @@ impl<T: VectorType> MemTable<T> {
             .collect()
     }
 
+    pub fn find_nodes_by_field_parallel(
+        &self,
+        field: &str,
+        value: &serde_json::Value,
+        threads: usize,
+    ) -> Vec<NodeId> {
+        if threads <= 1 {
+            return self.find_nodes_by_field(field, value);
+        }
+        use rayon::prelude::*;
+        let mut ids = self
+            .payloads
+            .par_iter()
+            .filter_map(|(&id, payload)| (payload.get().get(field) == Some(value)).then_some(id))
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    }
+
     // ════════════════════════════════════════════════════════
     //  属性二级索引 API
     // ════════════════════════════════════════════════════════
 
     /// 注册属性索引：对指定字段建立倒排索引，并回填所有已有节点
     pub fn register_property_index(&mut self, field: &str) {
-        if self.indexed_fields.contains(field) {
-            return; // 已注册
-        }
-        self.indexed_fields.insert(field.to_string());
+        let payloads = &self.payloads;
+        self.property_indexes.register(
+            field,
+            payloads.iter().map(|(&id, payload)| (id, payload.get())),
+        );
+    }
 
-        // 回填：扫描所有 payload，构建索引
-        let mut index: HashMap<String, Vec<NodeId>> = HashMap::new();
-        for (&id, payload) in &self.payloads {
-            if let Some(val) = payload.get().get(field) {
-                let key = value_to_index_key(val);
-                index.entry(key).or_default().push(id);
-            }
-        }
-        self.property_index.insert(field.to_string(), index);
+    pub fn register_composite_property_index(&mut self, fields: &[String]) {
+        let payloads = &self.payloads;
+        self.property_indexes.register_composite(
+            fields,
+            payloads.iter().map(|(&id, payload)| (id, payload.get())),
+        );
+    }
+
+    pub fn find_by_composite_property_index(
+        &self,
+        equalities: &[(String, serde_json::Value)],
+    ) -> Option<(Vec<String>, Vec<NodeId>)> {
+        self.property_indexes.composite_lookup(equalities)
+    }
+
+    pub fn find_by_composite_property_range(
+        &self,
+        equalities: &[(String, serde_json::Value)],
+        range_field: &str,
+        op: std::cmp::Ordering,
+        inclusive: bool,
+        value: &serde_json::Value,
+        descending: bool,
+        limit: Option<usize>,
+    ) -> Option<(Vec<String>, Vec<NodeId>)> {
+        self.property_indexes.composite_range_lookup(
+            equalities,
+            range_field,
+            op,
+            inclusive,
+            value,
+            descending,
+            limit,
+        )
+    }
+
+    pub fn register_bitmap_property_index(&mut self, field: &str) {
+        let payloads = &self.payloads;
+        self.property_indexes.register_bitmap(
+            field,
+            payloads.iter().map(|(&id, payload)| (id, payload.get())),
+        );
+    }
+
+    pub fn find_by_bitmap_property_index(
+        &self,
+        field: &str,
+        value: &serde_json::Value,
+    ) -> Option<Vec<NodeId>> {
+        self.property_indexes.bitmap_lookup(field, value)
+    }
+
+    pub fn find_by_bitmap_intersection(
+        &self,
+        equalities: &[(String, serde_json::Value)],
+    ) -> Option<Vec<NodeId>> {
+        self.property_indexes.bitmap_intersection(equalities)
+    }
+
+    pub fn drop_composite_property_index(&mut self, fields: &[String]) {
+        self.property_indexes.drop_composite_index(fields);
+    }
+
+    pub fn drop_bitmap_property_index(&mut self, field: &str) {
+        self.property_indexes.drop_bitmap_index(field);
+    }
+
+    pub fn register_ordered_property_index(&mut self, field: &str) {
+        let payloads = &self.payloads;
+        self.property_indexes.register_ordered(
+            field,
+            payloads.iter().map(|(&id, payload)| (id, payload.get())),
+        );
+    }
+
+    pub fn drop_ordered_property_index(&mut self, field: &str) {
+        self.property_indexes.drop_ordered_index(field);
+    }
+
+    pub fn find_by_property_range(
+        &self,
+        field: &str,
+        op: std::cmp::Ordering,
+        inclusive: bool,
+        value: &serde_json::Value,
+        descending: bool,
+        limit: Option<usize>,
+    ) -> Option<Vec<NodeId>> {
+        self.property_indexes
+            .range_lookup(field, op, inclusive, value, descending, limit)
+    }
+
+    pub fn ordered_property_ids(
+        &self,
+        field: &str,
+        descending: bool,
+        limit: Option<usize>,
+    ) -> Option<Vec<NodeId>> {
+        self.property_indexes.ordered_ids(field, descending, limit)
+    }
+
+    pub fn has_ordered_property_index(&self, field: &str) -> bool {
+        self.property_indexes.contains_ordered(field)
     }
 
     /// 删除属性索引
     pub fn drop_property_index(&mut self, field: &str) {
-        self.indexed_fields.remove(field);
-        self.property_index.remove(field);
+        self.property_indexes.drop_index(field);
     }
 
-    /// 查询属性索引：O(1) 查找（如果字段有索引）
-    /// 返回 Some(ids) 表示命中索引，None 表示该字段无索引
+    /// 查询属性索引。字段已建索引时即使值不存在也返回空切片。
     pub fn find_by_property_index(
         &self,
         field: &str,
         value: &serde_json::Value,
-    ) -> Option<&[NodeId]> {
-        if !self.indexed_fields.contains(field) {
-            return None;
-        }
-        let key = value_to_index_key(value);
-        self.property_index
-            .get(field)
-            .and_then(|m| m.get(&key))
-            .map(|v| v.as_slice())
+    ) -> Option<Vec<NodeId>> {
+        self.property_indexes.lookup(field, value)
     }
 
     /// 检查字段是否有属性索引
     pub fn has_property_index(&self, field: &str) -> bool {
-        self.indexed_fields.contains(field)
+        self.property_indexes.contains(field)
     }
 
     /// 获取所有已注册索引的字段名
-    pub fn indexed_field_names(&self) -> &HashSet<String> {
-        &self.indexed_fields
+    pub fn indexed_field_names(&self) -> HashSet<&str> {
+        self.property_indexes.field_names()
     }
 
-    // ── 属性索引维护辅助 ──
-
-    /// 将节点加入属性索引（在 insert 时调用）
-    fn add_to_property_index(&mut self, id: NodeId, payload: &serde_json::Value) {
-        for field in &self.indexed_fields.clone() {
-            if let Some(val) = payload.get(field) {
-                let key = value_to_index_key(val);
-                self.property_index
-                    .entry(field.clone())
-                    .or_default()
-                    .entry(key)
-                    .or_default()
-                    .push(id);
-            }
-        }
+    pub fn property_indexes(&self) -> &PropertyIndexRegistry {
+        &self.property_indexes
     }
 
-    /// 将节点从属性索引中移除（在 delete/update 时调用）
-    fn remove_from_property_index(&mut self, id: NodeId, payload: &serde_json::Value) {
-        for field in &self.indexed_fields.clone() {
-            if let Some(val) = payload.get(field) {
-                let key = value_to_index_key(val);
-                if let Some(field_map) = self.property_index.get_mut(field)
-                    && let Some(ids) = field_map.get_mut(&key)
-                {
-                    ids.retain(|&i| i != id);
+    pub fn property_index_stats(&self) -> Vec<crate::index::property::PropertyIndexStats> {
+        self.property_indexes.stats()
+    }
+
+    pub fn column_pair_stats(&self) -> Vec<crate::index::property::ColumnPairStats> {
+        let mut output = Vec::new();
+        for fields in self.property_indexes.composite_definitions() {
+            for left_index in 0..fields.len() {
+                for right_index in left_index + 1..fields.len() {
+                    let left_field = &fields[left_index];
+                    let right_field = &fields[right_index];
+                    let mut left_values = HashSet::new();
+                    let mut right_values = HashSet::new();
+                    let mut joint_values = HashSet::new();
+                    let mut sampled_rows = 0usize;
+                    for payload in self.payloads.values().map(PayloadEntry::get) {
+                        let (Some(left), Some(right)) =
+                            (payload.get(left_field), payload.get(right_field))
+                        else {
+                            continue;
+                        };
+                        let (Ok(left), Ok(right)) =
+                            (serde_json::to_vec(left), serde_json::to_vec(right))
+                        else {
+                            continue;
+                        };
+                        left_values.insert(left.clone());
+                        right_values.insert(right.clone());
+                        joint_values.insert((left, right));
+                        sampled_rows += 1;
+                    }
+                    output.push(crate::index::property::ColumnPairStats {
+                        left_field: left_field.clone(),
+                        right_field: right_field.clone(),
+                        left_distinct: left_values.len(),
+                        right_distinct: right_values.len(),
+                        joint_distinct: joint_values.len(),
+                        sampled_rows,
+                    });
                 }
             }
         }
+        output
+    }
+
+    pub fn cross_modal_stats(
+        &self,
+        field: &str,
+        value: &serde_json::Value,
+    ) -> Option<CrossModalStats> {
+        const MAX_SAMPLES: usize = 1024;
+        let encoded_value = serde_json::to_vec(value).ok()?;
+        let cache_key = (field.to_owned(), encoded_value);
+        if let Some(stats) = self
+            .cross_modal_stats_cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&cache_key)
+            .filter(|stats| stats.generation == self.generation)
+        {
+            return Some(stats.clone());
+        }
+        let ids = self.find_by_property_index(field, value)?;
+        let sampled = ids.len().min(MAX_SAMPLES);
+        if sampled == 0 {
+            return None;
+        }
+        let graph = self.graph_stats();
+        let vector_density = self
+            .quiver_index
+            .as_ref()
+            .and_then(|quiver| quiver.vector_density_skew(&ids, MAX_SAMPLES));
+        let stats = if graph.edge_count == 0 {
+            CrossModalStats {
+                degree_skew: 1.0,
+                fanout_skew: 1.0,
+                vector_density_skew: vector_density.map(|(skew, _)| skew),
+                sampled: vector_density.map_or(sampled, |(_, count)| count.min(sampled)),
+                generation: self.generation,
+            }
+        } else {
+            let degrees = ids
+                .iter()
+                .take(sampled)
+                .map(|id| self.get_edges(*id).map_or(0, <[Edge]>::len))
+                .collect::<Vec<_>>();
+            let sample_mean = degrees.iter().sum::<usize>() as f64 / sampled as f64;
+            let sample_first = degrees.iter().sum::<usize>() as f64;
+            let sample_second = degrees
+                .iter()
+                .map(|degree| degree.saturating_mul(*degree))
+                .sum::<usize>() as f64;
+            let sample_fanout = if sample_first > 0.0 {
+                sample_second / sample_first
+            } else {
+                0.0
+            };
+            let global_first = self
+                .payloads
+                .keys()
+                .map(|id| self.get_edges(*id).map_or(0, <[Edge]>::len))
+                .sum::<usize>() as f64;
+            let global_second = self
+                .payloads
+                .keys()
+                .map(|id| {
+                    let degree = self.get_edges(*id).map_or(0, <[Edge]>::len);
+                    degree.saturating_mul(degree)
+                })
+                .sum::<usize>() as f64;
+            let global_fanout = if global_first > 0.0 {
+                global_second / global_first
+            } else {
+                1.0
+            };
+            CrossModalStats {
+                degree_skew: (sample_mean / graph.avg_out_degree.max(f64::EPSILON)).max(0.0),
+                fanout_skew: (sample_fanout / global_fanout.max(f64::EPSILON)).max(0.0),
+                vector_density_skew: vector_density.map(|(skew, _)| skew),
+                sampled: vector_density.map_or(sampled, |(_, count)| count.min(sampled)),
+                generation: self.generation,
+            }
+        };
+        self.cross_modal_stats_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(cache_key, stats.clone());
+        Some(stats)
+    }
+
+    pub fn index_memory_stats(&self) -> crate::observability::IndexMemoryStats {
+        let property_bytes = self.property_indexes.estimated_memory_bytes();
+        let property_mapped_bytes = self.property_indexes.mapped_bytes();
+        let graph_mapped_bytes = self.mapped_graph_bytes();
+        let quiver_bytes = self
+            .quiver_index
+            .as_ref()
+            .map(|index| index.stats().hot_bytes)
+            .unwrap_or_default();
+        let hot_bytes = property_bytes.saturating_add(quiver_bytes);
+        crate::observability::IndexMemoryStats {
+            resident_heap_bytes: hot_bytes as u64,
+            mapped_bytes: self
+                .mmap_vector_bytes()
+                .saturating_add(property_mapped_bytes)
+                .saturating_add(graph_mapped_bytes) as u64,
+            hot_bytes: hot_bytes as u64,
+            persisted_bytes: self
+                .mmap_vector_bytes()
+                .saturating_add(property_mapped_bytes)
+                .saturating_add(graph_mapped_bytes) as u64,
+            posting_entries: self
+                .property_index_stats()
+                .iter()
+                .map(|stats| stats.entry_count as u64)
+                .sum::<u64>()
+                .saturating_add(self.property_indexes.mapped_posting_entries() as u64),
+        }
+    }
+
+    pub fn set_property_indexes(&mut self, indexes: PropertyIndexRegistry) {
+        self.property_indexes = indexes;
+    }
+
+    fn add_to_property_index(&mut self, id: NodeId, payload: &serde_json::Value) {
+        self.property_indexes.insert(id, payload);
+    }
+
+    fn remove_from_property_index(&mut self, id: NodeId, payload: &serde_json::Value) {
+        self.property_indexes.remove(id, payload);
     }
 
     /// 删除节点：三层原子联删（向量标记为死区 + Payload移除 + 所有关联边清理）
@@ -1629,9 +2073,9 @@ impl<T: VectorType> MemTable<T> {
                 if let Some(&idx) = self.ids_to_indices.get(&id) {
                     self.fast_tags[idx] = sig;
                 }
-                // 属性索引：先移除旧值，再添加新值
-                self.remove_from_property_index(id, &old_payload);
-                self.add_to_property_index(id, &payload);
+                // 属性索引同步更新
+                self.property_indexes.update(id, &old_payload, &payload);
+                self.mark_property_changed();
                 self.payloads.insert(id, PayloadEntry::from_value(payload));
                 self.mark_changed(false);
                 Ok(())
@@ -1722,14 +2166,14 @@ impl<T: VectorType> MemTable<T> {
                 }
             }
 
-            // 如果 patch 不包含任何操作符，视为纯 $set（兼容简写模式）
             if !patch_obj.contains_key("$set")
                 && !patch_obj.contains_key("$inc")
                 && !patch_obj.contains_key("$unset")
             {
-                for (k, v) in patch_obj {
-                    obj.insert(k.clone(), v.clone());
-                }
+                return Err(TriviumError::ApiMigrationRequired {
+                    removed_api: "patch_payload(普通对象简写)",
+                    replacement: "patch_payload({\"$set\": {...}}) 或 update_payload()",
+                });
             }
         } else {
             return Err(TriviumError::InvalidInput(
@@ -1795,6 +2239,19 @@ impl<T: VectorType> MemTable<T> {
         self.vec_pool.get(slot).map(|vector| (id, vector))
     }
 
+    /// 返回活跃节点对应的内部槽位。只读借用期间槽位映射保持稳定。
+    #[inline]
+    pub(crate) fn internal_slot_of(&self, id: NodeId) -> Option<usize> {
+        self.ids_to_indices.get(&id).copied()
+    }
+
+    /// 返回内部槽位上的活跃节点 ID，tombstone 返回 None。
+    #[inline]
+    pub(crate) fn active_id_at_slot(&self, slot: usize) -> Option<NodeId> {
+        let id = *self.indices_to_ids.get(slot)?;
+        (id != 0 && self.payloads.contains_key(&id)).then_some(id)
+    }
+
     /// 获取节点的入度数（若不存在则返回0）
     pub fn get_in_degree(&self, id: NodeId) -> usize {
         self.in_degrees.get(&id).copied().unwrap_or(0)
@@ -1851,6 +2308,7 @@ impl<T: VectorType> MemTable<T> {
             .map(|index| index.stats().hot_bytes)
             .unwrap_or_default();
         let text_bytes = self.text_index.estimated_memory_bytes();
+        let property_index_bytes = self.property_indexes.estimated_memory_bytes();
         vec_bytes
             + payload_bytes
             + edge_bytes
@@ -1858,6 +2316,7 @@ impl<T: VectorType> MemTable<T> {
             + label_index_bytes
             + quiver_bytes
             + text_bytes
+            + property_index_bytes
     }
 
     pub(crate) fn advise_cold_vectors_dontneed(&self) {
@@ -1923,17 +2382,5 @@ impl<T: VectorType> MemTable<T> {
                 self.payloads.len()
             );
         }
-    }
-}
-
-/// 将 JSON 值转换为索引键字符串
-fn value_to_index_key(val: &serde_json::Value) -> String {
-    match val {
-        serde_json::Value::String(s) => format!("s:{}", s),
-        serde_json::Value::Number(n) => format!("n:{}", n),
-        serde_json::Value::Bool(b) => format!("b:{}", b),
-        serde_json::Value::Null => "null".to_string(),
-        // 复杂类型用 JSON 序列化作为键
-        other => format!("j:{}", other),
     }
 }

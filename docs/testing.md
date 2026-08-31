@@ -27,13 +27,13 @@ TriviumDB 采用 **五层防御式测试体系**，从函数级正确性到系�
 
 | 层级 | 类型     | 用例数            | 覆盖目标                                                           |
 | ---- | -------- | ----------------- | ------------------------------------------------------------------ |
-| L1   | 单元测试 | 297               | 每个公开函数/方法的正确性与错误路径                                |
+| L1   | 单元测试 | 311               | 每个公开函数/方法、严格迁移错误和版本门禁                         |
 | L2   | 集成测试 | ~800+             | 跨模块协作、WAL 恢复、硬件级崩溃恢复、并发安全、安全防御、TQL 全链路 |
 | L3   | 属性测试 | ~2650+（随机生成）| 数据结构不变量、数学契约、事务原子性                               |
 | L4   | 模糊测试 | 持续运行          | WAL / TQL / Filter 解析器的随机输入鲁棒性（LibFuzzer）             |
 | L5   | 变异测试 | 按需              | 测试用例的"杀伤力"验证（cargo-mutants）                            |
 
-**总计约 3300+ 确定性测试 + 2650+ 随机测试用例，全部通过。**
+**测试数量持续随能力演进；请以当前 `cargo test` 输出和 CI artifact 为权威，不把历史计数当作永久质量指标。**
 
 ---
 
@@ -59,8 +59,9 @@ cargo test --test unit -- memtable     # memtable 模块
 cargo test --test deterministic_interleaving --features test-hooks
 cargo test --test concurrency_invariants --features test-hooks
 
-# 注意：不要用 --all-targets 作为普通全量测试命令；它会执行 Criterion benchmark，
-# 包括需要外部百万向量数据集的 bench_cohere1m。
+# 静态验收可使用 cargo check/clippy --all-targets。
+# 不要把 cargo test --all-targets 当作普通全量测试命令：它会执行 benchmark，
+# 其中包括依赖外部百万向量数据集的 bench_cohere1m。
 
 # 运行覆盖率报告（需要安装 cargo-llvm-cov）
 cargo llvm-cov --summary-only
@@ -147,7 +148,7 @@ fuzz/
 | `Database`  | `unit/database.rs`  | open/close、CRUD、search、TQL、事务（全 7 种 TxOp）、Hook 管理 |
 | `Filter`    | `unit/filter.rs`    | 数字/字符串范围、RFC3339 时区、错误路径、bloom mask             |
 | `Vector`    | `unit/vector.rs`    | 余弦相似度、SIMD 尾部处理、标量回退、多 dtype                  |
-| `WAL`       | `unit/wal.rs`       | 显式版本门禁、旧格式兼容、CRC、SyncMode、崩溃恢复               |
+| `WAL`       | `unit/wal.rs`       | v3 显式头、无头拒绝、未来版本门禁、CRC、SyncMode、崩溃恢复       |
 | `.tdb` 格式 | `format_migration.rs` | v5 32/48-chunk 自动迁移、v6 自描述布局、未来/过旧版本门禁与损坏拒绝 |
 | 图扩散参数 | `unit/traversal.rs` | 出/入/双向、强边上限、绝对权重阈值、稳定排序、自环去重与组合过滤 |
 | Python 类型 | `python_typing_smoke.py` | Wheel 内 `py.typed/.pyi`、mypy strict 与 pyright 双门禁 |
@@ -156,7 +157,7 @@ fuzz/
 | `Cognitive` | `unit/cognitive.rs` | FISTA 稀疏残差、DPP 多样性采样                                 |
 | `Index`     | `unit/index.rs`     | QuIVer/BQ 二值化、BruteForce 精确搜索                                 |
 
-TQL 集成测试还覆盖 `MATCH ... RANK` 的 anchor 去重、集合内精确排序、分页与显式排序顺序、EXPLAIN 计划，以及 `SEARCH ... EXPAND` 的 OUTGOING/INCOMING/BOTH、多标签和空标签语义。数据库生命周期测试验证 `reachable()` 与 `search_graph_first()` 在 close 后与其他可失败 API 一样返回 `DatabaseClosed`。
+TQL 集成测试还覆盖 WITH 作用域、Cascades、聚合/空输入、算术/COALESCE/Null、Prepared 严格绑定、Path/Shortest、UNION/INTERSECT/EXCEPT、图算法、预算、确定性和 EXPLAIN。`public_api_alignment.rs`、`python_public_api.py`、`node_public_api.js` 验证三语言能力对齐和历史入口拒绝。数据库生命周期测试验证 `reachable()` 与 `search_graph_first()` 在 close 后与其他可失败 API 一样返回 `DatabaseClosed`。
 
 ### 事务测试示例
 
@@ -243,13 +244,16 @@ fn from_json_嵌套and_or() {
 | `security.rs`     | 安全防御   | NaN 注入、超大 payload(10MB)、幽灵事务截断 |
 | `stress.rs`       | 压力极限   | 高频写入、自环重边图谱震荡、空库极端操作 |
 | `tql_executor.rs` | TQL 全链路 | MATCH/FIND/SEARCH 三种入口的完整执行     |
-| `tql_dml.rs`      | TQL 写操作 | CREATE/SET/DELETE/DETACH DELETE          |
+| `tql_dml.rs`      | TQL 写操作 | CREATE/SET/DELETE/DETACH DELETE；读查询误用拒绝 |
+| `tql_pipeline_parser.rs` | 三模管线 | 聚合、Prepared、路径、集合、作用域、旧语法回归 |
+| `pipeline_differential.rs` | 差分 | Q1–Q14 独立 reference 与多计划一致性 |
+| `public_api_alignment.rs` | 公共 API | 四类索引、StorageInfo、Prepared、一等值、除旧 |
 
 ### WAL 断写安全测试示例
 
 ```rust
 // 模拟 WAL 写入中途中断（只写了一半数据）
-// 验证重启后 CRC 校验能检测到损坏记录并安全跳过
+// 验证重启后 CRC 校验能检测到损坏记录并在损坏边界停止回放
 #[test]
 fn wal_半写条目被安全跳过() {
     // 1. 写入正常数据
@@ -393,9 +397,11 @@ cargo llvm-cov --html --open
 cargo llvm-cov --json --output-path coverage.json
 ```
 
-### 当前覆盖率基线
+### 当前覆盖率记录
 
-| 指标             | 覆盖率 |
+以下数字是历史实测快照，不代表本次超海量更新后的当前覆盖率；正式发布应以对应提交的 `cargo llvm-cov` 输出和 CI artifact 为准。
+
+| 指标             | 历史快照 |
 | ---------------- | ------ |
 | **总行覆盖率**   | 93.29% |
 | **总函数覆盖率** | 91.68% |
@@ -485,16 +491,16 @@ proptest! {
 TriviumDB 通过 GitHub Actions 构建了由三条独立工作流组成的完整自动化链路。
 
 ### 1. 核心 CI 管线 (`ci.yml`)
-在每次 Push 或 PR 时自动触发，包含 8 个核心 Job 和 2 个手动触发 Job：
+每次 Push 或 PR 会运行多平台 Rust 测试、CLI/TUI、Python/Node 生命周期、短时 fuzz、ASan、覆盖率、类型存根和 Clippy 等门禁；另有内存压力观测，以及手动 mutation/benchmark Job。平台矩阵和 Job 数会随工具链演进，具体以 workflow 为准。
 
-- **Job 1: Compile Check** - `cargo check` 交叉编译检查 (x86_64 + aarch64)
-- **Job 2: Test** - 5 个平台的并行测试 (Linux/Win/macOS x86_64, macOS ARM64, Linux ARM64 QEMU)
-- **Job 3: Fuzz (Short)** - 短时模糊测试 (30s × 3目标)，提前拦截解析器异常
-- **Job 4: ASan** - Nightly Rust + AddressSanitizer 内存安全专项扫描
-- **Job 5: Coverage** - 行覆盖率 ≥80% 强制门禁 (`cargo-llvm-cov`)
-- **Job 6: Lint** - `cargo clippy -- -D warnings` 零警告策略与 `rustfmt` 检查
-- *(手动)* **Job 7: Mutation Testing** - 基于 `cargo-mutants` 的变异测试
-- *(手动)* **Job 8: Benchmark** - 性能基准测试
+- **Compile Check**：默认、Python、Node 和 aarch64 编译检查
+- **Rust Test**：Linux/Windows/macOS x86_64、macOS ARM64，并以 QEMU 补充 Linux ARM64
+- **Binding Lifecycle**：Python wheel + mypy/pyright；Node 原生绑定 + 生命周期测试
+- **Short Fuzz / ASan / Coverage**：解析器、WAL、QuIVer fuzz，unsafe 路径检测与行覆盖率 80% 门禁
+- **Python Stubs / Lint**：存根生成漂移、stubtest、类型断言和 `clippy -D warnings`
+- **Manual Mutation / Benchmark**：benchmark 先编译全部目标，再运行无外部数据依赖的稳定套件并上传 `target/criterion/` 与 `target/bench-reports/`
+
+独立的 `benchmark-reports.yml` 还会手动或定时运行 `ci_report`、查询 Criterion 与索引/图基线，均只生成 artifact，不作为合并门禁。
 
 ### 2. 持续模糊测试 (`fuzz.yml`)
 由于深度的 Fuzz 测试非常耗时，配置为每周日自动运行的长时任务：
@@ -513,8 +519,8 @@ TriviumDB 通过 GitHub Actions 构建了由三条独立工作流组成的完整
 
 | 指标       | CI 门禁阈值 | 当前值 |
 | ---------- | ----------- | ------ |
-| 行覆盖率   | 80%         | 93.29% |
-| 函数覆盖率 | —           | 91.68% |
+| 行覆盖率   | 80%         | 93.29%（历史快照） |
+| 函数覆盖率 | —           | 91.68%（历史快照） |
 
 > ⚠️ 变异测试不建议放入 CI 常规流程（单次运行可能超过 30 分钟）。CI 中已配置为手动触发（`workflow_dispatch`），作为版本发布前的质量门禁。
 

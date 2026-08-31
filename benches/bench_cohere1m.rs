@@ -1,3 +1,8 @@
+//! Cohere 1M 外部数据集上的 QuIVer ANN 质量与性能复现入口。
+//!
+//! 需要用户预先提供向量文件，不属于普通 `cargo test` 或稳定 CI 套件。报告同时包含
+//! exact ground truth、Recall@K、构建成本和查询延迟，禁止在缺少数据时伪造结果。
+
 use rayon::prelude::*;
 use serde::Serialize;
 use std::fs::File;

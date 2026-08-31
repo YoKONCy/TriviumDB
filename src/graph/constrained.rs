@@ -1,3 +1,9 @@
+//! GraphFirst 候选集合内的精确向量排名门面。
+//!
+//! 图模式先产生合法 anchor，本模块负责维度、候选预算与节点存在性检查，再委托 exact
+//! Top-K 执行器评分。它绝不从全库补充近邻，因此图约束是硬边界；候选超过预算时在
+//! 分配和打分前 fail-closed。
+
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
 use crate::node::{NodeId, SearchHit};

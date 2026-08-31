@@ -3,7 +3,7 @@
 //!
 //! 验证范围：
 //! - `storage/compaction.rs`: 后台自动压实、手动压实、空库压实、连续压实幂等性
-//! - `database/mod.rs`: 同步模式、内存限制自动落盘、Hook 生命周期、混合搜索、文本索引
+//! - `database/mod.rs`: 同步模式、内存预算拒绝、Hook 生命周期、混合搜索、文本索引
 //! - `vector.rs`: 余弦相似度边界（零向量、尾部标量路径）、u64 汉明相似度、f32 SIMD 分发
 
 use triviumdb::database::{Config, Database, SearchConfig, StorageMode};
@@ -413,14 +413,20 @@ fn COV_04G_compact中断_flush_ok大小不匹配_已提交数据不丢() {
 //  database/mod.rs 覆盖
 // ════════════════════════════════════════════════════════════════
 
-/// open_with_sync API 覆盖
+/// open_with_config SyncMode 覆盖
 #[test]
-fn COV_05_open_with_sync() {
+fn COV_05_open_with_config_sync() {
     let path = tmp_db("open_sync");
 
-    let mut db =
-        Database::<f32>::open_with_sync(&path, DIM, triviumdb::storage::wal::SyncMode::Full)
-            .unwrap();
+    let mut db = Database::<f32>::open_with_config(
+        &path,
+        Config {
+            dim: DIM,
+            sync_mode: triviumdb::storage::wal::SyncMode::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))
         .unwrap();
     assert_eq!(db.node_count(), 1);
@@ -443,32 +449,39 @@ fn COV_06_dim_zero_rejected() {
     cleanup(&path);
 }
 
-/// memory limit 自动 flush
+/// memory limit 在写入前拒绝，不通过高频全量 flush 换内存
 #[test]
-fn COV_07_memory_limit_auto_flush() {
+fn COV_07_memory_limit_rejects_without_auto_flush() {
     let path = tmp_db("mem_limit");
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
-    db.set_memory_limit(1024); // 1KB 极小限制
+    db.set_memory_limit(1024);
+    let wal_before = std::fs::metadata(format!("{path}.wal"))
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
 
-    // 插入足够数据触发自动 flush
+    let mut inserted = 0usize;
     for i in 0..100u32 {
-        db.insert(
+        match db.insert(
             &[i as f32, 0.0, 0.0, 0.0],
             serde_json::json!({"data": "x".repeat(50)}),
-        )
-        .unwrap();
+        ) {
+            Ok(_) => inserted += 1,
+            Err(triviumdb::TriviumError::CapacityReservationRejected { .. }) => break,
+            Err(error) => panic!("内存门禁返回意外错误: {error}"),
+        }
     }
 
-    // 验证 estimated_memory 可调用
-    let mem = db.estimated_memory();
-    eprintln!("  estimated_memory: {} bytes", mem);
-
-    // 文件应已被自动 flush
+    assert!(inserted < 100, "内存预算必须在增长前拒绝");
+    assert_eq!(db.node_count(), inserted);
     assert!(
-        std::path::Path::new(&path).exists(),
-        "内存超限应触发自动 flush"
+        !std::path::Path::new(&path).exists(),
+        "内存预算不得触发全量 checkpoint"
     );
+    let wal_after = std::fs::metadata(format!("{path}.wal"))
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
+    assert!(wal_after >= wal_before, "已接受写入只能追加 WAL");
 
     cleanup(&path);
 }

@@ -1,6 +1,6 @@
 [package]
 name = "triviumdb-cli"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2024"
 authors = ["YoKONCy <2752026184@qq.com>"]
 description = "CLI & TUI tool for TriviumDB — interactive REPL, non-interactive commands, and a full-screen terminal UI."

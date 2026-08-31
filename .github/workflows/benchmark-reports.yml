@@ -7,15 +7,6 @@ name: Benchmark Reports
 
 on:
   workflow_dispatch:
-    inputs:
-      run_extreme:
-        description: '是否运行 10万节点/200万边/768维 QuIVer benchmark'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
   schedule:
     # 每周六 UTC 05:00（北京时间 13:00）生成一次报告
     - cron: '0 5 * * 6'
@@ -46,7 +37,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ci-entry-benchmark-report
-          path: target/bench-report/
+          path: target/bench-reports/
 
   criterion-query-report:
     name: Query Criterion Report
@@ -71,14 +62,11 @@ jobs:
         with:
           name: criterion-query-report
           path: target/criterion/
-
-
-  extreme-graph-vector-report:
-    name: Extreme Graph Vector Report
+  index-graph-baseline-report:
+    name: Index Graph Baseline Report
     runs-on: ubuntu-latest
     continue-on-error: true
-    timeout-minutes: 360
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_extreme == 'true'
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -87,14 +75,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: bench-extreme-graph-vector
+          key: bench-index-graph-baseline
 
-      - name: 运行 10万节点/200万边/768维 QuIVer benchmark 报告
-        run: cargo bench --bench bench_extreme_graph_vector
+      - name: 运行索引与图基线报告
+        env:
+          TRIVIUM_BASELINE_NODES: '100000'
+          TRIVIUM_BASELINE_QUERIES: '100'
+          TRIVIUM_BASELINE_DIM: '768'
+          TRIVIUM_BASELINE_DEGREE: '4'
+        run: cargo bench --bench bench_index_graph_baseline
 
-      - name: 上传极限规模 benchmark 报告
+      - name: 上传索引与图 benchmark 报告
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: extreme-graph-vector-benchmark-report
-          path: target/bench-report/
+          name: index-graph-benchmark-report
+          path: target/bench-reports/
+          if-no-files-found: warn

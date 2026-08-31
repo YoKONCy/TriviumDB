@@ -264,11 +264,11 @@ fn 测试_DETACH_DELETE_删除节点及边() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  读查询兼容
+//  读查询误用拒绝
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
-fn 测试_tql_mut_读查询降级() {
+fn 测试_tql_mut_读查询明确拒绝() {
     let path = tmp_db("read_fallback");
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
@@ -276,10 +276,11 @@ fn 测试_tql_mut_读查询降级() {
     db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"name": "Alice"}))
         .unwrap();
 
-    // 用 tql_mut 执行读查询应返回 affected=0
-    let result = db.tql_mut(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
-    assert_eq!(result.affected, 0, "读查询应返回 affected=0");
-    assert!(result.created_ids.is_empty(), "读查询不应有创建");
+    let error = db.tql_mut(r#"FIND {name: "Alice"} RETURN *"#).unwrap_err();
+    assert!(matches!(
+        error,
+        triviumdb::TriviumError::ApiMigrationRequired { .. }
+    ));
 
     drop(db);
     cleanup(&path);

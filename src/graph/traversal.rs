@@ -1,6 +1,12 @@
+//! 面向检索的有限深度 SA-PPR 图扩散。
+//!
+//! 算法从向量/文本锚点传播相关性能量，并支持方向、Label、弱边过滤、高出度截断、
+//! 入度抑制和不应期。它不会迭代到 PageRank 收敛：每层都按绝对边权归一化并注入
+//! restart 能量，因此深度和扫描成本可预测；排序以 score 和 NodeId 稳定归并。
+
 use crate::node::{NodeId, SearchHit};
 use crate::storage::memtable::MemTable;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::database::EdgeDirection;
 
@@ -63,7 +69,7 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
     }
 
     let alpha = restart_alpha.clamp(0.0, 1.0);
-    let mut seed_distribution = HashMap::<NodeId, f32>::new();
+    let mut seed_distribution = BTreeMap::<NodeId, f32>::new();
     let seed_mass: f32 = seeds.iter().map(|seed| seed.score.max(0.0)).sum();
     if seed_mass > 0.0 {
         for seed in &seeds {
@@ -76,8 +82,8 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
         }
     }
 
-    let mut total_activation = HashMap::<NodeId, f32>::new();
-    let mut current_tier = HashMap::<NodeId, f32>::new();
+    let mut total_activation = BTreeMap::<NodeId, f32>::new();
+    let mut current_tier = BTreeMap::<NodeId, f32>::new();
     let mut active_fatigue = Vec::new();
     for seed in &seeds {
         let fatigue_discount = if enable_refractory_fatigue && db.get_fatigue(seed.id) > 0 {
@@ -96,7 +102,7 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
         .map(|bias| 1.0 / (bias.len() as f32).sqrt());
 
     for _ in 0..max_depth {
-        let mut next_tier = HashMap::<NodeId, f32>::new();
+        let mut next_tier = BTreeMap::<NodeId, f32>::new();
 
         for (curr_id, curr_energy) in current_tier {
             if curr_energy <= 0.0 {

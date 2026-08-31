@@ -12,8 +12,12 @@ use crate::filter::Filter;
 pub struct TqlQuery {
     /// EXPLAIN 模式：输出查询计划而不执行
     pub explain: bool,
+    /// EXPLAIN ANALYZE：执行查询并返回计划与实际观测。
+    pub analyze: bool,
     /// 查询入口
     pub entry: QueryEntry,
+    /// `WITH` 链形成的管线阶段。空数组表示旧单阶段查询。
+    pub pipeline: Vec<PipelineStage>,
     /// WHERE 过滤（统一谓词）
     pub predicate: Option<Predicate>,
     /// MATCH 产生 anchor 后，在指定变量集合内执行精确向量排序。
@@ -33,6 +37,105 @@ pub struct RankClause {
     pub var: String,
     pub vector: Vec<f64>,
     pub top_k: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum PipelineStage {
+    With(WithStage),
+    Expand(PipelineExpandStage),
+    Filter(Predicate),
+    Rank(RankClause),
+    GraphAlgorithm(GraphAlgorithmStage),
+    AllPaths(AllPathsStage),
+    ShortestPaths(ShortestPathsStage),
+    SetCombine(SetCombineStage),
+    Iterate(IterateStage),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphAlgorithmKind {
+    PageRank,
+    Wcc,
+    Degree,
+    LabelPropagation,
+    Leiden,
+    SaPpr,
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphAlgorithmStage {
+    pub input: String,
+    pub output: String,
+    pub algorithm: GraphAlgorithmKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct WithStage {
+    pub items: Vec<WithItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WithItem {
+    pub expr: TqlExpr,
+    pub alias: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PipelineExpandStage {
+    pub input: String,
+    pub output: String,
+    pub expand: ExpandClause,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathAggregation {
+    MaxProduct,
+    SumProduct,
+    AverageWeight,
+}
+
+#[derive(Debug, Clone)]
+pub struct AllPathsStage {
+    pub input: String,
+    pub output: String,
+    pub targets: Vec<u64>,
+    pub max_depth: usize,
+    pub max_paths: usize,
+    pub aggregation: PathAggregation,
+    pub label_sequence: Option<Vec<String>>,
+    pub forbidden_nodes: Vec<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShortestPathsStage {
+    pub input: String,
+    pub output: String,
+    pub targets: Vec<u64>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TqlSetOperation {
+    Union,
+    Intersect,
+    Except,
+}
+
+#[derive(Debug, Clone)]
+pub struct SetCombineStage {
+    pub input: String,
+    pub other_ids: Vec<u64>,
+    pub output: String,
+    pub operation: TqlSetOperation,
+}
+
+#[derive(Debug, Clone)]
+pub struct IterateStage {
+    pub input: String,
+    pub output: String,
+    pub expand: ExpandClause,
+    pub max_iterations: usize,
+    pub stop_on_fixed_point: bool,
 }
 
 /// 查询入口类型
@@ -147,10 +250,48 @@ pub enum Predicate {
 /// TQL 表达式
 #[derive(Debug, Clone)]
 pub enum TqlExpr {
+    /// 节点集合、标量别名或节点变量引用。
+    Variable(String),
+    /// Prepared TQL 参数。
+    Parameter(String),
+    /// 确定性二元算术表达式。
+    Binary {
+        left: Box<TqlExpr>,
+        op: TqlBinaryOp,
+        right: Box<TqlExpr>,
+    },
+    /// 返回首个非空表达式。
+    Coalesce(Vec<TqlExpr>),
+    /// 空值判定。
+    IsNull { expr: Box<TqlExpr>, negated: bool },
     /// 属性访问: a.name
     Property { var: String, field: String },
+    /// 当前节点相对源查询向量的精确相似度。
+    Similarity { var: String },
+    /// 图算法分数列。
+    GraphScore { var: String },
+    /// 图扩展最小深度。
+    Depth { var: String },
+    /// 有界路径强度。
+    PathStrength { var: String },
+    /// 路径条数。
+    PathCount { var: String },
+    /// 社区 ID。
+    Community { var: String },
+    /// 当前行携带的路径。
+    Path { var: String },
+    /// 当前行携带路径的边数。
+    PathLength { var: String },
     /// 字面量值
     Literal(TqlLiteral),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TqlBinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
 }
 
 /// TQL 字面量
@@ -202,6 +343,8 @@ pub struct ReturnExpr {
 pub enum ReturnExprKind {
     /// 直接变量引用: a
     Var(String),
+    /// 一等查询表达式，如 similarity(a)、depth(a)。
+    Scalar(TqlExpr),
     /// 属性访问: a.name
     Property(String, String),
     /// 聚合函数: count(b), avg(b.age)

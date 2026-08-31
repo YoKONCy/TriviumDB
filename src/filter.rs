@@ -1,3 +1,9 @@
+//! 类 MongoDB JSON Payload 过滤表达式及安全求值器。
+//!
+//! Parser 只接受白名单操作符并验证参数类型，求值时按显式 JSON 类型比较，不进行会
+//! 改变语义的隐式字符串/数值转换。该过滤器既可直接扫描，也可由属性索引生成候选，
+//! 但最终结果必须通过同一 `matches` 路径精确复核。
+
 use serde_json::Value;
 
 #[derive(Debug, Clone)]

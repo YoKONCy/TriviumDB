@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.8.2
+> **版本**: v0.8.3
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -14,8 +14,9 @@
 - [向量检索](#向量检索)
 - [Hook 扩展系统](#hook-扩展系统)
 - [元数据过滤](#元数据过滤)
-- [TQL 统一查询](#tql-统一查询)
-- [属性二级索引](#属性二级索引)
+- [TQL、Prepared 与一等值](#tql-prepared-与一等值)
+- [持久化索引管理与观测](#持久化索引管理与观测)
+- [存储格式观测与迁移错误](#存储格式观测与迁移错误)
 - [持久化与压缩](#持久化与压缩)
 - [内存管理](#内存管理)
 - [工具方法](#工具方法)
@@ -74,7 +75,9 @@ with triviumdb.TriviumDB("my_data.tdb", dim=1536) as db:
 
 ### 只读访问模式
 
-只读模式面向已完成 `flush()` 的不可变数据库代际。多个进程可以同时以共享锁打开同一路径，但同路径 Reader 与 Writer 互斥：
+只读模式面向已完成 `flush()` 的不可变数据库代际。多个进程可以同时以共享锁打开同一路径，但同路径 Reader 与 Writer 互斥。
+
+TriviumDB 采用单写多读模型。同一语言绑定实例可被多个线程调用且不会再抛出底层借用冲突，但写 API 仍应由调用方通过单一写队列、`Lock` / `Mutex` 或 actor 串行化；这不是并行多 Writer 提交能力。高并发读取应使用 ReadOnly/Immutable Reader。
 
 ```python
 db = TriviumDB("generation-42/data.tdb", dim=768, access_mode="read_only")
@@ -210,10 +213,8 @@ use triviumdb::storage::wal::SyncMode;
 // 基础打开（默认 Mmap 模式 + Normal 同步）
 let mut db = Database::<f32>::open("my_data.tdb", 1536)?;
 
-// 指定同步模式（向后兼容）
-let mut db = Database::<f32>::open_with_sync("my_data.tdb", 1536, SyncMode::Full)?;
-
-// 高级配置（v0.4+）——同时指定存储模式和同步模式
+// 指定同步与存储模式统一使用 Config；open_with_sync 已移除
+// 高级配置——同时指定存储模式和同步模式
 let mut db = Database::<f32>::open_with_config("my_data.tdb", Config {
     dim: 1536,
     storage_mode: StorageMode::Rom,  // Rom：单文件便携 | Mmap：分离零拷贝（默认）
@@ -288,7 +289,7 @@ db.reserve_nodes(200_000)?;
 
 ### Node.js 配置对象
 
-旧位置参数构造方式继续兼容；新代码推荐配置对象：
+Node.js 构造器只接受配置对象。旧数字位置参数已移除，并返回 `TDB_API_MIGRATION_REQUIRED`：
 
 ```ts
 const db = new TriviumDB('my_data.tdb', {
@@ -1099,11 +1100,13 @@ let results = db.filter_where(&filter);
 
 ---
 
-## TQL 统一查询
+## TQL、Prepared 与一等值
 
-### tql — 执行 TQL 只读查询
+TQL 公共 API 暴露的是一套 **自由 DIY 混合查询能力**，而不是单一的混合搜索函数。调用者可以用一条查询按需组合向量源、属性索引、图扩展、图算法、路径、集合代数、迭代、聚合与重排；Prepared TQL 则让同一管线安全地重复绑定业务参数。
 
-支持三种入口：MATCH（图遍历）/ FIND（文档过滤）/ SEARCH（向量检索）。
+### tql / tql_values
+
+支持 MATCH、OPTIONAL MATCH、FIND、SEARCH、WITH 管线、聚合、图算法、路径与集合代数。Rust `tql()` 只适合纯节点绑定；标量、聚合、Path/List 必须使用 `tql_values()`。Python/Node 的 `tql` 已自动承载一等值。
 
 **Python：**
 ```python
@@ -1136,7 +1139,33 @@ for row in &rows {
 }
 ```
 
-### tql_mut — 执行 TQL 写操作 (v0.6.0 新增)
+### prepare_tql / execute_prepared_tql
+
+```python
+prepared = db.prepare_tql(
+    "FIND {kind: \"note\"} RETURN $bonus + 1 AS score"
+)
+rows = db.execute_prepared_tql(prepared, {"bonus": 4})
+```
+
+```ts
+const prepared = db.prepareTql('FIND {kind: "note"} RETURN $bonus + 1 AS score')
+const rows = db.executePreparedTql(prepared, { bonus: 4 })
+```
+
+Prepared 参数只接受 null/bool/string/number；缺参、额外参数、数组/对象和非有限数值明确失败。
+
+### 一等值映射
+
+| TQL 值 | Python | Node |
+|---|---|---|
+| Node | dict | object，NodeId 为字符串 |
+| Int/Float/String/Bool | 原生标量 | 原生标量 |
+| Path | `list[int]` | `string[]`，避免 u64 精度损失 |
+| List | list | array |
+| Null | None | null |
+
+### tql_mut — 执行 TQL 写操作
 
 支持 CREATE / SET / DELETE / DETACH DELETE 语法，返回受影响行数和新创建的节点 ID。
 
@@ -1187,13 +1216,24 @@ ReturnList := Ident (',' Ident)* | '*'
 
 > 💡 当起始节点已知 ID 时，强烈建议将 `id` 写入节点属性过滤器。主键 `id` 走 **O(1) 哈希短路扫描**，而 `type` 等非主键字段会触发 O(N) 全表扫描（除非已建立属性索引）。
 
-> 💡 当前仅支持**有向**边模式 `-[]->` ，不支持无向匹配或反向匹配。
+> MATCH 使用显式有向模式；管线 EXPAND 和 Reachability 另行支持 OUTGOING/INCOMING/BOTH。
 
 ---
 
-## 属性二级索引
+## 持久化索引管理与观测
 
-### create_index — 创建属性索引 (v0.6.0 新增)
+四类属性索引均持久化到 `.pidx` 并由 Planner 透明选择：
+
+| 类型 | Python | Node | Rust |
+|---|---|---|---|
+| Hash | `create_index` | `createIndex` | `create_index` |
+| Ordered ART | `create_ordered_index` | `createOrderedIndex` | `create_ordered_index` |
+| Composite ART | `create_composite_index` | `createCompositeIndex` | `create_composite_index` |
+| Roaring Bitmap | `create_bitmap_index` | `createBitmapIndex` | `create_bitmap_index` |
+
+删除接口使用对应 `drop_*` 名称。`index_info/indexInfo` 返回 kind、完整 fields、entry/distinct/null 计数并稳定排序。
+
+### create_index — 创建 Hash 属性索引
 
 对指定的 JSON Payload 字段建立 O(1) 倒排索引。创建时自动回填全表现有数据，后续 insert / update_payload / delete 自动维护索引一致性。
 
@@ -1214,7 +1254,7 @@ db.createIndex('type')
 db.create_index("name");
 ```
 
-### drop_index — 删除属性索引 (v0.6.0 新增)
+### drop_index — 删除 Hash 属性索引
 
 删除指定字段的索引。查询仍然可用，只是退化为 O(N) 全表扫描。
 
@@ -1228,6 +1268,19 @@ db.drop_index("name")
 db.dropIndex('name')
 ```
 
+
+## 存储格式观测与迁移错误
+
+`storage_info/storageInfo` 是只读诊断入口，返回产品版本、`.tdb` 当前/最低版本、WAL/Property/Graph/QuIVer/Text/Manifest 格式、dim、node count、访问模式、估算内存和 sidecar 存在状态。它不会创建、修复或重写文件。
+
+```python
+info = db.storage_info()
+print(info["database_format_current"])  # 7
+print(info["property_index_format"])    # 4
+print(info["sidecars"])
+```
+
+历史 API 不再静默翻译：`tql_mut` 读查询、patch 普通对象简写、Node 数字构造参数分别返回迁移错误；Rust `open_with_sync` 已删除。历史无头 WAL 返回 `UnsupportedWalVersion`；带记录的旧版本 WAL 需用旧内核恢复并 flush。恰好只有版本头、没有记录的旧 WAL 可由 ReadWrite 打开流程原子升级，ReadOnly/Immutable 保持零写并要求先由 Writer 完成升级。
 
 ## 持久化与压缩
 
@@ -1377,7 +1430,7 @@ QuIVer 索引支持增量 Insert/Delete/Update，无需全量重建。索引以 
 
 ## 维度迁移
 
-> 文件格式兼容边界：自动迁移保证从 TriviumDB `0.7.0` 开始。0.7.x/0.8.x 的 v5 文件可直接打开，并在可写句柄下一次 `flush()`/`close()` 时原子升级为 v6；早于 0.7.0 的文件需要使用旧版 JSONL 导出后导入。未来版本文件会被当前内核明确拒绝，避免降级写坏。
+> 文件格式兼容边界：当前 `.tdb` 为 v7，可读取 v5–v7；可写句柄在下次 flush/close 原子升级到当前格式。早于 v5 的主文件必须通过旧内核导出迁移；未来版本明确拒绝。sidecar 独立版本化：`.pidx v4`、`.gidx v2`、`.text v2`、`.quiver v1`。
 
 当需要更换 Embedding 模型（维度发生变化）时，使用 `migrate` 将旧库的结构迁移到新维度。
 
@@ -1425,7 +1478,7 @@ new_db.flush()?;
 
 > 💡 如果希望同时切换 dtype（例如从 f32 换 f16），需在创建新库时指定 `dtype` 参数：`TriviumDB("new.tdb", dim=1536, dtype="f16")`。
 
-## 事务支持 (Rust Only)
+## 事务支持（Rust / Python）
 
 TriviumDB 提供轻量级事务，采用**验证前置（Dry-Run）架构**：所有操作先缓冲在内存中，`commit()` 分两阶段执行——首先在纯内存验证全部约束（维度、节点存在性、ID 冲突），全部通过后才一次性写入。
 
@@ -1447,7 +1500,7 @@ let ids = tx.commit()?;
 // tx.rollback();
 ```
 
-> ⚠️ 事务目前仅在 Rust API 中可用，Python 侧暂未暴露。
+> Python 通过 `db.transaction()` 暴露同一套缓冲提交语义；Node.js 当前未公开事务构建器。
 
 ---
 

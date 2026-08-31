@@ -65,7 +65,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.8.2"
+triviumdb = "0.8.3"
 ```
 
 ### 30 秒入门模板
@@ -282,6 +282,10 @@ with triviumdb.TriviumDB("data.tdb", dim=768, sync_mode="off") as db:
 
 ```python
 db.set_memory_limit(mb=512)
+
+# 查看实际格式、模式和 sidecar 状态
+print(db.storage_info())
+print(db.index_info())
 ```
 
 该限制不是整个进程的 RSS 硬上限。达到预算后的普通写入仍按现有策略触发 flush；显式容量预留和 QuIVer 大分配则会在操作前返回错误。
@@ -423,6 +427,8 @@ RuntimeError: Database 'data.tdb' is already opened by another process.
 
 相比引入重型的跨进程内存通信与多版本控制架构，TriviumDB 选择 Writer 全文件级独占锁定：同一数据库同一时刻只允许一个 Writer。ReadOnly 使用共享锁并允许多个独立 Reader 并发；Immutable 用于经过 manifest 校验、生命周期内绝不原地修改的不可变 generation。
 
+同一 Python 或 Node 数据库实例被多个线程调用时，v0.8.3 已不会再暴露 `Already borrowed` 之类的绑定层借用冲突，但这**不等于支持真正的并行多写者提交**。调用方仍应把所有写操作汇聚到单一写队列，并在应用层用 `Lock` / `Mutex` / actor / 单消费者任务进行串行化；读查询可以交给 ReadOnly/Immutable Reader 并发执行。不要把“多个线程调用成功”误解为多个 Writer 能并行修改同一数据库。
+
 **如果确实存在多端读写或高并发共享的需求，请遵循嵌入式数据库的最佳实践：多线程调度、读写仲裁、锁的抢占等复杂机制，应由外部业务逻辑或应用服务进行设计（如通过单例模式封装连接池，或在应用程序外层架设统一的 RESTful API 网关代理）。存储引擎本身的职责是坚守绝对的数据一致性边界。**
 
 ---
@@ -496,7 +502,7 @@ rows = db.tql('FIND {type: "event"} RETURN *')  # 自动使用索引
 
 ### 使用 tql_mut 进行结构化写操作
 
-v0.6.0 新增的 `tql_mut` 提供声明式写操作，适合批量修改和条件删除：
+`tql_mut` 只接受 CREATE/SET/DELETE/DETACH DELETE。读查询必须调用 `tql`/`tql_values`，误用会返回迁移错误：
 
 ```python
 # 批量创建节点
@@ -676,7 +682,7 @@ db_b = triviumdb.TriviumDB("shared.tdb", dim=768)  # 💥 文件锁冲突!
 - TriviumDB 保证从 `0.7.0` 开始的已发布数据库文件可由后续版本读取并迁移。
 - `0.7.0` 的 v5/32-chunk BQ 和 `0.7.1–0.8.x` 的 v5/48-chunk BQ 会被自动识别；可写句柄下一次 `flush()` 或 `close()` 原子升级为自描述 v6。
 - ReadOnly 可以读取受支持旧格式，但不会原地升级；Immutable 的 manifest 必须与现有文件字节匹配。
-- 不对 `0.7.0` 以前的数据库文件提供自动兼容保证。需要保留历史数据时，请使用对应旧版导出 JSONL，再用当前版本导入；不要直接修改文件头版本号。
+- 当前主文件为 v7，只读取 v5–v7；早于 v5 使用对应旧版导出迁移。无头 WAL 不再自动解析。不要手工修改文件头或 sidecar 版本号。
 - 当前内核遇到低于最低支持版本或高于当前版本的文件会明确返回版本错误并保持文件不变，不会猜测解析。
 
 文件格式升级与下文的 Embedding 维度迁移是两件不同的事：前者保留现有向量并由内核自动完成，后者用于更换向量模型和维度。
@@ -976,9 +982,9 @@ db = triviumdb.TriviumDB("data.tdb", dim=1536, dtype="f16")  # 向量内存减�
 
 ### 二、字段索引：利用并行特征布隆网与"缩圈"策略
 
-**架构现状 (v0.6)**：TriviumDB 通过 **行级隐式布隆特征阵列 (Parallel Bit-Tag Array)** 技术，已经实现了绝大部分等值 `$eq` 的极速硬件并发拦截。这意味着过滤查询**不再需要昂贵的 JSON O(N) 反序列化**，99% 的不匹配节点会在几个 CPU 时钟周期内被直接物理截断返回。
+**当前架构**：TriviumDB 同时拥有持久化 Hash、Ordered ART、Composite ART、Roaring Bitmap 和行级 Fast Tags。Planner 会根据等值、范围、左前缀、低基数和多条件交集选择访问路径。这意味着过滤查询**不再需要昂贵的 JSON O(N) 反序列化**，99% 的不匹配节点会在几个 CPU 时钟周期内被直接物理截断返回。
 
-> 💡 对范围查询 `$gt` 或部分极复杂逻辑的优化，引擎依然会回落到精准 JSON 解析对比。对 JSON 字段建立 B-Tree 或完整 Hash 索引（`create_index("field_name")`）是后续路线。
+> 高频等值使用 Hash；范围/前缀/ORDER BY 使用 Ordered ART；多字段联合条件使用 Composite ART；低基数字段使用 Bitmap。最终仍执行精确 JSON 谓词校验，索引只负责安全缩小候选。
 
 **规避策略**：
 
@@ -996,15 +1002,17 @@ alices = [hit for hit in candidates if hit.payload.get("name") == "Alice"]
 node = db.get(known_id)
 ```
 
-对于确实需要高频全表 Payload 过滤的业务场景（如统计报表），建议在外部维护一份专用数据库（SQLite / PostgreSQL）同步记录关键字段索引，由 TriviumDB 负责语义检索，外部数据库负责精确过滤，实现互补。
+对于高频属性查询，应优先建立合适的 TDB 属性索引并通过 `index_info()` 核验类型、字段与基数。只有在需要 SQL 事务语义、复杂关系 JOIN 或外部分析生态时，才额外同步 SQLite/PostgreSQL。
 
 ---
 
-### 三、TQL 子集：定位是"图谱导航"而非完整图查询语言
+### 三、TQL：自由 DIY 的三模混合查询管线
 
-**边界**：TriviumDB 内置的 TQL 查询引擎支持 `MATCH`、`WHERE`、`RETURN`、`CREATE`、`SET`、`DELETE` 等基础语法，**不支持** `UNWIND`、`OPTIONAL MATCH`、聚合函数、路径算法等高级语法。它不是 Neo4j 的替代品。
+TQL 的核心价值不是“兼容另一种查询语言”，而是允许开发者围绕自己的 RAG、Agent、知识图谱、权限链、推荐或风控语义，自由组装向量、属性、业务图、图算法、路径、集合、迭代、聚合与重排。它不是只能选择 `vector-first` 或 `graph-first` 的固定模板：同一查询可以生成多个命名 NodeSet，逐阶段过滤、扩展、求交、寻路、计算图分数并再次排名。
 
-**正确定位**：TriviumDB 的 TQL 引擎的设计职责是在**向量检索已完成锚点定位后，沿已知图谱结构做精准的结构化跳转**。这类查询通常只有 1~3 跳，节点集极小，根本不需要复杂的查询计划器。
+TQL 已支持 OPTIONAL MATCH、WITH 管线、聚合、图算法、Path/Shortest、集合代数、Prepared 参数和统计感知 Cascades。它不承诺完整 SQL、Cypher 或 GQL 语法兼容；定位是把这些能力作为同一嵌入式执行器中的可组合算子，同时用作用域检查、预算和确定性约束守住自由编排的工程边界。
+
+优化器是确定性、有界、统计感知且成本驱动的 Cascades，不宣称数学意义上的全局最优。复杂查询应检查 EXPLAIN 的物理算子、预计行数、预算切片和边界语义。
 
 ```python
 # TriviumDB TQL 的正确用法：向量找锚，TQL 做图谱扩散导航
@@ -1014,7 +1022,7 @@ anchor_id = db.search(encode("小明的工作关系"), top_k=1)[0].id
 rows = db.tql(f'MATCH (a {{id: {anchor_id}}})-[:colleague]->(b) RETURN b')
 ```
 
-对于需要复杂图算法（最短路径、社区发现、PageRank）的场景，TriviumDB 的 **SA-PPR** 是有限深度扩散激活，不等同于收敛式 PageRank；它适合记忆关联传播，但标准 PageRank 分析仍应使用专用图算法：
+TQL 已内置最短路径、PageRank、WCC、Degree/Betweenness、标准多层 Leiden、Label Propagation 和 SA-PPR。SA-PPR 仍是有限深度扩散，不等同于收敛式 PageRank；应按语义选择算子：
 
 ```python
 results = db.search_advanced(

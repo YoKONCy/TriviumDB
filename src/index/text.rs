@@ -1,3 +1,9 @@
+//! 稀疏文本召回索引：Aho-Corasick 精确关键词 + BM25 2-Gram。
+//!
+//! 关键词目录负责高精度锚点，BM25 维护词频、文档长度和全局统计，两路结果由上层
+//! 混合检索管线融合。快照包含独立魔数/版本并按确定性顺序序列化；增删节点必须同步
+//! 清理所有 posting，防止 tombstone 文档在重启后重新出现。
+
 use crate::node::NodeId;
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use serde::{Deserialize, Serialize};
@@ -6,7 +12,7 @@ use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
 const TEXT_INDEX_MAGIC: &[u8; 4] = b"TIDX";
-const TEXT_INDEX_VERSION: u32 = 2;
+pub const TEXT_INDEX_VERSION: u32 = 2;
 
 #[derive(Serialize)]
 struct TextIndexSnapshotRef<'a> {

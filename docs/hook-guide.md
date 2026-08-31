@@ -1,6 +1,6 @@
 # TriviumDB Hook 开发指南
 
-> 🔌 面向想要深度定制检索管线的开发者：从零实现自定义 Hook 的完整攻略。
+> 面向深度定制固定检索管线的开发者。Hook 作用于 `search*` 工业检索管线；TQL 的 Cascades/NodeSet 管线通过查询算子和 EXPLAIN 扩展，不经过这些 Hook。
 
 ---
 
@@ -422,7 +422,7 @@ db.set_hook(composite);
 ## 安全注意事项
 
 1. **FFI 插件信任**：`load_ffi_hook()` 加载的动态库在进程内执行任意代码，**请确保来源可信**
-2. **Hook 回调不要阻塞**：管线执行期间持有 MemTable 锁，Hook 中执行网络 I/O 或长时间计算会阻塞所有读写
+2. **Hook 回调不要阻塞**：管线执行期间持有 MemTable 读锁，网络 I/O 或长计算会延迟 Writer；禁止从同线程重入写 API，内核会明确拒绝
 3. **不要修改向量维度**：`on_pre_search` 中可以修改查询向量的分量值，但**不要改变 Vec 长度**
 4. **C++ 异常安全**：FFI 回调中的 C++ 异常穿越 Rust FFI 边界会导致 UB，请在 C++ 侧 `try-catch` 所有异常
 5. **及时清除**：测试/调试用的 Hook 使用完毕后调用 `clear_hook()` 移除，避免影响后续正常查询性能
@@ -435,7 +435,7 @@ db.set_hook(composite);
 
 **Q: Hook 对普通 `search()` 有效吗？**
 
-A: 有效。`search()` 和 `search_hybrid()` 内部都走 `execute_pipeline`，已注册的 Hook 会在所有检索路径中生效。
+A: 对 `search()`、`search_hybrid()`、`search_advanced()` 等固定检索入口有效；TQL 查询不经过 SearchHook。
 
 **Q: 能否用纯 Python / JavaScript 编写 Hook？**
 

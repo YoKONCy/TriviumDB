@@ -429,6 +429,40 @@ fn 容量规划_事务预留拒绝前后WAL与代际完全不变() {
 }
 
 #[test]
+fn 容量规划_更新与图边增长在WAL前统一拒绝() {
+    let path = tmp_db("incremental_growth_budget");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let first = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], json!({"name": "first"}))
+        .unwrap();
+    let second = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], json!({"name": "second"}))
+        .unwrap();
+    db.set_memory_limit(1);
+    let before = db.storage_write_stats();
+
+    assert!(matches!(
+        db.update_payload(first, json!({"name": "blocked"})),
+        Err(TriviumError::CapacityReservationRejected { .. })
+    ));
+    assert!(matches!(
+        db.update_vector(first, &[0.0, 0.0, 1.0, 0.0]),
+        Err(TriviumError::CapacityReservationRejected { .. })
+    ));
+    assert!(matches!(
+        db.link(first, second, "blocked", 1.0),
+        Err(TriviumError::CapacityReservationRejected { .. })
+    ));
+    assert_eq!(db.storage_write_stats(), before);
+    assert!(db.get_edge(first, second, "blocked").is_none());
+
+    db.set_memory_limit(0);
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
 fn 容量规划_批次中非法向量不得产生半批数据() {
     let path = tmp_db("batch_validation_atomicity");
     cleanup(&path);

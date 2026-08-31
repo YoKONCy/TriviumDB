@@ -1,3 +1,9 @@
+//! 分层向量池：mmap 基础层、内存增量层与连续读取视图。
+//!
+//! 基础层使用 MAP_PRIVATE 映射保持磁盘只读，新增向量进入 delta；读取时按需构建
+//! 连续合并缓存。flush 根据基础层是否产生 COW 脏页选择 O(delta) 追加或 O(total)
+//! 原子重写，并在 Windows 上保证先释放 mmap 再替换文件。
+
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
 use crate::storage::fs::robust_rename_and_sync;

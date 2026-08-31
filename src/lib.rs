@@ -1,3 +1,9 @@
+//! TriviumDB 嵌入式三模数据库核心库。
+//!
+//! 一个稳定 NodeId 同时关联向量、JSON Payload 与带标签业务图；Database 提供单写多读
+//! 存储，TQL 提供可自由编排的混合查询，QuIVer/属性/文本/图索引负责加速。所有公共
+//! 路径共享确定性、预算 fail-closed、版本化磁盘格式和 ReadOnly/Immutable 零写约束。
+
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::ptr_arg)]
 #![allow(clippy::needless_range_loop)]
@@ -14,6 +20,7 @@ pub mod node;
 pub mod observability;
 pub mod query;
 pub mod storage;
+pub mod tsng;
 
 #[cfg(feature = "test-hooks")]
 pub mod test_hooks;
@@ -35,6 +42,11 @@ pub use hook::{CompositeHook, FfiHook, HookContext, NoopHook, SearchHook};
 pub use node::{Edge, GroupedSearchResult, NodeId, NodeView, SearchHit};
 pub use storage::generation::{CurrentGeneration, GenerationReader, GenerationStore};
 pub use storage::memtable::{GraphIntegrityReport, GraphRepairReport, GraphStats};
+pub use tsng::{
+    BeamAdaptation, GraphSignalQuery, IndustrialAccessPath, IndustrialSearchConfig,
+    QueryMemoryBudget, TsngBudget, TsngCost, TsngGroundTruth, TsngHit, TsngQualityMetrics,
+    TsngQuery, TsngSearchConfig, TsngSearchMetrics, TsngSearchResult, TsngWeights, quality_metrics,
+};
 pub mod vector;
 pub use vector::VectorType;
 

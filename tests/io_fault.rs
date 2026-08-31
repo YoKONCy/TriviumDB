@@ -132,8 +132,10 @@ fn IO_02_WAL文件注入随机垃圾_安全恢复() {
 
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
     assert!(result.is_ok(), "WAL 垃圾数据不应导致 panic");
-    let db = result.unwrap().unwrap();
-    assert_eq!(db.node_count(), 30, "flush 过的数据应完整");
+    assert!(matches!(
+        result.unwrap(),
+        Err(triviumdb::TriviumError::UnsupportedWalVersion { .. })
+    ));
 
     cleanup(&path);
 }

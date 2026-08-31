@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> **版本**: v0.8.2
+> **版本**: v0.8.3
 > **定位**: 统一查询 DSL — 融合文档过滤、图模式匹配、向量检索于一体  
 > **前置依赖**: 零外部依赖，纯 Rust 实现
 
@@ -16,22 +16,27 @@
 - [WHERE — 统一谓词系统](#where--统一谓词系统)
 - [RETURN / ORDER BY / LIMIT / OFFSET](#return--order-by--limit--offset)
 - [操作符速查表](#操作符速查表)
-- [与旧 API 的对照迁移](#与旧-api-的对照迁移)
-- [形式语法 (EBNF)](#形式语法-ebnf)
-- [内部架构](#内部架构)
-- [已知限制与路线图](#已知限制与路线图)
+- [WITH 可组合管线](#with-可组合管线)
+- [表达式、聚合与空值](#表达式聚合与空值)
+- [Prepared TQL](#prepared-tql)
+- [路径与集合代数](#路径与集合代数)
+- [形式语法与内部架构](#形式语法与内部架构)
+- [当前边界](#当前边界)
 
 ---
 
 ## 概述
 
-TQL 是 TriviumDB 的统一查询语言，将三种原本独立的查询范式合并为一个连贯的 DSL：
+TQL 是 TriviumDB 的统一查询语言，也是面向三模数据的 **自由 DIY 混合查询管线**。它不是把几条预设 RAG 流程包装成语法糖，而是让开发者把向量召回、属性过滤、图模式、图扩展、图算法、路径、集合运算、迭代、聚合和重排作为算子，按照自己的业务语义自由编排。
 
-| 入口 | 对应能力 | 替代的旧 API |
-|------|---------|-------------|
-| `FIND` | MongoDB 风格文档过滤 | `db.filter()` / `db.filter_where()` |
-| `MATCH` | Cypher 风格图模式匹配 | `db.query()` |
-| `SEARCH` | 向量相似度检索 + 图扩散 | `db.search()` |
+这种自由不是无边界的字符串拼接：每个阶段都有明确输入/输出类型、作用域、确定性规则和预算切片，完整查询仍由 Parser、Cascades 与 Pipeline 统一验证和优化。
+
+| 入口 | 对应能力 |
+|------|---------|
+| `FIND` | MongoDB 风格文档过滤与属性索引规划 |
+| `MATCH` / `OPTIONAL MATCH` | 图模式、可变长路径与 GraphFirst |
+| `SEARCH` | 向量源、确定性扩展与跨模管线 |
+| `WITH` | 命名 NodeSet、图算法、集合、路径、迭代与聚合组合 |
 
 **设计哲学**：
 
@@ -53,11 +58,11 @@ for row in &results {
 }
 ```
 
-**Python (计划中)：**
+**Python：**
 ```python
 results = db.tql('FIND {type: "event", heat: {$gte: 0.7}} RETURN * LIMIT 10')
-for row in results:
-    print(row["_"]["payload"])
+for result in results:
+    print(result.row["_"]["payload"])
 ```
 
 ---
@@ -353,17 +358,19 @@ RETURN *
 
 方向可为 `OUTGOING`、`INCOMING` 或 `BOTH`；省略时默认 `OUTGOING`。标签列表支持 `|` 分隔，省略标签表示全部边。EXPAND 使用确定性最短路径 Reachability 收集候选；候选或访问预算超限时明确报错，不静默截断。
 
-**EXPAND 执行流程**：
+**SEARCH + EXPAND 逻辑流程**：
 
+```text
+查询向量 → Cascades 选择向量访问路径 → 稳定 Top-K 锚点
+                                      │
+                                      ▼
+                             确定性 Reachability
+                                      │
+                                      ▼
+                             候选去重 → WHERE → 投影
 ```
-查询向量 → T::similarity 全量打分 → Top-K 锚点
-                                       │
-                                       ▼
-                              确定性 Reachability
-                                       │
-                                       ▼
-                              候选集去重 → WHERE 过滤 → 返回
-```
+
+实际物理路径可使用可用的向量索引或 exact fallback，并受统计信息、访问模式和预算约束。
 
 ### 带 WHERE 过滤
 
@@ -381,7 +388,7 @@ RETURN *
 
 > 💡 `SEARCH` 的 WHERE 过滤在向量打分和 EXPAND 之后执行，作为最终的候选集筛选。
 
-> ⚠️ 当前 `SEARCH` 使用全量 brute-force 打分。对于大规模数据集，建议使用 `db.search_advanced()` 走 QuIVer ANN 图索引加速管线。
+> `SEARCH` 进入统一 NodeSet/Cascades 管线；物理访问路径由统计、索引可用性和预算共同决定。需要认知检索、文本双路召回或 Hook 时仍使用 `search_advanced()`；两者语义不同，不应仅按“快/慢入口”区分。
 
 ---
 
@@ -480,8 +487,11 @@ WHERE a.age > 25 AND b MATCHES {tags: {$all: ["rust"]}}
 ### RETURN
 
 ```sql
-RETURN *          -- 返回所有绑定变量
-RETURN a, b       -- 仅返回指定变量
+RETURN *
+RETURN a, b
+RETURN a.score * 1.2 + 3 AS adjusted
+RETURN COALESCE(a.nickname, a.name, "unknown") AS display
+RETURN COUNT(*) AS total, AVG(a.score) AS avg_score
 ```
 
 - `FIND` / `SEARCH` 场景下，`RETURN *` 将节点绑定到隐式变量 `_`
@@ -507,7 +517,53 @@ LIMIT 10 OFFSET 20    -- 跳过前 20 条，返回 10 条
 
 ---
 
-## 与旧 API 的对照迁移
+## WITH 可组合管线
+
+`WITH` 把每个阶段的 NodeSet 绑定到显式 alias，作用域在解析期校验；未定义变量和错误阶段输入会在执行前拒绝，不产生部分结果。
+
+```sql
+SEARCH VECTOR [0.1, 0.2] TOP 100 AS seed
+WITH seed
+EXPAND seed [:cites*1..2] AS related
+WITH related
+WHERE similarity(related) > 0.5
+RETURN related, similarity(related) AS sim
+ORDER BY sim DESC LIMIT 10
+```
+
+可组合阶段包括 `EXPAND`、`FILTER/WHERE`、`RANK`、PageRank、WCC、Degree/Betweenness、Leiden、Label Propagation、SA-PPR、`ALL_PATHS`、`SHORTEST_PATHS`、`UNION/INTERSECT/EXCEPT` 与 `ITERATE`。每阶段接受预算切片，并在 EXPLAIN 中暴露成本、预计行数、临时字节和物理实现。
+
+## 表达式、聚合与空值
+
+表达式支持 `+ - * /`、括号优先级、参数、属性、一等分数、`COALESCE`、`IS NULL/IS NOT NULL`、`path()` 与 `path_length()`。除零、非数值算术和非有限结果返回 Null，不 panic。
+
+聚合支持 `COUNT/SUM/AVG/MIN/MAX/COLLECT` 与 aggregate `DISTINCT`。RETURN 中非聚合表达式构成隐式分组键；空输入 `COUNT(*)=0`，其他无值聚合返回 Null。聚合结果必须通过 `tql_values` 或动态语言统一值 API 获取。
+
+## Prepared TQL
+
+```python
+prepared = db.prepare_tql(
+    "FIND {kind: \"note\"} RETURN $bonus + 1 AS score"
+)
+print(prepared.parameter_names())
+rows = db.execute_prepared_tql(prepared, {"bonus": 4})
+```
+
+Node 使用 `prepareTql/executePreparedTql`，Rust 使用 `prepare_tql/execute_prepared_tql`。缺参、额外参数、数组/对象参数和非有限数值全部 fail-closed；同一 Prepared 对象可重复绑定执行。
+
+## 路径与集合代数
+
+```sql
+SEARCH VECTOR [1, 0] TOP 1 AS seed
+WITH seed
+SHORTEST_PATHS seed TO [42] LABEL cites AS route
+WITH route
+RETURN path(route) AS nodes, path_length(route) AS hops
+```
+
+Path 当前是一等 NodeId 序列；`path_length` 返回边数。集合阶段公开 `UNION/INTERSECT/EXCEPT`，结果按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。路径与集合均受节点数、字节和遍历预算约束。
+
+## 历史 API 迁移
 
 ### db.query() → db.tql()
 
@@ -540,7 +596,9 @@ LIMIT 10 OFFSET 20    -- 跳过前 20 条，返回 10 条
 
 ---
 
-## 形式语法 (EBNF)
+## 形式语法与内部架构
+
+以下 EBNF 仅展示顶层骨架；WITH 图算法阶段和 Mongo 文档过滤的完整细节以 Parser 为准。
 
 ```ebnf
 Query       := Entry (WHERE Predicate)? (RankClause)? RETURN ReturnClause
@@ -587,58 +645,51 @@ OrderExpr    := Expr (ASC | DESC)?
 
 ---
 
-## 内部架构
+### 内部架构
 
-TQL 由四个模块组成，遵循项目既有的模块化拆分模式：
+TQL 由七个协作模块组成，延续项目既有的模块化拆分：
 
 | 模块 | 文件 | 行数 | 职责 |
 |------|------|------|------|
-| **AST** | `query/tql_ast.rs` | ~160 | 统一语法树定义 |
-| **词法分析器** | `query/tql_lexer.rs` | ~300 | Token 化：17 关键字 + `$op` + 注释 |
-| **语法分析器** | `query/tql_parser.rs` | ~670 | 递归下降解析 → AST |
-| **执行器** | `query/tql_executor.rs` | ~790 | DFS 遍历 + 谓词评估 + 排序 |
+| **AST** | `query/tql_ast.rs` | 查询、管线、表达式、聚合、Path |
+| **Lexer** | `query/tql_lexer.rs` | Token、参数、位置诊断 |
+| **Parser** | `query/tql_parser.rs` | 递归下降、作用域与语义验证 |
+| **Cascades** | `query/cascades.rs` | Memo、物理候选、成本与预算 |
+| **Pipeline** | `query/pipeline.rs` | NodeSet 与图/集合/路径算子 |
+| **Executor** | `query/tql_executor.rs` | 一等值、聚合和结果投影 |
+| **Prepared** | `query/tql_prepared.rs` | 严格参数绑定 |
 
 ### 执行流程
 
+```text
+TQL 文本
+  → TqlLexer
+  → TqlParser / TqlQuery AST
+  → Cascades Memo（统计、成本、预算与确定性 tie-break）
+  → PipelineOperator（索引访问、NodeSet、图、路径、集合与迭代）
+  → 表达式/聚合/排序/分页
+  → TqlValueResult（Node、标量、Path、List、Null）
 ```
-TQL 字符串
-    │
-    ▼
-TqlLexer::tokenize()  →  Vec<TqlToken>
-    │
-    ▼
-TqlParser::parse_query()  →  TqlQuery (AST)
-    │
-    ▼
-execute_tql(&query, &memtable)
-    ├── FIND  → 全表扫描 + Filter::matches
-    ├── MATCH → DFS 图遍历 + Predicate 评估
-    └── SEARCH → T::similarity + Reachability EXPAND + WHERE
-    └── MATCH + RANK → 图 anchor 去重 + 集合内精确向量评分
-    │
-    ▼
-ORDER BY → OFFSET → LIMIT → TqlResult<T>
-```
+
+`FIND` 可选择主键、Hash/Ordered/Composite/Bitmap、索引交集或 Fast Tags + 精确校验；`SEARCH` 可选择可用的向量访问路径与 exact fallback；`MATCH`、图算法和路径阶段复用 `.gidx`/内存图目录。Cascades 是确定性、有界、统计感知且成本驱动的优化器，不宣称穷举意义上的数学全局最优。
 
 ---
 
-## 已知限制与路线图
+## 当前边界
 
-### TQL SEARCH 与现有检索管线的关系
+### TQL 与认知检索 API 的关系
 
-> ⚠️ **重要定位说明**：TQL 的 `SEARCH` 入口定位为**轻量级语义探查工具**，而非现有 `db.search()` / `db.search_advanced()` 检索管线的替代品。
+TQL 和 `search_advanced()` 共用底层数据、QuIVer、图与预算设施，但提供不同语义：
 
-| 维度 | `db.search*()` 管线 | `db.tql("SEARCH ...")` |
-|------|---------------------|------------------------|
-| 向量索引 | QuIVer ANN 图索引 + rayon 并行 | brute-force 全扫 |
-| 图扩散 | Spreading Activation（热度传播 + 边权衰减） | 确定性 Reachability 候选收集 |
-| 文本混合 | BM25 + AC 自动机双路召回 | 不支持 |
-| 认知管线 | FISTA / DPP / NMF | 不支持 |
-| Hook 注入 | 6 阶段管线 Hook | 不支持 |
-| 适用场景 | **生产级 RAG 检索** | **数据探查 / 简单语义过滤** |
+| 维度 | `search_advanced()` | TQL Pipeline |
+|---|---|---|
+| 主要目标 | 固定工业 RAG 检索管线 | 任意三模算子组合 |
+| 向量访问 | QuIVer / exact fallback | Cascades 选择向量源与重排 |
+| 图能力 | SA-PPR 扩散 | EXPAND、路径、PageRank/WCC/Leiden 等 |
+| 文本/认知 | AC+BM25、FISTA、DPP、Hook | 通过 TQL 算子与属性/向量/图组合 |
+| 结果 | SearchHit | Node/标量/Path/List/Null 绑定行 |
 
-- **FIND / MATCH**：✅ 设计目标是完全替代 `db.filter_where()` / `db.query()`
-- **SEARCH**：定位为补充，不替代现有管线。两者长期共存
+两者长期共存：固定低开销 RAG 流程优先使用 `search*`，需要跨阶段优化、聚合、路径或图算法组合时使用 TQL。
 
 ### 当前限制
 

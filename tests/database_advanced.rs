@@ -458,15 +458,17 @@ fn COV2_16_tql_mut_detach_delete() {
     cleanup(&path);
 }
 
-/// tql_mut — 读查询降级
+/// tql_mut — 读查询明确拒绝并提示替代 API
 #[test]
-fn COV2_17_tql_mut_read_fallback() {
+fn COV2_17_tql_mut_rejects_read_query() {
     let path = tmp_db("tql_read_fb");
     let mut db = seed_social_graph(&path);
 
-    // 传入读查询给 tql_mut
-    let result = db.tql_mut(r#"FIND {type: "user"} RETURN *"#).unwrap();
-    assert_eq!(result.affected, 0, "读查询降级应 affected=0");
+    let error = db.tql_mut(r#"FIND {type: "user"} RETURN *"#).unwrap_err();
+    assert!(matches!(
+        error,
+        triviumdb::TriviumError::ApiMigrationRequired { .. }
+    ));
 
     cleanup(&path);
 }

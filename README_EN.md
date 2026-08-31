@@ -38,6 +38,9 @@ TriviumDB is an **embedded single-file database engine** written in pure Rust, n
 
 Our goal: **SQLite for AI applications.**
 
+- 🧪 **DIY hybrid query pipelines** — TQL turns vector recall, property indexes, graph expansion, graph algorithms, paths, set algebra, iteration, aggregation, and reranking into freely composable operators, planned by a deterministic Cascades optimizer
+- 📊 **Four persistent property indexes** — Hash / Ordered ART / Composite ART / Roaring Bitmap: equality, range, prefix, composite predicates, and low-cardinality set operations all index-accelerated
+- 🧮 **Built-in graph algorithm library** — PageRank / WCC / Leiden / Betweenness / Degree / Label Propagation / SA-PPR callable inside queries, plus `ALL_PATHS` / `SHORTEST_PATHS` / `UNION` / `INTERSECT` / `EXCEPT` / `ITERATE`
 - 🗃️ **Dual storage modes** — Single-file `*.tdb` portability or split `.vec` mmap zero-copy loading
 - 🔗 **Node = everything** — Each node natively holds a dense vector, sparse text index, JSON metadata, and graph edges under one globally unique ID
 - 🧠 **AI-native** — Optional hybrid recall (AC-automaton BM25 + dense vector) triggers graph spreading activation, with built-in cognitive pipelines (FISTA / DPP / PPR)
@@ -169,6 +172,42 @@ TriviumDB uses an **intelligent auto-routing dual engine** for vector indexing �
 
 **Independent persistence**: QuIVer index stored as `.tdb.quiver` file, POD data memcpy ultra-fast serialization, zero-cost recovery on restart.
 
+---
+
+## Research Frontier: TSNG Tri-Signal Navigation
+
+**TSNG (Tri-Signal Navigation Graph)** is TriviumDB's hybrid-retrieval research track: a single query declares **vector, property, and graph signals** together, with `TsngWeights` controlling the three-way mix, producing a unified scored candidate set — "semantically similar, filter-compliant, and structurally reachable".
+
+```rust
+use triviumdb::tsng::{TsngQuery, TsngWeights, GraphSignalQuery};
+
+let query = TsngQuery {
+    vector: &query_embedding,
+    payload_filter: Some(&Filter::eq("kind", "note")),   // property signal
+    graph: Some(GraphSignalQuery {                        // graph signal
+        anchor_id: seed_id,
+        direction: ReachabilityDirection::Outgoing,
+        labels: Some(vec!["cites".into()]),
+        min_edge_weight: 0.2,
+        max_hops: 2,
+    }),
+    top_k: 10,
+    weights: TsngWeights { vector: 1.0, property: 1.0, graph: 0.5 },
+    budget: Default::default(),
+};
+
+let result = db.search_tsng(&query, config)?;   // every hit carries the signal breakdown
+```
+
+Its research value lies in **measurable retrieval quality**:
+
+- **Multiple execution strategies**: `search_tsng_post_filter` / `search_tsng_graph_union` / `search_tsng_industrial` — six hybrid-search access paths selected by budget and statistics
+- **Explainable signals**: `TsngHit` returns `vector_similarity` / `property_signal` / `graph_signal` decompositions, not a black-box score
+- **Built-in ground truth**: `tsng_ground_truth` produces exact answers with Recall@K / NDCG@K quality metrics — paper-grade experiments are directly reproducible
+- **Bounded budgets**: candidates, visited nodes, examined edges, and frontier size all fail closed
+
+> ⚠️ TSNG is currently an **experimental research track**: the default production paths remain TQL and the `search*` family. The TSNG API may evolve with research findings and is not semantically frozen.
+
 ```toml
 # Enable Python bindings
 maturin develop --features python
@@ -255,12 +294,12 @@ const batchResults = await db.searchBatch(queryVectors, 10, 0, 0.0)
 
 Every TriviumDB node can carry a **vector, JSON document, sparse text, and graph relationships** at the same time. They share one NodeId space, transaction boundary, WAL, and lifecycle, so applications do not need to synchronize copies across a vector database, document store, and graph database. Write the data once, then choose the query path that matches each question.
 
-### TQL: One Unified Query Language
+### TQL: A DIY-Composable Unified Query Language
 
-**TQL (Trivium Query Language)** unifies document filtering, graph pattern matching, vector search, and GraphFirst constrained ranking in a lightweight DSL:
+**TQL (Trivium Query Language)** is not three syntaxes glued together — it is a **freely composable tri-modal execution pipeline**. Every `WITH` stage produces a named NodeSet; vectors, property indexes, graph expansion, graph algorithms, paths, and set algebra are chained according to your business semantics, and the Cascades optimizer picks the physical plan within budget:
 
 ```sql
--- Document query: filter JSON fields
+-- Document query: filter JSON fields (property indexes skip full scans when hit)
 FIND {type: "paper", year: {$gte: 2024}} RETURN * LIMIT 10
 
 -- Graph query: match structural relationships
@@ -278,9 +317,36 @@ MATCH (paper)-[:belongs_to]->(topic)
 WHERE topic.name == "Database"
 RANK paper BY VECTOR [0.12, -0.45, 0.78] TOP 10
 RETURN paper
+
+-- 🧪 DIY: vector seed → graph expansion → graph algorithm scoring → similarity filter → rerank
+SEARCH VECTOR [0.12, -0.45, 0.78] TOP 100 AS seed
+WITH seed
+EXPAND seed [:cites*1..2] AS related
+WITH related
+pagerank related AS scored
+WITH scored
+WHERE similarity(scored) > 0.5
+RETURN scored, similarity(scored) AS sim
+ORDER BY sim DESC LIMIT 10
+
+-- 🛰️ Paths: bounded shortest paths from a semantic anchor
+SEARCH VECTOR [1, 0] TOP 1 AS seed
+WITH seed
+SHORTEST_PATHS seed TO [42] LABEL cites AS route
+WITH route
+RETURN path(route) AS nodes, path_length(route) AS hops
 ```
 
-TQL also supports `WHERE`, `RETURN`, `ORDER BY`, `LIMIT/OFFSET`, aggregation, `OPTIONAL MATCH`, and DML. See the **[TQL Reference](docs/tql-reference.md)** for the complete syntax.
+A single query can also use `union` / `intersect` / `except` for multi-way candidate set algebra, `iterate` for fixed-point diffusion, and `COUNT/SUM/AVG/MIN/MAX/COLLECT` for aggregation. `EXPLAIN` exposes the physical operators chosen by Cascades, estimated rows, temp bytes, and budget slices.
+
+```python
+# Prepared TQL: safely rebind business parameters on the same pipeline
+prepared = db.prepare_tql('FIND {kind: "note"} RETURN $bonus + 1 AS score')
+print(prepared.parameter_names())          # ['bonus']
+rows = db.execute_prepared_tql(prepared, {"bonus": 4})
+```
+
+Rust, Python, and Node.js share the same TQL, Prepared queries, four property indexes, and first-class query values. See the **[TQL Reference](docs/tql-reference.md)** for the complete syntax.
 
 ### Graph and Hybrid Query Modes
 
@@ -292,6 +358,10 @@ TQL also supports `WHERE`, `RETURN`, `ORDER BY`, `LIMIT/OFFSET`, aggregation, `O
 | **Vector + structural expansion (SEARCH + EXPAND)** | Locate semantic anchors, then collect structural candidates through `OUTGOING`, `INCOMING`, or `BOTH` edges | Add upstream or downstream context after semantic retrieval |
 | **SA-PPR graph diffusion** | Propagate relevance energy from vector/text anchors over weighted edges, with optional inhibition, fatigue, and restart | Agent associative memory, RAG context expansion, recommendation recall |
 | **Hybrid retrieval (`search_hybrid`)** | Combine Aho-Corasick, BM25 sparse text, and dense vectors before graph diffusion and reranking | Production retrieval balancing exact terminology and semantic similarity |
+| **Graph algorithm pipelines (WITH)** | `pagerank` / `wcc` / `degree` / `leiden` / `label_propagation` / `sa_ppr` score NodeSets; `graph_score()` projects results | Influence ranking, community detection, graph analytics |
+| **Path queries (ALL_PATHS / SHORTEST_PATHS)** | Bounded all-paths and batch shortest paths with label sequences, forbidden nodes, and path aggregation | Lineage tracing, dependency analysis, authorization chains |
+| **Set algebra (UNION / INTERSECT / EXCEPT)** | Deterministic union / intersection / difference over multi-way candidate NodeSets | Multi-way recall fusion, candidate convergence |
+| **Prepared TQL** | Parameterized queries; missing / extra / invalid parameters fail closed | Safe reuse of high-frequency business queries |
 
 These modes are complementary rather than interchangeable: **Reachability answers “is it structurally reachable?”**, **GraphFirst answers “which item is most similar within this structural constraint?”**, and **SA-PPR answers “which related nodes deserve more relevance?”** Applications can choose among them over the same `.tdb` data or combine document, graph, and vector conditions in one TQL query.
 
@@ -301,6 +371,10 @@ These modes are complementary rather than interchangeable: **Reachability answer
 
 | Feature                          | Description                                                                                                                |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 🧪 **DIY hybrid queries**        | TQL `WITH` pipelines: vectors / properties / expansion / algorithms / paths / sets / iteration / aggregation freely composed, with deterministic Cascades optimization and transparent `EXPLAIN` |
+| 📊 **Four property indexes**     | Hash / Ordered ART / Composite ART / Roaring Bitmap persisted to `.pidx`; equality / range / prefix / composite / low-cardinality set operations all accelerated |
+| 🧮 **Built-in graph algorithms** | PageRank / WCC / Leiden / Betweenness / Degree / Label Propagation / SA-PPR callable inside queries                        |
+| 🛰️ **Paths & set algebra**      | `ALL_PATHS` / `SHORTEST_PATHS` / `UNION` / `INTERSECT` / `EXCEPT` / `ITERATE`, plus Prepared TQL across three languages     |
 | 🔍 **Hybrid retrieval**          | Vector anchor → Top-K → Graph spreading activation → Final ranking                                                         |
 | 🧠 **Cognitive pipeline**        | Multi-layer cognitive retrieval: FISTA residual probing / PPR graph diffusion / DPP diversity sampling / refractory period |
 | 🔌 **Hook system**               | 6-stage pipeline injection points with C/C++ FFI dynamic library plugin support                                            |
@@ -320,15 +394,23 @@ These modes are complementary rather than interchangeable: **Reachability answer
 
 ## Comparison with Existing Solutions
 
-| Dimension            | SQLite       | Qdrant           | Neo4j              | SurrealDB       | **TriviumDB**                                   |
-| -------------------- | ------------ | ---------------- | ------------------ | --------------- | ----------------------------------------------- |
-| Document data        | ✅ SQL       | ❌ Filter only   | ⚠️ Properties      | ✅ SurrealQL    | ✅ JSON + $gt/$in                               |
-| Vector search        | ⚠️ Extension | ✅ HNSW          | ❌ Plugin          | ✅ DiskANN      | ✅ QuIVer (BQ+Vamana)                           |
-| Graph traversal      | ⚠️ JOIN      | ❌               | ✅ Cypher          | ✅ Graph        | ✅ Native adjacency                             |
-| Embedded single-file | ✅           | ❌ Server        | ❌ JVM             | ✅ Switchable   | ✅ Single .tdb                                  |
-| Hybrid search        | ❌           | ❌               | ❌                 | ⚠️ Manual       | ✅ Vector + graph diffusion                     |
-| Zero dependencies    | ✅           | ✅               | ❌ JVM             | ❌ RocksDB      | ✅ Pure Rust                                    |
-| Deletion cost        | ✅ O(1)      | ⚠️ Rebuild index | ⚠️ Reconnect edges | ⚠️ Tombstone GC | ✅ Incremental Tombstone, 25% threshold rebuild |
+| Dimension            | SQLite       | pgvector      | Kùzu           | Qdrant           | Neo4j              | SurrealDB       | LanceDB        | **TriviumDB**                                   |
+| -------------------- | ------------ | ------------- | -------------- | ---------------- | ------------------ | --------------- | -------------- | ----------------------------------------------- |
+| Concurrent multi-writer | ⚠️ Single-writer (WAL) | ✅ MVCC multi-writer | ⚠️ Single-process writer | ✅ Server-side concurrent writes | ✅ Concurrent tx writes | ✅ Distributed write nodes | ✅ MVCC+OCC concurrent writes | ⚠️ Single-writer + shared-read/immutable generations |
+| Document data        | ✅ SQL       | ✅ SQL+JSONB  | ⚠️ Fixed table schema | ❌ Filter only | ⚠️ Property KV    | ✅ SurrealQL    | ✅ Arrow schema | ✅ Free JSON + full `$op` suite                 |
+| Vector search        | ⚠️ Extension | ✅ HNSW/IVFFlat | ✅ HNSW ext.  | ✅ HNSW          | ✅ Native HNSW     | ✅ MTree/HNSW   | ✅ IVF+quant    | ✅ QuIVer (BQ+Vamana)                           |
+| Graph traversal      | ⚠️ JOIN      | ⚠️ Recursive CTE | ✅ Cypher    | ❌ No graph ops  | ✅ Cypher          | ✅ Graph        | ❌ No graph ops | ✅ Native adjacency + `.gidx`                   |
+| Embedded single-file | ✅ One file  | ❌ PG server  | ✅ One file     | ⚠️ Memory/dir embedded | ❌ JVM        | ✅ Switchable   | ⚠️ Dir embedded | ✅ Single .tdb                                  |
+| Hybrid query freedom | ❌           | ⚠️ SQL JOINs  | ⚠️ Filtered ANN | ❌ Vector-only  | ⚠️ SEARCH-filtered | ⚠️ Manual       | ⚠️ Vec+FTS+SQL | ✅ WITH pipeline composition                    |
+| Property index suite | ✅ B+Tree    | ✅ B/GIN/BRIN | ⚠️ In-schema indexes | ⚠️ Payload indexes | ⚠️ Label+prop Range/Text | ⚠️ Unique/FTS/ANN-centric | ⚠️ Scalar idx | ✅ Hash / ART / Composite / Bitmap              |
+| Query optimizer      | ✅           | ✅            | ✅              | ❌ API-call based | ✅                 | ⚠️ EXPLAIN limited | ⚠️ DataFusion SQL | ✅ Cascades + EXPLAIN                        |
+| Graph algorithm library | ❌        | ⚠️ External ext. | ⚠️ algo extension | ❌            | ⚠️ GDS plugin      | ❌             | ❌             | ✅ 7 algorithms in-query                        |
+| Path / set queries   | ⚠️ Recursive CTE | ⚠️ Recursive CTE | ✅ `*SHORTEST` + UNION | ❌ | ✅ shortestPath | ⚠️ No path primitives | ❌  | ✅ ALL/SHORTEST_PATHS + set algebra        |
+| Zero dependencies    | ✅           | ✅            | ✅              | ✅               | ❌ JVM             | ❌ RocksDB      | ⚠️ Arrow/object-store ecosystem | ✅ Pure Rust                    |
+
+> **Concurrent multi-writer** is TriviumDB's current known weakness: the Writer owns the write path through a process-level exclusive file lock, concurrent reads rely on ReadOnly shared locks, and lock-free cross-process reads rely on immutable published generations. This is a common trade-off among embedded engines — SQLite (single writer under WAL) and the original Kùzu (single-process writes) make the same choice. For workloads that genuinely need high-concurrency multi-writer access, prefer a server-based (Qdrant/Neo4j/pgvector), distributed (SurrealDB), or MVCC table-format (LanceDB) solution.
+>
+> Comparison verified against public docs and official repositories as of 2026-08: pgvector is a PostgreSQL C extension (v0.8.2, HNSW/IVFFlat with iterative-scan filtering); Qdrant offers an embedded local mode (`QdrantClient(":memory:")` or `path=`, stored as a directory rather than a single file) plus the Qdrant Edge embedded library for Rust/Python; LanceDB is a Rust-core embedded multimodal lakehouse (vector+FTS+SQL, no graph traversal); the main Kùzu repository was archived in Oct 2025 (the team joined Apple; 0.11.3 is the final release), and its Cypher supports `*SHORTEST` recursive paths plus the algo extension; Neo4j has shipped a native vector index since 5.13 (Lucene HNSW, with in-index filtering via the Cypher 25 `SEARCH` clause); SurrealDB vector indexes use MTree/HNSW; SQLite can emulate some capabilities via the sqlite-vec extension and recursive CTEs. **"Hybrid query freedom"** means being able to compose vectors, property filters, graph traversals, graph algorithms, paths, and set operations as pipeline operators handed to a unified optimizer within a single query — exactly what the TQL `WITH` pipeline + Cascades is built for.
 
 ---
 
@@ -348,7 +430,16 @@ TriviumDB/
 │   ├── node.rs             # Node / Edge / SearchHit data structures
 │   ├── vector.rs           # VectorType Trait (f32 / f16 / u64)
 │   ├── filter.rs           # Advanced filter engine ($gt/$lt/$in/$and/$or/$startsWith/$contains)
-│   ├── error.rs            # Unified error types
+│   ├── tsng.rs             # 🔬 TSNG tri-signal hybrid retrieval research track (6 access paths + ground truth)
+│   ├── error.rs            # Unified error types (incl. ApiMigrationRequired / sidecar version gates)
+│   ├── query/              # 🧪 TQL query subsystem (v0.8 query engine refactor)
+│   │   ├── tql_lexer.rs    #   Lexer (tokens / parameters / positional diagnostics)
+│   │   ├── tql_parser.rs   #   Recursive-descent parser + scope & semantic validation
+│   │   ├── tql_ast.rs      #   Query / pipeline / expression / aggregation / path AST
+│   │   ├── cascades.rs     #   Cascades optimizer (memo + costing + budget slicing)
+│   │   ├── pipeline.rs     #   NodeSet physical operators (algorithms / paths / sets / iteration)
+│   │   ├── tql_executor.rs #   First-class value execution, aggregation & projection
+│   │   └── tql_prepared.rs #   Prepared TQL strict parameter binding
 │   ├── storage/
 │   │   ├── memtable.rs     # In-memory workspace (SoA vector pool + HashMap + QuIVer integration)
 │   │   ├── wal.rs          # Write-Ahead Log (crash recovery)
@@ -358,9 +449,14 @@ TriviumDB/
 │   ├── index/
 │   │   ├── brute_force.rs  # rayon parallel exact search
 │   │   ├── bq.rs           # BQ binary quantization signatures (QuIVer foundation)
-│   │   └── quiver.rs       # 🚀 QuIVer ANN index (BQ + Vamana graph + hot/cold separation)
+│   │   ├── quiver.rs       # 🚀 QuIVer ANN index (BQ + Vamana graph + hot/cold separation)
+│   │   ├── property.rs     # 📊 Four property indexes (Hash / Ordered ART / Composite ART / Roaring Bitmap)
+│   │   ├── text.rs         # 📝 TextIndex (Aho-Corasick + BM25 2-Gram persistence)
+│   │   └── graph_blocks.rs # 🔗 Business graph block index .gidx (edge blocks / in-edge / label directories)
 │   ├── graph/
 │   │   ├── traversal.rs    # PPR graph diffusion (Spreading Activation)
+│   │   ├── reachability.rs # Deterministic reachability (direction / labels / depth / budget)
+│   │   ├── pathfinding.rs  # Bounded ALL_PATHS / batch shortest paths
 │   │   └── leiden.rs       # Leiden community detection
 │   └── bindings/           # FFI binding layer
 │       ├── mod.rs          # Unified entry (feature-gated)
@@ -378,13 +474,13 @@ TriviumDB/
 │       ├── commands/           # Non-interactive subcommands (info/exec/export/import/repair/compact)
 │       ├── repl/               # REPL mode (rustyline + Tab completion + multi-line input)
 │       └── tui/                # TUI mode (ratatui + crossterm full-screen visualization)
-├── benches/
-│   └── benchmark.rs        # Criterion performance benchmarks
+├── benches/                # Benchmark suites (queries / index & graph baselines / memory pressure / TSNG / Cohere1M)
 ├── tests/
-│   ├── unit/               # Unit tests (~268 cases)
-│   ├── proptest_core.rs    # Property-based tests (~2450 random cases)
-│   ├── proptest_query.rs   # TQL fuzzing
-│   └── ...                 # Integration tests (concurrency/recovery/stress)
+│   ├── unit/               # Unit tests (~311 cases)
+│   ├── proptest_core.rs    # Property-based tests (~2650 random cases)
+│   ├── proptest_query.rs   # TQL parser property tests
+│   ├── public_api_alignment.rs  # Three-language public API alignment gate
+│   └── ...                 # Integration tests (concurrency/recovery/security/stress/pipeline differential/graph algorithms)
 ├── docs/
 │   ├── api-reference.md    # Full API reference
 │   ├── features.md         # Feature details
@@ -437,7 +533,7 @@ TriviumDB/
 - [x] Property secondary index (O(1) inverted lookup + TQL auto-acceleration)
 - [x] ARM NEON SIMD adaptation + cross-platform CI (Apple Silicon / Linux ARM64)
 
-### v0.7 — QuIVer SOTA ANN Index ✅ (Current)
+### v0.7 — QuIVer SOTA ANN Index ✅
 
 - [x] In-house **QuIVer** ANN graph index (BQ signatures + Vamana graph + hot/cold separation)
 - [x] Incremental graph maintenance: Insert / Delete (Tombstone) / Update — no full rebuild
@@ -445,6 +541,20 @@ TriviumDB/
 - [x] Transaction-safe separated timeline architecture (Phase 5 QuIVer Sync)
 - [x] CLI tool `triviumdb-cli` (command `tdb`): non-interactive commands + REPL (Tab completion / syntax highlighting / multi-line input) + config file
 - [x] Database visualization: terminal TUI (`tdb ui`, force-directed graph layout / k-hop expand / vector search playground)
+
+### v0.8 — The DIY Hybrid Query Era ✅ (Current, v0.8.3)
+
+- [x] **Four persistent property indexes**: Hash / Ordered ART / Composite ART / Roaring Bitmap (`.pidx` v4, reads v1–v4) — equality, range, prefix, composite, and low-cardinality set operations all indexed
+- [x] **TQL `WITH` composable pipelines**: named NodeSets, scope validation, cross-stage composition; `FIND` / `MATCH` / `SEARCH` all enter the pipeline
+- [x] **Cascades query optimizer**: deterministic, bounded, statistics-aware, cost-driven — memo + physical candidates + budget slicing; `EXPLAIN` exposes operators / estimated rows / temp bytes
+- [x] **Built-in graph algorithm library**: PageRank / WCC / Degree / Betweenness / Leiden / Label Propagation / SA-PPR callable in-query with first-class `graph_score()` projection
+- [x] **Paths & set algebra**: `ALL_PATHS` (label sequences / forbidden nodes / path aggregation), `SHORTEST_PATHS`, `UNION` / `INTERSECT` / `EXCEPT`, `ITERATE` fixed-point diffusion
+- [x] **Expressions / aggregation / nulls**: `+ - * /`, `COALESCE`, `IS NULL`, `path()` / `path_length()`, `COUNT/SUM/AVG/MIN/MAX/COLLECT` with aggregate `DISTINCT`
+- [x] **Prepared TQL across three languages**: strict parameter binding; missing / extra / array-or-object parameters / non-finite values fail closed
+- [x] **Persistent sidecar index suite**: `.pidx` / `.gidx` (business graph blocks + in-edge + label directories) / `.text` (AC+BM25) / `.quiver` independently versioned, with `storage_info()` / `index_info()` diagnostics
+- [x] **Strict API migration policy**: all silent legacy compatibility removed; legacy entry points return `ApiMigrationRequired` migration errors with stable error codes; headerless WAL rejected
+- [x] **Production-grade hard guarantees**: ReadOnly / Immutable byte-level zero writes, four-dimensional query budgets failing closed, deterministic parallel execution, atomic generation publishing
+- [x] **TSNG tri-signal research track**: vector / property / graph unified scoring, six access paths, exact ground truth with Recall@K / NDCG@K evaluation
 
 ---
 
@@ -456,7 +566,7 @@ TriviumDB/
 4. **Predictable performance** — Sequential I/O only (WAL append + compaction sequential rewrite). SSD-safe.
 5. **Index as acceleration layer** — QuIVer is disposable derived data (`.tdb.quiver` file); auto-rebuilds on first query if missing.
 6. **Rust safety boundary** — All public APIs are safe code. Minimal audited `unsafe` only in mmap and SIMD paths.
-7. **Zero-panic policy** — No `panic!` / `unreachable!()` in the engine. 3300+ test cases covering 94%+ code lines.
+7. **Zero-panic policy** — No `panic!` / `unreachable!()` in the engine. Thousands of test cases (unit / property / fuzz / mutation / three-language public API alignment), with an enforced 80% line-coverage CI gate (see coverage artifacts for measured values).
 
 ---
 
@@ -490,6 +600,7 @@ TriviumDB's cognitive retrieval pipeline implements the following academic works
 In-house data structures and algorithms:
 
 - **QuIVer** — SOTA ANN graph index fusing BQ with Vamana graph navigation
+- **TSNG** (Tri-Signal Navigation Graph) — tri-signal (vector / property / graph) hybrid retrieval research track with multiple access-path strategies and exact ground-truth evaluation
 - **Parallel Bit-Tag Array** — Bloom-filter-inspired JSON fast filtering
 - **Reverse Hash Net** — O(1) reverse edge lookup hash index
 - **Zero-Ghost Node** — FreeList-based tombstone reuse

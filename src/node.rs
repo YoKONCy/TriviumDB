@@ -1,3 +1,8 @@
+//! 三模数据模型的公共节点、边与查询结果类型。
+//!
+//! NodeId 是跨向量、Payload 和图关系的唯一身份；Edge 以 `(src,dst,label)` 形成业务
+//! 唯一键。公共视图使用拥有型数据隔离内部 slot/mmap 生命周期，避免绑定层持有悬垂引用。
+
 use serde::{Deserialize, Serialize};
 
 pub type NodeId = u64;

@@ -430,6 +430,7 @@ fn reachability_预算超限返回部分结果和截断标记() {
     let config = ReachabilityConfig {
         max_depth: 2,
         max_visited_nodes: 1,
+        exhaustion_policy: triviumdb::graph::budget::BudgetExhaustionPolicy::Partial,
         ..Default::default()
     };
     let output = triviumdb::graph::reachability::traverse_detailed(&mt, 1, &config).unwrap();

@@ -1,3 +1,9 @@
+//! 受候选集合约束的精确向量 Top-K 执行器。
+//!
+//! 与全库 BruteForce 不同，本模块只对 Planner/GraphFirst 产生的合法 NodeId 集合打分。
+//! 使用有界最小堆控制内存，并以 score 降序、NodeId 升序作为最终稳定顺序；非有限
+//! 分数、墓碑和不存在节点不会进入结果，预算在并行分片前完成检查。
+
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
 use crate::node::{NodeId, SearchHit};

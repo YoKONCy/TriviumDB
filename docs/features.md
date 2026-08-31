@@ -1,6 +1,15 @@
 # TriviumDB 支持特性详解
 
-> 深入剖析 TriviumDB 的架构设计、核心能力与技术实现细节。
+> 深入剖析 TriviumDB 的架构设计、核心能力与技术实现细节。本文以 v0.8.3 当前源码和正式公共 API 为准。
+
+## 当前能力快照
+
+- **持久化索引**：QuIVer ANN、Hash、Ordered ART、Composite ART、Roaring Bitmap、AC+BM25 TextIndex、业务图块索引。
+- **自由 DIY 混合查询**：TQL 不是几条固定的“混合搜索模板”，而是一套可编排执行管线。开发者可将向量召回、属性过滤、图扩展、图算法、路径、集合代数、迭代、聚合和重排按业务语义自由串联，并由 Cascades 在预算内选择物理计划。
+- **统一查询底座**：TQL Parser/AST、WITH 管线、Cascades 优化、Prepared TQL、Path 与一等值结果共同支撑上述自由组合。
+- **系统保证**：确定性执行、查询/遍历/内存/并行预算、ReadOnly/Immutable 零写、generation 原子发布。
+- **跨语言能力**：Rust、Python、Node 同步提供四类属性索引管理、Prepared TQL、一等查询值和存储格式观测。
+- **严格升级策略**：历史静默 API 已移除；误用返回迁移错误。主文件保留有限读取窗口，可重建 sidecar 独立版本化。
 
 ---
 
@@ -13,7 +22,7 @@
 - [图谱扩散检索](#图谱扩散检索)
 - [认知检索管线](#认知检索管线)
 - [TQL 统一查询语言](#tql-统一查询语言)
-- [属性二级索引](#属性二级索引)
+- [持久化属性索引体系](#持久化属性索引体系)
 - [崩溃恢复机制](#崩溃恢复机制)
 - [并发安全模型](#并发安全模型)
 - [多语言绑定架构](#多语言绑定架构)
@@ -53,7 +62,7 @@ flowchart TD
         direction LR
         E1["向量索引\n(BruteForce / QuIVer)"]:::module
         E2["图谱遍历\n(Spreading Activation)"]:::module
-        E3["查询解析\n(Mongo Filter / Cypher)"]:::module
+        E3["TQL 查询引擎\n(Parser / Cascades / Pipeline)"]:::module
     end
     Layer3:::layer
 
@@ -69,7 +78,7 @@ flowchart TD
         direction LR
         M_VEC["SoA 向量池\n(基础层 mmap + 增量层 Vec)"]:::module
         M_PAY["HashMap\n(Payload 元数据)"]:::module
-        M_EDGE["图谱邻接表\n(Edges 边集)"]:::module
+        M_EDGE["图谱邻接表 + 派生目录\n(出边 / 入边 / Label)"]:::module
     end
     Layer5:::layer
 
@@ -77,7 +86,7 @@ flowchart TD
         direction LR
         S1[".tdb 聚合数据 / 元数据"]:::storage
         S2[".vec 分离 mmap 向量文件"]:::storage
-        S3["WAL 追加顺序日志"]:::storage
+        S3["WAL + .pidx/.gidx/.text/.quiver\n版本化 sidecar"]:::storage
     end
     Layer6:::layer
 
@@ -187,7 +196,7 @@ QuIVer 快照按 slot 流式读取 FP16/FP32/mmap 向量并直接编码为紧凑
 
 ```
 ┌────────────────────────┐ offset 0
-│       File Header       │ 58 字节（v6）
+│       File Header       │ 58 字节（当前 v7）
 │  MAGIC + VERSION + dim  │
 │  next_id + node_count   │
 │  各 block 的 offset     │
@@ -234,7 +243,7 @@ TriviumDB 的存储层针对 Windows 的强制锁定（Mandatory Locking）语�
 所有写操作（insert / delete / link / unlink / update）在生效前先追加写入 WAL 文件。
 
 - **Append-Only**：仅顺序追加，绝不随机写入，SSD 友好
-- **CRC32 校验**：每条记录都附带 CRC32，回放时自动跳过损坏条目
+- **CRC32 校验**：每条记录都附带 CRC32；遇到截断或校验失败时停止回放，绝不跨过损坏继续解释后续字节
 - **三种同步模式**：Full（fsync）/ Normal（flush）/ Off（无）
 
 ---
@@ -417,16 +426,20 @@ TriviumDB 内置了一套多层认知检索管线（本项目自研的功能性�
 
 ## TQL 统一查询语言
 
-TriviumDB v0.6.0 引入了 **TQL (Trivium Query Language)**，一套将图遍历、文档过滤、向量检索和写操作统一在一条语法下的查询语言。由四个模块组成：
+**TQL (Trivium Query Language)** 已发展为完整的三模查询管线，也是 TriviumDB 区别于固定混合检索 API 的关键能力。用户不必接受预设的“向量召回 → 图扩散 → 过滤”顺序，而可以自由决定先按属性缩小集合、再寻路、再与向量候选求交，或先运行图算法产生分数、再过滤和重排。自有 Lexer/Parser/AST、确定性且有界的统计感知 Cascades、NodeSet 物理算子和一等值结果共同保证这种 DIY 能力既自由又可规划、可解释、可预算。
+
+它统一图遍历、文档过滤、向量检索、图算法、聚合与写操作。核心模块包括：
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| **词法分析器** | `query/lexer.rs` | 将查询字符串切分为 Token 流 |
-| **语法分析器** | `query/parser.rs` | 递归下降解析，生成 AST |
-| **抽象语法树** | `query/ast.rs` | 定义 TqlQuery / TqlPattern / TqlCondition 等结构 |
-| **执行器** | `query/tql_executor.rs` | 在 MemTable 上执行 AST，返回匹配绑定 |
+| **词法分析器** | `query/tql_lexer.rs` | Token、参数和位置诊断 |
+| **语法分析器** | `query/tql_parser.rs` | 递归下降解析、作用域验证 |
+| **抽象语法树** | `query/tql_ast.rs` | 查询、管线、表达式、聚合和路径结构 |
+| **Cascades** | `query/cascades.rs` | Memo、成本估算、预算切片与确定性计划选择 |
+| **执行器** | `query/tql_executor.rs` | NodeSet/一等值执行、聚合、路径和图算法 |
+| **Prepared** | `query/tql_prepared.rs` | 严格参数发现、绑定和重复执行 |
 
-### 三大查询入口
+### 查询入口与可组合管线
 
 | 入口 | 用途 | 示例 |
 |------|------|------|
@@ -434,6 +447,9 @@ TriviumDB v0.6.0 引入了 **TQL (Trivium Query Language)**，一套将图遍历
 | **FIND** | 文档过滤（类 MongoDB） | `FIND {type: "event", heat: {$gte: 0.7}} RETURN *` |
 | **SEARCH** | 向量检索 | `SEARCH VECTOR [...] TOP 10 RETURN *` |
 | **MATCH + RANK** | GraphFirst 约束排名 | `MATCH (a)-[:rel]->(b) RANK a BY VECTOR [...] TOP 10 RETURN a` |
+| **WITH Pipeline** | 跨模组合 | `SEARCH ... AS seed WITH seed EXPAND ... RETURN ...` |
+
+管线支持 `FILTER`、`RANK`、`EXPAND`、PageRank/WCC/Leiden/SA-PPR、`ALL_PATHS`、`SHORTEST_PATHS`、`UNION/INTERSECT/EXCEPT`、`ITERATE`。RETURN 支持算术、`COALESCE`、`IS NULL`、`path()`、`path_length()` 以及 `COUNT/SUM/AVG/MIN/MAX/COLLECT`。
 
 ### DML 写操作（v0.6.0 新增）
 
@@ -469,37 +485,37 @@ TQL 的 FIND 入口底层采用三层加速策略：
 
 ---
 
-## 属性二级索引
+## 持久化属性索引体系
 
-v0.6.0 新增的属性二级索引系统，对指定的 JSON Payload 字段建立倒排索引，实现 O(1) 等值查找。
+属性索引由 `PropertyIndexRegistry` 统一管理，并持久化到 `.tdb.pidx`（当前 v4，可读取 v1–v4）。posting 使用稳定 NodeId/slot 映射，CRUD、slot 复用、重启与 ReadOnly/Immutable 均有专项测试。
 
-### 工作原理
+| 类型 | 数据结构 | 主要用途 |
+|---|---|---|
+| Hash | 类型稳定键 → posting | 等值过滤 |
+| Ordered | Safe Rust ART | 范围、前缀、ORDER BY |
+| Composite | 多字段 ART | 左前缀、等值 + 末列范围 |
+| Bitmap | RoaringTreemap | 低基数、多条件集合运算 |
 
-```
-property_index: HashMap<String, HashMap<String, Vec<NodeId>>>
-                  │                   │               │
-                  字段名            值的序列化键    匹配的节点 ID 列表
-```
+Planner 可选择单索引、复合索引、Bitmap 或多个 posting 交集；无合适索引时才使用 Fast Tags + 精确 JSON 校验。
 
-### 特性
-
-| 特性 | 说明 |
-|------|------|
-| 自动回填 | `create_index` 时自动扫描全表现有数据建立索引 |
-| 实时维护 | insert / update_payload / delete 时自动同步更新索引 |
-| TQL 透明加速 | TQL 执行器自动检测并使用索引，无需修改查询语句 |
-| 多值类型 | 支持 String / Number / Bool / Null 类型的等值匹配 |
-
-### API
+### 三语言 API
 
 ```python
-# 创建索引
-db.create_index("name")    # 之后 FIND {name: "Alice"} 自动走 O(1)
-db.create_index("type")
-
-# 删除索引（查询仍可用，退化为全扫描）
-db.drop_index("name")
+db.create_index("kind")
+db.create_ordered_index("score")
+db.create_composite_index(["tenant", "region"])
+db.create_bitmap_index("status")
+print(db.index_info())
 ```
+
+Node 使用 `createIndex/createOrderedIndex/createCompositeIndex/createBitmapIndex/indexInfo`；Rust 使用对应 snake_case 方法。删除接口与创建接口一一对应。`index_info` 返回 kind、完整 fields、entry/distinct/null 计数，复合索引不再压缩成不可解析的单字段字符串。
+
+### 其他持久化索引
+
+- `.quiver/.quiver.meta`：QuIVer ANN 图与一致性元数据；
+- `.text/.text.meta`：AC 自动机 + BM25 2-Gram；
+- `.gidx`：出边块、入边目录、Label 目录与 CRC；
+- `.tdb` 内 BQ block：低成本签名预筛，不等同于完整 QuIVer。
 
 ---
 
@@ -509,13 +525,12 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 
 ### 恢复流程（数据库 open 时自动执行）
 
-```
-1. 检查 WAL 文件是否存在
-2. 如果存在 → 逐条读取 WAL 记录
-3. 对每条记录进行 CRC32 校验
-4. 校验通过 → 回放到 MemTable（幂等操作）
-5. 校验失败 → 跳过该条记录（日志警告）
-6. 全部回放完成 → 正常进入服务状态
+```text
+1. 校验 WAL 的 `TVWL + v3` 版本头；无头或未知版本在回放前拒绝
+2. 逐条读取长度、记录体和 CRC32
+3. 完整记录校验通过后回放到 MemTable
+4. 遇到截断、非法长度、CRC 不匹配或反序列化失败时停止回放
+5. 保留此前已验证记录，不跨过损坏边界继续解释后续字节
 ```
 
 ### 崩溃场景矩阵
@@ -531,7 +546,7 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 
 ### WAL 记录类型
 
-WAL 文件以 `TVWL + u16 version` 版本头开场；历史无头 WAL 保持可读，未知版本会在任何记录回放前明确拒绝。图写入支持 `(src,dst,label)` 唯一边的 weight upsert，以及独立的指定标签 `UnlinkLabel` 记录。
+WAL 文件以 `TVWL + u16 version` 版本头开场；历史无头 WAL 不再猜测解析，会返回 `UnsupportedWalVersion`。带记录的旧版本 WAL 仍要求旧内核恢复并 flush；只有恰好 6 字节、零记录的旧版本 WAL 会在 ReadWrite 持有排他锁时原子升级为当前头，ReadOnly/Immutable 保持零写并拒绝打开。未知未来版本同样在任何记录回放前明确拒绝。图写入支持 `(src,dst,label)` 唯一边的 weight upsert，以及独立的指定标签 `UnlinkLabel` 记录。
 
 | 类型 | 内容 |
 |------|------|
@@ -700,7 +715,7 @@ for stage, ms in ctx.timings.items():
 | `aggregate_seeds()` | seed_map 聚合 + 排序 |
 | `apply_dpp()` | L9: DPP 多样性采样 |
 
-> 所有公开 API 签名完全不变，通过 `pub use` 重导出保证向后兼容。
+> 公共 API 不承诺保留历史静默入口。已移除的调用会在编译期失败，或返回 `ApiMigrationRequired` / `TDB_API_MIGRATION_REQUIRED` 并给出替代入口。
 
 ---
 

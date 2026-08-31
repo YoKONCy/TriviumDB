@@ -642,6 +642,12 @@ fn COV4_28_tql_explain_variants() {
         .tql("EXPLAIN SEARCH VECTOR [1.0, 0.0, 0.0, 0.0] TOP 3 RETURN *")
         .unwrap();
     assert!(!r2.is_empty());
+    let plan = &r2[0]["plan"].payload;
+    assert_eq!(plan["industrial_access_path"], "exact_fallback");
+    assert_eq!(plan["estimated_candidates"], db.node_count());
+    assert!(plan["estimated_temp_bytes"].as_u64().unwrap() > 0);
+    assert!(plan["estimated_vector_page_reads"].as_u64().unwrap() > 0);
+    assert_eq!(plan["temporary_spill"], false);
 
     cleanup(&path);
 }

@@ -33,7 +33,7 @@ EXCEPTIONS = [
 CLASS_ORDER = [
     "SearchHit", "GroupedSearchResult", "Edge", "IncomingEdge", "NodeView",
     "ReachabilityStep", "ReachabilityResult", "QueryRow", "HookContext",
-    "Transaction", "TriviumDB",
+    "PreparedTql", "Transaction", "TriviumDB",
 ]
 FUNCTIONS = ["init_logger"]
 CONSTRUCTIBLE = {"TriviumDB"}  # only these expose a real #[new]
@@ -68,8 +68,8 @@ PARAM_TYPES = {
     "payload": "Any", "payloads": "Sequence[Any]", "patch": "Mapping[str, Any]",
     "metadata": "Any",
     "payload_filter": "Mapping[str, Any]",
-    "labels": "Sequence[str]", "expand_labels": "Sequence[str]",
-    "hook": "Any",
+    "labels": "Sequence[str]", "expand_labels": "Sequence[str]", "fields": "Sequence[str]",
+    "parameters": "Mapping[str, Any]", "prepared": "PreparedTql", "hook": "Any",
     "exc_type": "object", "_exc_type": "object", "_exc_val": "object", "_exc_tb": "object",
 }
 # bulk name→type groups (space-separated names sharing one type)
@@ -114,7 +114,8 @@ for _ret, _quals in {
             "TriviumDB.delete TriviumDB.link TriviumDB.upsert_edge TriviumDB.update_edge "
             "TriviumDB.unlink TriviumDB.index_text "
             "TriviumDB.index_keyword TriviumDB.build_text_index TriviumDB.create_index "
-            "TriviumDB.drop_index TriviumDB.flush TriviumDB.compact "
+            "TriviumDB.create_ordered_index TriviumDB.create_composite_index TriviumDB.create_bitmap_index "
+            "TriviumDB.drop_index TriviumDB.drop_ordered_index TriviumDB.drop_composite_index TriviumDB.drop_bitmap_index TriviumDB.flush TriviumDB.compact "
             "TriviumDB.enable_auto_compaction TriviumDB.disable_auto_compaction "
             "TriviumDB.set_auto_build_quiver TriviumDB.clear_search_state "
             "TriviumDB.reserve_nodes TriviumDB.set_memory_limit TriviumDB.close "
@@ -132,8 +133,11 @@ for _ret, _quals in {
     "Edge | None": "TriviumDB.get_edge",
     "list[IncomingEdge]": "TriviumDB.get_incoming_edges",
     "list[ReachabilityResult]": "TriviumDB.reachable",
-    "list[QueryRow]": "TriviumDB.tql",
+    "list[QueryRow]": "TriviumDB.tql TriviumDB.execute_prepared_tql",
+    "list[str]": "PreparedTql.parameter_names",
+    "PreparedTql": "TriviumDB.prepare_tql",
     "dict[str, Any]": "TriviumDB.tql_mut TriviumDB.leiden_cluster TriviumDB.graph_stats "
+                      "TriviumDB.index_info TriviumDB.storage_info "
                       "TriviumDB.validate_graph TriviumDB.repair_graph_indexes "
                       "TriviumDB.reachable_detailed TriviumDB.query_subgraph",
     "GroupedSearchResult": "TriviumDB.search_grouped",

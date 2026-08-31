@@ -1,3 +1,6 @@
+//! ReadOnly 模式的锁、恢复门禁与字节级零写契约测试。
+//! 覆盖共享 Reader、Writer 互斥、缺失/旧 WAL、sidecar 策略及失败前后文件不变性。
+
 use serde_json::json;
 use std::path::Path;
 use std::process::Command;
@@ -164,6 +167,22 @@ fn 只读句柄拒绝写入事务索引和持久化操作() {
 }
 
 #[test]
+fn 只读打开遇到空旧版本_wal拒绝且字节不变() {
+    let path = tmp_db("legacy_empty_wal");
+    create_clean_database(&path);
+    let wal_path = format!("{path}.wal");
+    let legacy_header = [b'T', b'V', b'W', b'L', 2, 0];
+    std::fs::write(&wal_path, legacy_header).unwrap();
+
+    assert!(matches!(
+        Database::<f32>::open_read_only(&path, 2),
+        Err(TriviumError::RecoveryRequired { .. })
+    ));
+    assert_eq!(std::fs::read(&wal_path).unwrap(), legacy_header);
+    cleanup(&path);
+}
+
+#[test]
 fn 只读打开遇到待恢复_wal明确拒绝且不修改文件() {
     let path = tmp_db("wal");
     create_clean_database(&path);
@@ -284,6 +303,14 @@ fn 只读查询close和drop保持完整文件状态不变() {
     {
         let mut reader = Database::<f32>::open_read_only(&path, 2).unwrap();
         assert!(!reader.search(&[1.0, 0.0], 1, 0, 0.0).unwrap().is_empty());
+        let corpus = [
+            "SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed EXPAND seed [*1..1] AS reached WITH reached RETURN reached",
+            "FIND {kind: 'seed'} AS seed WITH seed degree seed AS scored WITH scored RETURN scored, graph_score(scored) AS score",
+            "SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed iterate seed EXPAND [*1..1] times 2 fixed AS reached WITH reached RETURN reached",
+        ];
+        for query in corpus {
+            reader.tql_values(query).unwrap();
+        }
         reader.close().unwrap();
     }
     assert_eq!(file_state(&path), before);

@@ -1,3 +1,8 @@
+//! QuIVer 使用的二值/多比特量化签名与 Hamming 预筛。
+//!
+//! 编码只保存紧凑近似信号，最终排序仍读取原始向量精排。位布局和 chunk 数属于磁盘
+//! 契约，维度上限与尾部掩码必须在编码前验证，避免移位溢出或跨版本误读。
+
 use crate::VectorType;
 use bytemuck::{Pod, Zeroable};
 

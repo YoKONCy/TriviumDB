@@ -1,3 +1,8 @@
+//! Node.js napi-rs 公共绑定。
+//!
+//! 该层只负责 JS 值校验、camelCase API、异步任务和稳定错误码映射，核心语义必须委托
+//! Rust Database/TQL 实现。u64 NodeId 在一等查询值中使用字符串，避免超过 JS 安全整数。
+
 #[cfg(feature = "nodejs")]
 #[allow(clippy::module_inception)]
 pub mod nodejs {
@@ -13,10 +18,68 @@ pub mod nodejs {
             crate::error::TriviumError::UnsupportedDatabaseVersion { .. } => {
                 "TDB_UNSUPPORTED_DATABASE_VERSION"
             }
+            crate::error::TriviumError::UnsupportedWalVersion { .. } => {
+                "TDB_UNSUPPORTED_WAL_VERSION"
+            }
+            crate::error::TriviumError::UnsupportedSidecarVersion { .. } => {
+                "TDB_UNSUPPORTED_SIDECAR_VERSION"
+            }
+            crate::error::TriviumError::ApiMigrationRequired { .. } => "TDB_API_MIGRATION_REQUIRED",
+            crate::error::TriviumError::QueryParse(_) => "TDB_QUERY_PARSE",
+            crate::error::TriviumError::QueryExecution(_) => "TDB_QUERY_EXECUTION",
+            crate::error::TriviumError::DimensionMismatch { .. } => "TDB_DIMENSION_MISMATCH",
+            crate::error::TriviumError::NodeNotFound(_) => "TDB_NODE_NOT_FOUND",
             crate::error::TriviumError::InvalidInput(_) => "TDB_INVALID_INPUT",
             _ => "TDB_ERROR",
         };
         napi::Error::new(napi::Status::GenericFailure, format!("{code}: {error}"))
+    }
+
+    fn node_tql_row_to_json<T: crate::VectorType>(
+        row: std::collections::HashMap<String, crate::query::tql_executor::TqlValue<T>>,
+    ) -> serde_json::Value {
+        use crate::query::tql_executor::TqlValue;
+        let mut obj = serde_json::Map::new();
+        for (name, value) in row {
+            let value = match value {
+                TqlValue::Node(node) => serde_json::json!({
+                    "id": node.id.to_string(),
+                    "payload": node.payload,
+                    "numEdges": node.edges.len(),
+                }),
+                TqlValue::Int(value) => serde_json::json!(value),
+                TqlValue::Float(value) => serde_json::json!(value),
+                TqlValue::String(value) => serde_json::json!(value),
+                TqlValue::Bool(value) => serde_json::json!(value),
+                TqlValue::Path(value) => serde_json::json!(
+                    value
+                        .into_iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                ),
+                TqlValue::List(value) => serde_json::Value::Array(value),
+                TqlValue::Null => serde_json::Value::Null,
+            };
+            obj.insert(name, value);
+        }
+        serde_json::Value::Object(obj)
+    }
+
+    #[napi]
+    pub struct JsPreparedTql {
+        inner: crate::query::tql_prepared::PreparedTql,
+    }
+
+    #[napi]
+    impl JsPreparedTql {
+        #[napi]
+        pub fn parameter_names(&self) -> Vec<String> {
+            self.inner
+                .parameter_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        }
     }
 
     // ════════ 后端枚举：封装三种泛型特化 ════════
@@ -257,6 +320,8 @@ pub mod nodejs {
         pub text_boost: Option<f64>,
         pub force_brute_force: Option<bool>,
         pub custom_query_text: Option<String>,
+        /// 类 MongoDB JSON Payload 过滤器，在向量召回阶段生效。
+        pub payload_filter: Option<serde_json::Value>,
         /// CCSA: 扩散方向偏置向量，让图扩散优先沿语义相近的节点方向传播
         pub diffusion_bias: Option<Vec<f64>>,
         /// 图扩散允许的边标签；空数组表示禁止扩散。
@@ -396,6 +461,8 @@ pub mod nodejs {
                 .map(|value| parse_safe_usize(value, "maxEdges"))
                 .transpose()?
                 .unwrap_or(50_000),
+            max_frontier_size: 10_000,
+            exhaustion_policy: crate::graph::budget::BudgetExhaustionPolicy::Partial,
         })
     }
 
@@ -536,6 +603,20 @@ pub mod nodejs {
         crate::storage::wal::SyncMode::parse(s).map_err(napi::Error::from_reason)
     }
 
+    fn parse_payload_filter(
+        value: Option<serde_json::Value>,
+    ) -> napi::Result<Option<crate::filter::Filter>> {
+        value
+            .map(|filter| {
+                crate::filter::Filter::from_json(&filter).map_err(|error| {
+                    napi::Error::from_reason(format!(
+                        "payloadFilter 无效 (Invalid payloadFilter): {error}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
     fn parse_edge_direction(value: Option<&str>) -> napi::Result<crate::database::EdgeDirection> {
         match value.unwrap_or("out") {
             "out" | "outgoing" => Ok(crate::database::EdgeDirection::Outgoing),
@@ -560,75 +641,59 @@ pub mod nodejs {
         /// 打开或创建数据库
         ///
         /// ```js
-        /// const db = new TriviumDB("data.tdb", 1536, "f32", "normal")
+        /// const db = new TriviumDB("data.tdb", { dim: 1536, dtype: "f32", syncMode: "normal" })
         /// ```
         #[napi(constructor)]
         pub fn new(
             path: String,
-            dim_or_options: Option<napi::bindgen_prelude::Either<u32, JsDatabaseOptions>>,
-            dtype: Option<String>,
-            sync_mode: Option<String>,
+            options: Option<napi::bindgen_prelude::Either<u32, JsDatabaseOptions>>,
         ) -> napi::Result<Self> {
-            let (_dim, dtype, config) = match dim_or_options {
-                Some(napi::bindgen_prelude::Either::A(dim)) => {
-                    let dtype = dtype.unwrap_or_else(|| "f32".into());
-                    let sm = parse_sync_mode(sync_mode.as_deref().unwrap_or("normal"))?;
-                    (
-                        dim as usize,
-                        dtype,
-                        crate::database::Config {
-                            dim: dim as usize,
-                            sync_mode: sm,
-                            ..Default::default()
-                        },
-                    )
+            let options = match options {
+                Some(napi::bindgen_prelude::Either::A(_)) => {
+                    return Err(napi::Error::from_reason(
+                        "TDB_API_MIGRATION_REQUIRED: 数字位置参数已移除，请使用 options 对象 (numeric positional arguments were removed; use an options object)",
+                    ));
                 }
-                Some(napi::bindgen_prelude::Either::B(options)) => {
-                    let dim = options.dim.unwrap_or(1536) as usize;
-                    let dtype = options.dtype.unwrap_or_else(|| "f32".into());
-                    let expected_nodes = options
-                        .expected_nodes
-                        .map(|value| parse_safe_usize(value, "expectedNodes"))
-                        .transpose()?;
-                    let memory_limit_mb = options
-                        .memory_limit_mb
-                        .map(|value| parse_safe_usize(value, "memoryLimitMb"))
-                        .transpose()?
-                        .unwrap_or(0);
-                    let memory_limit = memory_limit_mb
-                        .checked_mul(1024 * 1024)
-                        .ok_or_else(|| napi::Error::from_reason("memoryLimitMb 换算字节时溢出"))?;
-                    let config = crate::database::Config {
-                        dim,
-                        sync_mode: parse_sync_mode(
-                            options.sync_mode.as_deref().unwrap_or("normal"),
-                        )?,
-                        storage_mode: parse_storage_mode(options.storage_mode.as_deref())?,
-                        auto_build_quiver: options.auto_build_quiver.unwrap_or(true),
-                        load_text_index: options.load_text_index.unwrap_or(false),
-                        expected_nodes,
-                        memory_limit,
-                        access_mode: parse_access_mode(options.access_mode.as_deref())?,
-                        missing_index_policy: parse_missing_index_policy(
-                            options.missing_index_policy.as_deref(),
-                        )?,
-                    };
-                    (dim, dtype, config)
-                }
-                None => {
-                    let dim = 1536;
-                    let dtype = dtype.unwrap_or_else(|| "f32".into());
-                    let sm = parse_sync_mode(sync_mode.as_deref().unwrap_or("normal"))?;
-                    (
-                        dim,
-                        dtype,
-                        crate::database::Config {
-                            dim,
-                            sync_mode: sm,
-                            ..Default::default()
-                        },
-                    )
-                }
+                Some(napi::bindgen_prelude::Either::B(options)) => options,
+                None => JsDatabaseOptions {
+                    dim: None,
+                    dtype: None,
+                    sync_mode: None,
+                    storage_mode: None,
+                    auto_build_quiver: None,
+                    load_text_index: None,
+                    expected_nodes: None,
+                    memory_limit_mb: None,
+                    access_mode: None,
+                    missing_index_policy: None,
+                },
+            };
+            let dim = options.dim.unwrap_or(1536) as usize;
+            let dtype = options.dtype.unwrap_or_else(|| "f32".into());
+            let expected_nodes = options
+                .expected_nodes
+                .map(|value| parse_safe_usize(value, "expectedNodes"))
+                .transpose()?;
+            let memory_limit_mb = options
+                .memory_limit_mb
+                .map(|value| parse_safe_usize(value, "memoryLimitMb"))
+                .transpose()?
+                .unwrap_or(0);
+            let memory_limit = memory_limit_mb
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| napi::Error::from_reason("memoryLimitMb 换算字节时溢出"))?;
+            let config = crate::database::Config {
+                dim,
+                sync_mode: parse_sync_mode(options.sync_mode.as_deref().unwrap_or("normal"))?,
+                storage_mode: parse_storage_mode(options.storage_mode.as_deref())?,
+                auto_build_quiver: options.auto_build_quiver.unwrap_or(true),
+                load_text_index: options.load_text_index.unwrap_or(false),
+                expected_nodes,
+                memory_limit,
+                access_mode: parse_access_mode(options.access_mode.as_deref())?,
+                missing_index_policy: parse_missing_index_policy(
+                    options.missing_index_policy.as_deref(),
+                )?,
             };
             let dtype_str = dtype.as_str();
 
@@ -694,7 +759,7 @@ pub mod nodejs {
             query_vector: Vec<f64>,
             config: Option<JsSearchConfig>,
         ) -> napi::Result<JsSearchWithContextResult> {
-            let cfg = config.unwrap_or(JsSearchConfig {
+            let mut cfg = config.unwrap_or(JsSearchConfig {
                 top_k: None,
                 recall_k: None,
                 rerank_k: None,
@@ -709,6 +774,7 @@ pub mod nodejs {
                 dpp_quality_weight: None,
                 enable_refractory_fatigue: None,
                 custom_query_text: None,
+                payload_filter: None,
                 enable_text_hybrid_search: None,
                 text_boost: None,
                 force_brute_force: None,
@@ -725,6 +791,7 @@ pub mod nodejs {
                     "top_k 必须为正整数，收到 {top_k}"
                 )));
             }
+            let payload_filter = parse_payload_filter(cfg.payload_filter.take())?;
             let core_config = crate::database::SearchConfig {
                 top_k: top_k as usize,
                 recall_k: cfg.recall_k.unwrap_or(0).max(0) as usize,
@@ -753,6 +820,7 @@ pub mod nodejs {
                     .unwrap_or(0),
                 min_edge_weight: cfg.min_edge_weight.unwrap_or(0.0) as f32,
                 edge_direction: parse_edge_direction(cfg.edge_direction.as_deref())?,
+                payload_filter,
                 ..Default::default()
             };
 
@@ -1499,6 +1567,7 @@ pub mod nodejs {
             top_k: Option<i64>,
             expand_depth: Option<u32>,
             min_score: Option<f64>,
+            payload_filter: Option<serde_json::Value>,
         ) -> napi::Result<Vec<JsSearchHit>> {
             let top_k = top_k.unwrap_or(5);
             if top_k <= 0 {
@@ -1509,22 +1578,32 @@ pub mod nodejs {
             let top_k = top_k as usize;
             let expand_depth = expand_depth.unwrap_or(0) as usize;
             let min_score = min_score.unwrap_or(0.5) as f32;
+            let payload_filter = parse_payload_filter(payload_filter)?;
+
+            let search_config = crate::database::SearchConfig {
+                top_k,
+                expand_depth,
+                min_score,
+                enable_advanced_pipeline: false,
+                payload_filter,
+                ..Default::default()
+            };
 
             let hits = match &self.inner {
                 DbBackend::F32(db) => {
                     let v: Vec<f32> = query_vector.iter().map(|&x| x as f32).collect();
-                    db.search(&v, top_k, expand_depth, min_score)
+                    db.search_hybrid(None, Some(&v), &search_config)
                 }
                 DbBackend::F16(db) => {
                     let v: Vec<half::f16> = query_vector
                         .iter()
                         .map(|&x| half::f16::from_f64(x))
                         .collect();
-                    db.search(&v, top_k, expand_depth, min_score)
+                    db.search_hybrid(None, Some(&v), &search_config)
                 }
                 DbBackend::U64(db) => {
                     let v: Vec<u64> = query_vector.iter().map(|&x| x as u64).collect();
-                    db.search(&v, top_k, expand_depth, min_score)
+                    db.search_hybrid(None, Some(&v), &search_config)
                 }
             }
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
@@ -1546,6 +1625,7 @@ pub mod nodejs {
             top_k: Option<i64>,
             expand_depth: Option<u32>,
             min_score: Option<f64>,
+            payload_filter: Option<serde_json::Value>,
         ) -> napi::Result<JsGroupedSearchResult> {
             let top_k = top_k.unwrap_or(5);
             if top_k <= 0 {
@@ -1553,10 +1633,12 @@ pub mod nodejs {
                     "top_k 必须为正整数，收到 {top_k}"
                 )));
             }
+            let payload_filter = parse_payload_filter(payload_filter)?;
             let config = crate::database::SearchConfig {
                 top_k: top_k as usize,
                 expand_depth: expand_depth.unwrap_or(2) as usize,
                 min_score: min_score.unwrap_or(0.1) as f32,
+                payload_filter,
                 ..Default::default()
             };
             let result = match &self.inner {
@@ -1633,7 +1715,7 @@ pub mod nodejs {
             query_vector: Vec<f64>,
             config: Option<JsSearchConfig>,
         ) -> napi::Result<Vec<JsSearchHit>> {
-            let cfg = config.unwrap_or(JsSearchConfig {
+            let mut cfg = config.unwrap_or(JsSearchConfig {
                 top_k: None,
                 recall_k: None,
                 rerank_k: None,
@@ -1648,6 +1730,7 @@ pub mod nodejs {
                 dpp_quality_weight: None,
                 enable_refractory_fatigue: None,
                 custom_query_text: None,
+                payload_filter: None,
                 enable_text_hybrid_search: None,
                 text_boost: None,
                 force_brute_force: None,
@@ -1664,6 +1747,7 @@ pub mod nodejs {
                     "top_k 必须为正整数，收到 {top_k}"
                 )));
             }
+            let payload_filter = parse_payload_filter(cfg.payload_filter.take())?;
             let core_config = crate::database::SearchConfig {
                 top_k: top_k as usize,
                 recall_k: cfg.recall_k.unwrap_or(0).max(0) as usize,
@@ -1692,6 +1776,7 @@ pub mod nodejs {
                     .unwrap_or(0),
                 min_edge_weight: cfg.min_edge_weight.unwrap_or(0.0) as f32,
                 edge_direction: parse_edge_direction(cfg.edge_direction.as_deref())?,
+                payload_filter,
                 ..Default::default()
             };
 
@@ -1736,6 +1821,7 @@ pub mod nodejs {
             expand_depth: Option<u32>,
             min_score: Option<f64>,
             hybrid_alpha: Option<f64>,
+            payload_filter: Option<serde_json::Value>,
         ) -> napi::Result<Vec<JsSearchHit>> {
             let top_k = top_k.unwrap_or(5);
             if top_k <= 0 {
@@ -1747,6 +1833,7 @@ pub mod nodejs {
             let expand_depth = expand_depth.unwrap_or(2) as usize;
             let min_score = min_score.unwrap_or(0.1) as f32;
             let alpha = hybrid_alpha.unwrap_or(0.7) as f32;
+            let payload_filter = parse_payload_filter(payload_filter)?;
             // 简单的启发式权重换算
             let boost = (1.0 - alpha).max(0.1) * 3.0;
 
@@ -1756,6 +1843,7 @@ pub mod nodejs {
                 min_score,
                 enable_text_hybrid_search: true,
                 text_boost: boost,
+                payload_filter,
                 ..Default::default()
             };
 
@@ -1819,14 +1907,54 @@ pub mod nodejs {
         /// ```
         #[napi]
         pub fn create_index(&mut self, field: String) -> napi::Result<()> {
-            dispatch!(self, mut db => db.create_index(&field))
-                .map_err(|error| napi::Error::from_reason(error.to_string()))
+            dispatch!(self, mut db => db.create_index(&field)).map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn create_ordered_index(&mut self, field: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.create_ordered_index(&field)).map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn create_composite_index(&mut self, fields: Vec<String>) -> napi::Result<()> {
+            dispatch!(self, mut db => db.create_composite_index(&fields)).map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn create_bitmap_index(&mut self, field: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.create_bitmap_index(&field)).map_err(to_napi_error)
         }
 
         /// 删除属性索引（查询仍可用，退化为全扫描）
         #[napi]
         pub fn drop_index(&mut self, field: String) -> napi::Result<()> {
-            dispatch!(self, mut db => db.drop_index(&field))
+            dispatch!(self, mut db => db.drop_index(&field)).map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn drop_ordered_index(&mut self, field: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.drop_ordered_index(&field)).map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn drop_composite_index(&mut self, fields: Vec<String>) -> napi::Result<()> {
+            dispatch!(self, mut db => db.drop_composite_index(&fields)).map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn drop_bitmap_index(&mut self, field: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.drop_bitmap_index(&field)).map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn index_info(&self) -> napi::Result<serde_json::Value> {
+            dispatch!(self, db => serde_json::to_value(db.index_info()))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))
+        }
+
+        #[napi]
+        pub fn storage_info(&self) -> napi::Result<serde_json::Value> {
+            dispatch!(self, db => serde_json::to_value(db.storage_info()))
                 .map_err(|error| napi::Error::from_reason(error.to_string()))
         }
 
@@ -1881,37 +2009,60 @@ pub mod nodejs {
         /// ```
         #[napi]
         pub fn tql(&self, query: String) -> napi::Result<Vec<serde_json::Value>> {
-            fn row_to_json<T: crate::vector::VectorType>(
-                row: std::collections::HashMap<String, crate::node::Node<T>>,
-            ) -> serde_json::Value {
-                let mut obj = serde_json::Map::new();
-                for (var_name, node) in row {
-                    obj.insert(
-                        var_name,
-                        serde_json::json!({
-                            "id": node.id,
-                            "payload": node.payload,
-                            "numEdges": node.edges.len(),
-                        }),
-                    );
-                }
-                serde_json::Value::Object(obj)
-            }
-
             match &self.inner {
                 DbBackend::F32(db) => db
-                    .tql(&query)
+                    .tql_values(&query)
                     .map_err(|e| napi::Error::from_reason(e.to_string()))
-                    .map(|rows| rows.into_iter().map(row_to_json).collect()),
+                    .map(|rows| rows.into_iter().map(node_tql_row_to_json).collect()),
                 DbBackend::F16(db) => db
-                    .tql(&query)
+                    .tql_values(&query)
                     .map_err(|e| napi::Error::from_reason(e.to_string()))
-                    .map(|rows| rows.into_iter().map(row_to_json).collect()),
+                    .map(|rows| rows.into_iter().map(node_tql_row_to_json).collect()),
                 DbBackend::U64(db) => db
-                    .tql(&query)
+                    .tql_values(&query)
                     .map_err(|e| napi::Error::from_reason(e.to_string()))
-                    .map(|rows| rows.into_iter().map(row_to_json).collect()),
+                    .map(|rows| rows.into_iter().map(node_tql_row_to_json).collect()),
             }
+        }
+
+        #[napi]
+        pub fn prepare_tql(&self, query: String) -> napi::Result<JsPreparedTql> {
+            dispatch!(self, db => db.prepare_tql(&query))
+                .map(|inner| JsPreparedTql { inner })
+                .map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn execute_prepared_tql(
+            &self,
+            prepared: &JsPreparedTql,
+            parameters: serde_json::Value,
+        ) -> napi::Result<Vec<serde_json::Value>> {
+            let object = parameters.as_object().ok_or_else(|| {
+                napi::Error::from_reason(
+                    "Prepared TQL 参数必须是对象 (Prepared TQL parameters must be an object)",
+                )
+            })?;
+            let mut values = std::collections::HashMap::new();
+            for (name, value) in object {
+                values.insert(
+                    name.clone(),
+                    crate::query::tql_prepared::TqlParamValue::from_json(value)
+                        .map_err(to_napi_error)?,
+                );
+            }
+            match &self.inner {
+                DbBackend::F32(db) => db
+                    .execute_prepared_tql(&prepared.inner, &values)
+                    .map(|rows| rows.into_iter().map(node_tql_row_to_json).collect()),
+                DbBackend::F16(db) => db
+                    .execute_prepared_tql(&prepared.inner, &values)
+                    .map(|rows| rows.into_iter().map(node_tql_row_to_json).collect()),
+                DbBackend::U64(db) => db
+                    .execute_prepared_tql(&prepared.inner, &values)
+                    .map(|rows| rows.into_iter().map(node_tql_row_to_json).collect()),
+            }
+            .map_err(to_napi_error)
         }
 
         /// 执行 TQL 写操作（CREATE / SET / DELETE / DETACH DELETE）
@@ -1928,8 +2079,7 @@ pub mod nodejs {
         /// ```
         #[napi]
         pub fn tql_mut(&mut self, query: String) -> napi::Result<serde_json::Value> {
-            let result = dispatch!(self, mut db => db.tql_mut(&query))
-                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+            let result = dispatch!(self, mut db => db.tql_mut(&query)).map_err(to_napi_error)?;
             Ok(serde_json::json!({
                 "affected": result.affected,
                 "createdIds": result.created_ids,

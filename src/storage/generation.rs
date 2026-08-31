@@ -1,3 +1,10 @@
+//! 不可变数据库代际的发布、解析与 Reader 租约管理。
+//!
+//! Writer 在独立 generation 目录完成构建和 manifest 校验后，才通过临时文件、
+//! fsync 与原子 rename 发布 `current.json`。Reader 使用运行时目录中的租约保护
+//! 正在读取的旧代际，使发布新版本与回收旧版本解耦；Immutable 数据目录本身始终
+//! 保持零写。所有 generation/file 名称都按单一路径组件校验，避免目录穿越。
+
 use crate::VectorType;
 use crate::database::DatabaseReader;
 use crate::error::{Result, TriviumError};
