@@ -71,8 +71,15 @@ fn hit(score: f32) -> SearchHit {
     }
 }
 
+fn qemu_aarch64环境不支持运行时宿主动态库夹具() -> bool {
+    std::env::var_os("TRIVIUM_TEST_QEMU_AARCH64").is_some()
+}
+
 #[test]
 fn FFI_ABI_v2覆盖六阶段并传播错误() {
+    if qemu_aarch64环境不支持运行时宿主动态库夹具() {
+        return;
+    }
     let library = build_fixture("valid", 2);
     let hook = FfiHook::load(library.to_str().unwrap()).unwrap();
     let mut ctx = HookContext::new();
@@ -112,6 +119,9 @@ fn FFI_ABI_v2覆盖六阶段并传播错误() {
 
 #[test]
 fn FFI_ABI_v2拒绝版本不匹配() {
+    if qemu_aarch64环境不支持运行时宿主动态库夹具() {
+        return;
+    }
     let library = build_fixture("mismatch", 1);
     let error = match FfiHook::load(library.to_str().unwrap()) {
         Ok(_) => panic!("ABI 版本不匹配必须拒绝加载"),
@@ -122,6 +132,9 @@ fn FFI_ABI_v2拒绝版本不匹配() {
 
 #[test]
 fn FFI_ABI_v2拒绝越界返回数量() {
+    if qemu_aarch64环境不支持运行时宿主动态库夹具() {
+        return;
+    }
     let library = build_fixture("overflow", 2);
     let hook = FfiHook::load(library.to_str().unwrap()).unwrap();
     let mut ctx = HookContext::new();

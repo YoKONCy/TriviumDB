@@ -205,6 +205,9 @@ jobs:
       - name: 验证关闭、资源管理与跨进程文件锁
         run: npm run test:lifecycle
 
+      - name: 验证 Node.js 公共 API 契约
+        run: npm run test:public-api
+
   # ═══════════════════════════════════════════
   #  Job 2b: ARM64 Linux 原生测试 (QEMU)
   # ═══════════════════════════════════════════

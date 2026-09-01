@@ -77,9 +77,13 @@ def main() -> None:
         assert storage["property_index_format"] == 4
         assert storage["node_count"] == 2
 
-        prepared = db.prepare_tql('FIND {kind: "a"} RETURN $bonus + 1 AS score')
+        prepared = db.prepare_tql(
+            'FIND {kind: "a"} AS seed WITH seed RETURN seed, $bonus + 1 AS score'
+        )
         assert prepared.parameter_names() == ["bonus"]
-        assert len(db.execute_prepared_tql(prepared, {"bonus": 4})) == 1
+        prepared_rows = db.execute_prepared_tql(prepared, {"bonus": 4})
+        assert len(prepared_rows) == 1
+        assert prepared_rows[0].row["score"] == 5
         try:
             db.execute_prepared_tql(prepared, {})
         except RuntimeError as error:

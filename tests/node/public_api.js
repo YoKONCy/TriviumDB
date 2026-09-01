@@ -86,10 +86,11 @@ try {
   assert.equal(storage.property_index_format, 4)
   assert.equal(storage.node_count, 2)
 
-  const prepared = db.prepareTql('FIND {kind: "a"} RETURN $bonus + 1 AS score')
+  const prepared = db.prepareTql('FIND {kind: "a"} AS seed WITH seed RETURN seed, $bonus + 1 AS score')
   assert.deepEqual(prepared.parameterNames(), ['bonus'])
   const preparedRows = db.executePreparedTql(prepared, { bonus: 4 })
   assert.equal(preparedRows.length, 1)
+  assert.equal(preparedRows[0].score, 5)
   assert.throws(() => db.executePreparedTql(prepared, {}), /missing parameter|缺少参数/)
 
   const pathRows = db.tql('SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed shortest_paths seed TO [2] LABEL next AS route WITH route RETURN path(route) AS path')
