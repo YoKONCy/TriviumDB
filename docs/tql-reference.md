@@ -307,8 +307,43 @@ RETURN b
 | 机制 | 配置 | 说明 |
 |------|------|------|
 | 预算熔断 | 100,000 步 | 单次查询最多评估 10 万步，防止内存爆炸 |
-| 行数上限 | LIMIT 或默认 5,000 | 结果行数达标后立即停止所有 DFS 分支 |
+| 显式 LIMIT | 用户指定 | `LIMIT` 始终优先，不会被默认上限夹低；上限为 100,000 步预算 |
+| 默认行数上限 | 按风险区分 | 见下表；结果行数达标后立即停止所有 DFS 分支 |
 | 环路检测 | 可变长路径 | `HashSet<u64>` 跟踪已访问节点 |
+
+**默认行数上限**（仅在查询**未**显式写 `LIMIT` 时生效）：
+
+| 查询形态 | 默认上限 | 理由 |
+|---|---|---|
+| `MATCH (n)`（无边模式）、`FIND`、`SEARCH` | 无上限 | 每个节点最多产出一行，行数天然被节点数界定，不会爆炸 |
+| `MATCH (a)-[..]->(b)`（含边模式） | 5,000 | 多跳路径可能笛卡尔积爆炸，需要兜底 |
+
+**触及上限时默认报错**，不静默返回子集。语义对齐 ClickHouse 的
+`result_overflow_mode`（默认 `throw`）与 Elasticsearch 超 `max_result_window` 的行为。
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
+| `max_query_rows` | 未设置 | 未设置 = 按上表风险区分；`0` = 完全不限；`n` = 一律不超过 n 行。显式 `LIMIT` 优先级高于本配置 |
+| `row_overflow` | `"throw"` | `"throw"` = 触及上限即返回错误；`"break"` = 截断并记录 `tracing::warn!` 告警后返回部分结果 |
+| `memory_limit` | `0`（不限） | 结果集内存预算，会反推出一条行数上限，与 `max_query_rows` 取更严格者。**内存是硬约束，显式 `LIMIT` 也无法突破** |
+
+```python
+# 全量枚举大图：解除默认上限
+db = triviumdb.TriviumDB("graph.db", dim=768, max_query_rows=0)
+
+# 保留旧的「优雅截断」行为（v0.8.x 及更早的默认）
+db = triviumdb.TriviumDB("graph.db", dim=768, row_overflow="break")
+```
+
+聚合类查询（`count` / `sum` / `DISTINCT` / `ORDER BY`）一旦触及上限，返回的是
+**错误答案**而非部分答案，错误信息会明确区分这两种后果。`row_overflow="break"`
+下这类查询只会告警，需自行判断可接受性。
+
+`SET` / `DELETE` 的 `MATCH` 匹配集不受行数上限约束，避免静默的部分写入。
+
+内存护栅是**预算反推**而非实时计量，有两处已知低估：多变量模式
+（`MATCH (a)-[..]->(b)`）每行含多个节点但按 1 个估算；投影裁剪的节省未计入
+（它在物化之后才跑，峰值已经产生）。作为防 OOM 的护栅足够，不应当作精确计量。
 
 ---
 
@@ -511,9 +546,28 @@ ORDER BY _.heat DESC        -- FIND/SEARCH 场景
 ```sql
 LIMIT 10              -- 最多返回 10 条
 LIMIT 10 OFFSET 20    -- 跳过前 20 条，返回 10 条
+LIMIT 20000           -- 显式 LIMIT 不会被默认上限夹低
+OFFSET 5000           -- 可翻页到任意位置，不受默认上限影响
 ```
 
 **执行顺序**：`WHERE 过滤 → RANK（如有）→ 聚合/DISTINCT → ORDER BY → OFFSET → LIMIT`
+
+**分页保证**：全表扫描按节点 ID 升序返回，顺序在同一数据集上稳定且跨进程可重现，
+因此按 `LIMIT n OFFSET k*n` 逐页取全集不会漏行也不会重复。
+
+```python
+# 分页导出全图
+page, offset = 1000, 0
+while True:
+    rows = db.tql(f"MATCH (n) RETURN n LIMIT {page} OFFSET {offset}")
+    if not rows:
+        break
+    handle(rows)
+    offset += page
+```
+
+**聚合与排序拿到的是完整输入**：`RETURN count(n)` 统计的是全部匹配行，
+`ORDER BY ... LIMIT 10` 取的是全局 top-10，不是「前若干行里的 top-10」。
 
 ---
 

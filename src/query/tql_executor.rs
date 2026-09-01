@@ -13,6 +13,7 @@ use super::planner::{
 };
 use super::tql_ast::*;
 use crate::VectorType;
+use crate::database::config::RowOverflowPolicy;
 use crate::error::TriviumError;
 use crate::filter::Filter;
 use crate::node::{Node, NodeId};
@@ -78,14 +79,71 @@ pub enum MutationOp<T: VectorType> {
 const MAX_BUDGET: usize = 100_000;
 const DEFAULT_ROW_LIMIT: usize = 5_000;
 
+/// TQL 执行期的行数与内存配额。
+///
+/// 与 [`crate::database::Config`] 的 `max_query_rows` / `row_overflow` /
+/// `memory_limit` 一一对应；默认值等价于「按风险区分 + 超限报错」。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TqlLimits {
+    /// 未显式写 `LIMIT` 时的默认行数上限。`None` = 按风险区分，`Some(0)` = 不限。
+    pub max_query_rows: Option<usize>,
+    /// 触及非用户指定的行数上限时的行为。
+    pub row_overflow: RowOverflowPolicy,
+    /// 结果集内存预算（字节），0 = 不限。
+    pub memory_limit: usize,
+}
+
+impl TqlLimits {
+    /// 不设行数上限、不设内存预算。
+    ///
+    /// DML 的 MATCH 取值必须用这个：若匹配集被上限截断，`SET`/`DELETE`
+    /// 就只会改到一个子集，造成静默的部分写入。
+    const UNLIMITED: Self = Self {
+        max_query_rows: Some(0),
+        row_overflow: RowOverflowPolicy::Break,
+        memory_limit: 0,
+    };
+}
+
+/// 由内存预算反推结果集行数上限；`0` 预算表示不限。
+///
+/// 每行成本由 [`build_node`] 的向量拷贝主导——它对每个节点做 `vector.to_vec()`，
+/// dim=1536 的 f32 即 6 KiB/节点。这是**预算反推**而非实时计量，有两处已知低估：
+/// 多变量模式（`MATCH (a)-[..]->(b)`）每行含多个节点，此处按 1 个估算；
+/// `apply_projection_pruning` 的节省也未计入（它在物化之后才跑，峰值已经产生）。
+/// 作为防 OOM 的护栅足够，不应被当成精确计量。
+fn memory_derived_row_cap<T: VectorType>(memory_limit: usize, mt: &MemTable<T>) -> usize {
+    if memory_limit == 0 {
+        return usize::MAX;
+    }
+    /// payload + HashMap key + Node 字段的粗估开销
+    const PER_ROW_OVERHEAD: usize = 256;
+    let per_row = mt
+        .dim()
+        .saturating_mul(std::mem::size_of::<T>())
+        .saturating_add(PER_ROW_OVERHEAD)
+        .max(1);
+    // 至少放行 1 行：预算再小也不该让查询直接返回空集
+    (memory_limit / per_row).max(1)
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 //  公开入口
 // ═══════════════════════════════════════════════════════════════════════
 
-/// 执行一个已解析的 TqlQuery
+/// 执行一个已解析的 TqlQuery（使用默认行数配额）
 pub fn execute_tql<T: VectorType>(
     query: &TqlQuery,
     memtable: &MemTable<T>,
+) -> Result<TqlResult<T>, TriviumError> {
+    execute_tql_with_limits(query, memtable, TqlLimits::default())
+}
+
+/// 执行一个已解析的 TqlQuery，并指定行数配额。
+pub fn execute_tql_with_limits<T: VectorType>(
+    query: &TqlQuery,
+    memtable: &MemTable<T>,
+    limits: TqlLimits,
 ) -> Result<TqlResult<T>, TriviumError> {
     if query.explain {
         if query.analyze {
@@ -93,7 +151,7 @@ pub fn execute_tql<T: VectorType>(
             let mut executable = query.clone();
             executable.explain = false;
             executable.analyze = false;
-            let rows = execute_tql(&executable, memtable)?;
+            let rows = execute_tql_with_limits(&executable, memtable, limits)?;
             return Ok(generate_explain_plan(
                 query,
                 memtable,
@@ -103,9 +161,33 @@ pub fn execute_tql<T: VectorType>(
         return Ok(generate_explain_plan(query, memtable, None));
     }
     if !query.pipeline.is_empty() {
-        return execute_pipeline_node_query(query, memtable);
+        return execute_pipeline_node_query(query, memtable, limits);
     }
 
+    // 无边模式（MATCH (n) / FIND / SEARCH）每个节点最多产出一行，行数天然被节点数界定，
+    // 不可能笛卡尔积爆炸；含边模式才需要默认上限兜底。
+    let is_bounded_entry = match &query.entry {
+        QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } => {
+            pattern.edges.is_empty()
+        }
+        QueryEntry::Find { .. } | QueryEntry::Search { .. } => true,
+    };
+
+    // 解析默认上限：显式配置优先，否则按风险区分。usize::MAX 表示「不设默认上限」。
+    let configured_cap = match limits.max_query_rows {
+        Some(0) => usize::MAX,
+        Some(n) => n,
+        None if is_bounded_entry => usize::MAX,
+        None => DEFAULT_ROW_LIMIT,
+    };
+
+    // 内存护栅：由预算反推行数上限，与配置上限取更严格者，复用同一套截断/告知机制。
+    // 对齐 Neo4j 的 db.memory.transaction.max_size 与 ClickHouse 的 max_result_bytes。
+    let memory_cap = memory_derived_row_cap(limits.memory_limit, memtable);
+    let default_cap = configured_cap.min(memory_cap);
+    let capped_by_memory = memory_cap < configured_cap;
+
+    let offset = query.offset.unwrap_or(0);
     let ordered_find = matches!(
         &query.entry,
         QueryEntry::Find { filter } if find_ordered_find_plan(query, filter, memtable).is_some()
@@ -113,29 +195,53 @@ pub fn execute_tql<T: VectorType>(
     let requires_full_input = query.rank.is_some()
         || (!query.order_by.is_empty() && !ordered_find)
         || matches!(&query.returns, ReturnClause::Expressions(exprs) if exprs.iter().any(|expr| is_aggregate(&expr.kind) || expr.distinct));
-    let row_limit = if requires_full_input {
-        DEFAULT_ROW_LIMIT
+
+    // 聚合 / 排序 / RANK 必须拿到完整输入：用用户的 LIMIT 去截断*输入*会算出错误答案
+    // （例如 count(n) 只数了前 N 行），所以这里只受默认上限约束。
+    // 注意 offset 在这三种形态下也是后置的（先聚合/排序，再 OFFSET），所以同样要
+    // 叠加进预算，否则 `ORDER BY .. OFFSET 4000` 会把预算耗在被跳过的行上。
+    let (row_limit, limit_is_user_supplied) = if requires_full_input {
+        (default_cap.saturating_add(offset), false)
     } else {
-        query
-            .limit
-            .and_then(|limit| limit.checked_add(query.offset.unwrap_or(0)))
-            .unwrap_or(DEFAULT_ROW_LIMIT)
-            .min(DEFAULT_ROW_LIMIT)
+        match query.limit {
+            // 显式 LIMIT：优先级高于 max_query_rows 配置（允许用户为个别查询突破默认值），
+            // 但内存是硬约束——触及 memory_cap 时必须报错，否则护栅形同虚设。
+            Some(limit) => {
+                let requested = limit.saturating_add(offset);
+                if requested > memory_cap.saturating_add(offset) {
+                    return Err(TriviumError::QueryExecution(format!(
+                        "显式 LIMIT {} (+ OFFSET {}) 请求 {} 行会超过内存预算派生的上限 {} 行",
+                        limit, offset, requested, memory_cap
+                    )));
+                }
+                (requested, true)
+            }
+            // 无 LIMIT：默认上限作用于「返回行数」，故同样把 offset 叠加上去，
+            // 否则 `OFFSET 5000` 会把整个预算消耗在被跳过的行上而返回 0 行。
+            None => (default_cap.saturating_add(offset), false),
+        }
     };
 
-    let execution_row_limit = if query.rank.is_some() {
-        MAX_BUDGET.saturating_add(1)
+    // 步数预算只约束「边展开」的工作量——那才是笛卡尔积爆炸的来源。
+    // 无边模式的成本随候选数线性增长（每候选恰好 1 步、最多 1 行），拿步数去拦它
+    // 等于给全表扫描设了个 10 万节点的隐形天花板，与行数上限的语义自相矛盾。
+    let step_budget = if is_bounded_entry {
+        usize::MAX
     } else {
-        row_limit
+        MAX_BUDGET
     };
+
+    // 多取一行作为探针：若扫描真的还有第 row_limit+1 行，就能确证「被截断」，
+    // 而不是靠 `len() == cap` 去猜（那会把恰好产出 cap 行的查询误报成截断）。
+    let scan_limit = row_limit.saturating_add(1);
     let (mut results, ordered_output) = match &query.entry {
-        QueryEntry::Find { filter } => execute_find(filter, query, memtable, execution_row_limit)?,
+        QueryEntry::Find { filter } => execute_find(filter, query, memtable, scan_limit)?,
         QueryEntry::Match { pattern } => (
-            execute_match(pattern, query, memtable, execution_row_limit, false)?,
+            execute_match(pattern, query, memtable, scan_limit, step_budget, false)?,
             false,
         ),
         QueryEntry::OptionalMatch { pattern } => (
-            execute_match(pattern, query, memtable, execution_row_limit, true)?,
+            execute_match(pattern, query, memtable, scan_limit, step_budget, true)?,
             false,
         ),
         QueryEntry::Search {
@@ -143,17 +249,18 @@ pub fn execute_tql<T: VectorType>(
             top_k,
             expand,
         } => (
-            execute_search(
-                vector,
-                *top_k,
-                expand.as_ref(),
-                query,
-                memtable,
-                execution_row_limit,
-            )?,
+            execute_search(vector, *top_k, expand.as_ref(), query, memtable, scan_limit)?,
             false,
         ),
     };
+
+    // 截断检测必须在这里取样：一旦经过聚合/OFFSET/LIMIT，行数就被重塑了
+    // （聚合会把 N 行塌缩成 1 行 count，届时永远检测不到截断）。
+    // 探针行存在 ⇒ 确证被截断；随后立刻丢弃，否则会污染 count 等聚合结果。
+    let truncated = results.len() > row_limit;
+    if truncated {
+        results.truncate(row_limit);
+    }
 
     if let Some(rank) = &query.rank {
         results = apply_graph_first_rank(results, rank, memtable)?;
@@ -186,12 +293,77 @@ pub fn execute_tql<T: VectorType>(
     // 投影裁剪：对仅属性引用的变量，剥离 vector + edges 节省内存
     apply_projection_pruning(&query.returns, &mut results);
 
+    // 用户自己写的 LIMIT 达成即为预期，不算「静默丢数据」；其余任何截断都必须告知。
+    if truncated && !limit_is_user_supplied {
+        report_row_limit_truncation(RowLimitTruncation {
+            row_limit,
+            by_memory: capped_by_memory,
+            corrupts_result: requires_full_input,
+            policy: limits.row_overflow,
+        })?;
+    }
+
     Ok(results)
+}
+
+/// 一次「非用户指定的行数上限」截断事件。
+struct RowLimitTruncation {
+    /// 实际生效的行数上限
+    row_limit: usize,
+    /// 上限来自内存预算而非 `max_query_rows`
+    by_memory: bool,
+    /// 该查询形态下截断会让结果**错误**而非仅仅不完整
+    /// （聚合 / DISTINCT / ORDER BY / RANK 都需要完整输入）
+    corrupts_result: bool,
+    policy: RowOverflowPolicy,
+}
+
+/// 结果被非用户指定的行数上限截断时的告知路径。
+///
+/// `Throw` 返回错误，`Break` 记录告警。文案区分「不完整」与「错误」两种后果：
+/// 前者是少了行，后者是 `count`/`ORDER BY` 之类算出了错的答案。
+fn report_row_limit_truncation(event: RowLimitTruncation) -> Result<(), TriviumError> {
+    let RowLimitTruncation {
+        row_limit,
+        by_memory,
+        corrupts_result,
+        policy,
+    } = event;
+
+    let cause = if by_memory {
+        "内存预算 (memory budget)"
+    } else {
+        "行数上限 max_query_rows (row limit)"
+    };
+    let consequence = if corrupts_result {
+        "聚合/排序需要完整输入，结果是错误的而非仅不完整 \
+         (aggregation/ordering needs full input: the result is WRONG, not merely partial)"
+    } else {
+        "返回的只是子集 (the returned rows are only a subset)"
+    };
+    let remedy = if by_memory {
+        "请用 LIMIT/OFFSET 分页，或调高 memory_limit \
+         (paginate with LIMIT/OFFSET, or raise memory_limit)"
+    } else {
+        "请用 LIMIT/OFFSET 分页，或调整 max_query_rows \
+         (paginate with LIMIT/OFFSET, or adjust max_query_rows)"
+    };
+    let message =
+        format!("TQL 结果在 {row_limit} 行处被{cause}截断：{consequence}。{remedy}");
+
+    match policy {
+        RowOverflowPolicy::Throw => Err(TriviumError::QueryExecution(message)),
+        RowOverflowPolicy::Break => {
+            tracing::warn!("{}", message);
+            Ok(())
+        }
+    }
 }
 
 fn execute_pipeline_set<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
+    limits: TqlLimits,
 ) -> Result<
     (
         crate::query::pipeline::NodeSet,
@@ -225,7 +397,7 @@ fn execute_pipeline_set<T: VectorType>(
                 source_query.limit = None;
                 source_query.offset = None;
                 source_query.returns = ReturnClause::All;
-                let ids = execute_tql(&source_query, mt)?
+                let ids = execute_tql_with_limits(&source_query, mt, limits)?
                     .into_iter()
                     .flat_map(|row| row.into_values().map(|node| node.id))
                     .collect();
@@ -502,6 +674,7 @@ fn execute_pipeline_set<T: VectorType>(
 fn execute_pipeline_node_query<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
+    limits: TqlLimits,
 ) -> Result<TqlResult<T>, TriviumError> {
     if matches!(&query.returns, ReturnClause::Expressions(items) if items.iter().any(|item| matches!(item.kind, ReturnExprKind::Scalar(_))))
     {
@@ -509,7 +682,7 @@ fn execute_pipeline_node_query<T: VectorType>(
             "节点结果 API 无法承载标量列，请使用 tql_values (Node-only result API cannot carry scalar columns; use tql_values)".into(),
         ));
     }
-    let (set, current_name, scalar_aliases) = execute_pipeline_set(query, mt)?;
+    let (set, current_name, scalar_aliases) = execute_pipeline_set(query, mt, limits)?;
     let mut pipeline_rows = set.rows().to_vec();
     sort_pipeline_rows(&mut pipeline_rows, &query.order_by, &scalar_aliases, mt);
     apply_offset_limit(&mut pipeline_rows, query.offset, query.limit);
@@ -523,13 +696,22 @@ fn execute_pipeline_node_query<T: VectorType>(
     Ok(results)
 }
 
-/// 执行 TQL 并返回可同时承载节点与标量列的一等值结果。
+/// 执行 TQL 并返回可同时承载节点与标量列的一等值结果（使用默认行数配额）。
 pub fn execute_tql_values<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
 ) -> Result<TqlValueResult<T>, TriviumError> {
+    execute_tql_values_with_limits(query, mt, TqlLimits::default())
+}
+
+/// 执行 TQL 返回一等值结果，并指定行数配额。
+pub fn execute_tql_values_with_limits<T: VectorType>(
+    query: &TqlQuery,
+    mt: &MemTable<T>,
+    limits: TqlLimits,
+) -> Result<TqlValueResult<T>, TriviumError> {
     if query.pipeline.is_empty() {
-        return execute_tql(query, mt).map(|rows| {
+        return execute_tql_with_limits(query, mt, limits).map(|rows| {
             rows.into_iter()
                 .map(|row| {
                     row.into_iter()
@@ -539,7 +721,7 @@ pub fn execute_tql_values<T: VectorType>(
                 .collect()
         });
     }
-    let (set, current_name, scalar_aliases) = execute_pipeline_set(query, mt)?;
+    let (set, current_name, scalar_aliases) = execute_pipeline_set(query, mt, limits)?;
     let mut rows = set.rows().to_vec();
     if pipeline_has_aggregation(&query.returns) {
         let mut values =
@@ -1227,6 +1409,7 @@ fn execute_match<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
     row_limit: usize,
+    step_budget: usize,
     optional: bool,
 ) -> Result<TqlResult<T>, TriviumError> {
     // 建立变量映射
@@ -1271,7 +1454,7 @@ fn execute_match<T: VectorType>(
             start_id,
             &mut results,
             &mut budget,
-            MAX_BUDGET,
+            step_budget,
             row_limit,
         )?;
         if !cont {
@@ -2989,9 +3172,9 @@ fn execute_set<T: VectorType>(
         .as_ref()
         .ok_or_else(|| TriviumError::QueryParse("SET requires a preceding MATCH clause".into()))?;
 
-    // 运行 MATCH 查询获取匹配行
+    // 运行 MATCH 查询获取匹配行（不设默认上限：截断会导致静默的部分更新）
     let query = build_match_query(&source.pattern, source.predicate.as_ref());
-    let results = execute_tql(&query, mt)?;
+    let results = execute_tql_with_limits(&query, mt, TqlLimits::UNLIMITED)?;
 
     let mut ops = Vec::new();
 
@@ -3025,8 +3208,9 @@ fn execute_delete<T: VectorType>(
         TriviumError::QueryParse("DELETE requires a preceding MATCH clause".into())
     })?;
 
+    // 不设默认上限：截断会导致静默的部分删除
     let query = build_match_query(&source.pattern, source.predicate.as_ref());
-    let results = execute_tql(&query, mt)?;
+    let results = execute_tql_with_limits(&query, mt, TqlLimits::UNLIMITED)?;
 
     let mut ops = Vec::new();
     let mut deleted: HashSet<NodeId> = HashSet::new();

@@ -446,6 +446,12 @@ fn bitmap_filter_candidates<T: VectorType>(
     Some((fields, candidates))
 }
 
+/// 集合差：`left - right`。
+///
+/// **契约：`left` 与 `right` 都必须按升序排列。** 这是双指针归并，`right_index`
+/// 只前进不回退；若 `left` 无序，游标会越过本该排除的元素，导致 `$ne`/`$nin`
+/// 错误地返回应被排除的行。调用方传入的 universe 依赖
+/// `MemTable::all_node_ids()` 的升序保证。
 fn difference_sorted(left: &[NodeId], right: &[NodeId]) -> Vec<NodeId> {
     let mut output = Vec::with_capacity(left.len());
     let (mut left_index, mut right_index) = (0usize, 0usize);

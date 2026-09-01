@@ -2262,9 +2262,16 @@ impl<T: VectorType> MemTable<T> {
         self.payloads.contains_key(&id)
     }
 
-    /// 返回所有活跃节点 ID
+    /// 返回所有活跃节点 ID，**按 ID 升序**。
+    ///
+    /// 排序是契约而非实现细节：`payloads` 是 `HashMap`，裸迭代顺序随进程重启变化、
+    /// 且在扩容时整体重排。全表扫描（`planner::materialize_full_scan`）、TQL 的
+    /// `OFFSET` 分页、以及 `planner::difference_sorted`（双指针归并，要求两侧升序）
+    /// 都依赖此顺序的确定性。
     pub fn all_node_ids(&self) -> Vec<NodeId> {
-        self.payloads.keys().cloned().collect()
+        let mut ids: Vec<NodeId> = self.payloads.keys().cloned().collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// 返回包含逻辑删除（tombstones）在内的完整内部 ID 阵列，

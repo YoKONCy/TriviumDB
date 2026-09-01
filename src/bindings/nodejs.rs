@@ -297,6 +297,8 @@ pub mod nodejs {
         pub memory_limit_mb: Option<f64>,
         pub access_mode: Option<String>,
         pub missing_index_policy: Option<String>,
+        pub max_query_rows: Option<f64>,
+        pub row_overflow: Option<String>,
     }
 
     /// 高级管线专用配置结构
@@ -599,6 +601,16 @@ pub mod nodejs {
         }
     }
 
+    fn parse_row_overflow(value: Option<&str>) -> napi::Result<crate::database::RowOverflowPolicy> {
+        match value.unwrap_or("throw") {
+            "throw" => Ok(crate::database::RowOverflowPolicy::Throw),
+            "break" => Ok(crate::database::RowOverflowPolicy::Break),
+            _ => Err(napi::Error::from_reason(
+                "rowOverflow 必须是 throw / break",
+            )),
+        }
+    }
+
     fn parse_sync_mode(s: &str) -> napi::Result<crate::storage::wal::SyncMode> {
         crate::storage::wal::SyncMode::parse(s).map_err(napi::Error::from_reason)
     }
@@ -666,6 +678,8 @@ pub mod nodejs {
                     memory_limit_mb: None,
                     access_mode: None,
                     missing_index_policy: None,
+                    max_query_rows: None,
+                    row_overflow: None,
                 },
             };
             let dim = options.dim.unwrap_or(1536) as usize;
@@ -682,6 +696,10 @@ pub mod nodejs {
             let memory_limit = memory_limit_mb
                 .checked_mul(1024 * 1024)
                 .ok_or_else(|| napi::Error::from_reason("memoryLimitMb 换算字节时溢出"))?;
+            let max_query_rows = options
+                .max_query_rows
+                .map(|value| parse_safe_usize(value, "maxQueryRows"))
+                .transpose()?;
             let config = crate::database::Config {
                 dim,
                 sync_mode: parse_sync_mode(options.sync_mode.as_deref().unwrap_or("normal"))?,
@@ -694,6 +712,8 @@ pub mod nodejs {
                 missing_index_policy: parse_missing_index_policy(
                     options.missing_index_policy.as_deref(),
                 )?,
+                max_query_rows,
+                row_overflow: parse_row_overflow(options.row_overflow.as_deref())?,
             };
             let dtype_str = dtype.as_str();
 

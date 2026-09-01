@@ -440,6 +440,16 @@ pub mod python {
         }
     }
 
+    fn parse_row_overflow(value: &str) -> PyResult<crate::database::RowOverflowPolicy> {
+        match value {
+            "throw" => Ok(crate::database::RowOverflowPolicy::Throw),
+            "break" => Ok(crate::database::RowOverflowPolicy::Break),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                "row_overflow 必须是 throw / break",
+            )),
+        }
+    }
+
     fn parse_edge_direction(value: &str) -> PyResult<crate::database::EdgeDirection> {
         match value {
             "out" | "outgoing" => Ok(crate::database::EdgeDirection::Outgoing),
@@ -454,7 +464,7 @@ pub mod python {
     #[pymethods]
     impl PyTriviumDB {
         #[new]
-        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0, access_mode="read_write", missing_index_policy="fallback"))]
+        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0, access_mode="read_write", missing_index_policy="fallback", max_query_rows=None, row_overflow="throw"))]
         fn new(
             path: &str,
             dim: usize,
@@ -466,6 +476,8 @@ pub mod python {
             memory_limit_mb: usize,
             access_mode: &str,
             missing_index_policy: &str,
+            max_query_rows: Option<usize>,
+            row_overflow: &str,
         ) -> PyResult<Self> {
             let sm = parse_sync_mode(sync_mode)?;
             let memory_limit = memory_limit_mb.checked_mul(1024 * 1024).ok_or_else(|| {
@@ -480,6 +492,8 @@ pub mod python {
                 memory_limit,
                 access_mode: parse_access_mode(access_mode)?,
                 missing_index_policy: parse_missing_index_policy(missing_index_policy)?,
+                max_query_rows,
+                row_overflow: parse_row_overflow(row_overflow)?,
                 ..Default::default()
             };
             let inner = match dtype {

@@ -316,6 +316,21 @@ export interface TriviumDBOptions {
   accessMode?: 'readWrite' | 'readOnly' | 'immutable';
   /** Reader 遇到缺失或损坏 sidecar 时的行为 */
   missingIndexPolicy?: 'fallback' | 'buildInMemory' | 'error';
+  /**
+   * TQL 单次查询的默认行数上限，仅在查询未显式写 LIMIT 时生效。
+   *
+   * 省略时按风险区分：无边模式（`MATCH (n)`、`FIND`、`SEARCH`）不设默认上限，
+   * 含边模式默认 5,000 以防笛卡尔积爆炸。0 表示完全不限；n 表示一律不超过 n 行。
+   * 任何情况下仍受 100,000 步预算约束，显式 LIMIT 始终优先。
+   */
+  maxQueryRows?: number;
+  /**
+   * 结果因行数上限（而非显式 LIMIT）被截断时的行为，默认 'throw'（抛错）。
+   *
+   * 'throw' 宁可失败也不把子集伪装成全集（对齐 ClickHouse result_overflow_mode
+   * 的默认值）；'break' 截断并记录告警后返回部分结果。
+   */
+  rowOverflow?: 'throw' | 'break';
 }
 
 export class PreparedTql {

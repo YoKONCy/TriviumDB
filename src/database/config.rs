@@ -41,6 +41,25 @@ pub enum EdgeDirection {
     Both,
 }
 
+/// 结果行数触及上限时的行为。语义对齐 ClickHouse 的 `result_overflow_mode`。
+///
+/// 只在上限**不是**用户显式 `LIMIT` 时生效——用户自己写的 `LIMIT` 达成即为预期结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowOverflowPolicy {
+    /// 返回错误（默认）。宁可失败，也不把子集伪装成全集。
+    ///
+    /// 与 ClickHouse `result_overflow_mode=throw`、Elasticsearch 超
+    /// `max_result_window` 的行为一致。
+    #[default]
+    Throw,
+    /// 截断并记录 `tracing::warn!` 告警后返回部分结果。
+    ///
+    /// 对应 ClickHouse `result_overflow_mode=break`。注意：聚合类查询
+    /// （`count`/`sum`/`DISTINCT`/`ORDER BY`）一旦触及上限，返回的是**错误答案**
+    /// 而非部分答案，此策略下只会告警，需自行判断可接受性。
+    Break,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub dim: usize,
@@ -56,6 +75,18 @@ pub struct Config {
     pub memory_limit: usize,
     pub access_mode: AccessMode,
     pub missing_index_policy: MissingIndexPolicy,
+    /// TQL 单次查询的默认行数上限（仅在查询未显式写 LIMIT 时生效）。
+    ///
+    /// - `None`（默认）：按风险区分。无边模式（`MATCH (n)`、`FIND`、`SEARCH`）行数天然被
+    ///   节点数界定，不设默认上限；含边模式可能笛卡尔积爆炸，保留 5,000 默认上限。
+    /// - `Some(0)`：完全不设默认上限。
+    /// - `Some(n)`：无边/含边一律不超过 n 行。
+    ///
+    /// 任何情况下仍受 100,000 步预算熔断约束。显式 `LIMIT` 始终优先于本配置。
+    pub max_query_rows: Option<usize>,
+    /// 结果因行数上限（而非用户显式 `LIMIT`）被截断时的行为，默认
+    /// [`RowOverflowPolicy::Throw`]（报错）。
+    pub row_overflow: RowOverflowPolicy,
 }
 
 impl Default for Config {
@@ -70,6 +101,8 @@ impl Default for Config {
             memory_limit: 0,
             access_mode: AccessMode::ReadWrite,
             missing_index_policy: MissingIndexPolicy::Fallback,
+            max_query_rows: None,
+            row_overflow: RowOverflowPolicy::Throw,
         }
     }
 }

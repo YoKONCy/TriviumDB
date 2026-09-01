@@ -8,7 +8,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use triviumdb::database::Database;
+use triviumdb::database::{Config, Database, RowOverflowPolicy};
 use triviumdb::storage::wal::WalEntry;
 
 const DIM: usize = 2;
@@ -196,7 +196,12 @@ fn 测试_密集图谱_万级笛卡尔积防OOM_LazyEvaluation有效性() {
     let path = tmp_db("dense_graph_oom");
     cleanup(&path);
 
-    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let config = Config {
+        dim: DIM,
+        row_overflow: RowOverflowPolicy::Break,
+        ..Default::default()
+    };
+    let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
 
     // 构造一个超级中心节点 (0)
     let hub_id = db
