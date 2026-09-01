@@ -76,12 +76,12 @@ PARAM_TYPES = {
 for _t, _names in {
     "int": "id src dst key depth expand_depth min_depth max_depth max_visited_nodes "
            "max_anchor_nodes parallelism additional mb interval_secs min_community_size "
-           "max_iterations dim new_dim memory_limit_mb expected_nodes top_k recall_k rerank_k "
+           "max_iterations dim new_dim memory_limit_mb expected_nodes max_query_rows top_k recall_k rerank_k "
            "max_edges_per_node max_edges max_results seed",
     "float": "weight min_score teleport_alpha fista_lambda fista_threshold "
              "dpp_quality_weight text_boost hybrid_alpha min_edge_weight resolution",
     "str": "text keyword field query query_text mode lib_path path new_path generation_id "
-           "dtype sync_mode access_mode missing_index_policy direction label custom_query_text",
+           "dtype sync_mode access_mode missing_index_policy row_overflow direction label custom_query_text",
     "bool": "load_text_index auto_build_quiver enabled compute_centroids "
             "enable_advanced_pipeline enable_sparse_residual enable_dpp "
             "enable_refractory_fatigue enable_text_hybrid_search force_brute_force",
@@ -93,6 +93,7 @@ QUALIFIED_PARAM_TYPES = {
     "TriviumDB.__new__.sync_mode": "SyncMode",
     "TriviumDB.__new__.access_mode": "AccessMode",
     "TriviumDB.__new__.missing_index_policy": "MissingIndexPolicy",
+    "TriviumDB.__new__.row_overflow": "RowOverflowPolicy",
     "TriviumDB.set_sync_mode.mode": "SyncMode",
     "TriviumDB.search.edge_direction": "EdgeDirection",
     "TriviumDB.search_grouped.edge_direction": "EdgeDirection",
@@ -169,6 +170,7 @@ DType = Literal["f32", "f16", "u64"]
 SyncMode = Literal["full", "normal", "off"]
 AccessMode = Literal["read_write", "read_only", "immutable"]
 MissingIndexPolicy = Literal["fallback", "build_in_memory", "error"]
+RowOverflowPolicy = Literal["throw", "break"]
 EdgeDirection = Literal["out", "in", "both"]
 ReachabilityDirection = Literal["outgoing", "incoming", "both"]
 '''

@@ -165,14 +165,17 @@ jobs:
           python -m pip install --force-reinstall python-dist/*.whl
 
       - name: 验证上下文关闭与文件锁生命周期
-        run: python tests/python_context_manager.py
+        run: python tests/python/context_manager.py
+
+      - name: 验证 Python 公共 API 契约
+        run: python tests/python/public_api.py
 
       - name: 验证 Python 类型存根与 Wheel 内容
         shell: bash
         run: |
           python -c "import pathlib,triviumdb; root=pathlib.Path(triviumdb.__file__).parent; assert (root/'py.typed').is_file(); assert (root/'__init__.pyi').is_file()"
-          python -m mypy --strict tests/python_typing_smoke.py
-          npx --yes pyright tests/python_typing_smoke.py --pythonpath "$(command -v python)"
+          python -m mypy --strict tests/python/typing_smoke.py
+          npx --yes pyright tests/python/typing_smoke.py --pythonpath "$(command -v python)"
 
   node-binding:
     name: Node.js Binding Lifecycle

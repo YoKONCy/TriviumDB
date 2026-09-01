@@ -44,7 +44,7 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，
 - 🗃️ **Rom/Mmap 双引擎切换** —— 既支持单文件 `*.tdb` 复制走人，也支持分离 `.vec` 向量文件按需 mmap 零拷贝加载
 - 🔗 **节点即一切** —— 每个节点天然同时拥有限定长度的稠密向量、稀疏文本倒排词频、元数据和图关系，ID 全局唯一，绝不错位
 - 🧠 **为 AI 而生** —— 可选启用“AC自动机+BM25稀疏文本”与“Dense Vector稠密向量”的**多路召回**来触发图谱扩散检索，并内置多层认知管线（FISTA / DPP / PPR）
-- 🛡️ **四层数据安全保障** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，断电断存不毁库
+- 🛡️ **四层数据安全保障** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，`.flush_ok` v2 整文件 CRC 让损坏输入 fail-closed，断电断存不毁库
 - 🐍 **Python / Node.js 原生** —— `pip install` 或 `npm install` 后直接使用，类 MongoDB 查询语法
 - ⚡ **高性能检索** —— rayon 并行暴力搜索（小规模 100% 精确）+ 自研 SOTA 级 ANN 索引 **QuIVer**（1 万节点以上自动激活），无需手动配置
 - 💾 **SSD 友好** —— Append-Only WAL + 后台 Compaction 线程 + QuIVer 索引独立持久化，杜绝随机写入磨损
@@ -521,7 +521,7 @@ TriviumDB/
 - [x] CLI 工具 `triviumdb-cli`（命令 `tdb`）：非交互命令 + REPL（Tab 补全 / 语法高亮 / 多行输入）+ 配置文件
 - [x] 数据库可视化工具：终端 TUI（`tdb ui`，图谱力导向布局 / k-hop 展开 / 向量搜索 Playground）
 
-### v0.8 — 自由 DIY 混合查询时代 ✅ (当前，v0.8.3)
+### v0.8 — 自由 DIY 混合查询时代 ✅ (当前，v0.8.4)
 
 - [x] **四类持久化属性索引**：Hash / Ordered ART / Composite ART / Roaring Bitmap（`.pidx` v4，读取 v1–v4），等值、范围、前缀、复合与低基数集合运算全索引化
 - [x] **TQL `WITH` 可组合管线**：命名 NodeSet、作用域校验、跨阶段自由编排，`FIND` / `MATCH` / `SEARCH` 均可进入管线
@@ -534,6 +534,17 @@ TriviumDB/
 - [x] **严格 API 迁移策略**：移除全部静默历史兼容，旧入口返回 `ApiMigrationRequired` 迁移错误与稳定错误码，无头 WAL 拒绝解析
 - [x] **生产级硬保证**：ReadOnly / Immutable 字节级零写、四维查询预算 fail-closed、并行执行确定性、generation 原子发布
 - [x] **TSNG 三信号研究线**：向量 / 属性 / 图统一打分、六条 AccessPath、exact ground truth 与 Recall@K / NDCG@K 评测
+
+### v0.8.4 工程加固 ✅
+
+- [x] **`.flush_ok` v2 完整性标记**：`.tdb`/`.vec` 整文件 CRC32 + marker 自校验，等长位翻转与扇区撕裂可被发现；损坏输入统一 fail-closed（ReadOnly/Immutable 零写拒绝，不再产生零向量伪恢复），v1 标记有界兼容
+- [x] **生产路径零 panic**：外部输入、磁盘解析、查询执行与绑定层不再可达 `panic!/unreachable!`，统一结构化错误与静态门禁
+- [x] **Hook 三端 + FFI ABI v2 对齐**：Python / Node 原生六阶段 Hook（异常结构化传播，Node 同步回调），FFI Hook 升级为带 ABI 版本门禁、错误码与六阶段注入的 v2 协议
+- [x] **真实故障注入矩阵**：发布阶段子进程强杀断电（旧完整代/新完整代二选一）、确定性 I/O failpoint、目标 failpoint 失败分配器、独立格式规格 mutation 套件（`tests/format_spec/`），全部小型 fixture 隔离子进程，不耗尽真实资源
+- [x] **Cascades 权威物理计划**：Source/Filter/Expand/Rank 真实物理候选驱动执行器 lowering，可序列化物理属性，优化状态显式 `Complete/Fallback/BudgetExceeded`，`EXPLAIN` 同步暴露
+- [x] **属性索引数值键编码 v2**：整数/浮点统一有序键（修复组合范围误判空集）、大整数精确比较与安全回退、旧 sidecar 打开时内存重建迁移；修复 Ordered 索引 LIMIT 在其他条件过滤前过早截断
+- [x] **社区 Issue 修复**：#31 并行 PageRank 子集外边 panic、#32 TQL 隐藏 5000 行截断
+- [x] **TQL SEARCH 热路径重构**：Top-K 部分选择 + 惰性物化消除六倍级回归，Pipeline 归一化不再破坏相似度排名
 
 ---
 

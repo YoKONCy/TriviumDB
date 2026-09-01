@@ -278,11 +278,19 @@ export interface JsHookContext {
   /** 管线是否被 Hook 提前终止 */
   aborted: boolean;
 }
+/** 管线执行错误信息 */
+export interface JsHookError {
+  /** 错误类型 */
+  type: string;
+  /** 错误消息 */
+  message: strin
+}
+
 
 /** 带上下文的检索结果 */
 export interface JsSearchWithContextResult {
   /** 检索结果列表 */
-  hits: JsSearchHit[];
+  hits: JsSearchHit             [];
   /** Hook 管线上下文 */
   context: JsHookContext;
 }
@@ -316,6 +324,10 @@ export interface TriviumDBOptions {
   accessMode?: 'readWrite' | 'readOnly' | 'immutable';
   /** Reader 遇到缺失或损坏 sidecar 时的行为 */
   missingIndexPolicy?: 'fallback' | 'buildInMemory' | 'error';
+  /** TQL 默认结果行上限；0 表示禁用默认上限，显式 LIMIT 可覆盖该值 */
+  maxQueryRows?: number;
+  /** 普通 TQL 查询超过默认行上限时抛错，或告警后返回部分结果 */
+  rowOverflow?: 'throw' | 'break';
 }
 
 export class PreparedTql {
@@ -370,6 +382,16 @@ export class TriviumDB {
   };
 
   // ── Hook 管理 ──
+
+  /** 注册同步 JavaScript 六阶段 Hook；回调不得返回 Promise */
+  setHook(hook: {
+    onPreSearch?: (query: number[]) => number[] | null;
+    onCustomRecall?: (query: number[]) => Array<{ id: string; score: number; payload?: unknown }> | null;
+    onPostRecall?: (hits: Array<{ id: string; score: number; payload?: unknown }>) => Array<{ id: string; score: number; payload?: unknown }> | null;
+    onPreGraphExpand?: (hits: Array<{ id: string; score: number; payload?: unknown }>) => Array<{ id: string; score: number; payload?: unknown }> | null;
+    onRerank?: (hits: Array<{ id: string; score: number; payload?: unknown }>) => Array<{ id: string; score: number; payload?: unknown }> | null;
+    onPostSearch?: (hits: Array<{ id: string; score: number; payload?: unknown }>) => Array<{ id: string; score: number; payload?: unknown }> | null;
+  }): void;
 
   /**
    * 加载 C/C++ 动态库作为检索管线 Hook

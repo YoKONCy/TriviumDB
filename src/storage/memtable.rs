@@ -1912,6 +1912,56 @@ impl<T: VectorType> MemTable<T> {
         }
     }
 
+    pub fn rebuild_property_indexes_from_definitions(
+        &mut self,
+        definitions: &[(crate::index::property::PropertyIndexKind, Vec<String>)],
+    ) {
+        let mut indexes = PropertyIndexRegistry::default();
+        for (kind, fields) in definitions {
+            match kind {
+                crate::index::property::PropertyIndexKind::Hash => {
+                    if let Some(field) = fields.first() {
+                        indexes.register(
+                            field,
+                            self.payloads
+                                .iter()
+                                .map(|(&id, payload)| (id, payload.get())),
+                        );
+                    }
+                }
+                crate::index::property::PropertyIndexKind::Ordered => {
+                    if let Some(field) = fields.first() {
+                        indexes.register_ordered(
+                            field,
+                            self.payloads
+                                .iter()
+                                .map(|(&id, payload)| (id, payload.get())),
+                        );
+                    }
+                }
+                crate::index::property::PropertyIndexKind::Composite => {
+                    indexes.register_composite(
+                        fields,
+                        self.payloads
+                            .iter()
+                            .map(|(&id, payload)| (id, payload.get())),
+                    );
+                }
+                crate::index::property::PropertyIndexKind::Bitmap => {
+                    if let Some(field) = fields.first() {
+                        indexes.register_bitmap(
+                            field,
+                            self.payloads
+                                .iter()
+                                .map(|(&id, payload)| (id, payload.get())),
+                        );
+                    }
+                }
+            }
+        }
+        self.property_indexes = indexes;
+    }
+
     pub fn set_property_indexes(&mut self, indexes: PropertyIndexRegistry) {
         self.property_indexes = indexes;
     }
@@ -2262,9 +2312,13 @@ impl<T: VectorType> MemTable<T> {
         self.payloads.contains_key(&id)
     }
 
-    /// 返回所有活跃节点 ID
+    /// 返回所有活跃节点 ID，按 ID 升序。
+    ///
+    /// 全表扫描分页和 Planner 的有序差集都依赖该确定性契约。
     pub fn all_node_ids(&self) -> Vec<NodeId> {
-        self.payloads.keys().cloned().collect()
+        let mut ids = self.payloads.keys().copied().collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 
     /// 返回包含逻辑删除（tombstones）在内的完整内部 ID 阵列，

@@ -1,6 +1,6 @@
 {
   "name": "triviumdb",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "AI-native embedded database: Vector + Graph + Relational in one file",
   "main": "index.js",
   "types": "triviumdb.d.ts",
@@ -15,8 +15,8 @@
   "scripts": {
     "build": "napi build --platform --release --features nodejs",
     "build:debug": "napi build --platform --features nodejs",
-    "test:lifecycle": "node tests/node_lifecycle.js",
-    "test:public-api": "node tests/node_public_api.js",
+    "test:lifecycle": "node tests/node/lifecycle.js",
+    "test:public-api": "node tests/node/public_api.js",
     "prepublishOnly": "napi build --platform --release --features nodejs"
   },
   "keywords": [

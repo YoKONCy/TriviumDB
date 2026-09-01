@@ -29,10 +29,11 @@ const BQ_BLOCK_HEADER_SIZE: usize = 16;
 // ══════ flush_ok 提交标记常量 ══════
 /// 标记魔数：Trivium Flush Marker
 const FLUSH_MARKER_MAGIC: &[u8; 4] = b"TFMK";
-/// 标记版本号（u8，单字节）
-const FLUSH_MARKER_VERSION: u8 = 1;
-/// 标记总长度：magic(4) + version(1) + generation(8) + tdb_size(8) + vec_size(8) = 29
-const FLUSH_MARKER_SIZE: usize = 29;
+/// 当前标记版本记录 `.tdb/.vec` 的长度、整文件 CRC32 和 marker 自身 CRC32。
+const FLUSH_MARKER_VERSION: u8 = 2;
+const FLUSH_MARKER_V1_SIZE: usize = 29;
+/// magic(4) + version(1) + generation(8) + sizes(16) + file CRCs(8) + marker CRC(4)
+const FLUSH_MARKER_SIZE: usize = 41;
 
 /// flush_ok 提交标记：记录 .tdb 和 .vec 的文件大小及单调递增的 generation 号
 ///
@@ -41,6 +42,8 @@ struct FlushMarker {
     generation: u64,
     tdb_size: u64,
     vec_size: u64,
+    tdb_crc32: Option<u32>,
+    vec_crc32: Option<u32>,
 }
 
 /// 编码 flush marker 为固定字节数组
@@ -51,15 +54,18 @@ fn encode_flush_marker(marker: &FlushMarker) -> [u8; FLUSH_MARKER_SIZE] {
     bytes[5..13].copy_from_slice(&marker.generation.to_le_bytes());
     bytes[13..21].copy_from_slice(&marker.tdb_size.to_le_bytes());
     bytes[21..29].copy_from_slice(&marker.vec_size.to_le_bytes());
+    bytes[29..33].copy_from_slice(&marker.tdb_crc32.unwrap_or_default().to_le_bytes());
+    bytes[33..37].copy_from_slice(&marker.vec_crc32.unwrap_or_default().to_le_bytes());
+    let marker_crc = crc32fast::hash(&bytes[..37]);
+    bytes[37..41].copy_from_slice(&marker_crc.to_le_bytes());
     bytes
 }
 
 /// 解码 flush marker，校验 magic 和 version，不匹配时返回错误
 fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
-    if bytes.len() != FLUSH_MARKER_SIZE {
+    if !matches!(bytes.len(), FLUSH_MARKER_V1_SIZE | FLUSH_MARKER_SIZE) {
         return Err(TriviumError::CorruptedFile(format!(
-            "flush marker 长度无效：期望 {} 字节，实际 {} 字节",
-            FLUSH_MARKER_SIZE,
+            "flush marker 长度无效：实际 {} 字节",
             bytes.len()
         )));
     }
@@ -67,16 +73,40 @@ fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
         return Err(TriviumError::CorruptedFile("flush marker 魔数无效".into()));
     }
     let version = bytes[4];
-    if version != FLUSH_MARKER_VERSION {
+    if version != 1 && version != FLUSH_MARKER_VERSION {
         return Err(TriviumError::CorruptedFile(format!(
-            "flush marker 版本无效：期望 {}，实际 {}",
+            "flush marker 版本无效：支持 1..={}，实际 {}",
             FLUSH_MARKER_VERSION, version
         )));
+    }
+    if version == 1 && bytes.len() != FLUSH_MARKER_V1_SIZE {
+        return Err(TriviumError::CorruptedFile(
+            "flush marker v1 长度无效".into(),
+        ));
+    }
+    if version == FLUSH_MARKER_VERSION {
+        if bytes.len() != FLUSH_MARKER_SIZE {
+            return Err(TriviumError::CorruptedFile(
+                "flush marker v2 长度无效".into(),
+            ));
+        }
+        let stored_crc = read_u32_le(bytes, 37, "flush marker crc")?;
+        if crc32fast::hash(&bytes[..37]) != stored_crc {
+            return Err(TriviumError::CorruptedFile(
+                "flush marker CRC 不匹配".into(),
+            ));
+        }
     }
     Ok(FlushMarker {
         generation: read_u64_le(bytes, 5, "flush marker generation")?,
         tdb_size: read_u64_le(bytes, 13, "flush marker tdb_size")?,
         vec_size: read_u64_le(bytes, 21, "flush marker vec_size")?,
+        tdb_crc32: (version >= 2)
+            .then(|| read_u32_le(bytes, 29, "flush marker tdb_crc32"))
+            .transpose()?,
+        vec_crc32: (version >= 2)
+            .then(|| read_u32_le(bytes, 33, "flush marker vec_crc32"))
+            .transpose()?,
     })
 }
 
@@ -100,7 +130,17 @@ fn validate_flush_marker(marker_path: &str, tdb_path: &str, vec_path: &str) -> b
     };
     let actual_tdb = std::fs::metadata(tdb_path).map(|m| m.len()).unwrap_or(0);
     let actual_vec = std::fs::metadata(vec_path).map(|m| m.len()).unwrap_or(0);
-    marker.tdb_size == actual_tdb && marker.vec_size == actual_vec
+    if marker.tdb_size != actual_tdb || marker.vec_size != actual_vec {
+        return false;
+    }
+    match (marker.tdb_crc32, marker.vec_crc32) {
+        (Some(tdb_crc), Some(vec_crc)) => {
+            file_crc32(tdb_path).ok() == Some(tdb_crc)
+                && file_crc32_or_empty(vec_path).ok() == Some(vec_crc)
+        }
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// 从字节切片中安全读取小端序整数（军工级：禁止裸 unwrap）
@@ -178,6 +218,14 @@ fn file_crc32(path: impl AsRef<Path>) -> std::io::Result<u32> {
         hasher.update(&buffer[..read]);
     }
     Ok(hasher.finalize())
+}
+
+fn file_crc32_or_empty(path: impl AsRef<Path>) -> std::io::Result<u32> {
+    match file_crc32(path) {
+        Ok(crc) => Ok(crc),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(crc32fast::hash(&[])),
+        Err(error) => Err(error),
+    }
 }
 
 fn quiver_meta_path_from_db(db_path: &str) -> String {
@@ -354,11 +402,18 @@ pub fn save<T: VectorType>(
 fn save_mmap<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()> {
     let vec_file_path = vec_path_from_db(path);
     let vec_count = memtable.vec_pool_mut().flush(Path::new(&vec_file_path))?;
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::AfterVecPersisted);
+
     save_tdb(memtable, path, vec_count, true)?;
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::AfterTdbPersisted);
 
     // ═══ 跨文件一致性标记（提交点） ═══
     // .vec 和 .tdb 都已原子替换成功后，才写入 .flush_ok 标记。
     // 加载时校验此标记来检测撕裂写入。
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::io_result(crate::test_hooks::IoPoint::MarkerMetadata)?;
     let tdb_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let vec_size = std::fs::metadata(&vec_file_path)
         .map(|m| m.len())
@@ -374,15 +429,31 @@ fn save_mmap<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()
         generation,
         tdb_size,
         vec_size,
+        tdb_crc32: Some(file_crc32(path)?),
+        vec_crc32: Some(file_crc32_or_empty(&vec_file_path)?),
     };
     let marker_bytes = encode_flush_marker(&marker);
     let marker_tmp = format!("{}.tmp", marker_path);
     {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::io_result(crate::test_hooks::IoPoint::MarkerCreate)?;
         let mut f = File::create(&marker_tmp)?;
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::io_result(crate::test_hooks::IoPoint::MarkerWrite)?;
         f.write_all(&marker_bytes)?;
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::io_result(crate::test_hooks::IoPoint::MarkerSync)?;
         f.sync_all()?;
     }
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeFlushMarkerRename);
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::io_result(crate::test_hooks::IoPoint::MarkerRename)?;
+
     robust_rename_and_sync(Path::new(&marker_tmp), Path::new(&marker_path))?;
+
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::AfterFlushMarkerRename);
 
     Ok(())
 }
@@ -686,51 +757,16 @@ pub fn load<T: VectorType>(
             if mmap_property_postings {
                 load_mapped_graph(&mut mt, path)?;
             }
-            if mmap_property_postings {
-                load_mapped_graph(&mut mt, path)?;
-            }
             load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             if load_text_sidecar {
                 load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             }
             Ok(mt)
         } else {
-            if !repair_sidecars {
-                return Err(TriviumError::CorruptedFile(
-                    "只读打开拒绝不完整的 .tdb/.vec generation：.flush_ok 缺失或不匹配".into(),
-                ));
-            }
-            // marker 缺失或不匹配：直接安全降级，仅加载 .tdb 元数据，依赖 WAL 回放
-            tracing::warn!(
-                "检测到 .tdb/.vec 跨文件撕裂 (Cross-file tear detected)（.flush_ok 标记缺失或不匹配），\
-                 直接进入安全降级恢复 (metadata-only)，依赖 WAL 回放数据"
-            );
-            let mut mt = load_v2_metadata_only(
-                bytes,
-                dim,
-                next_id,
-                node_count,
-                payload_offset,
-                edge_offset,
-                edge_limit_offset,
-                version,
-            )?;
-            load_bq_block(&mut mt, bytes, bq_layout)?;
-            load_property_indexes(
-                &mut mt,
-                path,
-                repair_sidecars,
-                missing_index_policy,
-                mmap_property_postings,
-            )?;
-            if mmap_property_postings {
-                load_mapped_graph(&mut mt, path)?;
-            }
-            load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
-            if load_text_sidecar {
-                load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
-            }
-            Ok(mt)
+            Err(TriviumError::CorruptedFile(
+                "拒绝不完整的 .tdb/.vec generation：.flush_ok 缺失或不匹配，WAL 不能证明基础向量可完整重建"
+                    .into(),
+            ))
         }
     } else {
         let mut mt = load_v1_rom(
@@ -785,43 +821,6 @@ fn load_v2<T: VectorType>(
         payload_offset,
         edge_offset,
     )?;
-    load_edges(
-        &mut memtable,
-        bytes,
-        edge_offset,
-        edge_limit_offset,
-        version,
-    )?;
-    Ok(memtable)
-}
-
-/// 分离向量模式的安全降级加载：只读取 .tdb 元数据，向量由 WAL 回放补齐
-fn load_v2_metadata_only<T: VectorType>(
-    bytes: &[u8],
-    dim: usize,
-    next_id: u64,
-    node_count: usize,
-    payload_offset: usize,
-    edge_offset: usize,
-    edge_limit_offset: usize,
-    version: u16,
-) -> Result<MemTable<T>> {
-    let mut memtable = MemTable::new_with_next_id(dim, next_id);
-    load_payloads(
-        &mut memtable,
-        bytes,
-        node_count,
-        payload_offset,
-        edge_offset,
-    )?;
-    // register_node/register_tombstone 只注册元数据映射，不向 VecPool 推入向量。
-    // 安全降级时 .vec 不被信任，为保持 indices_to_ids 与 vec_pool 索引严格对齐，
-    // 为每个槽位（含 tombstone 占位）推入零向量，后续由 WAL 回放覆盖为真实向量。
-    let zero = vec![T::zero(); dim];
-    let slot_count = memtable.internal_slot_count();
-    for _ in 0..slot_count {
-        memtable.vec_pool_mut().push(&zero);
-    }
     load_edges(
         &mut memtable,
         bytes,
@@ -1183,7 +1182,15 @@ fn load_property_indexes<T: VectorType>(
         mmap_property_postings,
     ) {
         Ok(Some(indexes)) => {
-            memtable.set_property_indexes(indexes);
+            if indexes.key_encoding_version() < 2 {
+                let definitions = indexes.index_definitions();
+                memtable.rebuild_property_indexes_from_definitions(&definitions);
+                tracing::info!(
+                    "属性索引旧键编码已在内存重建；下次显式 flush 发布新编码 (Legacy property index keys rebuilt in memory)"
+                );
+            } else {
+                memtable.set_property_indexes(indexes);
+            }
             Ok(())
         }
         Ok(None) => Ok(()),

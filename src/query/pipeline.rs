@@ -122,6 +122,7 @@ impl NodeSet {
     }
 
     fn normalize(&mut self) {
+        let ranked = !self.rows.is_empty() && self.rows.iter().all(|row| row.similarity.is_some());
         self.rows.sort_by_key(|row| row.id);
         self.rows.dedup_by(|left, right| {
             if left.id != right.id {
@@ -130,6 +131,9 @@ impl NodeSet {
             merge_row(left, right);
             true
         });
+        if ranked {
+            self.rows.sort_by(compare_similarity);
+        }
     }
 }
 
@@ -355,22 +359,105 @@ impl<T: VectorType> PipelineOperator<T> for ExactVectorSearch<T> {
         }
         let ids = context.memtable.all_node_ids();
         context.charge_vectors(ids.len())?;
-        let mut rows = ids
+        let mut scored = ids
             .into_iter()
             .filter_map(|id| {
                 let vector = context.memtable.get_vector(id)?;
-                let mut row = NodeRow::new(id);
-                row.similarity = Some(ScoreValue {
-                    value: T::similarity(&self.query, vector),
-                    kind: ScoreKind::Exact,
-                });
-                row.provenance.source_ids.push(id);
-                Some(row)
+                Some((id, T::similarity(&self.query, vector)))
             })
             .collect::<Vec<_>>();
-        rows.sort_by(compare_similarity);
-        rows.truncate(self.top_k);
-        Ok(NodeSet { rows })
+        let compare = |left: &(NodeId, f32), right: &(NodeId, f32)| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        };
+        if self.top_k == 0 {
+            scored.clear();
+        } else if self.top_k < scored.len() {
+            scored.select_nth_unstable_by(self.top_k, compare);
+            scored.truncate(self.top_k);
+            scored.sort_by(compare);
+        } else {
+            scored.sort_by(compare);
+        }
+        Ok(NodeSet {
+            rows: scored
+                .into_iter()
+                .map(|(id, score)| {
+                    let mut row = NodeRow::new(id);
+                    row.similarity = Some(ScoreValue {
+                        value: score,
+                        kind: ScoreKind::Exact,
+                    });
+                    row.provenance.source_ids.push(id);
+                    row
+                })
+                .collect(),
+        })
+    }
+}
+
+pub struct QuiverVectorSearch<T: VectorType> {
+    pub query: Vec<T>,
+    pub top_k: usize,
+    pub ef_search: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for QuiverVectorSearch<T> {
+    fn name(&self) -> &'static str {
+        "quiver_vector_search"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        if self.query.len() != context.memtable.dim() {
+            return Err(TriviumError::DimensionMismatch {
+                expected: context.memtable.dim(),
+                got: self.query.len(),
+            });
+        }
+        let Some(index) = context.memtable.quiver() else {
+            return ExactVectorSearch {
+                query: self.query.clone(),
+                top_k: self.top_k,
+            }
+            .apply(NodeSet::empty(), context);
+        };
+        let query = self
+            .query
+            .iter()
+            .map(|value| value.to_f32())
+            .collect::<Vec<_>>();
+        let hits = index.search(
+            &query,
+            |slot, output| {
+                let Some((_, vector)) = context.memtable.active_vector_at_slot(slot) else {
+                    return false;
+                };
+                output.clear();
+                output.extend(vector.iter().map(|value| value.to_f32()));
+                true
+            },
+            &crate::index::quiver::QuIVerSearchConfig {
+                top_k: self.top_k,
+                ef_search: self.ef_search.max(self.top_k),
+                rerank_limit: Some(self.ef_search.max(self.top_k)),
+            },
+        );
+        context.charge_vectors(hits.len())?;
+        Ok(NodeSet::from_rows(
+            hits.into_iter()
+                .map(|(id, score)| {
+                    let mut row = NodeRow::new(id);
+                    row.similarity = Some(ScoreValue {
+                        value: score,
+                        kind: ScoreKind::Exact,
+                    });
+                    row.provenance.source_ids.push(id);
+                    row
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -484,6 +571,75 @@ fn compare_similarity(left: &NodeRow, right: &NodeRow) -> std::cmp::Ordering {
                 .unwrap_or(f32::NEG_INFINITY),
         )
         .then_with(|| left.id.cmp(&right.id))
+}
+
+pub struct PropertyIndexFilter {
+    pub equalities: Vec<(String, serde_json::Value)>,
+    pub strategy: PropertyIndexStrategy,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PropertyIndexStrategy {
+    Hash,
+    Ordered,
+    Composite,
+    Bitmap,
+    Intersection,
+}
+
+impl<T: VectorType> PipelineOperator<T> for PropertyIndexFilter {
+    fn name(&self) -> &'static str {
+        match self.strategy {
+            PropertyIndexStrategy::Hash => "property_hash_filter",
+            PropertyIndexStrategy::Ordered => "property_ordered_filter",
+            PropertyIndexStrategy::Composite => "property_composite_filter",
+            PropertyIndexStrategy::Bitmap => "property_bitmap_filter",
+            PropertyIndexStrategy::Intersection => "property_intersection_filter",
+        }
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let ids = match self.strategy {
+            PropertyIndexStrategy::Hash | PropertyIndexStrategy::Ordered => self
+                .equalities
+                .first()
+                .and_then(|(field, value)| context.memtable.find_by_property_index(field, value)),
+            PropertyIndexStrategy::Composite => context
+                .memtable
+                .find_by_composite_property_index(&self.equalities)
+                .map(|(_, ids)| ids),
+            PropertyIndexStrategy::Bitmap => context
+                .memtable
+                .find_by_bitmap_intersection(&self.equalities),
+            PropertyIndexStrategy::Intersection => {
+                let mut intersection = None::<BTreeSet<NodeId>>;
+                let mut complete = true;
+                for (field, value) in &self.equalities {
+                    let Some(ids) = context.memtable.find_by_property_index(field, value) else {
+                        complete = false;
+                        break;
+                    };
+                    let ids = ids.into_iter().collect::<BTreeSet<_>>();
+                    intersection = Some(match intersection {
+                        Some(current) => current.intersection(&ids).copied().collect(),
+                        None => ids,
+                    });
+                }
+                complete.then(|| intersection.unwrap_or_default().into_iter().collect())
+            }
+        };
+        let Some(ids) = ids else {
+            return Ok(input);
+        };
+        let allowed = ids.into_iter().collect::<BTreeSet<_>>();
+        Ok(NodeSet::from_rows(
+            input
+                .into_rows()
+                .into_iter()
+                .filter(|row| allowed.contains(&row.id))
+                .collect(),
+        ))
+    }
 }
 
 pub struct PayloadFilter {

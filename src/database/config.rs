@@ -41,6 +41,15 @@ pub enum EdgeDirection {
     Both,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowOverflowPolicy {
+    /// 触及非用户显式 LIMIT 的行数上限时返回错误。
+    #[default]
+    Throw,
+    /// 普通行查询截断并告警；需要完整输入的查询仍然返回错误。
+    Break,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub dim: usize,
@@ -56,6 +65,10 @@ pub struct Config {
     pub memory_limit: usize,
     pub access_mode: AccessMode,
     pub missing_index_policy: MissingIndexPolicy,
+    /// TQL 默认结果行上限；None 按风险分级，Some(0) 不设默认上限。
+    pub max_query_rows: Option<usize>,
+    /// 普通行查询触及非显式上限时的行为。
+    pub row_overflow: RowOverflowPolicy,
 }
 
 impl Default for Config {
@@ -70,6 +83,8 @@ impl Default for Config {
             memory_limit: 0,
             access_mode: AccessMode::ReadWrite,
             missing_index_policy: MissingIndexPolicy::Fallback,
+            max_query_rows: None,
+            row_overflow: RowOverflowPolicy::Throw,
         }
     }
 }

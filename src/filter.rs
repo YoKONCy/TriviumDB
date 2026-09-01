@@ -8,7 +8,7 @@ use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub enum ComparableValue {
-    Number(f64),
+    Number(serde_json::Number),
     String(String),
 }
 
@@ -363,8 +363,8 @@ impl Filter {
 }
 
 fn parse_comparable(value: &Value, operator: &str) -> Result<ComparableValue, String> {
-    if let Some(number) = value.as_f64() {
-        return Ok(ComparableValue::Number(number));
+    if let Some(number) = value.as_number() {
+        return Ok(ComparableValue::Number(number.clone()));
     }
     if let Some(string) = value.as_str() {
         return Ok(ComparableValue::String(string.to_string()));
@@ -381,11 +381,53 @@ fn compare_ordered<T: PartialOrd>(value: T, threshold: T, op: RangeOp) -> bool {
     }
 }
 
+fn compare_numbers(
+    actual: &serde_json::Number,
+    expected: &serde_json::Number,
+    op: RangeOp,
+) -> bool {
+    let ordering = match (
+        actual.as_i64(),
+        actual.as_u64(),
+        expected.as_i64(),
+        expected.as_u64(),
+    ) {
+        (Some(left), _, Some(right), _) => left.cmp(&right),
+        (_, Some(left), _, Some(right)) => left.cmp(&right),
+        (Some(left), _, _, Some(right)) => {
+            if left < 0 {
+                std::cmp::Ordering::Less
+            } else {
+                (left as u64).cmp(&right)
+            }
+        }
+        (_, Some(left), Some(right), _) => {
+            if right < 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                left.cmp(&(right as u64))
+            }
+        }
+        _ => actual
+            .as_f64()
+            .zip(expected.as_f64())
+            .map_or(std::cmp::Ordering::Equal, |(left, right)| {
+                left.total_cmp(&right)
+            }),
+    };
+    match op {
+        RangeOp::Gt => ordering.is_gt(),
+        RangeOp::Gte => !ordering.is_lt(),
+        RangeOp::Lt => ordering.is_lt(),
+        RangeOp::Lte => !ordering.is_gt(),
+    }
+}
+
 fn compare_value(value: &Value, threshold: &ComparableValue, op: RangeOp) -> bool {
     match (value, threshold) {
-        (Value::Number(number), ComparableValue::Number(expected)) => number
-            .as_f64()
-            .is_some_and(|actual| compare_ordered(actual, *expected, op)),
+        (Value::Number(number), ComparableValue::Number(expected)) => {
+            compare_numbers(number, expected, op)
+        }
         (Value::String(actual), ComparableValue::String(expected)) => {
             compare_ordered(actual.as_str(), expected.as_str(), op)
         }

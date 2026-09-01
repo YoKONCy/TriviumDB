@@ -28,15 +28,89 @@ pub enum LogicalOperator {
     Return,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptimizationStatus {
+    Complete,
+    Fallback,
+    BudgetExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderingProperty {
+    Unordered,
+    NodeId,
+    SimilarityDesc,
+    PropertyAsc(String),
+    PropertyDesc(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExactnessProperty {
+    Exact,
+    Approximate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializationProperty {
+    Streaming,
+    Materialized,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoreProperty {
+    None,
+    ApproximateSimilarity,
+    ExactSimilarity,
+    Graph,
+    Path,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathProperty {
+    Unavailable,
+    Available,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PhysicalProperties {
+    pub ordering: OrderingProperty,
+    pub exactness: ExactnessProperty,
+    pub materialization: MaterializationProperty,
+    pub available_columns: BTreeSet<String>,
+    pub score: ScoreProperty,
+    pub path: PathProperty,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PhysicalOperator {
     ExactVectorSearch,
+    QuiverVectorSearch,
+    NodeScan,
+    PropertyHashLookup,
+    PropertyOrderedLookup,
+    PropertyCompositeLookup,
+    PropertyBitmapLookup,
+    PropertyIndexIntersection,
+    GraphFirstSource,
+    TextFirstSource,
     ScopeProjection,
-    GraphExpand,
-    PayloadFilter,
+    GraphExpandSerial,
+    GraphExpandParallel,
+    GraphExpandIncoming,
+    GraphExpandLabelDirectory,
+    ExpandExactRerank,
+    PayloadFilterScan,
     ScalarFilter,
-    ExactRerank,
+    ExactRerankHeap,
+    RankAlreadyOrdered,
+    AnnExactRerank,
     GraphAlgorithm,
     ReturnProjection,
 }
@@ -73,6 +147,7 @@ pub struct MemoGroup {
 pub struct PlannedStage {
     pub stage_index: Option<usize>,
     pub operator: PhysicalOperator,
+    pub properties: PhysicalProperties,
     pub estimated_rows: usize,
     pub estimated_cost: f64,
     pub temp_bytes: usize,
@@ -94,8 +169,11 @@ pub struct AppliedRule {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CascadesPlan {
+    pub status: OptimizationStatus,
     pub groups: Vec<MemoGroup>,
     pub stages: Vec<PlannedStage>,
+    pub elided_stages: BTreeSet<usize>,
+    pub merged_filter_pairs: BTreeSet<(usize, usize)>,
     pub exact_rerank_after: BTreeSet<usize>,
     pub rules: Vec<AppliedRule>,
     pub explored_expressions: usize,
@@ -143,28 +221,14 @@ pub fn optimize_pipeline<T: VectorType>(
     let mut input_origin = query_entry_property_origin(query);
     let mut groups = Vec::new();
     let mut stages = Vec::new();
+    let mut status = OptimizationStatus::Complete;
     let mut exact_rerank_after = BTreeSet::new();
     let mut input_rows = source_rows(query, mt.node_count());
     let mut parent = None;
     let mut explored = 0usize;
     let mut pruned = 0usize;
 
-    let source_alt = PhysicalAlternative {
-        operator: PhysicalOperator::ExactVectorSearch,
-        estimated_cost: mt.node_count() as f64 * mt.dim() as f64,
-        estimated_rows: input_rows,
-        temp_bytes: input_rows
-            .saturating_mul(std::mem::size_of::<crate::query::pipeline::NodeRow>()),
-        vector_page_reads: pages(
-            mt.node_count()
-                .saturating_mul(mt.dim())
-                .saturating_mul(std::mem::size_of::<T>()),
-        ),
-        payload_page_reads: 0,
-        graph_page_reads: 0,
-        exact: true,
-        materialized: true,
-    };
+    let source_alt = source_alternative(query, mt, input_rows);
     push_group(
         &mut groups,
         GroupExpression {
@@ -182,10 +246,16 @@ pub fn optimize_pipeline<T: VectorType>(
 
     for (stage_index, stage) in query.pipeline.iter().enumerate() {
         if groups.len() >= budget.max_groups || explored >= budget.max_expressions {
+            status = if budget.max_groups == 0 || budget.max_expressions == 0 {
+                OptimizationStatus::BudgetExceeded
+            } else {
+                OptimizationStatus::Fallback
+            };
             pruned = pruned.saturating_add(query.pipeline.len().saturating_sub(stage_index));
+            append_fallback_stages(query, stage_index, &mut stages, mt);
             break;
         }
-        let (logical, alternatives) = match stage {
+        let (logical, mut alternatives) = match stage {
             PipelineStage::With(_) => (
                 LogicalOperator::With,
                 vec![PhysicalAlternative {
@@ -230,7 +300,7 @@ pub fn optimize_pipeline<T: VectorType>(
                 (
                     LogicalOperator::Expand,
                     vec![PhysicalAlternative {
-                        operator: PhysicalOperator::GraphExpand,
+                        operator: expand_operator(expand, estimated),
                         estimated_cost: estimated as f64 * fanout,
                         estimated_rows: estimated,
                         temp_bytes: estimated
@@ -254,7 +324,7 @@ pub fn optimize_pipeline<T: VectorType>(
                 let estimated = (input_rows as f64 * selectivity).ceil() as usize;
                 let mut alternatives = vec![PhysicalAlternative {
                     operator: if property_only {
-                        PhysicalOperator::PayloadFilter
+                        PhysicalOperator::PayloadFilterScan
                     } else {
                         PhysicalOperator::ScalarFilter
                     },
@@ -267,18 +337,20 @@ pub fn optimize_pipeline<T: VectorType>(
                     exact: true,
                     materialized: false,
                 }];
-                if property_only && predicate_has_index(predicate, &property_stats) {
-                    alternatives.push(PhysicalAlternative {
-                        operator: PhysicalOperator::PayloadFilter,
-                        estimated_cost: estimated as f64 * 0.2 + 8.0,
-                        estimated_rows: estimated,
-                        temp_bytes: estimated.saturating_mul(std::mem::size_of::<u64>()),
-                        vector_page_reads: 0,
-                        payload_page_reads: estimated,
-                        graph_page_reads: 0,
-                        exact: true,
-                        materialized: true,
-                    });
+                if property_only {
+                    for operator in indexed_filter_operators(predicate, mt) {
+                        alternatives.push(PhysicalAlternative {
+                            operator,
+                            estimated_cost: estimated as f64 * 0.2 + 8.0,
+                            estimated_rows: estimated,
+                            temp_bytes: estimated.saturating_mul(std::mem::size_of::<u64>()),
+                            vector_page_reads: 0,
+                            payload_page_reads: estimated,
+                            graph_page_reads: 0,
+                            exact: true,
+                            materialized: true,
+                        });
+                    }
                 }
                 (LogicalOperator::Filter, alternatives)
             }
@@ -304,7 +376,7 @@ pub fn optimize_pipeline<T: VectorType>(
             PipelineStage::Rank(rank) => (
                 LogicalOperator::Rank,
                 vec![PhysicalAlternative {
-                    operator: PhysicalOperator::ExactRerank,
+                    operator: PhysicalOperator::ExactRerankHeap,
                     estimated_cost: input_rows as f64 * mt.dim() as f64,
                     estimated_rows: input_rows.min(rank.top_k),
                     temp_bytes: input_rows.saturating_mul(std::mem::size_of::<(u64, f32)>()),
@@ -320,6 +392,41 @@ pub fn optimize_pipeline<T: VectorType>(
                 }],
             ),
         };
+        if matches!(stage, PipelineStage::Expand(_))
+            && matches!(
+                query.pipeline.get(stage_index + 1),
+                Some(PipelineStage::Rank(_))
+            )
+        {
+            let mut fused = alternatives[0].clone();
+            fused.operator = PhysicalOperator::ExpandExactRerank;
+            fused.estimated_cost *= 0.8;
+            fused.vector_page_reads = pages(
+                fused
+                    .estimated_rows
+                    .saturating_mul(mt.dim())
+                    .saturating_mul(std::mem::size_of::<T>()),
+            );
+            alternatives.push(fused);
+        }
+        if matches!(stage, PipelineStage::Rank(_))
+            && stages.last().is_some_and(|previous| {
+                previous.properties.ordering == OrderingProperty::SimilarityDesc
+                    && previous.properties.exactness == ExactnessProperty::Exact
+            })
+        {
+            alternatives.push(PhysicalAlternative {
+                operator: PhysicalOperator::RankAlreadyOrdered,
+                estimated_cost: 0.0,
+                estimated_rows: input_rows,
+                temp_bytes: 0,
+                vector_page_reads: 0,
+                payload_page_reads: 0,
+                graph_page_reads: 0,
+                exact: true,
+                materialized: false,
+            });
+        }
         let best = alternatives
             .iter()
             .enumerate()
@@ -361,7 +468,7 @@ pub fn optimize_pipeline<T: VectorType>(
         {
             exact_rerank_after.insert(stage_index);
             let rerank = PhysicalAlternative {
-                operator: PhysicalOperator::ExactRerank,
+                operator: PhysicalOperator::ExactRerankHeap,
                 estimated_cost: input_rows as f64 * mt.dim() as f64,
                 estimated_rows: input_rows,
                 temp_bytes: input_rows.saturating_mul(std::mem::size_of::<(u64, f32)>()),
@@ -391,10 +498,23 @@ pub fn optimize_pipeline<T: VectorType>(
             / total_weight;
     }
     let rules = evaluate_rules(query);
+    let elided_stages = rules
+        .iter()
+        .filter(|rule| rule.applied && rule.name == "eliminate_identity_with")
+        .map(|rule| rule.stage_index)
+        .collect();
+    let merged_filter_pairs = rules
+        .iter()
+        .filter(|rule| rule.applied && rule.name == "merge_adjacent_filters")
+        .map(|rule| (rule.stage_index, rule.stage_index + 1))
+        .collect();
     let total_estimated_cost = stages.iter().map(|stage| stage.estimated_cost).sum();
     CascadesPlan {
+        status,
         groups,
         stages,
+        elided_stages,
+        merged_filter_pairs,
         exact_rerank_after,
         rules,
         explored_expressions: explored,
@@ -442,6 +562,33 @@ fn histogram_fanout(graph: &crate::storage::memtable::GraphStats) -> f64 {
 fn evaluate_rules(query: &TqlQuery) -> Vec<AppliedRule> {
     let mut rules = Vec::new();
     for (index, stage) in query.pipeline.iter().enumerate() {
+        if let PipelineStage::With(with) = stage {
+            let identity = with.items.len() == 1
+                && matches!(&with.items[0].expr, TqlExpr::Variable(variable) if variable == &with.items[0].alias);
+            rules.push(AppliedRule {
+                name: "eliminate_identity_with",
+                stage_index: index,
+                applied: identity,
+                reason: if identity {
+                    "恒等 WITH 不改变作用域或可用列"
+                } else {
+                    "WITH 包含重命名或标量投影"
+                },
+            });
+        }
+        if matches!(stage, PipelineStage::Filter(_))
+            && matches!(
+                query.pipeline.get(index + 1),
+                Some(PipelineStage::Filter(_))
+            )
+        {
+            rules.push(AppliedRule {
+                name: "merge_adjacent_filters",
+                stage_index: index,
+                applied: true,
+                reason: "相邻过滤按 AND 合并且保持求值顺序",
+            });
+        }
         let next = query
             .pipeline
             .iter()
@@ -537,6 +684,7 @@ fn planned(
     PlannedStage {
         stage_index,
         operator: alternative.operator.clone(),
+        properties: properties_for(&alternative.operator),
         estimated_rows: alternative.estimated_rows,
         estimated_cost: alternative.estimated_cost,
         temp_bytes: alternative.temp_bytes,
@@ -731,18 +879,220 @@ fn query_entry_property_origin(_query: &TqlQuery) -> Option<(String, serde_json:
     None
 }
 
-fn predicate_has_index(
+fn source_alternative<T: VectorType>(
+    query: &TqlQuery,
+    mt: &MemTable<T>,
+    rows: usize,
+) -> PhysicalAlternative {
+    let operator = match &query.entry {
+        QueryEntry::Search { .. } if mt.quiver().is_some() => PhysicalOperator::QuiverVectorSearch,
+        QueryEntry::Search { .. } => PhysicalOperator::ExactVectorSearch,
+        QueryEntry::Find { filter } => match filter {
+            crate::filter::Filter::Eq(field, _) if mt.has_property_index(field) => {
+                PhysicalOperator::PropertyHashLookup
+            }
+            _ => PhysicalOperator::NodeScan,
+        },
+        QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern }
+            if pattern
+                .nodes
+                .first()
+                .and_then(|node| node.filter.as_ref())
+                .is_some() =>
+        {
+            PhysicalOperator::GraphFirstSource
+        }
+        QueryEntry::Match { .. } | QueryEntry::OptionalMatch { .. } => PhysicalOperator::NodeScan,
+    };
+    let approximate = operator == PhysicalOperator::QuiverVectorSearch;
+    PhysicalAlternative {
+        operator,
+        estimated_cost: if approximate {
+            rows.max(1).ilog2() as f64 * mt.dim() as f64
+        } else {
+            mt.node_count() as f64 * mt.dim().max(1) as f64
+        },
+        estimated_rows: rows,
+        temp_bytes: rows.saturating_mul(std::mem::size_of::<crate::query::pipeline::NodeRow>()),
+        vector_page_reads: pages(
+            mt.node_count()
+                .saturating_mul(mt.dim())
+                .saturating_mul(std::mem::size_of::<T>()),
+        ),
+        payload_page_reads: 0,
+        graph_page_reads: 0,
+        exact: !approximate,
+        materialized: true,
+    }
+}
+
+fn expand_operator(
+    expand: &super::tql_ast::PipelineExpandStage,
+    estimated_rows: usize,
+) -> PhysicalOperator {
+    if expand.expand.direction == super::tql_ast::EdgeDirection::Backward {
+        PhysicalOperator::GraphExpandIncoming
+    } else if !expand.expand.labels.is_empty() {
+        PhysicalOperator::GraphExpandLabelDirectory
+    } else if estimated_rows >= 4096 {
+        PhysicalOperator::GraphExpandParallel
+    } else {
+        PhysicalOperator::GraphExpandSerial
+    }
+}
+
+fn indexed_filter_operators<T: VectorType>(
     predicate: &Predicate,
-    stats: &BTreeMap<String, crate::index::property::PropertyIndexStats>,
-) -> bool {
+    mt: &MemTable<T>,
+) -> Vec<PhysicalOperator> {
+    let mut fields = Vec::new();
+    collect_predicate_fields(predicate, &mut fields);
+    fields.sort();
+    fields.dedup();
+    let mut output = Vec::new();
+    if fields.iter().any(|field| mt.has_property_index(field)) {
+        output.push(PhysicalOperator::PropertyHashLookup);
+    }
+    if fields
+        .iter()
+        .any(|field| mt.has_ordered_property_index(field))
+    {
+        output.push(PhysicalOperator::PropertyOrderedLookup);
+    }
+    if fields.len() > 1 && fields.iter().all(|field| mt.has_property_index(field)) {
+        output.extend([
+            PhysicalOperator::PropertyCompositeLookup,
+            PhysicalOperator::PropertyBitmapLookup,
+            PhysicalOperator::PropertyIndexIntersection,
+        ]);
+    }
+    output
+}
+
+fn collect_predicate_fields(predicate: &Predicate, output: &mut Vec<String>) {
     match predicate {
-        Predicate::Compare { left, .. } => {
-            matches!(left, TqlExpr::Property { field, .. } if stats.contains_key(field))
+        Predicate::Compare { left, right, .. } => {
+            for expression in [left, right] {
+                if let TqlExpr::Property { field, .. } = expression {
+                    output.push(field.clone());
+                }
+            }
         }
         Predicate::And(left, right) | Predicate::Or(left, right) => {
-            predicate_has_index(left, stats) || predicate_has_index(right, stats)
+            collect_predicate_fields(left, output);
+            collect_predicate_fields(right, output);
         }
-        Predicate::Not(inner) => predicate_has_index(inner, stats),
-        Predicate::DocFilter { .. } => false,
+        Predicate::Not(inner) => collect_predicate_fields(inner, output),
+        Predicate::DocFilter { .. } => {}
+    }
+}
+
+fn properties_for(operator: &PhysicalOperator) -> PhysicalProperties {
+    let (ordering, exactness, materialization, score, path) = match operator {
+        PhysicalOperator::ExactVectorSearch | PhysicalOperator::ExactRerankHeap => (
+            OrderingProperty::SimilarityDesc,
+            ExactnessProperty::Exact,
+            MaterializationProperty::Materialized,
+            ScoreProperty::ExactSimilarity,
+            PathProperty::Unavailable,
+        ),
+        PhysicalOperator::QuiverVectorSearch | PhysicalOperator::AnnExactRerank => (
+            OrderingProperty::SimilarityDesc,
+            ExactnessProperty::Approximate,
+            MaterializationProperty::Materialized,
+            ScoreProperty::ApproximateSimilarity,
+            PathProperty::Unavailable,
+        ),
+        PhysicalOperator::GraphExpandSerial
+        | PhysicalOperator::GraphExpandParallel
+        | PhysicalOperator::GraphExpandIncoming
+        | PhysicalOperator::GraphExpandLabelDirectory
+        | PhysicalOperator::GraphFirstSource => (
+            OrderingProperty::NodeId,
+            ExactnessProperty::Exact,
+            MaterializationProperty::Materialized,
+            ScoreProperty::Graph,
+            PathProperty::Unavailable,
+        ),
+        PhysicalOperator::GraphAlgorithm => (
+            OrderingProperty::NodeId,
+            ExactnessProperty::Exact,
+            MaterializationProperty::Materialized,
+            ScoreProperty::Graph,
+            PathProperty::Available,
+        ),
+        PhysicalOperator::ExpandExactRerank => (
+            OrderingProperty::SimilarityDesc,
+            ExactnessProperty::Exact,
+            MaterializationProperty::Materialized,
+            ScoreProperty::ExactSimilarity,
+            PathProperty::Unavailable,
+        ),
+        PhysicalOperator::RankAlreadyOrdered => (
+            OrderingProperty::SimilarityDesc,
+            ExactnessProperty::Exact,
+            MaterializationProperty::Streaming,
+            ScoreProperty::ExactSimilarity,
+            PathProperty::Unavailable,
+        ),
+        _ => (
+            OrderingProperty::NodeId,
+            ExactnessProperty::Exact,
+            MaterializationProperty::Streaming,
+            ScoreProperty::None,
+            PathProperty::Unavailable,
+        ),
+    };
+    PhysicalProperties {
+        ordering,
+        exactness,
+        materialization,
+        available_columns: BTreeSet::from(["node_id".to_owned(), "payload".to_owned()]),
+        score,
+        path,
+    }
+}
+
+fn fallback_alternative<T: VectorType>(
+    stage: &PipelineStage,
+    mt: &MemTable<T>,
+) -> PhysicalAlternative {
+    let operator = match stage {
+        PipelineStage::With(_) => PhysicalOperator::ScopeProjection,
+        PipelineStage::Expand(expand) => expand_operator(expand, mt.node_count()),
+        PipelineStage::Filter(predicate) => {
+            if predicate_is_property_only(predicate) {
+                PhysicalOperator::PayloadFilterScan
+            } else {
+                PhysicalOperator::ScalarFilter
+            }
+        }
+        PipelineStage::Rank(_) => PhysicalOperator::ExactRerankHeap,
+        _ => PhysicalOperator::GraphAlgorithm,
+    };
+    PhysicalAlternative {
+        operator,
+        estimated_cost: mt.node_count() as f64,
+        estimated_rows: mt.node_count(),
+        temp_bytes: mt
+            .node_count()
+            .saturating_mul(std::mem::size_of::<crate::query::pipeline::NodeRow>()),
+        vector_page_reads: 0,
+        payload_page_reads: 0,
+        graph_page_reads: 0,
+        exact: true,
+        materialized: true,
+    }
+}
+
+fn append_fallback_stages<T: VectorType>(
+    query: &TqlQuery,
+    start: usize,
+    stages: &mut Vec<PlannedStage>,
+    mt: &MemTable<T>,
+) {
+    for (stage_index, stage) in query.pipeline.iter().enumerate().skip(start) {
+        let alternative = fallback_alternative(stage, mt);
+        stages.push(planned(Some(stage_index), &alternative, 0));
     }
 }

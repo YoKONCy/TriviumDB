@@ -1,6 +1,6 @@
 # TriviumDB 安全特性详解
 
-> 基于 v0.8.3 当前源码的完整文档，覆盖并发安全、数据完整性、格式版本门禁、预算、ReadOnly/Immutable 零写、输入验证与跨平台 I/O 加固。
+> 基于 v0.8.4 当前源码的完整文档，覆盖并发安全、数据完整性、格式版本门禁、预算、ReadOnly/Immutable 零写、输入验证与跨平台 I/O 加固。
 
 ---
 
@@ -153,17 +153,23 @@ if len > 256 * 1024 * 1024 {
 
 ---
 
-### 8. Mmap 双文件一致性标记（`.flush_ok`）
+### 8. Mmap 双文件一致性标记（`.flush_ok` v2）
 
-**实现位置**：`storage/file_format.rs:86-103`（写），`file_format.rs:282-326`（读）
+**实现位置**：`storage/file_format.rs`（写与读取）
 
-Mmap 模式下，`.tdb` 和 `.vec` 均写入成功后，才原子写 `.flush_ok` 标记，内含两文件的**精确字节大小**：
+Mmap 模式下，`.tdb` 和 `.vec` 均写入成功后，才原子写 `.flush_ok` 标记。v2 标记共 41 字节：
 
+```text
+magic(4) + version(1) + generation(8)
++ tdb_size(8) + vec_size(8)
++ tdb_crc32(4) + vec_crc32(4) + marker_crc32(4)
 ```
-[tdb_size: u64 (8B)] [vec_size: u64 (8B)]
-```
 
-加载时交叉校验，失败则**降级为安全模式**（忽略 `.vec`，仅从 `.tdb` 骨架恢复 + WAL 回放）。
+- `tdb_crc32` / `vec_crc32` 是 `.tdb` 与 `.vec` 的**整文件 CRC32**，可发现等长位翻转、扇区撕裂等大小校验抓不到的损坏；空 `.vec`（纯 Rom/无向量库）使用明确的空文件 CRC。
+- `marker_crc32` 保护标记自身，防止 marker 字节被部分破坏后"恰好看起来合法"。
+- v1 标记（29 字节，仅 generation + size）保持有界兼容读取；ReadWrite 在下一次显式 flush 时自然升级为 v2，打开时不做隐式写入。
+- 校验失败时**fail-closed**：ReadOnly/Immutable 字节级零写并拒绝打开；ReadWrite 不再降级为"忽略 `.vec` 的零向量骨架恢复"——那会在 WAL 无法完整重建基础向量时产生"节点存在、向量全零"的伪恢复状态。现在统一拒绝打开，由用户从备份或上一代际恢复。
+- 发布路径（`.vec` 落盘 → `.tdb` 落盘 → marker 原子替换）由真实子进程强杀测试逐阶段验证：任何阶段断电后，重开只允许"旧完整代际"或"新完整代际"。
 
 ---
 
@@ -499,6 +505,17 @@ libc::madvise(ptr, len, libc::MADV_DONTNEED);
 
 Python/Node 绑定应通过中央转换器保留核心错误类别；控制流依赖枚举或稳定 code，不匹配中英文错误字符串。QuIVer profiler/连通性信息统一走 `tracing`，不直接写 stderr。
 
+## 生产路径零 panic 与故障注入验证
+
+生产可达的 `panic!` / `unreachable!` 已全部消除：解析器枚举转换返回 parse error、执行器聚合分支返回 execution error、mmap 对齐在打开阶段返回结构化错误，内部不变量使用显式校验而非 `unwrap/expect`。静态门禁防止生产代码重新引入 `panic!/unreachable!`。
+
+故障注入均使用小型 fixture 与隔离子进程，不会耗尽测试机的物理内存或磁盘：
+
+- **真实断电矩阵**：子进程在 `.vec` 落盘 / `.tdb` 落盘 / marker 替换前后到达指定发布阶段后由父进程强杀，重开验证只存在旧完整代或新完整代，不允许跨文件混代或半事务；
+- **确定性 I/O failpoint**：在 Create/Write/Sync/Rename 等定点注入失败，验证临时文件清理与错误传播；
+- **allocator failure**：仅在目标 failpoint 后拒绝分配，验证 `try_reserve` 路径的结构化错误与零部分提交；
+- **格式规格测试**：独立于生产解析器的字段规格 + 结构化 mutation（字段边界/截断/位翻转/CRC 修复），并验证 ReadOnly 对任何损坏输入字节级零写。
+
 ## FFI Hook 插件安全
 
 ### 30. FfiHook 动态库加载的安全边界
@@ -518,7 +535,7 @@ Python/Node 绑定应通过中央转换器保留核心错误类别；控制流�
 
 **缓解措施**：
 
-1. **符号可选加载**：`FfiHook` 使用 `libloading::Library::get()` 按名称查找符号。未找到的符号静默降级为 NoopHook，**不会因缺少符号而崩溃**。
+1. **符号可选加载 + ABI 版本门禁**：`FfiHook` 使用 `libloading::Library::get()` 按名称查找符号。未找到的符号静默降级为 NoopHook，**不会因缺少符号而崩溃**。导出 `trivium_hook_invoke_v2` 六阶段入口的插件必须同时导出返回 ABI 版本的 `trivium_hook_abi_version`，与内核期望的 `FFI_HOOK_ABI_VERSION = 2` 不一致时明确拒绝加载，避免跨 ABI 误读内存。
 
 2. **调用隔离**：所有 FFI 回调在 Rust 侧包装，返回值经过有效性检查后才被消费。C 侧返回的 `null` 指针会被安全处理。
 

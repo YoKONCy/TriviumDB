@@ -122,7 +122,12 @@ pub fn subset_pagerank<T: VectorType>(
             }
             let contribution = config.damping * scores[&source] / targets.len() as f64;
             for target in targets {
-                *next.get_mut(target).expect("目标属于诱导子图") += contribution;
+                let Some(score) = next.get_mut(target) else {
+                    return Err(TriviumError::QueryExecution(
+                        "PageRank 诱导子图目标映射不一致 (PageRank induced-subgraph target mapping is inconsistent)".into(),
+                    ));
+                };
+                *score += contribution;
             }
         }
         residual_l1 = ids.iter().map(|id| (next[id] - scores[id]).abs()).sum();
@@ -188,9 +193,11 @@ pub fn subset_pagerank_parallel<T: VectorType>(
             let mut targets = edges
                 .iter()
                 .filter_map(|edge| {
-                    (slots.contains_key(&edge.target_id)
-                        && label_filter.is_none_or(|label| edge.label == label))
-                    .then_some(slots[&edge.target_id])
+                    if label_filter.is_none_or(|label| edge.label == label) {
+                        slots.get(&edge.target_id).copied()
+                    } else {
+                        None
+                    }
                 })
                 .collect::<Vec<_>>();
             targets.sort_unstable();

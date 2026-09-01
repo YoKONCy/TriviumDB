@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 const MAGIC: &[u8; 4] = b"TPDX";
 pub const FORMAT_VERSION: u16 = 4;
-const KEY_ENCODING_VERSION: u16 = 1;
+const KEY_ENCODING_VERSION: u16 = 2;
 const HEADER_SIZE: usize = 36;
 const MAX_FIELD_BYTES: usize = 1024 * 1024;
 const MAX_KEY_BYTES: usize = 16 * 1024 * 1024;
@@ -74,7 +74,7 @@ impl PropertyKey {
     pub fn from_comparable(value: &crate::filter::ComparableValue) -> Option<Self> {
         match value {
             crate::filter::ComparableValue::Number(number) => {
-                Self::from_json(&serde_json::json!(number))
+                Self::from_json(&Value::Number(number.clone()))
             }
             crate::filter::ComparableValue::String(text) => {
                 Self::from_json(&Value::String(text.clone()))
@@ -129,7 +129,7 @@ impl HashPropertyIndex {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum PropertyIndexKind {
     Hash,
@@ -279,7 +279,10 @@ struct CompositePropertyIndex {
 }
 
 fn append_composite_part(bytes: &mut Vec<u8>, value: &Value) -> Option<()> {
-    let key = PropertyKey::from_json(value)?;
+    let key = match value {
+        Value::Number(_) | Value::String(_) => ordered_key(value)?,
+        _ => PropertyKey::from_json(value)?,
+    };
     let len = u32::try_from(key.0.len()).ok()?;
     bytes.extend_from_slice(&len.to_be_bytes());
     bytes.extend_from_slice(&key.0);
@@ -324,13 +327,27 @@ struct BitmapPropertyIndex {
     entries: HashMap<PropertyKey, roaring::RoaringTreemap>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PropertyIndexRegistry {
     indexes: HashMap<String, HashPropertyIndex>,
     ordered_indexes: HashMap<String, OrderedPropertyIndex>,
     composite_indexes: HashMap<CompositeDefinition, CompositePropertyIndex>,
     bitmap_indexes: HashMap<String, BitmapPropertyIndex>,
     mapped: Option<Arc<MappedPostingStore>>,
+    key_encoding_version: u16,
+}
+
+impl Default for PropertyIndexRegistry {
+    fn default() -> Self {
+        Self {
+            indexes: HashMap::new(),
+            ordered_indexes: HashMap::new(),
+            composite_indexes: HashMap::new(),
+            bitmap_indexes: HashMap::new(),
+            mapped: None,
+            key_encoding_version: KEY_ENCODING_VERSION,
+        }
+    }
 }
 
 impl PropertyIndexRegistry {
@@ -435,7 +452,7 @@ impl PropertyIndexRegistry {
                 (matched == range_position).then_some((definition, index, prefix))
             })
             .max_by_key(|(definition, _, _)| definition.0.len())?;
-        let range_key = PropertyKey::from_json(value)?;
+        let range_key = ordered_key(value)?;
         let take = limit.unwrap_or(usize::MAX);
         let mut matching = index
             .entries
@@ -611,6 +628,42 @@ impl PropertyIndexRegistry {
                 .mapped
                 .as_ref()
                 .is_some_and(|mapped| mapped.blocks.keys().any(|(name, _)| name == field))
+    }
+
+    pub fn key_encoding_version(&self) -> u16 {
+        self.key_encoding_version
+    }
+
+    pub fn index_definitions(&self) -> Vec<(PropertyIndexKind, Vec<String>)> {
+        let mut definitions = self
+            .indexes
+            .keys()
+            .map(|field| (PropertyIndexKind::Hash, vec![field.clone()]))
+            .chain(
+                self.ordered_indexes
+                    .keys()
+                    .map(|field| (PropertyIndexKind::Ordered, vec![field.clone()])),
+            )
+            .chain(
+                self.composite_indexes
+                    .keys()
+                    .map(|definition| (PropertyIndexKind::Composite, definition.0.clone())),
+            )
+            .chain(
+                self.bitmap_indexes
+                    .keys()
+                    .map(|field| (PropertyIndexKind::Bitmap, vec![field.clone()])),
+            )
+            .chain(self.mapped.iter().flat_map(|mapped| {
+                mapped
+                    .blocks
+                    .keys()
+                    .map(|(field, _)| (PropertyIndexKind::Hash, vec![field.clone()]))
+            }))
+            .collect::<Vec<_>>();
+        definitions.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+        definitions.dedup();
+        definitions
     }
 
     pub fn field_names(&self) -> HashSet<&str> {
@@ -1129,7 +1182,9 @@ pub fn load_sidecar(
     }
     let version = read_u16(&bytes, &mut offset, "format_version")?;
     let key_version = read_u16(&bytes, &mut offset, "key_encoding_version")?;
-    if !(1..=FORMAT_VERSION).contains(&version) || key_version != KEY_ENCODING_VERSION {
+    if !(1..=FORMAT_VERSION).contains(&version)
+        || !(1..=KEY_ENCODING_VERSION).contains(&key_version)
+    {
         return Err(TriviumError::CorruptedFile(format!(
             "不支持的属性索引版本 (Unsupported property index version): {version}/{key_version}"
         )));
@@ -1155,7 +1210,10 @@ pub fn load_sidecar(
         ));
     }
 
-    let mut registry = PropertyIndexRegistry::default();
+    let mut registry = PropertyIndexRegistry {
+        key_encoding_version: key_version,
+        ..Default::default()
+    };
     let mut all_mapped_blocks = BTreeMap::new();
     let mut all_mapped_posting_entries = 0usize;
     for _ in 0..field_count {

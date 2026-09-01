@@ -13,8 +13,8 @@ pub mod transaction;
 
 // 从子模块重导出公开类型，保持对外 API 不变
 pub use config::{
-    AccessMode, BatchSearchConfig, Config, EdgeDirection, MissingIndexPolicy, SearchConfig,
-    StorageMode,
+    AccessMode, BatchSearchConfig, Config, EdgeDirection, MissingIndexPolicy, RowOverflowPolicy,
+    SearchConfig, StorageMode,
 };
 pub use facade::{DatabaseReader, DatabaseWriter};
 pub use transaction::{Transaction, TxBuilder};
@@ -234,6 +234,8 @@ pub struct Database<T: VectorType> {
     _lock_file: Option<std::fs::File>,
     /// 内存上限（字节），0 = 无限制
     memory_limit: usize,
+    /// TQL 默认行上限与溢出策略。
+    tql_limits: crate::query::tql_executor::TqlLimits,
     /// 存储模式
     pub(crate) storage_mode: StorageMode,
     /// 检索管线 Hook（默认 NoopHook，零开销）
@@ -556,6 +558,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             compaction: None,
             _lock_file: lock_file,
             memory_limit: config.memory_limit,
+            tql_limits: crate::query::tql_executor::TqlLimits {
+                max_query_rows: config.max_query_rows,
+                row_overflow: config.row_overflow,
+                memory_limit: config.memory_limit,
+            },
             storage_mode: config.storage_mode,
             hook: Arc::new(NoopHook),
             stateful_search: Arc::new(Mutex::new(())),
@@ -1861,7 +1868,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let _operation = self.enter_operation()?;
         let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
         let mt = read_or_recover(&self.memtable);
-        crate::query::tql_executor::execute_tql(&query, &mt)
+        crate::query::tql_executor::execute_tql_with_limits(&query, &mt, self.tql_limits)
     }
 
     /// 执行 TQL，并返回可同时承载节点与标量列的一等值结果。
@@ -1869,7 +1876,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let _operation = self.enter_operation()?;
         let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
         let mt = read_or_recover(&self.memtable);
-        crate::query::tql_executor::execute_tql_values(&query, &mt)
+        crate::query::tql_executor::execute_tql_values_with_limits(&query, &mt, self.tql_limits)
     }
 
     /// 解析并准备可重复绑定执行的只读 TQL。
@@ -1888,7 +1895,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let _operation = self.enter_operation()?;
         let query = prepared.bind(parameters)?;
         let mt = read_or_recover(&self.memtable);
-        crate::query::tql_executor::execute_tql_values(&query, &mt)
+        crate::query::tql_executor::execute_tql_values_with_limits(&query, &mt, self.tql_limits)
     }
 
     /// TQL 写操作入口

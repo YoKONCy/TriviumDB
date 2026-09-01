@@ -53,7 +53,8 @@ pub mod python {
             | crate::error::TriviumError::UnsupportedSidecarVersion { .. }
             | crate::error::TriviumError::UnsupportedWalVersion { .. }
             | crate::error::TriviumError::QueryParse(_)
-            | crate::error::TriviumError::QueryExecution(_) => {
+            | crate::error::TriviumError::QueryExecution(_)
+            | crate::error::TriviumError::QueryRowBudgetExceeded { .. } => {
                 pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
             }
             crate::error::TriviumError::InvalidInput(message) => {
@@ -97,6 +98,16 @@ pub mod python {
     #[pyclass(name = "PreparedTql")]
     pub struct PyPreparedTql {
         inner: crate::query::tql_prepared::PreparedTql,
+    }
+
+    fn parse_row_overflow(value: &str) -> PyResult<crate::database::RowOverflowPolicy> {
+        match value {
+            "throw" => Ok(crate::database::RowOverflowPolicy::Throw),
+            "break" => Ok(crate::database::RowOverflowPolicy::Break),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                "row_overflow 必须是 throw / break",
+            )),
+        }
     }
 
     #[pymethods]
@@ -454,7 +465,7 @@ pub mod python {
     #[pymethods]
     impl PyTriviumDB {
         #[new]
-        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0, access_mode="read_write", missing_index_policy="fallback"))]
+        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0, access_mode="read_write", missing_index_policy="fallback", max_query_rows=None, row_overflow="throw"))]
         fn new(
             path: &str,
             dim: usize,
@@ -466,6 +477,8 @@ pub mod python {
             memory_limit_mb: usize,
             access_mode: &str,
             missing_index_policy: &str,
+            max_query_rows: Option<usize>,
+            row_overflow: &str,
         ) -> PyResult<Self> {
             let sm = parse_sync_mode(sync_mode)?;
             let memory_limit = memory_limit_mb.checked_mul(1024 * 1024).ok_or_else(|| {
@@ -480,6 +493,8 @@ pub mod python {
                 memory_limit,
                 access_mode: parse_access_mode(access_mode)?,
                 missing_index_policy: parse_missing_index_policy(missing_index_policy)?,
+                max_query_rows,
+                row_overflow: parse_row_overflow(row_overflow)?,
                 ..Default::default()
             };
             let inner = match dtype {
@@ -2422,8 +2437,12 @@ pub mod python {
     unsafe impl Sync for PySearchHookWrapper {}
 
     impl PySearchHookWrapper {
+        fn record_python_error(ctx: &mut crate::hook::HookContext, stage: &str, error: PyErr) {
+            ctx.error = Some(format!("Python Hook {stage} 执行失败: {error}"));
+        }
+
         /// 将 Rust Vec<SearchHit> 转换为 Python list[dict]
-        fn hits_to_py(py: Python<'_>, hits: &[crate::node::SearchHit]) -> PyObject {
+        fn hits_to_py(py: Python<'_>, hits: &[crate::node::SearchHit]) -> PyResult<PyObject> {
             let list = pyo3::types::PyList::new(
                 py,
                 hits.iter().map(|h| {
@@ -2433,9 +2452,8 @@ pub mod python {
                     let _ = d.set_item("payload", json_to_pyobject(py, &h.payload));
                     d
                 }),
-            )
-            .expect("创建 Python list 失败");
-            list.into_any().unbind()
+            )?;
+            Ok(list.into_any().unbind())
         }
 
         /// 将 Python list[dict] 转换回 Rust Vec<SearchHit>
@@ -2462,7 +2480,9 @@ pub mod python {
                             .flatten()
                             .map(|v| pyobject_to_json(&v))
                             .unwrap_or(serde_json::Value::Null);
-                        hits.push(crate::node::SearchHit { id, score, payload });
+                        if id != 0 && score.is_finite() {
+                            hits.push(crate::node::SearchHit { id, score, payload });
+                        }
                     }
                 }
             }
@@ -2486,18 +2506,72 @@ pub mod python {
                     let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
                     let _ = py_ctx.set_item("abort", ctx.abort);
 
-                    if let Ok(result) = method.call1((&py_vec, &py_ctx)) {
-                        // 如果返回了新向量，替换之
-                        if let Ok(new_vec) = result.extract::<Vec<f32>>() {
-                            *query_vector = new_vec;
+                    match method.call1((&py_vec, &py_ctx)) {
+                        Ok(result) => {
+                            if let Ok(new_vec) = result.extract::<Vec<f32>>() {
+                                *query_vector = new_vec;
+                            }
+                            if let Ok(Some(abort_val)) = py_ctx.get_item("abort")
+                                && let Ok(ab) = abort_val.extract::<bool>()
+                            {
+                                ctx.abort = ab;
+                            }
                         }
-                        // 检查 ctx.abort 是否被修改
-                        if let Ok(Some(abort_val)) = py_ctx.get_item("abort")
-                            && let Ok(ab) = abort_val.extract::<bool>()
-                        {
-                            ctx.abort = ab;
-                        }
+                        Err(error) => Self::record_python_error(ctx, "on_pre_search", error),
                     }
+                }
+            });
+        }
+
+        fn on_custom_recall(
+            &self,
+            query_vector: &[f32],
+            _config: &crate::database::SearchConfig,
+            ctx: &mut crate::hook::HookContext,
+        ) -> Option<Vec<crate::node::SearchHit>> {
+            pyo3::Python::with_gil(|py| {
+                let hook = self.py_hook.bind(py);
+                let Ok(method) = hook.getattr("on_custom_recall") else {
+                    return None;
+                };
+                let py_ctx = PyDict::new(py);
+                let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
+                match method.call1((query_vector.to_vec(), py_ctx)) {
+                    Ok(result) if !result.is_none() => Some(Self::py_to_hits(py, &result.unbind())),
+                    Ok(_) => None,
+                    Err(error) => {
+                        Self::record_python_error(ctx, "on_custom_recall", error);
+                        None
+                    }
+                }
+            })
+        }
+
+        fn on_pre_graph_expand(
+            &self,
+            seeds: &mut Vec<crate::node::SearchHit>,
+            ctx: &mut crate::hook::HookContext,
+        ) {
+            pyo3::Python::with_gil(|py| {
+                let hook = self.py_hook.bind(py);
+                let Ok(method) = hook.getattr("on_pre_graph_expand") else {
+                    return;
+                };
+                let py_hits = match Self::hits_to_py(py, seeds) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        Self::record_python_error(ctx, "on_pre_graph_expand", error);
+                        return;
+                    }
+                };
+                let py_ctx = PyDict::new(py);
+                let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
+                match method.call1((py_hits, py_ctx)) {
+                    Ok(result) if !result.is_none() => {
+                        *seeds = Self::py_to_hits(py, &result.unbind());
+                    }
+                    Ok(_) => {}
+                    Err(error) => Self::record_python_error(ctx, "on_pre_graph_expand", error),
                 }
             });
         }
@@ -2510,16 +2584,23 @@ pub mod python {
             pyo3::Python::with_gil(|py| {
                 let hook = self.py_hook.bind(py);
                 if let Ok(method) = hook.getattr("on_post_recall") {
-                    let py_hits = Self::hits_to_py(py, hits);
+                    let py_hits = match Self::hits_to_py(py, hits) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            Self::record_python_error(ctx, "on_post_recall", error);
+                            return;
+                        }
+                    };
                     let py_ctx = PyDict::new(py);
                     let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
 
-                    if let Ok(result) = method.call1((&py_hits, &py_ctx)) {
-                        // 如果返回了列表，替换 hits
-                        if !result.is_none() {
+                    match method.call1((&py_hits, &py_ctx)) {
+                        Ok(result) if !result.is_none() => {
                             let obj = result.unbind();
                             *hits = Self::py_to_hits(py, &obj);
                         }
+                        Ok(_) => {}
+                        Err(error) => Self::record_python_error(ctx, "on_post_recall", error),
                     }
                 }
             });
@@ -2533,15 +2614,21 @@ pub mod python {
             pyo3::Python::with_gil(|py| {
                 let hook = self.py_hook.bind(py);
                 if let Ok(method) = hook.getattr("on_rerank") {
-                    let py_hits = Self::hits_to_py(py, hits);
+                    let py_hits = match Self::hits_to_py(py, hits) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            Self::record_python_error(ctx, "on_rerank", error);
+                            return None;
+                        }
+                    };
                     let py_ctx = PyDict::new(py);
                     let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
-
-                    if let Ok(result) = method.call1((&py_hits, &py_ctx))
-                        && !result.is_none()
-                    {
-                        let obj = result.unbind();
-                        return Some(Self::py_to_hits(py, &obj));
+                    match method.call1((&py_hits, &py_ctx)) {
+                        Ok(result) if !result.is_none() => {
+                            return Some(Self::py_to_hits(py, &result.unbind()));
+                        }
+                        Ok(_) => {}
+                        Err(error) => Self::record_python_error(ctx, "on_rerank", error),
                     }
                 }
                 None
@@ -2556,15 +2643,21 @@ pub mod python {
             pyo3::Python::with_gil(|py| {
                 let hook = self.py_hook.bind(py);
                 if let Ok(method) = hook.getattr("on_post_search") {
-                    let py_hits = Self::hits_to_py(py, hits);
+                    let py_hits = match Self::hits_to_py(py, hits) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            Self::record_python_error(ctx, "on_post_search", error);
+                            return;
+                        }
+                    };
                     let py_ctx = PyDict::new(py);
                     let _ = py_ctx.set_item("custom_data", json_to_pyobject(py, &ctx.custom_data));
-
-                    if let Ok(result) = method.call1((&py_hits, &py_ctx))
-                        && !result.is_none()
-                    {
-                        let obj = result.unbind();
-                        *hits = Self::py_to_hits(py, &obj);
+                    match method.call1((&py_hits, &py_ctx)) {
+                        Ok(result) if !result.is_none() => {
+                            *hits = Self::py_to_hits(py, &result.unbind());
+                        }
+                        Ok(_) => {}
+                        Err(error) => Self::record_python_error(ctx, "on_post_search", error),
                     }
                 }
             });

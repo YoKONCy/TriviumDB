@@ -44,6 +44,10 @@ pub struct HookContext {
 
     pub observations: Vec<(String, u64)>,
 
+    /// Hook 执行失败。具体语言绑定或 FFI 适配器在此记录错误，管线在阶段结束后
+    /// 将其转换为结构化 `HookExecutionError`，禁止静默回退。
+    pub error: Option<String>,
+
     /// 当前查询是否被 Hook 提前终止
     ///
     /// 若在 `on_pre_search` 中设为 `true`，管线将跳过后续所有阶段，
@@ -64,6 +68,7 @@ impl HookContext {
             stage_timings: Vec::new(),
             stage_counts: Vec::new(),
             observations: Vec::new(),
+            error: None,
             abort: false,
         }
     }
@@ -352,6 +357,24 @@ pub struct FfiSearchHit {
     pub score: f32,
 }
 
+pub type FfiHookAbiVersionFn = unsafe extern "C" fn() -> u32;
+pub type FfiStageFn = unsafe extern "C" fn(
+    stage: u32,
+    query_ptr: *const f32,
+    query_len: usize,
+    hits_ptr: *mut FfiSearchHit,
+    hits_capacity: usize,
+    hits_count: *mut usize,
+) -> i32;
+
+pub const FFI_HOOK_ABI_VERSION: u32 = 2;
+pub const FFI_STAGE_PRE_SEARCH: u32 = 1;
+pub const FFI_STAGE_CUSTOM_RECALL: u32 = 2;
+pub const FFI_STAGE_POST_RECALL: u32 = 3;
+pub const FFI_STAGE_PRE_GRAPH_EXPAND: u32 = 4;
+pub const FFI_STAGE_RERANK: u32 = 5;
+pub const FFI_STAGE_POST_SEARCH: u32 = 6;
+
 /// C 侧召回函数签名
 ///
 /// ```c
@@ -404,6 +427,7 @@ fn valid_ffi_hit(hit: &FfiSearchHit) -> bool {
 pub struct FfiHook {
     /// 持有动态库句柄，防止提前卸载
     _lib: libloading::Library,
+    stage_fn: Option<FfiStageFn>,
     recall_fn: Option<FfiRecallFn>,
     rerank_fn: Option<FfiRerankFn>,
 }
@@ -431,6 +455,20 @@ impl FfiHook {
                 ))
             })?;
 
+            let abi_version = lib
+                .get::<FfiHookAbiVersionFn>(b"trivium_hook_abi_version")
+                .ok()
+                .map(|function| (*function)());
+            let stage_fn = lib
+                .get::<FfiStageFn>(b"trivium_hook_invoke_v2")
+                .ok()
+                .map(|f| *f);
+            if stage_fn.is_some() && abi_version != Some(FFI_HOOK_ABI_VERSION) {
+                return Err(crate::error::TriviumError::HookLoadError(format!(
+                    "FFI Hook ABI 版本不匹配：期望 {}，实际 {:?}",
+                    FFI_HOOK_ABI_VERSION, abi_version
+                )));
+            }
             let recall_fn = lib.get::<FfiRecallFn>(b"trivium_recall").ok().map(|f| *f);
             let rerank_fn = lib.get::<FfiRerankFn>(b"trivium_rerank").ok().map(|f| *f);
 
@@ -443,6 +481,7 @@ impl FfiHook {
 
             Ok(Self {
                 _lib: lib,
+                stage_fn,
                 recall_fn,
                 rerank_fn,
             })
@@ -450,13 +489,87 @@ impl FfiHook {
     }
 }
 
+impl FfiHook {
+    fn invoke_v2(
+        &self,
+        stage: u32,
+        query: &[f32],
+        hits: &mut Vec<SearchHit>,
+        minimum_capacity: usize,
+        ctx: &mut HookContext,
+    ) -> bool {
+        let Some(function) = self.stage_fn else {
+            return false;
+        };
+        let capacity = hits.len().max(minimum_capacity).clamp(1, 1_000_000);
+        let mut ffi_hits = vec![FfiSearchHit { id: 0, score: 0.0 }; capacity];
+        for (target, source) in ffi_hits.iter_mut().zip(hits.iter()) {
+            target.id = source.id;
+            target.score = source.score;
+        }
+        let mut count = hits.len().min(capacity);
+        let code = unsafe {
+            function(
+                stage,
+                query.as_ptr(),
+                query.len(),
+                ffi_hits.as_mut_ptr(),
+                capacity,
+                &mut count,
+            )
+        };
+        if code != 0 {
+            ctx.error = Some(format!("FFI Hook v2 阶段 {stage} 返回错误码 {code}"));
+            return true;
+        }
+        if count > capacity {
+            ctx.error = Some(format!(
+                "FFI Hook v2 阶段 {stage} 返回数量 {count} 超过容量 {capacity}"
+            ));
+            return true;
+        }
+        *hits = ffi_hits[..count]
+            .iter()
+            .filter(|hit| valid_ffi_hit(hit))
+            .map(|hit| SearchHit {
+                id: hit.id,
+                score: hit.score,
+                payload: serde_json::Value::Null,
+            })
+            .collect();
+        true
+    }
+}
+
 impl SearchHook for FfiHook {
+    fn on_pre_search(
+        &self,
+        query_vector: &mut Vec<f32>,
+        _config: &mut SearchConfig,
+        ctx: &mut HookContext,
+    ) {
+        let mut hits = Vec::new();
+        self.invoke_v2(FFI_STAGE_PRE_SEARCH, query_vector, &mut hits, 1, ctx);
+    }
+
     fn on_custom_recall(
         &self,
         query_vector: &[f32],
         config: &SearchConfig,
-        _ctx: &mut HookContext,
+        ctx: &mut HookContext,
     ) -> Option<Vec<SearchHit>> {
+        if self.stage_fn.is_some() {
+            let mut hits = Vec::new();
+            let capacity = config.top_k.saturating_mul(2);
+            self.invoke_v2(
+                FFI_STAGE_CUSTOM_RECALL,
+                query_vector,
+                &mut hits,
+                capacity,
+                ctx,
+            );
+            return Some(hits);
+        }
         let recall_fn = self.recall_fn?;
 
         // 预分配输出缓冲区（最多 top_k * 2 个候选）
@@ -497,11 +610,26 @@ impl SearchHook for FfiHook {
         Some(hits)
     }
 
+    fn on_post_recall(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
+        let capacity = hits.len();
+        self.invoke_v2(FFI_STAGE_POST_RECALL, &[], hits, capacity, ctx);
+    }
+
+    fn on_pre_graph_expand(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
+        let capacity = hits.len();
+        self.invoke_v2(FFI_STAGE_PRE_GRAPH_EXPAND, &[], hits, capacity, ctx);
+    }
+
     fn on_rerank(
         &self,
         hits: &mut Vec<SearchHit>,
         _ctx: &mut HookContext,
     ) -> Option<Vec<SearchHit>> {
+        if self.stage_fn.is_some() {
+            let capacity = hits.len();
+            self.invoke_v2(FFI_STAGE_RERANK, &[], hits, capacity, _ctx);
+            return Some(hits.clone());
+        }
         let rerank_fn = self.rerank_fn?;
 
         // 转换为 FFI 格式
@@ -544,6 +672,11 @@ impl SearchHook for FfiHook {
         });
 
         Some(reranked)
+    }
+
+    fn on_post_search(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
+        let capacity = hits.len();
+        self.invoke_v2(FFI_STAGE_POST_SEARCH, &[], hits, capacity, ctx);
     }
 }
 

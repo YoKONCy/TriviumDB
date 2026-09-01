@@ -41,7 +41,7 @@ jobs:
           key: fault-soak
 
       - name: 运行定时浸泡测试
-        run: cargo test --test soak -- --test-threads=1 --ignored
+        run: cargo test --test long_running soak -- --test-threads=1 --ignored
 
   logical-crash-consistency:
     name: Logical Crash Consistency
@@ -58,12 +58,12 @@ jobs:
 
       - name: 运行 WAL 与文件撕裂恢复测试
         run: |
-          cargo test --test wal_midwrite -- --test-threads=1
-          cargo test --test sector_tearing -- --test-threads=1 --ignored
-          cargo test --test power_cycle -- --test-threads=1
-          cargo test --test io_fault -- --test-threads=1
-          cargo test --test recovery -- --test-threads=1 P0_2_WAL恢复后_新插入不复用已有ID
-          cargo test --test hw_crash -- --test-threads=1
+          cargo test --test fault_io wal_midwrite -- --test-threads=1
+          cargo test --test fault_io sector_tearing -- --test-threads=1 --ignored
+          cargo test --test fault_power -- --test-threads=1
+          cargo test --test fault_io io_fault -- --test-threads=1
+          cargo test --test storage recovery::P0_2_WAL恢复后_新插入不复用已有ID -- --test-threads=1
+          cargo test --test fault_crash -- --test-threads=1
 
   compaction-recovery:
     name: Compaction Recovery Cuts
@@ -79,7 +79,7 @@ jobs:
           key: fault-compaction
 
       - name: 运行 compaction 中断恢复测试
-        run: cargo test --test compaction_core -- --test-threads=1
+        run: cargo test --test storage compaction_core -- --test-threads=1
 
   corruption-hardening:
     name: Corruption Hardening
@@ -96,8 +96,8 @@ jobs:
 
       - name: 运行损坏与 unsafe 边界测试
         run: |
-          cargo test --test emi_bitflip -- --test-threads=1
-          cargo test --test unsafe_audit -- --test-threads=1
+          cargo test --test fault_hardware emi_bitflip -- --test-threads=1
+          cargo test --test fault_hardware unsafe_audit -- --test-threads=1
 
   windows-rename-and-locks:
     name: Windows Rename & Lock Semantics
@@ -116,9 +116,9 @@ jobs:
         shell: pwsh
         run: |
           $env:CARGO_INCREMENTAL='0'
-          cargo test --test io_fault -- --test-threads=1 IO_06_文件锁_同一路径不能打开两次
-          cargo test --test power_cycle -- --test-threads=1
-          cargo test --test compaction_core -- --test-threads=1
+          cargo test --test fault_io io_fault::IO_06_文件锁_同一路径不能打开两次 -- --test-threads=1
+          cargo test --test fault_power -- --test-threads=1
+          cargo test --test storage compaction_core -- --test-threads=1
 
   extended-fault-matrix:
     name: Extended Fault Matrix
@@ -136,11 +136,11 @@ jobs:
 
       - name: 运行扩展故障测试矩阵
         run: |
-          cargo test --test wal_midwrite -- --test-threads=1
-          cargo test --test io_fault -- --test-threads=1
-          cargo test --test compaction_core -- --test-threads=1
-          cargo test --test power_cycle -- --test-threads=1
-          cargo test --test sector_tearing -- --test-threads=1 --ignored
-          cargo test --test emi_bitflip -- --test-threads=1
-          cargo test --test unsafe_audit -- --test-threads=1
-          cargo test --test engine_deep -- --test-threads=1 COV7_19_wal_truncated_recovery
+          cargo test --test fault_io wal_midwrite -- --test-threads=1
+          cargo test --test fault_io io_fault -- --test-threads=1
+          cargo test --test storage compaction_core -- --test-threads=1
+          cargo test --test fault_power -- --test-threads=1
+          cargo test --test fault_io sector_tearing -- --test-threads=1 --ignored
+          cargo test --test fault_hardware emi_bitflip -- --test-threads=1
+          cargo test --test fault_hardware unsafe_audit -- --test-threads=1
+          cargo test --test core engine_deep::COV7_19_wal_truncated_recovery -- --test-threads=1

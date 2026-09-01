@@ -47,17 +47,22 @@ cargo test
 cargo test --test unit
 
 # 仅运行属性测试
-cargo test --test proptest_core
-cargo test --test proptest_query
+cargo test --test core proptest          # tests/core/proptest_core.rs
+cargo test --test query proptest         # tests/query/proptest_query.rs
 
-# 运行特定模块的测试
-cargo test --test unit -- filter       # filter 模块
-cargo test --test unit -- database     # database 模块
-cargo test --test unit -- memtable     # memtable 模块
+# 运行特定领域的集成测试
+cargo test --test storage ordered        # storage 领域中的 ordered 用例
+cargo test --test pipeline cascades      # Cascades 优化器用例
 
 # 运行确定性交错、并发不变量和容量安全测试
-cargo test --test deterministic_interleaving --features test-hooks
-cargo test --test concurrency_invariants --features test-hooks
+cargo test --test concurrency --features test-hooks
+
+# 运行差分测试与磁盘格式规格测试
+cargo test --test differential --features test-hooks
+cargo test --test format_spec -- --test-threads=1
+
+# 运行真实发布阶段断电矩阵（子进程强杀）
+cargo test --test fault_power --features test-hooks
 
 # 静态验收可使用 cargo check/clippy --all-targets。
 # 不要把 cargo test --all-targets 当作普通全量测试命令：它会执行 benchmark，
@@ -75,6 +80,8 @@ cargo mutants --file src/filter.rs --timeout 60
 
 ## 测试分层架构
 
+`tests/` 按领域 harness 组织：每个顶层目录是一个独立 integration target，通过各自 `main.rs` 汇聚同领域的测试文件。
+
 ```
 tests/
 ├── unit/                        # L1: 单元测试（集中管理）
@@ -90,43 +97,38 @@ tests/
 │   ├── core.rs                  #   核心工具函数
 │   └── index.rs                 #   QuIVer/BruteForce 索引
 │
-├── proptest_core.rs             # L3: 核心数据结构属性测试
-├── proptest_query.rs            # L3: TQL 解析器模糊测试
+├── core/                        # L2: 内核集成（CRUD/事务/搜索/dtype/公共 API 对齐）
+├── query/                       # L2: TQL 全链路（parser/executor/DML/索引/planner）
+├── pipeline/                    # L2: NodeSet 管线、Cascades 优化器与 TSNG
+├── graph/                       # L2: 图算法、路径与反向边一致性
+├── storage/                     # L2: 恢复/压缩/格式迁移/四类属性索引持久化
+├── model/                       # L2: 独立 Reference Model 状态机（随机 CRUD/事务/索引/flush/reopen）
+├── differential/                # L3: 差分测试（Direct=Prepared、索引=扫描、Mmap=Rom、串行=并行、fusion=split）
+├── contracts/                   # L3: 三语言公共 API 对齐与 FFI Hook ABI v2 契约
+├── concurrency/                 # L3: 确定性交错与并发不变量
+├── hardening/                   # L3: 安全防御
+├── long_running/                # L3: soak / 压力
+├── python/  node/               # L3: 绑定生命周期与公共 API 冒烟
 │
-├── transaction.rs               # L2: 事务全链路
-├── tql_executor.rs              # L2: TQL 执行器集成
-├── tql_parser.rs                # L2: TQL 解析器集成
-├── tql_dml.rs                   # L2: TQL DML 写操作
-├── tql_phase2.rs                # L2: TQL 高级功能
-├── tql_index.rs                 # L2: TQL 属性索引
-├── tql_reverse.rs               # L2: TQL 反向边
-├── search.rs                    # L2: 搜索管线
-├── concurrent.rs                # L2: 并发安全
-├── recovery.rs                  # L2: 崩溃恢复
-├── wal_midwrite.rs              # L2: WAL 断写安全
-├── hw_crash.rs                  # L2: 硬件崩溃模拟 (内联汇编触发 CPU 异常)
-├── hw_intrusion.rs              # L2: 硬件入侵检测 (内联汇编比特翻转/绕过缓存写)
-├── emi_bitflip.rs               # L2: EMI 电磁脉冲突发错误
-├── unsafe_audit.rs              # L2: unsafe 代码路径专项验证 (GJB-5000B 条款 6.3.2)
-├── io_fault.rs                  # L2: IO 故障容错 (WAL/数据文件损坏)
-├── security.rs                  # L2: 安全防御
-├── stress.rs                    # L2: 压力测试
-├── vector_types.rs              # L2: 多 dtype 兼容性
-├── workflow.rs                  # L2: 端到端工作流
-├── reverse_edge.rs              # L2: 反向边一致性
-├── sector_tearing.rs            # L2: 扇区撕裂防护
-├── endian_limit.rs              # L2: 字节序与极限值
-├── oom_intercept.rs             # L2: OOM 拦截
-└── ablation.rs                  # L2: 消融实验
+├── format_spec/                 # L4: 磁盘格式规格测试（独立字段规格 + 结构化 mutation）
+│   ├── spec.rs                  #   .tdb/.flush_ok/WAL/.pidx/.gidx 字段规格与不重叠校验
+│   ├── mutation.rs              #   字段边界/截断/位翻转/追加/CRC 修复变异
+│   ├── snapshot_spec.rs         #   .flush_ok v1/v2、.tdb header、.vec 边界矩阵
+│   ├── wal_spec.rs              #   WAL header/帧/事务边界结构化损坏矩阵
+│   ├── sidecar_spec.rs          #   .pidx/.gidx header、CRC 修复后语义校验
+│   ├── cross_generation.rs      #   跨文件混代组合拒绝 + ReadOnly 零写 oracle
+│   └── replay.rs                #   失败回放元数据与 mutation shrinker
+│
+├── fault_power/                 # L4: 真实发布阶段断电（子进程强杀，父进程验收）
+├── fault_io/                    # L4: 确定性 I/O failpoint、扇区撕裂、WAL 断写
+├── fault_crash/                 # L4: 真实崩溃（内联汇编触发 CPU 异常的隔离子进程）
+├── fault_allocator/             # L4: 目标 failpoint 后拒绝分配的失败分配器
+├── fault_lock/                  # L4: 文件锁竞争
+├── fault_hardware/              # L4: EMI 位翻转、硬件入侵检测、unsafe 审计
+└── generation/                  # L4: 代际发布与跨进程租约
 ```
 
-```
-fuzz/
-└── fuzz_targets/                # L4: 模糊测试目标
-    ├── fuzz_wal_parse.rs        #   WAL 解析器
-    ├── fuzz_query_parse.rs      #   TQL 解析器
-    └── fuzz_filter_parse.rs     #   Filter 解析器
-```
+> ⚠️ `fault_*` 系列会启动真实子进程并施加故障（强杀、分配失败、硬件异常），日志中的 `TRAE Sandbox Error` 等输出来自预期的被杀子进程；主测试进程不会自我崩溃，fixture 均为小型数据，不会耗尽真实机器的内存或磁盘。
 
 ### 设计原则
 
@@ -149,15 +151,15 @@ fuzz/
 | `Filter`    | `unit/filter.rs`    | 数字/字符串范围、RFC3339 时区、错误路径、bloom mask             |
 | `Vector`    | `unit/vector.rs`    | 余弦相似度、SIMD 尾部处理、标量回退、多 dtype                  |
 | `WAL`       | `unit/wal.rs`       | v3 显式头、无头拒绝、未来版本门禁、CRC、SyncMode、崩溃恢复       |
-| `.tdb` 格式 | `format_migration.rs` | v5 32/48-chunk 自动迁移、v6 自描述布局、未来/过旧版本门禁与损坏拒绝 |
+| `.tdb` 格式 | `storage/format_migration.rs` | v5 32/48-chunk 自动迁移、v6 自描述布局、未来/过旧版本门禁与损坏拒绝 |
 | 图扩散参数 | `unit/traversal.rs` | 出/入/双向、强边上限、绝对权重阈值、稳定排序、自环去重与组合过滤 |
-| Python 类型 | `python_typing_smoke.py` | Wheel 内 `py.typed/.pyi`、mypy strict 与 pyright 双门禁 |
+| Python 类型 | `python/typing_smoke.py` | Wheel 内 `py.typed/.pyi`、mypy strict 与 pyright 双门禁 |
 | `Traversal` | `unit/traversal.rs` | PPR 扩散、Reachability 方向/最短路径/环/预算、GraphFirst 参数门禁 |
 | `TQL AST`   | `unit/tql_ast.rs`   | 语法树节点构造、枚举完整性                                     |
 | `Cognitive` | `unit/cognitive.rs` | FISTA 稀疏残差、DPP 多样性采样                                 |
 | `Index`     | `unit/index.rs`     | QuIVer/BQ 二值化、BruteForce 精确搜索                                 |
 
-TQL 集成测试还覆盖 WITH 作用域、Cascades、聚合/空输入、算术/COALESCE/Null、Prepared 严格绑定、Path/Shortest、UNION/INTERSECT/EXCEPT、图算法、预算、确定性和 EXPLAIN。`public_api_alignment.rs`、`python_public_api.py`、`node_public_api.js` 验证三语言能力对齐和历史入口拒绝。数据库生命周期测试验证 `reachable()` 与 `search_graph_first()` 在 close 后与其他可失败 API 一样返回 `DatabaseClosed`。
+TQL 集成测试还覆盖 WITH 作用域、Cascades、聚合/空输入、算术/COALESCE/Null、Prepared 严格绑定、Path/Shortest、UNION/INTERSECT/EXCEPT、图算法、预算、确定性和 EXPLAIN。`core/public_api_alignment.rs`、`python/public_api.py`、`node/public_api.js` 与 `contracts/` 验证三语言能力对齐和历史入口拒绝。数据库生命周期测试验证 `reachable()` 与 `search_graph_first()` 在 close 后与其他可失败 API 一样返回 `DatabaseClosed`。
 
 ### 事务测试示例
 
@@ -231,23 +233,23 @@ fn from_json_嵌套and_or() {
 
 | 测试文件          | 验证目标   | 核心场景                                 |
 | ----------------- | ---------- | ---------------------------------------- |
-| `hw_crash.rs`     | 硬件崩溃   | 使用真实内联汇编触发 CPU 异常（`ud2`、`div/0`、`int3`、内存违例），验证操作系统杀进程后的 WAL 恢复能力 |
-| `hw_intrusion.rs` | 硬件侵入   | 使用真实内联汇编（`bts` 翻转 bit、`movnti` 绕过缓存）直接篡改 mmap 页，验证容错能力 |
-| `wal_midwrite.rs` | 断写安全   | WAL 写入中途中断、逐字节截断、CRC 校验拦截损坏记录 |
-| `emi_bitflip.rs`  | 军工容错   | EMI 脉冲突发多比特错误，验证大面积翻转后引擎优雅降级而不恐慌 |
-| `io_fault.rs`     | IO 容错    | WAL/TDB 文件被删、截断、大小不匹配、全零覆写、并发锁竞争 |
+| `fault_crash/`    | 硬件崩溃   | 使用真实内联汇编触发 CPU 异常（`ud2`、`div/0`、`int3`、内存违例），验证操作系统杀进程后的 WAL 恢复能力 |
+| `fault_hardware/` | 硬件侵入   | 使用真实内联汇编（`bts` 翻转 bit、`movnti` 绕过缓存）直接篡改 mmap 页，验证容错能力；EMI 脉冲突发多比特错误 |
+| `fault_io/wal_midwrite.rs` | 断写安全   | WAL 写入中途中断、逐字节截断、CRC 校验拦截损坏记录 |
+| `fault_power/`    | 真实断电   | 子进程到达 `.vec`/`.tdb` 落盘与 `.flush_ok` 替换前后指定发布阶段后由父进程强杀，重开只允许旧完整代或新完整代 |
+| `fault_io/deterministic_failpoint.rs` | I/O 故障 | Create/Write/Sync/Rename 定点确定性失败，验证临时文件清理与错误传播 |
+| `format_spec/`    | 格式规格   | 独立字段规格 + 字段边界/截断/位翻转/追加/CRC 修复 mutation，验证损坏输入 fail-closed 与 ReadOnly 零写 |
+| `fault_allocator/`| OOM 拦截   | 目标 failpoint 后拒绝分配，验证 `try_reserve` 结构化错误与零部分提交（不耗尽真实内存） |
 | `unsafe_audit.rs` | 安全审计   | 针对全代码 28 处 unsafe (SIMD、mmap、FFI) 提供专门的安全契约边界验证 (GJB-5000B 条款 6.3.2) |
-| `transaction.rs`  | 事务原子性 | 多操作原子提交、NaN/维度拦截、跨事务依赖 |
-| `concurrent.rs`   | 线程安全   | 多线程并发读写、无数据竞争、Database Send+Sync 特性验证 |
-| `deterministic_interleaving.rs` | 确定性交错 | RwLock 读读并发、读写隔离、QuIVer generation/singleflight、fatigue 串行、compaction/WAL 边界 |
-| `concurrency_invariants.rs` | 并发与容量不变量 | generation、slot ABA、writer 进展、flush/QuIVer 解耦、FP16 流式构建、容量预算与 WAL 原子性 |
-| `security.rs`     | 安全防御   | NaN 注入、超大 payload(10MB)、幽灵事务截断 |
-| `stress.rs`       | 压力极限   | 高频写入、自环重边图谱震荡、空库极端操作 |
-| `tql_executor.rs` | TQL 全链路 | MATCH/FIND/SEARCH 三种入口的完整执行     |
-| `tql_dml.rs`      | TQL 写操作 | CREATE/SET/DELETE/DETACH DELETE；读查询误用拒绝 |
-| `tql_pipeline_parser.rs` | 三模管线 | 聚合、Prepared、路径、集合、作用域、旧语法回归 |
-| `pipeline_differential.rs` | 差分 | Q1–Q14 独立 reference 与多计划一致性 |
-| `public_api_alignment.rs` | 公共 API | 四类索引、StorageInfo、Prepared、一等值、除旧 |
+| `core/transaction.rs`  | 事务原子性 | 多操作原子提交、NaN/维度拦截、跨事务依赖 |
+| `concurrency/`    | 线程安全   | 多线程并发读写、无数据竞争、确定性交错、generation/singleflight/fatigue、容量预算与 WAL 原子性 |
+| `hardening/security.rs`     | 安全防御   | NaN 注入、超大 payload(10MB)、幽灵事务截断 |
+| `long_running/stress.rs`       | 压力极限   | 高频写入、自环重边图谱震荡、空库极端操作 |
+| `query/tql_executor.rs` | TQL 全链路 | MATCH/FIND/SEARCH 三种入口的完整执行     |
+| `query/tql_dml.rs`      | TQL 写操作 | CREATE/SET/DELETE/DETACH DELETE；读查询误用拒绝 |
+| `query/tql_pipeline_parser.rs` | 三模管线 | 聚合、Prepared、路径、集合、作用域、旧语法回归 |
+| `differential/`   | 差分 | 独立 reference、多物理计划一致性、Prepared/Direct、索引/扫描、Mmap/Rom、串行/并行、fusion/split |
+| `core/public_api_alignment.rs` | 公共 API | 四类索引、StorageInfo、Prepared、一等值、除旧 |
 
 ### WAL 断写安全测试示例
 
@@ -271,7 +273,7 @@ fn wal_半写条目被安全跳过() {
 
 ### 不变量清单
 
-TriviumDB 定义了以下 6 类核心不变量，由 `tests/proptest_core.rs` 持续验证：
+TriviumDB 定义了以下 6 类核心不变量，由 `tests/core/proptest_core.rs` 持续验证：
 
 | #   | 不变量                            | 随机用例数 | 描述                                                                   |
 | --- | --------------------------------- | ---------- | ---------------------------------------------------------------------- |
@@ -470,7 +472,7 @@ mod 新模块;     // ← 添加这一行
 
 ### 添加新属性测试
 
-在 `tests/proptest_core.rs` 中追加新的 `proptest!` 块：
+在 `tests/core/proptest_core.rs` 中追加新的 `proptest!` 块：
 
 ```rust
 proptest! {

@@ -44,7 +44,7 @@ Our goal: **SQLite for AI applications.**
 - 🗃️ **Dual storage modes** — Single-file `*.tdb` portability or split `.vec` mmap zero-copy loading
 - 🔗 **Node = everything** — Each node natively holds a dense vector, sparse text index, JSON metadata, and graph edges under one globally unique ID
 - 🧠 **AI-native** — Optional hybrid recall (AC-automaton BM25 + dense vector) triggers graph spreading activation, with built-in cognitive pipelines (FISTA / DPP / PPR)
-- 🛡️ **4-layer data safety** — Atomic replacement + WAL + dry-run transaction validation + mmap COW isolation
+- 🛡️ **4-layer data safety** — Atomic replacement + WAL + dry-run transaction validation + mmap COW isolation; `.flush_ok` v2 whole-file CRC makes corrupted inputs fail closed
 - 🐍 **Python / Node.js native** — `pip install` or `npm install`, MongoDB-style query syntax
 - ⚡ **High-performance search** — rayon parallel brute-force (100% exact at small scale) + in-house SOTA ANN index **QuIVer** (auto-activates above 10K nodes)
 - 💾 **SSD-friendly** — Append-only WAL + background compaction + independent QuIVer persistence
@@ -542,7 +542,7 @@ TriviumDB/
 - [x] CLI tool `triviumdb-cli` (command `tdb`): non-interactive commands + REPL (Tab completion / syntax highlighting / multi-line input) + config file
 - [x] Database visualization: terminal TUI (`tdb ui`, force-directed graph layout / k-hop expand / vector search playground)
 
-### v0.8 — The DIY Hybrid Query Era ✅ (Current, v0.8.3)
+### v0.8 — The DIY Hybrid Query Era ✅ (Current, v0.8.4)
 
 - [x] **Four persistent property indexes**: Hash / Ordered ART / Composite ART / Roaring Bitmap (`.pidx` v4, reads v1–v4) — equality, range, prefix, composite, and low-cardinality set operations all indexed
 - [x] **TQL `WITH` composable pipelines**: named NodeSets, scope validation, cross-stage composition; `FIND` / `MATCH` / `SEARCH` all enter the pipeline
@@ -555,6 +555,17 @@ TriviumDB/
 - [x] **Strict API migration policy**: all silent legacy compatibility removed; legacy entry points return `ApiMigrationRequired` migration errors with stable error codes; headerless WAL rejected
 - [x] **Production-grade hard guarantees**: ReadOnly / Immutable byte-level zero writes, four-dimensional query budgets failing closed, deterministic parallel execution, atomic generation publishing
 - [x] **TSNG tri-signal research track**: vector / property / graph unified scoring, six access paths, exact ground truth with Recall@K / NDCG@K evaluation
+
+### v0.8.4 Engineering Hardening ✅
+
+- [x] **`.flush_ok` v2 integrity marker**: whole-file CRC32 over `.tdb`/`.vec` plus a self-checked marker; equal-length bit flips and sector tearing are now detectable. Corrupted inputs fail closed (ReadOnly/Immutable zero-write rejection; no more zero-vector pseudo-recovery), v1 markers remain bounded-compatible
+- [x] **Zero panic on production paths**: `panic!/unreachable!` no longer reachable from external input, disk parsing, query execution, or bindings — structured errors plus a static guard
+- [x] **Hooks across three languages + FFI ABI v2**: native six-stage hooks in Python / Node (structured error propagation; Node uses synchronous callbacks), FFI hooks upgraded to a v2 protocol with ABI version gating, error codes, and full six-stage injection
+- [x] **Real fault-injection matrix**: child-process kill at publication phases (old complete generation or new complete generation — nothing else), deterministic I/O failpoints, fail-at-failpoint allocators, and an independent disk-format mutation suite (`tests/format_spec/`), all on small fixtures in isolated subprocesses that never exhaust real resources
+- [x] **Cascades as the authoritative physical plan**: real Source/Filter/Expand/Rank candidates drive executor lowering, serializable physical properties, explicit `Complete/Fallback/BudgetExceeded` optimizer status surfaced via `EXPLAIN`
+- [x] **Property-index numeric key encoding v2**: unified ordered keys for integers/floats (fixes composite range false-empty results), exact large-integer comparison with safe fallbacks, in-memory rebuild migration for legacy sidecars; fixes Ordered-index LIMIT truncating candidates before other predicates apply
+- [x] **Community issue fixes**: #31 (parallel PageRank panic on out-of-subset edges) and #32 (hidden 5000-row TQL truncation)
+- [x] **TQL SEARCH hot-path rework**: top-K partial selection + lazy materialization removes a ~6× regression; pipeline normalization no longer destroys similarity ranking
 
 ---
 

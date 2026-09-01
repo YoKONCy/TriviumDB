@@ -65,7 +65,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.8.3"
+triviumdb = "0.8.4"
 ```
 
 ### 30 秒入门模板
@@ -427,7 +427,7 @@ RuntimeError: Database 'data.tdb' is already opened by another process.
 
 相比引入重型的跨进程内存通信与多版本控制架构，TriviumDB 选择 Writer 全文件级独占锁定：同一数据库同一时刻只允许一个 Writer。ReadOnly 使用共享锁并允许多个独立 Reader 并发；Immutable 用于经过 manifest 校验、生命周期内绝不原地修改的不可变 generation。
 
-同一 Python 或 Node 数据库实例被多个线程调用时，v0.8.3 已不会再暴露 `Already borrowed` 之类的绑定层借用冲突，但这**不等于支持真正的并行多写者提交**。调用方仍应把所有写操作汇聚到单一写队列，并在应用层用 `Lock` / `Mutex` / actor / 单消费者任务进行串行化；读查询可以交给 ReadOnly/Immutable Reader 并发执行。不要把“多个线程调用成功”误解为多个 Writer 能并行修改同一数据库。
+同一 Python 或 Node 数据库实例被多个线程调用时，v0.8.4 已不会再暴露 `Already borrowed` 之类的绑定层借用冲突，但这**不等于支持真正的并行多写者提交**。调用方仍应把所有写操作汇聚到单一写队列，并在应用层用 `Lock` / `Mutex` / actor / 单消费者任务进行串行化；读查询可以交给 ReadOnly/Immutable Reader 并发执行。不要把“多个线程调用成功”误解为多个 Writer 能并行修改同一数据库。
 
 **如果确实存在多端读写或高并发共享的需求，请遵循嵌入式数据库的最佳实践：多线程调度、读写仲裁、锁的抢占等复杂机制，应由外部业务逻辑或应用服务进行设计（如通过单例模式封装连接池，或在应用程序外层架设统一的 RESTful API 网关代理）。存储引擎本身的职责是坚守绝对的数据一致性边界。**
 

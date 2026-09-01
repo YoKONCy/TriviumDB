@@ -343,6 +343,16 @@ fn materialize_full_scan<T: VectorType>(plan: &mut NodeAccessPlan, mt: &MemTable
 }
 
 fn ordered_range(filter: &Filter) -> Option<(&str, Ordering, bool, serde_json::Value)> {
+    fn exact_ordered_bound(value: serde_json::Value) -> Option<serde_json::Value> {
+        const MAX_EXACT_INTEGER: u64 = 1u64 << 53;
+        let precise = value
+            .as_i64()
+            .map(|number| number.unsigned_abs() < MAX_EXACT_INTEGER)
+            .or_else(|| value.as_u64().map(|number| number < MAX_EXACT_INTEGER))
+            .unwrap_or(true);
+        precise.then_some(value)
+    }
+
     match filter {
         Filter::Gt(field, value) => {
             Some((field, Ordering::Greater, false, serde_json::json!(value)))
@@ -354,7 +364,9 @@ fn ordered_range(filter: &Filter) -> Option<(&str, Ordering, bool, serde_json::V
         Filter::Lte(field, value) => Some((field, Ordering::Less, true, serde_json::json!(value))),
         Filter::Range(field, op, value) => {
             let value = match value {
-                crate::filter::ComparableValue::Number(value) => serde_json::json!(value),
+                crate::filter::ComparableValue::Number(value) => {
+                    exact_ordered_bound(serde_json::Value::Number(value.clone()))?
+                }
                 crate::filter::ComparableValue::String(value) => serde_json::json!(value),
             };
             let (ordering, inclusive) = match op {

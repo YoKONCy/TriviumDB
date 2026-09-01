@@ -245,25 +245,12 @@ impl<T: VectorType> VecPool<T> {
     pub fn get(&self, index: usize) -> Option<&[T]> {
         if index < self.mmap_count {
             // 从 mmap 基础层读取
-            self.mmap.as_ref().map(|m| {
+            self.mmap.as_ref().and_then(|m| {
                 let elem_size = std::mem::size_of::<T>();
-                let byte_offset = index * self.dim * elem_size;
-                let byte_len = self.dim * elem_size;
-                let bytes = &m[byte_offset..byte_offset + byte_len];
-
-                // SAFETY: VectorType 要求 T: Pod，所以从对齐的字节序列转换为 &[T] 是安全的
-                // MAP_PRIVATE 保证了内存映射的完整性
-                let ptr = bytes.as_ptr();
-                if (ptr as usize).is_multiple_of(std::mem::align_of::<T>()) {
-                    // 对齐情况：零拷贝直接引用
-                    unsafe { std::slice::from_raw_parts(ptr as *const T, self.dim) }
-                } else {
-                    // 不对齐：回退到合并缓存
-                    // 这种情况在实践中几乎不会发生（mmap 通常页对齐）
-                    // 为安全起见，回退到 merged 缓存路径
-                    // 这里返回对应的 merged 切片
-                    panic!("mmap 对齐异常，这不应该发生在正常的 OS 页映射中")
-                }
+                let byte_offset = index.checked_mul(self.dim)?.checked_mul(elem_size)?;
+                let byte_len = self.dim.checked_mul(elem_size)?;
+                let bytes = m.get(byte_offset..byte_offset.checked_add(byte_len)?)?;
+                bytemuck::try_cast_slice(bytes).ok()
             })
         } else {
             let delta_index = index - self.mmap_count;

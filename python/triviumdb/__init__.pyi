@@ -13,6 +13,7 @@ DType = Literal["f32", "f16", "u64"]
 SyncMode = Literal["full", "normal", "off"]
 AccessMode = Literal["read_write", "read_only", "immutable"]
 MissingIndexPolicy = Literal["fallback", "build_in_memory", "error"]
+RowOverflowPolicy = Literal["throw", "break"]
 EdgeDirection = Literal["out", "in", "both"]
 ReachabilityDirection = Literal["outgoing", "incoming", "both"]
 
@@ -139,7 +140,7 @@ class Transaction:
 @final
 class TriviumDB:
     dtype: str
-    def __new__(cls, path: str, dim: int = 1536, dtype: DType = 'f32', sync_mode: SyncMode = 'normal', load_text_index: bool = False, auto_build_quiver: bool = True, expected_nodes: int | None = None, memory_limit_mb: int = 0, access_mode: AccessMode = 'read_write', missing_index_policy: MissingIndexPolicy = 'fallback') -> "TriviumDB": ...
+    def __new__(cls, path: str, dim: int = 1536, dtype: DType = 'f32', sync_mode: SyncMode = 'normal', load_text_index: bool = False, auto_build_quiver: bool = True, expected_nodes: int | None = None, memory_limit_mb: int = 0, access_mode: AccessMode = 'read_write', missing_index_policy: MissingIndexPolicy = 'fallback', max_query_rows: int | None = None, row_overflow: RowOverflowPolicy = 'throw') -> "TriviumDB": ...
     def all_node_ids(self) -> list[int]: ...
     def batch_insert(self, vectors: Sequence[Vector], payloads: Sequence[Any]) -> list[int]: ...
     def batch_insert_with_ids(self, ids: Sequence[int], vectors: Sequence[Vector], payloads: Sequence[Any]) -> None: ...

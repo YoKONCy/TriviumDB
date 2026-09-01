@@ -7,7 +7,151 @@
 #[allow(clippy::module_inception)]
 pub mod nodejs {
     use crate::database::Database as GenericDatabase;
+    use napi::bindgen_prelude::Function;
+    use napi::{Env, JsObject, Ref};
     use napi_derive::napi;
+
+    struct JsNativeHook {
+        env: Env,
+        object: Ref<()>,
+        owner_thread: std::thread::ThreadId,
+    }
+
+    unsafe impl Send for JsNativeHook {}
+    unsafe impl Sync for JsNativeHook {}
+
+    impl JsNativeHook {
+        fn invoke(
+            &self,
+            name: &str,
+            value: serde_json::Value,
+            ctx: &mut crate::hook::HookContext,
+        ) -> Option<serde_json::Value> {
+            if std::thread::current().id() != self.owner_thread {
+                ctx.error = Some(format!(
+                    "Node Hook {name} 只能在注册它的 JavaScript 线程同步执行"
+                ));
+                return None;
+            }
+            let object: JsObject = match self.env.get_reference_value(&self.object) {
+                Ok(value) => value,
+                Err(error) => {
+                    ctx.error = Some(format!("Node Hook {name} 引用无效: {error}"));
+                    return None;
+                }
+            };
+            let function: Function<'_, serde_json::Value, serde_json::Value> =
+                match object.get_named_property(name) {
+                    Ok(value) => value,
+                    Err(_) => return None,
+                };
+            match function.call(value) {
+                Ok(result) => Some(result),
+                Err(error) => {
+                    ctx.error = Some(format!("Node Hook {name} 执行失败: {error}"));
+                    None
+                }
+            }
+        }
+
+        fn hits_json(hits: &[crate::node::SearchHit]) -> serde_json::Value {
+            serde_json::Value::Array(
+                hits.iter()
+                    .map(|hit| {
+                        serde_json::json!({
+                            "id": hit.id.to_string(), "score": hit.score, "payload": hit.payload
+                        })
+                    })
+                    .collect(),
+            )
+        }
+
+        fn replace_hits(hits: &mut Vec<crate::node::SearchHit>, value: serde_json::Value) {
+            let Some(items) = value.as_array() else {
+                return;
+            };
+            *hits = items
+                .iter()
+                .filter_map(|item| {
+                    Some(crate::node::SearchHit {
+                        id: item.get("id")?.as_str()?.parse().ok()?,
+                        score: item.get("score")?.as_f64()? as f32,
+                        payload: item
+                            .get("payload")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    })
+                })
+                .filter(|hit| hit.id != 0 && hit.score.is_finite())
+                .collect();
+        }
+    }
+
+    impl crate::hook::SearchHook for JsNativeHook {
+        fn on_pre_search(
+            &self,
+            query: &mut Vec<f32>,
+            _config: &mut crate::database::SearchConfig,
+            ctx: &mut crate::hook::HookContext,
+        ) {
+            if let Some(value) = self.invoke("onPreSearch", serde_json::json!(query), ctx)
+                && let Ok(updated) = serde_json::from_value::<Vec<f32>>(value)
+            {
+                *query = updated;
+            }
+        }
+        fn on_custom_recall(
+            &self,
+            query: &[f32],
+            _config: &crate::database::SearchConfig,
+            ctx: &mut crate::hook::HookContext,
+        ) -> Option<Vec<crate::node::SearchHit>> {
+            let value = self.invoke("onCustomRecall", serde_json::json!(query), ctx)?;
+            if value.is_null() {
+                return None;
+            }
+            let mut hits = Vec::new();
+            Self::replace_hits(&mut hits, value);
+            Some(hits)
+        }
+        fn on_post_recall(
+            &self,
+            hits: &mut Vec<crate::node::SearchHit>,
+            ctx: &mut crate::hook::HookContext,
+        ) {
+            if let Some(value) = self.invoke("onPostRecall", Self::hits_json(hits), ctx) {
+                Self::replace_hits(hits, value);
+            }
+        }
+        fn on_pre_graph_expand(
+            &self,
+            hits: &mut Vec<crate::node::SearchHit>,
+            ctx: &mut crate::hook::HookContext,
+        ) {
+            if let Some(value) = self.invoke("onPreGraphExpand", Self::hits_json(hits), ctx) {
+                Self::replace_hits(hits, value);
+            }
+        }
+        fn on_rerank(
+            &self,
+            hits: &mut Vec<crate::node::SearchHit>,
+            ctx: &mut crate::hook::HookContext,
+        ) -> Option<Vec<crate::node::SearchHit>> {
+            let value = self.invoke("onRerank", Self::hits_json(hits), ctx)?;
+            let mut updated = Vec::new();
+            Self::replace_hits(&mut updated, value);
+            Some(updated)
+        }
+        fn on_post_search(
+            &self,
+            hits: &mut Vec<crate::node::SearchHit>,
+            ctx: &mut crate::hook::HookContext,
+        ) {
+            if let Some(value) = self.invoke("onPostSearch", Self::hits_json(hits), ctx) {
+                Self::replace_hits(hits, value);
+            }
+        }
+    }
 
     fn to_napi_error(error: crate::error::TriviumError) -> napi::Error {
         let code = match &error {
@@ -27,8 +171,10 @@ pub mod nodejs {
             crate::error::TriviumError::ApiMigrationRequired { .. } => "TDB_API_MIGRATION_REQUIRED",
             crate::error::TriviumError::QueryParse(_) => "TDB_QUERY_PARSE",
             crate::error::TriviumError::QueryExecution(_) => "TDB_QUERY_EXECUTION",
+            crate::error::TriviumError::QueryRowBudgetExceeded { .. } => "TDB_QUERY_BUDGET",
             crate::error::TriviumError::DimensionMismatch { .. } => "TDB_DIMENSION_MISMATCH",
             crate::error::TriviumError::NodeNotFound(_) => "TDB_NODE_NOT_FOUND",
+            crate::error::TriviumError::HookExecutionError(_) => "TDB_HOOK_EXECUTION",
             crate::error::TriviumError::InvalidInput(_) => "TDB_INVALID_INPUT",
             _ => "TDB_ERROR",
         };
@@ -297,6 +443,8 @@ pub mod nodejs {
         pub memory_limit_mb: Option<f64>,
         pub access_mode: Option<String>,
         pub missing_index_policy: Option<String>,
+        pub max_query_rows: Option<f64>,
+        pub row_overflow: Option<String>,
     }
 
     /// 高级管线专用配置结构
@@ -567,6 +715,14 @@ pub mod nodejs {
         }
     }
 
+    fn parse_row_overflow(value: Option<&str>) -> napi::Result<crate::database::RowOverflowPolicy> {
+        match value.unwrap_or("throw") {
+            "throw" => Ok(crate::database::RowOverflowPolicy::Throw),
+            "break" => Ok(crate::database::RowOverflowPolicy::Break),
+            _ => Err(napi::Error::from_reason("rowOverflow 必须是 throw / break")),
+        }
+    }
+
     fn parse_storage_mode(value: Option<&str>) -> napi::Result<crate::database::StorageMode> {
         match value.unwrap_or("mmap") {
             "mmap" => Ok(crate::database::StorageMode::Mmap),
@@ -666,6 +822,8 @@ pub mod nodejs {
                     memory_limit_mb: None,
                     access_mode: None,
                     missing_index_policy: None,
+                    max_query_rows: None,
+                    row_overflow: None,
                 },
             };
             let dim = options.dim.unwrap_or(1536) as usize;
@@ -682,6 +840,10 @@ pub mod nodejs {
             let memory_limit = memory_limit_mb
                 .checked_mul(1024 * 1024)
                 .ok_or_else(|| napi::Error::from_reason("memoryLimitMb 换算字节时溢出"))?;
+            let max_query_rows = options
+                .max_query_rows
+                .map(|value| parse_safe_usize(value, "maxQueryRows"))
+                .transpose()?;
             let config = crate::database::Config {
                 dim,
                 sync_mode: parse_sync_mode(options.sync_mode.as_deref().unwrap_or("normal"))?,
@@ -694,6 +856,8 @@ pub mod nodejs {
                 missing_index_policy: parse_missing_index_policy(
                     options.missing_index_policy.as_deref(),
                 )?,
+                max_query_rows,
+                row_overflow: parse_row_overflow(options.row_overflow.as_deref())?,
             };
             let dtype_str = dtype.as_str();
 
@@ -719,6 +883,17 @@ pub mod nodejs {
         }
 
         // ── Hook 管理 ──
+
+        #[napi]
+        pub fn set_hook(&mut self, env: Env, hook: JsObject) -> napi::Result<()> {
+            let wrapper = JsNativeHook {
+                env,
+                object: env.create_reference(hook)?,
+                owner_thread: std::thread::current().id(),
+            };
+            dispatch!(self, mut db => db.set_hook(wrapper));
+            Ok(())
+        }
 
         /// 加载 C/C++ 动态库作为检索管线 Hook
         ///
@@ -843,7 +1018,7 @@ pub mod nodejs {
                     db.search_hybrid_with_context(q_text, Some(&v), &core_config)
                 }
             }
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+            .map_err(to_napi_error)?;
 
             // 转换 hits
             let hits: Vec<JsSearchHit> = results

@@ -121,6 +121,13 @@ fn validate_hooked_query(query: &[f32], dim: usize) -> Result<()> {
     Ok(())
 }
 
+fn check_hook_error(ctx: &mut HookContext) -> Result<()> {
+    if let Some(error) = ctx.error.take() {
+        return Err(crate::error::TriviumError::HookExecutionError(error));
+    }
+    Ok(())
+}
+
 /// 执行完整的混合检索管线
 ///
 /// 这是从 `Database::search_hybrid_internal` 中提取出的核心管线逻辑。
@@ -220,6 +227,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         let t0 = std::time::Instant::now();
         call_hook(|| hook.on_pre_search(&mut query_vec_f32, &mut safe_cfg, ctx));
         ctx.record_timing("hook_pre_search", t0.elapsed());
+        check_hook_error(ctx)?;
     }
 
     // 如果 Hook 请求提前终止管线，直接返回空结果
@@ -373,6 +381,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         if let Some(reranked) = call_hook(|| hook.on_rerank(&mut expanded, ctx)) {
             expanded = reranked;
         }
+        check_hook_error(ctx)?;
         ctx.record_timing("hook_rerank", t0.elapsed());
         ctx.record_count("rerank", expanded.len());
     }
@@ -418,6 +427,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         let t0 = std::time::Instant::now();
         call_hook(|| hook.on_post_search(&mut expanded, ctx));
         ctx.record_timing("hook_post_search", t0.elapsed());
+        check_hook_error(ctx)?;
     }
 
     Ok(PipelineOutput {

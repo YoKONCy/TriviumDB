@@ -1,6 +1,6 @@
 # TriviumDB 支持特性详解
 
-> 深入剖析 TriviumDB 的架构设计、核心能力与技术实现细节。本文以 v0.8.3 当前源码和正式公共 API 为准。
+> 深入剖析 TriviumDB 的架构设计、核心能力与技术实现细节。本文以 v0.8.4 当前源码和正式公共 API 为准。
 
 ## 当前能力快照
 
@@ -435,7 +435,7 @@ TriviumDB 内置了一套多层认知检索管线（本项目自研的功能性�
 | **词法分析器** | `query/tql_lexer.rs` | Token、参数和位置诊断 |
 | **语法分析器** | `query/tql_parser.rs` | 递归下降解析、作用域验证 |
 | **抽象语法树** | `query/tql_ast.rs` | 查询、管线、表达式、聚合和路径结构 |
-| **Cascades** | `query/cascades.rs` | Memo、成本估算、预算切片与确定性计划选择 |
+| **Cascades** | `query/cascades.rs` | Memo、成本估算、预算切片与确定性计划选择；优化结果以权威 `PhysicalPlan` 驱动执行器 lowering（Source/Filter/Expand/Rank 真实物理候选、可序列化物理属性、相邻 Filter 合并与恒等 WITH 消除），优化状态显式为 `Complete/Fallback/BudgetExceeded` 并通过 `EXPLAIN` 暴露 |
 | **执行器** | `query/tql_executor.rs` | NodeSet/一等值执行、聚合、路径和图算法 |
 | **Prepared** | `query/tql_prepared.rs` | 严格参数发现、绑定和重复执行 |
 
@@ -489,6 +489,8 @@ TQL 的 FIND 入口底层采用三层加速策略：
 
 属性索引由 `PropertyIndexRegistry` 统一管理，并持久化到 `.tdb.pidx`（当前 v4，可读取 v1–v4）。posting 使用稳定 NodeId/slot 映射，CRUD、slot 复用、重启与 ReadOnly/Immutable 均有专项测试。
 
+**数值键编码 v2**：Ordered/Composite ART 的有序键使用统一的数值全序编码——`i64`/`u64`/`f64` 共享同一数值顺序，整数范围查询（如 `age: {$gte: 30}`）与浮点阈值不再因键前缀不同而错配为空集。等值索引（Hash/Bitmap）继续保留 JSON 数字的精确类型与值，可区分超过 f64 精度的相邻大整数；Filter 的范围比较也使用精确整数比较。超出 f64 精确整数范围（±2^53 之外）的有序范围边界不参与索引剪枝，自动回退精确扫描。旧 key v1 编码的 `.pidx` 在打开时有界读取并按索引定义在内存中重建为 v2 编码：ReadOnly/Immutable 保持零写，Writer 在下一次显式 flush 发布 v2 sidecar。
+
 | 类型 | 数据结构 | 主要用途 |
 |---|---|---|
 | Hash | 类型稳定键 → posting | 等值过滤 |
@@ -538,11 +540,11 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 | 崩溃时机 | .tdb 状态 | .vec 状态 | .flush_ok | 恢复路径 |
 |----------|-----------|-----------|-----------|----------|
 | 写 .tdb.tmp 中途 | 旧版本完好 | 旧版本完好 | 有效 | 直接加载旧数据 + WAL 回放 |
-| .tdb rename 后、.flush_ok 更新前 | 新版本 | 旧版本（追加路径：新版本） | 失效（大小不符） | `.flush_ok` 校验失败 → 降级安全模式（忽略 .vec）→ WAL 回放 |
-| 追加写 .vec 后、.tdb 重写前 | 旧版本 | 已追加（比 .flush_ok 记录的大） | 失效 | 同上：降级忽略 .vec → WAL 回放 |
+| .tdb rename 后、.flush_ok 更新前 | 新版本 | 旧版本（追加路径：新版本） | 失效（大小不符） | `.flush_ok` 校验失败 → **fail-closed 拒绝打开**（损坏输入零降级、零伪恢复） |
+| 追加写 .vec 后、.tdb 重写前 | 旧版本 | 已追加（比 .flush_ok 记录的大） | 失效 | 同上：fail-closed 拒绝打开 |
 | flush 全部完成 | 新版本 | 新版本 | 有效 | 直接加载，无需 WAL |
 
-> **追加路径的崩溃安全性**：`.vec` 文件追加成功后如果崩溃，`.flush_ok` 中记录的 `vec_size` 与实际文件大小不符，下次启动时校验失败，引擎会**降级为安全模式**（忽略 .vec，仅从 .tdb 骨架恢复），然后通过 WAL 回放将那批新节点重新恢复到 delta 层。整个过程不会丢失任何已提交到 WAL 的数据。
+> **追加路径的崩溃安全性**：`.vec` 文件追加成功后如果崩溃，`.flush_ok` 中记录的 `vec_size` 与实际文件大小不符，下次启动时校验失败。引擎不再降级为"忽略 `.vec` 的骨架恢复"——那会依赖 WAL 能完整重建全部基础向量，否则产生"节点与 Payload 正确、向量全零"的伪恢复状态。现在统一 fail-closed：已提交到 WAL 的数据不会丢失，但打开会被拒绝，需由 WAL 完整回放能力或备份恢复后重新进入。发布各阶段的真实强杀矩阵验证只允许"旧完整代际"或"新完整代际"。
 
 ### WAL 记录类型
 

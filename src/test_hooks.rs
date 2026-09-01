@@ -3,7 +3,9 @@
 //! 启用 `test-hooks` feature 后，测试可以在指定执行点阻塞目标线程，再通过
 //! `WaitHandle` 精确等待到达并释放。默认生产构建不编译本模块，因而没有运行时开销。
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::io;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -26,6 +28,80 @@ pub enum ConcurrencyPoint {
     BeforeMemtableApply,
     BeforeCompactionSave,
     BeforeWalClear,
+    AfterVecPersisted,
+    AfterTdbPersisted,
+    BeforeFlushMarkerRename,
+    AfterFlushMarkerRename,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoPoint {
+    MarkerCreate,
+    MarkerWrite,
+    MarkerSync,
+    MarkerRename,
+    MarkerMetadata,
+}
+
+thread_local! {
+    static IO_FAILURE: Cell<Option<IoPoint>> = const { Cell::new(None) };
+}
+
+pub struct IoFailureGuard {
+    previous: Option<IoPoint>,
+}
+
+impl Drop for IoFailureGuard {
+    fn drop(&mut self) {
+        IO_FAILURE.set(self.previous);
+    }
+}
+
+pub fn fail_io_at(point: IoPoint) -> IoFailureGuard {
+    let previous = IO_FAILURE.replace(Some(point));
+    IoFailureGuard { previous }
+}
+
+pub fn io_result(point: IoPoint) -> io::Result<()> {
+    if IO_FAILURE.get() == Some(point) {
+        Err(io::Error::other(format!(
+            "deterministic I/O failure at {point:?}"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueryExecutionStrategy {
+    #[default]
+    Auto,
+    ForceSerial,
+    ForceParallel,
+    DisableFusion,
+}
+
+thread_local! {
+    static QUERY_STRATEGY: Cell<QueryExecutionStrategy> = const { Cell::new(QueryExecutionStrategy::Auto) };
+}
+
+pub struct QueryStrategyGuard {
+    previous: QueryExecutionStrategy,
+}
+
+impl Drop for QueryStrategyGuard {
+    fn drop(&mut self) {
+        QUERY_STRATEGY.set(self.previous);
+    }
+}
+
+pub fn force_query_strategy(strategy: QueryExecutionStrategy) -> QueryStrategyGuard {
+    let previous = QUERY_STRATEGY.replace(strategy);
+    QueryStrategyGuard { previous }
+}
+
+pub fn query_strategy() -> QueryExecutionStrategy {
+    QUERY_STRATEGY.get()
 }
 
 #[derive(Default)]

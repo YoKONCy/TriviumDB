@@ -370,6 +370,17 @@ fn bench_tql_vs_raw_search(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("search_comparison_5k");
 
+    let tql_vector = query
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let tql_query = format!("SEARCH VECTOR [{tql_vector}] TOP 10 RETURN *");
+
+    group.bench_function("tql_search_top10", |b| {
+        b.iter(|| db.tql(black_box(&tql_query)).unwrap())
+    });
+
     group.bench_function("raw_search_top10", |b| {
         b.iter(|| db.search(black_box(&query), 10, 0, 0.0).unwrap())
     });

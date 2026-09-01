@@ -150,10 +150,14 @@ for (stage, dur) in &ctx.stage_timings {
 
 `FfiHook` 按名称查找以下 C ABI 符号（**均为可选**，未找到的符号自动降级为空操作）：
 
-| 符号名 | 对应 Hook 点 | 签名 |
+| 符号名 | 对应 Hook 点 | 说明 |
 |--------|-------------|------|
-| `trivium_recall` | `on_custom_recall` | `void(const float* query, uint32_t dim, uint64_t* out_ids, float* out_scores, uint32_t* out_count)` |
-| `trivium_rerank` | `on_rerank` | `void(uint64_t* ids, float* scores, uint32_t count)` |
+| `trivium_hook_abi_version` | 全局 | 返回插件实现的 ABI 版本（当前 `2`），与内核不匹配时拒绝加载 |
+| `trivium_hook_invoke_v2` | 六阶段 | ABI v2 统一入口：`(stage, ctx, hits, count)`，返回 `0` 成功 / 非零错误码，覆盖 pre_search / custom_recall / post_recall / pre_graph_expand / rerank / post_search 全部六个阶段 |
+| `trivium_recall` | `on_custom_recall` | v1 兼容：`int(const float* query, size_t query_len, size_t top_k, FfiSearchHit* out_hits, size_t* out_count)` |
+| `trivium_rerank` | `on_rerank` | v1 兼容：`int(FfiSearchHit* hits, size_t count)` |
+
+> 💡 新插件建议直接实现 `trivium_hook_invoke_v2` + `trivium_hook_abi_version`：六阶段全部可注入，且错误码会传播为结构化查询错误而不是被静默吞掉；只导出 `trivium_recall`/`trivium_rerank` 的旧插件继续以 v1 兼容方式加载。
 
 ### 完整示例：自定义重排序插件
 
@@ -410,12 +414,15 @@ db.set_hook(composite);
 
 | 功能 | Python | Node.js | Rust |
 |------|--------|---------|------|
+| 原生六阶段 Hook | `db.set_hook(obj)`（对象实现 `on_*` 方法） | `db.setHook({...})`（同步 JS 回调对象） | `db.set_hook(impl SearchHook)` |
 | 加载 FFI 插件 | `db.load_ffi_hook(path)` | `db.loadFfiHook(path)` | `db.set_hook(FfiHook::load(path)?)` |
 | 清除 Hook | `db.clear_hook()` | `db.clearHook()` | `db.clear_hook()` |
 | 带上下文检索 | `hits, ctx = db.search_with_context(...)` | `const { hits, context } = db.searchWithContext(...)` | `let (hits, ctx) = db.search_hybrid_with_context(...)` |
 | 上下文·耗时 | `ctx.timings` (dict, ms) | `context.timings` (object, ms) | `ctx.stage_timings` (Vec, Duration) |
 | 上下文·数据 | `ctx.custom_data` (dict) | `context.customData` (object) | `ctx.custom_data` (serde_json::Value) |
 | 上下文·终止 | `ctx.aborted` (bool) | `context.aborted` (bool) | `ctx.abort` (bool) |
+
+> ⚠️ 原生 Python/JS Hook 的回调异常不会被静默吞掉：它们会转换为结构化错误并入查询错误路径；Node 侧回调必须是同步函数（不得返回 Promise）。
 
 ---
 
@@ -439,10 +446,11 @@ A: 对 `search()`、`search_hybrid()`、`search_advanced()` 等固定检索入�
 
 **Q: 能否用纯 Python / JavaScript 编写 Hook？**
 
-A: 目前不支持纯 Python/JS Hook（跨 FFI 回调 GIL/事件循环的性能和安全代价太大）。推荐方案：
-- 简单逻辑：在 Python/JS 侧对 `search()` 的返回结果做后处理
-- 高性能逻辑：编写 C/C++ 动态库通过 `load_ffi_hook()` 加载
-- 完整控制：在 Rust 项目中直接实现 `SearchHook` trait
+A: 可以。Python 对象实现六个 `on_*` 方法后通过 `db.set_hook(obj)` 注册，Node 通过 `db.setHook({...})` 注册同步回调对象，均覆盖全部六阶段，异常会以结构化错误传播。需要注意：
+
+- 跨 FFI/GIL/事件循环回调有性能开销，热路径仍推荐 C/C++ FFI 插件（`load_ffi_hook()`）或 Rust `SearchHook`
+- Node 回调必须是同步函数，不得返回 Promise
+- 简单逻辑也可以直接在 Python/JS 侧对 `search()` 的返回结果做后处理
 
 **Q: Hook 的性能开销是多少？**
 

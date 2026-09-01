@@ -455,7 +455,7 @@ impl TqlParser {
                     "label_propagation" => GraphAlgorithmKind::LabelPropagation,
                     "leiden" => GraphAlgorithmKind::Leiden,
                     "sa_ppr" => GraphAlgorithmKind::SaPpr,
-                    _ => unreachable!(),
+                    _ => return Err(format!("未知图算法: {name}")),
                 };
                 stages.push(PipelineStage::GraphAlgorithm(GraphAlgorithmStage {
                     input,
@@ -549,7 +549,7 @@ impl TqlParser {
                     "union" => TqlSetOperation::Union,
                     "intersect" => TqlSetOperation::Intersect,
                     "except" => TqlSetOperation::Except,
-                    _ => unreachable!(),
+                    _ => return Err(format!("未知集合运算: {name}")),
                 };
                 stages.push(PipelineStage::SetCombine(SetCombineStage {
                     input,
@@ -1181,7 +1181,7 @@ impl TqlParser {
                     "community" => Ok(TqlExpr::Community { var }),
                     "path" => Ok(TqlExpr::Path { var }),
                     "path_length" => Ok(TqlExpr::PathLength { var }),
-                    _ => unreachable!(),
+                    _ => Err(format!("未知标量函数: {name}")),
                 }
             }
             TqlToken::DollarOp(name) => {
@@ -1407,12 +1407,9 @@ impl TqlParser {
 
         loop {
             self.expect(&TqlToken::LParen)?;
-            let mut current_var = if let TqlToken::Ident(_) = self.peek() {
-                if let TqlToken::Ident(name) = self.advance() {
-                    name
-                } else {
-                    unreachable!()
-                }
+            let mut current_var = if let TqlToken::Ident(name) = self.peek().clone() {
+                self.advance();
+                name
             } else {
                 format!("_auto_{}", nodes.len())
             };

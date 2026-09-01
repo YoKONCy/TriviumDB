@@ -59,6 +59,12 @@ pub enum TriviumError {
     #[error("查询执行错误 (Query execution error): {0}")]
     QueryExecution(String),
 
+    /// 查询需要物化的行数超过安全预算；禁止以静默截断伪装成完整结果。
+    #[error(
+        "查询行预算耗尽 (Query row budget exceeded): 最多允许处理 {budget} 行；请使用 LIMIT/OFFSET 分页并确保 OFFSET + LIMIT 不超过预算"
+    )]
+    QueryRowBudgetExceeded { budget: usize },
+
     #[error(
         "图遍历预算耗尽 (Graph traversal budget exceeded): {dimension:?}，visited={visited_nodes}，edges={examined_edges}，frontier={peak_frontier_size}，depth={depth_reached}"
     )]
@@ -69,6 +75,10 @@ pub enum TriviumError {
         peak_frontier_size: usize,
         depth_reached: usize,
     },
+
+    /// Hook 回调执行失败；动态语言异常和 FFI 非零错误码统一映射到此变体。
+    #[error("Hook 执行失败 (Hook execution error): {0}")]
+    HookExecutionError(String),
 
     /// 外置 Hook 动态库加载失败
     #[error("Hook 加载失败 (Hook load error): {0}")]
