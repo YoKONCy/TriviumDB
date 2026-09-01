@@ -15,4 +15,4 @@
 # so the inner module needs no stub of its own. Ignoring it lets stubtest check
 # the entire public surface strictly while skipping only this layout artifact.
 triviumdb\.triviumdb
-triviumdb\.(Vector|DType|SyncMode|AccessMode|MissingIndexPolicy|EdgeDirection|ReachabilityDirection)
+triviumdb\.(Vector|DType|SyncMode|AccessMode|MissingIndexPolicy|EdgeDirection|ReachabilityDirection|RowOverflowPolicy)
