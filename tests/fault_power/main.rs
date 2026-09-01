@@ -26,6 +26,20 @@ fn cleanup(path: &str) {
     }
 }
 
+fn child_command() -> Command {
+    let executable = std::env::current_exe().unwrap();
+    if std::env::var_os("TRIVIUM_TEST_QEMU_AARCH64").is_some() {
+        let mut command = Command::new("qemu-aarch64");
+        command
+            .arg("-L")
+            .arg("/usr/aarch64-linux-gnu")
+            .arg(executable);
+        command
+    } else {
+        Command::new(executable)
+    }
+}
+
 #[cfg(feature = "test-hooks")]
 fn publication_point(name: &str) -> ConcurrencyPoint {
     match name {
@@ -111,7 +125,7 @@ fn PWR_00A_发布阶段真实强杀只允许完整旧代_完整新代或fail_clo
         }
 
         let ready = format!("{path}.{phase}.ready");
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut child = child_command()
             .env("TRIVIUM_PUBLICATION_CHILD_PATH", &path)
             .env("TRIVIUM_PUBLICATION_CHILD_PHASE", phase)
             .env("TRIVIUM_PUBLICATION_CHILD_READY", &ready)
@@ -167,8 +181,7 @@ fn __power_loss_child_entry() {
 fn PWR_00_真实强杀子进程后WAL保持可恢复() {
     let path = tmp_db("real_process_kill");
     cleanup(&path);
-    let exe = std::env::current_exe().unwrap();
-    let mut child = Command::new(exe)
+    let mut child = child_command()
         .env("TRIVIUM_POWER_LOSS_CHILD", &path)
         .arg("__power_loss_child_entry")
         .arg("--exact")

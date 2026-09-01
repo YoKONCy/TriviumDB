@@ -46,6 +46,20 @@ fn cleanup(path: &str) {
     }
 }
 
+fn child_command() -> Command {
+    let executable = std::env::current_exe().unwrap();
+    if std::env::var_os("TRIVIUM_TEST_QEMU_AARCH64").is_some() {
+        let mut command = Command::new("qemu-aarch64");
+        command
+            .arg("-L")
+            .arg("/usr/aarch64-linux-gnu")
+            .arg(executable);
+        command
+    } else {
+        Command::new(executable)
+    }
+}
+
 #[test]
 fn __allocator_failure_child_entry() {
     if std::env::var_os("TRIVIUM_ALLOCATOR_FAILURE_CHILD").is_none() {
@@ -81,8 +95,7 @@ fn __allocator_failure_child_entry() {
 
 #[test]
 fn 测试_真实allocator_failure隔离子进程并保持数据库可恢复() {
-    let exe = std::env::current_exe().unwrap();
-    let status = Command::new(exe)
+    let status = child_command()
         .env("TRIVIUM_ALLOCATOR_FAILURE_CHILD", "1")
         .arg("__allocator_failure_child_entry")
         .arg("--exact")
