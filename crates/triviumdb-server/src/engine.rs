@@ -316,6 +316,31 @@ impl EngineHandle {
             max_write_batch_delay: config.max_write_batch_delay,
         });
         tokio::spawn(run_writer(inner.clone(), receiver));
+
+        // 后台预热 QuIVer 索引：重启后若库中已有大量向量节点（≥10_000），首次查询会触发
+        // 数秒的全量索引构建（auto_quiver_build_needed 门槛即 10k）。此处提前在后台构建，
+        // 把"首次查询卡 ~3s"变为启动后静默预热，查询路径只保留纯 HNSW 检索。
+        // build_quiver_index 内部走 snapshot + 无锁并行构建 + 瞬间 publish，不阻塞读写。
+        {
+            let warmup_db = Arc::clone(&inner.database);
+            tokio::task::spawn_blocking(move || {
+                let started = Instant::now();
+                let (nodes, built) = {
+                    let db = read_or_recover(&warmup_db);
+                    let nodes = db.node_count();
+                    let built = nodes >= 10_000 && db.build_quiver_index(None).is_ok();
+                    (nodes, built)
+                };
+                if built {
+                    tracing::info!(
+                        nodes,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "QuIVer 索引后台预热完成 (background QuIVer index warmup finished)"
+                    );
+                }
+            });
+        }
+
         Ok(Self { inner, writes })
     }
 
