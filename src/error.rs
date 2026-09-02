@@ -59,6 +59,10 @@ pub enum TriviumError {
     #[error("查询执行错误 (Query execution error): {0}")]
     QueryExecution(String),
 
+    /// 查询因客户端取消或请求 deadline 到期而协作式终止。
+    #[error("查询已取消 (Query cancelled)")]
+    QueryCancelled,
+
     /// 查询需要物化的行数超过安全预算；禁止以静默截断伪装成完整结果。
     #[error(
         "查询行预算耗尽 (Query row budget exceeded): 最多允许处理 {budget} 行；请使用 LIMIT/OFFSET 分页并确保 OFFSET + LIMIT 不超过预算"

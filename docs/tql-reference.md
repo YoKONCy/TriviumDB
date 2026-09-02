@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> **版本**: v0.8.4
+> **版本**: v0.8.5
 > **定位**: 统一查询 DSL — 融合文档过滤、图模式匹配、向量检索于一体  
 > **前置依赖**: 零外部依赖，纯 Rust 实现
 
@@ -537,19 +537,21 @@ ORDER BY sim DESC LIMIT 10
 
 表达式支持 `+ - * /`、括号优先级、参数、属性、一等分数、`COALESCE`、`IS NULL/IS NOT NULL`、`path()` 与 `path_length()`。除零、非数值算术和非有限结果返回 Null，不 panic。
 
-聚合支持 `COUNT/SUM/AVG/MIN/MAX/COLLECT` 与 aggregate `DISTINCT`。RETURN 中非聚合表达式构成隐式分组键；空输入 `COUNT(*)=0`，其他无值聚合返回 Null。聚合结果必须通过 `tql_values` 或动态语言统一值 API 获取。
+聚合支持 `COUNT/SUM/AVG/MIN/MAX/COLLECT` 与 aggregate `DISTINCT`。RETURN 中非聚合表达式构成隐式分组键；空输入 `COUNT(*)=0`，其他无值聚合返回 Null。Rust 的 `tql()` 与 Python/Node 动态语言入口均返回统一一等值；`tql_nodes()` 保留给只需要节点绑定的 Rust 调用方，`tql_values()` 是兼容别名。
 
 ## Prepared TQL
 
 ```python
 prepared = db.prepare_tql(
-    "FIND {kind: \"note\"} RETURN $bonus + 1 AS score"
+    "SEARCH VECTOR [$x, $y] TOP 10 AS seed WITH seed RETURN seed, $bonus + 1 AS score"
 )
 print(prepared.parameter_names())
-rows = db.execute_prepared_tql(prepared, {"bonus": 4})
+rows = db.execute_prepared_tql(prepared, {"x": 0.2, "y": 0.8, "bonus": 4})
 ```
 
-Node 使用 `prepareTql/executePreparedTql`，Rust 使用 `prepare_tql/execute_prepared_tql`。缺参、额外参数、数组/对象参数和非有限数值全部 fail-closed；同一 Prepared 对象可重复绑定执行。
+`SEARCH VECTOR` 的方括号内可混合有限数字字面量与 Prepared 数值参数，例如 `[0.1, $y, -0.3]`。参数只在 bind 阶段写入连续向量，绑定完成后复用与字面量完全相同的 QuIVer/精确检索热路径，不增加候选打分开销。
+
+Node 使用 `prepareTql/executePreparedTql`，Rust 使用 `prepare_tql/execute_prepared_tql`。缺参、额外参数、非数值向量参数和非有限数值全部 fail-closed；同一 Prepared 对象可重复绑定执行。
 
 ## 路径与集合代数
 

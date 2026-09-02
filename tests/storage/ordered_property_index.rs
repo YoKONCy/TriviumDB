@@ -47,7 +47,7 @@ fn build(name: &str, nodes: usize) -> (String, Database<f32>) {
 
 fn ids(db: &Database<f32>, query: &str) -> Vec<u64> {
     let mut ids: Vec<_> = db
-        .tql(query)
+        .tql_nodes(query)
         .unwrap()
         .into_iter()
         .flat_map(|row| row.into_values().map(|node| node.id))
@@ -134,7 +134,7 @@ fn ordered_index_重启只读不可变和统计保持一致() {
         10
     );
     let explain = read_only
-        .tql(r#"EXPLAIN FIND {score: {$gte: 90}} RETURN *"#)
+        .tql_nodes(r#"EXPLAIN FIND {score: {$gte: 90}} RETURN *"#)
         .unwrap();
     assert_eq!(
         explain[0]["plan"].payload["access_path"]["kind"],
@@ -191,9 +191,9 @@ fn ordered_index_大整数范围保持精确边界() {
         db.insert(&[0.0; DIM], json!({"value": value})).unwrap();
     }
     let query = format!("FIND {{value: {{$gt: {first}}}}} RETURN *");
-    assert_eq!(db.tql(&query).unwrap().len(), 2);
+    assert_eq!(db.tql_nodes(&query).unwrap().len(), 2);
     db.create_ordered_index("value").unwrap();
-    assert_eq!(db.tql(&query).unwrap().len(), 2);
+    assert_eq!(db.tql_nodes(&query).unwrap().len(), 2);
     drop(db);
     cleanup(&path);
 }
@@ -234,9 +234,9 @@ fn ordered_limit不得在其他入口条件过滤前提前截断候选() {
         .unwrap();
     }
     let query = r#"FIND {region: "cn", age: {$gte: 0}} RETURN * LIMIT 5"#;
-    assert_eq!(db.tql(query).unwrap().len(), 5);
+    assert_eq!(db.tql_nodes(query).unwrap().len(), 5);
     db.create_ordered_index("age").unwrap();
-    let actual = db.tql(query).unwrap();
+    let actual = db.tql_nodes(query).unwrap();
     assert_eq!(actual.len(), 5);
     assert!(actual.iter().all(|row| row["_"].payload["region"] == "cn"));
     drop(db);
@@ -296,13 +296,13 @@ fn ordered_index_不同数字表示共享数值顺序() {
 fn ordered_index_order_by_limit_保持排序并安全早停() {
     let (path, mut db) = build("order_limit", 2_000);
     let query = r#"FIND {score: {$gte: -1000}} RETURN * ORDER BY _.score DESC LIMIT 10"#;
-    let expected = db.tql(query).unwrap();
+    let expected = db.tql_nodes(query).unwrap();
     let expected_scores: Vec<_> = expected
         .iter()
         .map(|row| row["_"].payload["score"].as_i64().unwrap())
         .collect();
     db.create_ordered_index("score").unwrap();
-    let actual = db.tql(query).unwrap();
+    let actual = db.tql_nodes(query).unwrap();
     let actual_scores: Vec<_> = actual
         .iter()
         .map(|row| row["_"].payload["score"].as_i64().unwrap())
@@ -343,7 +343,7 @@ fn ordered_index_复杂类型安全回退全扫描() {
     db.insert(&[0.0; DIM], json!({"value": [1, 2]})).unwrap();
     db.create_ordered_index("value").unwrap();
     assert!(
-        db.tql(r#"FIND {value: {$type: "array"}} RETURN *"#)
+        db.tql_nodes(r#"FIND {value: {$type: "array"}} RETURN *"#)
             .unwrap()
             .len()
             == 1

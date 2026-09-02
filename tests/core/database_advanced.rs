@@ -212,7 +212,7 @@ fn COV2_06_property_index() {
     }
 
     // TQL 使用索引查询
-    let results = db.tql(r#"FIND {name: "user_5"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {name: "user_5"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 1, "索引查询应精确命中 user_5");
     let node = results[0].get("_").expect("FIND RETURN * 应绑定 _");
     assert_eq!(node.payload.get("name"), Some(&serde_json::json!("user_5")));
@@ -266,13 +266,13 @@ fn COV2_07_tql_order_limit_skip() {
 
     // ORDER BY DESC
     let results = db
-        .tql(r#"FIND {type: "user"} RETURN * ORDER BY _.age DESC LIMIT 5"#)
+        .tql_nodes(r#"FIND {type: "user"} RETURN * ORDER BY _.age DESC LIMIT 5"#)
         .unwrap();
     assert!(results.len() <= 5);
 
     // ORDER BY ASC + SKIP
     let results = db
-        .tql(r#"FIND {type: "user"} RETURN * ORDER BY _.age ASC LIMIT 10 OFFSET 3"#)
+        .tql_nodes(r#"FIND {type: "user"} RETURN * ORDER BY _.age ASC LIMIT 10 OFFSET 3"#)
         .unwrap();
     assert!(results.len() <= 7);
 
@@ -286,7 +286,9 @@ fn COV2_08_tql_aggregate() {
     let db = seed_social_graph(&path);
 
     // LIMIT 1 返回单行
-    let results = db.tql(r#"FIND {type: "user"} RETURN * LIMIT 1"#).unwrap();
+    let results = db
+        .tql_nodes(r#"FIND {type: "user"} RETURN * LIMIT 1"#)
+        .unwrap();
     assert_eq!(results.len(), 1);
 
     cleanup(&path);
@@ -300,7 +302,7 @@ fn COV2_09_tql_match_where() {
 
     // 基础 MATCH
     let results = db
-        .tql(r#"MATCH (a)-[:knows]->(b) WHERE a.age > 25 RETURN b"#)
+        .tql_nodes(r#"MATCH (a)-[:knows]->(b) WHERE a.age > 25 RETURN b"#)
         .unwrap();
     assert!(
         (3..=4).contains(&results.len()),
@@ -330,7 +332,9 @@ fn COV2_10_tql_match_label_filter() {
     let path = tmp_db("tql_label");
     let db = seed_social_graph(&path);
 
-    let results = db.tql(r#"MATCH (a)-[:manages]->(b) RETURN a, b"#).unwrap();
+    let results = db
+        .tql_nodes(r#"MATCH (a)-[:manages]->(b) RETURN a, b"#)
+        .unwrap();
     assert_eq!(results.len(), 1, "manages 边应只有一条");
     let a = results[0].get("a").expect("MATCH manages 应绑定 a");
     let b = results[0].get("b").expect("MATCH manages 应绑定 b");
@@ -340,7 +344,7 @@ fn COV2_10_tql_match_label_filter() {
 
     // 不存在的标签
     let results = db
-        .tql(r#"MATCH (a)-[:nonexistent]->(b) RETURN a, b"#)
+        .tql_nodes(r#"MATCH (a)-[:nonexistent]->(b) RETURN a, b"#)
         .unwrap();
     assert!(results.is_empty(), "不存在的边标签应返回空结果");
 
@@ -354,7 +358,7 @@ fn COV2_11_tql_search_vector() {
     let db = seed_social_graph(&path);
 
     let results = db
-        .tql("SEARCH VECTOR [1.0, 0.0, 0.0, 0.0] TOP 3 RETURN *")
+        .tql_nodes("SEARCH VECTOR [1.0, 0.0, 0.0, 0.0] TOP 3 RETURN *")
         .unwrap();
     assert!(results.len() <= 3, "SEARCH VECTOR 必须遵守 TOP 3");
     assert_eq!(results.len(), 3, "10 个节点中 TOP 3 应返回 3 条");
@@ -377,7 +381,7 @@ fn COV2_12_tql_distinct() {
     let db = seed_social_graph(&path);
 
     let results = db
-        .tql(r#"FIND {type: "user"} RETURN DISTINCT type"#)
+        .tql_nodes(r#"FIND {type: "user"} RETURN DISTINCT type"#)
         .unwrap();
     assert_eq!(
         results.len(),
@@ -481,7 +485,7 @@ fn COV2_18_tql_complex_where() {
 
     // $gte + $lte 范围查询
     let results = db
-        .tql(r#"FIND {age: {$gte: 22, $lte: 26}} RETURN *"#)
+        .tql_nodes(r#"FIND {age: {$gte: 22, $lte: 26}} RETURN *"#)
         .unwrap();
     for row in &results {
         for node in row.values() {
@@ -492,7 +496,9 @@ fn COV2_18_tql_complex_where() {
     }
 
     // $ne
-    let results = db.tql(r#"FIND {name: {$ne: "user_0"}} RETURN *"#).unwrap();
+    let results = db
+        .tql_nodes(r#"FIND {name: {$ne: "user_0"}} RETURN *"#)
+        .unwrap();
     for row in &results {
         for node in row.values() {
             if let Some(name) = node.payload.get("name").and_then(|v| v.as_str()) {
@@ -510,7 +516,9 @@ fn COV2_19_tql_return_fields() {
     let path = tmp_db("tql_fields");
     let db = seed_social_graph(&path);
 
-    let results = db.tql(r#"FIND {type: "user"} RETURN name, age"#).unwrap();
+    let results = db
+        .tql_nodes(r#"FIND {type: "user"} RETURN name, age"#)
+        .unwrap();
     for row in &results {
         for node in row.values() {
             assert!(node.payload.get("name").is_some(), "应包含 name 字段");

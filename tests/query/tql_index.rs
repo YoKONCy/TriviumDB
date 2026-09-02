@@ -56,10 +56,10 @@ fn 测试_创建索引后_FIND加速() {
     db.create_index("type").unwrap();
 
     // 使用索引加速的 FIND
-    let results = db.tql(r#"FIND {type: "person"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {type: "person"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 2, "应找到 Alice 和 Bob");
 
-    let results = db.tql(r#"FIND {type: "event"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {type: "event"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 1, "应找到 Summit");
 
     drop(db);
@@ -85,7 +85,7 @@ fn 测试_创建索引后_MATCH加速() {
 
     // MATCH 使用索引定位起点
     let results = db
-        .tql(r#"MATCH (a {name: "Alice"})-[:knows]->(b) RETURN b"#)
+        .tql_nodes(r#"MATCH (a {name: "Alice"})-[:knows]->(b) RETURN b"#)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(
@@ -121,10 +121,10 @@ fn 测试_新插入节点自动进入索引() {
     db.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"name": "Bob"}))
         .unwrap();
 
-    let results = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 1);
 
-    let results = db.tql(r#"FIND {name: "Bob"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {name: "Bob"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 1);
 
     drop(db);
@@ -150,11 +150,13 @@ fn 测试_更新后索引同步() {
         .unwrap();
 
     // 旧值查不到
-    let results = db.tql(r#"FIND {status: "active"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {status: "active"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 0, "active 应已无结果");
 
     // 新值能查到
-    let results = db.tql(r#"FIND {status: "archived"} RETURN *"#).unwrap();
+    let results = db
+        .tql_nodes(r#"FIND {status: "archived"} RETURN *"#)
+        .unwrap();
     assert_eq!(results.len(), 1, "archived 应有 Alice");
 
     drop(db);
@@ -178,11 +180,11 @@ fn 测试_删除后索引清理() {
     db.tql_mut(r#"MATCH (a {name: "Alice"}) DELETE a"#).unwrap();
 
     // Alice 查不到
-    let results = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 0, "Alice 应已被删除");
 
     // Bob 仍在
-    let results = db.tql(r#"FIND {name: "Bob"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {name: "Bob"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 1, "Bob 应仍存在");
 
     drop(db);
@@ -204,14 +206,14 @@ fn 测试_删除索引后仍可查询() {
         .unwrap();
 
     // 有索引时可以查
-    let results = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 1);
 
     // 删除索引
     db.drop_index("name").unwrap();
 
     // 仍可查（退化为全扫描）
-    let results = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 1, "删除索引后仍应能通过全扫描找到");
 
     drop(db);
@@ -247,10 +249,10 @@ fn 测试_多字段索引() {
     )
     .unwrap();
 
-    let results = db.tql(r#"FIND {type: "event"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {type: "event"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 2, "应找到 2 个 event");
 
-    let results = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(results.len(), 1, "应找到 1 个 Alice");
 
     drop(db);

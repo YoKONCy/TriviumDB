@@ -429,7 +429,7 @@ fn assert_matches_model(db: &Database<f32>, model: &ReferenceDb, context: &str) 
     for kind in KINDS {
         let query = format!(r#"FIND {{kind: "{kind}"}} RETURN *"#);
         let actual = db
-            .tql(&query)
+            .tql_nodes(&query)
             .unwrap()
             .into_iter()
             .map(|row| row["_"].id)

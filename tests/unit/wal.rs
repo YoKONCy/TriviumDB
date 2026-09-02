@@ -145,6 +145,46 @@ fn wal_append_batch_事务完整性() {
     cleanup(&path);
 }
 
+#[test]
+fn wal_group_commit保留独立事务且仅同步一次() {
+    let path = tmp_db("group_commit");
+    cleanup(&path);
+
+    let mut wal = Wal::open_with_sync(&path, SyncMode::Full).unwrap();
+    wal.begin_group_commit().unwrap();
+    for id in 1..=3u64 {
+        wal.append_batch(
+            id,
+            &[WalEntry::Insert::<f32> {
+                id,
+                vector: vec![id as f32],
+                payload: "{}".to_string(),
+            }],
+        )
+        .unwrap();
+    }
+    assert_eq!(wal.stats().sync_count, 0);
+    assert!(wal.finish_group_commit().unwrap());
+    assert_eq!(wal.stats().sync_count, 1);
+    drop(wal);
+
+    let (entries, _) = Wal::read_entries::<f32>(&path).unwrap();
+    assert_eq!(entries.len(), 3);
+    cleanup(&path);
+}
+
+#[test]
+fn wal_group_commit空组不执行同步且拒绝嵌套() {
+    let path = tmp_db("group_commit_empty");
+    cleanup(&path);
+    let mut wal = Wal::open_with_sync(&path, SyncMode::Full).unwrap();
+    wal.begin_group_commit().unwrap();
+    assert!(wal.begin_group_commit().is_err());
+    assert!(!wal.finish_group_commit().unwrap());
+    assert_eq!(wal.stats().sync_count, 0);
+    cleanup(&path);
+}
+
 // ════════════════════════════════════════════════════════════════
 //  WAL clear
 // ════════════════════════════════════════════════════════════════

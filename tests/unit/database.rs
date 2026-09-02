@@ -74,11 +74,47 @@ fn open_with_config_sync() {
         &path,
         triviumdb::database::Config {
             dim: 3,
+            storage_mode: triviumdb::database::StorageMode::Mmap,
             sync_mode: triviumdb::storage::wal::SyncMode::Full,
             ..Default::default()
         },
     );
     assert!(db.is_ok());
+}
+
+#[test]
+fn group_commit多个事务共享一次fsync并保持独立结果() {
+    let path = temp_db("group_commit");
+    let mut db = Database::<f32>::open_with_config(
+        &path,
+        triviumdb::database::Config {
+            dim: 3,
+            storage_mode: triviumdb::database::StorageMode::Mmap,
+            sync_mode: triviumdb::storage::wal::SyncMode::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let before = db.wal_stats().sync_count;
+    let (results, synced) = db
+        .group_commit(|db| {
+            (1..=4u64)
+                .map(|id| {
+                    let mut tx = triviumdb::database::TxBuilder::new();
+                    tx.insert_with_id(id, &[id as f32, 0.0, 0.0], json!({"id": id}));
+                    db.commit_tx(tx)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    assert!(synced);
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(db.wal_stats().sync_count - before, 1);
+    assert_eq!(db.node_count(), 4);
+    drop(db);
+
+    let db = Database::<f32>::open(&path, 3).unwrap();
+    assert_eq!(db.node_count(), 4);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -241,7 +277,7 @@ fn create_index_和_drop_index() {
         .unwrap();
 
     // 通过 TQL 验证索引加速查询可用
-    let result = db.tql("FIND {role: \"admin\"} RETURN *");
+    let result = db.tql_nodes("FIND {role: \"admin\"} RETURN *");
     assert!(result.is_ok());
 
     db.drop_index("role").unwrap();
@@ -445,7 +481,7 @@ fn tql_find_读查询() {
     let mut db = open_db("tql_read");
     db.insert(&[1.0, 0.0, 0.0], json!({"type": "person"}))
         .unwrap();
-    let result = db.tql("FIND {type: \"person\"} RETURN *");
+    let result = db.tql_nodes("FIND {type: \"person\"} RETURN *");
     assert!(result.is_ok());
 }
 

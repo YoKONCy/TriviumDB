@@ -283,14 +283,14 @@ export interface JsHookError {
   /** 错误类型 */
   type: string;
   /** 错误消息 */
-  message: strin
+  message: string;
 }
 
 
 /** 带上下文的检索结果 */
 export interface JsSearchWithContextResult {
   /** 检索结果列表 */
-  hits: JsSearchHit             [];
+  hits: JsSearchHit[];
   /** Hook 管线上下文 */
   context: JsHookContext;
 }

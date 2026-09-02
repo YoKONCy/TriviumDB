@@ -157,6 +157,81 @@ fn PWR_00A_发布阶段真实强杀只允许完整旧代_完整新代或fail_clo
 }
 
 #[test]
+fn __group_commit_power_loss_child_entry() {
+    let Ok(path) = std::env::var("TRIVIUM_GROUP_COMMIT_CHILD") else {
+        return;
+    };
+    let ready = format!("{path}.ready");
+    let mut database = Database::<f32>::open_with_config(
+        &path,
+        triviumdb::database::Config {
+            dim: DIM,
+            storage_mode: triviumdb::database::StorageMode::Mmap,
+            sync_mode: triviumdb::storage::wal::SyncMode::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (results, synced) = database
+        .group_commit(|database| {
+            (1..=12u64)
+                .map(|id| {
+                    database.insert_with_id(
+                        id,
+                        &[id as f32, 1.0, 0.0, 0.0],
+                        serde_json::json!({"group": true, "id": id}),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    assert!(synced && results.iter().all(Result::is_ok));
+    std::fs::write(&ready, b"ready").unwrap();
+    std::mem::forget(database);
+    loop {
+        std::thread::park();
+    }
+}
+
+#[test]
+fn PWR_00B_group_commit确认后强杀可恢复全部独立事务() {
+    let path = tmp_db("group_commit_kill");
+    cleanup(&path);
+    let ready = format!("{path}.ready");
+    let mut child = child_command()
+        .env("TRIVIUM_GROUP_COMMIT_CHILD", &path)
+        .arg("__group_commit_power_loss_child_entry")
+        .arg("--exact")
+        .arg("--nocapture")
+        .spawn()
+        .unwrap();
+    for _ in 0..400 {
+        if std::path::Path::new(&ready).exists() {
+            break;
+        }
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "Group Commit 子进程提前退出"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        std::path::Path::new(&ready).exists(),
+        "子进程未完成 Group Commit"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    let database = Database::<f32>::open(&path, DIM).unwrap();
+    assert_eq!(database.node_count(), 12);
+    for id in 1..=12u64 {
+        assert_eq!(database.get_payload(id).unwrap()["id"], id);
+    }
+    std::fs::remove_file(ready).ok();
+    cleanup(&path);
+}
+
+#[test]
 fn __power_loss_child_entry() {
     let Ok(path) = std::env::var("TRIVIUM_POWER_LOSS_CHILD") else {
         return;

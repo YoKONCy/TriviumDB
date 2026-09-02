@@ -335,6 +335,7 @@ fn SEARCH_基础向量检索() {
         vector,
         top_k,
         expand,
+        ..
     } = &q.entry
     {
         assert_eq!(vector.len(), 3);

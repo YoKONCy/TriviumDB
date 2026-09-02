@@ -352,19 +352,29 @@ impl TqlParser {
         self.expect(&TqlToken::Search)?;
         self.expect(&TqlToken::Vector)?;
 
-        // 向量字面量 [0.1, -0.2, ...]
+        // 向量元素支持数字字面量或 Prepared 标量参数。
         self.expect(&TqlToken::LBracket)?;
         let mut vector = Vec::new();
+        let mut vector_parameters = Vec::new();
         loop {
             if self.at(&TqlToken::RBracket) {
                 break;
             }
-            let val = match self.advance() {
-                TqlToken::FloatLit(f) => f,
-                TqlToken::IntLit(n) => n as f64,
-                other => return Err(format!("Expected number in vector, got {:?}", other)),
+            let index = vector.len();
+            let value = match self.advance() {
+                TqlToken::FloatLit(value) => value,
+                TqlToken::IntLit(value) => value as f64,
+                TqlToken::DollarOp(name) => {
+                    vector_parameters.push((index, name.trim_start_matches('$').to_owned()));
+                    0.0
+                }
+                other => {
+                    return Err(format!(
+                        "Expected number or parameter in vector, got {other:?}"
+                    ));
+                }
             };
-            vector.push(val);
+            vector.push(value);
             if self.at(&TqlToken::Comma) {
                 self.advance();
             }
@@ -385,6 +395,7 @@ impl TqlParser {
 
         Ok(QueryEntry::Search {
             vector,
+            vector_parameters,
             top_k,
             expand,
         })

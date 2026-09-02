@@ -18,6 +18,42 @@ use crate::filter::Filter;
 use crate::node::{Node, NodeId};
 use crate::storage::memtable::MemTable;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Instant;
+
+#[derive(Debug, Clone, Default)]
+pub struct QueryControl {
+    cancelled: Arc<AtomicBool>,
+    deadline: Option<Instant>,
+}
+
+impl QueryControl {
+    pub fn with_deadline(deadline: Instant) -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: Some(deadline),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn check(&self) -> Result<(), TriviumError> {
+        if self.cancelled.load(Ordering::Acquire)
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            Err(TriviumError::QueryCancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// 兼容的节点查询结果：每行是一组变量绑定 → 节点快照。
 pub type TqlResult<T> = Vec<HashMap<String, Node<T>>>;
@@ -33,6 +69,24 @@ pub enum TqlValue<T> {
     Path(Vec<NodeId>),
     List(Vec<serde_json::Value>),
     Null,
+}
+
+impl<T> TqlValue<T> {
+    /// 返回节点值；标量值返回 `None`。
+    pub fn as_node(&self) -> Option<&Node<T>> {
+        match self {
+            Self::Node(node) => Some(node),
+            _ => None,
+        }
+    }
+
+    /// 消费并提取节点值；标量值原样返回。
+    pub fn into_node(self) -> Result<Node<T>, Self> {
+        match self {
+            Self::Node(node) => Ok(node),
+            value => Err(value),
+        }
+    }
 }
 
 /// 支持节点与标量列的统一查询结果。
@@ -78,11 +132,12 @@ pub enum MutationOp<T: VectorType> {
 const MAX_BUDGET: usize = 100_000;
 const DEFAULT_EDGE_ROW_LIMIT: usize = 5_000;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TqlLimits {
     pub max_query_rows: Option<usize>,
     pub row_overflow: crate::database::RowOverflowPolicy,
     pub memory_limit: usize,
+    pub query_control: Option<QueryControl>,
 }
 
 impl TqlLimits {
@@ -90,7 +145,14 @@ impl TqlLimits {
         max_query_rows: Some(0),
         row_overflow: crate::database::RowOverflowPolicy::Throw,
         memory_limit: 0,
+        query_control: None,
     };
+
+    fn check_cancelled(&self) -> Result<(), TriviumError> {
+        self.query_control
+            .as_ref()
+            .map_or(Ok(()), QueryControl::check)
+    }
 }
 
 fn memory_row_cap<T: VectorType>(memory_limit: usize, mt: &MemTable<T>) -> usize {
@@ -116,7 +178,7 @@ fn query_has_edges(query: &TqlQuery) -> bool {
 fn requested_row_limit<T: VectorType>(
     query: &TqlQuery,
     requires_full_input: bool,
-    limits: TqlLimits,
+    limits: &TqlLimits,
     mt: &MemTable<T>,
 ) -> Result<(usize, bool), TriviumError> {
     let configured_cap = match limits.max_query_rows {
@@ -154,11 +216,23 @@ pub fn execute_tql<T: VectorType>(
     execute_tql_with_limits(query, memtable, TqlLimits::default())
 }
 
+fn ensure_search_vector_bound(query: &TqlQuery) -> Result<(), TriviumError> {
+    if matches!(&query.entry, QueryEntry::Search { vector_parameters, .. } if !vector_parameters.is_empty())
+    {
+        return Err(TriviumError::QueryExecution(
+            "SEARCH VECTOR 参数必须通过 Prepared TQL 绑定后执行 (SEARCH VECTOR parameters must be bound through Prepared TQL before execution)".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn execute_tql_with_limits<T: VectorType>(
     query: &TqlQuery,
     memtable: &MemTable<T>,
     limits: TqlLimits,
 ) -> Result<TqlResult<T>, TriviumError> {
+    limits.check_cancelled()?;
+    ensure_search_vector_bound(query)?;
     if query.explain {
         if query.analyze {
             let started = std::time::Instant::now();
@@ -186,23 +260,44 @@ pub fn execute_tql_with_limits<T: VectorType>(
         || (!query.order_by.is_empty() && !ordered_find)
         || matches!(&query.returns, ReturnClause::Expressions(exprs) if exprs.iter().any(|expr| is_aggregate(&expr.kind) || expr.distinct));
     let (row_limit, user_limited) =
-        requested_row_limit(query, requires_full_input, limits, memtable)?;
+        requested_row_limit(query, requires_full_input, &limits, memtable)?;
     let scan_limit = row_limit.saturating_add(1);
 
     let (mut results, ordered_output) = match &query.entry {
-        QueryEntry::Find { filter } => execute_find(filter, query, memtable, scan_limit)?,
+        QueryEntry::Find { filter } => execute_find(
+            filter,
+            query,
+            memtable,
+            scan_limit,
+            limits.query_control.as_ref(),
+        )?,
         QueryEntry::Match { pattern } => (
-            execute_match(pattern, query, memtable, scan_limit, false)?,
+            execute_match(
+                pattern,
+                query,
+                memtable,
+                scan_limit,
+                false,
+                limits.query_control.as_ref(),
+            )?,
             false,
         ),
         QueryEntry::OptionalMatch { pattern } => (
-            execute_match(pattern, query, memtable, scan_limit, true)?,
+            execute_match(
+                pattern,
+                query,
+                memtable,
+                scan_limit,
+                true,
+                limits.query_control.as_ref(),
+            )?,
             false,
         ),
         QueryEntry::Search {
             vector,
             top_k,
             expand,
+            ..
         } => (
             execute_search(vector, *top_k, expand.as_ref(), query, memtable, scan_limit)?,
             false,
@@ -320,6 +415,7 @@ fn execute_pipeline_set<T: VectorType>(
                 vector,
                 top_k,
                 expand,
+                ..
             },
             Some(crate::query::cascades::PhysicalOperator::QuiverVectorSearch),
         ) => {
@@ -346,6 +442,7 @@ fn execute_pipeline_set<T: VectorType>(
                 vector,
                 top_k,
                 expand,
+                ..
             },
             _,
         ) => crate::query::pipeline::lower_search_entry(vector, *top_k, expand.as_ref()),
@@ -737,6 +834,7 @@ fn json_to_tql_value<T>(value: serde_json::Value) -> TqlValue<T> {
 fn project_legacy_value_row<T: VectorType>(
     query: &TqlQuery,
     row: HashMap<String, Node<T>>,
+    mt: &MemTable<T>,
 ) -> Result<HashMap<String, TqlValue<T>>, TriviumError> {
     let ReturnClause::Expressions(items) = &query.returns else {
         return Ok(row
@@ -770,12 +868,25 @@ fn project_legacy_value_row<T: VectorType>(
                 .get(var)
                 .and_then(|node| node.payload.get(field).cloned())
                 .map_or(TqlValue::Null, json_to_tql_value),
-            ReturnExprKind::Scalar(_) => {
-                return Err(TriviumError::QueryExecution(
-                    "非管线查询暂不支持标量 RETURN (Legacy query scalar RETURN is not supported)"
-                        .into(),
-                ));
-            }
+            ReturnExprKind::Scalar(expr) => runtime_to_tql_value(match &query.entry {
+                QueryEntry::Find { .. } => row.get("_").map_or(RuntimeValue::Null, |node| {
+                    eval_tql_expr_single(expr, node.id, mt)
+                }),
+                _ => {
+                    let mut names = row.keys().cloned().collect::<Vec<_>>();
+                    names.sort();
+                    let env = names
+                        .iter()
+                        .map(|name| row.get(name).map(|node| node.id))
+                        .collect::<Vec<_>>();
+                    let var_map = names
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, name)| (name, index))
+                        .collect::<HashMap<_, _>>();
+                    eval_tql_expr(expr, &env, &var_map, mt)
+                }
+            }),
         };
         output.insert(name, value);
     }
@@ -795,10 +906,12 @@ pub fn execute_tql_values_with_limits<T: VectorType>(
     mt: &MemTable<T>,
     limits: TqlLimits,
 ) -> Result<TqlValueResult<T>, TriviumError> {
+    limits.check_cancelled()?;
+    ensure_search_vector_bound(query)?;
     if query.pipeline.is_empty() {
         return execute_tql_with_limits(query, mt, limits)?
             .into_iter()
-            .map(|row| project_legacy_value_row(query, row))
+            .map(|row| project_legacy_value_row(query, row, mt))
             .collect();
     }
     let (set, current_name, scalar_aliases) = execute_pipeline_set(query, mt)?;
@@ -1438,25 +1551,35 @@ fn execute_find<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
     row_limit: usize,
+    control: Option<&QueryControl>,
 ) -> Result<(TqlResult<T>, bool), TriviumError> {
     let mut results = Vec::new();
     let ordered_plan = find_ordered_find_plan(query, filter, mt);
-    let candidates = ordered_plan
-        .as_ref()
-        .map(|plan| plan.candidates.clone())
-        .unwrap_or_else(|| {
-            let candidate_limit = (query.predicate.is_none()
-                && filter_is_single_ordered_range(filter))
-            .then(|| {
-                query
-                    .limit
-                    .and_then(|limit| limit.checked_add(query.offset.unwrap_or(0)))
-            })
-            .flatten();
-            plan_filter_with_limit(filter, candidate_limit, mt).candidates
-        });
     let ordered_output = ordered_plan.is_some();
-    for id in candidates {
+    let candidate_limit = (query.predicate.is_none()
+        && (filter_is_single_ordered_range(filter)
+            || matches!(filter, Filter::Eq(field, _) if field != "id")))
+    .then_some(row_limit);
+    let access_plan = ordered_plan
+        .clone()
+        .unwrap_or_else(|| plan_filter_with_limit(filter, candidate_limit, mt));
+    let full_scan = matches!(access_plan.access_path, AccessPath::FullNodeScan);
+    let filter_covered = query.predicate.is_none()
+        && matches!(
+            (&access_plan.access_path, filter),
+            (AccessPath::PropertyIndex { field: indexed }, Filter::Eq(field, _)) if indexed == field
+        );
+    let candidate_ids: Box<dyn Iterator<Item = NodeId> + '_> = if full_scan {
+        Box::new(mt.active_node_ids())
+    } else {
+        Box::new(access_plan.candidates.into_iter())
+    };
+    for (scanned, id) in candidate_ids.enumerate() {
+        if scanned & 0xff == 0
+            && let Some(control) = control
+        {
+            control.check()?;
+        }
         if results.len() >= row_limit {
             break;
         }
@@ -1466,8 +1589,8 @@ fn execute_find<T: VectorType>(
             None => continue,
         };
 
-        // FIND 入口过滤
-        if !filter.matches(payload) {
+        // 索引已完整覆盖简单等值条件时，只读取 Payload 供投影使用。
+        if !filter_covered && !filter.matches(payload) {
             continue;
         }
 
@@ -1543,6 +1666,7 @@ fn execute_match<T: VectorType>(
     mt: &MemTable<T>,
     row_limit: usize,
     optional: bool,
+    control: Option<&QueryControl>,
 ) -> Result<TqlResult<T>, TriviumError> {
     // 建立变量映射
     let mut var_map: HashMap<String, usize> = HashMap::new();
@@ -1567,7 +1691,12 @@ fn execute_match<T: VectorType>(
 
     let match_plan = plan_match(pattern, mt, optional);
     let planned_pattern = &match_plan.pattern;
-    let start_candidates = match_plan.candidates;
+    let full_scan = matches!(match_plan.access_path, AccessPath::FullNodeScan);
+    let start_candidates: Box<dyn Iterator<Item = NodeId> + '_> = if full_scan {
+        Box::new(mt.active_node_ids())
+    } else {
+        Box::new(match_plan.candidates.into_iter())
+    };
 
     let mut results = Vec::new();
     let mut budget: usize = 0;
@@ -1577,7 +1706,12 @@ fn execute_match<T: VectorType>(
         MAX_BUDGET
     };
 
-    for start_id in start_candidates {
+    for (scanned, start_id) in start_candidates.enumerate() {
+        if scanned & 0xff == 0
+            && let Some(control) = control
+        {
+            control.check()?;
+        }
         let result_start = results.len();
         let mut env = vec![None; var_map.len()];
         let cont = tql_dfs(

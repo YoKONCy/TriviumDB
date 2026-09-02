@@ -363,7 +363,7 @@ fn COV3_07_tql_optional_match() {
     let db = seed_graph(&path);
 
     let results = db
-        .tql(r#"OPTIONAL MATCH (a)-[:knows]->(b) RETURN a, b"#)
+        .tql_nodes(r#"OPTIONAL MATCH (a)-[:knows]->(b) RETURN a, b"#)
         .unwrap();
     eprintln!("  OPTIONAL MATCH: {} 条", results.len());
 
@@ -376,7 +376,9 @@ fn COV3_08_tql_explain() {
     let path = tmp_db("tql_explain");
     let db = seed_graph(&path);
 
-    let results = db.tql(r#"EXPLAIN FIND {type: "user"} RETURN *"#).unwrap();
+    let results = db
+        .tql_nodes(r#"EXPLAIN FIND {type: "user"} RETURN *"#)
+        .unwrap();
     assert!(!results.is_empty(), "EXPLAIN 应返回查询计划");
 
     cleanup(&path);
@@ -389,7 +391,7 @@ fn COV3_09_tql_variable_length_path() {
     let db = seed_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a)-[:knows*2..4]->(b) RETURN a, b"#)
+        .tql_nodes(r#"MATCH (a)-[:knows*2..4]->(b) RETURN a, b"#)
         .unwrap();
     eprintln!("  变长路径: {} 条", results.len());
 
@@ -403,7 +405,7 @@ fn COV3_10_tql_backward_edge() {
     let db = seed_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a)<-[:reports_to]-(b) RETURN a, b"#)
+        .tql_nodes(r#"MATCH (a)<-[:reports_to]-(b) RETURN a, b"#)
         .unwrap();
     eprintln!("  反向边: {} 条", results.len());
 
@@ -416,7 +418,9 @@ fn COV3_11_tql_bidirectional() {
     let path = tmp_db("tql_bidir");
     let db = seed_graph(&path);
 
-    let results = db.tql(r#"MATCH (a)-[:knows]-(b) RETURN a, b"#).unwrap();
+    let results = db
+        .tql_nodes(r#"MATCH (a)-[:knows]-(b) RETURN a, b"#)
+        .unwrap();
     eprintln!("  双向边: {} 条", results.len());
 
     cleanup(&path);
@@ -429,7 +433,7 @@ fn COV3_12_tql_search_expand() {
     let db = seed_graph(&path);
 
     let results = db
-        .tql("SEARCH VECTOR [1.0, 0.0, 0.0, 0.0] TOP 3 EXPAND [:knows*1..2] RETURN *")
+        .tql_nodes("SEARCH VECTOR [1.0, 0.0, 0.0, 0.0] TOP 3 EXPAND [:knows*1..2] RETURN *")
         .unwrap();
     assert!(!results.is_empty());
     eprintln!("  SEARCH+EXPAND: {} 条", results.len());
@@ -444,7 +448,7 @@ fn COV3_13_tql_search_where() {
     let db = seed_graph(&path);
 
     let results = db
-        .tql(r#"SEARCH VECTOR [1.0, 0.0, 0.0, 0.0] TOP 5 WHERE {age: {$gte: 25}} RETURN *"#)
+        .tql_nodes(r#"SEARCH VECTOR [1.0, 0.0, 0.0, 0.0] TOP 5 WHERE {age: {$gte: 25}} RETURN *"#)
         .unwrap();
     eprintln!("  SEARCH+WHERE: {} 条", results.len());
 
@@ -459,13 +463,13 @@ fn COV3_14_tql_and_or_not() {
 
     // AND
     let r = db
-        .tql(r#"MATCH (a)-[:knows]->(b) WHERE a.age > 22 AND b.age < 28 RETURN a, b"#)
+        .tql_nodes(r#"MATCH (a)-[:knows]->(b) WHERE a.age > 22 AND b.age < 28 RETURN a, b"#)
         .unwrap();
     eprintln!("  AND: {} 条", r.len());
 
     // OR
     let r = db
-        .tql(r#"MATCH (a)-[:knows]->(b) WHERE a.age > 28 OR b.age < 22 RETURN a, b"#)
+        .tql_nodes(r#"MATCH (a)-[:knows]->(b) WHERE a.age > 28 OR b.age < 22 RETURN a, b"#)
         .unwrap();
     eprintln!("  OR: {} 条", r.len());
 
@@ -480,25 +484,31 @@ fn COV3_15_tql_comparison_operators() {
 
     // ==
     let r = db
-        .tql(r#"MATCH (a) WHERE a.name == "user_0" RETURN a"#)
+        .tql_nodes(r#"MATCH (a) WHERE a.name == "user_0" RETURN a"#)
         .unwrap();
     assert!(!r.is_empty());
 
     // !=
     let r = db
-        .tql(r#"MATCH (a) WHERE a.name != "user_0" RETURN a"#)
+        .tql_nodes(r#"MATCH (a) WHERE a.name != "user_0" RETURN a"#)
         .unwrap();
     assert!(!r.is_empty());
 
     // < and <=
-    let r = db.tql(r#"MATCH (a) WHERE a.age < 23 RETURN a"#).unwrap();
+    let r = db
+        .tql_nodes(r#"MATCH (a) WHERE a.age < 23 RETURN a"#)
+        .unwrap();
     assert!(!r.is_empty());
 
-    let r = db.tql(r#"MATCH (a) WHERE a.age <= 20 RETURN a"#).unwrap();
+    let r = db
+        .tql_nodes(r#"MATCH (a) WHERE a.age <= 20 RETURN a"#)
+        .unwrap();
     assert!(!r.is_empty());
 
     // > and >=
-    let r = db.tql(r#"MATCH (a) WHERE a.age >= 29 RETURN a"#).unwrap();
+    let r = db
+        .tql_nodes(r#"MATCH (a) WHERE a.age >= 29 RETURN a"#)
+        .unwrap();
     assert!(!r.is_empty());
 
     cleanup(&path);
@@ -719,7 +729,7 @@ fn COV3_20_tql_offset_overflow() {
     let db = seed_graph(&path);
 
     let results = db
-        .tql(r#"FIND {type: "user"} RETURN * LIMIT 100 OFFSET 999"#)
+        .tql_nodes(r#"FIND {type: "user"} RETURN * LIMIT 100 OFFSET 999"#)
         .unwrap();
     assert!(results.is_empty(), "OFFSET 超过结果集应返回空");
 
@@ -733,7 +743,7 @@ fn COV3_21_tql_match_inline_filter() {
     let db = seed_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a {type: "user", age: {$gte: 25}}) RETURN a"#)
+        .tql_nodes(r#"MATCH (a {type: "user", age: {$gte: 25}}) RETURN a"#)
         .unwrap();
     assert!(!results.is_empty());
 

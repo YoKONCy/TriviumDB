@@ -358,6 +358,41 @@ fn shortest_path_和集合代数端到端稳定执行() {
 }
 
 #[test]
+fn prepared_search_vector逐维参数绑定后与字面量热路径一致() {
+    let prepared =
+        PreparedTql::from_query(parse_tql("SEARCH VECTOR [$x, $y] TOP 2 RETURN *").unwrap());
+    assert_eq!(prepared.parameter_names(), vec!["x", "y"]);
+    let parameters = std::collections::HashMap::from([
+        ("x".to_owned(), TqlParamValue::Float(1.0)),
+        ("y".to_owned(), TqlParamValue::Int(0)),
+    ]);
+    let bound = prepared.bind(&parameters).unwrap();
+    let literal = parse_tql("SEARCH VECTOR [1, 0] TOP 2 RETURN *").unwrap();
+    let bound_ids = execute_tql(&bound, &graph())
+        .unwrap()
+        .into_iter()
+        .map(|row| row["_"].id)
+        .collect::<Vec<_>>();
+    let literal_ids = execute_tql(&literal, &graph())
+        .unwrap()
+        .into_iter()
+        .map(|row| row["_"].id)
+        .collect::<Vec<_>>();
+    assert_eq!(bound_ids, literal_ids);
+
+    let mut invalid = parameters;
+    invalid.insert("x".to_owned(), TqlParamValue::String("1".into()));
+    assert!(prepared.bind(&invalid).is_err());
+    assert!(
+        execute_tql(
+            &parse_tql("SEARCH VECTOR [$x, 0] TOP 1 RETURN *").unwrap(),
+            &graph()
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn prepared_tql_严格绑定并可重复执行() {
     let parsed = parse_tql(
         "SEARCH VECTOR [1, 0] TOP 3 AS node WITH node WHERE node.id > $minimum RETURN node, coalesce($bonus, 0) + node.id AS score",

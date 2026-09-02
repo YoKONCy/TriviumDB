@@ -178,6 +178,8 @@ pnpm add triviumdb
 cargo add triviumdb
 ```
 
+> 🧪 **尝鲜：HTTP 服务端版（nightly）** —— TriviumDB 的正式产品形态始终是**嵌入式数据库**（进程内 Library，即装即用，无需部署）。仓库中的 `triviumdb-server` 提供了一个可选的 HTTP 壳（多客户端并发读写、OCC、流式 NDJSON 等），目前处于 **nightly 预览状态**，仅供尝鲜和跟踪演进方向，协议随时可能变更，请勿用于生产。详见 [Server 说明（nightly）](docs/server.md)；一切 API 与用法说明仍以嵌入式版本为准。
+
 ### 30 秒入门
 
 ```python
@@ -440,18 +442,20 @@ TriviumDB/
 │       ├── mod.rs          # 统一入口（feature-gated）
 │       ├── python.rs       # PyO3 绑定（含 Hook 管理接口）
 │       └── nodejs.rs       # napi-rs 绑定（含 Hook 管理接口）
-├── cli/                    # 🖥️ CLI & TUI 工具（triviumdb-cli，命令 `tdb`）
-│   ├── Cargo.toml
-│   ├── README.md
-│   └── src/
-│       ├── main.rs             # clap 参数解析 + 模式分发
-│       ├── db_handle.rs        # DbHandle dtype 动态分发（dispatch! 宏）
-│       ├── formatter.rs        # table / json / csv 输出格式化
-│       ├── tql_highlight.rs    # TQL 语法高亮（REPL ANSI + TUI Span）
-│       ├── config.rs           # ~/.triviumdb.toml 配置加载
-│       ├── commands/           # 非交互子命令（info/exec/export/import/repair/compact）
-│       ├── repl/               # REPL 模式（rustyline + Tab 补全 + 多行输入）
-│       └── tui/                # TUI 模式（ratatui + crossterm 全屏可视化）
+├── crates/
+│   ├── triviumdb-cli/      # 🖥️ CLI & TUI 工具（命令 `tdb`）
+│   │   ├── Cargo.toml
+│   │   ├── README.md
+│   │   └── src/
+│   │       ├── main.rs             # clap 参数解析 + 模式分发
+│   │       ├── db_handle.rs        # DbHandle dtype 动态分发（dispatch! 宏）
+│   │       ├── formatter.rs        # table / json / csv 输出格式化
+│   │       ├── tql_highlight.rs    # TQL 语法高亮（REPL ANSI + TUI Span）
+│   │       ├── config.rs           # ~/.triviumdb.toml 配置加载
+│   │       ├── commands/           # 非交互子命令（info/exec/export/import/repair/compact）
+│   │       ├── repl/               # REPL 模式（rustyline + Tab 补全 + 多行输入）
+│   │       └── tui/                # TUI 模式（ratatui + crossterm 全屏可视化）
+│   └── triviumdb-server/   # 🌐 HTTP Server（并发读、Writer Actor、OCC、Group Commit）
 ├── benches/                # 性能基准套件（查询 / 索引与图基线 / 内存压力 / TSNG / Cohere1M）
 ├── tests/
 │   ├── unit/               # 单元测试（集中管理，~311 用例）
@@ -521,7 +525,7 @@ TriviumDB/
 - [x] CLI 工具 `triviumdb-cli`（命令 `tdb`）：非交互命令 + REPL（Tab 补全 / 语法高亮 / 多行输入）+ 配置文件
 - [x] 数据库可视化工具：终端 TUI（`tdb ui`，图谱力导向布局 / k-hop 展开 / 向量搜索 Playground）
 
-### v0.8 — 自由 DIY 混合查询时代 ✅ (当前，v0.8.4)
+### v0.8 — 自由 DIY 混合查询时代 ✅ (当前，v0.8.5)
 
 - [x] **四类持久化属性索引**：Hash / Ordered ART / Composite ART / Roaring Bitmap（`.pidx` v4，读取 v1–v4），等值、范围、前缀、复合与低基数集合运算全索引化
 - [x] **TQL `WITH` 可组合管线**：命名 NodeSet、作用域校验、跨阶段自由编排，`FIND` / `MATCH` / `SEARCH` 均可进入管线
@@ -545,6 +549,14 @@ TriviumDB/
 - [x] **属性索引数值键编码 v2**：整数/浮点统一有序键（修复组合范围误判空集）、大整数精确比较与安全回退、旧 sidecar 打开时内存重建迁移；修复 Ordered 索引 LIMIT 在其他条件过滤前过早截断
 - [x] **社区 Issue 修复**：#31 并行 PageRank 子集外边 panic、#32 TQL 隐藏 5000 行截断
 - [x] **TQL SEARCH 热路径重构**：Top-K 部分选择 + 惰性物化消除六倍级回归，Pipeline 归一化不再破坏相似度排名
+
+### v0.8.5 查询体验与服务端预览 ✅
+
+- [x] **Prepared 参数化向量**：`SEARCH VECTOR [$a, $b, ...]` 支持逐维参数占位，与 Prepared TQL 严格绑定语义一致，不影响既有向量字面量性能
+- [x] **TQL 统一值结果**：`tql()` 升级为一等值（节点 + 标量列）统一入口，`tql_nodes()` 节点专用、`tql_values()` 兼容别名，legacy 标量 RETURN 支持；Rust/Python/Node 三端 API 同步
+- [x] **FIND/MATCH 扫描回归修复**（Issue #36）：`RoaringTreemap` 活跃 NodeId 惰性遍历、LIMIT 下推流式早停、Hash Posting 有界读取、索引覆盖跳过重复过滤、无边 MATCH 惰性起点扫描，未索引小 LIMIT 不再全表物化
+- [x] **TriviumDB Server（nightly 预览）**：`crates/triviumdb-server` HTTP 壳——Writer Actor + 有界写队列 + 并发读 semaphore + 写者优先公平门控、deadline/取消/幂等键、全局/节点/边级 OCC（ETag/If-Match/409 冲突）、多操作原子事务、Core 批量 WAL Group Commit + 动态合批、Prepared cache、NDJSON 流式、二进制 f32 向量传输、cooperative cancellation、请求级 profile/EXPLAIN ANALYZE、索引建议、结构化日志（pretty/JSON）+ request ID + access log + Prometheus 指标；跨平台二进制发布流水线（Linux x64/ARM64、Windows、macOS x64/ARM64）
+- [x] **仓库结构**：CLI 迁入 `crates/triviumdb-cli`，与 Server 并列，workspace 隔离发包（Embedded 零服务端依赖）
 
 ---
 
@@ -593,7 +605,8 @@ TriviumDB/
 | **[Hook 开发指南](docs/hook-guide.md)**       | C/C++ FFI 插件编写、Rust Hook 实现、管线诊断实战       |
 | **[测试实践](docs/testing.md)**               | 四层测试体系、属性测试、变异测试、覆盖率度量与 CI 建议 |
 | **[安全设计说明](docs/security.md)**          | 并发安全、数据完整性、unsafe 审计、FFI 安全边界        |
-| **[CLI 工具指南](cli/README.md)**             | `tdb` 命令行工具安装、用法、REPL/TUI 模式、配置文件   |
+| **[CLI 工具指南](crates/triviumdb-cli/README.md)** | `tdb` 命令行工具安装、用法、REPL/TUI 模式、配置文件   |
+| **[Server 说明（nightly）](docs/server.md)**   | HTTP 服务端版预览：并发模型、OCC、幂等、指标与限制    |
 
 ---
 

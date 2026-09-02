@@ -51,7 +51,7 @@ fn CRUD_索引_分页和重开公共契约保持一致() {
         database.create_index("kind").unwrap();
         database.create_ordered_index("rank").unwrap();
         let page = database
-            .tql("FIND {kind: \"even\"} RETURN * ORDER BY _.rank ASC LIMIT 5 OFFSET 3")
+            .tql_nodes("FIND {kind: \"even\"} RETURN * ORDER BY _.rank ASC LIMIT 5 OFFSET 3")
             .unwrap();
         assert_eq!(
             page.iter().map(|row| row["_"].id).collect::<Vec<_>>(),
@@ -107,7 +107,7 @@ fn 结构化错误契约覆盖维度_节点_只读_查询预算和API迁移() {
         Err(TriviumError::ReadOnlyViolation { .. })
     ));
     assert!(matches!(
-        readonly.tql("MATCH (n) RETURN n LIMIT 10 OFFSET 1"),
+        readonly.tql_nodes("MATCH (n) RETURN n LIMIT 10 OFFSET 1"),
         Err(TriviumError::QueryRowBudgetExceeded { .. })
     ));
     drop(readonly);

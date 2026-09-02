@@ -230,12 +230,20 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
         self.inner.query_subgraph(id, config)
     }
 
-    pub fn tql(&self, input: &str) -> Result<TqlResult<T>> {
+    pub fn tql(&self, input: &str) -> Result<TqlValueResult<T>> {
         self.inner.tql(input)
     }
 
+    pub fn tql_nodes(&self, input: &str) -> Result<TqlResult<T>> {
+        self.inner.tql_nodes(input)
+    }
+
+    pub fn query(&self, input: &str) -> Result<TqlValueResult<T>> {
+        self.inner.query(input)
+    }
+
     pub fn tql_values(&self, input: &str) -> Result<TqlValueResult<T>> {
-        self.inner.tql_values(input)
+        self.inner.query(input)
     }
 
     pub fn node_count(&self) -> usize {

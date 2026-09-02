@@ -158,7 +158,7 @@ fn BND_04_单节点数据库_所有操作() {
     assert_eq!(hits[0].id, id);
 
     // TQL
-    let results = db.tql(r#"FIND {"solo": true} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {"solo": true} RETURN *"#).unwrap();
     assert_eq!(results.len(), 1);
 
     // 图扩散（无边，应不崩溃）

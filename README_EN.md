@@ -255,6 +255,8 @@ Use as a library dependency:
 cargo add triviumdb
 ```
 
+> 🧪 **Early Preview: HTTP Server Edition (nightly)** — TriviumDB's primary product form remains an **embedded database** (an in-process library, no deployment required). The optional `triviumdb-server` crate in this repository adds an HTTP shell (multi-client concurrent reads/writes, OCC, streaming NDJSON, etc.) and is currently in **nightly preview**: the protocol may change at any time, so it is for experimentation only — do not use it in production. See [Server Guide (nightly)](docs/server.md) (Chinese); all API and usage documentation remains authoritative for the embedded edition.
+
 ### 30-Second Demo
 
 ```python
@@ -462,18 +464,20 @@ TriviumDB/
 │       ├── mod.rs          # Unified entry (feature-gated)
 │       ├── python.rs       # PyO3 bindings
 │       └── nodejs.rs       # napi-rs bindings
-├── cli/                    # 🖥️ CLI & TUI tool (triviumdb-cli, command `tdb`)
-│   ├── Cargo.toml
-│   ├── README.md
-│   └── src/
-│       ├── main.rs             # clap argument parsing + mode dispatch
-│       ├── db_handle.rs        # DbHandle dtype dynamic dispatch (dispatch! macro)
-│       ├── formatter.rs        # table / json / csv output formatting
-│       ├── tql_highlight.rs    # TQL syntax highlighting (REPL ANSI + TUI Span)
-│       ├── config.rs           # ~/.triviumdb.toml configuration loading
-│       ├── commands/           # Non-interactive subcommands (info/exec/export/import/repair/compact)
-│       ├── repl/               # REPL mode (rustyline + Tab completion + multi-line input)
-│       └── tui/                # TUI mode (ratatui + crossterm full-screen visualization)
+├── crates/
+│   ├── triviumdb-cli/      # 🖥️ CLI & TUI tool (command `tdb`)
+│   │   ├── Cargo.toml
+│   │   ├── README.md
+│   │   └── src/
+│   │       ├── main.rs             # clap argument parsing + mode dispatch
+│   │       ├── db_handle.rs        # DbHandle dtype dynamic dispatch (dispatch! macro)
+│   │       ├── formatter.rs        # table / json / csv output formatting
+│   │       ├── tql_highlight.rs    # TQL syntax highlighting (REPL ANSI + TUI Span)
+│   │       ├── config.rs           # ~/.triviumdb.toml configuration loading
+│   │       ├── commands/           # Non-interactive subcommands (info/exec/export/import/repair/compact)
+│   │       ├── repl/               # REPL mode (rustyline + Tab completion + multi-line input)
+│   │       └── tui/                # TUI mode (ratatui + crossterm full-screen visualization)
+│   └── triviumdb-server/   # 🌐 HTTP Server (concurrent reads, Writer Actor, OCC, Group Commit)
 ├── benches/                # Benchmark suites (queries / index & graph baselines / memory pressure / TSNG / Cohere1M)
 ├── tests/
 │   ├── unit/               # Unit tests (~311 cases)
@@ -542,7 +546,7 @@ TriviumDB/
 - [x] CLI tool `triviumdb-cli` (command `tdb`): non-interactive commands + REPL (Tab completion / syntax highlighting / multi-line input) + config file
 - [x] Database visualization: terminal TUI (`tdb ui`, force-directed graph layout / k-hop expand / vector search playground)
 
-### v0.8 — The DIY Hybrid Query Era ✅ (Current, v0.8.4)
+### v0.8 — The DIY Hybrid Query Era ✅ (Current, v0.8.5)
 
 - [x] **Four persistent property indexes**: Hash / Ordered ART / Composite ART / Roaring Bitmap (`.pidx` v4, reads v1–v4) — equality, range, prefix, composite, and low-cardinality set operations all indexed
 - [x] **TQL `WITH` composable pipelines**: named NodeSets, scope validation, cross-stage composition; `FIND` / `MATCH` / `SEARCH` all enter the pipeline
@@ -566,6 +570,14 @@ TriviumDB/
 - [x] **Property-index numeric key encoding v2**: unified ordered keys for integers/floats (fixes composite range false-empty results), exact large-integer comparison with safe fallbacks, in-memory rebuild migration for legacy sidecars; fixes Ordered-index LIMIT truncating candidates before other predicates apply
 - [x] **Community issue fixes**: #31 (parallel PageRank panic on out-of-subset edges) and #32 (hidden 5000-row TQL truncation)
 - [x] **TQL SEARCH hot-path rework**: top-K partial selection + lazy materialization removes a ~6× regression; pipeline normalization no longer destroys similarity ranking
+
+### v0.8.5 Query Experience & Server Preview ✅
+
+- [x] **Prepared parameterized vectors**: `SEARCH VECTOR [$a, $b, ...]` per-dimension parameter placeholders with the same strict binding semantics as Prepared TQL, with zero impact on existing vector-literal performance
+- [x] **Unified TQL value results**: `tql()` promoted to the unified first-class-value entry (nodes + scalar columns), with `tql_nodes()` for node-only results and `tql_values()` as a compatibility alias; legacy scalar RETURN support; Rust/Python/Node APIs kept in sync
+- [x] **FIND/MATCH scan regression fixed** (Issue #36): `RoaringTreemap` active NodeId lazy iteration, LIMIT pushdown with streaming early-stop, bounded Hash posting reads, skip-refilter when the index covers a simple equality, and lazy start-candidate scans for edge-less MATCH — small unindexed LIMITs no longer materialize the whole table
+- [x] **TriviumDB Server (nightly preview)**: `crates/triviumdb-server` HTTP shell — writer actor + bounded write queue + concurrent-read semaphore + writer-favored fairness gating, deadline / cancellation / idempotency keys, global / node / edge OCC (ETag / If-Match / 409 conflicts), multi-operation atomic transactions, core batched-WAL group commit with dynamic batching, prepared cache, NDJSON streaming, binary f32 vector transport, cooperative cancellation, per-request profile / EXPLAIN ANALYZE, index advice, structured logging (pretty/JSON) + request IDs + access logs + Prometheus metrics; cross-platform binary release pipeline (Linux x64/ARM64, Windows, macOS x64/ARM64)
+- [x] **Repository layout**: CLI relocated to `crates/triviumdb-cli` alongside the server crate with isolated workspace publishing (the embedded core gains zero server dependencies)
 
 ---
 
@@ -592,7 +604,8 @@ TriviumDB/
 | **[Hook Guide](docs/hook-guide.md)**         | C/C++ FFI plugin development, Rust Hook implementation           |
 | **[Testing Practices](docs/testing.md)**     | 4-layer testing, property testing, mutation testing, coverage    |
 | **[Security Design](docs/security.md)**      | Concurrency safety, data integrity, unsafe audit, FFI boundaries |
-| **[CLI Tool Guide](cli/README.md)**           | `tdb` command-line tool installation, usage, REPL/TUI modes, config file |
+| **[CLI Tool Guide](crates/triviumdb-cli/README.md)** | `tdb` command-line tool installation, usage, REPL/TUI modes, config file |
+| **[Server Guide (nightly)](docs/server.md)**  | HTTP server preview: concurrency model, OCC, idempotency, metrics & limits |
 
 ---
 

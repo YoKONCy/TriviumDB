@@ -78,7 +78,7 @@ fn 测试_聚合函数_COUNT() {
 
     // 统计 Alice 的 knows 好友数
     let results = db
-        .tql("MATCH (a)-[:knows]->(b) RETURN count(b) AS friend_count")
+        .tql_nodes("MATCH (a)-[:knows]->(b) RETURN count(b) AS friend_count")
         .unwrap();
     assert_eq!(results.len(), 1, "COUNT 应聚合为单行");
 
@@ -97,7 +97,7 @@ fn 测试_聚合函数_AVG() {
     let db = build_test_db(&path);
 
     let results = db
-        .tql("MATCH (a)-[:knows]->(b) RETURN avg(b.age) AS avg_age")
+        .tql_nodes("MATCH (a)-[:knows]->(b) RETURN avg(b.age) AS avg_age")
         .unwrap();
     assert_eq!(results.len(), 1);
 
@@ -119,7 +119,7 @@ fn 测试_聚合函数_SUM_MIN_MAX() {
     let path = tmp_db("agg_sum_min_max");
     let db = build_test_db(&path);
 
-    let results = db.tql("MATCH (a)-[:knows]->(b) RETURN sum(b.age) AS total, min(b.age) AS youngest, max(b.age) AS oldest").unwrap();
+    let results = db.tql_nodes("MATCH (a)-[:knows]->(b) RETURN sum(b.age) AS total, min(b.age) AS youngest, max(b.age) AS oldest").unwrap();
     assert_eq!(results.len(), 1);
 
     let row = &results[0];
@@ -151,7 +151,7 @@ fn 测试_聚合函数_COLLECT() {
     let db = build_test_db(&path);
 
     let results = db
-        .tql("MATCH (a)-[:knows]->(b) RETURN collect(b.name) AS names")
+        .tql_nodes("MATCH (a)-[:knows]->(b) RETURN collect(b.name) AS names")
         .unwrap();
     assert_eq!(results.len(), 1);
 
@@ -178,8 +178,8 @@ fn 测试_DISTINCT_去重() {
     let db = build_test_db(&path);
 
     // 不带 DISTINCT，Alice 出现 2 次（Alice->Bob, Alice->Acme 各一条路径的 a 都是 Alice）
-    let all_results = db.tql("MATCH (a)-[]->(b) RETURN a, b").unwrap();
-    let distinct_results = db.tql("MATCH (a)-[]->(b) RETURN DISTINCT a").unwrap();
+    let all_results = db.tql_nodes("MATCH (a)-[]->(b) RETURN a, b").unwrap();
+    let distinct_results = db.tql_nodes("MATCH (a)-[]->(b) RETURN DISTINCT a").unwrap();
 
     // all_results 有 3 条（Alice->Bob, Bob->Carol, Alice->Acme）
     assert_eq!(all_results.len(), 3);
@@ -200,7 +200,7 @@ fn 测试_AS别名_属性访问() {
     let db = build_test_db(&path);
 
     let results = db
-        .tql("MATCH (a)-[:knows]->(b) RETURN a.name, b.name")
+        .tql_nodes("MATCH (a)-[:knows]->(b) RETURN a.name, b.name")
         .unwrap();
     // 应该能解析并返回结果
     assert!(!results.is_empty(), "属性投影应返回结果");
@@ -220,7 +220,7 @@ fn 测试_OPTIONAL_MATCH_语法解析() {
 
     // OPTIONAL MATCH 正常匹配
     let results = db
-        .tql("OPTIONAL MATCH (a)-[:knows]->(b) RETURN a, b")
+        .tql_nodes("OPTIONAL MATCH (a)-[:knows]->(b) RETURN a, b")
         .unwrap();
     assert!(!results.is_empty(), "OPTIONAL MATCH 有匹配时应返回结果");
 
@@ -238,9 +238,11 @@ fn 测试_标签索引下推_减少扫描() {
     let db = build_test_db(&path);
 
     // 不带标签约束 → 全扫描
-    let r1 = db.tql("MATCH (a)-[]->(b) RETURN a, b").unwrap();
+    let r1 = db.tql_nodes("MATCH (a)-[]->(b) RETURN a, b").unwrap();
     // 带标签约束 → 使用 label_index 缩小候选集
-    let r2 = db.tql("MATCH (a)-[:works_at]->(b) RETURN a, b").unwrap();
+    let r2 = db
+        .tql_nodes("MATCH (a)-[:works_at]->(b) RETURN a, b")
+        .unwrap();
 
     assert_eq!(
         r1.len(),
@@ -267,7 +269,7 @@ fn 测试_EXPLAIN_基础计划() {
     let db = build_test_db(&path);
 
     let results = db
-        .tql("EXPLAIN MATCH (a)-[:knows]->(b) RETURN a, b")
+        .tql_nodes("EXPLAIN MATCH (a)-[:knows]->(b) RETURN a, b")
         .unwrap();
     assert_eq!(results.len(), 1, "EXPLAIN 应返回单行计划");
 
@@ -292,7 +294,7 @@ fn 测试_EXPLAIN_标签索引下推策略() {
     let db = build_test_db(&path);
 
     let results = db
-        .tql("EXPLAIN MATCH (a)-[:works_at]->(b) RETURN a, b")
+        .tql_nodes("EXPLAIN MATCH (a)-[:works_at]->(b) RETURN a, b")
         .unwrap();
     let plan = &results[0]["plan"].payload;
 
@@ -314,7 +316,7 @@ fn 测试_EXPLAIN_ID短路策略() {
     let db = build_test_db(&path);
 
     let results = db
-        .tql("EXPLAIN MATCH (a {id: 1})-[:knows]->(b) RETURN b")
+        .tql_nodes("EXPLAIN MATCH (a {id: 1})-[:knows]->(b) RETURN b")
         .unwrap();
     let plan = &results[0]["plan"].payload;
 
@@ -334,7 +336,9 @@ fn 测试_EXPLAIN_全扫描策略() {
     let path = tmp_db("explain_fullscan");
     let db = build_test_db(&path);
 
-    let results = db.tql("EXPLAIN MATCH (a)-[]->(b) RETURN a, b").unwrap();
+    let results = db
+        .tql_nodes("EXPLAIN MATCH (a)-[]->(b) RETURN a, b")
+        .unwrap();
     let plan = &results[0]["plan"].payload;
 
     let strategy = plan.get("candidate_strategy").unwrap().as_str().unwrap();
@@ -355,7 +359,7 @@ fn 测试_EXPLAIN_优化提示() {
 
     // 聚合 + LIMIT → 应显示 aggregation + LIMIT early termination
     let results = db
-        .tql("EXPLAIN MATCH (a)-[:knows]->(b) RETURN count(b) AS cnt LIMIT 10")
+        .tql_nodes("EXPLAIN MATCH (a)-[:knows]->(b) RETURN count(b) AS cnt LIMIT 10")
         .unwrap();
     let plan = &results[0]["plan"].payload;
 
@@ -380,7 +384,9 @@ fn 测试_EXPLAIN_FIND入口() {
     let path = tmp_db("explain_find");
     let db = build_test_db(&path);
 
-    let results = db.tql(r#"EXPLAIN FIND {name: "Alice"} RETURN *"#).unwrap();
+    let results = db
+        .tql_nodes(r#"EXPLAIN FIND {name: "Alice"} RETURN *"#)
+        .unwrap();
     let plan = &results[0]["plan"].payload;
 
     assert_eq!(plan.get("entry").unwrap().as_str().unwrap(), "FIND");
@@ -404,7 +410,7 @@ fn 测试_投影裁剪_属性引用剥离向量() {
 
     // RETURN a.name, b.age → a 和 b 都是仅属性引用，vector + edges 应被清空
     let results = db
-        .tql("MATCH (a)-[:knows]->(b) RETURN a.name, b.age")
+        .tql_nodes("MATCH (a)-[:knows]->(b) RETURN a.name, b.age")
         .unwrap();
     assert!(!results.is_empty());
 
@@ -428,7 +434,9 @@ fn 测试_投影裁剪_完整引用保留向量() {
     let db = build_test_db(&path);
 
     // RETURN a, b.name → a 是完整引用（保留 vector），b 是属性引用（裁剪 vector）
-    let results = db.tql("MATCH (a)-[:knows]->(b) RETURN a, b.name").unwrap();
+    let results = db
+        .tql_nodes("MATCH (a)-[:knows]->(b) RETURN a, b.name")
+        .unwrap();
     assert!(!results.is_empty());
 
     for row in &results {
@@ -451,7 +459,7 @@ fn 测试_投影裁剪_EXPLAIN显示() {
     let db = build_test_db(&path);
 
     let results = db
-        .tql("EXPLAIN MATCH (a)-[:knows]->(b) RETURN a.name, b.age")
+        .tql_nodes("EXPLAIN MATCH (a)-[:knows]->(b) RETURN a.name, b.age")
         .unwrap();
     let plan = &results[0]["plan"].payload;
 

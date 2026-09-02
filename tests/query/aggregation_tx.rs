@@ -63,7 +63,9 @@ fn COV4_01_tql_agg_count() {
     let path = tmp_db("agg_count");
     let db = seed_scored_graph(&path);
 
-    let results = db.tql(r#"MATCH (a)-[:next]->(b) RETURN count(a)"#).unwrap();
+    let results = db
+        .tql_nodes(r#"MATCH (a)-[:next]->(b) RETURN count(a)"#)
+        .unwrap();
     assert!(!results.is_empty(), "count 聚合应返回结果");
 
     cleanup(&path);
@@ -76,7 +78,7 @@ fn COV4_02_tql_agg_sum() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a)-[:next]->(b) RETURN sum(a.score)"#)
+        .tql_nodes(r#"MATCH (a)-[:next]->(b) RETURN sum(a.score)"#)
         .unwrap();
     assert!(!results.is_empty());
 
@@ -90,7 +92,7 @@ fn COV4_03_tql_agg_avg() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a)-[:next]->(b) RETURN avg(a.score)"#)
+        .tql_nodes(r#"MATCH (a)-[:next]->(b) RETURN avg(a.score)"#)
         .unwrap();
     assert!(!results.is_empty());
 
@@ -104,7 +106,7 @@ fn COV4_04_tql_agg_min() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a)-[:next]->(b) RETURN min(a.score)"#)
+        .tql_nodes(r#"MATCH (a)-[:next]->(b) RETURN min(a.score)"#)
         .unwrap();
     assert!(!results.is_empty());
 
@@ -118,7 +120,7 @@ fn COV4_05_tql_agg_max() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a)-[:next]->(b) RETURN max(a.score)"#)
+        .tql_nodes(r#"MATCH (a)-[:next]->(b) RETURN max(a.score)"#)
         .unwrap();
     assert!(!results.is_empty());
 
@@ -132,10 +134,24 @@ fn COV4_06_tql_agg_collect() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a)-[:next]->(b) RETURN collect(a)"#)
+        .tql_nodes(r#"MATCH (a)-[:next]->(b) RETURN collect(a)"#)
         .unwrap();
     assert!(!results.is_empty());
 
+    cleanup(&path);
+}
+
+#[test]
+fn legacy标量RETURN通过统一query入口执行() {
+    let path = tmp_db("legacy_scalar_return");
+    let db = seed_scored_graph(&path);
+    let rows = db
+        .query(r#"FIND {name: "item_1"} RETURN _.score + 5 AS adjusted"#)
+        .unwrap();
+    assert!(
+        matches!(rows[0]["adjusted"], triviumdb::query::tql_executor::TqlValue::Float(value) if value == 15.0)
+    );
+    drop(db);
     cleanup(&path);
 }
 
@@ -154,11 +170,11 @@ fn count星号统计全部匹配行且裸FIND属性明确拒绝() {
     assert_eq!(total, 10);
 
     let grouped = db
-        .tql(r#"FIND {type: "item"} RETURN _.group, count(*) AS total"#)
+        .tql_nodes(r#"FIND {type: "item"} RETURN _.group, count(*) AS total"#)
         .unwrap();
     assert_eq!(grouped.len(), 2);
     let error = db
-        .tql(r#"FIND {type: "item"} RETURN group, count(*) AS total"#)
+        .tql_nodes(r#"FIND {type: "item"} RETURN group, count(*) AS total"#)
         .unwrap_err();
     assert!(error.to_string().contains("_.group"));
 
@@ -173,7 +189,7 @@ fn COV4_07_tql_agg_with_group() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"FIND {type: "item"} RETURN _.group, count(_)"#)
+        .tql_nodes(r#"FIND {type: "item"} RETURN _.group, count(_)"#)
         .unwrap();
     assert!(!results.is_empty());
 
@@ -187,7 +203,7 @@ fn COV4_08_tql_return_alias() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a)-[:next]->(b) RETURN count(a) AS total, max(a.score) AS top_score"#)
+        .tql_nodes(r#"MATCH (a)-[:next]->(b) RETURN count(a) AS total, max(a.score) AS top_score"#)
         .unwrap();
     assert!(!results.is_empty());
 
@@ -205,7 +221,7 @@ fn COV4_09_filter_in() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"FIND {name: {$in: ["item_1", "item_3", "item_5"]}} RETURN *"#)
+        .tql_nodes(r#"FIND {name: {$in: ["item_1", "item_3", "item_5"]}} RETURN *"#)
         .unwrap();
     assert_eq!(results.len(), 3, "$in 应匹配 3 个");
 
@@ -219,7 +235,7 @@ fn COV4_10_filter_nin() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"FIND {name: {$nin: ["item_1", "item_3"]}} RETURN *"#)
+        .tql_nodes(r#"FIND {name: {$nin: ["item_1", "item_3"]}} RETURN *"#)
         .unwrap();
     assert_eq!(results.len(), 8, "$nin 应排除 2 个");
 
@@ -232,11 +248,13 @@ fn COV4_11_filter_exists() {
     let path = tmp_db("filter_exists");
     let db = seed_scored_graph(&path);
 
-    let results = db.tql(r#"FIND {score: {$exists: true}} RETURN *"#).unwrap();
+    let results = db
+        .tql_nodes(r#"FIND {score: {$exists: true}} RETURN *"#)
+        .unwrap();
     assert_eq!(results.len(), 10);
 
     let results = db
-        .tql(r#"FIND {nonexistent: {$exists: false}} RETURN *"#)
+        .tql_nodes(r#"FIND {nonexistent: {$exists: false}} RETURN *"#)
         .unwrap();
     assert_eq!(results.len(), 10);
 
@@ -250,7 +268,7 @@ fn COV4_12_filter_type() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"FIND {name: {$type: "string"}} RETURN *"#)
+        .tql_nodes(r#"FIND {name: {$type: "string"}} RETURN *"#)
         .unwrap();
     assert_eq!(results.len(), 10);
 
@@ -264,7 +282,7 @@ fn COV4_13_filter_all() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"FIND {tags: {$all: ["a", "b"]}} RETURN *"#)
+        .tql_nodes(r#"FIND {tags: {$all: ["a", "b"]}} RETURN *"#)
         .unwrap();
     assert_eq!(results.len(), 10);
 
@@ -277,7 +295,7 @@ fn COV4_14_filter_size() {
     let path = tmp_db("filter_size");
     let db = seed_scored_graph(&path);
 
-    let results = db.tql(r#"FIND {tags: {$size: 3}} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {tags: {$size: 3}} RETURN *"#).unwrap();
     assert_eq!(results.len(), 10);
 
     cleanup(&path);
@@ -290,12 +308,12 @@ fn COV4_15_filter_and_or() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"FIND {$and: [{group: "alpha"}, {score: {$gte: 20}}]} RETURN *"#)
+        .tql_nodes(r#"FIND {$and: [{group: "alpha"}, {score: {$gte: 20}}]} RETURN *"#)
         .unwrap();
     assert_eq!(results.len(), 3);
 
     let results = db
-        .tql(r#"FIND {$or: [{group: "alpha"}, {score: {$gte: 80}}]} RETURN *"#)
+        .tql_nodes(r#"FIND {$or: [{group: "alpha"}, {score: {$gte: 80}}]} RETURN *"#)
         .unwrap();
     assert_eq!(results.len(), 7);
 
@@ -526,9 +544,9 @@ fn COV4_23_parser_errors() {
     let path = tmp_db("parse_err");
     let db = Database::<f32>::open(&path, DIM).unwrap();
 
-    assert!(db.tql("FIND").is_err());
-    assert!(db.tql("MATCH").is_err());
-    assert!(db.tql(r#"FIND {type: "x"} RETURN"#).is_err());
+    assert!(db.tql_nodes("FIND").is_err());
+    assert!(db.tql_nodes("MATCH").is_err());
+    assert!(db.tql_nodes(r#"FIND {type: "x"} RETURN"#).is_err());
 
     cleanup(&path);
 }
@@ -540,7 +558,7 @@ fn COV4_24_tql_matches_predicate() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a)-[:next]->(b) WHERE a MATCHES {group: "alpha"} RETURN a, b"#)
+        .tql_nodes(r#"MATCH (a)-[:next]->(b) WHERE a MATCHES {group: "alpha"} RETURN a, b"#)
         .unwrap();
     eprintln!("  MATCHES: {} 条", results.len());
 
@@ -554,7 +572,7 @@ fn COV4_25_tql_not_predicate() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a) WHERE NOT a.score > 50 RETURN a"#)
+        .tql_nodes(r#"MATCH (a) WHERE NOT a.score > 50 RETURN a"#)
         .unwrap();
     eprintln!("  NOT: {} 条", results.len());
 
@@ -568,7 +586,7 @@ fn COV4_26_tql_multi_order() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"FIND {type: "item"} RETURN * ORDER BY _.group ASC, _.score DESC"#)
+        .tql_nodes(r#"FIND {type: "item"} RETURN * ORDER BY _.group ASC, _.score DESC"#)
         .unwrap();
     assert!(!results.is_empty());
 
@@ -581,7 +599,7 @@ fn COV4_26A_tql_order_before_offset_limit() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"FIND {type: "item"} RETURN * ORDER BY _.score DESC LIMIT 3 OFFSET 2"#)
+        .tql_nodes(r#"FIND {type: "item"} RETURN * ORDER BY _.score DESC LIMIT 3 OFFSET 2"#)
         .unwrap();
     let scores: Vec<i64> = results
         .iter()
@@ -598,7 +616,7 @@ fn COV4_26B_tql_aggregate_before_order_and_limit() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"FIND {type: "item"} RETURN _.group, count(_) AS total ORDER BY _.group DESC LIMIT 1"#)
+        .tql_nodes(r#"FIND {type: "item"} RETURN _.group, count(_) AS total ORDER BY _.group DESC LIMIT 1"#)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["_"].payload["group"], "beta");
@@ -618,7 +636,7 @@ fn COV4_26C_tql_create_continuous_edges_atomically() {
     assert_eq!(result.created_ids.len(), 3);
     assert_eq!(result.affected, 5);
     assert_eq!(
-        db.tql(r#"MATCH (a)-[:first]->(b)-[:second]->(c) RETURN a, b, c"#)
+        db.tql_nodes(r#"MATCH (a)-[:first]->(b)-[:second]->(c) RETURN a, b, c"#)
             .unwrap()
             .len(),
         1
@@ -647,7 +665,7 @@ fn COV4_27_tql_return_property() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"MATCH (a)-[:next]->(b) RETURN a.name, b.score"#)
+        .tql_nodes(r#"MATCH (a)-[:next]->(b) RETURN a.name, b.score"#)
         .unwrap();
     assert!(!results.is_empty());
 
@@ -661,12 +679,12 @@ fn COV4_28_tql_explain_variants() {
     let db = seed_scored_graph(&path);
 
     let r1 = db
-        .tql(r#"EXPLAIN MATCH (a)-[:next]->(b) RETURN a, b"#)
+        .tql_nodes(r#"EXPLAIN MATCH (a)-[:next]->(b) RETURN a, b"#)
         .unwrap();
     assert!(!r1.is_empty());
 
     let r2 = db
-        .tql("EXPLAIN SEARCH VECTOR [1.0, 0.0, 0.0, 0.0] TOP 3 RETURN *")
+        .tql_nodes("EXPLAIN SEARCH VECTOR [1.0, 0.0, 0.0, 0.0] TOP 3 RETURN *")
         .unwrap();
     assert!(!r2.is_empty());
     let plan = &r2[0]["plan"].payload;
@@ -686,7 +704,7 @@ fn COV4_29_search_expand_where() {
     let db = seed_scored_graph(&path);
 
     let results = db
-        .tql(r#"SEARCH VECTOR [5.0, 0.0, 0.0, 0.0] TOP 3 EXPAND [:next*1..2] WHERE {score: {$gte: 30}} RETURN *"#)
+        .tql_nodes(r#"SEARCH VECTOR [5.0, 0.0, 0.0, 0.0] TOP 3 EXPAND [:next*1..2] WHERE {score: {$gte: 30}} RETURN *"#)
         .unwrap();
     eprintln!("  SEARCH+EXPAND+WHERE: {} 条", results.len());
 

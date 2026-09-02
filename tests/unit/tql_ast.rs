@@ -24,6 +24,7 @@ fn query_entry_所有变体() {
     };
     let _search = QueryEntry::Search {
         vector: vec![1.0, 2.0],
+        vector_parameters: vec![],
         top_k: 5,
         expand: None,
     };

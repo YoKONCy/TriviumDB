@@ -43,7 +43,7 @@ fn build(name: &str) -> (String, Database<f32>) {
 }
 
 fn plan(db: &Database<f32>, query: &str) -> serde_json::Value {
-    db.tql(query).unwrap()[0]["plan"].payload.clone()
+    db.tql_nodes(query).unwrap()[0]["plan"].payload.clone()
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn planner_按选择性反转单链_match_且结果不变() {
     let (path, mut db) = build("reverse");
     db.create_index("side").unwrap();
     let query = r#"MATCH (a)-[:points_to]->(b {side: "target"}) RETURN a, b"#;
-    let expected = db.tql(query).unwrap();
+    let expected = db.tql_nodes(query).unwrap();
     assert_eq!(expected.len(), 199);
 
     let explain = plan(
@@ -148,17 +148,20 @@ fn planner_复合与_bitmap_访问路径和扫描结果一致() {
     let (path, mut db) = build("composite_bitmap");
     let composite_query = r#"FIND {group: "group_7", rare: "rare_7"} RETURN *"#;
     let bitmap_query = r#"FIND {$or: [{group: "group_1"}, {group: "group_3"}]} RETURN *"#;
-    let composite_reference = canonical(&db.tql(composite_query).unwrap());
-    let bitmap_reference = canonical(&db.tql(bitmap_query).unwrap());
+    let composite_reference = canonical(&db.tql_nodes(composite_query).unwrap());
+    let bitmap_reference = canonical(&db.tql_nodes(bitmap_query).unwrap());
 
     db.create_composite_index(&["group".into(), "rare".into()])
         .unwrap();
     db.create_bitmap_index("group").unwrap();
     assert_eq!(
-        canonical(&db.tql(composite_query).unwrap()),
+        canonical(&db.tql_nodes(composite_query).unwrap()),
         composite_reference
     );
-    assert_eq!(canonical(&db.tql(bitmap_query).unwrap()), bitmap_reference);
+    assert_eq!(
+        canonical(&db.tql_nodes(bitmap_query).unwrap()),
+        bitmap_reference
+    );
 
     let composite = plan(
         &db,
@@ -186,14 +189,18 @@ fn planner_有无索引执行结果差分一致() {
     ];
     let without: Vec<Vec<Vec<u64>>> = queries
         .iter()
-        .map(|query| canonical(&db.tql(query).unwrap()))
+        .map(|query| canonical(&db.tql_nodes(query).unwrap()))
         .collect();
 
     for field in ["group", "rare", "side"] {
         db.create_index(field).unwrap();
     }
     for (query, expected) in queries.iter().zip(without) {
-        assert_eq!(canonical(&db.tql(query).unwrap()), expected, "{query}");
+        assert_eq!(
+            canonical(&db.tql_nodes(query).unwrap()),
+            expected,
+            "{query}"
+        );
     }
 
     drop(db);

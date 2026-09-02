@@ -1,0 +1,29 @@
+[package]
+name = "triviumdb-server"
+version = "0.8.5"
+edition = "2024"
+authors = ["YoKONCy <2752026184@qq.com>"]
+description = "HTTP server for TriviumDB"
+license = "Apache-2.0"
+repository = "https://github.com/YoKONCy/TriviumDB"
+publish = false
+
+[dependencies]
+axum = { version = "0.8", features = ["json"] }
+async-stream = "0.3"
+bytes = "1.10"
+futures-util = "=0.3.32"
+clap = { version = "4.5", features = ["derive", "env"] }
+http-body-util = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5", features = ["limit", "timeout", "util"] }
+tower-http = { version = "0.6", features = ["catch-panic", "limit", "request-id", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+triviumdb = { path = "../..", version = "0.8.5" }
+uuid = { version = "1.18", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.21"

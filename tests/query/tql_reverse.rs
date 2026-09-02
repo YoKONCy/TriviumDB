@@ -83,7 +83,7 @@ fn 测试_反向单跳_谁认识Bob() {
 
     // Bob <-[:knows]- (b) → 谁 knows Bob？→ Alice 和 Dave
     let results = db
-        .tql(r#"MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN b"#)
+        .tql_nodes(r#"MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN b"#)
         .unwrap();
     assert_eq!(results.len(), 2, "Alice 和 Dave 都 knows Bob");
 
@@ -105,7 +105,7 @@ fn 测试_反向单跳_无标签() {
 
     // Bob <-[]- (b) → 所有指向 Bob 的节点
     let results = db
-        .tql(r#"MATCH (a {name: "Bob"})<-[]-(b) RETURN b"#)
+        .tql_nodes(r#"MATCH (a {name: "Bob"})<-[]-(b) RETURN b"#)
         .unwrap();
     assert_eq!(results.len(), 2, "Alice 和 Dave 都指向 Bob");
 
@@ -120,7 +120,7 @@ fn 测试_反向单跳_Carol() {
 
     // Carol <-[:knows]- (b) → 谁 knows Carol？→ 只有 Bob
     let results = db
-        .tql(r#"MATCH (a {name: "Carol"})<-[:knows]-(b) RETURN b"#)
+        .tql_nodes(r#"MATCH (a {name: "Carol"})<-[:knows]-(b) RETURN b"#)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(
@@ -148,7 +148,7 @@ fn 测试_反向可变长_溯源() {
 
     // Carol <-[:knows*1..2]- (b) → 1跳: Bob, 2跳: Alice, Dave
     let results = db
-        .tql(r#"MATCH (a {name: "Carol"})<-[:knows*1..2]-(b) RETURN b"#)
+        .tql_nodes(r#"MATCH (a {name: "Carol"})<-[:knows*1..2]-(b) RETURN b"#)
         .unwrap();
     // 1-hop: Bob
     // 2-hop from Bob: Alice, Dave
@@ -181,7 +181,7 @@ fn 测试_双向遍历_Bob的所有关联() {
 
     // Bob -[:knows]- (b) → 双向：Bob->Carol (正向) + Alice->Bob,Dave->Bob (反向)
     let results = db
-        .tql(r#"MATCH (a {name: "Bob"})-[:knows]-(b) RETURN b"#)
+        .tql_nodes(r#"MATCH (a {name: "Bob"})-[:knows]-(b) RETURN b"#)
         .unwrap();
     assert_eq!(results.len(), 3, "正向Carol + 反向Alice,Dave");
 
@@ -208,7 +208,7 @@ fn 测试_双向遍历_无标签() {
     // Actually Alice -> Bob (knows), Alice -> Acme (works_at)
     // Forward all: Bob, Acme; Backward: nobody
     let results = db
-        .tql(r#"MATCH (a {name: "Alice"})-[]-(b) RETURN b"#)
+        .tql_nodes(r#"MATCH (a {name: "Alice"})-[]-(b) RETURN b"#)
         .unwrap();
     // Alice outgoing: Bob(knows), Carol? no Alice->Carol is not in graph
     // Alice outgoing: Bob(knows), Acme(works_at)  — that's 2 forward
@@ -230,7 +230,7 @@ fn 测试_入度统计_反向COUNT() {
 
     // 统计 Bob 的 knows 入度
     let results = db
-        .tql(r#"MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN count(b) AS in_degree"#)
+        .tql_nodes(r#"MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN count(b) AS in_degree"#)
         .unwrap();
     assert_eq!(results.len(), 1);
 
@@ -256,7 +256,7 @@ fn 测试_EXPLAIN_反向模式() {
     let db = build_test_db(&path);
 
     let results = db
-        .tql(r#"EXPLAIN MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN b"#)
+        .tql_nodes(r#"EXPLAIN MATCH (a {name: "Bob"})<-[:knows]-(b) RETURN b"#)
         .unwrap();
     let plan = &results[0]["plan"].payload;
     let detail = plan.get("detail").unwrap().as_str().unwrap();

@@ -244,7 +244,7 @@ fn explain_analyze_暴露图统计和遍历预算() {
     let second = db.insert(&[0.0; DIM], json!({"type": "second"})).unwrap();
     db.link(first, second, "road", 1.0).unwrap();
     let rows = db
-        .tql(&format!(
+        .tql_nodes(&format!(
             "EXPLAIN ANALYZE MATCH (a {{id: {first}}})-[:road]->(b) RETURN b"
         ))
         .unwrap();

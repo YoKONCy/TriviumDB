@@ -118,13 +118,13 @@ fn COV5_01_where_float_cmp() {
     let db = seed_typed_graph(&path);
 
     // Float == (epsilon比较)
-    let r = db.tql(r#"FIND {score: 0.0} RETURN *"#).unwrap();
+    let r = db.tql_nodes(r#"FIND {score: 0.0} RETURN *"#).unwrap();
     assert_find_rows(&r, 1);
     assert_eq!(payload_f64(node(&r[0], "_"), "score"), 0.0);
 
     // Float !=
     let r = db
-        .tql(r#"MATCH (a) WHERE a.score != 0.0 RETURN a"#)
+        .tql_nodes(r#"MATCH (a) WHERE a.score != 0.0 RETURN a"#)
         .unwrap();
     assert_match_rows(&r, "a", 7);
     assert!(
@@ -134,7 +134,9 @@ fn COV5_01_where_float_cmp() {
     );
 
     // Float >
-    let r = db.tql(r#"MATCH (a) WHERE a.score > 5.0 RETURN a"#).unwrap();
+    let r = db
+        .tql_nodes(r#"MATCH (a) WHERE a.score > 5.0 RETURN a"#)
+        .unwrap();
     assert_match_rows(&r, "a", 4);
     assert!(
         r.iter()
@@ -144,13 +146,15 @@ fn COV5_01_where_float_cmp() {
 
     // Float >=
     let r = db
-        .tql(r#"MATCH (a) WHERE a.score >= 10.5 RETURN a"#)
+        .tql_nodes(r#"MATCH (a) WHERE a.score >= 10.5 RETURN a"#)
         .unwrap();
     assert_match_rows(&r, "a", 1);
     assert_eq!(payload_f64(node(&r[0], "a"), "score"), 10.5);
 
     // Float <
-    let r = db.tql(r#"MATCH (a) WHERE a.score < 3.0 RETURN a"#).unwrap();
+    let r = db
+        .tql_nodes(r#"MATCH (a) WHERE a.score < 3.0 RETURN a"#)
+        .unwrap();
     assert_match_rows(&r, "a", 2);
     assert!(
         r.iter()
@@ -160,7 +164,7 @@ fn COV5_01_where_float_cmp() {
 
     // Float <=
     let r = db
-        .tql(r#"MATCH (a) WHERE a.score <= 1.5 RETURN a"#)
+        .tql_nodes(r#"MATCH (a) WHERE a.score <= 1.5 RETURN a"#)
         .unwrap();
     assert_match_rows(&r, "a", 2);
     assert!(
@@ -179,7 +183,7 @@ fn COV5_02_where_bool_cmp() {
     let db = seed_typed_graph(&path);
 
     let r = db
-        .tql(r#"MATCH (a) WHERE a.active == true RETURN a"#)
+        .tql_nodes(r#"MATCH (a) WHERE a.active == true RETURN a"#)
         .unwrap();
     assert_match_rows(&r, "a", 4);
     assert!(
@@ -188,7 +192,7 @@ fn COV5_02_where_bool_cmp() {
     );
 
     let r = db
-        .tql(r#"MATCH (a) WHERE a.active != true RETURN a"#)
+        .tql_nodes(r#"MATCH (a) WHERE a.active != true RETURN a"#)
         .unwrap();
     assert_match_rows(&r, "a", 4);
     assert!(
@@ -206,17 +210,19 @@ fn COV5_03_where_string_cmp() {
     let db = seed_typed_graph(&path);
 
     let r = db
-        .tql(r#"MATCH (a) WHERE a.label == "low" RETURN a"#)
+        .tql_nodes(r#"MATCH (a) WHERE a.label == "low" RETURN a"#)
         .unwrap();
     assert_eq!(r.len(), 4);
 
     let r = db
-        .tql(r#"MATCH (a) WHERE a.label != "low" RETURN a"#)
+        .tql_nodes(r#"MATCH (a) WHERE a.label != "low" RETURN a"#)
         .unwrap();
     assert_eq!(r.len(), 4);
 
     // String > / < (字典序)
-    let r = db.tql(r#"MATCH (a) WHERE a.label > "l" RETURN a"#).unwrap();
+    let r = db
+        .tql_nodes(r#"MATCH (a) WHERE a.label > "l" RETURN a"#)
+        .unwrap();
     assert_match_rows(&r, "a", 4);
     assert!(
         r.iter()
@@ -224,7 +230,9 @@ fn COV5_03_where_string_cmp() {
         "label > l 不能返回字典序不满足的节点"
     );
 
-    let r = db.tql(r#"MATCH (a) WHERE a.label < "z" RETURN a"#).unwrap();
+    let r = db
+        .tql_nodes(r#"MATCH (a) WHERE a.label < "z" RETURN a"#)
+        .unwrap();
     assert_match_rows(&r, "a", 8);
     assert!(
         r.iter()
@@ -242,7 +250,9 @@ fn COV5_04_where_int_float_cross() {
     let db = seed_typed_graph(&path);
 
     // Int vs Float
-    let r = db.tql(r#"MATCH (a) WHERE a.rank > 2.5 RETURN a"#).unwrap();
+    let r = db
+        .tql_nodes(r#"MATCH (a) WHERE a.rank > 2.5 RETURN a"#)
+        .unwrap();
     assert_match_rows(&r, "a", 5);
     assert!(
         r.iter()
@@ -251,7 +261,9 @@ fn COV5_04_where_int_float_cross() {
     );
 
     // Float vs Int (通过 score 字段和整数字面量)
-    let r = db.tql(r#"MATCH (a) WHERE a.score > 5 RETURN a"#).unwrap();
+    let r = db
+        .tql_nodes(r#"MATCH (a) WHERE a.score > 5 RETURN a"#)
+        .unwrap();
     assert_match_rows(&r, "a", 4);
     assert!(
         r.iter()
@@ -271,7 +283,7 @@ fn COV5_05_where_id_field() {
     let ids = db.all_node_ids();
     let target = ids[3];
     let q = format!("MATCH (a) WHERE a.id == {} RETURN a", target);
-    let r = db.tql(&q).unwrap();
+    let r = db.tql_nodes(&q).unwrap();
     assert_eq!(r.len(), 1);
 
     cleanup(&path);
@@ -289,7 +301,7 @@ fn COV5_06_order_by_types() {
 
     // ORDER BY Int field
     let r = db
-        .tql(r#"FIND {active: true} RETURN * ORDER BY _.rank DESC"#)
+        .tql_nodes(r#"FIND {active: true} RETURN * ORDER BY _.rank DESC"#)
         .unwrap();
     assert_find_rows(&r, 4);
     let ranks: Vec<_> = r
@@ -300,7 +312,7 @@ fn COV5_06_order_by_types() {
 
     // ORDER BY Float field
     let r = db
-        .tql(r#"FIND {active: false} RETURN * ORDER BY _.score ASC"#)
+        .tql_nodes(r#"FIND {active: false} RETURN * ORDER BY _.score ASC"#)
         .unwrap();
     assert_find_rows(&r, 4);
     let scores: Vec<_> = r
@@ -311,7 +323,7 @@ fn COV5_06_order_by_types() {
 
     // ORDER BY String field
     let r = db
-        .tql(r#"FIND {active: true} RETURN * ORDER BY _.label ASC"#)
+        .tql_nodes(r#"FIND {active: true} RETURN * ORDER BY _.label ASC"#)
         .unwrap();
     assert_find_rows(&r, 4);
     assert!(
@@ -334,7 +346,7 @@ fn COV5_07_order_by_id() {
     let db = seed_typed_graph(&path);
 
     let r = db
-        .tql(r#"FIND {active: true} RETURN * ORDER BY _.id DESC"#)
+        .tql_nodes(r#"FIND {active: true} RETURN * ORDER BY _.id DESC"#)
         .unwrap();
     assert_find_rows(&r, 4);
     assert!(
@@ -357,7 +369,9 @@ fn COV5_08_find_where_order_limit() {
     let db = seed_typed_graph(&path);
 
     let r = db
-        .tql(r#"FIND {active: true} WHERE {rank: {$gte: 2}} RETURN * ORDER BY _.rank DESC LIMIT 2"#)
+        .tql_nodes(
+            r#"FIND {active: true} WHERE {rank: {$gte: 2}} RETURN * ORDER BY _.rank DESC LIMIT 2"#,
+        )
         .unwrap();
     assert_find_rows(&r, 2);
     let ranks: Vec<_> = r
@@ -390,19 +404,19 @@ fn COV5_09_find_and_or_not() {
     let db = seed_typed_graph(&path);
 
     // FIND + AND 当前语法会把空 FIND 文档安全拒绝
-    let r = db.tql(r#"FIND {} WHERE _.rank > 2 AND _.rank < 6 RETURN *"#);
+    let r = db.tql_nodes(r#"FIND {} WHERE _.rank > 2 AND _.rank < 6 RETURN *"#);
     let err = r.expect_err("空 FIND 文档应被安全拒绝");
     assert!(!err.to_string().is_empty(), "安全拒绝必须返回可诊断错误");
     assert_eq!(db.node_count(), 8, "解析失败不能污染数据库");
 
     // FIND + OR 当前语法会把空 FIND 文档安全拒绝
-    let r = db.tql(r#"FIND {} WHERE _.rank < 2 OR _.rank > 5 RETURN *"#);
+    let r = db.tql_nodes(r#"FIND {} WHERE _.rank < 2 OR _.rank > 5 RETURN *"#);
     let err = r.expect_err("空 FIND 文档应被安全拒绝");
     assert!(!err.to_string().is_empty(), "安全拒绝必须返回可诊断错误");
     assert_eq!(db.node_count(), 8, "解析失败不能污染数据库");
 
     // FIND + NOT 当前语法会把空 FIND 文档安全拒绝
-    let r = db.tql(r#"FIND {} WHERE NOT _.active == true RETURN *"#);
+    let r = db.tql_nodes(r#"FIND {} WHERE NOT _.active == true RETURN *"#);
     let err = r.expect_err("空 FIND 文档应被安全拒绝");
     assert!(!err.to_string().is_empty(), "安全拒绝必须返回可诊断错误");
     assert_eq!(db.node_count(), 8, "解析失败不能污染数据库");
@@ -570,19 +584,22 @@ fn COV5_14_tql_syntax_errors() {
     let db = Database::<f32>::open(&path, DIM).unwrap();
 
     // 不完整 SEARCH
-    assert_tql_err(db.tql("SEARCH VECTOR"), "Expected");
+    assert_tql_err(db.tql_nodes("SEARCH VECTOR"), "Expected");
     assert_eq!(db.node_count(), 0, "语法错误不能污染空数据库");
 
     // MATCH 缺少括号
-    assert_tql_err(db.tql("MATCH a RETURN a"), "Expected");
+    assert_tql_err(db.tql_nodes("MATCH a RETURN a"), "Expected");
     assert_eq!(db.node_count(), 0, "语法错误不能污染空数据库");
 
     // 空查询
-    assert_tql_err(db.tql(""), "Expected");
+    assert_tql_err(db.tql_nodes(""), "Expected");
     assert_eq!(db.node_count(), 0, "语法错误不能污染空数据库");
 
     // 无效操作符
-    assert_tql_err(db.tql(r#"FIND {x: {$invalid: 1}} RETURN *"#), "invalid");
+    assert_tql_err(
+        db.tql_nodes(r#"FIND {x: {$invalid: 1}} RETURN *"#),
+        "invalid",
+    );
     assert_eq!(db.node_count(), 0, "语法错误不能污染空数据库");
 
     cleanup(&path);
@@ -596,7 +613,7 @@ fn COV5_15_tql_distinct_edge() {
 
     // DISTINCT 带属性
     let r = db
-        .tql(r#"MATCH (a)-[:seq]->(b) RETURN DISTINCT a.label"#)
+        .tql_nodes(r#"MATCH (a)-[:seq]->(b) RETURN DISTINCT a.label"#)
         .unwrap();
     assert_eq!(r.len(), 2, "DISTINCT a.label 应只返回 low/high 两类标签");
     let mut labels: Vec<_> = r
@@ -628,7 +645,7 @@ fn COV5_16_search_complex_where() {
     let db = seed_typed_graph(&path);
 
     let r = db
-        .tql(r#"SEARCH VECTOR [3.0, 0.0, 0.0, 0.0] TOP 5 WHERE {$and: [{active: true}, {rank: {$gte: 2}}]} RETURN *"#)
+        .tql_nodes(r#"SEARCH VECTOR [3.0, 0.0, 0.0, 0.0] TOP 5 WHERE {$and: [{active: true}, {rank: {$gte: 2}}]} RETURN *"#)
         .unwrap();
     assert!(r.len() <= 5, "SEARCH TOP 5 必须限制返回数量");
     assert!(
@@ -653,7 +670,7 @@ fn COV5_17_match_where_on_b() {
     let db = seed_typed_graph(&path);
 
     let r = db
-        .tql(r#"MATCH (a)-[:seq]->(b) WHERE b.rank > 5 RETURN a, b"#)
+        .tql_nodes(r#"MATCH (a)-[:seq]->(b) WHERE b.rank > 5 RETURN a, b"#)
         .unwrap();
     assert!(
         r.len() <= 2,
@@ -670,7 +687,7 @@ fn COV5_17_match_where_on_b() {
 
     // WHERE on both a and b
     let r = db
-        .tql(r#"MATCH (a)-[:seq]->(b) WHERE a.active == true AND b.score > 5.0 RETURN a, b"#)
+        .tql_nodes(r#"MATCH (a)-[:seq]->(b) WHERE a.active == true AND b.score > 5.0 RETURN a, b"#)
         .unwrap();
     assert!(
         r.len() <= 3,
@@ -696,7 +713,7 @@ fn COV5_18_match_order_by() {
     let db = seed_typed_graph(&path);
 
     let r = db
-        .tql(r#"MATCH (a)-[:seq]->(b) RETURN a, b ORDER BY a.score DESC, b.rank ASC"#)
+        .tql_nodes(r#"MATCH (a)-[:seq]->(b) RETURN a, b ORDER BY a.score DESC, b.rank ASC"#)
         .unwrap();
     assert_eq!(r.len(), 7, "seq 链应返回 7 条有向边");
     let scores: Vec<_> = r
@@ -724,7 +741,7 @@ fn COV5_19_tql_mut_complex() {
     assert!(r.affected >= 1);
 
     // 验证
-    let results = db.tql(r#"FIND {label: "updated"} RETURN *"#).unwrap();
+    let results = db.tql_nodes(r#"FIND {label: "updated"} RETURN *"#).unwrap();
     assert_find_rows(&results, 1);
     let updated = node(&results[0], "_");
     assert_eq!(payload_f64(updated, "rank"), 0.0);

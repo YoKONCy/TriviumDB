@@ -75,13 +75,13 @@ fn 复合与_bitmap_索引_v4_重启更新删除无幽灵命中() {
 
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert_eq!(
-        db.tql(r#"FIND {tenant: "a", kind: "event"} RETURN *"#)
+        db.tql_nodes(r#"FIND {tenant: "a", kind: "event"} RETURN *"#)
             .unwrap()
             .len(),
         1
     );
     assert!(
-        db.tql(r#"FIND {tenant: "a", kind: "person"} RETURN *"#)
+        db.tql_nodes(r#"FIND {tenant: "a", kind: "person"} RETURN *"#)
             .unwrap()
             .is_empty()
     );
@@ -100,11 +100,13 @@ fn 属性索引重启后直接恢复并保持负命中语义() {
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert_eq!(db.list_indexes(), vec!["kind", "rank"]);
     assert_eq!(
-        db.tql(r#"FIND {kind: "person"} RETURN *"#).unwrap().len(),
+        db.tql_nodes(r#"FIND {kind: "person"} RETURN *"#)
+            .unwrap()
+            .len(),
         2
     );
     assert!(
-        db.tql(r#"MATCH (a {kind: "missing"}) RETURN a"#)
+        db.tql_nodes(r#"MATCH (a {kind: "missing"}) RETURN a"#)
             .unwrap()
             .is_empty()
     );
@@ -124,16 +126,21 @@ fn 属性索引在更新删除和槽位复用后无幽灵命中() {
         .unwrap();
     db.update_payload(first, json!({"state": "new"})).unwrap();
     assert!(
-        db.tql(r#"FIND {state: "old"} RETURN *"#)
+        db.tql_nodes(r#"FIND {state: "old"} RETURN *"#)
             .unwrap()
             .is_empty()
     );
-    assert_eq!(db.tql(r#"FIND {state: "new"} RETURN *"#).unwrap().len(), 1);
+    assert_eq!(
+        db.tql_nodes(r#"FIND {state: "new"} RETURN *"#)
+            .unwrap()
+            .len(),
+        1
+    );
     db.delete(first).unwrap();
     db.insert(&[0.0, 1.0, 0.0, 0.0], json!({"state": "replacement"}))
         .unwrap();
     assert!(
-        db.tql(r#"FIND {state: "new"} RETURN *"#)
+        db.tql_nodes(r#"FIND {state: "new"} RETURN *"#)
             .unwrap()
             .is_empty()
     );
@@ -141,12 +148,12 @@ fn 属性索引在更新删除和槽位复用后无幽灵命中() {
 
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert!(
-        db.tql(r#"FIND {state: "new"} RETURN *"#)
+        db.tql_nodes(r#"FIND {state: "new"} RETURN *"#)
             .unwrap()
             .is_empty()
     );
     assert_eq!(
-        db.tql(r#"FIND {state: "replacement"} RETURN *"#)
+        db.tql_nodes(r#"FIND {state: "replacement"} RETURN *"#)
             .unwrap()
             .len(),
         1
@@ -165,7 +172,9 @@ fn 旧数据库没有属性索引_sidecar_仍可兼容打开() {
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert!(db.list_indexes().is_empty());
     assert_eq!(
-        db.tql(r#"FIND {kind: "person"} RETURN *"#).unwrap().len(),
+        db.tql_nodes(r#"FIND {kind: "person"} RETURN *"#)
+            .unwrap()
+            .len(),
         2
     );
     drop(db);
@@ -184,7 +193,12 @@ fn 损坏属性索引按策略回退或报错() {
 
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert!(db.list_indexes().is_empty());
-    assert_eq!(db.tql(r#"FIND {kind: "event"} RETURN *"#).unwrap().len(), 1);
+    assert_eq!(
+        db.tql_nodes(r#"FIND {kind: "event"} RETURN *"#)
+            .unwrap()
+            .len(),
+        1
+    );
     drop(db);
 
     seed_database(&path);
@@ -307,7 +321,7 @@ fn 只读与不可变模式加载属性索引且零副作用() {
     assert!(memory.posting_entries >= 6);
     assert_eq!(
         read_only
-            .tql(r#"FIND {kind: "person"} RETURN *"#)
+            .tql_nodes(r#"FIND {kind: "person"} RETURN *"#)
             .unwrap()
             .len(),
         2
@@ -348,13 +362,13 @@ fn 属性索引与全扫描随机数据结果一致() {
     for bucket in 0..50usize {
         let query = format!("FIND {{bucket: \"bucket_{bucket}\"}} RETURN *");
         let mut indexed_ids: Vec<_> = indexed
-            .tql(&query)
+            .tql_nodes(&query)
             .unwrap()
             .into_iter()
             .map(|row| row["_"].id)
             .collect();
         let mut scanned_ids: Vec<_> = scanned
-            .tql(&query)
+            .tql_nodes(&query)
             .unwrap()
             .into_iter()
             .map(|row| row["_"].id)

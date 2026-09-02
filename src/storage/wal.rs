@@ -110,6 +110,16 @@ pub struct Wal {
     sync_mode: SyncMode,
     cumulative_written_bytes: u64,
     cumulative_logical_bytes: u64,
+    group_commit_active: bool,
+    group_commit_pending: bool,
+    cumulative_sync_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalStats {
+    pub written_bytes: u64,
+    pub logical_bytes: u64,
+    pub sync_count: u64,
 }
 
 impl Wal {
@@ -120,6 +130,9 @@ impl Wal {
             sync_mode,
             cumulative_written_bytes: 0,
             cumulative_logical_bytes: 0,
+            group_commit_active: false,
+            group_commit_pending: false,
+            cumulative_sync_count: 0,
         }
     }
     /// 检查并升级只有版本头、没有任何待回放记录的旧 WAL。
@@ -200,6 +213,9 @@ impl Wal {
                 0
             },
             cumulative_logical_bytes: 0,
+            group_commit_active: false,
+            group_commit_pending: false,
+            cumulative_sync_count: 0,
         })
     }
 
@@ -213,41 +229,27 @@ impl Wal {
     /// 格式: [len: u32][bincode bytes][crc32: u32]
     /// 写入后立即 fsync，保证即使 OS 崩溃数据也不丢失
     pub fn append<T: serde::Serialize>(&mut self, entry: &WalEntry<T>) -> Result<()> {
-        if let Some(ref mut writer) = self.writer {
-            let data = bincode::serialize(entry).map_err(TriviumError::Serialization)?;
-
-            // 计算 CRC32 校验和
-            let checksum = crc32fast::hash(&data);
-
-            let len = data.len() as u32;
+        let data = bincode::serialize(entry).map_err(TriviumError::Serialization)?;
+        let checksum = crc32fast::hash(&data);
+        let len = data.len() as u32;
+        {
+            let writer = self.writer.as_mut().ok_or(TriviumError::WalClosed)?;
             writer.write_all(&len.to_le_bytes())?;
             writer.write_all(&data)?;
             writer.write_all(&checksum.to_le_bytes())?;
-            self.cumulative_written_bytes = self
-                .cumulative_written_bytes
-                .saturating_add(8u64.saturating_add(data.len() as u64));
-            self.cumulative_logical_bytes = self
-                .cumulative_logical_bytes
-                .saturating_add(data.len() as u64);
-
-            // 根据 sync_mode 决定同步策略
-            match self.sync_mode {
-                SyncMode::Full => {
-                    writer.flush()?;
-                    writer.get_ref().sync_data()?; // 真正落盘
-                }
-                SyncMode::Normal => {
-                    writer.flush()?; // 到 OS 缓冲区，进程崩溃安全
-                }
-                SyncMode::Off => {
-                    // 不主动 flush，依赖 OS 或 BufWriter 满时自动写
-                }
-            }
-
-            Ok(())
-        } else {
-            Err(TriviumError::WalClosed)
         }
+        self.cumulative_written_bytes = self
+            .cumulative_written_bytes
+            .saturating_add(8u64.saturating_add(data.len() as u64));
+        self.cumulative_logical_bytes = self
+            .cumulative_logical_bytes
+            .saturating_add(data.len() as u64);
+        if self.group_commit_active {
+            self.group_commit_pending = true;
+        } else {
+            self.sync_writer()?;
+        }
+        Ok(())
     }
 
     /// 批量追加一个事务的所有日志（附带事务边界）
@@ -258,7 +260,11 @@ impl Wal {
         tx_id: u64,
         entries: &[WalEntry<T>],
     ) -> Result<()> {
-        if let Some(ref mut writer) = self.writer {
+        if self.writer.is_none() {
+            return Err(TriviumError::WalClosed);
+        }
+        let batch_bytes = {
+            let writer = self.writer.as_mut().ok_or(TriviumError::WalClosed)?;
             let mut write_single = |entry: &WalEntry<T>| -> Result<u64> {
                 let data = bincode::serialize(entry).map_err(TriviumError::Serialization)?;
                 let checksum = crc32fast::hash(&data);
@@ -273,27 +279,84 @@ impl Wal {
             for entry in entries {
                 batch_bytes = batch_bytes.saturating_add(write_single(entry)?);
             }
-            batch_bytes = batch_bytes.saturating_add(write_single(&WalEntry::TxCommit { tx_id })?);
+            batch_bytes.saturating_add(write_single(&WalEntry::TxCommit { tx_id })?)
+        };
 
-            // 4. 统一同步一次（极其提升性能与保证原子性）
-            match self.sync_mode {
-                SyncMode::Full => {
-                    writer.flush()?;
-                    writer.get_ref().sync_data()?;
-                }
-                SyncMode::Normal => {
-                    writer.flush()?;
-                }
-                SyncMode::Off => {}
-            }
-            self.cumulative_written_bytes =
-                self.cumulative_written_bytes.saturating_add(batch_bytes);
-            self.cumulative_logical_bytes = self
-                .cumulative_logical_bytes
-                .saturating_add(batch_bytes.saturating_sub(8 * (entries.len() as u64 + 2)));
-            Ok(())
+        // 字节已经写入 BufWriter；必须先更新指标，避免后续 flush/sync 失败时漏报。
+        self.cumulative_written_bytes = self.cumulative_written_bytes.saturating_add(batch_bytes);
+        self.cumulative_logical_bytes = self
+            .cumulative_logical_bytes
+            .saturating_add(batch_bytes.saturating_sub(8 * (entries.len() as u64 + 2)));
+
+        // Group Commit 中只追加完整事务帧，组尾统一执行同步。
+        if self.group_commit_active {
+            self.group_commit_pending = true;
         } else {
-            Err(TriviumError::WalClosed)
+            self.sync_writer()?;
+        }
+        Ok(())
+    }
+
+    /// 开始一个多事务 Group Commit。组内每个 `append_batch` 仍写入独立事务封条。
+    pub fn begin_group_commit(&mut self) -> Result<()> {
+        if self.writer.is_none() {
+            return Err(TriviumError::WalClosed);
+        }
+        if self.group_commit_active {
+            return Err(TriviumError::InvalidInput(
+                "WAL Group Commit 不允许嵌套 (WAL group commit cannot be nested)".into(),
+            ));
+        }
+        self.group_commit_active = true;
+        self.group_commit_pending = false;
+        Ok(())
+    }
+
+    /// 同步并结束当前 Group Commit；成功返回是否执行了物理同步调用。
+    pub fn finish_group_commit(&mut self) -> Result<bool> {
+        if !self.group_commit_active {
+            return Err(TriviumError::InvalidInput(
+                "WAL Group Commit 尚未开始 (WAL group commit is not active)".into(),
+            ));
+        }
+        self.group_commit_active = false;
+        let pending = std::mem::take(&mut self.group_commit_pending);
+        if !pending {
+            return Ok(false);
+        }
+        self.sync_writer()
+    }
+
+    pub fn stats(&self) -> WalStats {
+        WalStats {
+            written_bytes: self.cumulative_written_bytes,
+            logical_bytes: self.cumulative_logical_bytes,
+            sync_count: self.cumulative_sync_count,
+        }
+    }
+
+    fn sync_writer(&mut self) -> Result<bool> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Err(TriviumError::WalClosed);
+        };
+        match self.sync_mode {
+            SyncMode::Full => {
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalFlush)?;
+                writer.flush()?;
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalSync)?;
+                writer.get_ref().sync_data()?;
+                self.cumulative_sync_count = self.cumulative_sync_count.saturating_add(1);
+                Ok(true)
+            }
+            SyncMode::Normal => {
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalFlush)?;
+                writer.flush()?;
+                Ok(false)
+            }
+            SyncMode::Off => Ok(false),
         }
     }
 

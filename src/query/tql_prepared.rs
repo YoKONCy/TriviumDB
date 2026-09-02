@@ -84,6 +84,12 @@ impl PreparedTql {
 }
 
 fn collect_query_parameters(query: &TqlQuery, output: &mut BTreeSet<String>) {
+    if let QueryEntry::Search {
+        vector_parameters, ..
+    } = &query.entry
+    {
+        output.extend(vector_parameters.iter().map(|(_, name)| name.clone()));
+    }
     for stage in &query.pipeline {
         match stage {
             PipelineStage::With(with) => {
@@ -154,6 +160,28 @@ fn bind_query(
     query: &mut TqlQuery,
     values: &HashMap<String, TqlParamValue>,
 ) -> Result<(), TriviumError> {
+    if let QueryEntry::Search {
+        vector,
+        vector_parameters,
+        ..
+    } = &mut query.entry
+    {
+        for (index, name) in vector_parameters.iter() {
+            let value = values.get(name).ok_or_else(|| {
+                TriviumError::QueryExecution(format!("Prepared TQL 缺少参数 ${name}"))
+            })?;
+            vector[*index] = match value {
+                TqlParamValue::Int(value) => *value as f64,
+                TqlParamValue::Float(value) if value.is_finite() => *value,
+                _ => {
+                    return Err(TriviumError::QueryExecution(format!(
+                        "SEARCH VECTOR 参数 ${name} 必须是有限数值 (SEARCH VECTOR parameter ${name} must be a finite number)"
+                    )));
+                }
+            };
+        }
+        vector_parameters.clear();
+    }
     for stage in &mut query.pipeline {
         match stage {
             PipelineStage::With(with) => {

@@ -1,6 +1,6 @@
 [package]
 name = "triviumdb-cli"
-version = "0.8.4"
+version = "0.8.5"
 edition = "2024"
 authors = ["YoKONCy <2752026184@qq.com>"]
 description = "CLI & TUI tool for TriviumDB — interactive REPL, non-interactive commands, and a full-screen terminal UI."
@@ -15,7 +15,7 @@ name = "tdb"
 path = "src/main.rs"
 
 [dependencies]
-triviumdb = { path = "..", default-features = false }
+triviumdb = { path = "../..", default-features = false }
 
 # 核心数据类型
 serde = { version = "1.0", features = ["derive"] }

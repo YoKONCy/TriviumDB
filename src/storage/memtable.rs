@@ -269,6 +269,9 @@ pub struct MemTable<T: VectorType> {
     // 0 = 正常；1 = 疲劳中（被激活后，下一轮扩散大幅衰减，消费一次后清零）
     fatigue_map: std::sync::RwLock<HashMap<NodeId, u8>>,
 
+    // 活跃 NodeId 的压缩有序集合：FullNodeScan 可惰性遍历并按 LIMIT 早停。
+    active_ids: roaring::RoaringTreemap,
+
     // 映射表：内部索引 (0, 1, 2...) 到 NodeId
     // 用于在 vectors 数组里定位数据位置
     indices_to_ids: Vec<NodeId>,
@@ -332,6 +335,7 @@ impl<T: VectorType> MemTable<T> {
             cross_modal_stats_cache: std::sync::RwLock::new(BTreeMap::new()),
             property_indexes: PropertyIndexRegistry::default(),
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
+            active_ids: roaring::RoaringTreemap::new(),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
             fast_tags: Vec::new(),
@@ -371,6 +375,7 @@ impl<T: VectorType> MemTable<T> {
             cross_modal_stats_cache: std::sync::RwLock::new(BTreeMap::new()),
             property_indexes: PropertyIndexRegistry::default(),
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
+            active_ids: roaring::RoaringTreemap::new(),
             indices_to_ids: Vec::new(),
             ids_to_indices: HashMap::new(),
             fast_tags: Vec::new(),
@@ -553,6 +558,7 @@ impl<T: VectorType> MemTable<T> {
         };
         self.add_to_property_index(id, &payload);
         self.payloads.insert(id, PayloadEntry::from_value(payload));
+        self.active_ids.insert(id);
         self.ids_to_indices.insert(id, idx);
         self.mark_changed(true);
         Ok(())
@@ -569,6 +575,7 @@ impl<T: VectorType> MemTable<T> {
         let idx = self.indices_to_ids.len();
         self.payloads
             .insert(id, PayloadEntry::from_raw(payload_raw)?);
+        self.active_ids.insert(id);
         self.indices_to_ids.push(id);
         // 冷 Payload 尚未解析时使用全 1，布隆预过滤选择保守放行，避免假阴性。
         self.fast_tags.push(u64::MAX);
@@ -613,6 +620,7 @@ impl<T: VectorType> MemTable<T> {
         // 2. 更新文档型负载
         self.add_to_property_index(id, &payload);
         self.payloads.insert(id, PayloadEntry::from_value(payload));
+        self.active_ids.insert(id);
 
         // 3. 构建反向映射
         self.ids_to_indices.insert(id, idx);
@@ -674,6 +682,7 @@ impl<T: VectorType> MemTable<T> {
         };
         self.add_to_property_index(id, &payload);
         self.payloads.insert(id, PayloadEntry::from_value(payload));
+        self.active_ids.insert(id);
         self.ids_to_indices.insert(id, idx);
 
         // 属性索引已在 Payload 转入冷存储前维护
@@ -1730,12 +1739,21 @@ impl<T: VectorType> MemTable<T> {
     }
 
     /// 查询属性索引。字段已建索引时即使值不存在也返回空切片。
+    pub fn find_by_property_index_limit(
+        &self,
+        field: &str,
+        value: &serde_json::Value,
+        limit: Option<usize>,
+    ) -> Option<Vec<NodeId>> {
+        self.property_indexes.lookup_limit(field, value, limit)
+    }
+
     pub fn find_by_property_index(
         &self,
         field: &str,
         value: &serde_json::Value,
     ) -> Option<Vec<NodeId>> {
-        self.property_indexes.lookup(field, value)
+        self.find_by_property_index_limit(field, value, None)
     }
 
     /// 检查字段是否有属性索引
@@ -1994,6 +2012,7 @@ impl<T: VectorType> MemTable<T> {
 
         // 3. 元数据层
         self.payloads.remove(&id);
+        self.active_ids.remove(id);
 
         // 3. 图谱层：删除出边 + 清理其他节点指向该节点的入边
         //    同时收集需要从 label_index 中清理的标签集合，最后批量清理
@@ -2312,13 +2331,14 @@ impl<T: VectorType> MemTable<T> {
         self.payloads.contains_key(&id)
     }
 
+    /// 惰性遍历活跃 NodeId，顺序稳定且不产生查询期全量分配。
+    pub fn active_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.active_ids.iter()
+    }
+
     /// 返回所有活跃节点 ID，按 ID 升序。
-    ///
-    /// 全表扫描分页和 Planner 的有序差集都依赖该确定性契约。
     pub fn all_node_ids(&self) -> Vec<NodeId> {
-        let mut ids = self.payloads.keys().copied().collect::<Vec<_>>();
-        ids.sort_unstable();
-        ids
+        self.active_node_ids().collect()
     }
 
     /// 返回包含逻辑删除（tombstones）在内的完整内部 ID 阵列，

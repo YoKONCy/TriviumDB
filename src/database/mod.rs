@@ -27,7 +27,7 @@ use crate::node::{NodeId, SearchHit};
 use crate::storage::compaction::CompactionThread;
 use crate::storage::file_format;
 use crate::storage::memtable::MemTable;
-use crate::storage::wal::{SyncMode, Wal, WalEntry};
+use crate::storage::wal::{SyncMode, Wal, WalEntry, WalStats};
 use fs2::FileExt;
 use rayon::prelude::*;
 
@@ -562,6 +562,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 max_query_rows: config.max_query_rows,
                 row_overflow: config.row_overflow,
                 memory_limit: config.memory_limit,
+                query_control: None,
             },
             storage_mode: config.storage_mode,
             hook: Arc::new(NoopHook),
@@ -631,6 +632,23 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let mut w = lock_or_recover(&self.wal);
         w.set_sync_mode(mode);
         Ok(())
+    }
+
+    /// 返回当前进程内累计的 WAL 写入与物理同步计数。
+    pub fn wal_stats(&self) -> WalStats {
+        lock_or_recover(&self.wal).stats()
+    }
+
+    /// 在一个 WAL 同步组内执行多个独立事务，并在返回前统一同步。
+    ///
+    /// 闭包内仍通过普通事务 API 提交；每个事务保留独立 Begin/Commit 边界。
+    /// 返回值中的布尔量表示本组是否执行了一次物理 fsync。
+    pub fn group_commit<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Result<(R, bool)> {
+        self.require_write_access("group_commit")?;
+        lock_or_recover(&self.wal).begin_group_commit()?;
+        let result = operation(self);
+        let synced = lock_or_recover(&self.wal).finish_group_commit()?;
+        Ok((result, synced))
     }
 
     // ════════════════════════════════════════════════════════
@@ -1864,19 +1882,54 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// ```ignore
     /// let results = db.tql("FIND {type: \"event\", heat: {$gte: 0.7}} RETURN * LIMIT 10")?;
     /// ```
-    pub fn tql(&self, input: &str) -> Result<crate::query::tql_executor::TqlResult<T>> {
+    /// 执行 TQL，并返回可同时承载节点与标量列的一等值结果。
+    pub fn tql(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
         let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
         let mt = read_or_recover(&self.memtable);
-        crate::query::tql_executor::execute_tql_with_limits(&query, &mt, self.tql_limits)
+        crate::query::tql_executor::execute_tql_values_with_limits(
+            &query,
+            &mt,
+            self.tql_limits.clone(),
+        )
+    }
+
+    pub fn tql_with_control(
+        &self,
+        input: &str,
+        control: crate::query::tql_executor::QueryControl,
+    ) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
+        let _operation = self.enter_operation()?;
+        let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
+        let mt = read_or_recover(&self.memtable);
+        let mut limits = self.tql_limits.clone();
+        limits.query_control = Some(control);
+        crate::query::tql_executor::execute_tql_values_with_limits(&query, &mt, limits)
+    }
+
+    /// 执行仅返回节点绑定的 TQL。
+    pub fn tql_nodes(&self, input: &str) -> Result<crate::query::tql_executor::TqlResult<T>> {
+        let _operation = self.enter_operation()?;
+        let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
+        let mt = read_or_recover(&self.memtable);
+        crate::query::tql_executor::execute_tql_with_limits(&query, &mt, self.tql_limits.clone())
     }
 
     /// 执行 TQL，并返回可同时承载节点与标量列的一等值结果。
-    pub fn tql_values(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
+    pub fn query(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
         let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
         let mt = read_or_recover(&self.memtable);
-        crate::query::tql_executor::execute_tql_values_with_limits(&query, &mt, self.tql_limits)
+        crate::query::tql_executor::execute_tql_values_with_limits(
+            &query,
+            &mt,
+            self.tql_limits.clone(),
+        )
+    }
+
+    /// `query` 的兼容别名。
+    pub fn tql_values(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
+        self.query(input)
     }
 
     /// 解析并准备可重复绑定执行的只读 TQL。
@@ -1895,7 +1948,25 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let _operation = self.enter_operation()?;
         let query = prepared.bind(parameters)?;
         let mt = read_or_recover(&self.memtable);
-        crate::query::tql_executor::execute_tql_values_with_limits(&query, &mt, self.tql_limits)
+        crate::query::tql_executor::execute_tql_values_with_limits(
+            &query,
+            &mt,
+            self.tql_limits.clone(),
+        )
+    }
+
+    pub fn execute_prepared_tql_with_control(
+        &self,
+        prepared: &crate::query::tql_prepared::PreparedTql,
+        parameters: &std::collections::HashMap<String, crate::query::tql_prepared::TqlParamValue>,
+        control: crate::query::tql_executor::QueryControl,
+    ) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
+        let _operation = self.enter_operation()?;
+        let query = prepared.bind(parameters)?;
+        let mt = read_or_recover(&self.memtable);
+        let mut limits = self.tql_limits.clone();
+        limits.query_control = Some(control);
+        crate::query::tql_executor::execute_tql_values_with_limits(&query, &mt, limits)
     }
 
     /// TQL 写操作入口

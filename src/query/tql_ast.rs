@@ -152,7 +152,11 @@ pub enum QueryEntry {
 
     /// SEARCH VECTOR [...] TOP k [EXPAND ...]
     Search {
+        /// 已解析或 Prepared 绑定完成的连续查询向量。
         vector: Vec<f64>,
+        /// 尚待 Prepared 绑定的逐维参数槽 `(下标, 参数名)`。
+        /// 执行前必须为空，因此不会进入向量检索热路径。
+        vector_parameters: Vec<(usize, String)>,
         top_k: usize,
         expand: Option<ExpandClause>,
     },

@@ -349,10 +349,10 @@ fn DET_05_TQL查询_50次结果一致() {
     ];
 
     for query in &queries {
-        let baseline = db.tql(query).unwrap();
+        let baseline = db.tql_nodes(query).unwrap();
 
         for round in 1..=50 {
-            let result = db.tql(query).unwrap();
+            let result = db.tql_nodes(query).unwrap();
             assert_eq!(
                 result.len(),
                 baseline.len(),

@@ -77,6 +77,13 @@ def main() -> None:
         assert storage["property_index_format"] == 4
         assert storage["node_count"] == 2
 
+        vector_prepared = db.prepare_tql(
+            "SEARCH VECTOR [$x, $y] TOP 1 RETURN *"
+        )
+        assert vector_prepared.parameter_names() == ["x", "y"]
+        vector_rows = db.execute_prepared_tql(vector_prepared, {"x": 1, "y": 0.0})
+        assert vector_rows[0].row["_"].get("id") == 1
+
         prepared = db.prepare_tql(
             'FIND {kind: "a"} AS seed WITH seed RETURN seed, $bonus + 1 AS score'
         )

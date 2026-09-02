@@ -232,7 +232,7 @@ fn 测试_密集图谱_万级笛卡尔积防OOM_LazyEvaluation有效性() {
     // 预期总路径 10100 条。
     // 如果没有 LazyEvaluation，会在中间层产生 10100 份巨型 Node 深拷贝，造成严重阻塞内存飙升
     let results = db
-        .tql("MATCH (a)-[:connects]->(b)-[:connects]->(c) RETURN c LIMIT 10100")
+        .tql_nodes("MATCH (a)-[:connects]->(b)-[:connects]->(c) RETURN c LIMIT 10100")
         .unwrap();
 
     assert_eq!(

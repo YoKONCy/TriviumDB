@@ -595,10 +595,25 @@ impl PropertyIndexRegistry {
         self.indexes.remove(field);
     }
 
-    pub fn lookup(&self, field: &str, value: &Value) -> Option<Vec<NodeId>> {
+    pub fn lookup_limit(
+        &self,
+        field: &str,
+        value: &Value,
+        limit: Option<usize>,
+    ) -> Option<Vec<NodeId>> {
         let key = PropertyKey::from_json(value)?;
         if let Some(index) = self.indexes.get(field) {
-            return Some(index.entries.get(&key).cloned().unwrap_or_default());
+            let ids = index
+                .entries
+                .get(&key)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            return Some(
+                ids.iter()
+                    .copied()
+                    .take(limit.unwrap_or(usize::MAX))
+                    .collect(),
+            );
         }
         let mapped = self.mapped.as_ref()?;
         let Some(range) = mapped.blocks.get(&(field.to_owned(), key)) else {
@@ -617,9 +632,14 @@ impl PropertyIndexRegistry {
                 .as_chunks::<8>()
                 .0
                 .iter()
+                .take(limit.unwrap_or(usize::MAX))
                 .map(|raw| u64::from_le_bytes(*raw))
                 .collect(),
         )
+    }
+
+    pub fn lookup(&self, field: &str, value: &Value) -> Option<Vec<NodeId>> {
+        self.lookup_limit(field, value, None)
     }
 
     pub fn contains(&self, field: &str) -> bool {

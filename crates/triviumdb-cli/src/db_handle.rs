@@ -235,7 +235,7 @@ impl DbHandle {
     /// 执行只读 TQL 查询，结果转换为 dtype 无关的 [`CliRows`]。
     pub fn tql(&self, query: &str) -> Result<CliRows> {
         dispatch!(self, db => {
-            let rows = db.tql(query)?;
+            let rows = db.tql_nodes(query)?;
             Ok(convert_rows(rows))
         })
     }

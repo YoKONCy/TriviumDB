@@ -53,7 +53,7 @@ fn execute(database: &Database<f32>, query: &Query) -> Vec<CanonicalRow> {
     match query {
         Query::Find { order, .. } => {
             let mut rows = database
-                .tql(&tql)
+                .tql_nodes(&tql)
                 .unwrap_or_else(|error| panic!("TQL 失败: {tql}\n{error}"))
                 .into_iter()
                 .map(|row| {
@@ -68,7 +68,7 @@ fn execute(database: &Database<f32>, query: &Query) -> Vec<CanonicalRow> {
         }
         Query::Match { .. } => {
             let mut rows = database
-                .tql(&tql)
+                .tql_nodes(&tql)
                 .unwrap_or_else(|error| panic!("TQL 失败: {tql}\n{error}"))
                 .into_iter()
                 .map(|row| {

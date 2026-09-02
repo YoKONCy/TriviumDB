@@ -97,6 +97,25 @@ pub fn plan_filter_with_limit<T: VectorType>(
     limit: Option<usize>,
     mt: &MemTable<T>,
 ) -> NodeAccessPlan {
+    if limit.is_some() && !filter_has_usable_index(filter, mt) && ordered_range(filter).is_none() {
+        return NodeAccessPlan {
+            access_path: AccessPath::FullNodeScan,
+            estimated_rows: mt.node_count(),
+            candidates: Vec::new(),
+        };
+    }
+    if let Filter::Eq(field, value) = filter
+        && field != "id"
+        && let Some(candidates) = mt.find_by_property_index_limit(field, value, limit)
+    {
+        return NodeAccessPlan {
+            access_path: AccessPath::PropertyIndex {
+                field: field.clone(),
+            },
+            estimated_rows: candidates.len(),
+            candidates,
+        };
+    }
     if let Some((field, op, inclusive, value)) = ordered_range(filter)
         && let Some((fields, candidates)) = mt.find_by_composite_property_range(
             &filter_equalities(filter),
@@ -261,10 +280,16 @@ pub fn plan_match<T: VectorType>(
         .nodes
         .last()
         .is_some_and(|node| node.filter.is_some());
-    if pattern.edges.is_empty()
-        || pattern.edges.iter().any(|edge| edge.hop_range.is_some())
-        || !can_reverse_improve
-    {
+    if pattern.edges.is_empty() {
+        return MatchPlan {
+            access_path: forward.access_path,
+            estimated_rows: forward.estimated_rows,
+            reversed: false,
+            pattern: pattern.clone(),
+            candidates: forward.candidates,
+        };
+    }
+    if pattern.edges.iter().any(|edge| edge.hop_range.is_some()) || !can_reverse_improve {
         materialize_full_scan(&mut forward, mt);
         return MatchPlan {
             access_path: forward.access_path,
@@ -471,6 +496,21 @@ fn difference_sorted(left: &[NodeId], right: &[NodeId]) -> Vec<NodeId> {
         left_index += 1;
     }
     output
+}
+
+fn filter_has_usable_index<T: VectorType>(filter: &Filter, mt: &MemTable<T>) -> bool {
+    match filter {
+        Filter::Eq(field, _) if field != "id" => {
+            mt.has_property_index(field)
+                || mt
+                    .find_by_bitmap_property_index(field, &serde_json::Value::Null)
+                    .is_some()
+        }
+        Filter::And(filters) | Filter::Or(filters) => filters
+            .iter()
+            .any(|filter| filter_has_usable_index(filter, mt)),
+        _ => false,
+    }
 }
 
 fn filter_equalities(filter: &Filter) -> Vec<(String, serde_json::Value)> {

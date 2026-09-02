@@ -38,7 +38,7 @@ fn 测试_CREATE_单节点() {
     assert_eq!(result.created_ids.len(), 1, "应返回 1 个 ID");
 
     // 验证节点存在
-    let found = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
+    let found = db.tql_nodes(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(
         found[0]["_"].payload.get("age").unwrap().as_i64().unwrap(),
@@ -102,7 +102,7 @@ fn 测试_MATCH_CREATE_边() {
     }
 
     // 验证边存在
-    let edges = db.tql("MATCH (a)-[:knows]->(b) RETURN a, b").unwrap();
+    let edges = db.tql_nodes("MATCH (a)-[:knows]->(b) RETURN a, b").unwrap();
     assert_eq!(edges.len(), 1);
 
     drop(db);
@@ -133,7 +133,7 @@ fn 测试_SET_更新字段() {
     assert_eq!(result.affected, 1, "应更新 1 个节点");
 
     // 验证更新
-    let found = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
+    let found = db.tql_nodes(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(
         found[0]["_"].payload.get("age").unwrap().as_i64().unwrap(),
         31
@@ -157,7 +157,7 @@ fn 测试_SET_添加新字段() {
     db.tql_mut(r#"MATCH (a {name: "Alice"}) SET a.email == "alice@example.com""#)
         .unwrap();
 
-    let found = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
+    let found = db.tql_nodes(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(
         found[0]["_"]
             .payload
@@ -227,7 +227,7 @@ fn DML匹配集不受查询行上限截断() {
         .unwrap();
     assert_eq!(result.affected, 5);
     assert_eq!(
-        db.tql(r#"FIND {status: "archived"} RETURN * LIMIT 5"#)
+        db.tql_nodes(r#"FIND {status: "archived"} RETURN * LIMIT 5"#)
             .unwrap()
             .len(),
         5
@@ -255,7 +255,7 @@ fn 测试_DELETE_删除节点() {
     assert_eq!(result.affected, 1, "应删除 1 个节点");
 
     // 验证已删除
-    let found = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
+    let found = db.tql_nodes(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(found.len(), 0, "节点应已被删除");
 
     drop(db);
@@ -287,15 +287,15 @@ fn 测试_DETACH_DELETE_删除节点及边() {
     assert_eq!(result.affected, 1, "应删除 1 个节点");
 
     // Alice 已删除
-    let found = db.tql(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
+    let found = db.tql_nodes(r#"FIND {name: "Alice"} RETURN *"#).unwrap();
     assert_eq!(found.len(), 0, "Alice 应已被删除");
 
     // Bob 仍存在
-    let bob = db.tql(r#"FIND {name: "Bob"} RETURN *"#).unwrap();
+    let bob = db.tql_nodes(r#"FIND {name: "Bob"} RETURN *"#).unwrap();
     assert_eq!(bob.len(), 1, "Bob 应仍存在");
 
     // 无边残留
-    let edges = db.tql("MATCH (a)-[:knows]->(b) RETURN a, b").unwrap();
+    let edges = db.tql_nodes("MATCH (a)-[:knows]->(b) RETURN a, b").unwrap();
     assert_eq!(edges.len(), 0, "knows 边应已被移除");
 
     drop(db);

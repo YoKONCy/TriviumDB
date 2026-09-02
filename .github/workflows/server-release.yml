@@ -1,0 +1,132 @@
+name: Publish Server Binaries
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  quality-gate:
+    name: Server Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: 校验版本与运行门禁
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            test "$(cargo metadata --no-deps --format-version 1 | python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "triviumdb-server"))')" = "$VERSION"
+          fi
+          cargo fmt --all -- --check
+          cargo test -p triviumdb-server -- --test-threads=1
+          cargo clippy -p triviumdb-server --all-targets -- -D warnings
+
+  build:
+    name: Build Server (${{ matrix.name }})
+    needs: quality-gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - name: Linux ARM64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - name: Windows x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - name: macOS x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - name: macOS ARM64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server-${{ matrix.target }}
+      - name: 安装 Linux ARM64 交叉编译器
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: 构建 Server
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
+        run: cargo build --release -p triviumdb-server --target "${{ matrix.target }}"
+      - name: 打包 Unix 二进制
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="triviumdb-server-v${VERSION}-${{ matrix.target }}"
+          mkdir "$NAME"
+          cp "target/${{ matrix.target }}/release/triviumdb-server" "$NAME/"
+          cp LICENSE "$NAME/"
+          tar -czf "${NAME}.tar.gz" "$NAME"
+          shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+      - name: 打包 Windows 二进制
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $Version = "$env:GITHUB_REF_NAME" -replace '^v', ''
+          $Name = "triviumdb-server-v$Version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $Name | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/triviumdb-server.exe" "$Name/"
+          Copy-Item LICENSE "$Name/"
+          Compress-Archive -Path $Name -DestinationPath "$Name.zip"
+          $Hash = (Get-FileHash "$Name.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$Hash  $Name.zip" | Set-Content -NoNewline "$Name.zip.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.target }}
+          path: |
+            triviumdb-server-*.tar.gz
+            triviumdb-server-*.tar.gz.sha256
+            triviumdb-server-*.zip
+            triviumdb-server-*.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish Server Release Assets
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: server-*
+          merge-multiple: true
+      - name: 发布 GitHub Release 附件
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256

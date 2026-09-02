@@ -75,6 +75,33 @@ fn marker_io各操作定点失败均返回错误且不发布伪成功generation(
 }
 
 #[test]
+fn wal_group_commit_flush与sync故障均传播且不报告成功() {
+    for point in [IoPoint::WalFlush, IoPoint::WalSync] {
+        let path = path(&format!("group_commit_{point:?}"));
+        cleanup(&path);
+        let mut database = Database::<f32>::open_with_config(
+            &path,
+            triviumdb::database::Config {
+                dim: DIM,
+                storage_mode: triviumdb::database::StorageMode::Mmap,
+                sync_mode: triviumdb::storage::wal::SyncMode::Full,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let before = database.wal_stats().sync_count;
+        let guard = fail_io_at(point);
+        let result = database.group_commit(|database| {
+            database.insert_with_id(1, &[1.0, 0.0, 0.0, 0.0], serde_json::json!({"id": 1}))
+        });
+        drop(guard);
+        assert!(result.is_err(), "{point:?} 必须传播到 Group Commit 调用方");
+        assert_eq!(database.wal_stats().sync_count, before);
+        cleanup(&path);
+    }
+}
+
+#[test]
 fn io_failpoint_guard作用域结束后恢复正常发布() {
     let path = path("guard_scope");
     seed(&path);

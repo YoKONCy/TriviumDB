@@ -41,6 +41,8 @@ pub enum IoPoint {
     MarkerSync,
     MarkerRename,
     MarkerMetadata,
+    WalFlush,
+    WalSync,
 }
 
 thread_local! {

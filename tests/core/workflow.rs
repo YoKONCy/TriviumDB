@@ -111,7 +111,7 @@ fn 测试_全业务链路_社交网络复杂流转() {
     {
         // a. 纯图谱查询：测试修改后的结构：Alice follow 了谁？(应当是 Bob 和 Charlie)
         let results = db
-            .tql(r#"MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b"#)
+            .tql_nodes(r#"MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b"#)
             .unwrap();
         assert_eq!(results.len(), 2, "Alice 的两次关注结果应当独立可见");
 
@@ -154,7 +154,7 @@ fn 测试_全业务链路_社交网络复杂流转() {
 
         // Alice 是否还是 follow Bob?
         let rel_check = db
-            .tql(r#"MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b"#)
+            .tql_nodes(r#"MATCH (a {name: "Alice"})-[:follows]->(b) RETURN b"#)
             .unwrap();
         // 虽然曾经 Alice -> Bob，并且 Alice -> Charlie。但是 Bob 被删了，只剩 Charlie
         assert_eq!(

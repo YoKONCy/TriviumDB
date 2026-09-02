@@ -86,6 +86,11 @@ try {
   assert.equal(storage.property_index_format, 4)
   assert.equal(storage.node_count, 2)
 
+  const vectorPrepared = db.prepareTql('SEARCH VECTOR [$x, $y] TOP 1 RETURN *')
+  assert.deepEqual(vectorPrepared.parameterNames(), ['x', 'y'])
+  const vectorRows = db.executePreparedTql(vectorPrepared, { x: 1, y: 0 })
+  assert.equal(vectorRows[0]._.id, '1')
+
   const prepared = db.prepareTql('FIND {kind: "a"} AS seed WITH seed RETURN seed, $bonus + 1 AS score')
   assert.deepEqual(prepared.parameterNames(), ['bonus'])
   const preparedRows = db.executePreparedTql(prepared, { bonus: 4 })

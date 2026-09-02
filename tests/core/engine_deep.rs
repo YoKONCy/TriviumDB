@@ -100,7 +100,7 @@ fn COV7_01_optional_match_null_fill() {
         .unwrap();
 
     let r = db
-        .tql(r#"OPTIONAL MATCH (a)-[:nonexistent]->(b) RETURN a, b"#)
+        .tql_nodes(r#"OPTIONAL MATCH (a)-[:nonexistent]->(b) RETURN a, b"#)
         .unwrap();
     assert_eq!(r.len(), 1, "无匹配时必须保留左侧节点");
     assert_eq!(r[0]["a"].payload["name"], "lonely");
@@ -123,7 +123,7 @@ fn COV7_02_optional_match_mixed() {
 
     // 部分节点有 "skip" 边，部分没有
     let r = db
-        .tql(r#"OPTIONAL MATCH (a)-[:skip]->(b) RETURN a, b"#)
+        .tql_nodes(r#"OPTIONAL MATCH (a)-[:skip]->(b) RETURN a, b"#)
         .unwrap();
     assert_eq!(r.len(), 5, "每个左侧节点都必须至少产生一行");
     assert_eq!(
@@ -138,7 +138,7 @@ fn COV7_02_optional_match_mixed() {
     );
     assert_eq!(db.node_count(), 5, "OPTIONAL 查询不能改变图数据");
     assert_eq!(
-        db.tql(r#"MATCH (a)-[:skip]->(b) RETURN a, b"#)
+        db.tql_nodes(r#"MATCH (a)-[:skip]->(b) RETURN a, b"#)
             .unwrap()
             .len(),
         1,
@@ -160,7 +160,7 @@ fn COV7_03_varlen_path_deep() {
 
     // 路径深度 *1..20，但图只有 8 个节点 → 大部分深度截断
     let r = db
-        .tql(r#"MATCH (a)-[:next*1..20]->(b) RETURN a, b LIMIT 100"#)
+        .tql_nodes(r#"MATCH (a)-[:next*1..20]->(b) RETURN a, b LIMIT 100"#)
         .unwrap();
     assert_all_rows_have_vars(&r, &["a", "b"]);
     assert!(r.len() <= 100, "LIMIT 100 必须被执行器严格遵守");
@@ -179,7 +179,7 @@ fn COV7_04_varlen_zero_hop() {
     let db = seed_chain(&path, 5);
 
     let r = db
-        .tql(r#"MATCH (a)-[:next*0..1]->(b) RETURN a, b LIMIT 50"#)
+        .tql_nodes(r#"MATCH (a)-[:next*0..1]->(b) RETURN a, b LIMIT 50"#)
         .unwrap();
     assert_all_rows_have_vars(&r, &["a", "b"]);
     assert!(
@@ -197,7 +197,7 @@ fn COV7_05_varlen_cycle() {
     let db = seed_chain(&path, 4); // 4 节点 + 回环边
 
     let r = db
-        .tql(r#"MATCH (a)-[:next*1..10]->(b) RETURN a, b LIMIT 200"#)
+        .tql_nodes(r#"MATCH (a)-[:next*1..10]->(b) RETURN a, b LIMIT 200"#)
         .unwrap();
     assert_all_rows_have_vars(&r, &["a", "b"]);
     assert!(r.len() <= 200, "环图变长路径必须被 LIMIT 截断");
@@ -221,7 +221,7 @@ fn COV7_06_find_return_expression() {
 
     // RETURN 表达式中提取变量
     let r = db
-        .tql(r#"FIND {active: true} RETURN _.name, _.val"#)
+        .tql_nodes(r#"FIND {active: true} RETURN _.name, _.val"#)
         .unwrap();
     assert_eq!(r.len(), 5, "active=true 的节点应正好有 5 个");
     for row in &r {
@@ -240,7 +240,9 @@ fn COV7_07_find_return_aggregate() {
     let path = tmp_db("find_agg");
     let db = seed_chain(&path, 10);
 
-    let r = db.tql(r#"FIND {active: true} RETURN count(_)"#).unwrap();
+    let r = db
+        .tql_nodes(r#"FIND {active: true} RETURN count(_)"#)
+        .unwrap();
     assert_eq!(r.len(), 1, "count 聚合应返回单行");
     let count_node = r[0].get("count").expect("聚合结果应绑定到 count");
     assert_eq!(count_node.payload.get("count"), Some(&serde_json::json!(5)));
@@ -259,7 +261,7 @@ fn COV7_08_aggregate_empty_result() {
     let db = seed_chain(&path, 5);
 
     let r = db
-        .tql(r#"MATCH (a)-[:nonexistent]->(b) RETURN count(a) AS total"#)
+        .tql_nodes(r#"MATCH (a)-[:nonexistent]->(b) RETURN count(a) AS total"#)
         .unwrap();
     assert_eq!(r.len(), 1, "空输入上的无分组聚合必须返回一个结果行");
     assert_eq!(r[0]["total"].payload["total"], serde_json::json!(0));
@@ -289,7 +291,7 @@ fn COV7_09_order_by_with_nulls() {
 
     // ORDER BY priority → NULL 应排最后
     let r = db
-        .tql(r#"MATCH (a) RETURN a ORDER BY a.priority ASC"#)
+        .tql_nodes(r#"MATCH (a) RETURN a ORDER BY a.priority ASC"#)
         .unwrap();
     assert_eq!(r.len(), 6);
 
@@ -311,10 +313,10 @@ fn COV7_10_match_create_ref() {
         .unwrap();
     assert_eq!(r.created_ids.len(), 1, "应创建且只创建 fresh 节点");
     assert!(r.affected >= 2, "应至少影响 1 个节点和 1 条边");
-    let fresh = db.tql(r#"FIND {name: "fresh"} RETURN *"#).unwrap();
+    let fresh = db.tql_nodes(r#"FIND {name: "fresh"} RETURN *"#).unwrap();
     assert_eq!(fresh.len(), 1, "fresh 节点必须可被查询到");
     let edges = db
-        .tql(r#"MATCH (a {name: "node_0"})-[:new_edge]->(b) RETURN a, b"#)
+        .tql_nodes(r#"MATCH (a {name: "node_0"})-[:new_edge]->(b) RETURN a, b"#)
         .unwrap();
     assert_row_has_payload(&edges, "b", "name", serde_json::json!("fresh"));
 
@@ -332,7 +334,7 @@ fn COV7_11_match_create_edge_between_existing() {
         .unwrap();
     assert!(r.affected >= 1, "创建已有变量之间的边应报告受影响行数");
     let back = db
-        .tql(r#"MATCH (b)-[:backlink]->(a) WHERE a.name == "node_0" RETURN a, b"#)
+        .tql_nodes(r#"MATCH (b)-[:backlink]->(a) WHERE a.name == "node_0" RETURN a, b"#)
         .unwrap();
     assert_row_has_payload(&back, "a", "name", serde_json::json!("node_0"));
 
@@ -353,7 +355,7 @@ fn COV7_12_match_set_verify() {
         .unwrap();
 
     // 验证修改生效
-    let r = db.tql(r#"FIND {name: "node_0"} RETURN *"#).unwrap();
+    let r = db.tql_nodes(r#"FIND {name: "node_0"} RETURN *"#).unwrap();
     assert_eq!(r.len(), 1, "SET 后应仍只命中 node_0");
     let node = r[0].get("_").expect("FIND RETURN * 应绑定 _");
     assert_eq!(node.payload.get("name"), Some(&serde_json::json!("node_0")));
@@ -401,7 +403,7 @@ fn COV7_14_filter_not() {
     let path = tmp_db("filter_not");
     let db = seed_chain(&path, 10);
 
-    let r = db.tql(r#"FIND {$not: {group: "x"}} RETURN *"#);
+    let r = db.tql_nodes(r#"FIND {$not: {group: "x"}} RETURN *"#);
     match r {
         Ok(results) => {
             assert_eq!(results.len(), 6, "$not 应过滤掉 group=x 的 4 个节点");
@@ -433,7 +435,9 @@ fn COV7_15_find_null_value() {
     let path = tmp_db("find_null");
     let db = seed_chain(&path, 5);
 
-    let r = db.tql(r#"FIND {nonexistent: null} RETURN *"#).unwrap();
+    let r = db
+        .tql_nodes(r#"FIND {nonexistent: null} RETURN *"#)
+        .unwrap();
     assert_eq!(r.len(), 0, "缺失字段与 null 比较当前应安全返回空集");
     assert_eq!(db.node_count(), 5, "null 过滤不能修改数据库");
 
@@ -446,10 +450,10 @@ fn COV7_16_find_bool_value() {
     let path = tmp_db("find_bool");
     let db = seed_chain(&path, 10);
 
-    let r = db.tql(r#"FIND {active: true} RETURN *"#).unwrap();
+    let r = db.tql_nodes(r#"FIND {active: true} RETURN *"#).unwrap();
     assert_eq!(r.len(), 5);
 
-    let r = db.tql(r#"FIND {active: false} RETURN *"#).unwrap();
+    let r = db.tql_nodes(r#"FIND {active: false} RETURN *"#).unwrap();
     assert_eq!(r.len(), 5);
 
     cleanup(&path);
@@ -461,7 +465,7 @@ fn COV7_17_find_float_value() {
     let path = tmp_db("find_float");
     let db = seed_chain(&path, 10);
 
-    let r = db.tql(r#"FIND {val: 0.0} RETURN *"#).unwrap();
+    let r = db.tql_nodes(r#"FIND {val: 0.0} RETURN *"#).unwrap();
     assert_eq!(r.len(), 1, "val=0.0 只应匹配 node_0");
     let node = r[0].get("_").expect("FIND RETURN * 应绑定 _");
     assert_eq!(node.payload.get("name"), Some(&serde_json::json!("node_0")));
@@ -476,7 +480,7 @@ fn COV7_18_find_array_value() {
     let path = tmp_db("find_array");
     let db = seed_chain(&path, 5);
 
-    let r = db.tql(r#"FIND {tags: ["a", "b"]} RETURN *"#).unwrap();
+    let r = db.tql_nodes(r#"FIND {tags: ["a", "b"]} RETURN *"#).unwrap();
     assert_eq!(r.len(), 5, "所有 seed_chain 节点都应包含 tags=[a,b]");
     for row in &r {
         let node = row.get("_").expect("FIND RETURN * 应绑定 _");
@@ -634,7 +638,7 @@ fn COV7_23_match_budget_exceeded() {
     }
 
     // 深层变长路径 → 可能触发 budget 超限
-    let r = db.tql(r#"MATCH (a)-[:all*1..10]->(b) RETURN a, b LIMIT 10"#);
+    let r = db.tql_nodes(r#"MATCH (a)-[:all*1..10]->(b) RETURN a, b LIMIT 10"#);
     match r {
         Ok(res) => {
             assert!(res.len() <= 10, "LIMIT 10 必须限制预算内结果数量");
@@ -656,7 +660,7 @@ fn COV7_24_search_expand_multi_label() {
     let db = seed_chain(&path, 10);
 
     let r = db
-        .tql("SEARCH VECTOR [5.0, 0.0, 0.0, 0.0] TOP 3 EXPAND [:next|skip*1..2] RETURN *")
+        .tql_nodes("SEARCH VECTOR [5.0, 0.0, 0.0, 0.0] TOP 3 EXPAND [:next|skip*1..2] RETURN *")
         .unwrap();
     assert!(r.len() >= 3, "SEARCH TOP 3 至少应保留原始向量命中");
     for row in &r {
@@ -685,7 +689,7 @@ fn COV7_25_match_all_order_limit() {
     let db = seed_chain(&path, 10);
 
     let r = db
-        .tql(r#"MATCH (a)-[:next]->(b) RETURN * ORDER BY a.val DESC LIMIT 5"#)
+        .tql_nodes(r#"MATCH (a)-[:next]->(b) RETURN * ORDER BY a.val DESC LIMIT 5"#)
         .unwrap();
     assert_eq!(r.len(), 5, "LIMIT 5 应返回 5 条 next 边");
     let vals: Vec<_> = r
