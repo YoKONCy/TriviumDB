@@ -265,7 +265,7 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
             expanded_results.push(SearchHit {
                 id,
                 score,
-                payload: payload.clone(),
+                payload: (*payload).clone(),
             });
         }
     }

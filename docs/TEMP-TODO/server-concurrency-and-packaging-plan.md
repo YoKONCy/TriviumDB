@@ -63,7 +63,7 @@ resolver = "2"
 
 ```toml
 [dependencies]
-triviumdb = { path = "../..", version = "0.8.5" }
+triviumdb = { path = "../..", version = "0.8.6" }
 axum = "..."
 tokio = { version = "...", features = ["rt-multi-thread", "macros"] }
 tower-http = "..."
@@ -128,7 +128,7 @@ crates.io: triviumdb        0.8.x
 crates.io: triviumdb-server 0.8.x
 ```
 
-使用同一个正式 tag，例如 `v0.8.5`，以便明确 Server 与 Core 的兼容关系。发布顺序必须为：
+使用同一个正式 tag，例如 `v0.8.6`，以便明确 Server 与 Core 的兼容关系。发布顺序必须为：
 
 1. 完成 Core 与 Server 的全部 Release Gate；
 2. 发布 `triviumdb`；

@@ -3,14 +3,53 @@
 覆盖 Prepared TQL、一等 Path/List、四类属性索引、存储诊断和历史入口迁移错误。
 """
 
+import json
 import os
 import tempfile
 
 import triviumdb
 
 
+def run_shared_contract(root: str) -> None:
+    contract_path = os.path.join(os.path.dirname(__file__), "..", "contracts", "public_cases.json")
+    with open(contract_path, encoding="utf-8") as source:
+        contract = json.load(source)
+    assert contract["schema_version"] == 1
+    path = os.path.join(root, "shared-contract.tdb")
+    db = triviumdb.TriviumDB(path, dim=contract["setup"]["dimension"])
+    for node in contract["setup"]["nodes"]:
+        db.insert_with_id(node["id"], node["vector"], node["payload"])
+    for edge in contract["setup"]["edges"]:
+        db.link(edge["source"], edge["target"], edge["label"], edge["weight"])
+    for case in contract["cases"]:
+        expected = case["expected"]
+        if case["operation"] == "get_payload":
+            payload = db.get_payload(case["node_id"])
+            assert payload[expected["field"]] == expected["value"], case["name"]
+        elif case["operation"] == "prepared_tql":
+            prepared = db.prepare_tql(case["tql"])
+            rows = db.execute_prepared_tql(prepared, case.get("parameters", {}))
+            assert len(rows) == expected["row_count"], case["name"]
+            assert rows[0].row[expected["column"]] == expected["value"], case["name"]
+        elif case["operation"] == "tql_path":
+            rows = db.tql(case["tql"])
+            assert rows[0].row["path"] == expected["path"], case["name"]
+        elif case["operation"] == "prepared_missing_parameter":
+            prepared = db.prepare_tql(case["tql"])
+            try:
+                db.execute_prepared_tql(prepared, case.get("parameters", {}))
+            except RuntimeError as error:
+                assert any(needle in str(error) for needle in expected["error_contains_any"])
+            else:
+                raise AssertionError(case["name"])
+        else:
+            raise AssertionError(f"未知共享契约操作: {case['operation']}")
+    db.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="triviumdb-python-public-api-") as root:
+        run_shared_contract(root)
         path = os.path.join(root, "api.tdb")
         db = triviumdb.TriviumDB(path, dim=2)
         db.insert_with_id(1, [1.0, 0.0], {"kind": "a", "score": 1, "tenant": "t", "region": "r"})
@@ -73,8 +112,8 @@ def main() -> None:
         ]
 
         storage = db.storage_info()
-        assert storage["database_format_current"] == 7
-        assert storage["property_index_format"] == 4
+        assert storage["database_format_current"] == 9
+        assert storage["property_index_format"] == 6
         assert storage["node_count"] == 2
 
         vector_prepared = db.prepare_tql(

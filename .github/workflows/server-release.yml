@@ -3,7 +3,7 @@ name: Publish Server Binaries
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
+      - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -24,6 +26,15 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
+              echo "只允许 beta 或 stable Tag 进入 Server 发布"
+              exit 1
+            fi
+            git fetch origin master
+            if [[ "$VERSION" != *-beta.* ]] && ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/master"; then
+              echo "stable Tag 必须指向 master 历史中的提交"
+              exit 1
+            fi
             test "$(cargo metadata --no-deps --format-version 1 | python -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "triviumdb-server"))')" = "$VERSION"
           fi
           cargo fmt --all -- --check
@@ -125,6 +136,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-beta.') }}
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256

@@ -65,7 +65,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.8.5"
+triviumdb = "0.8.6"
 ```
 
 ### 30 秒入门模板
@@ -107,7 +107,7 @@ TriviumDB v0.4 引入了 **Rom / Mmap 双存储引擎**，在打开数据库时�
 | 模式 | 启动开销 | 内存占用 | 磁盘文件 | 推荐场景 |
 |------|----------|----------|----------|----------|
 | **Rom（单文件）** | O(N) 全量加载 | = 数据体积 | 单一 `.tdb` | 知识库 < 50 万节点、需要一键打包转移 |
-| **Mmap（分离，默认）** | ~O(1) 映射 | ≈ 增量 + 工作集 | `.tdb` + `.vec` | 超大规模数据、追求冷启动性能 |
+| **Mmap（分离，默认）** | ~O(1) 映射 | ≈ 目录 + delta + 有界缓存 + 工作集 | `.tdb` + `.vec` + `.pld.<generation>` + `.flush_ok` | 超大规模数据、追求冷启动与 Payload 堆占用可控 |
 
 > 表中的“工作集”由 OS PageCache 管理，不受 `memory_limit` 直接控制。数据文件大于 RAM 并不等于不可用，但均匀随机访问可能形成 Major Fault 和 SSD 队列压力。生产容量评估应同时观察 p99/p999、主缺页速率、RSS/RssFile、swap/pagefile 和磁盘 `await`，不能只看平均 QPS。
 
@@ -335,14 +335,17 @@ db.search(query_vec, top_k=10, expand_depth=1, min_score=0.5)
 | 批量导入（一次性） | 不启用，导入完成后手动 `flush()` |
 | 延迟极敏感服务 | `db.enable_auto_compaction(interval_secs=86400)` (每天 1 次) |
 
-### 认知管线 (search_advanced) 开关策略
+### 认知管线入口与开关策略
+
+`search_advanced()` 与 TQL 认知算子共享底层算法，但服务于不同使用方式：前者允许通过 API 自由开关组件，执行顺序固定；后者通过显式 NodeSet 阶段自由安排无状态算子顺序。不要为追求“更高级”而把所有组件全部开启。
 
 | 场景 | 建议配置 |
 |------|----------|
 | 纯向量检索（不需要深层认知） | 直接用 `search()`，完全不涉及管线开销 |
-| 向量 + 图扩散（轻量认知） | `search_advanced(enable_advanced_pipeline=True, enable_dpp=False)` |
-| 全流程认知探索（发现隐藏记忆） | `enable_sparse_residual=True` + `enable_dpp=True` |
-| 非常复杂的跨领域记忆查询 | 低 `fista_threshold`（如 0.15）+ 高 `teleport_alpha`（如 0.2）|
+| 稳定的官方 RAG 模板 | 使用 `search_advanced()`，按需启用文本、FISTA、SA-PPR、DPP |
+| 需要改变算子顺序或保留中间候选 | 使用 TQL `TEXT/RESIDUAL/SA_PPR_CONFIG/DIVERSIFY/TOPICS` |
+| 全流程认知探索（发现隐藏记忆） | `enable_sparse_residual=True` + `enable_dpp=True`，并限制 `recall_k/rerank_k` |
+| 有状态记忆衰减 | 只能使用 `search_advanced()` 的疲劳不应期；普通 TQL 不提供该算子 |
 
 ```python
 # “简单问答”场景：纯向量 + 图扩散，不需要 FISTA/DPP
@@ -356,6 +359,15 @@ results = db.search_advanced(
     enable_dpp=True,              # 保证结果多样性
 )
 ```
+
+### 认知算子的预算原则
+
+- `TEXT`：限制查询文本长度和 token 数，`TOP` 不超过查询节点预算；长自然语言应先在应用侧清洗。
+- `DIVERSIFY`：候选池最多 512，先用属性或向量召回收窄池；DPP 不适合直接作用于全库。
+- `RESIDUAL`：候选最多 512、迭代最多 256；Gram 矩阵为平方复杂度，应优先减小候选池而不是提高预算。
+- `TOPICS`：候选最多 512、主题最多 32、迭代最多 256；它用于小型候选集分析，不是离线全库主题训练。
+- `SA_PPR_CONFIG`：同时限制 `DEPTH` 和 `MAX_EDGES`，不要只靠最终 `LIMIT` 控制扩散成本。
+- 所有认知分数都通过一等表达式读取；不要把 `text_score`、余弦相似度和 DPP 次序分数当作天然同量纲值直接相加。
 
 ---
 
@@ -427,7 +439,7 @@ RuntimeError: Database 'data.tdb' is already opened by another process.
 
 相比引入重型的跨进程内存通信与多版本控制架构，TriviumDB 选择 Writer 全文件级独占锁定：同一数据库同一时刻只允许一个 Writer。ReadOnly 使用共享锁并允许多个独立 Reader 并发；Immutable 用于经过 manifest 校验、生命周期内绝不原地修改的不可变 generation。
 
-同一 Python 或 Node 数据库实例被多个线程调用时，v0.8.5 已不会再暴露 `Already borrowed` 之类的绑定层借用冲突，但这**不等于支持真正的并行多写者提交**。调用方仍应把所有写操作汇聚到单一写队列，并在应用层用 `Lock` / `Mutex` / actor / 单消费者任务进行串行化；读查询可以交给 ReadOnly/Immutable Reader 并发执行。不要把“多个线程调用成功”误解为多个 Writer 能并行修改同一数据库。
+同一 Python 或 Node 数据库实例被多个线程调用时，v0.8.6 已不会再暴露 `Already borrowed` 之类的绑定层借用冲突，但这**不等于支持真正的并行多写者提交**。调用方仍应把所有写操作汇聚到单一写队列，并在应用层用 `Lock` / `Mutex` / actor / 单消费者任务进行串行化；读查询可以交给 ReadOnly/Immutable Reader 并发执行。不要把“多个线程调用成功”误解为多个 Writer 能并行修改同一数据库。
 
 **如果确实存在多端读写或高并发共享的需求，请遵循嵌入式数据库的最佳实践：多线程调度、读写仲裁、锁的抢占等复杂机制，应由外部业务逻辑或应用服务进行设计（如通过单例模式封装连接池，或在应用程序外层架设统一的 RESTful API 网关代理）。存储引擎本身的职责是坚守绝对的数据一致性边界。**
 
@@ -727,14 +739,16 @@ with triviumdb.TriviumDB("knowledge_v2.tdb", dim=NEW_DIM) as new_db:
 
 ## QuIVer 索引策略与调优
 
-TriviumDB v0.7.0 起采用自研的 **QuIVer**（Quantized Indexed Vector Retrieval）SOTA 级 ANN 图索引，开发者**无需也无法手动触发重建**。了解以下策略可以取得最佳检索效果。
+TriviumDB v0.7.0 起采用自研的 **QuIVer**（Quantized Indexed Vector Retrieval）SOTA 级 ANN 图索引。常规查询会按配置和数据规模自动选择、构建与维护索引；Rust Core 也提供显式 `build_quiver_index()`，nightly Server 提供 `/v1/indexes/quiver` 管理入口。显式构建仍受访问模式、维度、generation 和内存预算约束。
 
 ### QuIVer 自动激活条件
 
 | 条件 | 检索引擎 | 行为 |
 |------|----------|------|
-| < 1 万节点 | **BruteForce** | 100% 精确召回 |
-| ≥ 1 万节点 + 首次构建完成 | **QuIVer (BQ + Vamana)** | BQ 签名 + 图导航 + f32 精排，Recall@10 > 97% |
+| 低于当前维度的动态阈值 | **BruteForce** | 100% 精确召回 |
+| 达到动态阈值 + 首次构建完成 | **QuIVer (BQ + Vamana)** | BQ 签名 + 图导航 + f32 精排，Recall@10 > 97% |
+
+动态阈值为 `ceil(8,000,000 / dim)`，并限制在 2,500–10,000 节点。例如 768 维为 10,000，1536 维约 5,209，3072 维约 2,605。
 
 ### 快速达到 QuIVer 激活
 
@@ -941,9 +955,9 @@ TriviumDB 是一款经过深度取舍、专为 AI 嵌入式记忆场景设计的
 
 ---
 
-### 一、内存占用：Payload 精简原则
+### 一、内存占用：Payload 冷热分层与缓存预算
 
-**边界**：向量数据通过 Mmap 按需换入，OS 只加载被访问的 Page，不占满全部物理内存。然而 Payload（JSON 元数据）和图关系边（`HashMap`）是**全量常驻内存**的结构。若每个节点存储了几 KB 甚至几十 KB 的大文本对象，百万节点规模下将会出现数 GB 级别的 RAM 消耗。
+**边界**：Mmap 模式下，已发布 raw Payload 不再全量复制到堆，而是保存在 generation 化 `.pld` 冷基础层；NodeId 目录、新写入/更新 delta、图关系边和有界 Parsed Cache 仍占用堆内存。首次访问冷条目仍会触发 mmap page fault 和 JSON 解析，因此超大随机工作集的尾延迟仍受 PageCache 与存储设备影响。
 
 **规避策略**：
 
@@ -966,13 +980,26 @@ db.insert(vec, {
 })
 ```
 
-2. **使用 `set_memory_limit()` 设置内存上限**，引擎会在超限时自动触发 flush 将向量 delta 写回磁盘，释放增量层内存：
+2. **在打开数据库时配置 Parsed Cache**。缓存只影响性能，不影响结果；总预算设为 0 可完全禁用，超过单条上限的 Payload 会按需解析但不驻留：
+
+```python
+db = triviumdb.TriviumDB(
+    "data.tdb",
+    dim=1536,
+    payload_cache_mb=64,
+    payload_cache_entry_mb=8,
+)
+```
+
+Rust 使用 `Config.payload_cache_bytes` 和 `Config.payload_cache_entry_bytes`；Node.js 使用 `payloadCacheMb` 和 `payloadCacheEntryMb`。
+
+3. **使用 `set_memory_limit()` 设置内核堆预算**。超限时引擎会 fail-closed 拒绝新增负载，不会依靠频繁全量 flush 伪装成 RSS 上限；该预算不包含 mmap 驻留页和 OS PageCache：
 
 ```python
 db.set_memory_limit(mb=512)
 ```
 
-3. **对于 payload 体积不可控的场景**，使用 `dtype="f16"` 将向量内存减半，为 payload 腾出空间：
+4. **对于向量体积较大的场景**，使用 `dtype="f16"` 将向量空间减半，为 Payload delta、目录、解析缓存和查询工作区留出空间：
 
 ```python
 db = triviumdb.TriviumDB("data.tdb", dim=1536, dtype="f16")  # 向量内存减半

@@ -9,6 +9,7 @@ pub(crate) mod fs;
 pub mod generation;
 pub mod graph_blocks;
 pub mod memtable;
+pub(crate) mod payload_store;
 pub mod snapshot;
 pub mod vec_pool;
 pub mod wal;

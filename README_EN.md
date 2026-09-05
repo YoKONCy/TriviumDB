@@ -34,19 +34,20 @@
 
 ## What is TriviumDB?
 
-TriviumDB is an **embedded single-file database engine** written in pure Rust, natively fusing **vector retrieval**, **property graph**, and **document-style metadata** within a single storage kernel.
+TriviumDB is an **embedded tri-model database engine** written in pure Rust, natively fusing **vector retrieval**, **property graph**, and **document-style metadata** within one storage kernel. Rom mode preserves single-`*.tdb` portability; default Mmap mode uses split sidecars protected by one generation protocol.
 
 Our goal: **SQLite for AI applications.**
 
 - 🧪 **DIY hybrid query pipelines** — TQL turns vector recall, property indexes, graph expansion, graph algorithms, paths, set algebra, iteration, aggregation, and reranking into freely composable operators, planned by a deterministic Cascades optimizer
 - 📊 **Four persistent property indexes** — Hash / Ordered ART / Composite ART / Roaring Bitmap: equality, range, prefix, composite predicates, and low-cardinality set operations all index-accelerated
-- 🧮 **Built-in graph algorithm library** — PageRank / WCC / Leiden / Betweenness / Degree / Label Propagation / SA-PPR callable inside queries, plus `ALL_PATHS` / `SHORTEST_PATHS` / `UNION` / `INTERSECT` / `EXCEPT` / `ITERATE`
-- 🗃️ **Dual storage modes** — Single-file `*.tdb` portability or split `.vec` mmap zero-copy loading
+- 🧮 **Built-in graph algorithm library** — PageRank / WCC / SCC / K-Core / Articulation Points / Triangle Count / Local Clustering Coefficient / HITS / Harmonic Centrality / Node Similarity / Leiden / Betweenness / Degree / Label Propagation / SA-PPR callable inside queries, plus Weighted Dijkstra, Yen K-Shortest Paths, bounded PairSet, path, and set operators
+- 🗃️ **Dual storage modes** — Rom keeps portable single-file `*.tdb`; Mmap separates vectors and published Payload into `.vec` and generation-scoped `.pld.<generation>` files
+- ❄️ **Tiered Payload storage** — Published raw JSON stays in an mmap cold base, writes/updates enter an in-memory delta, and parsed values use a byte-bounded LRU cache; ANN/BQ/Exact candidate generation performs zero Payload parsing
 - 🔗 **Node = everything** — Each node natively holds a dense vector, sparse text index, JSON metadata, and graph edges under one globally unique ID
 - 🧠 **AI-native** — Optional hybrid recall (AC-automaton BM25 + dense vector) triggers graph spreading activation, with built-in cognitive pipelines (FISTA / DPP / PPR)
-- 🛡️ **4-layer data safety** — Atomic replacement + WAL + dry-run transaction validation + mmap COW isolation; `.flush_ok` v2 whole-file CRC makes corrupted inputs fail closed
+- 🛡️ **4-layer data safety** — Atomic replacement + WAL + dry-run transaction validation + mmap COW isolation; `.flush_ok` v3 binds `.tdb/.vec/.pld` generation, sizes, and whole-file CRCs into one fail-closed commit
 - 🐍 **Python / Node.js native** — `pip install` or `npm install`, MongoDB-style query syntax
-- ⚡ **High-performance search** — rayon parallel brute-force (100% exact at small scale) + in-house SOTA ANN index **QuIVer** (auto-activates above 10K nodes)
+- ⚡ **High-performance search** — rayon parallel brute-force (100% exact at small scale) + in-house SOTA ANN index **QuIVer**, dynamically activated at 2,500–10,000 nodes based on an approximately 8M-component workload
 - 💾 **SSD-friendly** — Append-only WAL + background compaction + independent QuIVer persistence
 - 🔒 **Shared read-only opens** — Multiple reader processes can query a completed generation under shared locks while writers retain exclusive WAL ownership
 - 🧩 **Typed access capabilities** — Rust `DatabaseReader` hides mutation APIs at compile time while `DatabaseWriter` retains the complete embedded write surface
@@ -124,7 +125,7 @@ Suppose you're building an **AI conversation memory system** and the user says "
 | ② Store metadata  | Call SQLite to write time, scene  | ↑ Same step — payload is JSON        |
 | ③ Store relations | Call Neo4j: user→café→person      | `db.link(user, cafe, "went_to")`     |
 | ④ Recall later    | 3 cross-DB queries + manual merge | `db.search(vec, expand_depth=2)`     |
-| ⑤ Migrate data    | Export 3 files + write scripts    | Copy `memory.tdb` — one file         |
+| ⑤ Migrate data    | Export 3 files + write scripts    | Copy one `.tdb` in Rom, or one committed `.tdb/.vec/.pld/.flush_ok` generation in Mmap |
 
 ### Use Cases
 
@@ -150,12 +151,14 @@ Suppose you're building an **AI conversation memory system** and the user says "
 
 > ⚠️ **Dimension guidance: keeping database vectors at or below 3072 dimensions is strongly recommended.** TriviumDB storage and exact BruteForce retrieval support higher dimensions, but QuIVer's BQ signature safety limit is 3072 dimensions. Above this limit, automatic QuIVer construction is disabled and search safely falls back to BruteForce; manual QuIVer construction returns an explicit error. Higher-dimensional databases remain usable, but do not receive QuIVer ANN acceleration and incur substantially higher memory and compute costs.
 
-TriviumDB uses an **intelligent auto-routing dual engine** for vector indexing — fully automatic, zero configuration:
+TriviumDB uses an **intelligent auto-routing dual engine**. The automatic threshold is `ceil(8,000,000 / dim)`, clamped to 2,500–10,000 nodes, so low-dimensional data stays exact longer while high-dimensional data switches to ANN earlier:
 
-| Phase                     | Engine     | Activation Condition                                | Characteristics                                                   |
-| ------------------------- | ---------- | --------------------------------------------------- | ----------------------------------------------------------------- |
-| **Small-scale hot zone**  | BruteForce | < 10K nodes (or QuIVer not ready)                   | 100% exact recall, rayon multi-core, ultra-low latency            |
-| **Large-scale cold zone** | **QuIVer** | Auto-builds at ≥ 10K nodes when dimension ≤ 3072, independently persisted | BQ signatures + Vamana graph + f32 reranking, hot/cold separation |
+| Phase | Engine | Activation Condition | Characteristics |
+|---|---|---|---|
+| **Small-scale hot zone** | BruteForce | Below the dimension-dependent threshold, or QuIVer not ready | 100% exact recall, rayon multi-core |
+| **Large-scale cold zone** | **QuIVer** | Dimension ≤ 3072 and the dynamic threshold is reached | BQ signatures + Vamana graph + f32 reranking, independently persisted |
+
+For example, 384/768 dimensions trigger at 10,000 nodes, 1024 at about 7,813, 1536 at about 5,209, and 3072 at about 2,605.
 
 ### Key Innovations
 
@@ -298,7 +301,7 @@ Every TriviumDB node can carry a **vector, JSON document, sparse text, and graph
 
 ### TQL: A DIY-Composable Unified Query Language
 
-**TQL (Trivium Query Language)** is not three syntaxes glued together — it is a **freely composable tri-modal execution pipeline**. Every `WITH` stage produces a named NodeSet; vectors, property indexes, graph expansion, graph algorithms, paths, and set algebra are chained according to your business semantics, and the Cascades optimizer picks the physical plan within budget:
+**TQL (Trivium Query Language)** is not three syntaxes glued together — it is a **freely composable tri-modal execution pipeline**. Every `WITH` stage produces a named NodeSet; vectors, BM25/AC text recall, property indexes, graph expansion, graph algorithms, FISTA, DPP, NMF, paths, and set algebra can be chained according to application semantics, while Cascades picks a physical plan within budget:
 
 ```sql
 -- Document query: filter JSON fields (property indexes skip full scans when hit)
@@ -331,7 +334,16 @@ WHERE similarity(scored) > 0.5
 RETURN scored, similarity(scored) AS sim
 ORDER BY sim DESC LIMIT 10
 
--- 🛰️ Paths: bounded shortest paths from a semantic anchor
+-- Text anchors → parameterized SA-PPR → DPP diversification
+TEXT HYBRID "vector database" TOP 100 K1 1.2 B 0.75 AC_WEIGHT 1 AS text_seed
+WITH text_seed
+SA_PPR_CONFIG text_seed DEPTH 3 ALPHA 0.15 MAX_EDGES 64 MIN_WEIGHT 0 AS expanded
+WITH expanded
+DIVERSIFY expanded TOP 10 QUALITY_WEIGHT 1 AS diverse
+WITH diverse
+RETURN diverse, graph_score(diverse) AS relevance, diversity_score(diverse) AS diversity
+
+-- Paths: bounded shortest paths from a semantic anchor
 SEARCH VECTOR [1, 0] TOP 1 AS seed
 WITH seed
 SHORTEST_PATHS seed TO [42] LABEL cites AS route
@@ -339,7 +351,9 @@ WITH route
 RETURN path(route) AS nodes, path_length(route) AS hops
 ```
 
-A single query can also use `union` / `intersect` / `except` for multi-way candidate set algebra, `iterate` for fixed-point diffusion, and `COUNT/SUM/AVG/MIN/MAX/COLLECT` for aggregation. `EXPLAIN` exposes the physical operators chosen by Cascades, estimated rows, temp bytes, and budget slices.
+A query can also use `TEXT BM25/AC/HYBRID` for sparse recall, `RESIDUAL` for FISTA residual recall, `DIVERSIFY` for DPP diversification, `TOPICS` for bounded NMF topic assignment, and `SA_PPR_CONFIG` for parameterized diffusion. `union` / `intersect` / `except`, fixed-point `iterate`, and `COUNT/SUM/AVG/MIN/MAX/COLLECT` remain composable with them. `text_score()`, `residual_score()`, `diversity_score()`, `topic()`, and `topic_score()` are first-class expressions. `EXPLAIN` exposes physical operators, estimated rows, temporary bytes, and budget slices.
+
+TQL does not replace `search_advanced()`: `SearchConfig` still independently toggles hybrid text, FISTA, SA-PPR, DPP, and refractory fatigue inside the official fixed-order template. TQL reuses the same underlying algorithms while allowing advanced users to reorder the stateless operators.
 
 ```python
 # Prepared TQL: safely rebind business parameters on the same pipeline
@@ -359,6 +373,7 @@ Rust, Python, and Node.js share the same TQL, Prepared queries, four property in
 | **GraphFirst (MATCH + RANK)** | Produce valid anchors from graph structure, then compute exact vector Top-K within that set | “Find the most similar objects only within this relationship constraint” |
 | **Vector + structural expansion (SEARCH + EXPAND)** | Locate semantic anchors, then collect structural candidates through `OUTGOING`, `INCOMING`, or `BOTH` edges | Add upstream or downstream context after semantic retrieval |
 | **SA-PPR graph diffusion** | Propagate relevance energy from vector/text anchors over weighted edges, with optional inhibition, fatigue, and restart | Agent associative memory, RAG context expansion, recommendation recall |
+| **Text & cognitive operators (TQL)** | Independently compose `TEXT BM25/AC/HYBRID`, `RESIDUAL`, `SA_PPR_CONFIG`, `DIVERSIFY`, and `TOPICS`, with first-class scores | Custom RAG, agent memory, topic analysis, diversified retrieval |
 | **Hybrid retrieval (`search_hybrid`)** | Combine Aho-Corasick, BM25 sparse text, and dense vectors before graph diffusion and reranking | Production retrieval balancing exact terminology and semantic similarity |
 | **Graph algorithm pipelines (WITH)** | `pagerank` / `wcc` / `degree` / `leiden` / `label_propagation` / `sa_ppr` score NodeSets; `graph_score()` projects results | Influence ranking, community detection, graph analytics |
 | **Path queries (ALL_PATHS / SHORTEST_PATHS)** | Bounded all-paths and batch shortest paths with label sequences, forbidden nodes, and path aggregation | Lineage tracing, dependency analysis, authorization chains |
@@ -373,12 +388,12 @@ These modes are complementary rather than interchangeable: **Reachability answer
 
 | Feature                          | Description                                                                                                                |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| 🧪 **DIY hybrid queries**        | TQL `WITH` pipelines: vectors / properties / expansion / algorithms / paths / sets / iteration / aggregation freely composed, with deterministic Cascades optimization and transparent `EXPLAIN` |
+| 🧪 **DIY hybrid queries**        | TQL `WITH`: freely compose vectors / BM25 / AC / properties / graph expansion / FISTA / DPP / NMF / paths / sets / aggregation, with deterministic Cascades and transparent `EXPLAIN` |
 | 📊 **Four property indexes**     | Hash / Ordered ART / Composite ART / Roaring Bitmap persisted to `.pidx`; equality / range / prefix / composite / low-cardinality set operations all accelerated |
 | 🧮 **Built-in graph algorithms** | PageRank / WCC / Leiden / Betweenness / Degree / Label Propagation / SA-PPR callable inside queries                        |
 | 🛰️ **Paths & set algebra**      | `ALL_PATHS` / `SHORTEST_PATHS` / `UNION` / `INTERSECT` / `EXCEPT` / `ITERATE`, plus Prepared TQL across three languages     |
 | 🔍 **Hybrid retrieval**          | Vector anchor → Top-K → Graph spreading activation → Final ranking                                                         |
-| 🧠 **Cognitive pipeline**        | Multi-layer cognitive retrieval: FISTA residual probing / PPR graph diffusion / DPP diversity sampling / refractory period |
+| 🧠 **Cognitive pipeline**        | `search_advanced()` is the toggleable fixed-order official template; TQL freely composes stateless FISTA / parameterized SA-PPR / DPP / NMF, while refractory fatigue remains stateful API-only |
 | 🔌 **Hook system**               | 6-stage pipeline injection points with C/C++ FFI dynamic library plugin support                                            |
 | 📦 **O(1) operations**           | FreeList tombstone reuse + Reverse Hash Net for O(1) reverse edge lookup                                                   |
 | ⚡ **QuIVer ANN index**          | BQ signatures + Vamana graph navigation, hot/cold separation, incremental insert/delete/update                             |
@@ -402,7 +417,7 @@ These modes are complementary rather than interchangeable: **Reachability answer
 | Document data        | ✅ SQL       | ✅ SQL+JSONB  | ⚠️ Fixed table schema | ❌ Filter only | ⚠️ Property KV    | ✅ SurrealQL    | ✅ Arrow schema | ✅ Free JSON + full `$op` suite                 |
 | Vector search        | ⚠️ Extension | ✅ HNSW/IVFFlat | ✅ HNSW ext.  | ✅ HNSW          | ✅ Native HNSW     | ✅ MTree/HNSW   | ✅ IVF+quant    | ✅ QuIVer (BQ+Vamana)                           |
 | Graph traversal      | ⚠️ JOIN      | ⚠️ Recursive CTE | ✅ Cypher    | ❌ No graph ops  | ✅ Cypher          | ✅ Graph        | ❌ No graph ops | ✅ Native adjacency + `.gidx`                   |
-| Embedded single-file | ✅ One file  | ❌ PG server  | ✅ One file     | ⚠️ Memory/dir embedded | ❌ JVM        | ✅ Switchable   | ⚠️ Dir embedded | ✅ Single .tdb                                  |
+| Embedded portable storage | ✅ One file  | ❌ PG server  | ✅ One file     | ⚠️ Memory/dir embedded | ❌ JVM        | ✅ Switchable   | ⚠️ Dir embedded | ✅ Single `.tdb` in Rom / committed file set in Mmap |
 | Hybrid query freedom | ❌           | ⚠️ SQL JOINs  | ⚠️ Filtered ANN | ❌ Vector-only  | ⚠️ SEARCH-filtered | ⚠️ Manual       | ⚠️ Vec+FTS+SQL | ✅ WITH pipeline composition                    |
 | Property index suite | ✅ B+Tree    | ✅ B/GIN/BRIN | ⚠️ In-schema indexes | ⚠️ Payload indexes | ⚠️ Label+prop Range/Text | ⚠️ Unique/FTS/ANN-centric | ⚠️ Scalar idx | ✅ Hash / ART / Composite / Bitmap              |
 | Query optimizer      | ✅           | ✅            | ✅              | ❌ API-call based | ✅                 | ⚠️ EXPLAIN limited | ⚠️ DataFusion SQL | ✅ Cascades + EXPLAIN                        |
@@ -546,38 +561,16 @@ TriviumDB/
 - [x] CLI tool `triviumdb-cli` (command `tdb`): non-interactive commands + REPL (Tab completion / syntax highlighting / multi-line input) + config file
 - [x] Database visualization: terminal TUI (`tdb ui`, force-directed graph layout / k-hop expand / vector search playground)
 
-### v0.8 — The DIY Hybrid Query Era ✅ (Current, v0.8.5)
+### v0.8 — DIY Hybrid Queries & Engineering Hardening ✅ (Current)
 
-- [x] **Four persistent property indexes**: Hash / Ordered ART / Composite ART / Roaring Bitmap (`.pidx` v4, reads v1–v4) — equality, range, prefix, composite, and low-cardinality set operations all indexed
-- [x] **TQL `WITH` composable pipelines**: named NodeSets, scope validation, cross-stage composition; `FIND` / `MATCH` / `SEARCH` all enter the pipeline
-- [x] **Cascades query optimizer**: deterministic, bounded, statistics-aware, cost-driven — memo + physical candidates + budget slicing; `EXPLAIN` exposes operators / estimated rows / temp bytes
-- [x] **Built-in graph algorithm library**: PageRank / WCC / Degree / Betweenness / Leiden / Label Propagation / SA-PPR callable in-query with first-class `graph_score()` projection
-- [x] **Paths & set algebra**: `ALL_PATHS` (label sequences / forbidden nodes / path aggregation), `SHORTEST_PATHS`, `UNION` / `INTERSECT` / `EXCEPT`, `ITERATE` fixed-point diffusion
-- [x] **Expressions / aggregation / nulls**: `+ - * /`, `COALESCE`, `IS NULL`, `path()` / `path_length()`, `COUNT/SUM/AVG/MIN/MAX/COLLECT` with aggregate `DISTINCT`
-- [x] **Prepared TQL across three languages**: strict parameter binding; missing / extra / array-or-object parameters / non-finite values fail closed
-- [x] **Persistent sidecar index suite**: `.pidx` / `.gidx` (business graph blocks + in-edge + label directories) / `.text` (AC+BM25) / `.quiver` independently versioned, with `storage_info()` / `index_info()` diagnostics
-- [x] **Strict API migration policy**: all silent legacy compatibility removed; legacy entry points return `ApiMigrationRequired` migration errors with stable error codes; headerless WAL rejected
-- [x] **Production-grade hard guarantees**: ReadOnly / Immutable byte-level zero writes, four-dimensional query budgets failing closed, deterministic parallel execution, atomic generation publishing
-- [x] **TSNG tri-signal research track**: vector / property / graph unified scoring, six access paths, exact ground truth with Recall@K / NDCG@K evaluation
+- [x] **Unified TQL query system**: `FIND` / `MATCH` / `SEARCH`, composable `WITH`, Prepared parameters, expressions/aggregates/paths/set algebra, scientific notation, and atomic `SET VECTOR`
+- [x] **Bounded Cascades and graph computing**: deterministic statistics-aware physical plans, built-in graph algorithms, and estimated/actual metrics through `EXPLAIN ANALYZE`
+- [x] **Complete persistent index suite**: Hash / Ordered ART / Composite ART / Bitmap, graph blocks, AC+BM25, and QuIVer sidecars; dynamic QuIVer thresholds select between 2,500 and 10,000 nodes by vector workload
+- [x] **Production-grade storage and safety**: `.flush_ok` v3 binds `.tdb/.vec/.pld` generation, sizes, and CRCs; no production-reachable panic, byte-level zero writes in ReadOnly/Immutable modes, WAL/generation atomicity, fail-closed query/traversal/memory/Payload budgets, and bounded real fault injection
+- [x] **Payload tiering phase 1**: generation-scoped `.pld` mmap raw base, in-memory delta/tombstones, bounded LRU parsed cache, late materialization, `ColdPayloadScan`, and cross-language cache configuration
+- [x] **Aligned Rust/Python/Node capabilities**: first-class TQL values, four property indexes, Prepared TQL, six-stage Hooks, FFI ABI v2, and explicit migration errors instead of silent legacy compatibility
+- [x] **Tools and nightly Server**: CLI/REPL/TUI plus a dependency-isolated HTTP Server with Writer Actor, Group Commit, OCC/idempotency, health supervision, index management, NDJSON import, binary vectors, and cross-platform releases
 
-### v0.8.4 Engineering Hardening ✅
-
-- [x] **`.flush_ok` v2 integrity marker**: whole-file CRC32 over `.tdb`/`.vec` plus a self-checked marker; equal-length bit flips and sector tearing are now detectable. Corrupted inputs fail closed (ReadOnly/Immutable zero-write rejection; no more zero-vector pseudo-recovery), v1 markers remain bounded-compatible
-- [x] **Zero panic on production paths**: `panic!/unreachable!` no longer reachable from external input, disk parsing, query execution, or bindings — structured errors plus a static guard
-- [x] **Hooks across three languages + FFI ABI v2**: native six-stage hooks in Python / Node (structured error propagation; Node uses synchronous callbacks), FFI hooks upgraded to a v2 protocol with ABI version gating, error codes, and full six-stage injection
-- [x] **Real fault-injection matrix**: child-process kill at publication phases (old complete generation or new complete generation — nothing else), deterministic I/O failpoints, fail-at-failpoint allocators, and an independent disk-format mutation suite (`tests/format_spec/`), all on small fixtures in isolated subprocesses that never exhaust real resources
-- [x] **Cascades as the authoritative physical plan**: real Source/Filter/Expand/Rank candidates drive executor lowering, serializable physical properties, explicit `Complete/Fallback/BudgetExceeded` optimizer status surfaced via `EXPLAIN`
-- [x] **Property-index numeric key encoding v2**: unified ordered keys for integers/floats (fixes composite range false-empty results), exact large-integer comparison with safe fallbacks, in-memory rebuild migration for legacy sidecars; fixes Ordered-index LIMIT truncating candidates before other predicates apply
-- [x] **Community issue fixes**: #31 (parallel PageRank panic on out-of-subset edges) and #32 (hidden 5000-row TQL truncation)
-- [x] **TQL SEARCH hot-path rework**: top-K partial selection + lazy materialization removes a ~6× regression; pipeline normalization no longer destroys similarity ranking
-
-### v0.8.5 Query Experience & Server Preview ✅
-
-- [x] **Prepared parameterized vectors**: `SEARCH VECTOR [$a, $b, ...]` per-dimension parameter placeholders with the same strict binding semantics as Prepared TQL, with zero impact on existing vector-literal performance
-- [x] **Unified TQL value results**: `tql()` promoted to the unified first-class-value entry (nodes + scalar columns), with `tql_nodes()` for node-only results and `tql_values()` as a compatibility alias; legacy scalar RETURN support; Rust/Python/Node APIs kept in sync
-- [x] **FIND/MATCH scan regression fixed** (Issue #36): `RoaringTreemap` active NodeId lazy iteration, LIMIT pushdown with streaming early-stop, bounded Hash posting reads, skip-refilter when the index covers a simple equality, and lazy start-candidate scans for edge-less MATCH — small unindexed LIMITs no longer materialize the whole table
-- [x] **TriviumDB Server (nightly preview)**: `crates/triviumdb-server` HTTP shell — writer actor + bounded write queue + concurrent-read semaphore + writer-favored fairness gating, deadline / cancellation / idempotency keys, global / node / edge OCC (ETag / If-Match / 409 conflicts), multi-operation atomic transactions, core batched-WAL group commit with dynamic batching, prepared cache, NDJSON streaming, binary f32 vector transport, cooperative cancellation, per-request profile / EXPLAIN ANALYZE, index advice, structured logging (pretty/JSON) + request IDs + access logs + Prometheus metrics; cross-platform binary release pipeline (Linux x64/ARM64, Windows, macOS x64/ARM64)
-- [x] **Repository layout**: CLI relocated to `crates/triviumdb-cli` alongside the server crate with isolated workspace publishing (the embedded core gains zero server dependencies)
 
 ---
 
@@ -585,7 +578,7 @@ TriviumDB/
 
 1. **Trinity atomicity** — One `u64` ID maps to vector, payload, and edge table simultaneously. Insert atomic, delete atomic, never inconsistent.
 2. **Embedded-first** — No server, no port, no config file. `import triviumdb` is everything.
-3. **Auto performance routing** — BruteForce below 10K nodes (100% exact), QuIVer auto-builds and seamlessly takes over above 10K.
+3. **Auto performance routing** — Uses an approximately 8M-component workload to select a dynamic threshold between 2,500 and 10,000 nodes; exact BruteForce runs below it and QuIVer builds automatically once reached.
 4. **Predictable performance** — Sequential I/O only (WAL append + compaction sequential rewrite). SSD-safe.
 5. **Index as acceleration layer** — QuIVer is disposable derived data (`.tdb.quiver` file); auto-rebuilds on first query if missing.
 6. **Rust safety boundary** — All public APIs are safe code. Minimal audited `unsafe` only in mmap and SIMD paths.

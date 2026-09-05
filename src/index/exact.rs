@@ -116,7 +116,7 @@ pub fn search<T: VectorType>(
             db.get_payload(candidate.id).map(|payload| SearchHit {
                 id: candidate.id,
                 score: candidate.score,
-                payload: payload.clone(),
+                payload: (*payload).clone(),
             })
         })
         .collect())

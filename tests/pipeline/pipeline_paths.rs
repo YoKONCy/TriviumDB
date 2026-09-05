@@ -41,6 +41,8 @@ fn pipeline_budget() -> PipelineBudget {
         max_nodes: 100,
         max_node_set_bytes: 1024 * 1024,
         max_vector_read_bytes: 1024 * 1024,
+        max_payload_lookups: 100,
+        max_payload_parsed_bytes: 1024 * 1024,
         traversal: budget(),
         parallelism: Default::default(),
     }

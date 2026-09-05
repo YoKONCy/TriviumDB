@@ -27,6 +27,20 @@ pub enum TriviumError {
     #[error("Payload 过大 (Payload too large): {size_bytes} 字节，上限 {max_bytes} 字节")]
     PayloadTooLarge { size_bytes: usize, max_bytes: usize },
 
+    /// 唯一属性约束被另一个节点占用。
+    #[error(
+        "唯一约束冲突 (Unique constraint violation): 字段 {fields:?} 的键已被节点 {existing_id} 占用，冲突节点 {conflicting_id}"
+    )]
+    UniqueConstraintViolation {
+        fields: Vec<String>,
+        existing_id: u64,
+        conflicting_id: u64,
+    },
+
+    /// 条件更新的前置谓词不成立。
+    #[error("条件更新未匹配 (Conditional update did not match): 节点 {id}")]
+    ConditionalUpdateNotMatched { id: u64 },
+
     /// 插入时节点 ID 已存在
     #[error("节点已存在 (Node already exists): {0}")]
     NodeAlreadyExists(u64),
@@ -68,6 +82,16 @@ pub enum TriviumError {
         "查询行预算耗尽 (Query row budget exceeded): 最多允许处理 {budget} 行；请使用 LIMIT/OFFSET 分页并确保 OFFSET + LIMIT 不超过预算"
     )]
     QueryRowBudgetExceeded { budget: usize },
+
+    /// 查询访问或解析 Payload 的工作量超过显式预算。
+    #[error(
+        "Payload 查询预算耗尽 (Payload query budget exceeded): {dimension}，已使用 {used}，上限 {budget}"
+    )]
+    PayloadQueryBudgetExceeded {
+        dimension: &'static str,
+        used: u64,
+        budget: u64,
+    },
 
     #[error(
         "图遍历预算耗尽 (Graph traversal budget exceeded): {dimension:?}，visited={visited_nodes}，edges={examined_edges}，frontier={peak_frontier_size}，depth={depth_reached}"

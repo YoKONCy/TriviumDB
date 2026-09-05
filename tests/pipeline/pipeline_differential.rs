@@ -40,6 +40,8 @@ fn budget() -> PipelineBudget {
         max_nodes: 10_000,
         max_node_set_bytes: 32 * 1024 * 1024,
         max_vector_read_bytes: 32 * 1024 * 1024,
+        max_payload_lookups: 10_000,
+        max_payload_parsed_bytes: 32 * 1024 * 1024,
         traversal: TraversalBudget {
             max_visited_nodes: 10_000,
             max_examined_edges: 100_000,

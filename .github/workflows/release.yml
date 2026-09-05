@@ -1,10 +1,10 @@
-name: Publish to PyPI & NPM
+name: Publish to crates.io, PyPI & NPM
 
-# 触发条件：当推送形如 vX.Y.Z 的 tag 时触发
+# GitHub 使用 glob 过滤 Tag；版本门禁再严格限定 beta/stable
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
+      - 'v*.*.*'
 
 jobs:
   # ═══════════════════════════════════════════════════════════
@@ -14,19 +14,58 @@ jobs:
     name: Version Gate
     runs-on: ubuntu-latest
     outputs:
+      crates_should_publish: ${{ steps.check_crates.outputs.should_publish }}
       pypi_should_publish: ${{ steps.check_pypi.outputs.should_publish }}
       npm_should_publish: ${{ steps.check_npm.outputs.should_publish }}
       version: ${{ steps.extract.outputs.version }}
+      channel: ${{ steps.extract.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: 提取版本号
+      - name: 提取并校验版本号
         id: extract
+        shell: bash
         run: |
-          # 从 tag 名提取版本：v0.6.0 → 0.6.0
-          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="$GITHUB_REF_NAME"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
+            echo "只允许 beta（vX.Y.Z-beta.N）或 stable（vX.Y.Z）Tag 进入三端发布"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          CHANNEL="stable"
+          if [[ "$VERSION" == *-beta.* ]]; then
+            CHANNEL="beta"
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "📦 当前发布版本: $VERSION"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "当前发布版本: $VERSION ($CHANNEL)"
+
+      - name: 验证 stable Tag 位于 master
+        shell: bash
+        run: |
+          if [[ "${{ steps.extract.outputs.channel }}" == "stable" ]]; then
+            git fetch origin master
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/master"; then
+              echo "stable Tag 必须指向 master 历史中的提交"
+              exit 1
+            fi
+          fi
+
+      - name: 检查 crates.io 是否已发布
+        id: check_crates
+        shell: bash
+        run: |
+          VERSION="${{ steps.extract.outputs.version }}"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/triviumdb/${VERSION}")
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "crates.io 已存在 triviumdb@${VERSION}，跳过发布"
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "crates.io 未找到 triviumdb@${VERSION}，准备发布"
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: 检查 PyPI 是否已发布
         id: check_pypi
@@ -59,7 +98,7 @@ jobs:
     name: Release Quality Gate
     runs-on: ubuntu-latest
     needs: version-gate
-    if: needs.version-gate.outputs.pypi_should_publish == 'true' || needs.version-gate.outputs.npm_should_publish == 'true'
+    if: needs.version-gate.outputs.crates_should_publish == 'true' || needs.version-gate.outputs.pypi_should_publish == 'true' || needs.version-gate.outputs.npm_should_publish == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -78,13 +117,32 @@ jobs:
       - name: 运行发布质量门禁
         run: |
           cargo fmt --all -- --check
+          cargo check --workspace --all-targets
           cargo check --lib --features python
           cargo check --lib --features nodejs
-          cargo test --lib --tests -- --test-threads=1
-          cargo clippy --all-targets -- -D warnings
+          cargo test --workspace -- --test-threads=1
+          cargo clippy --workspace --all-targets -- -D warnings
+          npm ci
+          npx --yes --package typescript tsc --noEmit --skipLibCheck triviumdb.d.ts
 
   # ═══════════════════════════════════════════════════════════
-  #  阶段 1: 编译 Python Wheels（含 ARM64）
+  #  阶段 1: 发布 Rust Core 到 crates.io
+  # ═══════════════════════════════════════════════════════════
+  release-crates:
+    name: Release to crates.io
+    runs-on: ubuntu-latest
+    needs: [version-gate, quality-gate]
+    if: needs.version-gate.outputs.crates_should_publish == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 发布 Rust Core
+        run: cargo publish -p triviumdb --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # ═══════════════════════════════════════════════════════════
+  #  阶段 2: 编译 Python Wheels（含 ARM64）
   # ═══════════════════════════════════════════════════════════
   build-wheels:
     name: Build wheels (${{ matrix.name }})
@@ -268,9 +326,15 @@ jobs:
           EOF
 
       - name: Publish to NPM
+        shell: bash
         run: |
           npm install
-          npm publish
+          CHANNEL="${{ needs.version-gate.outputs.channel }}"
+          if [[ "$CHANNEL" == "beta" ]]; then
+            npm publish --tag beta
+          else
+            npm publish
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -280,13 +344,18 @@ jobs:
   summary:
     name: Release Summary
     runs-on: ubuntu-latest
-    needs: [version-gate, release, release-npm]
+    needs: [version-gate, release-crates, release, release-npm]
     if: always()
     steps:
       - name: 输出发布摘要
         run: |
-          echo "## 📦 Release Summary: v${{ needs.version-gate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "## Release Summary: v${{ needs.version-gate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.version-gate.outputs.crates_should_publish }}" = "true" ]; then
+            echo "- **crates.io**: 已发布 triviumdb@${{ needs.version-gate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **crates.io**: 跳过（版本已存在）" >> $GITHUB_STEP_SUMMARY
+          fi
           if [ "${{ needs.version-gate.outputs.pypi_should_publish }}" = "true" ]; then
             echo "- **PyPI**: ✅ 已发布 triviumdb==${{ needs.version-gate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           else

@@ -47,16 +47,41 @@ pub struct Provenance {
     pub property_origin: Option<PropertyOrigin>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphMetric {
+    PageRank,
+    Degree,
+    Betweenness,
+    SaPpr,
+    HarmonicCentrality,
+    WeightedDistance,
+    NodeSimilarity,
+    CoreNumber,
+    TriangleCount,
+    ClusteringCoefficient,
+    Authority,
+    Hub,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NodeRow {
     pub id: NodeId,
     pub similarity: Option<ScoreValue>,
     pub property_score: Option<ScoreValue>,
     pub graph_score: Option<ScoreValue>,
+    pub graph_metrics: BTreeMap<GraphMetric, ScoreValue>,
+    pub text_score: Option<ScoreValue>,
+    pub diversity_score: Option<ScoreValue>,
+    pub residual_score: Option<ScoreValue>,
+    pub topic_id: Option<u64>,
+    pub topic_score: Option<ScoreValue>,
     pub community_id: Option<u64>,
     pub path_strength: Option<ScoreValue>,
     pub path_count: Option<usize>,
     pub path: Option<Vec<NodeId>>,
+    pub pair: Option<(NodeId, NodeId)>,
+    pub path_rank: Option<usize>,
     pub provenance: Provenance,
 }
 
@@ -67,12 +92,29 @@ impl NodeRow {
             similarity: None,
             property_score: None,
             graph_score: None,
+            graph_metrics: BTreeMap::new(),
+            text_score: None,
+            diversity_score: None,
+            residual_score: None,
+            topic_id: None,
+            topic_score: None,
             community_id: None,
             path_strength: None,
             path_count: None,
             path: None,
+            pair: None,
+            path_rank: None,
             provenance: Provenance::default(),
         }
+    }
+    pub fn set_graph_metric(&mut self, metric: GraphMetric, score: ScoreValue) -> Result<()> {
+        self.graph_metrics.insert(metric, score);
+        self.graph_score = Some(score);
+        Ok(())
+    }
+
+    pub fn graph_metric(&self, metric: GraphMetric) -> Option<ScoreValue> {
+        self.graph_metrics.get(&metric).copied()
     }
 }
 
@@ -116,19 +158,48 @@ impl NodeSet {
     }
 
     fn estimated_bytes(&self) -> usize {
-        self.rows
+        let inline = self
+            .rows
             .len()
-            .saturating_mul(std::mem::size_of::<NodeRow>())
+            .saturating_mul(std::mem::size_of::<NodeRow>());
+        let graph_metrics = self
+            .rows
+            .iter()
+            .map(|row| {
+                row.graph_metrics.len().saturating_mul(
+                    std::mem::size_of::<GraphMetric>()
+                        .saturating_add(std::mem::size_of::<ScoreValue>())
+                        .saturating_add(std::mem::size_of::<usize>() * 4),
+                )
+            })
+            .sum::<usize>();
+        inline.saturating_add(graph_metrics)
     }
 
     fn normalize(&mut self) {
         let ranked = !self.rows.is_empty() && self.rows.iter().all(|row| row.similarity.is_some());
-        self.rows.sort_by_key(|row| row.id);
+        self.rows.sort_by(|left, right| {
+            left.id
+                .cmp(&right.id)
+                .then_with(|| left.pair.cmp(&right.pair))
+                .then_with(|| left.path_rank.cmp(&right.path_rank))
+                .then_with(|| {
+                    if left.path_rank.is_some() || right.path_rank.is_some() {
+                        left.path.cmp(&right.path)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+        });
         self.rows.dedup_by(|left, right| {
-            if left.id != right.id {
+            let same_ranked_path =
+                left.path_rank.is_none() && right.path_rank.is_none() || left.path == right.path;
+            if (left.id, left.pair, left.path_rank) != (right.id, right.pair, right.path_rank)
+                || !same_ranked_path
+            {
                 return false;
             }
-            merge_row(left, right);
+            merge_row(right, left);
             true
         });
         if ranked {
@@ -138,21 +209,73 @@ impl NodeSet {
 }
 
 fn merge_row(target: &mut NodeRow, source: &NodeRow) {
+    let target_distance = target
+        .graph_metrics
+        .get(&GraphMetric::WeightedDistance)
+        .copied();
+    let source_distance = source
+        .graph_metrics
+        .get(&GraphMetric::WeightedDistance)
+        .copied();
+    let weighted_path = target_distance.is_some() || source_distance.is_some();
+    let prefer_source_weighted = match (target_distance, source_distance) {
+        (None, Some(_)) => true,
+        (Some(left), Some(right)) => {
+            right.value < left.value
+                || right.value == left.value
+                    && source.path.as_ref().is_some_and(|candidate| {
+                        target
+                            .path
+                            .as_ref()
+                            .is_none_or(|current| candidate < current)
+                    })
+        }
+        _ => false,
+    };
+    if prefer_source_weighted {
+        if let Some(distance) = source_distance {
+            target
+                .graph_metrics
+                .insert(GraphMetric::WeightedDistance, distance);
+            target.graph_score = Some(distance);
+        }
+        target.path = source.path.clone();
+    }
     target.similarity = better_score(target.similarity, source.similarity);
     target.property_score = better_score(target.property_score, source.property_score);
-    target.graph_score = better_score(target.graph_score, source.graph_score);
+    if !weighted_path {
+        target.graph_score = better_score(target.graph_score, source.graph_score);
+    }
+    for (&metric, &score) in &source.graph_metrics {
+        if metric == GraphMetric::WeightedDistance && weighted_path {
+            continue;
+        }
+        let merged = better_score(target.graph_metrics.get(&metric).copied(), Some(score));
+        if let Some(merged) = merged {
+            target.graph_metrics.insert(metric, merged);
+        }
+    }
+    target.text_score = better_score(target.text_score, source.text_score);
+    target.diversity_score = better_score(target.diversity_score, source.diversity_score);
+    target.residual_score = better_score(target.residual_score, source.residual_score);
+    target.topic_id = target.topic_id.or(source.topic_id);
+    target.topic_score = better_score(target.topic_score, source.topic_score);
     target.community_id = target.community_id.or(source.community_id);
+    target.pair = target.pair.or(source.pair);
+    target.path_rank = target.path_rank.or(source.path_rank);
     target.path_strength = better_score(target.path_strength, source.path_strength);
     target.path_count = match (target.path_count, source.path_count) {
         (Some(left), Some(right)) => Some(left.saturating_add(right)),
         (left, right) => left.or(right),
     };
-    if source.path.as_ref().is_some_and(|candidate| {
-        target.path.as_ref().is_none_or(|current| {
-            candidate.len() < current.len()
-                || candidate.len() == current.len() && candidate < current
+    if !weighted_path
+        && source.path.as_ref().is_some_and(|candidate| {
+            target.path.as_ref().is_none_or(|current| {
+                candidate.len() < current.len()
+                    || candidate.len() == current.len() && candidate < current
+            })
         })
-    }) {
+    {
         target.path = source.path.clone();
     }
     target
@@ -198,6 +321,8 @@ pub struct PipelineBudget {
     pub max_nodes: usize,
     pub max_node_set_bytes: usize,
     pub max_vector_read_bytes: usize,
+    pub max_payload_lookups: u64,
+    pub max_payload_parsed_bytes: u64,
     pub traversal: TraversalBudget,
     pub parallelism: QueryParallelismBudget,
 }
@@ -209,6 +334,8 @@ impl Default for PipelineBudget {
             max_nodes: 100_000,
             max_node_set_bytes: 64 * 1024 * 1024,
             max_vector_read_bytes: 256 * 1024 * 1024,
+            max_payload_lookups: 100_000,
+            max_payload_parsed_bytes: 256 * 1024 * 1024,
             traversal: TraversalBudget::default(),
             parallelism: QueryParallelismBudget::default(),
         }
@@ -223,6 +350,8 @@ pub struct PipelineStageMetrics {
     pub elapsed_ns: u64,
     pub node_set_bytes: usize,
     pub vector_read_bytes: usize,
+    pub payload_lookups: u64,
+    pub payload_parsed_bytes: u64,
     pub visited_nodes: usize,
     pub examined_edges: usize,
 }
@@ -231,18 +360,26 @@ pub struct PipelineContext<'a, T: VectorType> {
     pub memtable: &'a MemTable<T>,
     pub budget: PipelineBudget,
     pub metrics: Vec<PipelineStageMetrics>,
+    profile: bool,
     stages: usize,
     vector_read_bytes: usize,
+    payload_start: crate::observability::PayloadMemoryStats,
 }
 
 impl<'a, T: VectorType> PipelineContext<'a, T> {
     pub fn new(memtable: &'a MemTable<T>, budget: PipelineBudget) -> Self {
+        Self::with_profile(memtable, budget, false)
+    }
+
+    pub fn with_profile(memtable: &'a MemTable<T>, budget: PipelineBudget, profile: bool) -> Self {
         Self {
             memtable,
             budget,
             metrics: Vec::new(),
+            profile,
             stages: 0,
             vector_read_bytes: 0,
+            payload_start: memtable.payload_memory_stats(),
         }
     }
 
@@ -257,7 +394,7 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
         Ok(())
     }
 
-    fn charge_vectors(&mut self, vectors: usize) -> Result<usize> {
+    pub(crate) fn charge_vectors(&mut self, vectors: usize) -> Result<usize> {
         let bytes = vectors
             .checked_mul(self.memtable.dim())
             .and_then(|value| value.checked_mul(std::mem::size_of::<T>()))
@@ -273,6 +410,37 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
             )));
         }
         Ok(bytes)
+    }
+
+    fn payload_usage(&self) -> (u64, u64) {
+        let current = self.memtable.payload_memory_stats();
+        (
+            current
+                .payload_lookups
+                .saturating_sub(self.payload_start.payload_lookups),
+            current
+                .payload_parsed_bytes
+                .saturating_sub(self.payload_start.payload_parsed_bytes),
+        )
+    }
+
+    fn validate_payload_budget(&self) -> Result<(u64, u64)> {
+        let (lookups, parsed_bytes) = self.payload_usage();
+        if lookups > self.budget.max_payload_lookups {
+            return Err(TriviumError::PayloadQueryBudgetExceeded {
+                dimension: "lookups",
+                used: lookups,
+                budget: self.budget.max_payload_lookups,
+            });
+        }
+        if parsed_bytes > self.budget.max_payload_parsed_bytes {
+            return Err(TriviumError::PayloadQueryBudgetExceeded {
+                dimension: "parsed_bytes",
+                used: parsed_bytes,
+                budget: self.budget.max_payload_parsed_bytes,
+            });
+        }
+        Ok((lookups, parsed_bytes))
     }
 
     fn validate_output(&self, output: &NodeSet) -> Result<()> {
@@ -302,23 +470,61 @@ pub fn execute_pipeline<T: VectorType>(
     let mut current = NodeSet::empty();
     for operator in operators {
         context.begin_stage()?;
-        let input_rows = current.len();
-        let started = Instant::now();
+        let input_rows = context.profile.then(|| current.len());
+        let started = context.profile.then(Instant::now);
         current = operator.apply(current, context)?;
         current.normalize();
         context.validate_output(&current)?;
-        context.metrics.push(PipelineStageMetrics {
-            operator: operator.name(),
-            input_rows,
-            output_rows: current.len(),
-            elapsed_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            node_set_bytes: current.estimated_bytes(),
-            vector_read_bytes: context.vector_read_bytes,
-            visited_nodes: 0,
-            examined_edges: 0,
-        });
+        let (payload_lookups, payload_parsed_bytes) = context.validate_payload_budget()?;
+        if let (Some(input_rows), Some(started)) = (input_rows, started) {
+            context.metrics.push(PipelineStageMetrics {
+                operator: operator.name(),
+                input_rows,
+                output_rows: current.len(),
+                elapsed_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                node_set_bytes: current.estimated_bytes(),
+                vector_read_bytes: context.vector_read_bytes,
+                payload_lookups,
+                payload_parsed_bytes,
+                visited_nodes: 0,
+                examined_edges: 0,
+            });
+        }
     }
     Ok(current)
+}
+
+pub struct FullNodeScanSource;
+
+impl<T: VectorType> PipelineOperator<T> for FullNodeScanSource {
+    fn name(&self) -> &'static str {
+        "full_node_scan"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        Ok(NodeSet::from_ids(context.memtable.active_node_ids()))
+    }
+}
+
+pub struct FilteredNodeScanSource {
+    pub filter: Filter,
+}
+
+impl<T: VectorType> PipelineOperator<T> for FilteredNodeScanSource {
+    fn name(&self) -> &'static str {
+        "filtered_node_scan"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        Ok(NodeSet::from_ids(
+            context.memtable.active_node_ids().filter(|id| {
+                context
+                    .memtable
+                    .get_payload(*id)
+                    .is_some_and(|payload| self.filter.matches(&payload))
+            }),
+        ))
+    }
 }
 
 pub struct NodeIdsSource {
@@ -458,6 +664,334 @@ impl<T: VectorType> PipelineOperator<T> for QuiverVectorSearch<T> {
                 })
                 .collect(),
         ))
+    }
+}
+
+pub struct TextSearchSource {
+    pub query: String,
+    pub top_k: usize,
+    pub k1: f32,
+    pub b: f32,
+    pub ac_weight: f32,
+    pub include_bm25: bool,
+    pub include_ac: bool,
+}
+
+impl<T: VectorType> PipelineOperator<T> for TextSearchSource {
+    fn name(&self) -> &'static str {
+        "text_search_source"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        if self.query.len() > 4096
+            || self.query.split_whitespace().count() > 256
+            || context.memtable.node_count() > context.budget.max_nodes
+            || self.top_k == 0
+            || self.top_k > context.budget.max_nodes
+        {
+            return Err(TriviumError::InvalidInput(
+                "文本查询或召回规模超过预算 (Text query or recall size exceeds budget)".into(),
+            ));
+        }
+        if !self.k1.is_finite()
+            || self.k1 <= 0.0
+            || !self.b.is_finite()
+            || !(0.0..=1.0).contains(&self.b)
+            || !self.ac_weight.is_finite()
+            || self.ac_weight < 0.0
+        {
+            return Err(TriviumError::InvalidInput(
+                "文本召回参数无效 (Invalid text retrieval parameters)".into(),
+            ));
+        }
+        let index = context.memtable.text_engine();
+        let mut scores = HashMap::<NodeId, f32>::new();
+        if self.include_bm25 {
+            for (id, score) in index.search_bm25(&self.query, self.k1, self.b) {
+                *scores.entry(id).or_default() += score;
+            }
+        }
+        if self.include_ac {
+            for (id, score) in index.search_ac(&self.query) {
+                *scores.entry(id).or_default() += score * self.ac_weight;
+            }
+        }
+        let mut scored = scores.into_iter().collect::<Vec<_>>();
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        scored.truncate(self.top_k);
+        Ok(NodeSet::from_rows(
+            scored
+                .into_iter()
+                .filter(|(id, _)| context.memtable.contains(*id))
+                .map(|(id, score)| {
+                    let mut row = NodeRow::new(id);
+                    row.text_score = Some(ScoreValue {
+                        value: score,
+                        kind: ScoreKind::Exact,
+                    });
+                    row.provenance.source_ids.push(id);
+                    row
+                })
+                .collect(),
+        ))
+    }
+}
+
+pub struct DppDiversify {
+    pub top_k: usize,
+    pub quality_weight: f32,
+}
+
+impl<T: VectorType> PipelineOperator<T> for DppDiversify {
+    fn name(&self) -> &'static str {
+        "dpp_diversify"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        const MAX_POOL: usize = 512;
+        if self.top_k == 0 || input.len() > MAX_POOL || self.top_k > input.len() {
+            return Err(TriviumError::InvalidInput(
+                "DPP 要求 1 <= TOP <= 候选数且候选池不超过 512 (DPP candidate bounds violated)"
+                    .into(),
+            ));
+        }
+        if !self.quality_weight.is_finite() || !(0.0..=10.0).contains(&self.quality_weight) {
+            return Err(TriviumError::InvalidInput("DPP quality_weight 无效".into()));
+        }
+        let temp_cells = input
+            .len()
+            .checked_mul(self.top_k)
+            .ok_or_else(|| TriviumError::QueryExecution("DPP 临时预算溢出".into()))?;
+        let temp_bytes = temp_cells
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| TriviumError::QueryExecution("DPP 临时字节预算溢出".into()))?;
+        if temp_bytes > context.budget.max_node_set_bytes {
+            return Err(TriviumError::QueryExecution(
+                "DPP 超过临时内存预算 (DPP exceeds temporary memory budget)".into(),
+            ));
+        }
+        context.charge_vectors(input.len())?;
+        let mut rows = input.into_rows();
+        rows.sort_by_key(|row| row.id);
+        let mut vectors = Vec::with_capacity(rows.len());
+        let mut scores = Vec::with_capacity(rows.len());
+        let mut valid = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(vector) = context.memtable.get_vector(row.id) {
+                vectors.push(vector.iter().map(|value| value.to_f32()).collect());
+                scores.push(
+                    row.similarity
+                        .or(row.text_score)
+                        .or(row.graph_score)
+                        .map_or(1.0, |score| score.value),
+                );
+                valid.push(row);
+            }
+        }
+        let selected =
+            crate::cognitive::dpp_greedy(&vectors, &scores, self.top_k, self.quality_weight);
+        let mut output = Vec::with_capacity(selected.len());
+        for (rank, index) in selected.into_iter().enumerate() {
+            if let Some(mut row) = valid.get(index).cloned() {
+                row.diversity_score = Some(ScoreValue {
+                    value: 1.0 / (rank + 1) as f32,
+                    kind: ScoreKind::Approximate,
+                });
+                output.push(row);
+            }
+        }
+        Ok(NodeSet { rows: output })
+    }
+}
+
+pub struct FistaResidualRecall<T: VectorType> {
+    pub query: Vec<T>,
+    pub top_k: usize,
+    pub lambda: f32,
+    pub threshold: f32,
+    pub iterations: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for FistaResidualRecall<T> {
+    fn name(&self) -> &'static str {
+        "fista_residual_recall"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        const MAX_CANDIDATES: usize = 512;
+        const MAX_ITERATIONS: usize = 256;
+        if input.is_empty()
+            || input.len() > MAX_CANDIDATES
+            || self.top_k == 0
+            || self.iterations == 0
+            || self.iterations > MAX_ITERATIONS
+            || !self.lambda.is_finite()
+            || self.lambda <= 0.0
+            || !self.threshold.is_finite()
+            || self.threshold < 0.0
+        {
+            return Err(TriviumError::InvalidInput(
+                "FISTA 参数或候选预算无效".into(),
+            ));
+        }
+        let gram_cells = input
+            .len()
+            .checked_mul(input.len())
+            .ok_or_else(|| TriviumError::QueryExecution("FISTA Gram 矩阵预算溢出".into()))?;
+        let gram_bytes = gram_cells
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| TriviumError::QueryExecution("FISTA Gram 矩阵字节预算溢出".into()))?;
+        if gram_bytes > context.budget.max_node_set_bytes {
+            return Err(TriviumError::QueryExecution(
+                "FISTA Gram 矩阵超过临时内存预算 (FISTA Gram matrix exceeds temporary memory budget)".into(),
+            ));
+        }
+        context.charge_vectors(input.len().saturating_add(context.memtable.node_count()))?;
+        let entities = input
+            .rows()
+            .iter()
+            .filter_map(|row| {
+                context.memtable.get_vector(row.id).map(|vector| {
+                    vector
+                        .iter()
+                        .map(|value| value.to_f32())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let query = self
+            .query
+            .iter()
+            .map(|value| value.to_f32())
+            .collect::<Vec<_>>();
+        let (_, residual, norm) =
+            crate::cognitive::fista_solve(&query, &entities, self.lambda, self.iterations);
+        if norm <= self.threshold {
+            return Ok(NodeSet::empty());
+        }
+        let mut inherited = input
+            .into_rows()
+            .into_iter()
+            .map(|row| (row.id, row))
+            .collect::<BTreeMap<_, _>>();
+        let mut scored = context
+            .memtable
+            .all_node_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let vector = context.memtable.get_vector(id)?;
+                let vector = vector
+                    .iter()
+                    .map(|value| value.to_f32())
+                    .collect::<Vec<_>>();
+                Some((id, crate::vector::cosine_similarity_f32(&residual, &vector)))
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        scored.truncate(self.top_k);
+        Ok(NodeSet::from_rows(
+            scored
+                .into_iter()
+                .map(|(id, score)| {
+                    let mut row = inherited.remove(&id).unwrap_or_else(|| NodeRow::new(id));
+                    row.residual_score = Some(ScoreValue {
+                        value: score,
+                        kind: ScoreKind::Exact,
+                    });
+                    row
+                })
+                .collect(),
+        ))
+    }
+}
+
+pub struct NmfTopics {
+    pub topics: usize,
+    pub iterations: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for NmfTopics {
+    fn name(&self) -> &'static str {
+        "nmf_topics"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        const MAX_CANDIDATES: usize = 512;
+        const MAX_TOPICS: usize = 32;
+        const MAX_ITERATIONS: usize = 256;
+        if input.is_empty()
+            || input.len() > MAX_CANDIDATES
+            || self.topics == 0
+            || self.topics > MAX_TOPICS
+            || self.topics > input.len()
+            || self.iterations == 0
+            || self.iterations > MAX_ITERATIONS
+        {
+            return Err(TriviumError::InvalidInput("NMF 参数或矩阵预算无效".into()));
+        }
+        let matrix_cells = input
+            .len()
+            .checked_mul(context.memtable.dim())
+            .and_then(|value| value.checked_add(input.len().checked_mul(self.topics)?))
+            .and_then(|value| value.checked_add(self.topics.checked_mul(context.memtable.dim())?))
+            .ok_or_else(|| TriviumError::QueryExecution("NMF 矩阵预算溢出".into()))?;
+        let matrix_bytes = matrix_cells
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| TriviumError::QueryExecution("NMF 矩阵字节预算溢出".into()))?;
+        if matrix_bytes > context.budget.max_node_set_bytes {
+            return Err(TriviumError::QueryExecution(
+                "NMF 矩阵超过临时内存预算 (NMF matrices exceed temporary memory budget)".into(),
+            ));
+        }
+        context.charge_vectors(input.len())?;
+        let mut rows = input.into_rows();
+        rows.sort_by_key(|row| row.id);
+        let mut flat = Vec::with_capacity(rows.len().saturating_mul(context.memtable.dim()));
+        for row in &rows {
+            let vector = context
+                .memtable
+                .get_vector(row.id)
+                .ok_or(TriviumError::NodeNotFound(row.id))?;
+            flat.extend(vector.iter().map(|value| value.to_f32()));
+        }
+        let (weights, _) = crate::cognitive::nmf_multiplicative_update(
+            &flat,
+            rows.len(),
+            context.memtable.dim(),
+            self.topics,
+            self.iterations,
+            1e-4,
+        );
+        for (row_index, row) in rows.iter_mut().enumerate() {
+            let start = row_index * self.topics;
+            let topic_weights = &weights[start..start + self.topics];
+            let (topic, score) = topic_weights
+                .iter()
+                .copied()
+                .enumerate()
+                .max_by(|left, right| {
+                    left.1
+                        .total_cmp(&right.1)
+                        .then_with(|| right.0.cmp(&left.0))
+                })
+                .unwrap_or((0, 0.0));
+            row.topic_id = Some(topic as u64);
+            row.topic_score = Some(ScoreValue {
+                value: score,
+                kind: ScoreKind::Approximate,
+            });
+        }
+        Ok(NodeSet { rows })
     }
 }
 
@@ -656,7 +1190,7 @@ impl<T: VectorType> PipelineOperator<T> for PayloadFilter {
             context
                 .memtable
                 .get_payload(row.id)
-                .is_some_and(|payload| self.filter.matches(payload))
+                .is_some_and(|payload| self.filter.matches(&payload))
         });
         Ok(input)
     }
@@ -1010,6 +1544,175 @@ impl<T: VectorType> PipelineOperator<T> for BatchShortestPaths {
 }
 
 /// 从输入锚点到目标集合枚举有界简单路径并聚合路径强度。
+pub struct WeightedShortestPathsOperator {
+    pub targets: Vec<NodeId>,
+    pub label_filter: Option<String>,
+}
+
+impl<T: VectorType> PipelineOperator<T> for WeightedShortestPathsOperator {
+    fn name(&self) -> &'static str {
+        "weighted_dijkstra"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        if context.memtable.node_count() > context.budget.max_nodes {
+            return Err(TriviumError::QueryExecution(
+                "加权最短路径全图节点数超过预算 (Weighted shortest path graph exceeds node budget)"
+                    .into(),
+            ));
+        }
+        let universe = context.memtable.active_node_ids().collect();
+        let workspace = crate::graph::analytics::build_workspace(
+            context.memtable,
+            &universe,
+            self.label_filter.as_deref(),
+            context.budget.traversal.max_examined_edges,
+            context.budget.max_node_set_bytes,
+        )?;
+        let request_count = input
+            .len()
+            .checked_mul(self.targets.len())
+            .ok_or_else(|| TriviumError::QueryExecution("加权最短路径请求数量溢出".into()))?;
+        let request_budget = context
+            .budget
+            .traversal
+            .max_examined_edges
+            .checked_div(request_count.max(1))
+            .unwrap_or(0);
+        let mut rows = Vec::new();
+        for source in input.rows {
+            for &target in &self.targets {
+                let Some(path) = crate::graph::analytics::weighted_dijkstra(
+                    &workspace,
+                    source.id,
+                    target,
+                    request_budget,
+                )?
+                else {
+                    continue;
+                };
+                let mut row = NodeRow::new(target);
+                row.path = Some(path.nodes.clone());
+                row.path_count = Some(1);
+                row.provenance.source_ids = vec![source.id];
+                row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+                row.set_graph_metric(
+                    GraphMetric::WeightedDistance,
+                    ScoreValue {
+                        value: path.cost as f32,
+                        kind: ScoreKind::Exact,
+                    },
+                )?;
+                rows.push(row);
+            }
+        }
+        Ok(NodeSet::from_rows(rows))
+    }
+}
+
+pub struct YenKShortestPathsOperator {
+    pub targets: Vec<NodeId>,
+    pub label_filter: Option<String>,
+    pub k: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for YenKShortestPathsOperator {
+    fn name(&self) -> &'static str {
+        "yen_k_shortest_paths"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        if context.memtable.node_count() > context.budget.max_nodes {
+            return Err(TriviumError::QueryExecution(
+                "Yen 全图节点数超过预算 (Yen graph exceeds node budget)".into(),
+            ));
+        }
+        let universe = context.memtable.active_node_ids().collect();
+        let workspace = crate::graph::analytics::build_workspace(
+            context.memtable,
+            &universe,
+            self.label_filter.as_deref(),
+            context.budget.traversal.max_examined_edges,
+            context.budget.max_node_set_bytes,
+        )?;
+        let mut rows = Vec::new();
+        for source in input.rows {
+            for &target in &self.targets {
+                let paths = crate::graph::analytics::yen_k_shortest_paths(
+                    &workspace,
+                    source.id,
+                    target,
+                    self.k,
+                    context.budget.traversal.max_examined_edges,
+                    context.budget.max_nodes,
+                )?;
+                for (rank, path) in paths.into_iter().enumerate() {
+                    let mut row = NodeRow::new(target);
+                    row.path = Some(path.nodes.clone());
+                    row.path_count = Some(1);
+                    row.path_rank = Some(rank + 1);
+                    row.provenance.source_ids = vec![source.id];
+                    row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+                    row.set_graph_metric(
+                        GraphMetric::WeightedDistance,
+                        ScoreValue {
+                            value: path.cost as f32,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                    rows.push(row);
+                }
+            }
+        }
+        Ok(NodeSet::from_rows(rows))
+    }
+}
+
+pub struct NodeSimilarityOperator {
+    pub label_filter: Option<String>,
+    pub top_k: usize,
+    pub cutoff: f64,
+}
+
+impl<T: VectorType> PipelineOperator<T> for NodeSimilarityOperator {
+    fn name(&self) -> &'static str {
+        "node_similarity"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let universe = ids(&input);
+        let workspace = crate::graph::analytics::build_workspace(
+            context.memtable,
+            &universe,
+            self.label_filter.as_deref(),
+            context.budget.traversal.max_examined_edges,
+            context.budget.max_node_set_bytes,
+        )?;
+        let pairs = crate::graph::analytics::node_similarity(
+            &workspace,
+            self.top_k,
+            self.cutoff,
+            context.budget.traversal.max_examined_edges,
+            context.budget.max_node_set_bytes,
+        )?;
+        let mut rows = Vec::with_capacity(pairs.pairs().len());
+        for pair in pairs.pairs() {
+            let mut row = NodeRow::new(pair.left);
+            row.pair = Some((pair.left, pair.right));
+            row.provenance.source_ids = vec![pair.left, pair.right];
+            row.set_graph_metric(
+                GraphMetric::NodeSimilarity,
+                ScoreValue {
+                    value: pair.similarity as f32,
+                    kind: ScoreKind::Exact,
+                },
+            )?;
+            rows.push(row);
+        }
+        Ok(NodeSet::from_rows(rows))
+    }
+}
+
 pub struct BoundedAllPaths {
     pub targets: Vec<NodeId>,
     pub config: crate::graph::pathfinding::BoundedPathConfig,
@@ -1195,10 +1898,12 @@ impl<T: VectorType> PipelineOperator<T> for PageRankOperator {
         for (id, score) in result.scores {
             if output_ids.contains(&id) {
                 let row = rows.entry(id).or_insert_with(|| NodeRow::new(id));
-                row.graph_score = Some(ScoreValue {
+                let score = ScoreValue {
                     value: score as f32,
                     kind: ScoreKind::Exact,
-                });
+                };
+                row.graph_score = Some(score);
+                row.graph_metrics.insert(GraphMetric::PageRank, score);
             }
         }
         Ok(NodeSet {
@@ -1476,6 +2181,164 @@ impl<T: VectorType> PipelineOperator<T> for LabelPropagationOperator {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuralAlgorithm {
+    Scc,
+    KCore,
+    ArticulationPoints,
+    TriangleCount,
+    Hits,
+    HarmonicCentrality,
+}
+
+pub struct StructuralGraphOperator {
+    pub mode: GraphSubsetMode,
+    pub algorithm: StructuralAlgorithm,
+    pub label_filter: Option<String>,
+    pub max_iterations: usize,
+    pub tolerance: f64,
+}
+
+impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
+    fn name(&self) -> &'static str {
+        match self.algorithm {
+            StructuralAlgorithm::Scc => "subset_scc",
+            StructuralAlgorithm::KCore => "subset_k_core",
+            StructuralAlgorithm::ArticulationPoints => "subset_articulation_points",
+            StructuralAlgorithm::TriangleCount => "subset_triangle_count",
+            StructuralAlgorithm::Hits => "subset_hits",
+            StructuralAlgorithm::HarmonicCentrality => "subset_harmonic_centrality",
+        }
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
+        if universe.len() > context.budget.max_nodes {
+            return Err(TriviumError::QueryExecution(
+                "图算法节点数超过预算 (Graph algorithm node count exceeds budget)".into(),
+            ));
+        }
+        let workspace = crate::graph::analytics::build_workspace(
+            context.memtable,
+            &universe,
+            self.label_filter.as_deref(),
+            context.budget.traversal.max_examined_edges,
+            context.budget.max_node_set_bytes,
+        )?;
+        let old = rows_by_id(&input);
+        let mut rows = output_ids
+            .iter()
+            .map(|&id| {
+                old.get(&id)
+                    .map_or_else(|| NodeRow::new(id), |row| (*row).clone())
+            })
+            .collect::<Vec<_>>();
+        match self.algorithm {
+            StructuralAlgorithm::Scc => {
+                let components = crate::graph::analytics::strongly_connected_components(&workspace);
+                for row in &mut rows {
+                    row.community_id = components.get(&row.id).copied();
+                }
+            }
+            StructuralAlgorithm::KCore => {
+                let core = crate::graph::analytics::k_core(&workspace);
+                for row in &mut rows {
+                    row.set_graph_metric(
+                        GraphMetric::CoreNumber,
+                        ScoreValue {
+                            value: core.get(&row.id).copied().unwrap_or(0) as f32,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                }
+            }
+            StructuralAlgorithm::ArticulationPoints => {
+                let points = crate::graph::analytics::articulation_points(&workspace);
+                rows.retain(|row| points.contains(&row.id));
+            }
+            StructuralAlgorithm::TriangleCount => {
+                let metrics = crate::graph::analytics::triangle_metrics(
+                    &workspace,
+                    context.budget.traversal.max_examined_edges,
+                )?;
+                for row in &mut rows {
+                    let (triangles, coefficient) =
+                        metrics.get(&row.id).copied().unwrap_or_default();
+                    row.set_graph_metric(
+                        GraphMetric::TriangleCount,
+                        ScoreValue {
+                            value: triangles as f32,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                    row.set_graph_metric(
+                        GraphMetric::ClusteringCoefficient,
+                        ScoreValue {
+                            value: coefficient as f32,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                }
+            }
+            StructuralAlgorithm::Hits => {
+                let scores = crate::graph::analytics::hits(
+                    &workspace,
+                    self.max_iterations,
+                    self.tolerance,
+                    context.budget.traversal.max_examined_edges,
+                )?;
+                for row in &mut rows {
+                    let (authority, hub) = scores.get(&row.id).copied().unwrap_or_default();
+                    row.set_graph_metric(
+                        GraphMetric::Authority,
+                        ScoreValue {
+                            value: authority as f32,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                    row.set_graph_metric(
+                        GraphMetric::Hub,
+                        ScoreValue {
+                            value: hub as f32,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                }
+            }
+            StructuralAlgorithm::HarmonicCentrality => {
+                let scores = crate::graph::analytics::harmonic_centrality(
+                    &workspace,
+                    context.budget.traversal.max_examined_edges,
+                )?;
+                for row in &mut rows {
+                    row.set_graph_metric(
+                        GraphMetric::HarmonicCentrality,
+                        ScoreValue {
+                            value: scores.get(&row.id).copied().unwrap_or_default() as f32,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                }
+            }
+        }
+        Ok(NodeSet::from_rows(rows))
+    }
+}
+
+pub fn graph_metric_from_name(name: &str) -> Option<GraphMetric> {
+    match name {
+        "harmonic_centrality" => Some(GraphMetric::HarmonicCentrality),
+        "weighted_distance" => Some(GraphMetric::WeightedDistance),
+        "node_similarity" => Some(GraphMetric::NodeSimilarity),
+        "core_number" => Some(GraphMetric::CoreNumber),
+        "triangle_count" => Some(GraphMetric::TriangleCount),
+        "clustering_coefficient" => Some(GraphMetric::ClusteringCoefficient),
+        "authority_score" => Some(GraphMetric::Authority),
+        "hub_score" => Some(GraphMetric::Hub),
+        _ => None,
+    }
+}
+
 /// 有限深度 SA-PPR 算子。分数质量明确标记为 DepthBounded，而非收敛型 PPR Exact。
 pub struct SaPprOperator {
     pub max_depth: usize,
@@ -1495,7 +2358,7 @@ impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
             .rows
             .iter()
             .filter_map(|row| {
-                let payload = context.memtable.get_payload(row.id)?.clone();
+                let payload = (*context.memtable.get_payload(row.id)?).clone();
                 Some(crate::node::SearchHit {
                     id: row.id,
                     score: row
@@ -1524,10 +2387,12 @@ impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
             hits.into_iter()
                 .map(|hit| {
                     let mut row = NodeRow::new(hit.id);
-                    row.graph_score = Some(ScoreValue {
+                    let graph_score = ScoreValue {
                         value: hit.score,
                         kind: ScoreKind::DepthBounded,
-                    });
+                    };
+                    row.graph_score = Some(graph_score);
+                    row.graph_metrics.insert(GraphMetric::SaPpr, graph_score);
                     row.provenance.source_ids = input.rows.iter().map(|seed| seed.id).collect();
                     row.provenance.min_depth = Some(self.max_depth);
                     row

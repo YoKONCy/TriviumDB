@@ -183,6 +183,36 @@ fn 只读打开遇到空旧版本_wal拒绝且字节不变() {
 }
 
 #[test]
+fn 只读与不可变遇到非空v2_wal均拒绝且完整文件状态零写() {
+    let path = tmp_db("legacy_nonempty_v2_wal");
+    create_clean_database(&path);
+    let wal_path = format!("{path}.wal");
+    let entry = triviumdb::storage::wal::WalEntry::Delete::<f32> { id: 1 };
+    let data = bincode::serialize(&entry).unwrap();
+    let mut bytes = vec![b'T', b'V', b'W', b'L', 2, 0];
+    bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&data);
+    bytes.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
+    std::fs::write(&wal_path, &bytes).unwrap();
+    let before = file_state(&path);
+
+    assert!(matches!(
+        Database::<f32>::open_read_only(&path, 2),
+        Err(TriviumError::RecoveryRequired { .. })
+    ));
+    assert_eq!(file_state(&path), before);
+
+    let immutable = Config {
+        dim: 2,
+        access_mode: AccessMode::Immutable,
+        ..Default::default()
+    };
+    assert!(Database::<f32>::open_with_config(&path, immutable).is_err());
+    assert_eq!(file_state(&path), before);
+    cleanup(&path);
+}
+
+#[test]
 fn 只读打开遇到待恢复_wal明确拒绝且不修改文件() {
     let path = tmp_db("wal");
     create_clean_database(&path);

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "setup": {
+    "dimension": 2,
+    "nodes": [
+      {"id": 1, "vector": [1.0, 0.0], "payload": {"kind": "alpha", "rank": 1}},
+      {"id": 2, "vector": [0.0, 1.0], "payload": {"kind": "beta", "rank": 2}}
+    ],
+    "edges": [
+      {"source": 1, "target": 2, "label": "next", "weight": 1.0}
+    ]
+  },
+  "cases": [
+    {
+      "name": "node_id_roundtrip",
+      "operation": "get_payload",
+      "node_id": 2,
+      "expected": {"field": "kind", "value": "beta"}
+    },
+    {
+      "name": "prepared_scalar",
+      "operation": "prepared_tql",
+      "tql": "FIND {kind: \"alpha\"} AS seed WITH seed RETURN seed, $bonus + 1 AS score",
+      "parameters": {"bonus": 4},
+      "expected": {"row_count": 1, "column": "score", "value": 5}
+    },
+    {
+      "name": "path_value",
+      "operation": "tql_path",
+      "tql": "SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed SHORTEST_PATHS seed TO [2] LABEL next AS route WITH route RETURN path(route) AS path",
+      "expected": {"path": [1, 2]}
+    },
+    {
+      "name": "prepared_missing_parameter",
+      "operation": "prepared_missing_parameter",
+      "tql": "FIND {kind: \"alpha\"} AS seed WITH seed RETURN seed, $required AS value",
+      "parameters": {},
+      "expected": {"error_contains_any": ["缺少参数", "missing parameter"]}
+    }
+  ],
+  "ffi_cases": [
+    {
+      "name": "hook_abi_v2",
+      "operation": "ffi_hook_abi",
+      "expected": {
+        "abi_version": 2,
+        "stages": [1, 2, 3, 4, 5, 6],
+        "error_status": 77,
+        "capacity_overflow_rejected": true
+      }
+    }
+  ]
+}

@@ -477,33 +477,43 @@ impl TqlLexer {
         Ok(tokens)
     }
 
-    /// 读取数字（整数或浮点数）
+    /// 读取十进制数字，支持整数、小数和科学计数法。
     fn read_number(&mut self) -> Result<TqlToken, String> {
         let mut num_str = String::new();
         let mut is_float = false;
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() {
-                num_str.push(c);
-                self.advance();
-            } else if c == '.'
-                && !is_float
-                && self.peek_ahead(1).is_some_and(|c| c.is_ascii_digit())
-            {
-                // 只有 "数字.数字" 才是浮点数，"数字.." 是整数 + DotDot
-                is_float = true;
-                num_str.push(c);
-                self.advance();
-            } else {
-                break;
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+            num_str.push(self.advance().unwrap_or_default());
+        }
+        if self.peek() == Some('.') && self.peek_ahead(1).is_some_and(|c| c.is_ascii_digit()) {
+            // 只有“数字.数字”才是小数，“数字..”保留为整数和 DotDot。
+            is_float = true;
+            num_str.push(self.advance().unwrap_or_default());
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                num_str.push(self.advance().unwrap_or_default());
+            }
+        }
+        if matches!(self.peek(), Some('e' | 'E')) {
+            is_float = true;
+            num_str.push(self.advance().unwrap_or_default());
+            if matches!(self.peek(), Some('+' | '-')) {
+                num_str.push(self.advance().unwrap_or_default());
+            }
+            if !self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                return Err(format!("Bad float exponent: {num_str}"));
+            }
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                num_str.push(self.advance().unwrap_or_default());
             }
         }
         if is_float {
-            Ok(TqlToken::FloatLit(
-                num_str.parse().map_err(|e| format!("Bad float: {}", e))?,
-            ))
+            let value: f64 = num_str.parse().map_err(|e| format!("Bad float: {e}"))?;
+            if !value.is_finite() {
+                return Err(format!("Non-finite float literal: {num_str}"));
+            }
+            Ok(TqlToken::FloatLit(value))
         } else {
             Ok(TqlToken::IntLit(
-                num_str.parse().map_err(|e| format!("Bad int: {}", e))?,
+                num_str.parse().map_err(|e| format!("Bad int: {e}"))?,
             ))
         }
     }
@@ -550,6 +560,17 @@ mod tests {
         assert_eq!(tokens[0], TqlToken::Search);
         assert_eq!(tokens[1], TqlToken::Vector);
         assert_eq!(tokens[2], TqlToken::LBracket);
+    }
+
+    #[test]
+    fn 科学计数法支持正负指数且拒绝非法与非有限值() {
+        let tokens = TqlLexer::new("[1e-5, 2.5E+7, -3e8]").tokenize().unwrap();
+        assert!(tokens.contains(&TqlToken::FloatLit(1e-5)));
+        assert!(tokens.contains(&TqlToken::FloatLit(2.5e7)));
+        assert!(tokens.contains(&TqlToken::FloatLit(-3e8)));
+        for invalid in ["1e", "1e+", "1e9999"] {
+            assert!(TqlLexer::new(invalid).tokenize().is_err(), "{invalid}");
+        }
     }
 
     #[test]

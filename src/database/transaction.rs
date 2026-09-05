@@ -510,6 +510,34 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
         }
 
+        let mut unique_changes =
+            std::collections::BTreeMap::<NodeId, Option<serde_json::Value>>::new();
+        for (index, op) in ops.iter().enumerate() {
+            match op {
+                TxOp::Insert { payload, .. } | TxOp::InsertWithId { payload, .. } => {
+                    let id = pre_assigned_ids.get(index).copied().flatten().ok_or_else(|| {
+                        crate::error::TriviumError::InvalidInput(
+                            "事务插入缺少预分配 ID (Transaction insert is missing a pre-assigned ID)"
+                                .into(),
+                        )
+                    })?;
+                    unique_changes.insert(id, Some(payload.clone()));
+                }
+                TxOp::UpdatePayload { id, payload } => {
+                    unique_changes.insert(*id, Some(payload.clone()));
+                }
+                TxOp::Delete { id } => {
+                    unique_changes.insert(*id, None);
+                }
+                _ => {}
+            }
+        }
+        mt.validate_unique_changes(
+            unique_changes
+                .iter()
+                .map(|(id, payload)| (*id, payload.as_ref())),
+        )?;
+
         let insert_count = pre_assigned_ids.iter().filter(|id| id.is_some()).count();
         let estimated_bytes = mt.estimate_reserve_bytes(insert_count)?;
         let current_bytes = mt.estimated_memory_bytes();
@@ -532,7 +560,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         for (i, op) in ops.iter().enumerate() {
             match op {
                 TxOp::Insert { vector, payload } => {
-                    let id = pre_assigned_ids[i].expect("BUG: Insert op must have pre-assigned ID");
+                    let id = pre_assigned_ids.get(i).copied().flatten().ok_or_else(|| {
+                        crate::error::TriviumError::InvalidInput(
+                            "事务插入缺少预分配 ID (Transaction insert is missing a pre-assigned ID)"
+                                .into(),
+                        )
+                    })?;
                     let payload_str = payload.to_string();
                     if payload_str.len() > 8 * 1024 * 1024 {
                         return Err(crate::error::TriviumError::PayloadTooLarge {

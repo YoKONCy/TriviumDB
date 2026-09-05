@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "triviumdb"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "aho-corasick",
  "bincode",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "triviumdb-cli"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2513,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "triviumdb-server"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "async-stream",
  "axum",
@@ -2547,9 +2547,9 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "unicode-segmentation"
-version = "1.13.1"
+version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da36089a805484bcccfffe0739803392c8298778a2d2f09febf76fac5ad9025b"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-truncate"

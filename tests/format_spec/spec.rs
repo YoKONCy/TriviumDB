@@ -2,6 +2,7 @@
 pub enum FileRole {
     Tdb,
     Vec,
+    Payload,
     FlushMarker,
     Wal,
     PropertyIndex,
@@ -18,6 +19,7 @@ impl FileRole {
         match self {
             Self::Tdb => "",
             Self::Vec => ".vec",
+            Self::Payload => ".pld",
             Self::FlushMarker => ".flush_ok",
             Self::Wal => ".wal",
             Self::PropertyIndex => ".pidx",
@@ -111,7 +113,7 @@ pub const TDB_HEADER: &[FieldSpec] = &[
     },
 ];
 
-pub const FLUSH_MARKER_V2: &[FieldSpec] = &[
+pub const FLUSH_MARKER_V3: &[FieldSpec] = &[
     FieldSpec {
         name: "magic",
         offset: 0,
@@ -143,20 +145,32 @@ pub const FLUSH_MARKER_V2: &[FieldSpec] = &[
         encoding: FieldEncoding::U64Le,
     },
     FieldSpec {
-        name: "tdb_crc",
+        name: "payload_size",
         offset: 29,
+        width: 8,
+        encoding: FieldEncoding::U64Le,
+    },
+    FieldSpec {
+        name: "tdb_crc",
+        offset: 37,
         width: 4,
         encoding: FieldEncoding::U32Le,
     },
     FieldSpec {
         name: "vec_crc",
-        offset: 33,
+        offset: 41,
+        width: 4,
+        encoding: FieldEncoding::U32Le,
+    },
+    FieldSpec {
+        name: "payload_crc",
+        offset: 45,
         width: 4,
         encoding: FieldEncoding::U32Le,
     },
     FieldSpec {
         name: "marker_crc",
-        offset: 37,
+        offset: 49,
         width: 4,
         encoding: FieldEncoding::U32Le,
     },
@@ -265,7 +279,7 @@ pub const GRAPH_HEADER: &[FieldSpec] = &[
 fn 所有固定规格字段不重叠且完全落在声明头部内() {
     for (name, fields, size) in [
         ("tdb", TDB_HEADER, 58),
-        ("flush", FLUSH_MARKER_V2, 41),
+        ("flush", FLUSH_MARKER_V3, 53),
         ("wal", WAL_HEADER, 6),
         ("property", PROPERTY_HEADER, 36),
         ("graph", GRAPH_HEADER, 24),

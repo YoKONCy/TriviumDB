@@ -320,6 +320,10 @@ export interface TriviumDBOptions {
   expectedNodes?: number;
   /** TriviumDB 内核内存预算（MiB），0 或省略表示不限制 */
   memoryLimitMb?: number;
+  /** Payload 解析缓存总上限（MiB），默认 64，0 表示禁用 */
+  payloadCacheMb?: number;
+  /** 单条 Payload 可进入解析缓存的最大估算大小（MiB），默认 8 */
+  payloadCacheEntryMb?: number;
   /** 访问模式；readOnly 不创建 WAL、不会修改任何数据库文件 */
   accessMode?: 'readWrite' | 'readOnly' | 'immutable';
   /** Reader 遇到缺失或损坏 sidecar 时的行为 */
@@ -337,7 +341,8 @@ export class PreparedTql {
 export interface PropertyIndexInfo {
   field: string;
   fields: string[];
-  kind: 'hash' | 'ordered' | 'composite' | 'bitmap';
+  kind: 'hash' | 'ordered' | 'composite' | 'bitmap' | 'ngram';
+  unique: boolean;
   entry_count: number;
   distinct_count: number;
   null_count: number;
@@ -657,12 +662,19 @@ export class TriviumDB {
    * ```
    */
   createIndex(field: string): void;
+  indexedLookup(equalities: Record<string, any>, maxResults?: number): number[];
+  createNgramIndex(field: string): void;
+  substringLookup(field: string, needle: string, maxResults?: number): number[];
+  createUniqueIndex(field: string): void;
+  createUniqueCompositeIndex(fields: string[]): void;
+  listUniqueIndexes(): string[][];
   createOrderedIndex(field: string): void;
   createCompositeIndex(fields: string[]): void;
   createBitmapIndex(field: string): void;
 
   /** 删除属性索引（查询仍可用，退化为全扫描） */
   dropIndex(field: string): void;
+  dropNgramIndex(field: string): void;
   dropOrderedIndex(field: string): void;
   dropCompositeIndex(fields: string[]): void;
   dropBitmapIndex(field: string): void;

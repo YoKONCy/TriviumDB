@@ -26,6 +26,8 @@ fn cleanup(path: &Path) {
     for suffix in [
         "",
         ".vec",
+        ".pld",
+        ".pld.tmp",
         ".wal",
         ".lock",
         ".flush_ok",
@@ -67,14 +69,61 @@ fn seed_v6(path: &Path, mode: StorageMode, dim: usize) {
     db.flush().unwrap();
 }
 
+fn current_payload_path(path: &Path) -> Option<PathBuf> {
+    let marker = std::fs::read(format!("{}.flush_ok", path.display())).ok()?;
+    let generation = u64::from_le_bytes(marker.get(5..13)?.try_into().ok()?);
+    Some(PathBuf::from(format!(
+        "{}.pld.{generation}",
+        path.display()
+    )))
+}
+
+fn mapped_payloads(path: &Path) -> std::collections::HashMap<u64, Vec<u8>> {
+    let bytes = std::fs::read(current_payload_path(path).unwrap()).unwrap();
+    let count = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
+    let mut payloads = std::collections::HashMap::new();
+    for index in 0..count {
+        let cursor = 40 + index * 32;
+        let id = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
+        let offset =
+            u64::from_le_bytes(bytes[cursor + 8..cursor + 16].try_into().unwrap()) as usize;
+        let length =
+            u32::from_le_bytes(bytes[cursor + 16..cursor + 20].try_into().unwrap()) as usize;
+        payloads.insert(id, bytes[offset..offset + length].to_vec());
+    }
+    payloads
+}
+
 fn rewrite_v6_as_v5(path: &Path, chunks: usize) {
     let bytes = std::fs::read(path).unwrap();
+    let node_count = u64::from_le_bytes(bytes[18..26].try_into().unwrap()) as usize;
+    let payload_offset = u64::from_le_bytes(bytes[26..34].try_into().unwrap()) as usize;
     let edge_offset = u64::from_le_bytes(bytes[42..50].try_into().unwrap()) as usize;
     let bq_offset = u64::from_le_bytes(bytes[50..58].try_into().unwrap()) as usize;
     assert_eq!(&bytes[bq_offset..bq_offset + 4], b"TBQF");
     let count = u64::from_le_bytes(bytes[bq_offset + 8..bq_offset + 16].try_into().unwrap());
 
-    let mut rewritten = bytes[..edge_offset].to_vec();
+    let sidecar_path = current_payload_path(path);
+    let mut rewritten = bytes[..payload_offset].to_vec();
+    if sidecar_path.as_ref().is_some_and(|path| path.exists()) {
+        let payloads = mapped_payloads(path);
+        for index in 0..node_count {
+            let slot = payload_offset + index * 12;
+            let id = u64::from_le_bytes(bytes[slot..slot + 8].try_into().unwrap());
+            rewritten.extend_from_slice(&id.to_le_bytes());
+            if id == 0 {
+                rewritten.extend_from_slice(&0u32.to_le_bytes());
+            } else {
+                let payload = payloads.get(&id).unwrap();
+                rewritten.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                rewritten.extend_from_slice(payload);
+            }
+        }
+    } else {
+        // Rom 当前格式仍内嵌 raw Payload，可直接保留旧式变长记录。
+        rewritten.extend_from_slice(&bytes[payload_offset..edge_offset]);
+    }
+    let legacy_edge_offset = rewritten.len() as u64;
     let mut cursor = edge_offset;
     while cursor < bq_offset {
         let record_start = cursor;
@@ -89,6 +138,7 @@ fn rewrite_v6_as_v5(path: &Path, chunks: usize) {
 
     let legacy_bq_offset = rewritten.len() as u64;
     rewritten[4..6].copy_from_slice(&5u16.to_le_bytes());
+    rewritten[42..50].copy_from_slice(&legacy_edge_offset.to_le_bytes());
     rewritten[50..58].copy_from_slice(&legacy_bq_offset.to_le_bytes());
     rewritten.extend_from_slice(&count.to_le_bytes());
     for index in 0..count as usize {
@@ -107,9 +157,14 @@ fn refresh_flush_marker(path: &Path) {
     let mut marker = std::fs::read(&marker_path).unwrap();
     marker[13..21].copy_from_slice(&std::fs::metadata(path).unwrap().len().to_le_bytes());
     let tdb_crc = crc32fast::hash(&std::fs::read(path).unwrap());
-    marker[29..33].copy_from_slice(&tdb_crc.to_le_bytes());
-    let marker_crc = crc32fast::hash(&marker[..37]);
-    marker[37..41].copy_from_slice(&marker_crc.to_le_bytes());
+    let (tdb_crc_offset, marker_crc_offset) = match marker.len() {
+        41 => (29, 37),
+        53 => (37, 49),
+        _ => panic!("未知 flush marker 长度"),
+    };
+    marker[tdb_crc_offset..tdb_crc_offset + 4].copy_from_slice(&tdb_crc.to_le_bytes());
+    let marker_crc = crc32fast::hash(&marker[..marker_crc_offset]);
+    marker[marker_crc_offset..marker_crc_offset + 4].copy_from_slice(&marker_crc.to_le_bytes());
     std::fs::write(marker_path, marker).unwrap();
 }
 

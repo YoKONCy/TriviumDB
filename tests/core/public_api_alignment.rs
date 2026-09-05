@@ -70,8 +70,8 @@ fn 四类属性索引和存储格式可结构化观测() {
     );
 
     let storage = db.storage_info();
-    assert_eq!(storage.database_format_current, 7);
-    assert_eq!(storage.property_index_format, 4);
+    assert_eq!(storage.database_format_current, 9);
+    assert_eq!(storage.property_index_format, 6);
     assert_eq!(storage.graph_index_format, 2);
     assert_eq!(storage.wal_format, 3);
     assert_eq!(storage.dim, 2);

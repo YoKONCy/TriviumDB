@@ -62,6 +62,72 @@ fn open_空旧WAL自动升级且首次写入后二次打开成功() {
 }
 
 #[test]
+fn open_非空v2_wal自动迁移并恢复已提交事务() {
+    #[derive(serde::Serialize)]
+    enum WalEntryV2<T> {
+        TxBegin {
+            tx_id: u64,
+        },
+        TxCommit {
+            tx_id: u64,
+        },
+        Insert {
+            id: u64,
+            vector: Vec<T>,
+            payload: String,
+        },
+        Link {
+            src: u64,
+            dst: u64,
+            label: String,
+            weight: f32,
+        },
+    }
+
+    let path = temp_db("legacy_nonempty_wal_upgrade");
+    {
+        let mut db = Database::<f32>::open(&path, 3).unwrap();
+        db.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"kind": "base"}))
+            .unwrap();
+        db.flush().unwrap();
+    }
+    let entries = [
+        WalEntryV2::TxBegin::<f32> { tx_id: 9 },
+        WalEntryV2::Insert {
+            id: 2,
+            vector: vec![0.0, 1.0, 0.0],
+            payload: json!({"kind": "recovered"}).to_string(),
+        },
+        WalEntryV2::Link {
+            src: 1,
+            dst: 2,
+            label: "legacy".into(),
+            weight: 0.75,
+        },
+        WalEntryV2::TxCommit { tx_id: 9 },
+    ];
+    let mut wal = vec![b'T', b'V', b'W', b'L', 2, 0];
+    for entry in entries {
+        let data = bincode::serialize(&entry).unwrap();
+        wal.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wal.extend_from_slice(&data);
+        wal.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
+    }
+    std::fs::write(format!("{}.wal", path), wal).unwrap();
+
+    let db = Database::<f32>::open(&path, 3).unwrap();
+    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.get_payload(2).unwrap()["kind"], "recovered");
+    let edges = db.get_edges(1);
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].target_id, 2);
+    assert_eq!(edges[0].label, "legacy");
+    assert!(edges[0].metadata.is_null());
+    let wal = std::fs::read(format!("{}.wal", path)).unwrap();
+    assert_eq!(u16::from_le_bytes([wal[4], wal[5]]), 3);
+}
+
+#[test]
 fn open_维度0报错() {
     let result = Database::<f32>::open(&temp_db("dim0"), 0);
     assert!(result.is_err());

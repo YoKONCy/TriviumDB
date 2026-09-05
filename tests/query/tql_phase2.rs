@@ -190,6 +190,28 @@ fn 测试_DISTINCT_去重() {
     cleanup(&path);
 }
 
+#[test]
+fn match_distinct属性和id投影按实际值去重() {
+    let path = tmp_db("distinct_projection");
+    let db = build_test_db(&path);
+
+    let ids = db
+        .tql_values("MATCH (a)-[:knows]->(b) RETURN DISTINCT b.id")
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    let function_ids = db
+        .tql_values("MATCH (a)-[:knows]->(b) RETURN DISTINCT id(b)")
+        .unwrap();
+    assert_eq!(function_ids.len(), 2);
+    let ages = db
+        .tql_values("MATCH (a)-[:knows]->(b) RETURN DISTINCT b.age")
+        .unwrap();
+    assert_eq!(ages.len(), 2);
+
+    drop(db);
+    cleanup(&path);
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  AS 别名
 // ═══════════════════════════════════════════════════════════════
@@ -392,7 +414,7 @@ fn 测试_EXPLAIN_FIND入口() {
     assert_eq!(plan.get("entry").unwrap().as_str().unwrap(), "FIND");
     assert_eq!(
         plan.get("candidate_strategy").unwrap().as_str().unwrap(),
-        "full_scan"
+        "cold_payload_scan"
     );
 
     drop(db);

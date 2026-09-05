@@ -93,9 +93,12 @@ impl TqlParser {
             TqlToken::Optional => self.parse_optional_match_entry()?,
             TqlToken::Find => self.parse_find_entry()?,
             TqlToken::Search => self.parse_search_entry()?,
+            TqlToken::Ident(name) if name.eq_ignore_ascii_case("text") => {
+                self.parse_text_entry()?
+            }
             other => {
                 return Err(format!(
-                    "Expected MATCH, OPTIONAL MATCH, FIND, or SEARCH, got {:?}",
+                    "Expected MATCH, OPTIONAL MATCH, FIND, SEARCH, or TEXT, got {:?}",
                     other
                 ));
             }
@@ -161,6 +164,61 @@ impl TqlParser {
         };
         validate_pipeline_scope(&query)?;
         Ok(query)
+    }
+
+    fn parse_text_entry(&mut self) -> Result<QueryEntry, String> {
+        self.expect_ident_keyword("text")?;
+        let kind = match self.parse_ident()?.to_ascii_lowercase().as_str() {
+            "bm25" => TextSearchKind::Bm25,
+            "ac" => TextSearchKind::Ac,
+            "hybrid" => TextSearchKind::Hybrid,
+            other => {
+                return Err(format!(
+                    "未知文本召回类型 {other} (Unknown text search kind)"
+                ));
+            }
+        };
+        let query = match self.advance() {
+            TqlToken::StringLit(value) => value,
+            other => return Err(format!("TEXT 查询需要字符串，收到 {other:?}")),
+        };
+        self.expect(&TqlToken::Top)?;
+        let top_k = self.parse_positive_int()?;
+        let mut k1 = 1.2f32;
+        let mut b = 0.75f32;
+        let mut ac_weight = 1.0f32;
+        while let TqlToken::Ident(name) = self.peek().clone() {
+            let target = match name.to_ascii_lowercase().as_str() {
+                "k1" => &mut k1,
+                "b" => &mut b,
+                "ac_weight" => &mut ac_weight,
+                _ => break,
+            };
+            self.advance();
+            *target = self.parse_finite_f32()?;
+        }
+        Ok(QueryEntry::Text {
+            clause: TextSearchClause {
+                kind,
+                query,
+                top_k,
+                k1,
+                b,
+                ac_weight,
+            },
+        })
+    }
+
+    fn parse_finite_f32(&mut self) -> Result<f32, String> {
+        let value = match self.advance() {
+            TqlToken::FloatLit(value) => value,
+            TqlToken::IntLit(value) => value as f64,
+            other => return Err(format!("Expected finite number, got {other:?}")),
+        };
+        if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
+            return Err("参数必须是有限 f32 数值 (Parameter must be finite f32)".into());
+        }
+        Ok(value as f32)
     }
 
     fn parse_rank_clause(&mut self) -> Result<RankClause, String> {
@@ -452,11 +510,84 @@ impl TqlParser {
             if let TqlToken::Ident(name) = self.peek().clone()
                 && matches!(
                     name.to_ascii_lowercase().as_str(),
-                    "pagerank" | "wcc" | "degree" | "label_propagation" | "leiden" | "sa_ppr"
+                    "pagerank"
+                        | "wcc"
+                        | "degree"
+                        | "label_propagation"
+                        | "leiden"
+                        | "sa_ppr"
+                        | "scc"
+                        | "k_core"
+                        | "articulation_points"
+                        | "triangle_count"
+                        | "hits"
+                        | "harmonic_centrality"
                 )
             {
                 self.advance();
                 let input = self.parse_ident()?;
+                let subset = if matches!(self.peek(), TqlToken::Ident(value) if value.eq_ignore_ascii_case("mode"))
+                {
+                    self.advance();
+                    let mode = match self.advance() {
+                        TqlToken::Expand => "expand".to_owned(),
+                        TqlToken::Ident(mode) => mode.to_ascii_lowercase(),
+                        other => return Err(format!("Expected graph subset mode, got {other:?}")),
+                    };
+                    match mode.as_str() {
+                        "induced" => GraphSubsetSpec::Induced,
+                        mode @ ("expand" | "boundary") => {
+                            self.expect_ident_keyword("hops")?;
+                            let hops = self.parse_positive_int()?;
+                            let direction = if matches!(self.peek(), TqlToken::Outgoing) {
+                                self.advance();
+                                EdgeDirection::Forward
+                            } else if matches!(self.peek(), TqlToken::Incoming) {
+                                self.advance();
+                                EdgeDirection::Backward
+                            } else if matches!(self.peek(), TqlToken::Both) {
+                                self.advance();
+                                EdgeDirection::Both
+                            } else {
+                                EdgeDirection::Forward
+                            };
+                            let labels = if matches!(self.peek(), TqlToken::Ident(value) if value.eq_ignore_ascii_case("labels"))
+                            {
+                                self.advance();
+                                Some(self.parse_ident_list()?)
+                            } else {
+                                None
+                            };
+                            if mode == "expand" {
+                                GraphSubsetSpec::Expand {
+                                    hops,
+                                    labels,
+                                    direction,
+                                }
+                            } else {
+                                GraphSubsetSpec::Boundary {
+                                    hops,
+                                    labels,
+                                    direction,
+                                }
+                            }
+                        }
+                        mode => {
+                            return Err(format!(
+                                "未知图子集模式 {mode} (Unknown graph subset mode)"
+                            ));
+                        }
+                    }
+                } else {
+                    GraphSubsetSpec::Induced
+                };
+                let label_filter = if matches!(self.peek(), TqlToken::Ident(value) if value.eq_ignore_ascii_case("label"))
+                {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
                 self.expect(&TqlToken::As)?;
                 let output = self.parse_ident()?;
                 let algorithm = match name.to_ascii_lowercase().as_str() {
@@ -466,12 +597,20 @@ impl TqlParser {
                     "label_propagation" => GraphAlgorithmKind::LabelPropagation,
                     "leiden" => GraphAlgorithmKind::Leiden,
                     "sa_ppr" => GraphAlgorithmKind::SaPpr,
+                    "scc" => GraphAlgorithmKind::Scc,
+                    "k_core" => GraphAlgorithmKind::KCore,
+                    "articulation_points" => GraphAlgorithmKind::ArticulationPoints,
+                    "triangle_count" => GraphAlgorithmKind::TriangleCount,
+                    "hits" => GraphAlgorithmKind::Hits,
+                    "harmonic_centrality" => GraphAlgorithmKind::HarmonicCentrality,
                     _ => return Err(format!("未知图算法: {name}")),
                 };
                 stages.push(PipelineStage::GraphAlgorithm(GraphAlgorithmStage {
                     input,
                     output,
                     algorithm,
+                    subset,
+                    label_filter,
                 }));
             }
             if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("all_paths"))
@@ -544,6 +683,78 @@ impl TqlParser {
                     label,
                 }));
             }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("weighted_paths"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("to")?;
+                let targets = self.parse_u64_list()?;
+                let label = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("label"))
+                {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::WeightedPaths(WeightedPathsStage {
+                    input,
+                    output,
+                    targets,
+                    label,
+                }));
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("yen_paths"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("to")?;
+                let targets = self.parse_u64_list()?;
+                self.expect_ident_keyword("k")?;
+                let k = self.parse_positive_int()?;
+                let label = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("label"))
+                {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::YenPaths(YenPathsStage {
+                    input,
+                    output,
+                    targets,
+                    k,
+                    label,
+                }));
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("node_similarity"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect(&TqlToken::Top)?;
+                let top_k = self.parse_positive_int()?;
+                self.expect_ident_keyword("cutoff")?;
+                let cutoff = self.parse_json_number()?;
+                let label = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("label"))
+                {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::NodeSimilarity(NodeSimilarityStage {
+                    input,
+                    output,
+                    top_k,
+                    cutoff,
+                    label,
+                }));
+            }
             if let TqlToken::Ident(name) = self.peek().clone()
                 && matches!(
                     name.to_ascii_lowercase().as_str(),
@@ -592,6 +803,110 @@ impl TqlParser {
                     expand,
                     max_iterations,
                     stop_on_fixed_point,
+                }));
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("diversify"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect(&TqlToken::Top)?;
+                let top_k = self.parse_positive_int()?;
+                let quality_weight = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("quality_weight"))
+                {
+                    self.advance();
+                    self.parse_finite_f32()?
+                } else {
+                    1.0
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::Diversify(DiversifyStage {
+                    input,
+                    output,
+                    top_k,
+                    quality_weight,
+                }));
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("residual"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect(&TqlToken::By)?;
+                self.expect(&TqlToken::Vector)?;
+                self.expect(&TqlToken::LBracket)?;
+                let mut vector = Vec::new();
+                while !self.at(&TqlToken::RBracket) {
+                    vector.push(self.parse_finite_f32()? as f64);
+                    if self.at(&TqlToken::Comma) {
+                        self.advance();
+                    }
+                }
+                self.expect(&TqlToken::RBracket)?;
+                self.expect(&TqlToken::Top)?;
+                let top_k = self.parse_positive_int()?;
+                self.expect_ident_keyword("lambda")?;
+                let lambda = self.parse_finite_f32()?;
+                self.expect_ident_keyword("threshold")?;
+                let threshold = self.parse_finite_f32()?;
+                self.expect_ident_keyword("iterations")?;
+                let iterations = self.parse_positive_int()?;
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::Residual(ResidualStage {
+                    input,
+                    output,
+                    vector,
+                    top_k,
+                    lambda,
+                    threshold,
+                    iterations,
+                }));
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("topics")) {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("k")?;
+                let topics = self.parse_positive_int()?;
+                self.expect_ident_keyword("iterations")?;
+                let iterations = self.parse_positive_int()?;
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::Topics(TopicsStage {
+                    input,
+                    output,
+                    topics,
+                    iterations,
+                }));
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("sa_ppr_config"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("depth")?;
+                let max_depth = self.parse_positive_int()?;
+                self.expect_ident_keyword("alpha")?;
+                let restart_alpha = self.parse_finite_f32()?;
+                self.expect_ident_keyword("max_edges")?;
+                let max_edges_per_node = self.parse_positive_int()?;
+                self.expect_ident_keyword("min_weight")?;
+                let min_edge_weight = self.parse_finite_f32()?;
+                let labels = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("labels"))
+                {
+                    self.advance();
+                    Some(self.parse_ident_list()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                stages.push(PipelineStage::SaPpr(SaPprStage {
+                    input,
+                    output,
+                    max_depth,
+                    restart_alpha,
+                    max_edges_per_node,
+                    min_edge_weight,
+                    labels,
                 }));
             }
             if self.at(&TqlToken::Where) {
@@ -1171,12 +1486,29 @@ impl TqlParser {
                     name.to_ascii_lowercase().as_str(),
                     "similarity"
                         | "graph_score"
+                        | "core_number"
+                        | "triangle_count"
+                        | "clustering_coefficient"
+                        | "authority_score"
+                        | "hub_score"
+                        | "harmonic_centrality"
+                        | "weighted_distance"
+                        | "node_similarity"
+                        | "path_rank"
+                        | "pair_left"
+                        | "pair_right"
+                        | "text_score"
+                        | "diversity_score"
+                        | "residual_score"
+                        | "topic"
+                        | "topic_score"
                         | "depth"
                         | "path_strength"
                         | "path_count"
                         | "community"
                         | "path"
                         | "path_length"
+                        | "id"
                 ) =>
             {
                 self.advance();
@@ -1186,12 +1518,35 @@ impl TqlParser {
                 match name.to_ascii_lowercase().as_str() {
                     "similarity" => Ok(TqlExpr::Similarity { var }),
                     "graph_score" => Ok(TqlExpr::GraphScore { var }),
+                    "core_number"
+                    | "triangle_count"
+                    | "clustering_coefficient"
+                    | "authority_score"
+                    | "hub_score"
+                    | "harmonic_centrality"
+                    | "weighted_distance"
+                    | "node_similarity" => Ok(TqlExpr::GraphMetric {
+                        var,
+                        metric: name.to_ascii_lowercase(),
+                    }),
+                    "path_rank" => Ok(TqlExpr::PathRank { var }),
+                    "pair_left" => Ok(TqlExpr::PairLeft { var }),
+                    "pair_right" => Ok(TqlExpr::PairRight { var }),
+                    "text_score" => Ok(TqlExpr::TextScore { var }),
+                    "diversity_score" => Ok(TqlExpr::DiversityScore { var }),
+                    "residual_score" => Ok(TqlExpr::ResidualScore { var }),
+                    "topic" => Ok(TqlExpr::Topic { var }),
+                    "topic_score" => Ok(TqlExpr::TopicScore { var }),
                     "depth" => Ok(TqlExpr::Depth { var }),
                     "path_strength" => Ok(TqlExpr::PathStrength { var }),
                     "path_count" => Ok(TqlExpr::PathCount { var }),
                     "community" => Ok(TqlExpr::Community { var }),
                     "path" => Ok(TqlExpr::Path { var }),
                     "path_length" => Ok(TqlExpr::PathLength { var }),
+                    "id" => Ok(TqlExpr::Property {
+                        var,
+                        field: "id".to_owned(),
+                    }),
                     _ => Err(format!("未知标量函数: {name}")),
                 }
             }
@@ -1534,8 +1889,20 @@ impl TqlParser {
         let action = match self.peek() {
             TqlToken::Set => {
                 self.advance();
-                let assignments = self.parse_set_assignments()?;
-                MutationAction::Set(assignments)
+                if self.at(&TqlToken::Vector) {
+                    self.advance();
+                    self.expect(&TqlToken::LParen)?;
+                    let var = self.parse_ident()?;
+                    self.expect(&TqlToken::RParen)?;
+                    self.expect(&TqlToken::Eq)?;
+                    MutationAction::SetVector {
+                        var,
+                        vector: self.parse_numeric_vector()?,
+                    }
+                } else {
+                    let assignments = self.parse_set_assignments()?;
+                    MutationAction::Set(assignments)
+                }
             }
             TqlToken::Delete => {
                 self.advance();
@@ -1566,6 +1933,32 @@ impl TqlParser {
         };
 
         Ok(TqlMutation { source, action })
+    }
+
+    fn parse_numeric_vector(&mut self) -> Result<Vec<f64>, String> {
+        self.expect(&TqlToken::LBracket)?;
+        let mut vector = Vec::new();
+        while !self.at(&TqlToken::RBracket) {
+            let value = match self.advance() {
+                TqlToken::FloatLit(value) => value,
+                TqlToken::IntLit(value) => value as f64,
+                other => return Err(format!("Expected number in vector, got {other:?}")),
+            };
+            if !value.is_finite() {
+                return Err("Vector values must be finite".into());
+            }
+            vector.push(value);
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            } else if !self.at(&TqlToken::RBracket) {
+                return Err(format!("Expected comma in vector, got {:?}", self.peek()));
+            }
+        }
+        self.expect(&TqlToken::RBracket)?;
+        if vector.is_empty() {
+            return Err("Vector must not be empty".into());
+        }
+        Ok(vector)
     }
 
     /// 解析 SET 赋值列表: a.name = "Alice", a.age = 30
@@ -1653,12 +2046,21 @@ fn collect_expr_vars(expr: &TqlExpr, output: &mut Vec<String>) {
         | TqlExpr::Property { var, .. }
         | TqlExpr::Similarity { var }
         | TqlExpr::GraphScore { var }
+        | TqlExpr::GraphMetric { var, .. }
+        | TqlExpr::TextScore { var }
+        | TqlExpr::DiversityScore { var }
+        | TqlExpr::ResidualScore { var }
+        | TqlExpr::Topic { var }
+        | TqlExpr::TopicScore { var }
         | TqlExpr::Depth { var }
         | TqlExpr::PathStrength { var }
         | TqlExpr::PathCount { var }
         | TqlExpr::Community { var }
         | TqlExpr::Path { var }
-        | TqlExpr::PathLength { var } => output.push(var.clone()),
+        | TqlExpr::PathLength { var }
+        | TqlExpr::PathRank { var }
+        | TqlExpr::PairLeft { var }
+        | TqlExpr::PairRight { var } => output.push(var.clone()),
         TqlExpr::Binary { left, right, .. } => {
             collect_expr_vars(left, output);
             collect_expr_vars(right, output);
@@ -1679,12 +2081,21 @@ fn expr_var(expr: &TqlExpr) -> Option<&str> {
         | TqlExpr::Property { var, .. }
         | TqlExpr::Similarity { var }
         | TqlExpr::GraphScore { var }
+        | TqlExpr::GraphMetric { var, .. }
+        | TqlExpr::TextScore { var }
+        | TqlExpr::DiversityScore { var }
+        | TqlExpr::ResidualScore { var }
+        | TqlExpr::Topic { var }
+        | TqlExpr::TopicScore { var }
         | TqlExpr::Depth { var }
         | TqlExpr::PathStrength { var }
         | TqlExpr::PathCount { var }
         | TqlExpr::Community { var }
         | TqlExpr::Path { var }
-        | TqlExpr::PathLength { var } => Some(var),
+        | TqlExpr::PathLength { var }
+        | TqlExpr::PathRank { var }
+        | TqlExpr::PairLeft { var }
+        | TqlExpr::PairRight { var } => Some(var),
         TqlExpr::Binary { left, right, .. } => expr_var(left).or_else(|| expr_var(right)),
         TqlExpr::Coalesce(values) => values.iter().find_map(expr_var),
         TqlExpr::IsNull { expr, .. } => expr_var(expr),
@@ -1786,6 +2197,24 @@ fn validate_pipeline_scope(query: &TqlQuery) -> Result<(), String> {
                 }
                 scope.insert(paths.output.clone());
             }
+            PipelineStage::WeightedPaths(paths) => {
+                if !scope.contains(&paths.input) {
+                    return Err(format!("WEIGHTED_PATHS 引用了未定义变量 {}", paths.input));
+                }
+                scope.insert(paths.output.clone());
+            }
+            PipelineStage::YenPaths(paths) => {
+                if !scope.contains(&paths.input) {
+                    return Err(format!("YEN_PATHS 引用了未定义变量 {}", paths.input));
+                }
+                scope.insert(paths.output.clone());
+            }
+            PipelineStage::NodeSimilarity(stage) => {
+                if !scope.contains(&stage.input) {
+                    return Err(format!("NODE_SIMILARITY 引用了未定义变量 {}", stage.input));
+                }
+                scope.insert(stage.output.clone());
+            }
             PipelineStage::SetCombine(combine) => {
                 if !scope.contains(&combine.input) {
                     return Err(format!(
@@ -1803,6 +2232,30 @@ fn validate_pipeline_scope(query: &TqlQuery) -> Result<(), String> {
                     ));
                 }
                 scope.insert(iterate.output.clone());
+            }
+            PipelineStage::Diversify(stage) => {
+                if !scope.contains(&stage.input) {
+                    return Err(format!("DIVERSIFY 引用了未定义变量 {}", stage.input));
+                }
+                scope.insert(stage.output.clone());
+            }
+            PipelineStage::Residual(stage) => {
+                if !scope.contains(&stage.input) {
+                    return Err(format!("RESIDUAL 引用了未定义变量 {}", stage.input));
+                }
+                scope.insert(stage.output.clone());
+            }
+            PipelineStage::Topics(stage) => {
+                if !scope.contains(&stage.input) {
+                    return Err(format!("TOPICS 引用了未定义变量 {}", stage.input));
+                }
+                scope.insert(stage.output.clone());
+            }
+            PipelineStage::SaPpr(stage) => {
+                if !scope.contains(&stage.input) {
+                    return Err(format!("SA_PPR_CONFIG 引用了未定义变量 {}", stage.input));
+                }
+                scope.insert(stage.output.clone());
             }
             PipelineStage::Filter(predicate) => {
                 let mut vars = Vec::new();

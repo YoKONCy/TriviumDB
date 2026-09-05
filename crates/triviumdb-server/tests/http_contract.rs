@@ -186,11 +186,132 @@ async fn request_id自动生成传播且冲突指标只统计occ冲突() {
 }
 
 #[tokio::test]
+async fn indexed_equality_与_ngram_lookup_http_契约() {
+    let (app, _directory) = app("lookup_contract").await;
+    let seed = request(
+        app.clone(),
+        "POST",
+        "/v1/transactions",
+        Some(serde_json::json!({"operations": [
+            {"op": "insert", "id": 1, "vector": [1.0, 0.0], "payload": {"tenant": "a", "text": "向量数据库检索"}},
+            {"op": "insert", "id": 2, "vector": [0.0, 1.0], "payload": {"tenant": "b", "text": "天气预报服务"}}
+        ]})),
+        &[],
+    )
+    .await;
+    assert_eq!(seed.status(), StatusCode::OK);
+    for body in [
+        serde_json::json!({"kind": "hash", "fields": ["tenant"]}),
+        serde_json::json!({"kind": "ngram", "fields": ["text"]}),
+    ] {
+        assert_eq!(
+            request(app.clone(), "POST", "/v1/indexes", Some(body), &[])
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let equality = json(
+        request(
+            app.clone(),
+            "POST",
+            "/v1/lookup/equality",
+            Some(serde_json::json!({"equalities": {"tenant": "a"}})),
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(equality["ids"], serde_json::json!(["1"]));
+    let substring = json(
+        request(
+            app,
+            "POST",
+            "/v1/lookup/substring",
+            Some(serde_json::json!({"field": "text", "needle": "向量数据库"})),
+            &[],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(substring["ids"], serde_json::json!(["1"]));
+}
+
+#[tokio::test]
+async fn unique_cas_与批量删除_http_契约() {
+    let (app, _directory) = app("unique_cas_delete").await;
+    let first = request(
+        app.clone(),
+        "POST",
+        "/v1/transactions",
+        Some(serde_json::json!({"operations": [
+            {"op": "insert", "id": 1, "vector": [1.0, 0.0], "payload": {"email": "a", "version": 1}},
+            {"op": "insert", "id": 2, "vector": [0.0, 1.0], "payload": {"email": "b", "version": 1}}
+        ]})),
+        &[],
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let index = request(
+        app.clone(),
+        "POST",
+        "/v1/indexes",
+        Some(serde_json::json!({"kind": "unique", "fields": ["email"]})),
+        &[],
+    )
+    .await;
+    assert_eq!(index.status(), StatusCode::OK);
+
+    let cas = request(
+        app.clone(),
+        "POST",
+        "/v1/nodes/1/compare-and-set",
+        Some(serde_json::json!({"field": "version", "expected": 1, "replacement": 2})),
+        &[],
+    )
+    .await;
+    assert_eq!(cas.status(), StatusCode::OK);
+    let stale = request(
+        app.clone(),
+        "POST",
+        "/v1/nodes/1/compare-and-set",
+        Some(serde_json::json!({"field": "version", "expected": 1, "replacement": 3})),
+        &[],
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(json(stale).await["code"], "CONDITIONAL_UPDATE_NOT_MATCHED");
+
+    let deleted = request(
+        app,
+        "POST",
+        "/v1/nodes/delete-many",
+        Some(serde_json::json!({"ids": [2, 1, 2]})),
+        &[],
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(json(deleted).await["affected"], 2);
+}
+
+#[tokio::test]
 async fn 健康检查与未知路由使用标准状态码和双语消息() {
     let (app, _directory) = app("health").await;
     let live = request(app.clone(), "GET", "/health/live", None, &[]).await;
     assert_eq!(live.status(), StatusCode::OK);
     assert!(json(live).await["message"].as_str().unwrap().contains('('));
+
+    let details = request(app.clone(), "GET", "/health/details", None, &[]).await;
+    assert_eq!(details.status(), StatusCode::OK);
+    let details = json(details).await;
+    assert_eq!(details["status"], "ready");
+    assert_eq!(details["reason"], "ready");
+    assert_eq!(details["writerAlive"], true);
+    assert!(details["quiverWarmup"].as_str().is_some());
+
+    let ready = request(app.clone(), "GET", "/health/ready", None, &[]).await;
+    assert_eq!(ready.status(), StatusCode::OK);
 
     let missing = request(app, "GET", "/missing", None, &[]).await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
@@ -529,6 +650,21 @@ async fn 并发读与串行写在压力下保持完整结果和单调generation(
     for read in reads {
         assert_eq!(read.await.unwrap().status(), StatusCode::OK);
     }
+    let live = request(app.clone(), "GET", "/health/live", None, &[]).await;
+    assert_eq!(live.status(), StatusCode::OK);
+    let details = request(app.clone(), "GET", "/health/details", None, &[]).await;
+    assert_eq!(details.status(), StatusCode::OK);
+    let details = json(details).await;
+    assert_eq!(details["writerAlive"], true);
+    assert_eq!(details["writerFailed"], false);
+    assert_eq!(details["writeQueueDepth"], 0);
+    assert_eq!(details["activeReads"], 0);
+    assert_eq!(details["waitingReads"], 0);
+    assert_eq!(details["waitingWriters"], 0);
+    let metrics = text(request(app.clone(), "GET", "/metrics", None, &[]).await).await;
+    assert!(metrics.contains("triviumdb_active_reads 0"));
+    assert!(metrics.contains("triviumdb_waiting_reads 0"));
+    assert!(metrics.contains("triviumdb_writer_alive 1"));
     let final_count = request(
         app,
         "POST",
@@ -855,6 +991,150 @@ async fn ndjson分块协议包含meta_rows_summary与profile() {
 }
 
 #[tokio::test]
+async fn 索引管理quiver状态与ndjson导入形成完整http契约() {
+    let (app, _directory) = app("management_import").await;
+    let nodes = raw_request(
+        app.clone(),
+        "POST",
+        "/v1/import/nodes",
+        br#"{"id":1,"vector":[1.0,0.0],"payload":{"type":"event"}}
+{"id":2,"vector":[0.0,1.0],"payload":{"type":"person"}}
+"#
+        .to_vec(),
+        &[("content-type", "application/x-ndjson")],
+    )
+    .await;
+    assert_eq!(nodes.status(), StatusCode::OK);
+
+    let edge = raw_request(
+        app.clone(),
+        "POST",
+        "/v1/import/edges",
+        br#"{"source":1,"target":2,"label":"knows","weight":1.0}
+"#
+        .to_vec(),
+        &[("content-type", "application/x-ndjson")],
+    )
+    .await;
+    assert_eq!(edge.status(), StatusCode::OK);
+
+    let created = request(
+        app.clone(),
+        "POST",
+        "/v1/indexes",
+        Some(serde_json::json!({"kind":"hash","fields":["type"]})),
+        &[],
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let indexes = json(request(app.clone(), "GET", "/v1/indexes", None, &[]).await).await;
+    assert_eq!(indexes["indexes"].as_array().unwrap().len(), 1);
+
+    let quiver = json(request(app.clone(), "GET", "/v1/indexes/quiver", None, &[]).await).await;
+    assert!(quiver["status"].as_str().is_some());
+
+    let deleted = request(
+        app.clone(),
+        "DELETE",
+        "/v1/indexes/delete",
+        Some(serde_json::json!({"kind":"hash","fields":["type"]})),
+        &[],
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let malformed = raw_request(
+        app,
+        "POST",
+        "/v1/import/nodes",
+        b"not-json\n".to_vec(),
+        &[("content-type", "application/x-ndjson")],
+    )
+    .await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn tql_set_vector更新向量且维度错误原子拒绝() {
+    let (app, _directory) = app("set_vector").await;
+    let seed = request(
+        app.clone(),
+        "POST",
+        "/v1/transactions",
+        Some(serde_json::json!({"operations":[{"op":"insert","id":1,"vector":[1.0,0.0],"payload":{"name":"node"}}]})),
+        &[],
+    )
+    .await;
+    assert_eq!(seed.status(), StatusCode::OK);
+    let updated = request(
+        app.clone(),
+        "POST",
+        "/v1/tql",
+        Some(serde_json::json!({"query":"MATCH (n {id: 1}) SET VECTOR(n) == [0.0, 1.0]","mutation":true})),
+        &[],
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let invalid = request(
+        app,
+        "POST",
+        "/v1/tql",
+        Some(
+            serde_json::json!({"query":"MATCH (n {id: 1}) SET VECTOR(n) == [1.0]","mutation":true}),
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn 搜索参数受服务端硬上限和有限值约束() {
+    let (app, _directory) = app("search_limits").await;
+    for uri in [
+        "/v1/search/vector?top_k=0",
+        "/v1/search/vector?top_k=10001",
+        "/v1/search/vector?top_k=1&recall_k=100001",
+        "/v1/search/vector?top_k=1&rerank_k=100001",
+    ] {
+        let response = raw_request(
+            app.clone(),
+            "POST",
+            uri,
+            [1.0f32.to_le_bytes(), 0.0f32.to_le_bytes()].concat(),
+            &[("content-type", "application/vnd.triviumdb.vector+f32")],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn ndjson导入失败保持事务原子性() {
+    let (app, _directory) = app("import_atomic").await;
+    let response = raw_request(
+        app.clone(),
+        "POST",
+        "/v1/import/nodes",
+        br#"{"id":1,"vector":[1.0,0.0],"payload":{}}
+{"id":2,"vector":[1.0],"payload":{}}
+"#
+        .to_vec(),
+        &[("content-type", "application/x-ndjson")],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let count = request(
+        app,
+        "POST",
+        "/v1/tql",
+        Some(serde_json::json!({"query":"MATCH (n) RETURN count(*) AS total"})),
+        &[],
+    )
+    .await;
+    assert_eq!(json(count).await["rows"][0]["total"]["value"], 0);
+}
+
+#[tokio::test]
 async fn 二进制f32向量检索与边界校验() {
     let (app, _directory) = app("binary_vector").await;
     request(
@@ -945,6 +1225,8 @@ async fn 请求级profile和索引建议只建议未索引字段() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = json(response).await;
     assert!(body["profile"]["elapsedMicros"].is_number());
+    assert!(body["profile"]["queueWaitMicros"].is_number());
+    assert!(body["profile"]["executionMicros"].is_number());
     assert_eq!(body["indexAdvice"][0]["kind"], "ordered");
     assert_eq!(body["indexAdvice"][0]["fields"][0], "age");
 }

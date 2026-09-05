@@ -3,7 +3,8 @@
 
 use serde_json::json;
 use triviumdb::query::cascades::{
-    OptimizationStatus, OptimizerBudget, PhysicalOperator, optimize_pipeline,
+    EstimateSource, OptimizationStatus, OptimizerBudget, PhysicalOperator, optimize_pipeline,
+    optimize_pipeline_with_profile,
 };
 use triviumdb::query::pipeline::{
     ExactRerank, NodeIdsSource, PayloadFilter, PipelineBudget, PipelineContext, PipelineOperator,
@@ -204,6 +205,8 @@ fn 相关字段对修正独立性假设导致的基数低估() {
         })
         .unwrap();
     assert_eq!(filter.estimated_rows, 10);
+    assert_eq!(filter.estimate_source, EstimateSource::CachedColumnPair);
+    assert!(filter.estimate_confidence >= 0.8);
 }
 
 #[test]
@@ -487,4 +490,130 @@ fn pipeline_explain_暴露_cascades_阶段成本和预算() {
             && stage.get("properties").is_some()
     }));
     assert!(payload["cross_modal_stats"].is_array());
+}
+
+#[test]
+fn pipeline_explain_analyze_暴露规划和逐阶段实际指标() {
+    let mt = graph();
+    let query = parse_tql(
+        "EXPLAIN ANALYZE SEARCH VECTOR [1, 0] TOP 4 AS seed WITH seed EXPAND seed [:next*1..1] AS related RETURN related",
+    )
+    .unwrap();
+    let rows = execute_tql(&query, &mt).unwrap();
+    let payload = &rows[0].values().next().unwrap().payload;
+    assert_eq!(payload["analyze"], true);
+    assert!(payload["planning_profile"].is_object());
+    assert!(payload["estimated_memo_bytes"].as_u64().unwrap() > 0);
+    let actuals = payload["pipeline_stage_actuals"].as_array().unwrap();
+    assert!(!actuals.is_empty());
+    assert!(actuals.iter().all(|stage| {
+        stage.get("input_rows").is_some()
+            && stage.get("actual_rows").is_some()
+            && stage.get("estimated_rows").is_some()
+            && stage.get("elapsed_ns").is_some()
+            && stage.get("estimate_source").is_some()
+            && stage.get("estimate_confidence").is_some()
+    }));
+}
+
+#[test]
+fn 统计需求按管线阶段精确启用() {
+    let mt = graph();
+    let simple = parse_tql("SEARCH VECTOR [1, 0] TOP 4 AS seed WITH seed RETURN seed").unwrap();
+    let filtered = parse_tql(
+        "SEARCH VECTOR [1, 0] TOP 4 AS seed WITH seed WHERE seed.active == true AND seed.group == 1 RETURN seed",
+    )
+    .unwrap();
+    let expanded = parse_tql(
+        "SEARCH VECTOR [1, 0] TOP 4 AS seed WITH seed WHERE seed.active == true WITH seed EXPAND seed [*1..1] AS related RETURN related",
+    )
+    .unwrap();
+    let simple = optimize_pipeline(&simple, &mt, OptimizerBudget::default());
+    assert_eq!(
+        (
+            simple.stats_requirement.graph,
+            simple.stats_requirement.property
+        ),
+        (false, false)
+    );
+    let filtered = optimize_pipeline(&filtered, &mt, OptimizerBudget::default());
+    assert!(filtered.stats_requirement.property);
+    assert!(filtered.stats_requirement.column_pairs);
+    assert!(!filtered.stats_requirement.graph);
+    let expanded = optimize_pipeline(&expanded, &mt, OptimizerBudget::default());
+    assert!(expanded.stats_requirement.graph);
+    assert!(expanded.stats_requirement.cross_modal);
+}
+
+#[test]
+fn 规划计时仅在显式请求时采集() {
+    let mt = graph();
+    let query = parse_tql(
+        "SEARCH VECTOR [1, 0] TOP 4 AS seed WITH seed EXPAND seed [*1..1] AS related RETURN related",
+    )
+    .unwrap();
+    let normal = optimize_pipeline(&query, &mt, OptimizerBudget::default());
+    assert!(normal.planning_profile.is_none());
+    assert!(normal.estimated_memo_bytes > 0);
+    let profiled = optimize_pipeline_with_profile(&query, &mt, OptimizerBudget::default(), true);
+    let profile = profiled.planning_profile.unwrap();
+    assert!(profile.total_ns >= profile.stats_ns);
+    assert!(profile.total_ns >= profile.memo_ns);
+}
+
+#[test]
+fn 增量图统计覆盖自环多标签和删除() {
+    let mut mt = MemTable::new(2);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[id as f32, 0.0], json!({})).unwrap();
+    }
+    mt.link(1, 1, "self".into(), 1.0).unwrap();
+    mt.link(1, 2, "a".into(), 1.0).unwrap();
+    mt.link(1, 2, "b".into(), 1.0).unwrap();
+    let stats = mt.graph_stats();
+    assert_eq!(stats.edge_count, 3);
+    assert_eq!(stats.isolated_node_count, 1);
+    assert_eq!(stats.label_count, 3);
+    mt.unlink_label(1, 2, "a").unwrap();
+    let stats = mt.graph_stats();
+    assert_eq!(stats.edge_count, 2);
+    assert!(!stats.label_stats.contains_key("a"));
+    mt.delete(1).unwrap();
+    let stats = mt.graph_stats();
+    assert_eq!(stats.node_count, 2);
+    assert_eq!(stats.edge_count, 0);
+    assert_eq!(stats.isolated_node_count, 2);
+    assert_eq!(stats.label_count, 0);
+}
+
+#[test]
+fn 图属性和向量_generation_彼此解耦() {
+    let mut mt = graph();
+    let graph_generation = mt.graph_generation();
+    let property_generation = mt.property_generation();
+    let vector_generation = mt.vector_generation();
+    mt.update_payload(1, json!({"active": true, "group": 9}))
+        .unwrap();
+    assert_eq!(mt.graph_generation(), graph_generation);
+    assert!(mt.property_generation() > property_generation);
+    assert_eq!(mt.vector_generation(), vector_generation);
+    let property_generation = mt.property_generation();
+    let vector_generation = mt.vector_generation();
+    mt.link(1, 3, "extra".into(), 1.0).unwrap();
+    assert_eq!(mt.property_generation(), property_generation);
+    assert_eq!(mt.vector_generation(), vector_generation);
+}
+
+#[test]
+fn pipeline默认不采集指标且显式profile可采集() {
+    let mt = graph();
+    let operators: Vec<Box<dyn PipelineOperator<f32>>> =
+        vec![Box::new(NodeIdsSource { ids: vec![1, 2, 3] })];
+    let mut normal = PipelineContext::new(&mt, PipelineBudget::default());
+    execute_pipeline(&mut normal, &operators).unwrap();
+    assert!(normal.metrics.is_empty());
+    let mut profiled = PipelineContext::with_profile(&mt, PipelineBudget::default(), true);
+    execute_pipeline(&mut profiled, &operators).unwrap();
+    assert_eq!(profiled.metrics.len(), 1);
+    assert_eq!(profiled.metrics[0].output_rows, 3);
 }
