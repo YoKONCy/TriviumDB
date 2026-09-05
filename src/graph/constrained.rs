@@ -50,7 +50,7 @@ pub fn rank_within<T: VectorType>(
             hits.push(SearchHit {
                 id,
                 score,
-                payload: payload.clone(),
+                payload: (*payload).clone(),
             });
         }
     }

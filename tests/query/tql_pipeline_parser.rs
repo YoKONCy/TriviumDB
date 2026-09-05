@@ -21,6 +21,165 @@ fn graph() -> MemTable<f32> {
     mt
 }
 
+fn cognitive_graph() -> MemTable<f32> {
+    let mut mt = graph();
+    mt.index_text(1, "rust memory safety database");
+    mt.index_text(2, "rust graph vector search");
+    mt.index_text(3, "python scripting language");
+    mt.index_keyword(1, "memory safety");
+    mt.index_keyword(2, "vector search");
+    mt.build_text_index();
+    mt
+}
+
+#[test]
+fn text_bm25_ac_hybrid_入口与分数稳定执行() {
+    let mt = cognitive_graph();
+    for kind in ["bm25", "ac", "hybrid"] {
+        let query = parse_tql(&format!(
+            "TEXT {kind} \"rust memory safety\" TOP 3 AS hit WITH hit RETURN hit, text_score(hit) AS score ORDER BY text_score(hit) DESC"
+        ))
+        .unwrap();
+        let first = execute_tql_values(&query, &mt).unwrap();
+        let second = execute_tql_values(&query, &mt).unwrap();
+        assert!(!first.is_empty());
+        assert_eq!(first.len(), second.len());
+        assert!(
+            first
+                .iter()
+                .all(|row| matches!(row["score"], TqlValue::Float(_)))
+        );
+        let ids = |rows: &[std::collections::HashMap<String, TqlValue<f32>>]| {
+            rows.iter()
+                .map(|row| match &row["hit"] {
+                    TqlValue::Node(node) => node.id,
+                    _ => 0,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&first), ids(&second));
+    }
+}
+
+#[test]
+fn dpp_sa_ppr_fista_nmf_作为有界_tql_算子执行() {
+    let mt = cognitive_graph();
+    let dpp = parse_tql("SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed diversify seed TOP 2 quality_weight 1 AS diverse WITH diverse RETURN diverse, diversity_score(diverse) AS score").unwrap();
+    let rows = execute_tql_values(&dpp, &mt).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| matches!(row["score"], TqlValue::Float(_)))
+    );
+
+    let ppr = parse_tql("SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed sa_ppr_config seed depth 2 alpha 0.15 max_edges 8 min_weight 0 labels [related] AS expanded WITH expanded RETURN expanded, graph_score(expanded) AS score").unwrap();
+    assert!(!execute_tql_values(&ppr, &mt).unwrap().is_empty());
+
+    let residual = parse_tql("SEARCH VECTOR [1, 0] TOP 2 AS seed WITH seed residual seed BY VECTOR [0, 1] TOP 2 lambda 0.1 threshold 0 iterations 8 AS shadow WITH shadow RETURN shadow, residual_score(shadow) AS score").unwrap();
+    assert!(!execute_tql_values(&residual, &mt).unwrap().is_empty());
+
+    let topics = parse_tql("SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed topics seed k 2 iterations 8 AS clustered WITH clustered RETURN clustered, topic(clustered) AS topic_id, topic_score(clustered) AS score").unwrap();
+    let rows = execute_tql_values(&topics, &mt).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter()
+            .all(|row| matches!(row["topic_id"], TqlValue::Int(_)))
+    );
+}
+
+#[test]
+fn 认知算子预算和参数_fail_closed() {
+    let mt = cognitive_graph();
+    let oversized_dpp = parse_tql("SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed diversify seed TOP 4 AS diverse WITH diverse RETURN diverse").unwrap();
+    assert!(execute_tql_values(&oversized_dpp, &mt).is_err());
+    assert!(parse_tql("TEXT bm25 \"rust\" TOP 2 b 1.5 AS hit WITH hit RETURN hit").is_ok());
+    let invalid_text =
+        parse_tql("TEXT bm25 \"rust\" TOP 2 b 1.5 AS hit WITH hit RETURN hit").unwrap();
+    assert!(execute_tql_values(&invalid_text, &mt).is_err());
+    assert!(parse_tql("SEARCH VECTOR [1, 0] TOP 2 AS seed WITH seed topics seed k 33 iterations 8 AS clustered WITH clustered RETURN clustered").is_ok());
+    let oversized_nmf = parse_tql("SEARCH VECTOR [1, 0] TOP 2 AS seed WITH seed topics seed k 33 iterations 8 AS clustered WITH clustered RETURN clustered").unwrap();
+    assert!(execute_tql_values(&oversized_nmf, &mt).is_err());
+    let oversized_fista = parse_tql("SEARCH VECTOR [1, 0] TOP 2 AS seed WITH seed residual seed BY VECTOR [0, 1] TOP 2 lambda 0.1 threshold 0 iterations 257 AS shadow WITH shadow RETURN shadow").unwrap();
+    assert!(execute_tql_values(&oversized_fista, &mt).is_err());
+}
+
+#[test]
+fn explain_暴露四类认知物理算子且估算受预算约束() {
+    let mt = cognitive_graph();
+    let cases = [
+        (
+            "EXPLAIN TEXT bm25 \"rust\" TOP 2 AS hit WITH hit RETURN hit",
+            "text_first_source",
+        ),
+        (
+            "EXPLAIN SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed diversify seed TOP 2 AS diverse WITH diverse RETURN diverse",
+            "dpp_diversify",
+        ),
+        (
+            "EXPLAIN SEARCH VECTOR [1, 0] TOP 2 AS seed WITH seed residual seed BY VECTOR [0, 1] TOP 2 lambda 0.1 threshold 0 iterations 8 AS shadow WITH shadow RETURN shadow",
+            "fista_residual_recall",
+        ),
+        (
+            "EXPLAIN SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed topics seed k 2 iterations 8 AS clustered WITH clustered RETURN clustered",
+            "nmf_topics",
+        ),
+        (
+            "EXPLAIN SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed sa_ppr_config seed depth 2 alpha 0.15 max_edges 8 min_weight 0 AS expanded WITH expanded RETURN expanded",
+            "sa_ppr_depth_bounded",
+        ),
+    ];
+    for (source, operator) in cases {
+        let result = execute_tql(&parse_tql(source).unwrap(), &mt).unwrap();
+        let rendered = format!("{result:?}");
+        assert!(
+            rendered.contains(operator),
+            "EXPLAIN 应包含 {operator}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn g1_g2_图算法通过_tql_输出命名指标() {
+    let mt = cognitive_graph();
+    for (algorithm, scalar) in [
+        ("scc", "community(scored)"),
+        ("k_core", "core_number(scored)"),
+        ("triangle_count", "triangle_count(scored)"),
+        ("hits", "authority_score(scored)"),
+    ] {
+        let query = parse_tql(&format!(
+            "SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed {algorithm} seed AS scored WITH scored RETURN scored, {scalar} AS value"
+        ))
+        .unwrap();
+        let rows = execute_tql_values(&query, &mt).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter()
+                .all(|row| !matches!(row["value"], TqlValue::Null))
+        );
+    }
+    let articulation = parse_tql("SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed articulation_points seed AS critical WITH critical RETURN critical").unwrap();
+    assert!(!execute_tql_values(&articulation, &mt).unwrap().is_empty());
+
+    let expanded = parse_tql("SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed scc seed MODE EXPAND HOPS 2 BOTH LABELS [related] LABEL related AS component WITH component RETURN component, community(component) AS id").unwrap();
+    assert!(matches!(
+        expanded.pipeline.iter().find_map(|stage| match stage {
+            PipelineStage::GraphAlgorithm(stage) => Some(&stage.subset),
+            _ => None,
+        }),
+        Some(triviumdb::query::tql_ast::GraphSubsetSpec::Expand { hops: 2, .. })
+    ));
+    assert!(!execute_tql_values(&expanded, &mt).unwrap().is_empty());
+
+    let both = parse_tql("SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed triangle_count seed AS triangles WITH triangles hits triangles AS ranked WITH ranked RETURN ranked, triangle_count(ranked) AS triangles, authority_score(ranked) AS authority, hub_score(ranked) AS hub, clustering_coefficient(ranked) AS clustering").unwrap();
+    let rows = execute_tql_values(&both, &mt).unwrap();
+    assert!(rows.iter().all(|row| {
+        ["triangles", "authority", "hub", "clustering"]
+            .iter()
+            .all(|key| !matches!(row[*key], TqlValue::Null))
+    }));
+}
+
 #[test]
 fn with_链和一等分数表达式解析正确() {
     let query = parse_tql(
@@ -315,6 +474,70 @@ fn 管线聚合支持分组_count_数值聚合_collect_和空输入() {
     assert_eq!(rows.len(), 1);
     assert!(matches!(rows[0]["total"], TqlValue::Int(0)));
     assert!(matches!(rows[0]["avg_id"], TqlValue::Null));
+}
+
+#[test]
+fn g3_g4_加权路径_yen_调和中心性与_pairset_端到端执行() {
+    let mut mt = MemTable::new(2);
+    for id in 1..=6 {
+        mt.insert_with_id(id, &[0.0, 0.0], json!({})).unwrap();
+    }
+    for (source, target, weight) in [
+        (1, 2, 1.0),
+        (2, 4, 1.0),
+        (1, 3, 1.0),
+        (3, 4, 1.0),
+        (1, 4, 3.0),
+        (5, 2, 1.0),
+        (5, 3, 1.0),
+        (6, 2, 1.0),
+        (6, 3, 1.0),
+    ] {
+        mt.link(source, target, "road".into(), weight).unwrap();
+    }
+
+    let weighted = parse_tql(
+        "SEARCH VECTOR [0, 0] TOP 1 AS seed WITH seed weighted_paths seed TO [4] LABEL road AS route WITH route RETURN path(route) AS path, weighted_distance(route) AS distance",
+    )
+    .unwrap();
+    let rows = execute_tql_values(&weighted, &mt).unwrap();
+    assert!(matches!(&rows[0]["path"], TqlValue::Path(path) if path == &vec![1, 2, 4]));
+    assert!(matches!(rows[0]["distance"], TqlValue::Float(value) if value == 2.0));
+
+    let yen = parse_tql(
+        "SEARCH VECTOR [0, 0] TOP 1 AS seed WITH seed yen_paths seed TO [4] K 3 LABEL road AS route WITH route RETURN path(route) AS path, path_rank(route) AS rank, weighted_distance(route) AS distance",
+    )
+    .unwrap();
+    let rows = execute_tql_values(&yen, &mt).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(matches!(rows[0]["rank"], TqlValue::Int(1)));
+    assert!(matches!(rows[1]["rank"], TqlValue::Int(2)));
+    assert!(matches!(rows[2]["rank"], TqlValue::Int(3)));
+
+    let harmonic = parse_tql(
+        "SEARCH VECTOR [0, 0] TOP 6 AS seed WITH seed harmonic_centrality seed LABEL road AS scored WITH scored RETURN scored, harmonic_centrality(scored) AS score",
+    )
+    .unwrap();
+    assert_eq!(execute_tql_values(&harmonic, &mt).unwrap().len(), 6);
+
+    let similarity = parse_tql(
+        "SEARCH VECTOR [0, 0] TOP 6 AS seed WITH seed node_similarity seed TOP 4 CUTOFF 0.3 LABEL road AS pairs WITH pairs RETURN pair_left(pairs) AS left, pair_right(pairs) AS right, node_similarity(pairs) AS score",
+    )
+    .unwrap();
+    let first = execute_tql_values(&similarity, &mt).unwrap();
+    let second = execute_tql_values(&similarity, &mt).unwrap();
+    assert_eq!(first.len(), 4);
+    let project = |rows: &[std::collections::HashMap<String, TqlValue<f32>>]| {
+        rows.iter()
+            .map(|row| match (&row["left"], &row["right"], &row["score"]) {
+                (TqlValue::Int(left), TqlValue::Int(right), TqlValue::Float(score)) => {
+                    (*left, *right, score.to_bits())
+                }
+                _ => (0, 0, 0),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(project(&first), project(&second));
 }
 
 #[test]

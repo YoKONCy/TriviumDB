@@ -6,6 +6,23 @@ use std::collections::BTreeMap;
 use triviumdb::error::TriviumError;
 use triviumdb::query::tql_executor::{TqlMutResult, TqlValue, TqlValueResult};
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthDetailsResponse {
+    pub status: &'static str,
+    pub reason: &'static str,
+    pub version: &'static str,
+    pub write_queue_depth: usize,
+    pub write_queue_capacity: usize,
+    pub active_reads: usize,
+    pub waiting_reads: usize,
+    pub waiting_writers: usize,
+    pub active_blocking_tasks: usize,
+    pub writer_alive: bool,
+    pub writer_failed: bool,
+    pub quiver_warmup: &'static str,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TqlRequest {
@@ -69,6 +86,78 @@ pub struct TransactionRequest {
     #[serde(default)]
     pub expected_edges: Vec<EdgePrecondition>,
     pub operations: Vec<TransactionOperation>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexKind {
+    Hash,
+    Ordered,
+    Composite,
+    Bitmap,
+    Ngram,
+    Unique,
+    UniqueComposite,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IndexRequest {
+    pub kind: IndexKind,
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConditionalMutationRequest {
+    pub field: String,
+    pub expected: serde_json::Value,
+    pub replacement: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteManyRequest {
+    pub ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IndexedLookupRequest {
+    pub equalities: BTreeMap<String, serde_json::Value>,
+    #[serde(default = "default_lookup_limit")]
+    pub max_results: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubstringLookupRequest {
+    pub field: String,
+    pub needle: String,
+    #[serde(default = "default_lookup_limit")]
+    pub max_results: usize,
+}
+
+fn default_lookup_limit() -> usize {
+    10_000
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BulkNodeRecord {
+    #[serde(default)]
+    pub id: Option<u64>,
+    pub vector: Vec<f32>,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BulkEdgeRecord {
+    pub source: u64,
+    pub target: u64,
+    pub label: String,
+    pub weight: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -294,6 +383,20 @@ impl From<TriviumError> for ApiError {
                 "NODE_ALREADY_EXISTS",
                 "节点已存在 (Node already exists)",
                 format!("节点 {id} 已存在 (Node {id} already exists)"),
+                false,
+            ),
+            TriviumError::UniqueConstraintViolation { .. } => Self::new(
+                StatusCode::CONFLICT,
+                "UNIQUE_CONSTRAINT_VIOLATION",
+                "唯一约束冲突 (Unique constraint violation)",
+                error.to_string(),
+                false,
+            ),
+            TriviumError::ConditionalUpdateNotMatched { .. } => Self::new(
+                StatusCode::CONFLICT,
+                "CONDITIONAL_UPDATE_NOT_MATCHED",
+                "条件更新未匹配 (Conditional update did not match)",
+                error.to_string(),
                 false,
             ),
             TriviumError::ReadOnlyViolation { .. } => Self::new(

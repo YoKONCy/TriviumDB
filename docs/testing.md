@@ -111,9 +111,9 @@ tests/
 ├── python/  node/               # L3: 绑定生命周期与公共 API 冒烟
 │
 ├── format_spec/                 # L4: 磁盘格式规格测试（独立字段规格 + 结构化 mutation）
-│   ├── spec.rs                  #   .tdb/.flush_ok/WAL/.pidx/.gidx 字段规格与不重叠校验
+│   ├── spec.rs                  #   .tdb/.flush_ok/WAL/.pld/.pidx/.gidx 字段规格与不重叠校验
 │   ├── mutation.rs              #   字段边界/截断/位翻转/追加/CRC 修复变异
-│   ├── snapshot_spec.rs         #   .flush_ok v1/v2、.tdb header、.vec 边界矩阵
+│   ├── snapshot_spec.rs         #   .flush_ok v1/v2/v3、.tdb header、.vec/.pld 边界矩阵
 │   ├── wal_spec.rs              #   WAL header/帧/事务边界结构化损坏矩阵
 │   ├── sidecar_spec.rs          #   .pidx/.gidx header、CRC 修复后语义校验
 │   ├── cross_generation.rs      #   跨文件混代组合拒绝 + ReadOnly 零写 oracle

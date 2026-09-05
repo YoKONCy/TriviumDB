@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "triviumdb"
-version = "0.8.5"
+version = "0.8.6"
 description = "AI-native embedded database: Vector + Graph + Relational in one file"
 readme = "README.md"
 license = { text = "Apache-2.0" }

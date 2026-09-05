@@ -12,9 +12,22 @@ use crate::index::property::PropertyIndexRegistry;
 use crate::index::quiver::{QuIVer, QuIVerConfig};
 use crate::index::text::TextIndex;
 use crate::node::{Edge, NodeId};
+use crate::observability::PayloadMemoryStats;
+use crate::storage::payload_store::PayloadStore;
 use crate::storage::vec_pool::VecPool;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+const AUTO_QUIVER_TARGET_COMPONENTS: usize = 8_000_000;
+const AUTO_QUIVER_MIN_NODES: usize = 2_500;
+const AUTO_QUIVER_MAX_NODES: usize = 10_000;
+
+/// 根据暴力检索的近似向量分量工作量计算自动 QuIVer 节点阈值。
+pub fn auto_quiver_node_threshold(dim: usize) -> usize {
+    AUTO_QUIVER_TARGET_COMPONENTS
+        .div_ceil(dim.max(1))
+        .clamp(AUTO_QUIVER_MIN_NODES, AUTO_QUIVER_MAX_NODES)
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LabelStats {
@@ -69,97 +82,183 @@ pub struct GraphRepairReport {
     pub removed_duplicate_edges: usize,
     pub rebuilt_indexes: bool,
 }
-use std::sync::OnceLock;
 
-fn degree_histogram(degrees: impl Iterator<Item = usize>) -> Vec<DegreeBucket> {
-    const UPPER_BOUNDS: [usize; 8] = [0, 1, 2, 4, 8, 16, 64, usize::MAX];
-    let mut counts = [0usize; UPPER_BOUNDS.len()];
-    for degree in degrees {
-        let index = UPPER_BOUNDS
-            .iter()
-            .position(|upper| degree <= *upper)
-            .unwrap_or(UPPER_BOUNDS.len() - 1);
-        counts[index] += 1;
-    }
-    UPPER_BOUNDS
-        .into_iter()
-        .zip(counts)
-        .map(|(upper_bound, node_count)| DegreeBucket {
-            upper_bound,
-            node_count,
-        })
-        .collect()
+#[derive(Debug, Clone, Default)]
+struct MutableLabelStats {
+    edge_count: usize,
+    sources: HashMap<NodeId, usize>,
+    targets: HashMap<NodeId, usize>,
 }
 
-struct PayloadEntry {
-    raw: Box<[u8]>,
-    parsed: OnceLock<serde_json::Value>,
+#[derive(Debug, Clone, Default)]
+struct GraphStatsState {
+    node_count: usize,
+    edge_count: usize,
+    isolated_node_count: usize,
+    out_degrees: HashMap<NodeId, usize>,
+    in_degrees: HashMap<NodeId, usize>,
+    out_degree_frequency: BTreeMap<usize, usize>,
+    in_degree_frequency: BTreeMap<usize, usize>,
+    labels: BTreeMap<String, MutableLabelStats>,
+    sum_out_degree_squared: u128,
 }
 
-impl PayloadEntry {
-    fn from_value(value: serde_json::Value) -> Self {
-        let raw = serde_json::to_vec(&value).unwrap_or_else(|_| b"null".to_vec());
-        let parsed = OnceLock::new();
-        let _ = parsed.set(value);
-        Self {
-            raw: raw.into_boxed_slice(),
-            parsed,
+impl GraphStatsState {
+    fn adjust_frequency(frequency: &mut BTreeMap<usize, usize>, old: usize, new: usize) {
+        if let Some(count) = frequency.get_mut(&old) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                frequency.remove(&old);
+            }
+        }
+        *frequency.entry(new).or_default() += 1;
+    }
+
+    fn node_added(&mut self, id: NodeId) {
+        if self.out_degrees.contains_key(&id) {
+            return;
+        }
+        self.node_count += 1;
+        self.isolated_node_count += 1;
+        self.out_degrees.insert(id, 0);
+        self.in_degrees.insert(id, 0);
+        *self.out_degree_frequency.entry(0).or_default() += 1;
+        *self.in_degree_frequency.entry(0).or_default() += 1;
+    }
+
+    fn edge_added(&mut self, src: NodeId, dst: NodeId, label: &str) {
+        let old_out = self.out_degrees.get(&src).copied().unwrap_or(0);
+        let old_in = self.in_degrees.get(&dst).copied().unwrap_or(0);
+        let src_was_isolated = old_out == 0 && self.in_degrees.get(&src).copied().unwrap_or(0) == 0;
+        let dst_was_isolated =
+            src != dst && old_in == 0 && self.out_degrees.get(&dst).copied().unwrap_or(0) == 0;
+        Self::adjust_frequency(&mut self.out_degree_frequency, old_out, old_out + 1);
+        Self::adjust_frequency(&mut self.in_degree_frequency, old_in, old_in + 1);
+        self.out_degrees.insert(src, old_out + 1);
+        self.in_degrees.insert(dst, old_in + 1);
+        self.edge_count += 1;
+        self.sum_out_degree_squared = self
+            .sum_out_degree_squared
+            .saturating_add((2usize.saturating_mul(old_out).saturating_add(1)) as u128);
+        self.isolated_node_count = self
+            .isolated_node_count
+            .saturating_sub(usize::from(src_was_isolated) + usize::from(dst_was_isolated));
+        let stats = self.labels.entry(label.to_owned()).or_default();
+        stats.edge_count += 1;
+        *stats.sources.entry(src).or_default() += 1;
+        *stats.targets.entry(dst).or_default() += 1;
+    }
+
+    fn edge_removed(&mut self, src: NodeId, dst: NodeId, label: &str) {
+        let old_out = self.out_degrees.get(&src).copied().unwrap_or(0);
+        let old_in = self.in_degrees.get(&dst).copied().unwrap_or(0);
+        if old_out == 0 || old_in == 0 {
+            return;
+        }
+        Self::adjust_frequency(&mut self.out_degree_frequency, old_out, old_out - 1);
+        Self::adjust_frequency(&mut self.in_degree_frequency, old_in, old_in - 1);
+        self.out_degrees.insert(src, old_out - 1);
+        self.in_degrees.insert(dst, old_in - 1);
+        self.edge_count = self.edge_count.saturating_sub(1);
+        self.sum_out_degree_squared = self
+            .sum_out_degree_squared
+            .saturating_sub((2usize.saturating_mul(old_out).saturating_sub(1)) as u128);
+        let src_is_isolated = old_out == 1 && self.in_degrees.get(&src).copied().unwrap_or(0) == 0;
+        let dst_is_isolated =
+            src != dst && old_in == 1 && self.out_degrees.get(&dst).copied().unwrap_or(0) == 0;
+        self.isolated_node_count += usize::from(src_is_isolated) + usize::from(dst_is_isolated);
+        if let Some(stats) = self.labels.get_mut(label) {
+            stats.edge_count = stats.edge_count.saturating_sub(1);
+            for (map, id) in [(&mut stats.sources, src), (&mut stats.targets, dst)] {
+                if let Some(count) = map.get_mut(&id) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        map.remove(&id);
+                    }
+                }
+            }
+            if stats.edge_count == 0 {
+                self.labels.remove(label);
+            }
         }
     }
 
-    fn from_raw(raw: &[u8]) -> Result<Self> {
-        use serde::Deserialize;
-        let mut deserializer = serde_json::Deserializer::from_slice(raw);
-        serde::de::IgnoredAny::deserialize(&mut deserializer).map_err(|error| {
-            TriviumError::CorruptedFile(format!("JSON 解析错误 (JSON parse error): {error}"))
-        })?;
-        deserializer.end().map_err(|error| {
-            TriviumError::CorruptedFile(format!("JSON 尾部数据无效 (Invalid JSON tail): {error}"))
-        })?;
-        Ok(Self {
-            raw: raw.to_vec().into_boxed_slice(),
-            parsed: OnceLock::new(),
-        })
-    }
-
-    fn get(&self) -> &serde_json::Value {
-        self.parsed
-            .get_or_init(|| serde_json::from_slice(&self.raw).unwrap_or(serde_json::Value::Null))
-    }
-
-    fn raw(&self) -> &[u8] {
-        &self.raw
-    }
-
-    fn memory_bytes(&self) -> usize {
-        self.raw.len()
-            + self
-                .parsed
-                .get()
-                .map(estimate_json_memory)
-                .unwrap_or_default()
-    }
-}
-
-fn estimate_json_memory(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            std::mem::size_of::<serde_json::Value>()
+    fn node_removed(&mut self, id: NodeId) {
+        let out = self.out_degrees.remove(&id).unwrap_or(0);
+        let incoming = self.in_degrees.remove(&id).unwrap_or(0);
+        if out == 0 && incoming == 0 {
+            self.isolated_node_count = self.isolated_node_count.saturating_sub(1);
         }
-        serde_json::Value::String(text) => {
-            std::mem::size_of::<serde_json::Value>() + text.capacity()
+        for (frequency, degree) in [
+            (&mut self.out_degree_frequency, out),
+            (&mut self.in_degree_frequency, incoming),
+        ] {
+            if let Some(count) = frequency.get_mut(&degree) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    frequency.remove(&degree);
+                }
+            }
         }
-        serde_json::Value::Array(values) => {
-            std::mem::size_of::<serde_json::Value>()
-                + values.capacity() * std::mem::size_of::<serde_json::Value>()
-                + values.iter().map(estimate_json_memory).sum::<usize>()
+        self.node_count = self.node_count.saturating_sub(1);
+    }
+
+    fn histogram(frequency: &BTreeMap<usize, usize>) -> Vec<DegreeBucket> {
+        const UPPER_BOUNDS: [usize; 8] = [0, 1, 2, 4, 8, 16, 64, usize::MAX];
+        let mut counts = [0usize; UPPER_BOUNDS.len()];
+        for (degree, count) in frequency {
+            let index = UPPER_BOUNDS
+                .iter()
+                .position(|upper| degree <= upper)
+                .unwrap_or(UPPER_BOUNDS.len() - 1);
+            counts[index] = counts[index].saturating_add(*count);
         }
-        serde_json::Value::Object(map) => {
-            std::mem::size_of::<serde_json::Value>()
-                + map
-                    .iter()
-                    .map(|(key, value)| key.capacity() + estimate_json_memory(value))
-                    .sum::<usize>()
+        UPPER_BOUNDS
+            .into_iter()
+            .zip(counts)
+            .map(|(upper_bound, node_count)| DegreeBucket {
+                upper_bound,
+                node_count,
+            })
+            .collect()
+    }
+
+    fn snapshot(&self) -> GraphStats {
+        GraphStats {
+            node_count: self.node_count,
+            edge_count: self.edge_count,
+            isolated_node_count: self.isolated_node_count,
+            label_count: self.labels.len(),
+            avg_out_degree: self.edge_count as f64 / self.node_count.max(1) as f64,
+            avg_in_degree: self.edge_count as f64 / self.node_count.max(1) as f64,
+            max_out_degree: self
+                .out_degree_frequency
+                .keys()
+                .next_back()
+                .copied()
+                .unwrap_or(0),
+            max_in_degree: self
+                .in_degree_frequency
+                .keys()
+                .next_back()
+                .copied()
+                .unwrap_or(0),
+            label_stats: self
+                .labels
+                .iter()
+                .map(|(label, stats)| {
+                    (
+                        label.clone(),
+                        LabelStats {
+                            edge_count: stats.edge_count,
+                            distinct_source_count: stats.sources.len(),
+                            distinct_target_count: stats.targets.len(),
+                        },
+                    )
+                })
+                .collect(),
+            out_degree_histogram: Self::histogram(&self.out_degree_frequency),
+            in_degree_histogram: Self::histogram(&self.in_degree_frequency),
         }
     }
 }
@@ -216,6 +315,9 @@ pub(crate) struct QuiverBuildSnapshot {
     pub slots: Vec<usize>,
 }
 
+type CrossModalCacheKey = (String, Vec<u8>);
+type CrossModalCacheEntry = (u64, u64, u64, CrossModalStats);
+
 /// 内存工作区，扮演类似 LSM Tree 中 MemTable 的角色。
 ///
 /// v0.4 改进：向量存储委托给 VecPool（分层 mmap + 内存增量），
@@ -226,6 +328,7 @@ pub struct MemTable<T: VectorType> {
     generation: u64,
     vector_generation: u64,
     property_generation: u64,
+    graph_generation: u64,
 
     // --- 三位一体的核心存储 ---
 
@@ -242,7 +345,7 @@ pub struct MemTable<T: VectorType> {
     text_index: TextIndex,
 
     // 2. 元数据映射（文档型负载）—— 原始 JSON 紧凑存储，按访问惰性解析
-    payloads: HashMap<NodeId, PayloadEntry>,
+    payloads: PayloadStore,
 
     // 3. 图谱邻接表 —— RW 使用内存 delta，ReadOnly/Immutable 可使用 mmap 基础块
     edges: HashMap<NodeId, Vec<Edge>>,
@@ -257,10 +360,13 @@ pub struct MemTable<T: VectorType> {
     // 边标签倒排索引：label → [(src, dst)]，加速图谱按标签查询
     label_index: HashMap<String, Vec<(NodeId, NodeId)>>,
 
-    // 图统计缓存：generation 变化时失效，避免 Planner 每次扫描全图。
-    graph_stats_cache: std::sync::RwLock<Option<(u64, GraphStats)>>,
+    // 图统计随节点和边写入增量维护，查询只生成轻量快照。
+    graph_stats_state: std::sync::RwLock<GraphStatsState>,
+    // 复合字段统计仅随 Payload 或索引定义变化失效。
+    column_pair_stats_cache:
+        std::sync::RwLock<Option<(u64, Vec<crate::index::property::ColumnPairStats>)>>,
     // 跨模统计按“字段 + 类型稳定 JSON 值”缓存；任意写操作后随 generation 失效。
-    cross_modal_stats_cache: std::sync::RwLock<BTreeMap<(String, Vec<u8>), CrossModalStats>>,
+    cross_modal_stats_cache: std::sync::RwLock<BTreeMap<CrossModalCacheKey, CrossModalCacheEntry>>,
 
     // 属性二级索引 Registry：字段名 → 类型稳定 Hash 索引
     property_indexes: PropertyIndexRegistry,
@@ -321,17 +427,19 @@ impl<T: VectorType> MemTable<T> {
             generation: 0,
             vector_generation: 0,
             property_generation: 0,
+            graph_generation: 0,
             vec_pool: VecPool::new(dim),
             bq_signatures: Vec::new(),
             bq_dirty: false,
             text_index: TextIndex::new(),
-            payloads: HashMap::new(),
+            payloads: PayloadStore::default(),
             edges: HashMap::new(),
             mapped_graph: None,
             in_degrees: HashMap::new(),
             incoming_edges: HashMap::new(),
             label_index: HashMap::new(),
-            graph_stats_cache: std::sync::RwLock::new(None),
+            graph_stats_state: std::sync::RwLock::new(GraphStatsState::default()),
+            column_pair_stats_cache: std::sync::RwLock::new(None),
             cross_modal_stats_cache: std::sync::RwLock::new(BTreeMap::new()),
             property_indexes: PropertyIndexRegistry::default(),
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
@@ -361,17 +469,19 @@ impl<T: VectorType> MemTable<T> {
             generation: 0,
             vector_generation: 0,
             property_generation: 0,
+            graph_generation: 0,
             vec_pool,
             bq_signatures: Vec::new(),
             bq_dirty: false,
             text_index: TextIndex::new(),
-            payloads: HashMap::new(),
+            payloads: PayloadStore::default(),
             edges: HashMap::new(),
             mapped_graph: None,
             in_degrees: HashMap::new(),
             incoming_edges: HashMap::new(),
             label_index: HashMap::new(),
-            graph_stats_cache: std::sync::RwLock::new(None),
+            graph_stats_state: std::sync::RwLock::new(GraphStatsState::default()),
+            column_pair_stats_cache: std::sync::RwLock::new(None),
             cross_modal_stats_cache: std::sync::RwLock::new(BTreeMap::new()),
             property_indexes: PropertyIndexRegistry::default(),
             fatigue_map: std::sync::RwLock::new(HashMap::new()),
@@ -407,24 +517,59 @@ impl<T: VectorType> MemTable<T> {
     }
 
     #[inline]
-    fn mark_property_changed(&mut self) {
-        self.property_generation = self.property_generation.wrapping_add(1);
+    pub fn graph_generation(&self) -> u64 {
+        self.graph_generation
     }
 
     #[inline]
-    fn mark_changed(&mut self, vectors_changed: bool) {
-        self.generation = self.generation.wrapping_add(1);
+    fn mark_property_changed(&mut self) {
+        self.property_generation = self.property_generation.wrapping_add(1);
         *self
-            .graph_stats_cache
+            .column_pair_stats_cache
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         self.cross_modal_stats_cache
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
+    }
+
+    #[inline]
+    fn mark_graph_changed(&mut self) {
+        self.graph_generation = self.graph_generation.wrapping_add(1);
+        self.cross_modal_stats_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    #[inline]
+    fn mark_changed(&mut self, vectors_changed: bool) {
+        self.generation = self.generation.wrapping_add(1);
         if vectors_changed {
             self.vector_generation = self.vector_generation.wrapping_add(1);
+            self.cross_modal_stats_cache
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
         }
+    }
+
+    fn rebuild_graph_stats_state(&mut self) {
+        let mut state = GraphStatsState::default();
+        for id in self.payloads.keys().copied() {
+            state.node_added(id);
+        }
+        for src in self.payloads.keys().copied() {
+            for edge in self.get_edges(src).unwrap_or_default() {
+                state.edge_added(src, edge.target_id, &edge.label);
+            }
+        }
+        *self
+            .graph_stats_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+        self.mark_graph_changed();
     }
 
     /// 将 next_id 推进到至少 candidate 值（WAL 回放时防止 ID 复用）
@@ -453,7 +598,7 @@ impl<T: VectorType> MemTable<T> {
             additional.saturating_sub(self.payloads.capacity().saturating_sub(self.payloads.len()));
         let payload_bytes = checked(
             missing_payload
-                .checked_mul(std::mem::size_of::<(NodeId, PayloadEntry)>() + 32)
+                .checked_mul(std::mem::size_of::<(NodeId, usize)>() + 32)
                 .and_then(|n| n.checked_mul(2)),
             "Payload 映射",
         )?;
@@ -492,11 +637,7 @@ impl<T: VectorType> MemTable<T> {
             return Ok(());
         }
         self.vec_pool.try_reserve_nodes(additional)?;
-        self.payloads.try_reserve(additional).map_err(|error| {
-            TriviumError::CapacityAllocationFailed {
-                reason: format!("Payload 映射预留失败: {error}"),
-            }
-        })?;
+        self.payloads.reserve(additional)?;
         self.ids_to_indices
             .try_reserve(additional)
             .map_err(|error| TriviumError::CapacityAllocationFailed {
@@ -557,9 +698,15 @@ impl<T: VectorType> MemTable<T> {
             i
         };
         self.add_to_property_index(id, &payload);
-        self.payloads.insert(id, PayloadEntry::from_value(payload));
+        self.payloads.insert_value(id, payload)?;
         self.active_ids.insert(id);
         self.ids_to_indices.insert(id, idx);
+        self.mark_property_changed();
+        self.graph_stats_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .node_added(id);
+        self.mark_graph_changed();
         self.mark_changed(true);
         Ok(())
     }
@@ -573,13 +720,37 @@ impl<T: VectorType> MemTable<T> {
     /// 从 mmap 加载时使用：仅注册紧凑 JSON 与映射关系，不解析 Payload DOM。
     pub fn register_node_raw(&mut self, id: NodeId, payload_raw: &[u8]) -> Result<()> {
         let idx = self.indices_to_ids.len();
-        self.payloads
-            .insert(id, PayloadEntry::from_raw(payload_raw)?);
+        self.payloads.insert_raw(id, payload_raw)?;
         self.active_ids.insert(id);
         self.indices_to_ids.push(id);
         // 冷 Payload 尚未解析时使用全 1，布隆预过滤选择保守放行，避免假阴性。
         self.fast_tags.push(u64::MAX);
         self.ids_to_indices.insert(id, idx);
+        self.graph_stats_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .node_added(id);
+        Ok(())
+    }
+
+    /// 从分离 Payload 格式加载时，仅恢复活动 slot；raw JSON 随后由已校验的 sidecar 安装。
+    pub(crate) fn register_payload_slot(&mut self, id: NodeId) -> Result<()> {
+        if id == 0 || self.ids_to_indices.contains_key(&id) {
+            return Err(TriviumError::CorruptedFile(
+                "Payload slot 包含非法或重复 NodeId".into(),
+            ));
+        }
+        let idx = self.indices_to_ids.len();
+        // 边和索引恢复发生在 sidecar 安装前；使用最小合法 JSON 占位，随后整体替换为 mmap raw。
+        self.payloads.insert_raw(id, b"null")?;
+        self.active_ids.insert(id);
+        self.indices_to_ids.push(id);
+        self.fast_tags.push(u64::MAX);
+        self.ids_to_indices.insert(id, idx);
+        self.graph_stats_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .node_added(id);
         Ok(())
     }
 
@@ -619,11 +790,17 @@ impl<T: VectorType> MemTable<T> {
 
         // 2. 更新文档型负载
         self.add_to_property_index(id, &payload);
-        self.payloads.insert(id, PayloadEntry::from_value(payload));
+        self.payloads.insert_value(id, payload)?;
         self.active_ids.insert(id);
 
         // 3. 构建反向映射
         self.ids_to_indices.insert(id, idx);
+        self.mark_property_changed();
+        self.graph_stats_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .node_added(id);
+        self.mark_graph_changed();
 
         // 4. 属性索引已在 Payload 转入冷存储前维护
 
@@ -681,9 +858,15 @@ impl<T: VectorType> MemTable<T> {
             i
         };
         self.add_to_property_index(id, &payload);
-        self.payloads.insert(id, PayloadEntry::from_value(payload));
+        self.payloads.insert_value(id, payload)?;
         self.active_ids.insert(id);
         self.ids_to_indices.insert(id, idx);
+        self.mark_property_changed();
+        self.graph_stats_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .node_added(id);
+        self.mark_graph_changed();
 
         // 属性索引已在 Payload 转入冷存储前维护
 
@@ -825,7 +1008,15 @@ impl<T: VectorType> MemTable<T> {
         if !self.incoming_edges.entry(dst).or_default().contains(&src) {
             self.incoming_edges.entry(dst).or_default().push(src);
         }
-        self.label_index.entry(label).or_default().push((src, dst));
+        self.label_index
+            .entry(label.clone())
+            .or_default()
+            .push((src, dst));
+        self.graph_stats_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .edge_added(src, dst, &label);
+        self.mark_graph_changed();
         self.mark_changed(false);
         Ok(())
     }
@@ -837,91 +1028,10 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub fn graph_stats(&self) -> GraphStats {
-        if let Some((generation, stats)) = self
-            .graph_stats_cache
+        self.graph_stats_state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            && *generation == self.generation
-        {
-            return stats.clone();
-        }
-        let node_count = self.payloads.len();
-        let mut edge_count = 0usize;
-        let mut max_out_degree = 0usize;
-        let mut label_pairs = BTreeMap::<String, Vec<(NodeId, NodeId)>>::new();
-        let mut out_degree_values = Vec::with_capacity(node_count);
-        for id in self.payloads.keys().copied() {
-            let edges = self.get_edges(id).unwrap_or_default();
-            edge_count = edge_count.saturating_add(edges.len());
-            max_out_degree = max_out_degree.max(edges.len());
-            out_degree_values.push(edges.len());
-            for edge in edges {
-                label_pairs
-                    .entry(edge.label.clone())
-                    .or_default()
-                    .push((id, edge.target_id));
-            }
-        }
-        let isolated_node_count = self
-            .payloads
-            .keys()
-            .filter(|id| {
-                self.get_edges(**id).is_none_or(<[Edge]>::is_empty)
-                    && self.in_degrees.get(id).copied().unwrap_or_default() == 0
-            })
-            .count();
-        let max_in_degree = self.in_degrees.values().copied().max().unwrap_or(0);
-        let label_stats = label_pairs
-            .into_iter()
-            .map(|(label, pairs)| {
-                let stats = LabelStats {
-                    edge_count: pairs.len(),
-                    distinct_source_count: pairs
-                        .iter()
-                        .map(|pair| pair.0)
-                        .collect::<HashSet<_>>()
-                        .len(),
-                    distinct_target_count: pairs
-                        .iter()
-                        .map(|pair| pair.1)
-                        .collect::<HashSet<_>>()
-                        .len(),
-                };
-                (label, stats)
-            })
-            .collect::<BTreeMap<_, _>>();
-        let in_degrees = self
-            .payloads
-            .keys()
-            .map(|id| self.in_degrees.get(id).copied().unwrap_or(0));
-        let stats = GraphStats {
-            node_count,
-            edge_count,
-            isolated_node_count,
-            label_count: label_stats.len(),
-            avg_out_degree: if node_count == 0 {
-                0.0
-            } else {
-                edge_count as f64 / node_count as f64
-            },
-            avg_in_degree: if node_count == 0 {
-                0.0
-            } else {
-                edge_count as f64 / node_count as f64
-            },
-            max_out_degree,
-            max_in_degree,
-            label_stats,
-            out_degree_histogram: degree_histogram(out_degree_values.into_iter()),
-            in_degree_histogram: degree_histogram(in_degrees),
-        };
-        *self
-            .graph_stats_cache
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Some((self.generation, stats.clone()));
-        stats
+            .snapshot()
     }
 
     pub fn validate_graph(&self) -> GraphIntegrityReport {
@@ -1036,6 +1146,7 @@ impl<T: VectorType> MemTable<T> {
             pairs.sort_unstable();
             pairs.dedup();
         }
+        self.rebuild_graph_stats_state();
         self.mark_changed(false);
         GraphRepairReport {
             removed_dangling_edges,
@@ -1094,7 +1205,7 @@ impl<T: VectorType> MemTable<T> {
     pub fn auto_quiver_build_needed(&self) -> bool {
         self.dim <= crate::index::bq::MAX_BQ_DIM
             && self.auto_build_quiver
-            && self.payloads.len() >= 10_000
+            && self.payloads.len() >= auto_quiver_node_threshold(self.dim)
             && self.quiver_index.is_none()
     }
 
@@ -1489,12 +1600,45 @@ impl<T: VectorType> MemTable<T> {
         self.indices_to_ids[idx]
     }
 
-    pub fn get_payload(&self, id: NodeId) -> Option<&serde_json::Value> {
-        self.payloads.get(&id).map(PayloadEntry::get)
+    pub fn get_payload(&self, id: NodeId) -> Option<std::sync::Arc<serde_json::Value>> {
+        self.payloads.get_value(id)
     }
 
     pub(crate) fn get_payload_raw(&self, id: NodeId) -> Option<&[u8]> {
-        self.payloads.get(&id).map(PayloadEntry::raw)
+        self.payloads.raw(id)
+    }
+
+    pub(crate) fn payload_memory_stats(&self) -> PayloadMemoryStats {
+        self.payloads.memory_stats()
+    }
+
+    pub fn configure_payload_cache(&mut self, max_bytes: usize, max_entry_bytes: usize) {
+        self.payloads.configure_cache(max_bytes, max_entry_bytes);
+    }
+
+    pub(crate) fn save_payload_sidecar(
+        &self,
+        path: &std::path::Path,
+        generation: u64,
+    ) -> Result<()> {
+        self.payloads.save_sidecar(path, generation)
+    }
+
+    pub(crate) fn install_payload_sidecar(
+        &mut self,
+        mmap: memmap2::Mmap,
+        records: Vec<(NodeId, std::ops::Range<usize>)>,
+    ) -> Result<()> {
+        let mut expected = self.active_node_ids().collect::<Vec<_>>();
+        let mut actual = records.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        if expected != actual {
+            return Err(TriviumError::CorruptedFile(
+                "Payload sidecar 节点集合与主文件不一致".into(),
+            ));
+        }
+        self.payloads.install_mapped(mmap, records)
     }
 
     pub fn get_edges(&self, id: NodeId) -> Option<&[Edge]> {
@@ -1502,6 +1646,13 @@ impl<T: VectorType> MemTable<T> {
             .get(&id)
             .map(Vec::as_slice)
             .or_else(|| self.mapped_graph.as_ref()?.edges(id))
+    }
+
+    pub fn incident_edge_count(&self, id: NodeId) -> usize {
+        self.get_edges(id)
+            .map(<[Edge]>::len)
+            .unwrap_or_default()
+            .saturating_add(self.in_degrees.get(&id).copied().unwrap_or_default())
     }
 
     pub fn set_mapped_graph(&mut self, graph: crate::storage::graph_blocks::MappedGraphStore) {
@@ -1516,6 +1667,7 @@ impl<T: VectorType> MemTable<T> {
             }
         }
         self.mapped_graph = Some(graph);
+        self.rebuild_graph_stats_state();
     }
 
     pub fn mapped_graph_bytes(&self) -> usize {
@@ -1586,8 +1738,8 @@ impl<T: VectorType> MemTable<T> {
     pub fn find_nodes_by_field(&self, field: &str, value: &serde_json::Value) -> Vec<NodeId> {
         self.payloads
             .iter()
-            .filter_map(|(&id, payload)| {
-                if payload.get().get(field) == Some(value) {
+            .filter_map(|(id, payload)| {
+                if payload.get(field) == Some(value) {
                     Some(id)
                 } else {
                     None
@@ -1608,8 +1760,14 @@ impl<T: VectorType> MemTable<T> {
         use rayon::prelude::*;
         let mut ids = self
             .payloads
-            .par_iter()
-            .filter_map(|(&id, payload)| (payload.get().get(field) == Some(value)).then_some(id))
+            .ids()
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .filter(|&id| {
+                self.payloads
+                    .get_value(id)
+                    .is_some_and(|payload| payload.get(field) == Some(value))
+            })
             .collect::<Vec<_>>();
         ids.sort_unstable();
         ids
@@ -1619,21 +1777,64 @@ impl<T: VectorType> MemTable<T> {
     //  属性二级索引 API
     // ════════════════════════════════════════════════════════
 
+    pub fn register_unique_property_index(&mut self, field: &str) -> Result<()> {
+        let payloads = &self.payloads;
+        self.property_indexes
+            .register_unique(field, payloads.iter())?;
+        self.mark_property_changed();
+        Ok(())
+    }
+
+    pub fn register_unique_composite_property_index(&mut self, fields: &[String]) -> Result<()> {
+        let payloads = &self.payloads;
+        self.property_indexes
+            .register_unique_composite(fields, payloads.iter())?;
+        self.mark_property_changed();
+        Ok(())
+    }
+
+    pub fn validate_unique_changes<'a, I>(&self, changes: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (NodeId, Option<&'a serde_json::Value>)>,
+    {
+        self.property_indexes.validate_unique_changes(changes)
+    }
+
+    pub fn validate_unique_payloads<'a, I>(&self, payloads: I) -> Result<()>
+    where
+        I: IntoIterator<Item = (NodeId, &'a serde_json::Value)>,
+    {
+        self.property_indexes.validate_unique_payloads(payloads)
+    }
+
+    pub fn unique_index_definitions(&self) -> Vec<Vec<String>> {
+        self.property_indexes.unique_definitions()
+    }
+
+    pub fn restore_unique_index_definitions(&mut self, definitions: &[Vec<String>]) -> Result<()> {
+        self.property_indexes.clear_unique_constraints();
+        for fields in definitions {
+            if fields.len() == 1 {
+                self.register_unique_property_index(&fields[0])?;
+            } else {
+                self.register_unique_composite_property_index(fields)?;
+            }
+        }
+        Ok(())
+    }
+
     /// 注册属性索引：对指定字段建立倒排索引，并回填所有已有节点
     pub fn register_property_index(&mut self, field: &str) {
         let payloads = &self.payloads;
-        self.property_indexes.register(
-            field,
-            payloads.iter().map(|(&id, payload)| (id, payload.get())),
-        );
+        self.property_indexes.register(field, payloads.iter());
+        self.mark_property_changed();
     }
 
     pub fn register_composite_property_index(&mut self, fields: &[String]) {
         let payloads = &self.payloads;
-        self.property_indexes.register_composite(
-            fields,
-            payloads.iter().map(|(&id, payload)| (id, payload.get())),
-        );
+        self.property_indexes
+            .register_composite(fields, payloads.iter());
+        self.mark_property_changed();
     }
 
     pub fn find_by_composite_property_index(
@@ -1664,12 +1865,32 @@ impl<T: VectorType> MemTable<T> {
         )
     }
 
+    pub fn register_ngram_property_index(&mut self, field: &str) -> Result<()> {
+        let payloads = &self.payloads;
+        self.property_indexes
+            .register_ngram(field, payloads.iter())?;
+        self.mark_property_changed();
+        Ok(())
+    }
+
+    pub fn find_by_ngram_property_index(
+        &self,
+        field: &str,
+        needle: &str,
+    ) -> Result<Option<Vec<NodeId>>> {
+        self.property_indexes.ngram_lookup(field, needle)
+    }
+
+    pub fn drop_ngram_property_index(&mut self, field: &str) {
+        self.property_indexes.drop_ngram_index(field);
+        self.mark_property_changed();
+    }
+
     pub fn register_bitmap_property_index(&mut self, field: &str) {
         let payloads = &self.payloads;
-        self.property_indexes.register_bitmap(
-            field,
-            payloads.iter().map(|(&id, payload)| (id, payload.get())),
-        );
+        self.property_indexes
+            .register_bitmap(field, payloads.iter());
+        self.mark_property_changed();
     }
 
     pub fn find_by_bitmap_property_index(
@@ -1689,22 +1910,24 @@ impl<T: VectorType> MemTable<T> {
 
     pub fn drop_composite_property_index(&mut self, fields: &[String]) {
         self.property_indexes.drop_composite_index(fields);
+        self.mark_property_changed();
     }
 
     pub fn drop_bitmap_property_index(&mut self, field: &str) {
         self.property_indexes.drop_bitmap_index(field);
+        self.mark_property_changed();
     }
 
     pub fn register_ordered_property_index(&mut self, field: &str) {
         let payloads = &self.payloads;
-        self.property_indexes.register_ordered(
-            field,
-            payloads.iter().map(|(&id, payload)| (id, payload.get())),
-        );
+        self.property_indexes
+            .register_ordered(field, payloads.iter());
+        self.mark_property_changed();
     }
 
     pub fn drop_ordered_property_index(&mut self, field: &str) {
         self.property_indexes.drop_ordered_index(field);
+        self.mark_property_changed();
     }
 
     pub fn find_by_property_range(
@@ -1736,6 +1959,7 @@ impl<T: VectorType> MemTable<T> {
     /// 删除属性索引
     pub fn drop_property_index(&mut self, field: &str) {
         self.property_indexes.drop_index(field);
+        self.mark_property_changed();
     }
 
     /// 查询属性索引。字段已建索引时即使值不存在也返回空切片。
@@ -1775,6 +1999,15 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub fn column_pair_stats(&self) -> Vec<crate::index::property::ColumnPairStats> {
+        if let Some((generation, stats)) = self
+            .column_pair_stats_cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            && *generation == self.property_generation
+        {
+            return stats.clone();
+        }
         let mut output = Vec::new();
         for fields in self.property_indexes.composite_definitions() {
             for left_index in 0..fields.len() {
@@ -1785,7 +2018,7 @@ impl<T: VectorType> MemTable<T> {
                     let mut right_values = HashSet::new();
                     let mut joint_values = HashSet::new();
                     let mut sampled_rows = 0usize;
-                    for payload in self.payloads.values().map(PayloadEntry::get) {
+                    for payload in self.payloads.values() {
                         let (Some(left), Some(right)) =
                             (payload.get(left_field), payload.get(right_field))
                         else {
@@ -1812,6 +2045,11 @@ impl<T: VectorType> MemTable<T> {
                 }
             }
         }
+        *self
+            .column_pair_stats_cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((self.property_generation, output.clone()));
         output
     }
 
@@ -1823,12 +2061,16 @@ impl<T: VectorType> MemTable<T> {
         const MAX_SAMPLES: usize = 1024;
         let encoded_value = serde_json::to_vec(value).ok()?;
         let cache_key = (field.to_owned(), encoded_value);
-        if let Some(stats) = self
+        if let Some((_, _, _, stats)) = self
             .cross_modal_stats_cache
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&cache_key)
-            .filter(|stats| stats.generation == self.generation)
+            .filter(|(property, graph, vector, _)| {
+                *property == self.property_generation
+                    && *graph == self.graph_generation
+                    && *vector == self.vector_generation
+            })
         {
             return Some(stats.clone());
         }
@@ -1867,19 +2109,12 @@ impl<T: VectorType> MemTable<T> {
             } else {
                 0.0
             };
-            let global_first = self
-                .payloads
-                .keys()
-                .map(|id| self.get_edges(*id).map_or(0, <[Edge]>::len))
-                .sum::<usize>() as f64;
-            let global_second = self
-                .payloads
-                .keys()
-                .map(|id| {
-                    let degree = self.get_edges(*id).map_or(0, <[Edge]>::len);
-                    degree.saturating_mul(degree)
-                })
-                .sum::<usize>() as f64;
+            let graph_state = self
+                .graph_stats_state
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let global_first = graph_state.edge_count as f64;
+            let global_second = graph_state.sum_out_degree_squared as f64;
             let global_fanout = if global_first > 0.0 {
                 global_second / global_first
             } else {
@@ -1896,7 +2131,15 @@ impl<T: VectorType> MemTable<T> {
         self.cross_modal_stats_cache
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(cache_key, stats.clone());
+            .insert(
+                cache_key,
+                (
+                    self.property_generation,
+                    self.graph_generation,
+                    self.vector_generation,
+                    stats.clone(),
+                ),
+            );
         Some(stats)
     }
 
@@ -1939,49 +2182,36 @@ impl<T: VectorType> MemTable<T> {
             match kind {
                 crate::index::property::PropertyIndexKind::Hash => {
                     if let Some(field) = fields.first() {
-                        indexes.register(
-                            field,
-                            self.payloads
-                                .iter()
-                                .map(|(&id, payload)| (id, payload.get())),
-                        );
+                        indexes.register(field, self.payloads.iter());
                     }
                 }
                 crate::index::property::PropertyIndexKind::Ordered => {
                     if let Some(field) = fields.first() {
-                        indexes.register_ordered(
-                            field,
-                            self.payloads
-                                .iter()
-                                .map(|(&id, payload)| (id, payload.get())),
-                        );
+                        indexes.register_ordered(field, self.payloads.iter());
                     }
                 }
                 crate::index::property::PropertyIndexKind::Composite => {
-                    indexes.register_composite(
-                        fields,
-                        self.payloads
-                            .iter()
-                            .map(|(&id, payload)| (id, payload.get())),
-                    );
+                    indexes.register_composite(fields, self.payloads.iter());
                 }
                 crate::index::property::PropertyIndexKind::Bitmap => {
                     if let Some(field) = fields.first() {
-                        indexes.register_bitmap(
-                            field,
-                            self.payloads
-                                .iter()
-                                .map(|(&id, payload)| (id, payload.get())),
-                        );
+                        indexes.register_bitmap(field, self.payloads.iter());
+                    }
+                }
+                crate::index::property::PropertyIndexKind::Ngram => {
+                    if let Some(field) = fields.first() {
+                        let _ = indexes.register_ngram(field, self.payloads.iter());
                     }
                 }
             }
         }
         self.property_indexes = indexes;
+        self.mark_property_changed();
     }
 
     pub fn set_property_indexes(&mut self, indexes: PropertyIndexRegistry) {
         self.property_indexes = indexes;
+        self.mark_property_changed();
     }
 
     fn add_to_property_index(&mut self, id: NodeId, payload: &serde_json::Value) {
@@ -2006,12 +2236,12 @@ impl<T: VectorType> MemTable<T> {
         }
 
         // 2. 属性索引清理（必须在 payload 移除之前）
-        if let Some(payload) = self.get_payload(id).cloned() {
+        if let Some(payload) = self.get_payload(id).map(|payload| (*payload).clone()) {
             self.remove_from_property_index(id, &payload);
         }
 
         // 3. 元数据层
-        self.payloads.remove(&id);
+        self.payloads.remove(id);
         self.active_ids.remove(id);
 
         // 3. 图谱层：删除出边 + 清理其他节点指向该节点的入边
@@ -2053,13 +2283,31 @@ impl<T: VectorType> MemTable<T> {
         }
         self.in_degrees.remove(&id);
 
-        // 批量清理 label_index：每个标签只做一次 retain，避免 O(N²) 雪崩
+        // 批量清理 label_index：每个标签只做一次 retain，避免 O(N²) 雪崩。
+        // 删除自环时，同一条边可能同时出现在出边与入边收集路径，必须先去重。
+        let dirty_labels = dirty_labels
+            .into_iter()
+            .map(|(label, pairs)| (label, pairs.into_iter().collect::<HashSet<_>>()))
+            .collect::<HashMap<_, _>>();
         for (label, to_remove) in &dirty_labels {
             if let Some(pairs) = self.label_index.get_mut(label) {
-                let remove_set: HashSet<&(NodeId, NodeId)> = to_remove.iter().collect();
-                pairs.retain(|pair| !remove_set.contains(pair));
+                pairs.retain(|pair| !to_remove.contains(pair));
             }
         }
+        {
+            let mut state = self
+                .graph_stats_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (label, pairs) in &dirty_labels {
+                for &(src, dst) in pairs {
+                    state.edge_removed(src, dst, label);
+                }
+            }
+            state.node_removed(id);
+        }
+        self.mark_property_changed();
+        self.mark_graph_changed();
 
         self.bq_dirty = true;
         if !self.quiver_sync_paused {
@@ -2091,6 +2339,13 @@ impl<T: VectorType> MemTable<T> {
         if !still_connected && let Some(incoming) = self.incoming_edges.get_mut(&dst) {
             incoming.retain(|&source| source != src);
         }
+        for _ in 0..removed {
+            self.graph_stats_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .edge_removed(src, dst, label);
+        }
+        self.mark_graph_changed();
         self.mark_changed(false);
         Ok(())
     }
@@ -2107,6 +2362,11 @@ impl<T: VectorType> MemTable<T> {
         };
         {
             let initial_len = edge_list.len();
+            let removed_labels = edge_list
+                .iter()
+                .filter(|edge| edge.target_id == dst)
+                .map(|edge| edge.label.clone())
+                .collect::<Vec<_>>();
             // 先清理 label_index 中对应的条目
             for edge in edge_list.iter() {
                 if edge.target_id == dst
@@ -2124,6 +2384,13 @@ impl<T: VectorType> MemTable<T> {
                 if let Some(incoming) = self.incoming_edges.get_mut(&dst) {
                     incoming.retain(|&id| id != src);
                 }
+                for label in removed_labels {
+                    self.graph_stats_state
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .edge_removed(src, dst, &label);
+                }
+                self.mark_graph_changed();
                 self.mark_changed(false);
             }
             Ok(())
@@ -2136,7 +2403,7 @@ impl<T: VectorType> MemTable<T> {
 
     /// 更新节点的元数据（Payload），不影响向量和图谱
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
-        match self.get_payload(id).cloned() {
+        match self.get_payload(id).map(|payload| (*payload).clone()) {
             Some(old_payload) => {
                 let sig = calculate_json_signature(&payload);
                 if let Some(&idx) = self.ids_to_indices.get(&id) {
@@ -2145,7 +2412,7 @@ impl<T: VectorType> MemTable<T> {
                 // 属性索引同步更新
                 self.property_indexes.update(id, &old_payload, &payload);
                 self.mark_property_changed();
-                self.payloads.insert(id, PayloadEntry::from_value(payload));
+                self.payloads.insert_value(id, payload)?;
                 self.mark_changed(false);
                 Ok(())
             }
@@ -2183,7 +2450,7 @@ impl<T: VectorType> MemTable<T> {
     ) -> Result<serde_json::Value> {
         let old_payload = self
             .get_payload(id)
-            .cloned()
+            .map(|payload| (*payload).clone())
             .ok_or(TriviumError::NodeNotFound(id))?;
 
         let mut new_payload = old_payload.clone();
@@ -2362,7 +2629,11 @@ impl<T: VectorType> MemTable<T> {
     /// 只计算增量层和合并缓存的实际堆分配。
     pub fn estimated_memory_bytes(&self) -> usize {
         let vec_bytes = self.vec_pool.heap_memory_bytes();
-        let payload_bytes: usize = self.payloads.values().map(PayloadEntry::memory_bytes).sum();
+        let payload_stats = self.payloads.memory_stats();
+        let payload_bytes = payload_stats
+            .directory_bytes
+            .saturating_add(payload_stats.delta_raw_bytes)
+            .saturating_add(payload_stats.parsed_cache_bytes);
         let edge_bytes: usize = self
             .edges
             .values()
@@ -2437,8 +2708,8 @@ impl<T: VectorType> MemTable<T> {
     /// 这使得文本混合检索在重启后自动恢复，无需额外持久化文件。
     pub fn rebuild_text_index_from_payloads(&mut self) {
         self.text_index.clear();
-        for (&id, payload) in &self.payloads {
-            if let serde_json::Value::Object(map) = payload.get() {
+        for (id, payload) in self.payloads.iter() {
+            if let serde_json::Value::Object(map) = payload.as_ref() {
                 for (_key, value) in map {
                     if let serde_json::Value::String(text) = value
                         && !text.is_empty()

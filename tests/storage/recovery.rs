@@ -582,7 +582,7 @@ fn 回归_marker_generation单调递增() {
     // 第一次 flush 后读取 generation
     let marker_path = format!("{}.flush_ok", path);
     let marker_bytes = std::fs::read(&marker_path).unwrap();
-    assert_eq!(marker_bytes.len(), 41, "marker v2 应为 41 字节");
+    assert_eq!(marker_bytes.len(), 53, "marker v3 应为 53 字节");
     let gen1 = u64::from_le_bytes(marker_bytes[5..13].try_into().unwrap());
     assert_eq!(gen1, 1, "首次 flush 的 generation 应为 1");
 

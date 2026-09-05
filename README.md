@@ -34,19 +34,20 @@
 
 ## 一句话介绍
 
-TriviumDB 是一个用纯 Rust 编写的**嵌入式单文件数据库引擎**，将**向量检索（Vector）**、**属性图谱（Graph）**和**文档型元数据（Document）**原生融合在同一个存储内核中。
+TriviumDB 是一个用纯 Rust 编写的**嵌入式三模数据库引擎**，将**向量检索（Vector）**、**属性图谱（Graph）**和**文档型元数据（Document）**原生融合在同一个存储内核中。Rom 模式保持单个 `*.tdb` 的便携性；默认 Mmap 模式使用受同一 generation 协议保护的分离 sidecar。
 
 我们的目标是成为 **AI 应用领域的 SQLite**：
 
 - 🧪 **自由 DIY 混合查询管线** —— TQL 把向量召回、属性索引、图扩展、图算法、路径、集合代数、迭代、聚合与重排变成可自由编排的算子，由确定性 Cascades 优化器统一规划
 - 📊 **四类持久化属性索引** —— Hash / Ordered ART / Composite ART / Roaring Bitmap，等值、范围、前缀、复合条件与低基数集合运算全部索引加速
-- 🧮 **内嵌图算法库** —— PageRank / WCC / Leiden / Betweenness / Degree / Label Propagation / SA-PPR 可在查询内直接调用，`ALL_PATHS` / `SHORTEST_PATHS` / `UNION` / `INTERSECT` / `EXCEPT` / `ITERATE` 一应俱全
-- 🗃️ **Rom/Mmap 双引擎切换** —— 既支持单文件 `*.tdb` 复制走人，也支持分离 `.vec` 向量文件按需 mmap 零拷贝加载
+- 🧮 **内嵌图算法库** —— PageRank / WCC / SCC / K-Core / Articulation Points / Triangle Count / Local Clustering Coefficient / HITS / Harmonic Centrality / Node Similarity / Leiden / Betweenness / Degree / Label Propagation / SA-PPR 可在查询内直接调用，并支持 Weighted Dijkstra、Yen K-Shortest Paths、PairSet 与有界路径/集合算子
+- 🗃️ **Rom/Mmap 双引擎切换** —— Rom 支持单文件 `*.tdb` 复制走人；Mmap 将向量和已发布 Payload 分离到 `.vec` 与 generation 化 `.pld.<generation>`，按需映射
+- ❄️ **Payload 冷热分层** —— 已发布 raw JSON 留在 mmap 冷基础层，新写入/更新进入内存 delta，解析结果进入有硬字节上限的 LRU Cache；ANN/BQ/Exact 候选阶段零 Payload 解析
 - 🔗 **节点即一切** —— 每个节点天然同时拥有限定长度的稠密向量、稀疏文本倒排词频、元数据和图关系，ID 全局唯一，绝不错位
 - 🧠 **为 AI 而生** —— 可选启用“AC自动机+BM25稀疏文本”与“Dense Vector稠密向量”的**多路召回**来触发图谱扩散检索，并内置多层认知管线（FISTA / DPP / PPR）
-- 🛡️ **四层数据安全保障** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，`.flush_ok` v2 整文件 CRC 让损坏输入 fail-closed，断电断存不毁库
+- 🛡️ **四层数据安全保障** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，`.flush_ok` v3 将 `.tdb/.vec/.pld` 的 generation、大小和整文件 CRC 绑定为同一提交，损坏或混代输入 fail-closed
 - 🐍 **Python / Node.js 原生** —— `pip install` 或 `npm install` 后直接使用，类 MongoDB 查询语法
-- ⚡ **高性能检索** —— rayon 并行暴力搜索（小规模 100% 精确）+ 自研 SOTA 级 ANN 索引 **QuIVer**（1 万节点以上自动激活），无需手动配置
+- ⚡ **高性能检索** —— rayon 并行暴力搜索（小规模 100% 精确）+ 自研 SOTA 级 ANN 索引 **QuIVer**；按约 800 万向量分量工作量动态触发（2,500–10,000 节点），无需手动配置
 - 💾 **SSD 友好** —— Append-Only WAL + 后台 Compaction 线程 + QuIVer 索引独立持久化，杜绝随机写入磨损
 - 🔒 **共享只读打开** —— 多进程 Reader 共享锁并发查询已完成代际，Writer 继续保持排他锁与 WAL 安全边界
 - 🧩 **类型化访问能力** —— Rust `DatabaseReader` 在编译期隐藏写 API，`DatabaseWriter` 保留完整嵌入式写能力
@@ -124,7 +125,7 @@ flowchart TD
 | ② 存数据     | 调 SQLite 写入时间、场景     | ↑ 同一步，payload 里就是 JSON      |
 | ③ 存关系     | 调 Neo4j: 用户→地点→人物     | `db.link(user, cafe, "went_to")`   |
 | ④ 后续召回   | 3 次跨库查询 + 手写合并      | `db.search(vec, expand_depth=2)`   |
-| ⑤ 迁移数据   | 导出 3 份 + 写转换脚本       | 复制 `memory.tdb` 一个文件         |
+| ⑤ 迁移数据   | 导出 3 份 + 写转换脚本       | Rom 复制 `memory.tdb`；Mmap 复制同代 `.tdb/.vec/.pld/.flush_ok` |
 
 ### 适用场景
 
@@ -221,7 +222,7 @@ TriviumDB 中的一个节点可以同时拥有**向量、JSON 文档、稀疏文
 
 ### TQL：自由 DIY 的统一查询语言
 
-**TQL（Trivium Query Language）** 不只是把三种查询语法拼在一起，而是一条**可自由编排的三模执行管线**：每个 `WITH` 阶段产出命名 NodeSet，向量、属性索引、图扩展、图算法、路径与集合代数都按你的业务语义自由串联，最后由 Cascades 优化器在预算内选择物理计划：
+**TQL（Trivium Query Language）** 不只是把三种查询语法拼在一起，而是一条**可自由编排的三模执行管线**：每个 `WITH` 阶段产出命名 NodeSet，向量、BM25/AC 文本召回、属性索引、图扩展、图算法、FISTA、DPP、NMF、路径与集合代数都可按业务语义自由串联，最后由 Cascades 优化器在预算内选择物理计划：
 
 ```sql
 -- 文档查询：按 JSON 字段过滤（命中属性索引则跳过全表扫描）
@@ -254,6 +255,15 @@ WHERE similarity(scored) > 0.5
 RETURN scored, similarity(scored) AS sim
 ORDER BY sim DESC LIMIT 10
 
+-- 🧠 文本锚定 → 参数化 SA-PPR → DPP 多样化
+TEXT HYBRID "vector database" TOP 100 K1 1.2 B 0.75 AC_WEIGHT 1 AS text_seed
+WITH text_seed
+SA_PPR_CONFIG text_seed DEPTH 3 ALPHA 0.15 MAX_EDGES 64 MIN_WEIGHT 0 AS expanded
+WITH expanded
+DIVERSIFY expanded TOP 10 QUALITY_WEIGHT 1 AS diverse
+WITH diverse
+RETURN diverse, graph_score(diverse) AS relevance, diversity_score(diverse) AS diversity
+
 -- 🛰️ 路径查询：从语义锚点出发的有界最短路径
 SEARCH VECTOR [1, 0] TOP 1 AS seed
 WITH seed
@@ -262,7 +272,9 @@ WITH route
 RETURN path(route) AS nodes, path_length(route) AS hops
 ```
 
-一条查询内还能使用 `union` / `intersect` / `except` 做多路候选集合运算、`iterate` 做定点迭代扩散、`COUNT/SUM/AVG/MIN/MAX/COLLECT` 做聚合。`EXPLAIN` 会暴露 Cascades 选出的物理算子、预计行数、临时字节与预算切片。
+一条查询内还能使用 `TEXT BM25/AC/HYBRID` 做稀疏召回，`RESIDUAL` 做 FISTA 残差召回，`DIVERSIFY` 做 DPP 多样化，`TOPICS` 做有界 NMF 主题分配，`SA_PPR_CONFIG` 控制扩散参数；也可使用 `union` / `intersect` / `except` 做多路候选集合运算、`iterate` 做定点迭代扩散、`COUNT/SUM/AVG/MIN/MAX/COLLECT` 做聚合。`text_score()`、`residual_score()`、`diversity_score()`、`topic()` 与 `topic_score()` 均是一等表达式。`EXPLAIN` 会暴露 Cascades 选出的物理算子、预计行数、临时字节与预算切片。
+
+`search_advanced()` 不会被 TQL 取代：它仍通过 `SearchConfig` 自由启停文本混合、FISTA、SA-PPR、DPP 与疲劳不应期，并按官方固定顺序执行；TQL 则复用同一底层算法，让高级用户自由安排无状态算子的顺序。
 
 ```python
 # Prepared TQL：同一管线安全地重复绑定业务参数
@@ -282,6 +294,7 @@ Rust / Python / Node.js 三语言共享同一套 TQL、Prepared、四类属性�
 | **GraphFirst（MATCH + RANK）** | 先由图结构产生合法 anchor，再在候选集合内精确向量 Top-K | “只在某类关系约束内找最相似对象” |
 | **向量 + 结构扩展（SEARCH + EXPAND）** | 先用向量定位语义锚点，再沿 `OUTGOING`、`INCOMING` 或 `BOTH` 收集结构候选 | 语义检索后补充上下游上下文 |
 | **SA-PPR 图谱扩散** | 从向量/文本锚点沿带权边传播相关性能量，可启用抑制、疲劳和重启 | Agent 联想记忆、RAG 上下文扩展、推荐召回 |
+| **文本与认知算子（TQL）** | `TEXT BM25/AC/HYBRID`、`RESIDUAL`、`SA_PPR_CONFIG`、`DIVERSIFY`、`TOPICS` 可独立编排，并投影各自分数 | 自定义 RAG、Agent 记忆、主题分析与多样化检索 |
 | **混合检索（search_hybrid）** | AC 自动机 + BM25 稀疏文本 + Dense Vector 多路召回，再进行图扩散与重排 | 专有名词与语义兼顾的生产级检索 |
 | **图算法管线（WITH + 算子）** | `pagerank` / `wcc` / `degree` / `leiden` / `label_propagation` / `sa_ppr` 对 NodeSet 打分，`graph_score()` 直接投影 | 影响力排序、社区发现、图谱分析 |
 | **路径查询（ALL_PATHS / SHORTEST_PATHS）** | 有界全路径与批量最短路径，支持标签序列、避让节点与路径聚合 | 血缘追踪、依赖分析、权限链 |
@@ -296,12 +309,12 @@ Rust / Python / Node.js 三语言共享同一套 TQL、Prepared、四类属性�
 
 | 特性                   | 说明                                                                                                                             |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| 🧪 **自由 DIY 混合查询** | TQL `WITH` 管线：向量 / 属性 / 图扩展 / 图算法 / 路径 / 集合 / 迭代 / 聚合自由编排，确定性 Cascades 优化器 + `EXPLAIN` 成本透明 |
+| 🧪 **自由 DIY 混合查询** | TQL `WITH` 管线：向量 / BM25 / AC / 属性 / 图扩展 / FISTA / DPP / NMF / 路径 / 集合 / 聚合自由编排，确定性 Cascades 优化器 + `EXPLAIN` 成本透明 |
 | 📊 **四类属性索引**    | Hash / Ordered ART / Composite ART / Roaring Bitmap，持久化 `.pidx`，等值 / 范围 / 前缀 / 复合 / 低基数集合运算全索引加速        |
 | 🧮 **内嵌图算法库**    | PageRank / WCC / Leiden / Betweenness / Degree / Label Propagation / SA-PPR，在查询内直接调用                                    |
 | 🛰️ **路径与集合代数**  | `ALL_PATHS` / `SHORTEST_PATHS` / `UNION` / `INTERSECT` / `EXCEPT` / `ITERATE`，Prepared TQL 三语言参数化                        |
 | 🔍 **混合检索**        | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序                                                                    |
-| 🧠 **认知管线**        | FISTA 残差寻隐 / SA-PPR 有限深度扩散 / DPP 多样性采样 / 疲劳不应期，运行时可独立开关                                         |
+| 🧠 **认知管线**        | `search_advanced()` 提供组件可开关、顺序固定的官方模板；TQL 提供 FISTA / 参数化 SA-PPR / DPP / NMF 无状态算子的自由编排，疲劳不应期仍仅属有状态 API |
 | 🔌 **Hook 扩展系统**   | 6 个管线关键阶段的自定义注入点：查询预处理 / 自定义召回 / 召回后处理 / 图扩散前 / 重排序 / 最终后处理，支持 C/C++ FFI 动态库插件 |
 | 📦 **三位一体 O(1)**   | 自动增量 O(1) FreeList 墓碑空洞复用；删节点 O(1) 反向边哈希表（本项目称 Reverse Hash Net），彻底杜绝盘面膨胀与图谱雪崩           |
 | ⚡ **QuIVer ANN 索引** | 自研 SOTA 级近似最近邻图索引：BQ 签名 + Vamana 图导航，冷热分离架构，增量 Insert/Delete/Update 无需重建                          |
@@ -329,12 +342,14 @@ Rust / Python / Node.js 三语言共享同一套 TQL、Prepared、四类属性�
 
 > ⚠️ **维度建议：强烈建议数据库向量维度不超过 3072。** TriviumDB 的通用存储与精确 BruteForce 检索允许更高维度，但 QuIVer 的 BQ 签名安全上限是 3072 维。超过该维度时引擎不会自动构建 QuIVer，检索会稳定回退到 BruteForce；手动构建 QuIVer 会返回明确错误。高维数据库仍可使用，但无法获得 QuIVer ANN 加速，内存和计算开销也会显著增加。
 
-TriviumDB 采用**智能自适应双引擎**向量索引，全程自动路由，无需手动配置：
+TriviumDB 采用**智能自适应双引擎**向量索引。自动 QuIVer 阈值按 `ceil(8,000,000 / dim)` 计算，并限制在 2,500–10,000 节点；低维数据保留更久的精确 BruteForce，高维数据更早切换 ANN：
 
-| 阶段           | 引擎       | 激活条件                         | 特点                                         |
-| -------------- | ---------- | -------------------------------- | -------------------------------------------- |
-| **小规模热区** | BruteForce | < 1 万节点（或 QuIVer 未就绪）   | 100% 精确召回，rayon 多核，延迟极低          |
-| **大规模冷区** | **QuIVer** | 维度 ≤ 3072 且 ≥ 1 万节点时自动构建，独立持久化 | BQ 签名 + Vamana 图导航 + f32 精排，冷热分离 |
+| 阶段 | 引擎 | 激活条件 | 特点 |
+|---|---|---|---|
+| **小规模热区** | BruteForce | 节点数低于当前维度的动态阈值，或 QuIVer 未就绪 | 100% 精确召回，rayon 多核 |
+| **大规模冷区** | **QuIVer** | 维度 ≤ 3072 且达到动态阈值（2,500–10,000 节点） | BQ 签名 + Vamana 图导航 + f32 精排，独立持久化 |
+
+例如 384/768 维仍在 10,000 节点触发，1024 维约 7,813，1536 维约 5,209，3072 维约 2,605。
 
 ### QuIVer 的核心创新
 
@@ -525,38 +540,15 @@ TriviumDB/
 - [x] CLI 工具 `triviumdb-cli`（命令 `tdb`）：非交互命令 + REPL（Tab 补全 / 语法高亮 / 多行输入）+ 配置文件
 - [x] 数据库可视化工具：终端 TUI（`tdb ui`，图谱力导向布局 / k-hop 展开 / 向量搜索 Playground）
 
-### v0.8 — 自由 DIY 混合查询时代 ✅ (当前，v0.8.5)
+### v0.8 — 自由 DIY 混合查询与工程化时代 ✅（当前）
 
-- [x] **四类持久化属性索引**：Hash / Ordered ART / Composite ART / Roaring Bitmap（`.pidx` v4，读取 v1–v4），等值、范围、前缀、复合与低基数集合运算全索引化
-- [x] **TQL `WITH` 可组合管线**：命名 NodeSet、作用域校验、跨阶段自由编排，`FIND` / `MATCH` / `SEARCH` 均可进入管线
-- [x] **Cascades 查询优化器**：确定性、有界、统计感知、成本驱动，Memo + 物理候选 + 预算切片，`EXPLAIN` 暴露物理算子 / 预计行数 / 临时字节
-- [x] **内嵌图算法库**：PageRank / WCC / Degree / Betweenness / Leiden / Label Propagation / SA-PPR 查询内直调，`graph_score()` 一等投影
-- [x] **路径与集合代数**：`ALL_PATHS`（标签序列 / 避让 / 路径聚合）、`SHORTEST_PATHS`、`UNION` / `INTERSECT` / `EXCEPT`、`ITERATE` 定点迭代
-- [x] **表达式 / 聚合 / 空值**：`+ - * /`、`COALESCE`、`IS NULL`、`path()` / `path_length()`，`COUNT/SUM/AVG/MIN/MAX/COLLECT` 与 aggregate `DISTINCT`
-- [x] **Prepared TQL 三语言同步**：严格参数绑定，缺参 / 多参 / 数组对象参数 / 非有限数值 fail-closed
-- [x] **持久化 sidecar 索引体系**：`.pidx` / `.gidx`（业务图块+入边+Label 目录）/ `.text`（AC+BM25）/ `.quiver` 独立版本化，`storage_info()` / `index_info()` 诊断
-- [x] **严格 API 迁移策略**：移除全部静默历史兼容，旧入口返回 `ApiMigrationRequired` 迁移错误与稳定错误码，无头 WAL 拒绝解析
-- [x] **生产级硬保证**：ReadOnly / Immutable 字节级零写、四维查询预算 fail-closed、并行执行确定性、generation 原子发布
-- [x] **TSNG 三信号研究线**：向量 / 属性 / 图统一打分、六条 AccessPath、exact ground truth 与 Recall@K / NDCG@K 评测
-
-### v0.8.4 工程加固 ✅
-
-- [x] **`.flush_ok` v2 完整性标记**：`.tdb`/`.vec` 整文件 CRC32 + marker 自校验，等长位翻转与扇区撕裂可被发现；损坏输入统一 fail-closed（ReadOnly/Immutable 零写拒绝，不再产生零向量伪恢复），v1 标记有界兼容
-- [x] **生产路径零 panic**：外部输入、磁盘解析、查询执行与绑定层不再可达 `panic!/unreachable!`，统一结构化错误与静态门禁
-- [x] **Hook 三端 + FFI ABI v2 对齐**：Python / Node 原生六阶段 Hook（异常结构化传播，Node 同步回调），FFI Hook 升级为带 ABI 版本门禁、错误码与六阶段注入的 v2 协议
-- [x] **真实故障注入矩阵**：发布阶段子进程强杀断电（旧完整代/新完整代二选一）、确定性 I/O failpoint、目标 failpoint 失败分配器、独立格式规格 mutation 套件（`tests/format_spec/`），全部小型 fixture 隔离子进程，不耗尽真实资源
-- [x] **Cascades 权威物理计划**：Source/Filter/Expand/Rank 真实物理候选驱动执行器 lowering，可序列化物理属性，优化状态显式 `Complete/Fallback/BudgetExceeded`，`EXPLAIN` 同步暴露
-- [x] **属性索引数值键编码 v2**：整数/浮点统一有序键（修复组合范围误判空集）、大整数精确比较与安全回退、旧 sidecar 打开时内存重建迁移；修复 Ordered 索引 LIMIT 在其他条件过滤前过早截断
-- [x] **社区 Issue 修复**：#31 并行 PageRank 子集外边 panic、#32 TQL 隐藏 5000 行截断
-- [x] **TQL SEARCH 热路径重构**：Top-K 部分选择 + 惰性物化消除六倍级回归，Pipeline 归一化不再破坏相似度排名
-
-### v0.8.5 查询体验与服务端预览 ✅
-
-- [x] **Prepared 参数化向量**：`SEARCH VECTOR [$a, $b, ...]` 支持逐维参数占位，与 Prepared TQL 严格绑定语义一致，不影响既有向量字面量性能
-- [x] **TQL 统一值结果**：`tql()` 升级为一等值（节点 + 标量列）统一入口，`tql_nodes()` 节点专用、`tql_values()` 兼容别名，legacy 标量 RETURN 支持；Rust/Python/Node 三端 API 同步
-- [x] **FIND/MATCH 扫描回归修复**（Issue #36）：`RoaringTreemap` 活跃 NodeId 惰性遍历、LIMIT 下推流式早停、Hash Posting 有界读取、索引覆盖跳过重复过滤、无边 MATCH 惰性起点扫描，未索引小 LIMIT 不再全表物化
-- [x] **TriviumDB Server（nightly 预览）**：`crates/triviumdb-server` HTTP 壳——Writer Actor + 有界写队列 + 并发读 semaphore + 写者优先公平门控、deadline/取消/幂等键、全局/节点/边级 OCC（ETag/If-Match/409 冲突）、多操作原子事务、Core 批量 WAL Group Commit + 动态合批、Prepared cache、NDJSON 流式、二进制 f32 向量传输、cooperative cancellation、请求级 profile/EXPLAIN ANALYZE、索引建议、结构化日志（pretty/JSON）+ request ID + access log + Prometheus 指标；跨平台二进制发布流水线（Linux x64/ARM64、Windows、macOS x64/ARM64）
-- [x] **仓库结构**：CLI 迁入 `crates/triviumdb-cli`，与 Server 并列，workspace 隔离发包（Embedded 零服务端依赖）
+- [x] **统一 TQL 查询系统**：`FIND` / `MATCH` / `SEARCH`、`WITH` 可组合管线、Prepared 参数、表达式/聚合/路径/集合代数、科学计数法和原子 `SET VECTOR`
+- [x] **有界 Cascades 与图计算**：确定性、统计感知的物理计划，内嵌 PageRank / WCC / Leiden / Betweenness / Degree / Label Propagation / SA-PPR，并通过 `EXPLAIN ANALYZE` 暴露估算与实际指标
+- [x] **完整持久化索引体系**：Hash / Ordered ART / Composite ART / Bitmap、业务图块、AC+BM25 与 QuIVer sidecar；动态 QuIVer 阈值按向量工作量在 2,500–10,000 节点间自动选择
+- [x] **生产级存储与安全保证**：`.flush_ok` v3 绑定 `.tdb/.vec/.pld` generation、大小与 CRC；无生产可达 panic、ReadOnly/Immutable 字节级零写、WAL/代际原子发布、查询/遍历/内存/Payload 预算 fail-closed 与真实小型故障注入
+- [x] **Payload 冷热分离一期**：generation 化 `.pld` mmap raw base、内存 delta/tombstone、有界 LRU Parsed Cache、Late Materialization、ColdPayloadScan 与跨端 cache 配置
+- [x] **Rust/Python/Node 能力对齐**：一等 TQL 值、四类属性索引、Prepared TQL、六阶段 Hook 与 FFI ABI v2，清理静默历史兼容并提供稳定迁移错误
+- [x] **工具与 Server nightly**：CLI/REPL/TUI，以及隔离于 Embedded 依赖树的 HTTP Server，提供 Writer Actor、Group Commit、OCC/幂等、健康监管、索引管理、NDJSON 导入、二进制向量和跨平台发布
 
 ---
 
@@ -568,7 +560,7 @@ TriviumDB/
 | 文档型数据       | ✅ SQL       | ✅ SQL+JSONB | ⚠️ 需预定义表 Schema | ❌ 仅过滤 | ⚠️ 属性键值 | ✅ SurrealQL | ✅ Arrow Schema | ✅ 自由 JSON + `$op` 全家桶 |
 | 向量检索         | ⚠️ 需外挂    | ✅ HNSW/IVFFlat | ✅ HNSW 扩展 | ✅ HNSW | ✅ 原生 HNSW | ✅ MTree/HNSW | ✅ IVF+量化 | ✅ 自研 QuIVer (BQ+Vamana) |
 | 图谱遍历         | ⚠️ JOIN 模拟 | ⚠️ 递归 CTE | ✅ Cypher   | ❌ 无图原语 | ✅ Cypher   | ✅ 图查询    | ❌ 无图原语 | ✅ 原生邻接表 + `.gidx`         |
-| 嵌入式单文件     | ✅ 单文件    | ❌ PG 服务  | ✅ 单文件    | ⚠️ 内存/目录嵌入式 | ❌ JVM 服务 | ✅ 可切换    | ⚠️ 目录嵌入式 | ✅ 单 .tdb          |
+| 嵌入式便携存储 | ✅ 单文件    | ❌ PG 服务  | ✅ 单文件    | ⚠️ 内存/目录嵌入式 | ❌ JVM 服务 | ✅ 可切换    | ⚠️ 目录嵌入式 | ✅ Rom 单 `.tdb` / Mmap 同代文件集 |
 | 混合查询自由度   | ❌           | ⚠️ SQL JOIN 组合 | ⚠️ 过滤式向量搜索 | ❌ 单模向量 | ⚠️ SEARCH 过滤式 | ⚠️ 手动实现 | ⚠️ 向量+FTS+SQL | ✅ WITH 管线自由编排 |
 | 属性索引体系     | ✅ B+Tree    | ✅ B/GIN/BRIN 全家桶 | ⚠️ 表 Schema 内索引 | ⚠️ Payload 索引 | ⚠️ Label+属性 Range/Text | ⚠️ Unique/全文/ANN 为主 | ⚠️ 标量索引 | ✅ Hash/ART/复合/Bitmap 四类 |
 | 查询优化器       | ✅           | ✅          | ✅          | ❌ API 调用式 | ✅          | ⚠️ EXPLAIN 有限 | ⚠️ DataFusion SQL | ✅ Cascades + EXPLAIN           |
@@ -586,7 +578,7 @@ TriviumDB/
 
 1. **三合一原子性**：一个 `u64` ID 同时映射到向量、Payload、边表。插入原子、删除原子，永不出现 ID 不一致。
 2. **嵌入式优先**：没有 Server、没有端口、没有配置文件。`import triviumdb` 就是全部。
-3. **全自动性能路由**：数据量不足 1 万时走 100% 精确 BruteForce，超过后引擎自动构建 QuIVer 索引并无缝切换，开发者无感知。
+3. **全自动性能路由**：按约 800 万向量分量工作量在 2,500–10,000 节点间动态选择阈值；低于阈值使用精确 BruteForce，达到阈值后自动构建并切换 QuIVer。
 4. **可预测的性能**：顺序 I/O only（WAL 追加写 + Compaction 顺序重写），SSD 寿命安全。
 5. **索引即加速层**：QuIVer 是可丢弃的派生数据（`.tdb.quiver` 独立文件），丢失后首次查询时自动重建，不依赖也不污染 WAL 真相源。
 6. **Rust 安全边界**：所有公开 API 均为安全代码。内部仅存在少量经过严格审计的 `unsafe`（主要分布在 mmap 零拷贝与 SIMD 硬件加速），且附有明确的 SAFETY 安全契约注释。

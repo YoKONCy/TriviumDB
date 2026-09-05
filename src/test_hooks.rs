@@ -43,6 +43,10 @@ pub enum IoPoint {
     MarkerMetadata,
     WalFlush,
     WalSync,
+    WalMigrationCreate,
+    WalMigrationWrite,
+    WalMigrationSync,
+    WalMigrationRename,
 }
 
 thread_local! {

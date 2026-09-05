@@ -54,7 +54,8 @@ pub mod python {
             | crate::error::TriviumError::UnsupportedWalVersion { .. }
             | crate::error::TriviumError::QueryParse(_)
             | crate::error::TriviumError::QueryExecution(_)
-            | crate::error::TriviumError::QueryRowBudgetExceeded { .. } => {
+            | crate::error::TriviumError::QueryRowBudgetExceeded { .. }
+            | crate::error::TriviumError::PayloadQueryBudgetExceeded { .. } => {
                 pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
             }
             crate::error::TriviumError::InvalidInput(message) => {
@@ -465,7 +466,7 @@ pub mod python {
     #[pymethods]
     impl PyTriviumDB {
         #[new]
-        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0, access_mode="read_write", missing_index_policy="fallback", max_query_rows=None, row_overflow="throw"))]
+        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0, payload_cache_mb=64, payload_cache_entry_mb=8, access_mode="read_write", missing_index_policy="fallback", max_query_rows=None, row_overflow="throw"))]
         fn new(
             path: &str,
             dim: usize,
@@ -475,6 +476,8 @@ pub mod python {
             auto_build_quiver: bool,
             expected_nodes: Option<usize>,
             memory_limit_mb: usize,
+            payload_cache_mb: usize,
+            payload_cache_entry_mb: usize,
             access_mode: &str,
             missing_index_policy: &str,
             max_query_rows: Option<usize>,
@@ -484,6 +487,17 @@ pub mod python {
             let memory_limit = memory_limit_mb.checked_mul(1024 * 1024).ok_or_else(|| {
                 pyo3::exceptions::PyOverflowError::new_err("memory_limit_mb 换算字节时溢出")
             })?;
+            let payload_cache_bytes =
+                payload_cache_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err("payload_cache_mb 换算字节时溢出")
+                })?;
+            let payload_cache_entry_bytes = payload_cache_entry_mb
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err(
+                        "payload_cache_entry_mb 换算字节时溢出",
+                    )
+                })?;
             let config = crate::database::Config {
                 dim,
                 sync_mode: sm,
@@ -491,6 +505,8 @@ pub mod python {
                 auto_build_quiver,
                 expected_nodes,
                 memory_limit,
+                payload_cache_bytes,
+                payload_cache_entry_bytes,
                 access_mode: parse_access_mode(access_mode)?,
                 missing_index_policy: parse_missing_index_policy(missing_index_policy)?,
                 max_query_rows,
@@ -1156,6 +1172,23 @@ pub mod python {
                 .collect())
         }
 
+        fn delete_many_atomic(&mut self, ids: Vec<u64>) -> PyResult<usize> {
+            dispatch!(self, mut db => db.delete_many_atomic(&ids)).map_err(to_py_error)
+        }
+
+        fn compare_and_set_payload_field(
+            &mut self,
+            id: u64,
+            field: &str,
+            expected: &Bound<'_, PyAny>,
+            replacement: &Bound<'_, PyAny>,
+        ) -> PyResult<()> {
+            let expected = pyobject_to_json(expected);
+            let replacement = pyobject_to_json(replacement);
+            dispatch!(self, mut db => db.compare_and_set_payload_field(id, field, &expected, replacement))
+                .map_err(to_py_error)
+        }
+
         fn delete(&mut self, id: u64) -> PyResult<()> {
             dispatch!(self, mut db => db.delete(id)).map_err(|e: crate::error::TriviumError| {
                 pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
@@ -1267,6 +1300,57 @@ pub mod python {
         /// db.create_index("name")    # 之后 tql('FIND {name: "Alice"} RETURN *') 使用 O(1) 索引
         /// db.create_index("type")
         /// ```
+        #[pyo3(signature = (equalities, max_results=10000))]
+        fn indexed_lookup(
+            &self,
+            equalities: &Bound<'_, PyAny>,
+            max_results: usize,
+        ) -> PyResult<Vec<u64>> {
+            let value = pyobject_to_json(equalities);
+            let object = value.as_object().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "equalities 必须是对象 (equalities must be an object)",
+                )
+            })?;
+            let equalities = object
+                .iter()
+                .map(|(field, value)| (field.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            dispatch!(self, db => db.indexed_lookup(&equalities, max_results)).map_err(to_py_error)
+        }
+
+        fn create_ngram_index(&mut self, field: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.create_ngram_index(field)).map_err(to_py_error)
+        }
+
+        fn drop_ngram_index(&mut self, field: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.drop_ngram_index(field)).map_err(to_py_error)
+        }
+
+        #[pyo3(signature = (field, needle, max_results=10000))]
+        fn substring_lookup(
+            &self,
+            field: &str,
+            needle: &str,
+            max_results: usize,
+        ) -> PyResult<Vec<u64>> {
+            dispatch!(self, db => db.substring_lookup(field, needle, max_results))
+                .map_err(to_py_error)
+        }
+
+        fn create_unique_index(&mut self, field: &str) -> PyResult<()> {
+            dispatch!(self, mut db => db.create_unique_index(field)).map_err(to_py_error)
+        }
+
+        fn create_unique_composite_index(&mut self, fields: Vec<String>) -> PyResult<()> {
+            dispatch!(self, mut db => db.create_unique_composite_index(&fields))
+                .map_err(to_py_error)
+        }
+
+        fn list_unique_indexes(&self) -> Vec<Vec<String>> {
+            dispatch!(self, db => db.list_unique_indexes())
+        }
+
         fn create_index(&mut self, field: &str) -> PyResult<()> {
             dispatch!(self, mut db => db.create_index(field)).map_err(to_py_error)
         }

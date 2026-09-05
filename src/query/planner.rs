@@ -21,8 +21,10 @@ pub enum AccessPath {
     OrderedPropertyIndex { field: String, descending: bool },
     CompositePropertyIndex { fields: Vec<String> },
     BitmapPropertyIndex { fields: Vec<String> },
+    NgramPropertyIndex { field: String },
     PropertyIndexIntersection { fields: Vec<String> },
     EdgeLabelIndex { labels: Vec<String> },
+    ColdPayloadScan,
     FullNodeScan,
 }
 
@@ -34,8 +36,10 @@ impl AccessPath {
             Self::OrderedPropertyIndex { .. } => "ordered_property_index",
             Self::CompositePropertyIndex { .. } => "composite_property_index",
             Self::BitmapPropertyIndex { .. } => "bitmap_property_index",
+            Self::NgramPropertyIndex { .. } => "ngram_property_index",
             Self::PropertyIndexIntersection { .. } => "property_index_intersection",
             Self::EdgeLabelIndex { .. } => "edge_label_index",
+            Self::ColdPayloadScan => "cold_payload_scan",
             Self::FullNodeScan => "full_node_scan",
         }
     }
@@ -97,7 +101,14 @@ pub fn plan_filter_with_limit<T: VectorType>(
     limit: Option<usize>,
     mt: &MemTable<T>,
 ) -> NodeAccessPlan {
-    if limit.is_some() && !filter_has_usable_index(filter, mt) && ordered_range(filter).is_none() {
+    let ordered = ordered_range(filter);
+    let has_ordered_index = matches!(
+        filter,
+        Filter::Gt(..) | Filter::Gte(..) | Filter::Lt(..) | Filter::Lte(..) | Filter::Range(..)
+    ) && ordered
+        .as_ref()
+        .is_some_and(|(field, ..)| mt.has_ordered_property_index(field));
+    if limit.is_some() && !filter_has_usable_index(filter, mt) && !has_ordered_index {
         return NodeAccessPlan {
             access_path: AccessPath::FullNodeScan,
             estimated_rows: mt.node_count(),
@@ -150,6 +161,17 @@ pub fn plan_filter_with_limit<T: VectorType>(
 }
 
 pub fn plan_filter<T: VectorType>(filter: &Filter, mt: &MemTable<T>) -> NodeAccessPlan {
+    if let Filter::Contains(field, needle) = filter
+        && let Ok(Some(candidates)) = mt.find_by_ngram_property_index(field, needle)
+    {
+        return NodeAccessPlan {
+            access_path: AccessPath::NgramPropertyIndex {
+                field: field.clone(),
+            },
+            estimated_rows: candidates.len(),
+            candidates,
+        };
+    }
     if let Some((field, op, inclusive, value)) = ordered_range(filter)
         && let Some((fields, candidates)) = mt.find_by_composite_property_range(
             &filter_equalities(filter),
@@ -244,7 +266,7 @@ pub fn plan_filter<T: VectorType>(filter: &Filter, mt: &MemTable<T>) -> NodeAcce
     }
 
     NodeAccessPlan {
-        access_path: AccessPath::FullNodeScan,
+        access_path: AccessPath::ColdPayloadScan,
         estimated_rows: mt.node_count(),
         candidates: mt.all_node_ids(),
     }
@@ -629,9 +651,11 @@ fn access_path_key(path: &AccessPath) -> (u8, String) {
         }
         AccessPath::CompositePropertyIndex { fields } => (3, fields.join("\0")),
         AccessPath::BitmapPropertyIndex { fields } => (4, fields.join("\0")),
-        AccessPath::PropertyIndexIntersection { fields } => (5, fields.join("\0")),
-        AccessPath::EdgeLabelIndex { labels } => (6, labels.join("\0")),
-        AccessPath::FullNodeScan => (7, String::new()),
+        AccessPath::NgramPropertyIndex { field } => (5, field.clone()),
+        AccessPath::PropertyIndexIntersection { fields } => (6, fields.join("\0")),
+        AccessPath::EdgeLabelIndex { labels } => (7, labels.join("\0")),
+        AccessPath::ColdPayloadScan => (8, String::new()),
+        AccessPath::FullNodeScan => (9, String::new()),
     }
 }
 

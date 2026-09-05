@@ -2,8 +2,8 @@
 //!
 //! 每条记录采用 `len + bincode + CRC32`，事务通过 Begin/Commit 封条过滤未提交操作。
 //! 恢复只消费连续且校验成功的前缀，遇到截断、CRC 或反序列化错误立即停止，绝不
-//! 跨过损坏边界猜测后续字节。空旧版本头仅允许持有 Writer 排他锁的打开流程通过
-//! fsync + 原子替换升级；非空旧 WAL 和无头 WAL 始终 fail-closed。
+//! 跨过损坏边界猜测后续字节。旧版本头只允许持有 Writer 排他锁的打开流程升级；
+//! WAL v2 通过独立历史类型解码并原子转写为 v3，未知非空版本始终 fail-closed。
 
 use crate::error::{Result, TriviumError};
 use crate::node::NodeId;
@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 
 const WAL_MAGIC: &[u8; 4] = b"TVWL";
 pub const WAL_VERSION: u16 = 3;
+const LEGACY_WAL_VERSION_V2: u16 = 2;
 const WAL_HEADER_SIZE: u64 = 6;
+const MAX_WAL_ENTRY_SIZE: usize = 256 * 1024 * 1024;
 
 /// WAL 条目：记录每一次变更操作
 ///
@@ -63,6 +65,150 @@ pub enum WalEntry<T> {
         dst: NodeId,
         label: String,
     },
+}
+
+/// WAL v2 的精确磁盘枚举布局；仅用于迁移，禁止用于新写入。
+#[derive(Debug, Deserialize)]
+enum WalEntryV2<T> {
+    TxBegin {
+        tx_id: u64,
+    },
+    TxCommit {
+        tx_id: u64,
+    },
+    Insert {
+        id: NodeId,
+        vector: Vec<T>,
+        payload: String,
+    },
+    Link {
+        src: NodeId,
+        dst: NodeId,
+        label: String,
+        weight: f32,
+    },
+    Delete {
+        id: NodeId,
+    },
+    Unlink {
+        src: NodeId,
+        dst: NodeId,
+    },
+    UpdatePayload {
+        id: NodeId,
+        payload: String,
+    },
+    UpdateVector {
+        id: NodeId,
+        vector: Vec<T>,
+    },
+    UnlinkLabel {
+        src: NodeId,
+        dst: NodeId,
+        label: String,
+    },
+}
+
+impl<T> From<WalEntryV2<T>> for WalEntry<T> {
+    fn from(entry: WalEntryV2<T>) -> Self {
+        match entry {
+            WalEntryV2::TxBegin { tx_id } => Self::TxBegin { tx_id },
+            WalEntryV2::TxCommit { tx_id } => Self::TxCommit { tx_id },
+            WalEntryV2::Insert {
+                id,
+                vector,
+                payload,
+            } => Self::Insert {
+                id,
+                vector,
+                payload,
+            },
+            WalEntryV2::Link {
+                src,
+                dst,
+                label,
+                weight,
+            } => Self::Link {
+                src,
+                dst,
+                label,
+                weight,
+                metadata: "null".into(),
+            },
+            WalEntryV2::Delete { id } => Self::Delete { id },
+            WalEntryV2::Unlink { src, dst } => Self::Unlink { src, dst },
+            WalEntryV2::UpdatePayload { id, payload } => Self::UpdatePayload { id, payload },
+            WalEntryV2::UpdateVector { id, vector } => Self::UpdateVector { id, vector },
+            WalEntryV2::UnlinkLabel { src, dst, label } => Self::UnlinkLabel { src, dst, label },
+        }
+    }
+}
+
+fn decode_legacy_v2_frames<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<Vec<WalEntry<T>>> {
+    let mut offset = 0usize;
+    let mut entries = Vec::new();
+    while offset < bytes.len() {
+        let len_end = offset
+            .checked_add(4)
+            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 帧偏移溢出".into()))?;
+        let len_bytes = bytes
+            .get(offset..len_end)
+            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 尾部长度字段被截断".into()))?;
+        let len = u32::from_le_bytes(
+            len_bytes
+                .try_into()
+                .map_err(|_| TriviumError::CorruptedFile("WAL v2 长度字段无效".into()))?,
+        ) as usize;
+        if len > MAX_WAL_ENTRY_SIZE {
+            return Err(TriviumError::CorruptedFile(format!(
+                "WAL v2 单条记录超过上限：{} 字节",
+                len
+            )));
+        }
+        let data_end = len_end
+            .checked_add(len)
+            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 数据长度溢出".into()))?;
+        let crc_end = data_end
+            .checked_add(4)
+            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 CRC 偏移溢出".into()))?;
+        let data = bytes
+            .get(len_end..data_end)
+            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 记录数据被截断".into()))?;
+        let crc_bytes = bytes
+            .get(data_end..crc_end)
+            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 记录 CRC 被截断".into()))?;
+        let stored_crc = u32::from_le_bytes(
+            crc_bytes
+                .try_into()
+                .map_err(|_| TriviumError::CorruptedFile("WAL v2 CRC 字段无效".into()))?,
+        );
+        if crc32fast::hash(data) != stored_crc {
+            return Err(TriviumError::CorruptedFile(
+                "WAL v2 记录 CRC 不匹配，拒绝迁移".into(),
+            ));
+        }
+        let entry = bincode::deserialize::<WalEntryV2<T>>(data).map_err(|error| {
+            TriviumError::CorruptedFile(format!("WAL v2 记录无法解码，拒绝迁移：{error}"))
+        })?;
+        entries.push(entry.into());
+        offset = crc_end;
+    }
+    Ok(entries)
+}
+
+fn write_framed_entry<T: serde::Serialize>(
+    writer: &mut impl Write,
+    entry: &WalEntry<T>,
+) -> Result<()> {
+    let data = bincode::serialize(entry).map_err(TriviumError::Serialization)?;
+    let len = u32::try_from(data.len())
+        .map_err(|_| TriviumError::InvalidInput("WAL 记录超过 u32 长度上限".into()))?;
+    writer.write_all(&len.to_le_bytes())?;
+    writer.write_all(&data)?;
+    writer.write_all(&crc32fast::hash(&data).to_le_bytes())?;
+    Ok(())
 }
 
 /// WAL 磁盘同步模式
@@ -135,52 +281,75 @@ impl Wal {
             cumulative_sync_count: 0,
         }
     }
-    /// 检查并升级只有版本头、没有任何待回放记录的旧 WAL。
+    /// 将受支持的旧 WAL 原子迁移到当前版本。
     ///
-    /// 必须仅由持有 Writer 排他锁的 ReadWrite 打开流程调用。非空旧 WAL
-    /// 始终拒绝，避免跨版本解释记录；空旧 WAL 则通过临时文件原子替换为
-    /// 当前版本头，确保后续追加记录不会落在旧版本头之后。
-    pub fn upgrade_empty_legacy_wal(db_path: &str) -> Result<bool> {
+    /// WAL v2 与 v3 共享帧、CRC 和事务封条格式，唯一记录差异是 v3 的 Link
+    /// 新增 metadata。迁移必须完整验证每个物理帧和反序列化结果；任何截断、CRC
+    /// 错误或未知记录都会拒绝迁移并保持原文件不变。
+    pub fn upgrade_legacy_wal<T>(db_path: &str) -> Result<bool>
+    where
+        T: serde::de::DeserializeOwned + serde::Serialize,
+    {
         let wal_path = PathBuf::from(format!("{}.wal", db_path));
-        let Ok(metadata) = std::fs::metadata(&wal_path) else {
+        let Ok(bytes) = std::fs::read(&wal_path) else {
             return Ok(false);
         };
-        if metadata.len() != WAL_HEADER_SIZE {
-            return Ok(false);
-        }
-
-        let bytes = std::fs::read(&wal_path)?;
-        if bytes.len() != WAL_HEADER_SIZE as usize || &bytes[0..4] != WAL_MAGIC {
+        if bytes.len() < WAL_HEADER_SIZE as usize || &bytes[0..4] != WAL_MAGIC {
             return Ok(false);
         }
         let found = u16::from_le_bytes([bytes[4], bytes[5]]);
         if found == WAL_VERSION {
             return Ok(false);
         }
-
+        if found != LEGACY_WAL_VERSION_V2 {
+            return Ok(false);
+        }
+        let entries = decode_legacy_v2_frames::<T>(&bytes[WAL_HEADER_SIZE as usize..])?;
         let tmp_path = PathBuf::from(format!("{}.upgrade.tmp", wal_path.to_string_lossy()));
-        {
+        let write_result = (|| -> Result<()> {
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalMigrationCreate)?;
             let mut tmp = OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .open(&tmp_path)?;
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalMigrationWrite)?;
             tmp.write_all(WAL_MAGIC)?;
             tmp.write_all(&WAL_VERSION.to_le_bytes())?;
+            for entry in &entries {
+                write_framed_entry(&mut tmp, entry)?;
+            }
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalMigrationSync)?;
             tmp.sync_all()?;
-        }
-        if let Err(error) = robust_rename_and_sync(&tmp_path, &wal_path) {
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalMigrationRename)?;
+            robust_rename_and_sync(&tmp_path, &wal_path)?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(error.into());
+            return Err(error);
         }
-
         tracing::info!(
             found_version = found,
             current_version = WAL_VERSION,
+            entry_count = entries.len(),
             wal_path = %wal_path.display(),
-            "已原子升级空旧 WAL 版本头 (Atomically upgraded empty legacy WAL header)"
+            "已原子迁移旧 WAL (Atomically migrated legacy WAL)"
         );
         Ok(true)
+    }
+
+    /// 兼容旧调用名；只处理历史空 WAL，非空迁移必须携带真实向量类型。
+    pub fn upgrade_empty_legacy_wal(db_path: &str) -> Result<bool> {
+        let wal_path = PathBuf::from(format!("{}.wal", db_path));
+        if std::fs::metadata(&wal_path).map(|meta| meta.len()).ok() != Some(WAL_HEADER_SIZE) {
+            return Ok(false);
+        }
+        Self::upgrade_legacy_wal::<u8>(db_path)
     }
 
     /// 创建或打开 WAL 文件（追加模式）

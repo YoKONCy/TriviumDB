@@ -68,9 +68,15 @@ impl Mutation {
                 }
             }
             Self::RepairFlushMarkerCrc => {
-                if output.len() == 41 {
-                    let checksum = crc32fast::hash(&output[..37]);
-                    output[37..41].copy_from_slice(&checksum.to_le_bytes());
+                let checksum_offset = match output.len() {
+                    41 => Some(37),
+                    53 => Some(49),
+                    _ => None,
+                };
+                if let Some(checksum_offset) = checksum_offset {
+                    let checksum = crc32fast::hash(&output[..checksum_offset]);
+                    output[checksum_offset..checksum_offset + 4]
+                        .copy_from_slice(&checksum.to_le_bytes());
                 }
             }
         }

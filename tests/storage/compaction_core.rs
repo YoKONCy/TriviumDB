@@ -94,9 +94,24 @@ fn corrupt_flush_marker_size(path: &str) {
     // vec_size 位于 bytes[21..29]
     let stored_vec = u64::from_le_bytes(marker[21..29].try_into().unwrap());
     marker[21..29].copy_from_slice(&(stored_vec + 1).to_le_bytes());
-    let marker_crc = crc32fast::hash(&marker[..37]);
-    marker[37..41].copy_from_slice(&marker_crc.to_le_bytes());
+    let marker_crc_offset = match marker.len() {
+        41 => 37,
+        53 => 49,
+        length => panic!("未知 flush marker 长度: {length}"),
+    };
+    let marker_crc = crc32fast::hash(&marker[..marker_crc_offset]);
+    marker[marker_crc_offset..marker_crc_offset + 4].copy_from_slice(&marker_crc.to_le_bytes());
     std::fs::write(marker_path, marker).unwrap();
+}
+
+fn payload_size(path: &str) -> u64 {
+    let Ok(marker) = std::fs::read(format!("{path}.flush_ok")) else {
+        return 0;
+    };
+    let generation = u64::from_le_bytes(marker[5..13].try_into().unwrap());
+    std::fs::metadata(format!("{path}.pld.{generation}"))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn tmp_db(name: &str) -> String {
@@ -111,7 +126,17 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok", ".tmp", ".vec.tmp"] {
+    for ext in &[
+        "",
+        ".wal",
+        ".vec",
+        ".pld",
+        ".lock",
+        ".flush_ok",
+        ".tmp",
+        ".vec.tmp",
+        ".pld.tmp",
+    ] {
         std::fs::remove_file(format!("{}{}", path, ext)).ok();
     }
 }
@@ -166,7 +191,7 @@ fn COV_02_manual_compact_删除后压实() {
     }
     db.flush().unwrap();
 
-    let size_before = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let size_before = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) + payload_size(&path);
 
     // 删除 80 个节点
     let ids = db.all_node_ids();
@@ -176,7 +201,7 @@ fn COV_02_manual_compact_删除后压实() {
 
     db.compact().unwrap();
 
-    let size_after = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let size_after = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) + payload_size(&path);
     assert_eq!(db.node_count(), 20);
     assert!(
         size_after < size_before,

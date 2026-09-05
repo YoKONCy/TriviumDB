@@ -75,8 +75,34 @@ fn qemu_aarch64环境不支持运行时宿主动态库夹具() -> bool {
     std::env::var_os("TRIVIUM_TEST_QEMU_AARCH64").is_some()
 }
 
+#[derive(serde::Deserialize)]
+struct SharedFfiContract {
+    schema_version: u32,
+    ffi_cases: Vec<SharedFfiCase>,
+}
+
+#[derive(serde::Deserialize)]
+struct SharedFfiCase {
+    name: String,
+    operation: String,
+    expected: serde_json::Value,
+}
+
+fn shared_ffi_contract() -> SharedFfiCase {
+    let contract: SharedFfiContract =
+        serde_json::from_str(include_str!("public_cases.json")).unwrap();
+    assert_eq!(contract.schema_version, 1);
+    let case = contract.ffi_cases.into_iter().next().unwrap();
+    assert_eq!(case.name, "hook_abi_v2");
+    assert_eq!(case.operation, "ffi_hook_abi");
+    case
+}
+
 #[test]
 fn FFI_ABI_v2覆盖六阶段并传播错误() {
+    let contract = shared_ffi_contract();
+    assert_eq!(contract.expected["abi_version"].as_u64(), Some(2));
+    assert_eq!(contract.expected["stages"].as_array().unwrap().len(), 6);
     if qemu_aarch64环境不支持运行时宿主动态库夹具() {
         return;
     }
@@ -110,10 +136,11 @@ fn FFI_ABI_v2覆盖六阶段并传播错误() {
 
     let mut failing_query = vec![-1.0];
     hook.on_pre_search(&mut failing_query, &mut config, &mut ctx);
+    let expected_status = contract.expected["error_status"].as_i64().unwrap();
     assert!(
         ctx.error
             .as_deref()
-            .is_some_and(|error| error.contains("77"))
+            .is_some_and(|error| error.contains(&expected_status.to_string()))
     );
 }
 

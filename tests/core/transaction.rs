@@ -7,7 +7,7 @@
 //! - Dry-Run 预检（维度错误、重复 ID、链接不存在节点）
 //! - 空事务、基础增删改查
 
-use triviumdb::Database;
+use triviumdb::{Database, TriviumError};
 
 const DIM: usize = 4;
 
@@ -236,6 +236,100 @@ fn 事务_空事务_提交成功并返回空列表() {
     let ids = db.begin_tx().commit().unwrap();
     assert!(ids.is_empty(), "空事务应返回空 ID 列表");
 
+    cleanup(&path);
+}
+
+#[test]
+fn 事务唯一约束支持键交换与删除后复用() {
+    let path = tmp_db("unique_swap_reuse");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let first = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"key": "a"}))
+        .unwrap();
+    let second = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"key": "b"}))
+        .unwrap();
+    db.create_unique_index("key").unwrap();
+
+    {
+        let mut tx = db.begin_tx();
+        tx.update_payload(first, serde_json::json!({"key": "b"}));
+        tx.update_payload(second, serde_json::json!({"key": "a"}));
+        tx.commit().unwrap();
+    }
+    {
+        let mut tx = db.begin_tx();
+        tx.delete(first);
+        tx.insert(&[0.0, 0.0, 1.0, 0.0], serde_json::json!({"key": "b"}));
+        tx.commit().unwrap();
+    }
+    assert_eq!(db.node_count(), 2);
+    cleanup(&path);
+}
+
+#[test]
+fn 事务批内唯一冲突在_wal_前拒绝() {
+    let path = tmp_db("unique_batch_conflict");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    db.create_unique_index("key").unwrap();
+    let wal_len = std::fs::metadata(format!("{path}.wal")).unwrap().len();
+
+    let result = {
+        let mut tx = db.begin_tx();
+        tx.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"key": "same"}));
+        tx.insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"key": "same"}));
+        tx.commit()
+    };
+    assert!(matches!(
+        result,
+        Err(TriviumError::UniqueConstraintViolation { .. })
+    ));
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(
+        std::fs::metadata(format!("{path}.wal")).unwrap().len(),
+        wal_len
+    );
+    cleanup(&path);
+}
+
+#[test]
+fn 条件更新与原子批量删除保持稳定失败语义() {
+    let path = tmp_db("cas_delete_many");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let first = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({"version": 1}))
+        .unwrap();
+    let second = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], serde_json::json!({"version": 1}))
+        .unwrap();
+
+    db.compare_and_set_payload_field(
+        first,
+        "version",
+        &serde_json::json!(1),
+        serde_json::json!(2),
+    )
+    .unwrap();
+    assert!(matches!(
+        db.compare_and_set_payload_field(
+            first,
+            "version",
+            &serde_json::json!(1),
+            serde_json::json!(3)
+        ),
+        Err(TriviumError::ConditionalUpdateNotMatched { id }) if id == first
+    ));
+    assert!(matches!(
+        db.delete_many_atomic(&[first, 999_999]),
+        Err(TriviumError::NodeNotFound(999_999))
+    ));
+    assert!(db.contains(first));
+    assert!(db.contains(second));
+    assert_eq!(db.delete_many_atomic(&[second, first, second]).unwrap(), 2);
+    assert_eq!(db.node_count(), 0);
     cleanup(&path);
 }
 

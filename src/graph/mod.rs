@@ -3,6 +3,7 @@
 //! 算法直接读取 MemTable/NodeSet 子图，统一使用稳定 NodeId 顺序、TraversalBudget 和
 //! 明确的截断策略；并行实现只优化执行，不得改变语义或确定性。
 
+pub mod analytics;
 pub mod budget;
 pub mod centrality;
 pub mod constrained;

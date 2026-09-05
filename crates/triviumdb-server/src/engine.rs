@@ -3,7 +3,9 @@
 //! 读请求由受限 blocking worker 并发执行；Writer Actor 在提交前先声明写等待，再获取
 //! 全部读许可，阻止新读插队并等待已有读退出。OCC 和幂等状态只在成功提交后发布。
 
-use crate::protocol::{ApiError, MutationResponse, TransactionOperation, TransactionRequest};
+use crate::protocol::{
+    ApiError, IndexKind, IndexRequest, MutationResponse, TransactionOperation, TransactionRequest,
+};
 use axum::http::StatusCode;
 use std::{
     collections::{HashMap, VecDeque},
@@ -14,7 +16,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use triviumdb::{
     Database,
     database::Config,
@@ -103,6 +105,55 @@ pub struct EngineMetrics {
     pub batched_writes_total: u64,
     pub max_observed_batch_size: usize,
     pub wal_sync_total: u64,
+    pub active_reads: usize,
+    pub waiting_reads: usize,
+    pub active_blocking_tasks: usize,
+    pub waiting_writers: usize,
+    pub writer_alive: bool,
+    pub writer_failed: bool,
+    pub warmup_state: WarmupState,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WarmupState {
+    #[default]
+    Idle,
+    Preparing,
+    Building,
+    Ready,
+    Skipped,
+    Failed,
+}
+
+impl WarmupState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Preparing => "preparing",
+            Self::Building => "building",
+            Self::Ready => "ready",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_usize(value: usize) -> Self {
+        match value {
+            1 => Self::Preparing,
+            2 => Self::Building,
+            3 => Self::Ready,
+            4 => Self::Skipped,
+            5 => Self::Failed,
+            _ => Self::Idle,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReadinessSnapshot {
+    pub ready: bool,
+    pub reason: &'static str,
+    pub metrics: EngineMetrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +209,7 @@ struct EngineInner {
     read_slots: Arc<Semaphore>,
     max_concurrent_reads: u32,
     waiting_writers: AtomicUsize,
+    writer_released: Notify,
     versions: Arc<Mutex<VersionState>>,
     prepared: Mutex<PreparedCache>,
     metrics: EngineMetricState,
@@ -174,7 +226,12 @@ struct EngineMetricState {
     batched_writes_total: AtomicU64,
     max_observed_batch_size: AtomicUsize,
     wal_sync_total: AtomicU64,
+    writer_alive: AtomicBool,
     writer_failed: AtomicBool,
+    active_reads: AtomicUsize,
+    waiting_reads: AtomicUsize,
+    active_blocking_tasks: AtomicUsize,
+    warmup_state: AtomicUsize,
 }
 
 struct VersionState {
@@ -191,6 +248,27 @@ struct EdgeKey {
     source: u64,
     target: u64,
     label: String,
+}
+
+struct AtomicGaugeGuard<'a> {
+    gauge: &'a AtomicUsize,
+}
+
+impl<'a> AtomicGaugeGuard<'a> {
+    fn enter(gauge: &'a AtomicUsize) -> Self {
+        gauge.fetch_add(1, Ordering::AcqRel);
+        Self { gauge }
+    }
+
+    fn enter_existing(gauge: &'a AtomicUsize) -> Self {
+        Self { gauge }
+    }
+}
+
+impl Drop for AtomicGaugeGuard<'_> {
+    fn drop(&mut self) {
+        self.gauge.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 struct QueryCancelGuard {
@@ -259,6 +337,13 @@ enum WriteOperation {
         expected_generation: Option<String>,
     },
     Transaction(TransactionRequest),
+    CompareAndSet {
+        id: u64,
+        request: crate::protocol::ConditionalMutationRequest,
+    },
+    DeleteMany(crate::protocol::DeleteManyRequest),
+    CreateIndex(IndexRequest),
+    DropIndex(IndexRequest),
 }
 
 impl EngineHandle {
@@ -299,6 +384,7 @@ impl EngineHandle {
                 ApiError::invalid_request("读并发数过大 (Read concurrency is too large)")
             })?,
             waiting_writers: AtomicUsize::new(0),
+            writer_released: Notify::new(),
             versions,
             prepared: Mutex::new(PreparedCache::new(config.prepared_cache_capacity)),
             metrics: EngineMetricState {
@@ -310,12 +396,18 @@ impl EngineHandle {
                 batched_writes_total: AtomicU64::new(0),
                 max_observed_batch_size: AtomicUsize::new(0),
                 wal_sync_total: AtomicU64::new(0),
+                writer_alive: AtomicBool::new(true),
                 writer_failed: AtomicBool::new(false),
+                active_reads: AtomicUsize::new(0),
+                waiting_reads: AtomicUsize::new(0),
+                active_blocking_tasks: AtomicUsize::new(0),
+                warmup_state: AtomicUsize::new(WarmupState::Idle as usize),
             },
             max_write_batch_size: config.max_write_batch_size,
             max_write_batch_delay: config.max_write_batch_delay,
         });
-        tokio::spawn(run_writer(inner.clone(), receiver));
+        start_writer_supervisor(inner.clone(), receiver);
+        start_quiver_warmup(inner.clone());
         Ok(Self { inner, writes })
     }
 
@@ -391,7 +483,7 @@ impl EngineHandle {
     pub async fn search_vector(
         &self,
         vector: Vec<f32>,
-        top_k: usize,
+        config: triviumdb::database::SearchConfig,
         deadline: Instant,
     ) -> Result<(Vec<SearchHit>, VersionSnapshot), ApiError> {
         let versions = self.inner.versions.clone();
@@ -399,7 +491,7 @@ impl EngineHandle {
         self.run_read(deadline, control.clone(), move |database| {
             control.check().map_err(ApiError::from)?;
             let hits = database
-                .search(&vector, top_k, 0, -1.0)
+                .search_advanced(&vector, &config)
                 .map_err(ApiError::from)?;
             control.check().map_err(ApiError::from)?;
             Ok((hits, lock_or_recover(&versions).snapshot()))
@@ -414,6 +506,37 @@ impl EngineHandle {
             .into_iter()
             .flat_map(|index| index.fields)
             .collect()
+    }
+
+    pub async fn indexed_lookup(
+        &self,
+        request: crate::protocol::IndexedLookupRequest,
+        deadline: Instant,
+    ) -> Result<Vec<String>, ApiError> {
+        let control = QueryControl::with_deadline(deadline);
+        self.run_read(deadline, control, move |database| {
+            let equalities = request.equalities.into_iter().collect::<Vec<_>>();
+            database
+                .indexed_lookup(&equalities, request.max_results)
+                .map(|ids| ids.into_iter().map(|id| id.to_string()).collect())
+                .map_err(ApiError::from)
+        })
+        .await
+    }
+
+    pub async fn substring_lookup(
+        &self,
+        request: crate::protocol::SubstringLookupRequest,
+        deadline: Instant,
+    ) -> Result<Vec<String>, ApiError> {
+        let control = QueryControl::with_deadline(deadline);
+        self.run_read(deadline, control, move |database| {
+            database
+                .substring_lookup(&request.field, &request.needle, request.max_results)
+                .map(|ids| ids.into_iter().map(|id| id.to_string()).collect())
+                .map_err(ApiError::from)
+        })
+        .await
     }
 
     pub async fn get_node(&self, id: u64, deadline: Instant) -> Result<VersionedNode, ApiError> {
@@ -487,6 +610,100 @@ impl EngineHandle {
         }
     }
 
+    pub async fn manage_index(
+        &self,
+        request: IndexRequest,
+        create: bool,
+        deadline: Instant,
+    ) -> Result<VersionSnapshot, ApiError> {
+        let operation = if create {
+            WriteOperation::CreateIndex(request)
+        } else {
+            WriteOperation::DropIndex(request)
+        };
+        match self
+            .send_write(operation, None, Vec::new(), deadline)
+            .await?
+        {
+            StoredWriteResult::Mutation(result) => Ok(result.version),
+            StoredWriteResult::Transaction(_) => Err(ApiError::internal(
+                "索引操作结果类型不匹配 (Index operation result type mismatch)",
+            )),
+        }
+    }
+
+    pub fn index_info(&self) -> Vec<triviumdb::index::property::PropertyIndexStats> {
+        read_or_recover(&self.inner.database).index_info()
+    }
+
+    pub async fn build_quiver(&self, deadline: Instant) -> Result<bool, ApiError> {
+        let handle = read_or_recover(&self.inner.database).quiver_build_handle();
+        self.inner
+            .metrics
+            .active_blocking_tasks
+            .fetch_add(1, Ordering::AcqRel);
+        let inner = self.inner.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let _blocking_guard =
+                AtomicGaugeGuard::enter_existing(&inner.metrics.active_blocking_tasks);
+            let Some(build) = handle.prepare_auto_build().map_err(ApiError::from)? else {
+                return Ok(false);
+            };
+            build.execute().map_err(ApiError::from)
+        });
+        tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), task)
+            .await
+            .map_err(|_| ApiError::timeout())?
+            .map_err(|error| {
+                ApiError::internal(format!(
+                    "QuIVer 构建任务失败 (QuIVer build task failed): {error}"
+                ))
+            })?
+    }
+
+    pub async fn conditional_mutation(
+        &self,
+        id: u64,
+        request: crate::protocol::ConditionalMutationRequest,
+        deadline: Instant,
+    ) -> Result<WriteResult, ApiError> {
+        match self
+            .send_write(
+                WriteOperation::CompareAndSet { id, request },
+                None,
+                Vec::new(),
+                deadline,
+            )
+            .await?
+        {
+            StoredWriteResult::Mutation(result) => Ok(result),
+            StoredWriteResult::Transaction(_) => Err(ApiError::internal(
+                "条件更新结果类型不匹配 (Conditional mutation result type mismatch)",
+            )),
+        }
+    }
+
+    pub async fn delete_many(
+        &self,
+        request: crate::protocol::DeleteManyRequest,
+        deadline: Instant,
+    ) -> Result<WriteResult, ApiError> {
+        match self
+            .send_write(
+                WriteOperation::DeleteMany(request),
+                None,
+                Vec::new(),
+                deadline,
+            )
+            .await?
+        {
+            StoredWriteResult::Mutation(result) => Ok(result),
+            StoredWriteResult::Transaction(_) => Err(ApiError::internal(
+                "批量删除结果类型不匹配 (Delete-many result type mismatch)",
+            )),
+        }
+    }
+
     pub async fn transaction(
         &self,
         request: TransactionRequest,
@@ -511,12 +728,29 @@ impl EngineHandle {
         }
     }
 
-    pub async fn ready(&self) -> bool {
-        !self.writes.is_closed() && !self.inner.metrics.writer_failed.load(Ordering::Acquire)
+    pub fn readiness(&self) -> ReadinessSnapshot {
+        let mut metrics = self.inner.metrics.snapshot();
+        metrics.waiting_writers = self.inner.waiting_writers.load(Ordering::Acquire);
+        let (ready, reason) = if metrics.writer_failed {
+            (false, "writer_failed")
+        } else if !metrics.writer_alive || self.writes.is_closed() {
+            (false, "writer_unavailable")
+        } else if self.inner.read_slots.is_closed() {
+            (false, "read_capacity_unavailable")
+        } else {
+            (true, "ready")
+        };
+        ReadinessSnapshot {
+            ready,
+            reason,
+            metrics,
+        }
     }
 
     pub fn metrics(&self) -> EngineMetrics {
-        self.inner.metrics.snapshot()
+        let mut metrics = self.inner.metrics.snapshot();
+        metrics.waiting_writers = self.inner.waiting_writers.load(Ordering::Acquire);
+        metrics
     }
 
     async fn run_read<R, F>(
@@ -535,15 +769,27 @@ impl EngineHandle {
         let mut operation = Some(operation);
         let telemetry = current_telemetry();
         let wait_started = Instant::now();
+        let waiting_guard = AtomicGaugeGuard::enter(&self.inner.metrics.waiting_reads);
         let permit = loop {
             if Instant::now() >= deadline {
                 return Err(ApiError::timeout());
             }
-            while self.inner.waiting_writers.load(Ordering::Acquire) != 0 {
-                if Instant::now() >= deadline {
-                    return Err(ApiError::timeout());
+            if self.inner.metrics.writer_failed.load(Ordering::Acquire)
+                || !self.inner.metrics.writer_alive.load(Ordering::Acquire)
+            {
+                return Err(engine_stopped());
+            }
+            if self.inner.waiting_writers.load(Ordering::Acquire) != 0 {
+                let notified = self.inner.writer_released.notified();
+                if self.inner.waiting_writers.load(Ordering::Acquire) != 0 {
+                    tokio::time::timeout(
+                        deadline.saturating_duration_since(Instant::now()),
+                        notified,
+                    )
+                    .await
+                    .map_err(|_| ApiError::timeout())?;
+                    continue;
                 }
-                tokio::task::yield_now().await;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             let permit =
@@ -556,13 +802,21 @@ impl EngineHandle {
             }
             drop(permit);
         };
+        drop(waiting_guard);
         if let Some(telemetry) = &telemetry {
             telemetry.record_queue_wait(wait_started.elapsed());
         }
         let database = self.inner.database.clone();
         let mut cancel_guard = QueryCancelGuard::new(control.clone());
         let task_telemetry = telemetry;
+        let metrics = &self.inner.metrics;
+        metrics.active_blocking_tasks.fetch_add(1, Ordering::AcqRel);
+        metrics.active_reads.fetch_add(1, Ordering::AcqRel);
+        let inner = self.inner.clone();
         let task = tokio::task::spawn_blocking(move || {
+            let _blocking_guard =
+                AtomicGaugeGuard::enter_existing(&inner.metrics.active_blocking_tasks);
+            let _read_guard = AtomicGaugeGuard::enter_existing(&inner.metrics.active_reads);
             let _permit = permit;
             let guard = read_or_recover(&database);
             let execution_started = Instant::now();
@@ -648,6 +902,87 @@ impl EngineHandle {
     }
 }
 
+fn start_writer_supervisor(inner: Arc<EngineInner>, receiver: mpsc::Receiver<WriteCommand>) {
+    tokio::spawn(async move {
+        let writer = tokio::spawn(run_writer(inner.clone(), receiver));
+        if let Err(error) = writer.await {
+            inner.metrics.writer_failed.store(true, Ordering::Release);
+            tracing::error!(%error, "Writer Actor 异常退出 (writer actor terminated unexpectedly)");
+        }
+        inner.metrics.writer_alive.store(false, Ordering::Release);
+        inner.read_slots.close();
+        inner.writer_released.notify_waiters();
+    });
+}
+
+fn start_quiver_warmup(inner: Arc<EngineInner>) {
+    let handle = read_or_recover(&inner.database).quiver_build_handle();
+    inner
+        .metrics
+        .warmup_state
+        .store(WarmupState::Preparing as usize, Ordering::Release);
+    inner
+        .metrics
+        .active_blocking_tasks
+        .fetch_add(1, Ordering::AcqRel);
+    tokio::task::spawn_blocking(move || {
+        let _blocking_guard =
+            AtomicGaugeGuard::enter_existing(&inner.metrics.active_blocking_tasks);
+        let build = match handle.prepare_auto_build() {
+            Ok(Some(build)) => build,
+            Ok(None) => {
+                inner
+                    .metrics
+                    .warmup_state
+                    .store(WarmupState::Skipped as usize, Ordering::Release);
+                return;
+            }
+            Err(error) => {
+                inner
+                    .metrics
+                    .warmup_state
+                    .store(WarmupState::Failed as usize, Ordering::Release);
+                tracing::warn!(%error, "QuIVer 后台预热准备失败 (background QuIVer warmup preparation failed)");
+                return;
+            }
+        };
+        inner
+            .metrics
+            .warmup_state
+            .store(WarmupState::Building as usize, Ordering::Release);
+        let started = Instant::now();
+        match build.execute() {
+            Ok(true) => {
+                inner
+                    .metrics
+                    .warmup_state
+                    .store(WarmupState::Ready as usize, Ordering::Release);
+                tracing::info!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "QuIVer 后台预热完成 (background QuIVer warmup finished)"
+                )
+            }
+            Ok(false) => {
+                inner
+                    .metrics
+                    .warmup_state
+                    .store(WarmupState::Skipped as usize, Ordering::Release);
+                tracing::info!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "QuIVer 后台预热因向量代际变化而放弃发布 (background QuIVer warmup skipped publishing after vector generation changed)"
+                )
+            }
+            Err(error) => {
+                inner
+                    .metrics
+                    .warmup_state
+                    .store(WarmupState::Failed as usize, Ordering::Release);
+                tracing::warn!(%error, "QuIVer 后台预热失败 (background QuIVer warmup failed)")
+            }
+        }
+    });
+}
+
 async fn run_writer(inner: Arc<EngineInner>, mut receiver: mpsc::Receiver<WriteCommand>) {
     while let Some(command) = receiver.recv().await {
         inner.metrics.queue_depth.fetch_sub(1, Ordering::AcqRel);
@@ -663,6 +998,8 @@ async fn run_writer(inner: Arc<EngineInner>, mut receiver: mpsc::Receiver<WriteC
             break;
         }
     }
+    inner.metrics.writer_alive.store(false, Ordering::Release);
+    inner.writer_released.notify_waiters();
 }
 
 async fn collect_write_batch(
@@ -744,6 +1081,7 @@ async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteComma
         }
     };
     inner.waiting_writers.fetch_sub(1, Ordering::AcqRel);
+    inner.writer_released.notify_waiters();
     let Some(permits) = permits else {
         if !batch.is_empty() {
             reject_batch(batch, engine_stopped());
@@ -768,7 +1106,14 @@ async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteComma
 
     let database = inner.database.clone();
     let versions = inner.versions.clone();
+    inner
+        .metrics
+        .active_blocking_tasks
+        .fetch_add(1, Ordering::AcqRel);
+    let task_inner = inner.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let _blocking_guard =
+            AtomicGaugeGuard::enter_existing(&task_inner.metrics.active_blocking_tasks);
         let _permits = permits;
         let mut database = write_or_recover(&database);
         let mut versions = lock_or_recover(&versions);
@@ -862,6 +1207,67 @@ fn execute_write(
                 replayed: false,
             }))
         }
+        WriteOperation::CompareAndSet { id, request } => {
+            database
+                .compare_and_set_payload_field(
+                    id,
+                    &request.field,
+                    &request.expected,
+                    request.replacement,
+                )
+                .map_err(ApiError::from)?;
+            versions.generation = versions.generation.saturating_add(1);
+            versions.node_versions.insert(id, versions.generation);
+            Ok(StoredWriteResult::Mutation(WriteResult {
+                mutation: MutationResponse {
+                    affected: 1,
+                    created_ids: Vec::new(),
+                },
+                version: versions.snapshot(),
+                replayed: false,
+            }))
+        }
+        WriteOperation::DeleteMany(request) => {
+            let affected = database
+                .delete_many_atomic(&request.ids)
+                .map_err(ApiError::from)?;
+            versions.generation = versions.generation.saturating_add(1);
+            for id in request.ids {
+                versions.node_versions.insert(id, versions.generation);
+            }
+            Ok(StoredWriteResult::Mutation(WriteResult {
+                mutation: MutationResponse {
+                    affected,
+                    created_ids: Vec::new(),
+                },
+                version: versions.snapshot(),
+                replayed: false,
+            }))
+        }
+        WriteOperation::CreateIndex(request) => {
+            apply_index_change(database, &request, true)?;
+            versions.generation = versions.generation.saturating_add(1);
+            Ok(StoredWriteResult::Mutation(WriteResult {
+                mutation: MutationResponse {
+                    affected: 1,
+                    created_ids: Vec::new(),
+                },
+                version: versions.snapshot(),
+                replayed: false,
+            }))
+        }
+        WriteOperation::DropIndex(request) => {
+            apply_index_change(database, &request, false)?;
+            versions.generation = versions.generation.saturating_add(1);
+            Ok(StoredWriteResult::Mutation(WriteResult {
+                mutation: MutationResponse {
+                    affected: 1,
+                    created_ids: Vec::new(),
+                },
+                version: versions.snapshot(),
+                replayed: false,
+            }))
+        }
         WriteOperation::Transaction(request) => {
             validate_transaction_preconditions(versions, &request)?;
             let mut transaction = database.begin_tx();
@@ -938,6 +1344,48 @@ fn execute_write(
             }))
         }
     }
+}
+
+fn apply_index_change(
+    database: &mut Database<f32>,
+    request: &IndexRequest,
+    create: bool,
+) -> Result<(), ApiError> {
+    if request.fields.iter().any(|field| field.trim().is_empty()) {
+        return Err(ApiError::invalid_request(
+            "索引字段不得为空 (Index fields must not be empty)",
+        ));
+    }
+    match (&request.kind, request.fields.as_slice(), create) {
+        (IndexKind::Hash, [field], true) => database.create_index(field),
+        (IndexKind::Hash, [field], false) => database.drop_index(field),
+        (IndexKind::Ordered, [field], true) => database.create_ordered_index(field),
+        (IndexKind::Ordered, [field], false) => database.drop_ordered_index(field),
+        (IndexKind::Bitmap, [field], true) => database.create_bitmap_index(field),
+        (IndexKind::Bitmap, [field], false) => database.drop_bitmap_index(field),
+        (IndexKind::Ngram, [field], true) => database.create_ngram_index(field),
+        (IndexKind::Ngram, [field], false) => database.drop_ngram_index(field),
+        (IndexKind::Unique, [field], true) => database.create_unique_index(field),
+        (IndexKind::Unique, [field], false) => database.drop_index(field),
+        (IndexKind::UniqueComposite, fields, true) if fields.len() >= 2 => {
+            database.create_unique_composite_index(fields)
+        }
+        (IndexKind::UniqueComposite, fields, false) if fields.len() >= 2 => {
+            database.drop_composite_index(fields)
+        }
+        (IndexKind::Composite, fields, true) if fields.len() >= 2 => {
+            database.create_composite_index(fields)
+        }
+        (IndexKind::Composite, fields, false) if fields.len() >= 2 => {
+            database.drop_composite_index(fields)
+        }
+        _ => {
+            return Err(ApiError::invalid_request(
+                "单字段索引必须恰好一个字段，复合索引至少两个字段 (Single-field indexes require exactly one field; composite indexes require at least two)",
+            ));
+        }
+    }
+    .map_err(ApiError::from)
 }
 
 fn validate_global_precondition(
@@ -1019,6 +1467,13 @@ impl EngineMetricState {
             batched_writes_total: self.batched_writes_total.load(Ordering::Relaxed),
             max_observed_batch_size: self.max_observed_batch_size.load(Ordering::Relaxed),
             wal_sync_total: self.wal_sync_total.load(Ordering::Relaxed),
+            active_reads: self.active_reads.load(Ordering::Acquire),
+            waiting_reads: self.waiting_reads.load(Ordering::Acquire),
+            active_blocking_tasks: self.active_blocking_tasks.load(Ordering::Acquire),
+            waiting_writers: 0,
+            writer_alive: self.writer_alive.load(Ordering::Acquire),
+            writer_failed: self.writer_failed.load(Ordering::Acquire),
+            warmup_state: WarmupState::from_usize(self.warmup_state.load(Ordering::Acquire)),
         }
     }
 }
@@ -1189,6 +1644,88 @@ mod tests {
     }
 
     #[test]
+    fn 后台quiver任务不持有server外层database读锁() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("warmup-lock.tdb");
+        let mut database = Database::<f32>::open_with_config(
+            &path.to_string_lossy(),
+            Config {
+                dim: 1,
+                storage_mode: triviumdb::database::StorageMode::Rom,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        for id in 1..=10_000 {
+            database
+                .insert_with_id(id, &[id as f32], serde_json::Value::Null)
+                .unwrap();
+        }
+        let database = Arc::new(RwLock::new(database));
+        let handle = read_or_recover(&database).quiver_build_handle();
+        assert!(
+            database.try_write().is_ok(),
+            "Core 构建句柄存在时 Server 外层写锁必须立即可获取"
+        );
+        let prepared = handle.prepare_auto_build().unwrap().unwrap();
+        assert!(handle.prepare_auto_build().unwrap().is_none());
+        assert!(
+            database.try_write().is_ok(),
+            "后台构建任务存在时 Server 外层写锁必须立即可获取"
+        );
+        drop(prepared);
+    }
+
+    #[test]
+    fn 后台quiver预热服从auto_build配置() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("warmup-disabled.tdb");
+        let mut database = Database::<f32>::open_with_config(
+            &path.to_string_lossy(),
+            Config {
+                dim: 1,
+                storage_mode: triviumdb::database::StorageMode::Rom,
+                auto_build_quiver: false,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        for id in 1..=10_000 {
+            database
+                .insert_with_id(id, &[id as f32], serde_json::Value::Null)
+                .unwrap();
+        }
+        assert!(database.prepare_auto_quiver_build().unwrap().is_none());
+    }
+
+    #[test]
+    fn 后台quiver预热服从内存预算并返回明确错误() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("warmup-memory.tdb");
+        let mut database = Database::<f32>::open_with_config(
+            &path.to_string_lossy(),
+            Config {
+                dim: 1,
+                storage_mode: triviumdb::database::StorageMode::Rom,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        for id in 1..=10_000 {
+            database
+                .insert_with_id(id, &[id as f32], serde_json::Value::Null)
+                .unwrap();
+        }
+        database.set_memory_limit(1);
+        let error = database
+            .quiver_build_handle()
+            .prepare_auto_build()
+            .err()
+            .expect("内存不足时预热准备必须失败");
+        assert!(error.to_string().contains("内存上限"));
+    }
+
+    #[test]
     fn prepared缓存按lru有界淘汰() {
         let first = PreparedTql::from_query(
             triviumdb::query::tql_parser::parse_tql("MATCH (n) RETURN n").unwrap(),
@@ -1295,6 +1832,28 @@ mod tests {
             rows[0].get("total"),
             Some(triviumdb::query::tql_executor::TqlValue::Int(1))
         ));
+        assert_eq!(engine.metrics().waiting_reads, 0);
+        assert_eq!(engine.metrics().active_reads, 0);
+    }
+
+    #[tokio::test]
+    async fn readiness与metrics不获取database锁且报告运行状态() {
+        let (engine, _directory) = test_engine("health_state", 4, 1).await;
+        let database = engine.inner.database.clone();
+        let held = std::thread::spawn(move || {
+            let _guard = write_or_recover(&database);
+            std::thread::sleep(Duration::from_millis(40));
+        });
+        std::thread::sleep(Duration::from_millis(5));
+        let readiness = engine.readiness();
+        assert!(readiness.ready);
+        assert!(readiness.metrics.writer_alive);
+        assert!(!readiness.metrics.writer_failed);
+        assert!(matches!(
+            readiness.metrics.warmup_state,
+            WarmupState::Skipped | WarmupState::Idle
+        ));
+        held.join().unwrap();
     }
 
     #[tokio::test]

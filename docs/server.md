@@ -1,85 +1,65 @@
 # TriviumDB Server（HTTP 服务端版）
 
-> **版本**: v0.8.5（nightly 预览）
+> **版本**: v0.8.6 开发分支（nightly 预览）
 > **语言**: Rust（Axum + Tokio，仅服务端 crate，嵌入式核心零依赖侵入）
 > **许可**: Apache-2.0
 
 ---
 
-## ⚠️ 状态声明：nightly 预览
+## 状态声明：nightly 预览
 
-**TriviumDB 的正式产品形态是嵌入式数据库（Embedded Database）。** Python / Node.js / Rust 用户应继续以嵌入式方式使用：
+**TriviumDB 的正式产品形态仍是嵌入式数据库（Embedded Database）。** Python、Node.js 和 Rust 用户应优先使用正式嵌入式包：
 
 ```bash
-pip install triviumdb     # Python
-npm install triviumdb     # Node.js
-cargo add triviumdb       # Rust
+pip install triviumdb
+npm install triviumdb
+cargo add triviumdb
 ```
 
-`triviumdb-server` 目前处于 **nightly 预览状态**：
+`triviumdb-server` 目前处于 nightly 预览状态：
 
-- 协议（路由、字段、错误码）可能在不通知的情况下变更；
-- 并发模型仍在迭代，尚未承诺任何稳定性保证；
-- 尚未发布到 crates.io，也未承诺长期支持；
-- **一切 API、语义与用法说明仍以嵌入式版本为准**，本文档仅为尝鲜者提供上手参考；
-- 生产环境请勿依赖 nightly Server。
+- HTTP 路由、字段和错误码仍可能调整；
+- 尚未发布到 crates.io，也未承诺长期兼容性；
+- 一切核心 API、存储格式和查询语义仍以嵌入式版本为准；
+- 当前没有认证和 TLS，不应直接暴露到公网；
+- 生产环境仍不建议依赖 nightly Server。
 
-它适合两类读者：
-
-1. 想提前体验「多客户端并发读写一个 TriviumDB 文件」的开发者；
-2. 想跟踪 Server 演进方向（Writer Actor、Group Commit、OCC、流式协议）的社区成员。
+Server 适合提前体验多客户端访问、Writer Actor、Group Commit、OCC、健康监管、流式响应和批量导入。
 
 ---
 
-## 目录
-
-- [架构与定位](#架构与定位)
-- [构建与运行](#构建与运行)
-- [配置参考（CLI 参数与环境变量）](#配置参考cli-参数与环境变量)
-- [HTTP API 一览](#http-api-一览)
-- [并发模型](#并发模型)
-- [OCC 与 ETag/If-Match](#occ-与-etagif-match)
-- [幂等写](#幂等写)
-- [可观测性（日志 / 指标 / request ID）](#可观测性日志--指标--request-id)
-- [边界与已知限制](#边界与已知限制)
-
----
-
-## 架构与定位
+## 架构与并发模型
 
 ```text
-HTTP / JSON / NDJSON / 二进制向量
+HTTP / JSON / NDJSON / 二进制 f32
         │
-┌───────┴────────────────────────────┐
-│ triviumdb-server (Axum + Tokio)    │
-│  ├─ 并发读：semaphore + blocking   │
-│  ├─ 写：bounded queue → Writer     │
-│  │        Actor → Group Commit     │
-│  └─ OCC / 幂等 / 指标 / 日志       │
-├────────────────────────────────────┤
-│ triviumdb（嵌入式核心，同一份代码） │
-└────────────────────────────────────┘
+┌───────┴──────────────────────────────┐
+│ triviumdb-server（Axum + Tokio）     │
+│  ├─ liveness / readiness / metrics  │
+│  ├─ 并发读：有界 semaphore + blocking│
+│  ├─ 写：bounded queue → Writer Actor │
+│  │                       → Group Commit│
+│  ├─ OCC / 幂等 / deadline / cancellation│
+│  └─ QuIVer 后台预热与任务监管       │
+├──────────────────────────────────────┤
+│ triviumdb（同一份嵌入式核心）        │
+└──────────────────────────────────────┘
 ```
 
-要点：
-
-- Server 与嵌入式核心共用同一个 `triviumdb` crate，没有第二套存储实现；
-- Server 依赖（Axum/Tokio 等）**只存在于 `crates/triviumdb-server`**，嵌入式用户 `cargo add triviumdb` 不会引入任何服务端依赖；
-- 嵌入式核心保持「单写多读」契约不变；Server 通过 Writer Actor 把多个客户端写请求串行化为确定性的提交序列。
+- Server 和 Embedded 共用同一个 `triviumdb` crate，没有第二套存储引擎；
+- Axum/Tokio 等依赖只存在于 `crates/triviumdb-server`，不会进入嵌入式用户依赖树；
+- Core 的单写多读契约不变，Server 将并发客户端写入串行化；
+- Writer 等待时新读不会插队；读等待使用通知唤醒，不做忙轮询；
+- 读、写、预热和手工 QuIVer 构建均在受监管的 blocking 任务中运行；
+- 请求断开或 deadline 到期会传播取消信号；已经进入 durable commit 的写入不会被中断。
 
 ---
 
 ## 构建与运行
 
-需要 Rust 工具链：
-
 ```bash
 cargo build --release -p triviumdb-server
-```
 
-运行：
-
-```bash
 ./target/release/triviumdb-server \
   --database /var/lib/triviumdb/main.tdb \
   --listen 0.0.0.0:8080 \
@@ -91,34 +71,33 @@ cargo build --release -p triviumdb-server
 ```bash
 curl http://127.0.0.1:8080/health/live
 curl http://127.0.0.1:8080/health/ready
+curl http://127.0.0.1:8080/health/details
 ```
 
-优雅关闭：`Ctrl+C` 或 `SIGTERM`。
+优雅关闭使用 `Ctrl+C` 或 `SIGTERM`。进程后台化交给操作系统服务管理器，Server 自身不 daemon 化。
 
 ---
 
-## 配置参考（CLI 参数与环境变量）
+## 配置参考
 
-所有参数同时支持命令行与环境变量，优先级为 **命令行 > 环境变量 > 默认值**。
+所有参数同时支持命令行和环境变量，优先级为 **命令行 > 环境变量 > 默认值**。
 
 | CLI 参数 | 环境变量 | 默认值 | 说明 |
-|---|---|---|---|
-| `--log-format` | `TRIVIUMDB_LOG_FORMAT` | `pretty` | 日志格式：`pretty` / `json` |
-| `--database` | `TRIVIUMDB_DATABASE` | `triviumdb-server.tdb` | 数据库文件路径 |
+|---|---|---:|---|
+| `--log-format` | `TRIVIUMDB_LOG_FORMAT` | `pretty` | `pretty` 或 `json` |
+| `--database` | `TRIVIUMDB_DATABASE` | `triviumdb-server.tdb` | 数据库路径 |
 | `--listen` | `TRIVIUMDB_LISTEN` | `127.0.0.1:8080` | 监听地址 |
 | `--dim` | `TRIVIUMDB_DIM` | `1536` | 向量维度 |
 | `--max-query-rows` | `TRIVIUMDB_MAX_QUERY_ROWS` | `10000` | 查询行上限，0 为不限 |
-| `--memory-limit` | `TRIVIUMDB_MEMORY_LIMIT` | `0` | 内核内存上限（字节），0 为不限 |
+| `--memory-limit` | `TRIVIUMDB_MEMORY_LIMIT` | `0` | Core 内存上限（字节），0 为不限 |
 | `--write-queue-capacity` | `TRIVIUMDB_WRITE_QUEUE_CAPACITY` | `256` | 有界写队列容量 |
-| `--max-concurrent-reads` | `TRIVIUMDB_MAX_CONCURRENT_READS` | `8` | 最大并发读 |
-| `--idempotency-capacity` | `TRIVIUMDB_IDEMPOTENCY_CAPACITY` | `4096` | 幂等缓存容量，0 为关闭 |
-| `--max-write-batch-size` | `TRIVIUMDB_MAX_WRITE_BATCH_SIZE` | `64` | Group Commit 批量上限 |
-| `--max-write-batch-delay-us` | `TRIVIUMDB_MAX_WRITE_BATCH_DELAY_US` | `500` | 动态合批等待窗口（微秒） |
-| `--prepared-cache-capacity` | `TRIVIUMDB_PREPARED_CACHE_CAPACITY` | `1024` | Prepared 缓存容量 |
+| `--max-concurrent-reads` | `TRIVIUMDB_MAX_CONCURRENT_READS` | 系统并行度 | 最大并发读 |
+| `--idempotency-capacity` | `TRIVIUMDB_IDEMPOTENCY_CAPACITY` | `4096` | 进程内幂等缓存容量 |
+| `--max-write-batch-size` | `TRIVIUMDB_MAX_WRITE_BATCH_SIZE` | `64` | Group Commit 合批上限 |
+| `--max-write-batch-delay-us` | `TRIVIUMDB_MAX_WRITE_BATCH_DELAY_US` | `500` | 动态合批窗口（微秒） |
+| `--prepared-cache-capacity` | `TRIVIUMDB_PREPARED_CACHE_CAPACITY` | `1024` | Prepared TQL 缓存容量 |
 | `--request-timeout-ms` | `TRIVIUMDB_REQUEST_TIMEOUT_MS` | `30000` | 请求 deadline（毫秒） |
-| `--max-body-bytes` | `TRIVIUMDB_MAX_BODY_BYTES` | `4194304` | HTTP 请求体上限（字节） |
-
-日志级别使用 tracing 标准变量：
+| `--max-body-bytes` | `TRIVIUMDB_MAX_BODY_BYTES` | `4194304` | HTTP 请求体硬上限 |
 
 ```bash
 RUST_LOG=triviumdb_server=info,triviumdb=warn ./triviumdb-server
@@ -126,85 +105,157 @@ RUST_LOG=triviumdb_server=info,triviumdb=warn ./triviumdb-server
 
 ---
 
-## HTTP API 一览
+## HTTP API
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/health/live` | 存活检查 |
-| GET | `/health/ready` | 就绪检查（Writer Actor 故障时返回 503） |
+| GET | `/health/live` | 纯事件循环存活探针，不获取 Database 锁 |
+| GET | `/health/ready` | Writer/read capacity 就绪状态；不可服务时返回 503 |
+| GET | `/health/details` | 脱敏运行状态、队列、读写等待和 QuIVer 预热状态 |
 | GET | `/metrics` | Prometheus 文本指标 |
-| POST | `/v1/tql` | TQL 查询 / 写入（`mutation: true`） |
-| POST | `/v1/prepared` | 创建 Prepared 查询，返回 `preparedId` |
-| POST | `/v1/prepared/{id}/execute` | 执行 Prepared 查询 |
-| POST | `/v1/search/vector` | 二进制 f32 向量检索 |
-| POST | `/v1/transactions` | 多操作原子事务（含 OCC precondition） |
-| GET | `/v1/nodes/{id}` | 节点详情 + 节点/边 ETag |
+| POST | `/v1/tql` | TQL 查询或 mutation |
+| POST | `/v1/prepared` | 创建 Prepared TQL |
+| POST | `/v1/prepared/{id}/execute` | 执行 Prepared TQL |
+| POST | `/v1/search/vector` | little-endian f32 二进制向量搜索 |
+| POST | `/v1/transactions` | 多操作原子事务和 OCC precondition |
+| GET | `/v1/nodes/{id}` | 节点详情及节点/边 ETag |
+| GET | `/v1/indexes` | 查询四类属性索引及统计 |
+| POST | `/v1/indexes` | 创建属性索引 |
+| DELETE | `/v1/indexes/delete` | 删除属性索引 |
+| GET | `/v1/indexes/quiver` | 查询 QuIVer 预热状态 |
+| POST | `/v1/indexes/quiver` | 按 Core 资格和预算启动 QuIVer 构建 |
+| POST | `/v1/import/nodes` | 有界、整请求原子的节点 NDJSON 导入 |
+| POST | `/v1/import/edges` | 有界、整请求原子的边 NDJSON 导入 |
 
-示例——写入与查询：
+### TQL
 
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/tql \
   -H 'content-type: application/json' \
-  -d '{"query": "CREATE ({name: \"Alice\"})", "mutation": true}'
+  -d '{"query":"CREATE ({name: \"Alice\"})","mutation":true}'
 
 curl -X POST http://127.0.0.1:8080/v1/tql \
   -H 'content-type: application/json' \
-  -d '{"query": "FIND {name: \"Alice\"} RETURN *"}'
+  -d '{"query":"FIND {name: \"Alice\"} RETURN *","profile":true}'
+
+curl -X POST http://127.0.0.1:8080/v1/tql \
+  -H 'content-type: application/json' \
+  -d '{"query":"TEXT HYBRID \"vector database\" TOP 100 AS seed WITH seed DIVERSIFY seed TOP 10 AS result WITH result RETURN result, text_score(result) AS text, diversity_score(result) AS diversity","profile":true}'
 ```
 
-流式响应：请求头加 `Accept: application/x-ndjson`，逐行返回 `meta → row... → summary` 帧。
+Server 不为认知算子维护另一套 HTTP API；`TEXT`、`RESIDUAL`、`DIVERSIFY`、`TOPICS` 和 `SA_PPR_CONFIG` 均通过 `/v1/tql` 使用 Core 的相同 Parser、Cascades、预算和确定性语义。Refractory Fatigue 未开放为普通 TQL 算子，因为它会修改进程内检索状态。
 
-请求级 profile：请求体加 `"profile": true`，响应携带 `elapsedMicros` 等字段；`EXPLAIN ANALYZE` 语句可直接通过 `/v1/tql` 执行。
+普通 JSON 查询响应有 16 MiB 硬上限。超限返回 `413 RESPONSE_TOO_LARGE`；应改用属性投影、`LIMIT` 或 NDJSON 响应。
 
-错误模型：统一 JSON 结构（`code` / 双语 `title` / `detail` / `retryable`），使用标准 HTTP 状态码（400 / 404 / 409 / 413 / 415 / 422 / 423 / 500 / 503 / 504）。
+请求头设置 `Accept: application/x-ndjson` 时，响应按 `meta → row... → summary` 输出。HTTP 输出逐行生成，但排序、聚合和 Top-K 等 Core 算子仍可能先物化结果。
+
+### 属性索引
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/indexes \
+  -H 'content-type: application/json' \
+  -d '{"kind":"hash","fields":["type"]}'
+
+curl -X POST http://127.0.0.1:8080/v1/indexes \
+  -H 'content-type: application/json' \
+  -d '{"kind":"composite","fields":["tenant","type"]}'
+
+curl -X DELETE http://127.0.0.1:8080/v1/indexes/delete \
+  -H 'content-type: application/json' \
+  -d '{"kind":"hash","fields":["type"]}'
+```
+
+可用 kind 为 `hash`、`ordered`、`bitmap` 和 `composite`。单字段索引必须恰好提供一个字段；复合索引至少两个字段。修改操作统一进入 Writer Actor，并推进 Server generation。
+
+### 二进制向量搜索
+
+请求体必须为连续 little-endian f32，媒体类型为 `application/vnd.triviumdb.vector+f32`：
+
+```text
+POST /v1/search/vector?top_k=10&recall_k=80&rerank_k=40&min_score=0.1
+Content-Type: application/vnd.triviumdb.vector+f32
+```
+
+支持参数：
+
+| 参数 | 默认值 | 服务端约束 |
+|---|---:|---|
+| `top_k` | `10` | `1..=10000` |
+| `recall_k` | `0`（Core 自动） | 不超过 `100000` |
+| `rerank_k` | `0`（Core 自动） | 不超过 `100000` |
+| `min_score` | `-1.0` | 必须为有限值 |
+| `force_brute_force` | `false` | true 时请求精确暴力搜索 |
+
+查询向量中的 NaN/Infinity 会被拒绝。
+
+### NDJSON 批量导入
+
+节点行：
+
+```json
+{"id":1,"vector":[1.0,0.0],"payload":{"type":"event"}}
+```
+
+边行：
+
+```json
+{"source":1,"target":2,"label":"related","weight":1.0}
+```
+
+请求体使用 `Content-Type: application/x-ndjson`。当前协议边界：
+
+- 整个 HTTP body 受 `max_body_bytes` 限制；
+- 单行最大 1 MiB；
+- 单请求最多 10,000 条；
+- 空请求、未知字段、非法 JSON、非法维度和非有限数值均 fail-closed；
+- 当前模式为**整请求原子提交**：任意记录失败时整批不写入；
+- 导入通过 Writer Actor 和 Core transaction/WAL 提交，不是绕过持久化的快速旁路。
 
 ---
 
-## 并发模型
+## OCC、幂等与错误模型
 
-- **并发读**：请求在 blocking worker 中执行，read semaphore 限制并发上限；
-- **串行写**：所有写进入有界队列，由唯一 Writer Actor 依序提交，饱和时返回 `503 WRITE_QUEUE_FULL`；
-- **公平性**：写者等待时新读不插队，写者拿到全部读许可后才提交；
-- **deadline**：排队、等许可、执行全程计入请求超时，过期返回 `504 REQUEST_TIMEOUT`；
-- **取消**：客户端断开且写尚未开始时不产生副作用；已开始的 durable 提交不会被中断；
-- **Group Commit**：相邻写请求动态合批，整批共享一次 WAL fsync，单请求业务失败不影响同批其他请求。
+- 全局 ETag 为 `"<epoch>-g<n>"`，成功写入后递增；
+- `GET /v1/nodes/{id}` 返回节点和边 ETag；
+- `If-Match`、`expectedGeneration`、`expectedNodes` 和 `expectedEdges` 提供 OCC；
+- 版本不匹配返回 `409 WRITE_CONFLICT`，事务不会部分提交；
+- `Idempotency-Key` 同键同请求重放首次结果，同键不同请求返回 `409 IDEMPOTENCY_KEY_REUSED`；
+- 幂等缓存和 Server generation 是进程内状态，重启后 epoch 改变。
 
----
-
-## OCC 与 ETag/If-Match
-
-- 全局 generation ETag：`"<epoch>-g<n>"`，任何成功写入后递增；
-- 节点/边 ETag：从 `GET /v1/nodes/{id}` 获取；
-- 写请求可带 `If-Match`（或事务 body 中的 `expectedGeneration` / `expectedNodes` / `expectedEdges`）做乐观并发控制；
-- 版本不匹配返回 `409 WRITE_CONFLICT`，冲突事务不会部分写入；
-- 进程重启后 epoch 变化，旧 ETag 自动失效（返回 409），不会误判为匹配。
+统一错误响应包含 `code`、双语 `title`、`detail` 和 `retryable`。常见状态码包括 400、404、409、413、415、422、423、500、503 和 504。
 
 ---
 
-## 幂等写
+## 健康、任务监管与可观测性
 
-写请求可携带 `Idempotency-Key` Header：
+`/health/details` 不获取 Database 锁，可在数据库操作被阻塞时继续诊断：
 
-- 同键同请求：重放首次结果（响应 `replayed: true`）；
-- 同键不同请求：返回 `409 IDEMPOTENCY_KEY_REUSED`；
-- 缓存有界（FIFO 淘汰），仅进程内，重启不保留。
+- `writeQueueDepth` / `writeQueueCapacity`
+- `activeReads` / `waitingReads` / `waitingWriters`
+- `activeBlockingTasks`
+- `writerAlive` / `writerFailed`
+- `quiverWarmup`
 
----
+Writer Actor 由 supervisor 监管。异常退出会设置失败状态、关闭读取容量并唤醒等待者，后续请求快速返回明确错误，而不是永久挂起。
 
-## 可观测性（日志 / 指标 / request ID）
+请求 `profile: true` 时，JSON 响应或 NDJSON summary 会提供：
 
-- `--log-format json` 输出结构化日志，便于采集；
-- 每个请求自动生成或透传 `X-Request-ID`，并回写到响应头；
-- access log 记录 method / path / status / elapsed / queue wait / execution / response bytes / cancelled，**不含**查询文本、向量、Payload、参数或幂等键；
-- `/metrics` 暴露队列深度、合批、fsync、取消、超时、OCC 冲突等计数，可直接被 Prometheus 抓取；
-- 进程后台化交给 systemd / Docker / 服务管理器，Server 自身不 daemon 化。
+- `elapsedMicros`：HTTP 请求总耗时；
+- `queueWaitMicros`：队列或 read semaphore 等待；
+- `executionMicros`：Core/blocking 执行；
+- `preparedCacheHit`：是否命中 Prepared 缓存。
+
+`/metrics` 公开写队列、合批、WAL fsync、活动/等待读、等待写、blocking 任务、Writer 状态、取消、超时和 OCC 冲突指标。access log 记录 method、path、status、elapsed、queue wait、execution、response bytes 和 cancelled；不记录完整查询参数、向量、Payload、Prepared 参数、Authorization 或幂等键。
 
 ---
 
 ## 边界与已知限制
 
-- TQL mutation 目前保守失效所有细粒度节点/边 ETag；真正的细粒度写集追踪在路线图中；
-- 幂等缓存与 generation 均为进程内状态，不持久化；
-- NDJSON 为 HTTP 层流式，排序 / 聚合 / Top-K 算子仍需先物化；
-- 尚无认证与 TLS，请勿直接暴露到公网；
-- 交叉编译与二进制发布流水线尚在 nightly 演进中，安装方式以 GitHub Release 说明为准。
+- Server 仍是 nightly，不提供协议兼容承诺；
+- 当前没有认证和 TLS；
+- NDJSON 导入是有界整请求原子导入，并非无限流式、逐批提交协议；
+- TQL mutation 当前保守失效此前签发的全部细粒度节点/边 ETag；
+- 幂等缓存与 Server generation 不持久化；
+- QuIVer 手工构建仍遵守 Core 的自动构建资格，数据量不足、已就绪或配置禁用时返回 `published: false`；
+- JSON 响应受 16 MiB 上限约束；NDJSON 只流式编码 HTTP 输出，Core 算子仍受自己的内存与查询预算约束；
+- 安装方式和跨平台二进制以 GitHub Release 的 nightly 说明为准。

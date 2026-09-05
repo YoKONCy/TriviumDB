@@ -345,6 +345,196 @@ fn wal空旧版本头只能显式升级() {
 }
 
 #[test]
+fn wal非空v2可安全迁移并补齐link元数据() {
+    #[derive(serde::Serialize)]
+    enum WalEntryV2<T> {
+        TxBegin {
+            tx_id: u64,
+        },
+        TxCommit {
+            tx_id: u64,
+        },
+        Insert {
+            id: u64,
+            vector: Vec<T>,
+            payload: String,
+        },
+        Link {
+            src: u64,
+            dst: u64,
+            label: String,
+            weight: f32,
+        },
+    }
+
+    let path = tmp_db("legacy_nonempty_v2");
+    cleanup(&path);
+    let entries = [
+        WalEntryV2::TxBegin::<f32> { tx_id: 7 },
+        WalEntryV2::Insert {
+            id: 1,
+            vector: vec![1.0, 0.0],
+            payload: "{}".into(),
+        },
+        WalEntryV2::Insert {
+            id: 2,
+            vector: vec![0.0, 1.0],
+            payload: "{}".into(),
+        },
+        WalEntryV2::Link {
+            src: 1,
+            dst: 2,
+            label: "old".into(),
+            weight: 0.5,
+        },
+        WalEntryV2::TxCommit { tx_id: 7 },
+    ];
+    let mut bytes = vec![b'T', b'V', b'W', b'L', 2, 0];
+    for entry in entries {
+        let data = bincode::serialize(&entry).unwrap();
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&data);
+        bytes.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
+    }
+    std::fs::write(format!("{}.wal", path), bytes).unwrap();
+
+    assert!(Wal::upgrade_legacy_wal::<f32>(&path).unwrap());
+    let migrated = std::fs::read(format!("{}.wal", path)).unwrap();
+    assert_eq!(u16::from_le_bytes([migrated[4], migrated[5]]), 3);
+    let (entries, _) = Wal::read_entries::<f32>(&path).unwrap();
+    assert_eq!(entries.len(), 3);
+    assert!(matches!(
+        &entries[2],
+        WalEntry::Link { metadata, .. } if metadata == "null"
+    ));
+    cleanup(&path);
+}
+
+#[test]
+fn wal_v2全部历史变体迁移后保持事务过滤和字段语义() {
+    #[derive(serde::Serialize)]
+    enum V2<T> {
+        TxBegin {
+            tx_id: u64,
+        },
+        TxCommit {
+            tx_id: u64,
+        },
+        Insert {
+            id: u64,
+            vector: Vec<T>,
+            payload: String,
+        },
+        Link {
+            src: u64,
+            dst: u64,
+            label: String,
+            weight: f32,
+        },
+        Delete {
+            id: u64,
+        },
+        Unlink {
+            src: u64,
+            dst: u64,
+        },
+        UpdatePayload {
+            id: u64,
+            payload: String,
+        },
+        UpdateVector {
+            id: u64,
+            vector: Vec<T>,
+        },
+        UnlinkLabel {
+            src: u64,
+            dst: u64,
+            label: String,
+        },
+    }
+    let committed = vec![
+        V2::TxBegin::<f32> { tx_id: 1 },
+        V2::Insert {
+            id: 1,
+            vector: vec![1.0, 0.0],
+            payload: "{\"v\":1}".into(),
+        },
+        V2::Link {
+            src: 1,
+            dst: 2,
+            label: "x".into(),
+            weight: 0.5,
+        },
+        V2::Delete { id: 3 },
+        V2::Unlink { src: 1, dst: 2 },
+        V2::UpdatePayload {
+            id: 1,
+            payload: "{\"v\":2}".into(),
+        },
+        V2::UpdateVector {
+            id: 1,
+            vector: vec![0.0, 1.0],
+        },
+        V2::UnlinkLabel {
+            src: 1,
+            dst: 2,
+            label: "x".into(),
+        },
+        V2::TxCommit { tx_id: 1 },
+        V2::TxBegin { tx_id: 2 },
+        V2::Delete { id: 99 },
+    ];
+    let path = tmp_db("legacy_v2_all_variants");
+    cleanup(&path);
+    let mut bytes = vec![b'T', b'V', b'W', b'L', 2, 0];
+    for entry in committed {
+        let data = bincode::serialize(&entry).unwrap();
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&data);
+        bytes.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
+    }
+    std::fs::write(format!("{path}.wal"), bytes).unwrap();
+    assert!(Wal::upgrade_legacy_wal::<f32>(&path).unwrap());
+    let (entries, valid_offset) = Wal::read_entries::<f32>(&path).unwrap();
+    assert_eq!(entries.len(), 7, "未提交事务中的 Delete 必须被过滤");
+    assert!(valid_offset > 6);
+    assert!(
+        matches!(&entries[0], WalEntry::Insert { id: 1, payload, .. } if payload == "{\"v\":1}")
+    );
+    assert!(
+        matches!(&entries[1], WalEntry::Link { metadata, weight, .. } if metadata == "null" && *weight == 0.5)
+    );
+    assert!(matches!(&entries[2], WalEntry::Delete { id: 3 }));
+    assert!(matches!(&entries[3], WalEntry::Unlink { src: 1, dst: 2 }));
+    assert!(
+        matches!(&entries[4], WalEntry::UpdatePayload { id: 1, payload } if payload == "{\"v\":2}")
+    );
+    assert!(
+        matches!(&entries[5], WalEntry::UpdateVector { id: 1, vector } if vector == &vec![0.0, 1.0])
+    );
+    assert!(matches!(&entries[6], WalEntry::UnlinkLabel { src: 1, dst: 2, label } if label == "x"));
+    cleanup(&path);
+}
+
+#[test]
+fn wal损坏v2迁移失败且原文件不变() {
+    let path = tmp_db("legacy_v2_corrupt");
+    cleanup(&path);
+    let entry = WalEntry::Delete::<f32> { id: 9 };
+    let data = bincode::serialize(&entry).unwrap();
+    let mut bytes = vec![b'T', b'V', b'W', b'L', 2, 0];
+    bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&data);
+    bytes.extend_from_slice(&0xDEADBEEFu32.to_le_bytes());
+    std::fs::write(format!("{}.wal", path), &bytes).unwrap();
+
+    assert!(Wal::upgrade_legacy_wal::<f32>(&path).is_err());
+    assert_eq!(std::fs::read(format!("{}.wal", path)).unwrap(), bytes);
+    assert!(!std::path::Path::new(&format!("{}.wal.upgrade.tmp", path)).exists());
+    cleanup(&path);
+}
+
+#[test]
 fn wal非空旧版本不能升级且字节不变() {
     let path = tmp_db("legacy_nonempty_header");
     cleanup(&path);

@@ -7,7 +7,7 @@
 //!       register_node, register_tombstone, advance_next_id, 等全部公开方法
 
 use serde_json::json;
-use triviumdb::storage::memtable::MemTable;
+use triviumdb::storage::memtable::{MemTable, auto_quiver_node_threshold};
 
 const DIM: usize = 3;
 
@@ -18,6 +18,37 @@ fn make_mt() -> MemTable<f32> {
 // ═══════════════════════════════════════════════════════════════
 //  构造与基本属性
 // ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn quiver自动阈值随维度下降并保持上下界() {
+    assert_eq!(auto_quiver_node_threshold(0), 10_000);
+    assert_eq!(auto_quiver_node_threshold(128), 10_000);
+    assert_eq!(auto_quiver_node_threshold(768), 10_000);
+    assert_eq!(auto_quiver_node_threshold(1024), 7_813);
+    assert_eq!(auto_quiver_node_threshold(1536), 5_209);
+    assert_eq!(auto_quiver_node_threshold(2048), 3_907);
+    assert_eq!(auto_quiver_node_threshold(3072), 2_605);
+    assert_eq!(auto_quiver_node_threshold(usize::MAX), 2_500);
+}
+
+#[test]
+fn quiver自动构建严格遵守动态阈值与禁用配置() {
+    let threshold = auto_quiver_node_threshold(3072);
+    let mut below = MemTable::<f32>::new(3072);
+    let vector = vec![0.0; 3072];
+    for id in 1..threshold as u64 {
+        below
+            .insert_with_id(id, &vector, serde_json::Value::Null)
+            .unwrap();
+    }
+    assert!(!below.auto_quiver_build_needed());
+    below
+        .insert_with_id(threshold as u64, &vector, serde_json::Value::Null)
+        .unwrap();
+    assert!(below.auto_quiver_build_needed());
+    below.set_auto_build_quiver(false);
+    assert!(!below.auto_quiver_build_needed());
+}
 
 #[test]
 fn new_空表() {

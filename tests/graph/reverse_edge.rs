@@ -47,11 +47,13 @@ fn test_reverse_edge_avalanche_deletion() {
         num_fans, elapsed
     );
 
-    // Verify deletion speed (should be virtually instantaneous, < 500ms even in debug mode)
-    assert!(
-        elapsed.as_millis() < 500,
-        "Deletion took too long, might be hitting O(E) avalanche!"
-    );
+    // QEMU 用户态仿真的墙钟时间不代表真实 ARM64 性能；该环境只验证完整清理语义。
+    if std::env::var_os("TRIVIUM_TEST_QEMU_AARCH64").is_none() {
+        assert!(
+            elapsed.as_millis() < 500,
+            "Deletion took too long, might be hitting O(E) avalanche!"
+        );
+    }
 
     // Verify correctness: center is gone
     assert!(db.get(center_id).is_none());

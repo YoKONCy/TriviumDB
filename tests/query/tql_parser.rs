@@ -9,7 +9,23 @@
 
 use triviumdb::filter::Filter;
 use triviumdb::query::tql_ast::*;
-use triviumdb::query::tql_parser::parse_tql;
+use triviumdb::query::tql_parser::{parse_tql, parse_tql_statement};
+
+#[test]
+fn JSON数组嵌套超过解析预算时安全拒绝() {
+    let depth = 256;
+    let query = format!(
+        "CREATE ({{payload: {}0{}}})",
+        "[".repeat(depth),
+        "]".repeat(depth)
+    );
+
+    let error = parse_tql_statement(&query).expect_err("超深 JSON 数组必须安全拒绝");
+    assert!(
+        error.contains("JSON nesting too deep"),
+        "应由 JSON 递归预算拒绝，实际错误：{error}"
+    );
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  FIND 入口测试

@@ -177,6 +177,92 @@ pub(crate) fn try_start_quiver_build(
     })
 }
 
+/// 已完成资格检查和快照捕获、可在线程间移动的 QuIVer 后台构建任务。
+pub struct PreparedQuiverBuild<T: VectorType> {
+    snapshot: crate::storage::memtable::QuiverBuildSnapshot,
+    config: crate::index::quiver::QuIVerConfig,
+    memtable: Arc<RwLock<MemTable<T>>>,
+    _build_guard: QuiverBuildGuard,
+    _operation_guard: OperationGuard,
+}
+
+impl<T: VectorType> PreparedQuiverBuild<T> {
+    /// 在不持有调用方 Database guard 的情况下构建，并仅在向量代际未变化时发布。
+    pub fn execute(self) -> Result<bool> {
+        let source_generation = self.snapshot.generation;
+        let index = MemTable::<T>::build_quiver_snapshot(self.snapshot, &self.config);
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverPublish);
+        Ok(write_or_recover(&self.memtable).publish_quiver_if_current(source_generation, index))
+    }
+}
+
+/// 可脱离 `Database` 借用执行资格检查、快照和后台构建的轻量句柄。
+#[derive(Clone)]
+pub struct QuiverBuildHandle<T: VectorType> {
+    memtable: Arc<RwLock<MemTable<T>>>,
+    memory_limit: usize,
+    quiver_builds: Arc<(Mutex<std::collections::HashSet<u64>>, Condvar)>,
+    lifecycle: Arc<(Mutex<LifecycleState>, Condvar)>,
+    access_mode: AccessMode,
+}
+
+impl<T: VectorType> QuiverBuildHandle<T> {
+    /// 若当前配置和数据状态满足自动构建条件，捕获后台 QuIVer 构建任务。
+    pub fn prepare_auto_build(&self) -> Result<Option<PreparedQuiverBuild<T>>> {
+        if self.access_mode != AccessMode::ReadWrite {
+            return Err(TriviumError::ReadOnlyViolation {
+                operation: "prepare_auto_quiver_build",
+            });
+        }
+        let operation_guard = {
+            let mut state = lock_or_recover(&self.lifecycle.0);
+            if state.lifecycle != DatabaseLifecycle::Open {
+                return Err(TriviumError::DatabaseClosed);
+            }
+            state.active_operations = state
+                .active_operations
+                .checked_add(1)
+                .ok_or_else(|| TriviumError::InvalidInput("数据库活动操作计数溢出".into()))?;
+            OperationGuard {
+                lifecycle: Arc::clone(&self.lifecycle),
+            }
+        };
+        let config = crate::index::quiver::QuIVerConfig::default();
+        let snapshot = {
+            let mt = read_or_recover(&self.memtable);
+            if !mt.auto_quiver_build_needed() {
+                return Ok(None);
+            }
+            let projected = mt
+                .estimated_memory_bytes()
+                .saturating_add(mt.quiver_build_peak_bytes(&config));
+            if self.memory_limit > 0 && projected > self.memory_limit {
+                return Err(TriviumError::InvalidInput(format!(
+                    "QuIVer 自动构建预计峰值 {}MB 超过内存上限 {}MB",
+                    projected / (1024 * 1024),
+                    self.memory_limit / (1024 * 1024)
+                )));
+            }
+            mt.quiver_build_snapshot()
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(None);
+        };
+        let Some(build_guard) = try_start_quiver_build(&self.quiver_builds, snapshot.generation)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedQuiverBuild {
+            snapshot,
+            config,
+            memtable: Arc::clone(&self.memtable),
+            _build_guard: build_guard,
+            _operation_guard: operation_guard,
+        }))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DatabaseLifecycle {
     Open,
@@ -485,7 +571,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         };
 
         if config.access_mode == AccessMode::ReadWrite {
-            Wal::upgrade_empty_legacy_wal(path)?;
+            Wal::upgrade_legacy_wal::<T>(path)?;
         }
 
         if Wal::needs_recovery(path) && config.access_mode != AccessMode::ReadWrite {
@@ -521,6 +607,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 );
             }
         }
+
+        memtable
+            .configure_payload_cache(config.payload_cache_bytes, config.payload_cache_entry_bytes);
 
         // TextIndex 由 sidecar 精确恢复；缺失时保持为空，避免打开数据库时
         // 无条件扫描全部 Payload 并改变用户显式 index_text() 的索引语义。
@@ -692,6 +781,22 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     // ════════════════════════════════════════════════════════
     //  QuIVer 索引管理
     // ════════════════════════════════════════════════════════
+
+    /// 克隆一个可在线程池中完成自动 QuIVer 预热的轻量句柄。
+    pub fn quiver_build_handle(&self) -> QuiverBuildHandle<T> {
+        QuiverBuildHandle {
+            memtable: Arc::clone(&self.memtable),
+            memory_limit: self.memory_limit,
+            quiver_builds: Arc::clone(&self.quiver_builds),
+            lifecycle: Arc::clone(&self.lifecycle),
+            access_mode: self.access_mode,
+        }
+    }
+
+    /// 若当前配置和数据状态满足自动构建条件，捕获后台 QuIVer 构建任务。
+    pub fn prepare_auto_quiver_build(&self) -> Result<Option<PreparedQuiverBuild<T>>> {
+        self.quiver_build_handle().prepare_auto_build()
+    }
 
     /// 构建 QuIVer BQ-native Vamana 图索引
     ///
@@ -947,6 +1052,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             let mut mt = write_or_recover(&self.memtable);
             mt.validate_insert(vector)?;
             let id = mt.next_id_value();
+            mt.validate_unique_changes([(id, Some(&payload))])?;
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::Insert {
                 id,
@@ -987,6 +1093,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         {
             let mut mt = write_or_recover(&self.memtable);
             mt.validate_insert_with_id(id, vector)?;
+            mt.validate_unique_changes([(id, Some(&payload))])?;
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::Insert {
                 id,
@@ -1131,6 +1238,104 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         )
     }
 
+    /// 当字段当前值等于 `expected` 时原子替换为 `replacement`。
+    pub fn compare_and_set_payload_field(
+        &mut self,
+        id: NodeId,
+        field: &str,
+        expected: &serde_json::Value,
+        replacement: serde_json::Value,
+    ) -> Result<()> {
+        self.require_write_access("compare_and_set_payload_field")?;
+        if field.is_empty() {
+            return Err(TriviumError::InvalidInput(
+                "条件更新字段不能为空 (Conditional update field cannot be empty)".into(),
+            ));
+        }
+        self.ensure_incremental_memory_budget(replacement.to_string().len().saturating_add(128))?;
+        let _operation = self.enter_operation()?;
+        reject_hook_reentrant_write()?;
+        let mut mt = write_or_recover(&self.memtable);
+        mt.validate_update_payload(id)?;
+        let mut payload = mt
+            .get_payload(id)
+            .map(|payload| (*payload).clone())
+            .ok_or(TriviumError::NodeNotFound(id))?;
+        if payload.get(field) != Some(expected) {
+            return Err(TriviumError::ConditionalUpdateNotMatched { id });
+        }
+        let object = payload.as_object_mut().ok_or_else(|| {
+            TriviumError::InvalidInput(
+                "条件更新要求 Payload 为 JSON 对象 (Conditional update requires an object payload)"
+                    .into(),
+            )
+        })?;
+        object.insert(field.to_owned(), replacement);
+        let payload_str = payload.to_string();
+        if payload_str.len() > 8 * 1024 * 1024 {
+            return Err(TriviumError::PayloadTooLarge {
+                size_bytes: payload_str.len(),
+                max_bytes: 8 * 1024 * 1024,
+            });
+        }
+        mt.validate_unique_changes([(id, Some(&payload))])?;
+        lock_or_recover(&self.wal).append(&WalEntry::UpdatePayload::<T> {
+            id,
+            payload: payload_str,
+        })?;
+        mt.update_payload(id, payload)
+    }
+
+    /// 原子删除去重后的节点集合；任一节点不存在时不执行任何删除。
+    pub fn delete_many_atomic(&mut self, ids: &[NodeId]) -> Result<usize> {
+        const MAX_DELETE_NODES: usize = 100_000;
+        const MAX_DELETE_INCIDENT_EDGES: usize = 1_000_000;
+        const MAX_DELETE_WAL_BYTES: usize = 8 * 1024 * 1024;
+        let ids = ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if ids.len() > MAX_DELETE_NODES {
+            return Err(TriviumError::InvalidInput(format!(
+                "批量删除超过节点预算 {MAX_DELETE_NODES} (Delete set exceeds node budget)"
+            )));
+        }
+        let estimated_wal_bytes = ids.len().saturating_mul(32);
+        if estimated_wal_bytes > MAX_DELETE_WAL_BYTES {
+            return Err(TriviumError::InvalidInput(format!(
+                "批量删除超过 WAL 字节预算 {MAX_DELETE_WAL_BYTES} (Delete set exceeds WAL byte budget)"
+            )));
+        }
+        let incident_edges = {
+            let mt = read_or_recover(&self.memtable);
+            let mut total = 0usize;
+            for id in &ids {
+                if !mt.contains(*id) {
+                    return Err(TriviumError::NodeNotFound(*id));
+                }
+                total = total.saturating_add(mt.incident_edge_count(*id));
+                if total > MAX_DELETE_INCIDENT_EDGES {
+                    return Err(TriviumError::InvalidInput(format!(
+                        "批量删除超过关联边预算 {MAX_DELETE_INCIDENT_EDGES} (Delete set exceeds incident edge budget)"
+                    )));
+                }
+            }
+            total
+        };
+        self.ensure_incremental_memory_budget(
+            estimated_wal_bytes
+                .saturating_add(ids.len().saturating_mul(24))
+                .saturating_add(incident_edges.saturating_mul(16)),
+        )?;
+        let count = ids.len();
+        let mut tx = transaction::TxBuilder::new();
+        for id in ids {
+            tx.delete(id);
+        }
+        self.commit_tx(tx)?;
+        Ok(count)
+    }
+
     pub fn delete(&mut self, id: NodeId) -> Result<()> {
         self.require_write_access("delete")?;
         let _operation = self.enter_operation()?;
@@ -1188,6 +1393,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         {
             let mut mt = write_or_recover(&self.memtable);
             mt.validate_update_payload(id)?;
+            mt.validate_unique_changes([(id, Some(&payload))])?;
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::UpdatePayload::<T> {
                 id,
@@ -1232,6 +1438,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         {
             let mut mt = write_or_recover(&self.memtable);
             mt.validate_update_payload(id)?;
+            mt.validate_unique_changes([(id, Some(&final_payload))])?;
             let mut w = lock_or_recover(&self.wal);
             w.append(&WalEntry::UpdatePayload::<T> {
                 id,
@@ -1361,7 +1568,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     pub fn get_payload(&self, id: NodeId) -> Option<serde_json::Value> {
         let mt = read_or_recover(&self.memtable);
-        mt.get_payload(id).cloned()
+        mt.get_payload(id).map(|payload| (*payload).clone())
     }
 
     pub fn get_edges(&self, id: NodeId) -> Vec<crate::node::Edge> {
@@ -1545,7 +1752,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     pub fn get(&self, id: NodeId) -> Option<crate::node::NodeView<T>> {
         let mt = read_or_recover(&self.memtable);
-        let payload = mt.get_payload(id)?.clone();
+        let payload = (*mt.get_payload(id)?).clone();
         let vector = mt.get_vector(id)?.to_vec();
         let edges = mt.get_edges(id).unwrap_or(&[]).to_vec();
         Some(crate::node::NodeView {
@@ -1691,6 +1898,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         read_or_recover(&self.memtable).index_memory_stats()
     }
 
+    pub fn payload_memory_stats(&self) -> crate::observability::PayloadMemoryStats {
+        read_or_recover(&self.memtable).payload_memory_stats()
+    }
+
     pub fn storage_write_stats(&self) -> crate::observability::StorageWriteStats {
         let file_len = |suffix: &str| {
             std::fs::metadata(format!("{}{}", self.db_path, suffix))
@@ -1731,6 +1942,151 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     //  属性二级索引管理
     // ════════════════════════════════════════════════════════
 
+    pub fn indexed_lookup(
+        &self,
+        equalities: &[(String, serde_json::Value)],
+        max_results: usize,
+    ) -> Result<Vec<NodeId>> {
+        if equalities.is_empty() {
+            return Err(TriviumError::InvalidInput(
+                "索引等值查询至少需要一个字段 (Indexed equality lookup requires at least one field)"
+                    .into(),
+            ));
+        }
+        if max_results == 0 || max_results > 1_000_000 {
+            return Err(TriviumError::InvalidInput(
+                "索引等值查询 max_results 必须在 1..=1000000 (max_results must be within 1..=1000000)"
+                    .into(),
+            ));
+        }
+        let mt = read_or_recover(&self.memtable);
+        let filter = if equalities.len() == 1 {
+            crate::filter::Filter::Eq(equalities[0].0.clone(), equalities[0].1.clone())
+        } else {
+            crate::filter::Filter::And(
+                equalities
+                    .iter()
+                    .map(|(field, value)| crate::filter::Filter::Eq(field.clone(), value.clone()))
+                    .collect(),
+            )
+        };
+        let plan = crate::query::planner::plan_filter(&filter, &mt);
+        if matches!(
+            plan.access_path,
+            crate::query::planner::AccessPath::FullNodeScan
+                | crate::query::planner::AccessPath::ColdPayloadScan
+        ) {
+            return Err(TriviumError::InvalidInput(
+                "等值查询没有可用属性索引，已拒绝全扫描 (No usable property index; full scan rejected)"
+                    .into(),
+            ));
+        }
+        let mut ids = plan
+            .candidates
+            .into_iter()
+            .filter(|id| {
+                mt.get_payload(*id)
+                    .is_some_and(|payload| filter.matches(&payload))
+            })
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        if ids.len() > max_results {
+            return Err(TriviumError::QueryRowBudgetExceeded {
+                budget: max_results,
+            });
+        }
+        Ok(ids)
+    }
+
+    pub fn create_ngram_index(&mut self, field: &str) -> Result<()> {
+        self.require_write_access("create_ngram_index")?;
+        if field.is_empty() {
+            return Err(TriviumError::InvalidInput(
+                "N-gram 索引字段不能为空 (N-gram index field cannot be empty)".into(),
+            ));
+        }
+        write_or_recover(&self.memtable).register_ngram_property_index(field)
+    }
+
+    pub fn drop_ngram_index(&mut self, field: &str) -> Result<()> {
+        self.require_write_access("drop_ngram_index")?;
+        write_or_recover(&self.memtable).drop_ngram_property_index(field);
+        Ok(())
+    }
+
+    pub fn substring_lookup(
+        &self,
+        field: &str,
+        needle: &str,
+        max_results: usize,
+    ) -> Result<Vec<NodeId>> {
+        if field.is_empty() || needle.is_empty() || max_results == 0 || max_results > 1_000_000 {
+            return Err(TriviumError::InvalidInput(
+                "子串查询参数无效 (Invalid substring lookup parameters)".into(),
+            ));
+        }
+        let mt = read_or_recover(&self.memtable);
+        let candidates = mt
+            .find_by_ngram_property_index(field, needle)?
+            .ok_or_else(|| {
+                TriviumError::InvalidInput(
+                    "字段没有 N-gram 索引，已拒绝全扫描 (Field has no N-gram index; full scan rejected)"
+                        .into(),
+                )
+            })?;
+        let mut ids = candidates
+            .into_iter()
+            .filter(|id| {
+                mt.get_payload(*id).is_some_and(|payload| {
+                    payload
+                        .get(field)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|text| text.contains(needle))
+                })
+            })
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        if ids.len() > max_results {
+            return Err(TriviumError::QueryRowBudgetExceeded {
+                budget: max_results,
+            });
+        }
+        Ok(ids)
+    }
+
+    pub fn create_unique_index(&mut self, field: &str) -> Result<()> {
+        self.require_write_access("create_unique_index")?;
+        if field.is_empty() {
+            return Err(TriviumError::InvalidInput(
+                "唯一索引字段不能为空 (Unique index field cannot be empty)".into(),
+            ));
+        }
+        write_or_recover(&self.memtable).register_unique_property_index(field)?;
+        self.flush_inner()
+    }
+
+    pub fn create_unique_composite_index(&mut self, fields: &[String]) -> Result<()> {
+        self.require_write_access("create_unique_composite_index")?;
+        if fields.len() < 2
+            || fields.iter().any(String::is_empty)
+            || fields
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != fields.len()
+        {
+            return Err(TriviumError::InvalidInput(
+                "复合唯一索引至少需要两个非空且不重复的字段 (Composite unique index requires at least two distinct non-empty fields)".into(),
+            ));
+        }
+        write_or_recover(&self.memtable).register_unique_composite_property_index(fields)?;
+        self.flush_inner()
+    }
+
+    pub fn list_unique_indexes(&self) -> Vec<Vec<String>> {
+        read_or_recover(&self.memtable).unique_index_definitions()
+    }
+
     /// 创建属性索引：对指定 payload 字段建立倒排索引，加速 MATCH/FIND 查询
     ///
     /// ```ignore
@@ -1763,7 +2119,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     pub fn drop_composite_index(&mut self, fields: &[String]) -> Result<()> {
         self.require_write_access("drop_composite_index")?;
+        let was_unique = read_or_recover(&self.memtable)
+            .unique_index_definitions()
+            .iter()
+            .any(|definition| definition == fields);
         write_or_recover(&self.memtable).drop_composite_property_index(fields);
+        if was_unique {
+            self.flush_inner()?;
+        }
         Ok(())
     }
 
@@ -1790,8 +2153,16 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 删除属性索引
     pub fn drop_index(&mut self, field: &str) -> Result<()> {
         self.require_write_access("drop_index")?;
+        let was_unique = read_or_recover(&self.memtable)
+            .unique_index_definitions()
+            .iter()
+            .any(|definition| definition.as_slice() == [field]);
         let mut mt = write_or_recover(&self.memtable);
         mt.drop_property_index(field);
+        drop(mt);
+        if was_unique {
+            self.flush_inner()?;
+        }
         Ok(())
     }
 
@@ -2068,6 +2439,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                             });
                             affected += 1;
                         }
+                        MutationOp::UpdateVector { id, vector } => {
+                            tx_ops.push(transaction::TxOp::UpdateVector { id, vector });
+                            affected += 1;
+                        }
                         MutationOp::UpdatePayload { id, payload } => {
                             tx_ops.push(transaction::TxOp::UpdatePayload { id, payload });
                             affected += 1;
@@ -2229,7 +2604,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let zero_vec = vec![T::zero(); new_dim];
         for &nid in &node_ids {
             if let Some(payload) = mt.get_payload(nid) {
-                new_db.insert_with_id(nid, &zero_vec, payload.clone())?;
+                new_db.insert_with_id(nid, &zero_vec, (*payload).clone())?;
             }
         }
 

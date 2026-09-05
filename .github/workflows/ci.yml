@@ -18,7 +18,7 @@ on:
   push:
     branches: [master, dev]
   pull_request:
-    branches: [master]
+    branches: [master, dev]
   workflow_dispatch:
     inputs:
       run_mutation:
@@ -42,6 +42,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ═══════════════════════════════════════════
+  #  PR 来源分支策略
+  # ═══════════════════════════════════════════
+  source-branch-policy:
+    name: Source Branch Policy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: 校验目标分支
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [[ "$BASE_REF" == "master" && "$HEAD_REF" != "dev" ]]; then
+            echo "master 只接受来自 dev 的发布 PR"
+            exit 1
+          fi
+
   # ═══════════════════════════════════════════
   #  Job 1: 编译检查（快速门禁）
   # ═══════════════════════════════════════════
@@ -202,11 +221,17 @@ jobs:
       - name: 构建 Node.js 原生绑定
         run: npm run build
 
+      - name: 校验 TypeScript 声明为最新
+        run: git diff --exit-code -- triviumdb.d.ts
+
       - name: 验证关闭、资源管理与跨进程文件锁
         run: npm run test:lifecycle
 
       - name: 验证 Node.js 公共 API 契约
         run: npm run test:public-api
+
+      - name: 校验 TypeScript 类型声明
+        run: npx --yes --package typescript tsc --noEmit --skipLibCheck triviumdb.d.ts
 
   # ═══════════════════════════════════════════
   #  Job 2b: ARM64 Linux 原生测试 (QEMU)
@@ -458,8 +483,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+
       - name: 静态分析 (Clippy)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   memory-pressure-observation:
     name: Memory Pressure Observation

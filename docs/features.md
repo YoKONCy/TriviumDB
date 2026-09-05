@@ -1,12 +1,13 @@
 # TriviumDB 支持特性详解
 
-> 深入剖析 TriviumDB 的架构设计、核心能力与技术实现细节。本文以 v0.8.5 当前源码和正式公共 API 为准。
+> 深入剖析 TriviumDB 的架构设计、核心能力与技术实现细节。本文以 v0.8.6 当前源码和正式公共 API 为准。
 
 ## 当前能力快照
 
 - **持久化索引**：QuIVer ANN、Hash、Ordered ART、Composite ART、Roaring Bitmap、AC+BM25 TextIndex、业务图块索引。
-- **自由 DIY 混合查询**：TQL 不是几条固定的“混合搜索模板”，而是一套可编排执行管线。开发者可将向量召回、属性过滤、图扩展、图算法、路径、集合代数、迭代、聚合和重排按业务语义自由串联，并由 Cascades 在预算内选择物理计划。
-- **统一查询底座**：TQL Parser/AST、WITH 管线、Cascades 优化、Prepared TQL、Path 与一等值结果共同支撑上述自由组合。
+- **自由 DIY 混合查询**：TQL 不是几条固定的“混合搜索模板”，而是一套可编排执行管线。开发者可将向量召回、BM25/AC 文本召回、属性过滤、图扩展、图算法、FISTA 残差召回、DPP 多样化、NMF 主题分配、路径、集合代数、迭代、聚合和重排按业务语义自由串联，并由 Cascades 在预算内选择物理计划。
+- **双形态认知检索**：`search_advanced()` 保留组件可开关、顺序固定的官方模板；TQL 复用相同 BM25、AC、FISTA、DPP、NMF 与图扩散底层实现，允许自由编排无状态组件。疲劳不应期仍仅属于有状态 API。
+- **统一查询底座**：TQL Parser/AST、WITH 管线、Cascades 优化、Prepared TQL、Path 与一等值结果共同支撑上述自由组合；数字字面量支持科学计数法，MATCH 属性/ID 投影按实际值去重，`SET VECTOR` 通过原子 mutation 更新向量。
 - **系统保证**：确定性执行、查询/遍历/内存/并行预算、ReadOnly/Immutable 零写、generation 原子发布。
 - **跨语言能力**：Rust、Python、Node 同步提供四类属性索引管理、Prepared TQL、一等查询值和存储格式观测。
 - **严格升级策略**：历史静默 API 已移除；误用返回迁移错误。主文件保留有限读取窗口，可重建 sidecar 独立版本化。
@@ -134,10 +135,12 @@ TriviumDB 提供两种互斥的存储模式（`StorageMode`），且**系统支�
 
 ### 2. Mmap 模式（大规模零拷贝优先，默认）
 
-启动时，所有大体积的持续增长向量池（Vector Block）将分离为独立的 `.vec` 文件，而 `.tdb` 中只记录关系边和 Payload。
+启动时，持续增长的大体积向量与已发布 raw Payload 分别位于 `.vec` 和 generation 化 `.pld.<generation>`；`.tdb` v9 保存节点 slot、关系边和必要元数据，不再重复内嵌完整 raw Payload。
 
 - **MAP_PRIVATE (COW)**：通过 `memmap2` 库将数 GB 的向量文件映射到操作系统的虚拟内存中。进程不会真的霸占物理内存，而是由 OS 根据查询压力按需（Page Fault）换入换出。
-- **分层向量池（VecPool）**：内存中维护 `基础层（mmap）+ 增量层（Vec）` 两段结构。新插入的向量只进增量层；delete/update 操作对基础层做 COW 写入，产生进程私有脏页，不改变磁盘文件。直到显式 `flush()` 时才统一持久化。
+- **分层向量池（VecPool）**：内存中维护 `基础层（mmap）+ 增量层（Vec）` 两段结构。新插入的向量只进增量层；delete/update 操作对基础层做 COW 写入，直到显式 `flush()` 时统一发布。
+- **分层 PayloadStore**：NodeId 目录常驻内存；已发布 raw JSON 引用只读 `.pld` mmap，新写入和更新保存在堆 delta，删除以 tombstone 语义覆盖基础层。解析结果由 `Arc<Value>` 承载并进入有总字节和单条字节上限的 LRU Cache；cache=0 或超大条目绕过缓存，不影响查询结果。
+- **Late Materialization**：BQ/QuIVer/Exact 候选生成、向量精排和 Top-K 截断不访问 Payload。只有最终返回、Payload 谓词、字段排序或聚合需要时才 hydrate。纯向量候选阶段固定满足 `payload_lookup_count = 0`、`payload_parsed_bytes = 0`。
 
 Mmap 的能力边界必须明确：它降低启动和复制成本，但不把 SSD 变成内存。非驻留页首次访问仍需要磁盘 fault-in；当随机访问工作集超过可用 PageCache 时，可能出现持续回收、Major Fault 和尾延迟上升。`Config.memory_limit` 只约束 TDB 可估算的堆分配，不包含 mmap 映射的驻留页、OS PageCache、pagefile/swap 和其他进程占用。
 
@@ -190,26 +193,20 @@ QuIVer 快照按 slot 流式读取 FP16/FP32/mmap 向量并直接编码为紧凑
   鉴于 99% 的纯插入 AI 记忆场景走的是无感知的“追加路径（Append Path）”，TriviumDB 将掌控权完全交给了开发者。
   开发者可以通过 `disable_auto_compaction()` 关闭不可控的后台压实，并在业务低峰期（如凌晨 3 点）主动调用 `compact()` 方法进行手动全量落盘，以此换取系统结构在严苛环境下的绝对健壮与零数据败坏风险。
 
-### 单个 .tdb 底层布局 (Rom 模式 / Mmap 时的元数据底座)
+### `.tdb` v9 与 Payload sidecar 布局
 
-所有数据打包进一个 `.tdb` 二进制文件，内部由四个连续的块组成：
+Rom 模式仍将完整 Payload 写入单个 `.tdb`。Mmap 模式的 `.tdb` v9 只保存活跃 NodeId slot 和图/BQ 元数据，raw JSON 位于与提交 generation 绑定的 `.pld.<generation>`：
 
+```text
+.tdb                 slot + graph + BQ metadata
+.vec                 mmap vector base
+.pld.<generation>    header + sorted NodeId directory + raw JSON + record/file CRC
+.flush_ok            generation + .tdb/.vec/.pld size + whole-file CRC
 ```
-┌────────────────────────┐ offset 0
-│       File Header       │ 58 字节（当前 v7）
-│  MAGIC + VERSION + dim  │
-│  next_id + node_count   │
-│  各 block 的 offset     │
-├────────────────────────┤ payload_offset
-│     Payload Block       │ [node_id(8B) + json_len(4B) + json_data] × N
-├────────────────────────┤ vector_offset
-│      Vector Block       │ 连续 f32 数组（可 mmap 零拷贝加载，仅 Rom 模式）
-├────────────────────────┤ edge_offset
-│       Edge Block        │ [src(8B) + dst(8B) + label_len(2B) + label + weight(4B)] × M
-├────────────────────────┤ bq_offset
-│    BQ Metadata Block    │ magic + block_version + chunks + count + LE u64[]
-└────────────────────────┘
-```
+
+`.pld` 目录按 NodeId 严格递增，记录数据连续且每条带 CRC；header/目录 reserved、flags、offset、范围、JSON 完整性和整文件 CRC 均 fail-closed。Writer 先写临时文件并 fsync，再发布 generation marker；只有 marker v3 明确声明的 `.pld` 才可加载，旧 marker 附近的游离 sidecar 会被忽略。generation 文件名避免 Windows 上替换仍被旧 Reader mmap 的同名文件，旧 generation 在失去引用后 best-effort 回收。
+
+加载 v5-v8 时继续读取 `.tdb` 内嵌 Payload。ReadWrite 仅在显式 `flush()`/`compact()` 后迁移到 v9；ReadOnly/Immutable 只读兼容旧格式，不自动迁移、不创建 `.pld`、不修改任何制品。
 
 > **边持久化格式** 从 v7 起保存任意 JSON `metadata`，唯一键为 `(src, dst, label)`，重复 Upsert 原地覆盖权重与元数据。加载器继续兼容 v5/v6，旧边的元数据恢复为 `null`。BQ 元数据块仍采用从 v6 开始的自描述固定小端序布局。
 >
@@ -257,7 +254,7 @@ TriviumDB 采用**全自动双引擎路由**，无需编译期 Feature 选择，
 - **精确度**：100% 精确召回，零误差
 - **并行化**：rayon `par_chunks` 多核线性加速
 - **原理**：对整个 SoA 向量池做并行余弦相似度扫描
-- **激活条件**：< 1 万节点，或 QuIVer 索引尚未构建完成
+- **激活条件**：节点数低于按 `ceil(8,000,000 / dim)` 计算并限制在 2,500–10,000 的动态阈值，或 QuIVer 索引尚未构建完成
 
 ```rust
 // 内部实现伪码
@@ -273,7 +270,7 @@ flat_vectors
 **QuIVer**（**Qu**antized **I**ndexed **Ve**ctor **R**etrieval）是 TriviumDB 自研的 SOTA 级近似最近邻（ANN）图索引，融合 **BQ 二进制量化**与 **Vamana 图导航**，冷热分离架构：
 
 - **精确度**：近似搜索，实测 Recall@10 在 20 万规模下达 99%+
-- **激活条件**：≥ 1 万节点时自动构建
+- **激活条件**：维度不超过 3072，且节点数达到动态阈值时自动构建
 - **搜索流程**：
   1. **BQ 签名比对**：利用 CPU 原生 `Popcount` 硬件指令，在 Vamana 图导航过程中快速计算 Hamming 距离
   2. **Vamana 图导航**：沿着贪心最近邻路径在图中跳转，快速收敛到目标区域
@@ -291,7 +288,7 @@ flat_vectors
 | 事务安全 | — | ✅ 分离时间线架构，零回滚开销 |
 | 持久化 | — | ✅ `.tdb.quiver` 独立文件，POD memcpy |
 | 内存布局 | 连续 f32 数组 | 冷热分离：BQ 签名(hot) + f32 向量(cold) |
-| 激活方式 | 默认 | 自动（1 万节点时构建）|
+| 激活方式 | 默认 | 自动（达到 2,500–10,000 节点的维度相关阈值时构建）|
 
 ---
 
@@ -399,9 +396,10 @@ TriviumDB 内置了一套多层认知检索管线（本项目自研的功能性�
 
 ### 设计哲学
 
-- **可配（Configurable）**：每个数学参数通过 `SearchConfig` 在运行时控制
-- **可关（Runtime Toggleable）**：每条查询独立决定启用哪些层，不是编译期宏
-- **零侵入（Zero-Impact）**：原有22 `search()` API 绝对不受影响，认知功能全部收束在 `search_advanced()` 入口
+- **可配（Configurable）**：`search_advanced()` 的每个数学参数通过 `SearchConfig` 在运行时控制；TQL 通过显式语法参数控制无状态算子
+- **可关（Runtime Toggleable）**：每条高级 API 查询独立决定启用哪些层；TQL 则只写入需要执行的算子
+- **双入口（Two Frontends）**：`search_advanced()` 是组件可开关、顺序固定的官方模板；TQL 是无状态认知算子的自由编排入口
+- **兼容基础检索（Zero-Impact）**：普通 `search()` API 不受认知算子影响；疲劳不应期和 Hook 因状态/回调语义仍只属于高级 API
 
 ### 管线架构（功能性分层）
 
@@ -436,7 +434,7 @@ TriviumDB 内置了一套多层认知检索管线（本项目自研的功能性�
 | **语法分析器** | `query/tql_parser.rs` | 递归下降解析、作用域验证 |
 | **抽象语法树** | `query/tql_ast.rs` | 查询、管线、表达式、聚合和路径结构 |
 | **Cascades** | `query/cascades.rs` | Memo、成本估算、预算切片与确定性计划选择；优化结果以权威 `PhysicalPlan` 驱动执行器 lowering（Source/Filter/Expand/Rank 真实物理候选、可序列化物理属性、相邻 Filter 合并与恒等 WITH 消除），优化状态显式为 `Complete/Fallback/BudgetExceeded` 并通过 `EXPLAIN` 暴露 |
-| **执行器** | `query/tql_executor.rs` | NodeSet/一等值执行、聚合、路径和图算法 |
+| **执行器** | `query/tql_executor.rs` | NodeSet/一等值执行、聚合、路径和图算法；内置 SCC、K-Core、割点、三角计数、局部聚类系数与 HITS |
 | **Prepared** | `query/tql_prepared.rs` | 严格参数发现、绑定和重复执行 |
 
 ### 查询入口与可组合管线
@@ -446,10 +444,11 @@ TriviumDB 内置了一套多层认知检索管线（本项目自研的功能性�
 | **MATCH** | 图谱遍历（沿边跳转） | `MATCH (a)-[:knows]->(b) RETURN b` |
 | **FIND** | 文档过滤（类 MongoDB） | `FIND {type: "event", heat: {$gte: 0.7}} RETURN *` |
 | **SEARCH** | 向量检索 | `SEARCH VECTOR [...] TOP 10 RETURN *` |
+| **TEXT** | BM25、AC 或 Hybrid 稀疏文本召回 | `TEXT HYBRID "query" TOP 100 AS hits ...` |
 | **MATCH + RANK** | GraphFirst 约束排名 | `MATCH (a)-[:rel]->(b) RANK a BY VECTOR [...] TOP 10 RETURN a` |
 | **WITH Pipeline** | 跨模组合 | `SEARCH ... AS seed WITH seed EXPAND ... RETURN ...` |
 
-管线支持 `FILTER`、`RANK`、`EXPAND`、PageRank/WCC/Leiden/SA-PPR、`ALL_PATHS`、`SHORTEST_PATHS`、`UNION/INTERSECT/EXCEPT`、`ITERATE`。RETURN 支持算术、`COALESCE`、`IS NULL`、`path()`、`path_length()` 以及 `COUNT/SUM/AVG/MIN/MAX/COLLECT`。
+管线支持 `FILTER`、`RANK`、`EXPAND`、PageRank/WCC/Leiden/SA-PPR、`RESIDUAL`（FISTA）、`DIVERSIFY`（DPP）、`TOPICS`（NMF）、参数化 `SA_PPR_CONFIG`、`ALL_PATHS`、`SHORTEST_PATHS`、`UNION/INTERSECT/EXCEPT`、`ITERATE`。RETURN 支持算术、`COALESCE`、`IS NULL`、`text_score()`、`residual_score()`、`diversity_score()`、`topic()`、`topic_score()`、`path()`、`path_length()` 以及 `COUNT/SUM/AVG/MIN/MAX/COLLECT`。文本、候选、向量读取、FISTA Gram、DPP 临时矩阵与 NMF V/W/H 均执行分配前预算检查。
 
 ### DML 写操作（v0.6.0 新增）
 

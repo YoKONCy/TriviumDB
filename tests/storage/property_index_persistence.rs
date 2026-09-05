@@ -223,16 +223,16 @@ fn 损坏属性索引按策略回退或报错() {
 }
 
 #[test]
-fn 属性索引_v4_posting块_crc_独立拒绝损坏() {
+fn 属性索引_v5_posting块_crc_独立拒绝损坏() {
     let path = database_path("posting_block_crc");
     cleanup(&path);
     seed_database(&path);
     let sidecar = format!("{path}.pidx");
     let mut bytes = std::fs::read(&sidecar).unwrap();
-    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 4);
+    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 6);
 
-    let field_len = u32::from_le_bytes(bytes[37..41].try_into().unwrap()) as usize;
-    let entry_count_offset = 41 + field_len;
+    let field_len = u32::from_le_bytes(bytes[38..42].try_into().unwrap()) as usize;
+    let entry_count_offset = 42 + field_len;
     let key_len_offset = entry_count_offset + 8;
     let key_len = u32::from_le_bytes(
         bytes[key_len_offset..key_len_offset + 4]
@@ -289,6 +289,150 @@ fn 属性索引逐字节截断均不触发_panic() {
         );
         assert!(result.is_err(), "截断到 {length} 字节时必须拒绝");
     }
+    cleanup(&path);
+}
+
+#[test]
+fn 唯一约束由主文件恢复且_sidecar_缺失时仍然生效() {
+    let path = database_path("unique_authoritative");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    db.insert(&[1.0, 0.0, 0.0, 0.0], json!({"email": "a@example.com"}))
+        .unwrap();
+    db.create_unique_index("email").unwrap();
+    db.close().unwrap();
+
+    std::fs::remove_file(format!("{path}.pidx")).unwrap();
+    let mut reopened = Database::<f32>::open(&path, DIM).unwrap();
+    assert_eq!(
+        reopened.list_unique_indexes(),
+        vec![vec!["email".to_owned()]]
+    );
+    assert!(matches!(
+        reopened.insert(&[0.0, 1.0, 0.0, 0.0], json!({"email": "a@example.com"})),
+        Err(TriviumError::UniqueConstraintViolation { .. })
+    ));
+    cleanup(&path);
+}
+
+#[test]
+fn 复合唯一约束拒绝重复与非标量并允许字段缺失() {
+    let path = database_path("unique_composite");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    db.create_unique_composite_index(&["tenant".into(), "slug".into()])
+        .unwrap();
+    db.insert(
+        &[1.0, 0.0, 0.0, 0.0],
+        json!({"tenant": "a", "slug": "home"}),
+    )
+    .unwrap();
+    assert!(matches!(
+        db.insert(
+            &[0.0, 1.0, 0.0, 0.0],
+            json!({"tenant": "a", "slug": "home"})
+        ),
+        Err(TriviumError::UniqueConstraintViolation { .. })
+    ));
+    db.insert(&[0.0, 0.0, 1.0, 0.0], json!({"tenant": "a"}))
+        .unwrap();
+    assert!(matches!(
+        db.insert(
+            &[0.0, 0.0, 0.0, 1.0],
+            json!({"tenant": "a", "slug": ["invalid"]})
+        ),
+        Err(TriviumError::InvalidInput(_))
+    ));
+    cleanup(&path);
+}
+
+#[test]
+fn indexed_equality_lookup_只走索引并受结果预算约束() {
+    let path = database_path("indexed_equality");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let first = db
+        .insert(
+            &[1.0, 0.0, 0.0, 0.0],
+            json!({"tenant": "a", "kind": "note"}),
+        )
+        .unwrap();
+    db.insert(
+        &[0.0, 1.0, 0.0, 0.0],
+        json!({"tenant": "a", "kind": "event"}),
+    )
+    .unwrap();
+    assert!(
+        db.indexed_lookup(&[("tenant".into(), json!("a"))], 10)
+            .is_err()
+    );
+    db.create_composite_index(&["tenant".into(), "kind".into()])
+        .unwrap();
+    assert_eq!(
+        db.indexed_lookup(
+            &[
+                ("tenant".into(), json!("a")),
+                ("kind".into(), json!("note"))
+            ],
+            10,
+        )
+        .unwrap(),
+        vec![first]
+    );
+    assert!(matches!(
+        db.indexed_lookup(&[("tenant".into(), json!("a"))], 1),
+        Err(TriviumError::QueryRowBudgetExceeded { budget: 1 })
+    ));
+    cleanup(&path);
+}
+
+#[test]
+fn ngram_子串索引维护持久化并精确复核() {
+    let path = database_path("ngram");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let first = db
+        .insert(&[1.0, 0.0, 0.0, 0.0], json!({"text": "向量数据库检索"}))
+        .unwrap();
+    let second = db
+        .insert(&[0.0, 1.0, 0.0, 0.0], json!({"text": "数据库系统"}))
+        .unwrap();
+    db.create_ngram_index("text").unwrap();
+    assert_eq!(
+        db.substring_lookup("text", "向量数据库", 10).unwrap(),
+        vec![first]
+    );
+    let explain = db
+        .tql_values(r#"EXPLAIN FIND {text: {$contains: "向量数据库"}} RETURN *"#)
+        .unwrap();
+    assert!(format!("{explain:?}").contains("ngram_property_index"));
+    assert_eq!(
+        db.tql_nodes(r#"FIND {text: {$contains: "向量数据库"}} RETURN *"#)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(db.substring_lookup("text", "数据", 10).is_err());
+    db.update_payload(second, json!({"text": "向量数据库课程"}))
+        .unwrap();
+    assert_eq!(
+        db.substring_lookup("text", "向量数据库", 10).unwrap(),
+        vec![first, second]
+    );
+    db.delete(first).unwrap();
+    db.close().unwrap();
+
+    let reopened = Database::<f32>::open(&path, DIM).unwrap();
+    assert_eq!(
+        reopened.substring_lookup("text", "向量数据库", 10).unwrap(),
+        vec![second]
+    );
+    assert!(
+        reopened
+            .index_info()
+            .iter()
+            .any(|info| info.kind == triviumdb::index::property::PropertyIndexKind::Ngram)
+    );
     cleanup(&path);
 }
 
