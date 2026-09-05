@@ -1676,8 +1676,14 @@ impl TqlParser {
                 Ok(serde_json::Value::Null)
             }
             TqlToken::LBracket => {
-                let arr = self.parse_json_array()?;
-                Ok(serde_json::Value::Array(arr))
+                self.depth += 1;
+                if self.depth > 128 {
+                    self.depth -= 1;
+                    return Err("Parser recursion depth exceeded (JSON nesting too deep)".into());
+                }
+                let result = self.parse_json_array().map(serde_json::Value::Array);
+                self.depth -= 1;
+                result
             }
             other => Err(format!("Expected JSON value, got {:?}", other)),
         }
