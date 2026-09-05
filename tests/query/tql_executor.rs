@@ -370,6 +370,45 @@ fn FIND小LIMIT在扫描与Hash索引路径保持相同稳定语义() {
 }
 
 #[test]
+fn FIND范围与复合过滤小LIMIT保持稳定提前终止语义() {
+    let path = tmp_db("find_range_compound_limit");
+    cleanup(&path);
+    let mut db = Database::<f32>::open_with_config(
+        &path,
+        Config {
+            dim: DIM,
+            storage_mode: StorageMode::Rom,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for id in 1..=1_000u64 {
+        db.insert_with_id(
+            id,
+            &[1.0, 0.0],
+            serde_json::json!({"type": if id % 2 == 0 { "even" } else { "odd" }, "score": id}),
+        )
+        .unwrap();
+    }
+    let range = db
+        .tql_nodes(r#"FIND {score: {$gte: 500}} RETURN * LIMIT 3"#)
+        .unwrap()
+        .into_iter()
+        .map(|row| row["_"].id)
+        .collect::<Vec<_>>();
+    assert_eq!(range, vec![500, 501, 502]);
+    let compound = db
+        .tql_nodes(r#"FIND {type: "even", score: {$gte: 500}} RETURN * LIMIT 3"#)
+        .unwrap()
+        .into_iter()
+        .map(|row| row["_"].id)
+        .collect::<Vec<_>>();
+    assert_eq!(compound, vec![500, 502, 504]);
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
 fn TQL_FIND和MATCH超过五千行仍完整分页() {
     let path = tmp_db("pagination_over_5000");
     cleanup(&path);
@@ -431,6 +470,8 @@ fn 显式LIMIT可覆盖配置行上限但OFFSET仍受内存硬上限() {
             max_query_rows: Some(2),
             row_overflow: RowOverflowPolicy::Throw,
             memory_limit: 3 * (DIM * std::mem::size_of::<f32>() + 256),
+            payload_cache_bytes: 0,
+            payload_cache_entry_bytes: 0,
             ..Default::default()
         },
     )
@@ -676,6 +717,23 @@ fn TQL_SEARCH_带WHERE过滤() {
     for row in &results {
         assert_eq!(row["_"].payload["type"], "event");
     }
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
+fn TQL_SEARCH_带索引WHERE返回过滤集合内TopK() {
+    let (mut db, path) = build_test_db("search_where_indexed_topk");
+    db.create_index("type").unwrap();
+    let results = db
+        .tql_nodes(r#"SEARCH VECTOR [1.0, 0.0] TOP 2 WHERE {type: "event"} RETURN *"#)
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(
+        results
+            .iter()
+            .all(|row| row["_"].payload["type"] == "event")
+    );
     drop(db);
     cleanup(&path);
 }

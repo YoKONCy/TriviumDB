@@ -71,6 +71,8 @@ fn budget(nodes: usize, dim: usize) -> PipelineBudget {
         max_nodes: nodes,
         max_node_set_bytes: nodes.saturating_mul(256),
         max_vector_read_bytes: nodes.saturating_mul(dim).saturating_mul(16),
+        max_payload_lookups: nodes as u64,
+        max_payload_parsed_bytes: nodes.saturating_mul(1024) as u64,
         traversal: TraversalBudget {
             max_visited_nodes: nodes.saturating_mul(8),
             max_examined_edges: nodes.saturating_mul(32),

@@ -333,7 +333,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     let mut seeds = Vec::with_capacity(anchor_hits.len());
     for mut hit in anchor_hits {
         if let Some(payload) = mt.get_payload(hit.id) {
-            hit.payload = payload.clone();
+            hit.payload = (*payload).clone();
             seeds.push(hit);
         }
     }
@@ -479,7 +479,7 @@ fn recall_text_ranked<T: VectorType>(
             *combined.entry(id).or_insert(0.0) += score;
         }
         ranking.extend(combined);
-        ranking.sort_by(|a, b| b.1.total_cmp(&a.1));
+        ranking.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         ranking.truncate(effective_recall_k(config));
     }
 }
@@ -659,18 +659,11 @@ fn quiver_pipeline<T: VectorType + Sync>(
         .map(|(id, score)| SearchHit {
             id,
             score,
-            payload: mt
-                .get_payload(id)
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
+            payload: serde_json::Value::Null,
         })
         .collect();
 
-    hits.sort_unstable_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    hits.sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
     hits.truncate(recall_k);
     hits
 }
@@ -740,27 +733,33 @@ fn aggregate_seeds<T: VectorType>(
     anchor_hits: &mut Vec<SearchHit>,
 ) {
     let filter_ref = config.payload_filter.as_ref();
-    for (&id, &score) in seed_map {
-        if score >= config.min_score {
-            let passes = match filter_ref {
-                None => mt.contains(id),
-                Some(f) => mt.get_payload(id).is_some_and(|p| f.matches(p)),
-            };
-            if passes {
-                let payload = mt
-                    .get_payload(id)
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                anchor_hits.push(SearchHit { id, score, payload });
-            }
-        }
-    }
-    anchor_hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+    let mut candidates = seed_map
+        .iter()
+        .filter_map(|(&id, &score)| {
+            (score >= config.min_score)
+                .then_some((id, score))
+                .filter(|(id, _)| match filter_ref {
+                    None => mt.contains(*id),
+                    Some(filter) => mt
+                        .get_payload(*id)
+                        .is_some_and(|payload| filter.matches(&payload)),
+                })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
     });
-    anchor_hits.truncate(effective_rerank_k(config));
+    candidates.truncate(effective_rerank_k(config));
+    anchor_hits.extend(candidates.into_iter().filter_map(|(id, score)| {
+        mt.get_payload(id).map(|payload| SearchHit {
+            id,
+            score,
+            payload: (*payload).clone(),
+        })
+    }));
 }
 
 #[inline]
@@ -776,7 +775,7 @@ fn matches_payload_filter<T: VectorType>(
         None => mt.contains(id),
         Some(filter) => mt
             .get_payload(id)
-            .is_some_and(|payload| filter.matches(payload)),
+            .is_some_and(|payload| filter.matches(&payload)),
     }
 }
 
@@ -840,11 +839,7 @@ fn apply_dpp<T: VectorType>(
     for &idx in &selected_idx {
         final_results.push(pool_valid[idx].clone());
     }
-    final_results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    final_results.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
     Some(final_results)
 }
 
@@ -985,6 +980,35 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_seeds_only_hydrates_rerank_pool() {
+        let mut nodes = Vec::new();
+        let mut seed_map = std::collections::HashMap::new();
+        for id in 1..=100 {
+            nodes.push((id, vec![1.0, 0.0], serde_json::json!({"id": id})));
+            seed_map.insert(id, id as f32);
+        }
+        let mut mt = make_memtable(2, &nodes);
+        mt.configure_payload_cache(0, 0);
+        let before = mt.payload_memory_stats();
+        let mut hits = Vec::new();
+        aggregate_seeds(
+            &mt,
+            &SearchConfig {
+                top_k: 2,
+                rerank_k: 5,
+                min_score: 0.0,
+                ..Default::default()
+            },
+            &seed_map,
+            &mut hits,
+        );
+        let after = mt.payload_memory_stats();
+        assert_eq!(hits.len(), 5);
+        assert_eq!(after.payload_lookups - before.payload_lookups, 5);
+        assert!(after.payload_parsed_bytes > before.payload_parsed_bytes);
+    }
+
+    #[test]
     fn test_aggregate_seeds_filters_by_min_score() {
         let mt = make_memtable(
             2,
@@ -1077,6 +1101,36 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(*best_id, 1);
+    }
+
+    #[test]
+    fn pure_vector_recall_does_not_touch_payload() {
+        let mut mt = make_memtable(
+            3,
+            &[
+                (1, vec![1.0, 0.0, 0.0], serde_json::json!({"text": "一"})),
+                (2, vec![0.0, 1.0, 0.0], serde_json::json!({"text": "二"})),
+            ],
+        );
+        mt.configure_payload_cache(0, 0);
+        mt.ensure_vectors_cache(true);
+        let before = mt.payload_memory_stats();
+        let mut ranking = Vec::new();
+        recall_vector_ranked(
+            &mt,
+            &SearchConfig {
+                top_k: 2,
+                min_score: -1.0,
+                force_brute_force: true,
+                ..Default::default()
+            },
+            Some(&[1.0, 0.0, 0.0]),
+            &mut ranking,
+        );
+        let after = mt.payload_memory_stats();
+        assert_eq!(ranking.len(), 2);
+        assert_eq!(after.payload_lookups, before.payload_lookups);
+        assert_eq!(after.payload_parsed_bytes, before.payload_parsed_bytes);
     }
 
     #[test]

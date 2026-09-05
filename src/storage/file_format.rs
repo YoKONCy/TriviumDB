@@ -11,6 +11,7 @@ use crate::index::bq::BqSignature;
 use crate::node::{Edge, NodeId};
 use crate::storage::fs::robust_rename_and_sync;
 use crate::storage::memtable::MemTable;
+use crate::storage::payload_store::PayloadStore;
 use crate::storage::vec_pool::VecPool;
 use memmap2::Mmap;
 use std::fs::File;
@@ -19,21 +20,24 @@ use std::path::Path;
 
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
-pub const CURRENT_VERSION: u16 = 7;
+pub const CURRENT_VERSION: u16 = 9;
 pub const MINIMUM_SUPPORTED_VERSION: u16 = 5;
 const HEADER_SIZE: u64 = 58;
 const BQ_BLOCK_MAGIC: &[u8; 4] = b"TBQF";
 const BQ_BLOCK_VERSION: u16 = 1;
 const BQ_BLOCK_HEADER_SIZE: usize = 16;
+const UNIQUE_BLOCK_MAGIC: &[u8; 4] = b"TUQC";
+const UNIQUE_BLOCK_VERSION: u16 = 1;
 
 // ══════ flush_ok 提交标记常量 ══════
 /// 标记魔数：Trivium Flush Marker
 const FLUSH_MARKER_MAGIC: &[u8; 4] = b"TFMK";
-/// 当前标记版本记录 `.tdb/.vec` 的长度、整文件 CRC32 和 marker 自身 CRC32。
-const FLUSH_MARKER_VERSION: u8 = 2;
+/// 当前标记版本记录 `.tdb/.vec/.pld` 的长度、整文件 CRC32 和 marker 自身 CRC32。
+const FLUSH_MARKER_VERSION: u8 = 3;
 const FLUSH_MARKER_V1_SIZE: usize = 29;
-/// magic(4) + version(1) + generation(8) + sizes(16) + file CRCs(8) + marker CRC(4)
-const FLUSH_MARKER_SIZE: usize = 41;
+const FLUSH_MARKER_V2_SIZE: usize = 41;
+/// magic(4) + version(1) + generation(8) + sizes(24) + file CRCs(12) + marker CRC(4)
+const FLUSH_MARKER_SIZE: usize = 53;
 
 /// flush_ok 提交标记：记录 .tdb 和 .vec 的文件大小及单调递增的 generation 号
 ///
@@ -42,8 +46,10 @@ struct FlushMarker {
     generation: u64,
     tdb_size: u64,
     vec_size: u64,
+    payload_size: Option<u64>,
     tdb_crc32: Option<u32>,
     vec_crc32: Option<u32>,
+    payload_crc32: Option<u32>,
 }
 
 /// 编码 flush marker 为固定字节数组
@@ -54,16 +60,21 @@ fn encode_flush_marker(marker: &FlushMarker) -> [u8; FLUSH_MARKER_SIZE] {
     bytes[5..13].copy_from_slice(&marker.generation.to_le_bytes());
     bytes[13..21].copy_from_slice(&marker.tdb_size.to_le_bytes());
     bytes[21..29].copy_from_slice(&marker.vec_size.to_le_bytes());
-    bytes[29..33].copy_from_slice(&marker.tdb_crc32.unwrap_or_default().to_le_bytes());
-    bytes[33..37].copy_from_slice(&marker.vec_crc32.unwrap_or_default().to_le_bytes());
-    let marker_crc = crc32fast::hash(&bytes[..37]);
-    bytes[37..41].copy_from_slice(&marker_crc.to_le_bytes());
+    bytes[29..37].copy_from_slice(&marker.payload_size.unwrap_or_default().to_le_bytes());
+    bytes[37..41].copy_from_slice(&marker.tdb_crc32.unwrap_or_default().to_le_bytes());
+    bytes[41..45].copy_from_slice(&marker.vec_crc32.unwrap_or_default().to_le_bytes());
+    bytes[45..49].copy_from_slice(&marker.payload_crc32.unwrap_or_default().to_le_bytes());
+    let marker_crc = crc32fast::hash(&bytes[..49]);
+    bytes[49..53].copy_from_slice(&marker_crc.to_le_bytes());
     bytes
 }
 
 /// 解码 flush marker，校验 magic 和 version，不匹配时返回错误
 fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
-    if !matches!(bytes.len(), FLUSH_MARKER_V1_SIZE | FLUSH_MARKER_SIZE) {
+    if !matches!(
+        bytes.len(),
+        FLUSH_MARKER_V1_SIZE | FLUSH_MARKER_V2_SIZE | FLUSH_MARKER_SIZE
+    ) {
         return Err(TriviumError::CorruptedFile(format!(
             "flush marker 长度无效：实际 {} 字节",
             bytes.len()
@@ -73,7 +84,7 @@ fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
         return Err(TriviumError::CorruptedFile("flush marker 魔数无效".into()));
     }
     let version = bytes[4];
-    if version != 1 && version != FLUSH_MARKER_VERSION {
+    if !matches!(version, 1 | 2 | FLUSH_MARKER_VERSION) {
         return Err(TriviumError::CorruptedFile(format!(
             "flush marker 版本无效：支持 1..={}，实际 {}",
             FLUSH_MARKER_VERSION, version
@@ -84,14 +95,20 @@ fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
             "flush marker v1 长度无效".into(),
         ));
     }
-    if version == FLUSH_MARKER_VERSION {
-        if bytes.len() != FLUSH_MARKER_SIZE {
+    if version >= 2 {
+        let expected_size = if version == 2 {
+            FLUSH_MARKER_V2_SIZE
+        } else {
+            FLUSH_MARKER_SIZE
+        };
+        if bytes.len() != expected_size {
             return Err(TriviumError::CorruptedFile(
                 "flush marker v2 长度无效".into(),
             ));
         }
-        let stored_crc = read_u32_le(bytes, 37, "flush marker crc")?;
-        if crc32fast::hash(&bytes[..37]) != stored_crc {
+        let crc_offset = if version == 2 { 37 } else { 49 };
+        let stored_crc = read_u32_le(bytes, crc_offset, "flush marker crc")?;
+        if crc32fast::hash(&bytes[..crc_offset]) != stored_crc {
             return Err(TriviumError::CorruptedFile(
                 "flush marker CRC 不匹配".into(),
             ));
@@ -101,11 +118,29 @@ fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
         generation: read_u64_le(bytes, 5, "flush marker generation")?,
         tdb_size: read_u64_le(bytes, 13, "flush marker tdb_size")?,
         vec_size: read_u64_le(bytes, 21, "flush marker vec_size")?,
+        payload_size: (version >= 3)
+            .then(|| read_u64_le(bytes, 29, "flush marker payload_size"))
+            .transpose()?,
         tdb_crc32: (version >= 2)
-            .then(|| read_u32_le(bytes, 29, "flush marker tdb_crc32"))
+            .then(|| {
+                read_u32_le(
+                    bytes,
+                    if version == 2 { 29 } else { 37 },
+                    "flush marker tdb_crc32",
+                )
+            })
             .transpose()?,
         vec_crc32: (version >= 2)
-            .then(|| read_u32_le(bytes, 33, "flush marker vec_crc32"))
+            .then(|| {
+                read_u32_le(
+                    bytes,
+                    if version == 2 { 33 } else { 41 },
+                    "flush marker vec_crc32",
+                )
+            })
+            .transpose()?,
+        payload_crc32: (version >= 3)
+            .then(|| read_u32_le(bytes, 45, "flush marker payload_crc32"))
             .transpose()?,
     })
 }
@@ -119,7 +154,12 @@ fn read_marker_generation(marker_path: &str) -> Option<u64> {
 
 /// 校验 flush_ok 标记是否有效
 /// 检查 magic、version，以及 tdb_size/vec_size 是否与实际文件大小匹配
-fn validate_flush_marker(marker_path: &str, tdb_path: &str, vec_path: &str) -> bool {
+fn validate_flush_marker(
+    marker_path: &str,
+    tdb_path: &str,
+    vec_path: &str,
+    payload_path: &str,
+) -> bool {
     let marker_bytes = match std::fs::read(marker_path) {
         Ok(b) => b,
         Err(_) => return false,
@@ -131,6 +171,12 @@ fn validate_flush_marker(marker_path: &str, tdb_path: &str, vec_path: &str) -> b
     let actual_tdb = std::fs::metadata(tdb_path).map(|m| m.len()).unwrap_or(0);
     let actual_vec = std::fs::metadata(vec_path).map(|m| m.len()).unwrap_or(0);
     if marker.tdb_size != actual_tdb || marker.vec_size != actual_vec {
+        return false;
+    }
+    if let Some(payload_size) = marker.payload_size
+        && (std::fs::metadata(payload_path).map(|meta| meta.len()).ok() != Some(payload_size)
+            || file_crc32(payload_path).ok() != marker.payload_crc32)
+    {
         return false;
     }
     match (marker.tdb_crc32, marker.vec_crc32) {
@@ -198,6 +244,10 @@ fn vec_path_from_db(db_path: &str) -> String {
 /// 该文件是 Mmap 双文件写入的"提交点"，内含 .tdb 和 .vec 的文件大小
 fn flush_ok_path_from_db(db_path: &str) -> String {
     format!("{}.flush_ok", db_path)
+}
+
+fn payload_path_for_generation(db_path: &str, generation: u64) -> String {
+    format!("{db_path}.pld.{generation}")
 }
 
 /// QuIVer 索引文件路径（.tdb → .tdb.quiver）
@@ -414,23 +464,32 @@ fn save_mmap<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()
     // 加载时校验此标记来检测撕裂写入。
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::MarkerMetadata)?;
+    let marker_path = flush_ok_path_from_db(path);
+    let previous_generation = read_marker_generation(&marker_path);
+    let generation = previous_generation
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| TriviumError::InvalidInput("flush generation 已耗尽".into()))
+        .or_else(|error| {
+            if previous_generation.is_none() {
+                Ok(1)
+            } else {
+                Err(error)
+            }
+        })?;
+    let payload_path = payload_path_for_generation(path, generation);
+    memtable.save_payload_sidecar(Path::new(&payload_path), generation)?;
     let tdb_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let vec_size = std::fs::metadata(&vec_file_path)
         .map(|m| m.len())
         .unwrap_or(0);
-    let marker_path = flush_ok_path_from_db(path);
-
-    // 读取上一次的 generation 号，单调递增；不存在或无效时从 1 开始
-    let generation = read_marker_generation(&marker_path)
-        .map(|g| g.wrapping_add(1))
-        .unwrap_or(1);
-
     let marker = FlushMarker {
         generation,
         tdb_size,
         vec_size,
+        payload_size: Some(std::fs::metadata(&payload_path)?.len()),
         tdb_crc32: Some(file_crc32(path)?),
         vec_crc32: Some(file_crc32_or_empty(&vec_file_path)?),
+        payload_crc32: Some(file_crc32(&payload_path)?),
     };
     let marker_bytes = encode_flush_marker(&marker);
     let marker_tmp = format!("{}.tmp", marker_path);
@@ -451,6 +510,12 @@ fn save_mmap<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::MarkerRename)?;
 
     robust_rename_and_sync(Path::new(&marker_tmp), Path::new(&marker_path))?;
+
+    // marker 已提交后旧 Payload generation 才失去可见性。Windows 上旧 mmap 可能暂时阻止删除，
+    // 因此回收必须是 best-effort，绝不能让已提交的新 generation 回滚或报错。
+    if let Some(previous) = previous_generation {
+        std::fs::remove_file(payload_path_for_generation(path, previous)).ok();
+    }
 
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::AfterFlushMarkerRename);
@@ -476,8 +541,12 @@ fn save_rom<T: VectorType>(memtable: &mut MemTable<T>, path: &str) -> Result<()>
         std::fs::remove_file(vec_file_path).ok();
     }
     let marker_path = flush_ok_path_from_db(path);
+    let payload_generation = read_marker_generation(&marker_path);
     if Path::new(&marker_path).exists() {
         std::fs::remove_file(marker_path).ok();
+    }
+    if let Some(generation) = payload_generation {
+        std::fs::remove_file(payload_path_for_generation(path, generation)).ok();
     }
 
     Ok(())
@@ -508,15 +577,21 @@ fn save_tdb<T: VectorType>(
     let mut all_edges: Vec<(NodeId, &Edge)> = Vec::new();
     let mut payload_size: u64 = 0;
 
-    // 计算 Payload 块大小并收集边
+    // Mmap v9 主文件只保留固定宽度 slot 目录，raw JSON 全部位于 .pld。
     for &nid in internal_indices {
         if nid != 0 {
-            // 有效节点
-            if let Some(payload_raw) = memtable.get_payload_raw(nid) {
-                payload_size += 8 + 4 + payload_raw.len() as u64;
+            if is_mmap_mode {
+                payload_size = payload_size.checked_add(12).ok_or_else(|| {
+                    TriviumError::InvalidInput("Payload slot 目录大小溢出".into())
+                })?;
+            } else if let Some(payload_raw) = memtable.get_payload_raw(nid) {
+                payload_size = payload_size
+                    .checked_add(12 + payload_raw.len() as u64)
+                    .ok_or_else(|| TriviumError::InvalidInput("Payload 块大小溢出".into()))?;
             } else {
-                // tombstone 占位符结构：NodeId (0) + len (0) = 12 bytes
-                payload_size += 12;
+                payload_size = payload_size
+                    .checked_add(12)
+                    .ok_or_else(|| TriviumError::InvalidInput("Payload 块大小溢出".into()))?;
             }
             if let Some(edges) = memtable.get_edges(nid) {
                 for edge in edges {
@@ -525,7 +600,9 @@ fn save_tdb<T: VectorType>(
             }
         } else {
             // 空洞（由于节点被彻底移除，保留内部索引占位）
-            payload_size += 12;
+            payload_size = payload_size
+                .checked_add(12)
+                .ok_or_else(|| TriviumError::InvalidInput("Payload slot 目录大小溢出".into()))?;
         }
     }
 
@@ -569,15 +646,20 @@ fn save_tdb<T: VectorType>(
     w.write_all(&edge_offset.to_le_bytes())?;
     w.write_all(&bq_offset.to_le_bytes())?; // v5 新增
 
-    // 2. Payload Block 包含 Tombstones
+    // 2. Mmap 模式仅写 slot；Rom 模式继续内嵌 Payload，保持单文件语义。
     for &nid in internal_indices {
-        if nid != 0
-            && let Some(payload_raw) = memtable.get_payload_raw(nid)
-        {
-            w.write_all(&nid.to_le_bytes())?;
-            w.write_all(&(payload_raw.len() as u32).to_le_bytes())?;
-            w.write_all(payload_raw)?;
-            continue;
+        if nid != 0 {
+            if is_mmap_mode {
+                w.write_all(&nid.to_le_bytes())?;
+                w.write_all(&0u32.to_le_bytes())?;
+                continue;
+            }
+            if let Some(payload_raw) = memtable.get_payload_raw(nid) {
+                w.write_all(&nid.to_le_bytes())?;
+                w.write_all(&(payload_raw.len() as u32).to_le_bytes())?;
+                w.write_all(payload_raw)?;
+                continue;
+            }
         }
         // Tombstone
         w.write_all(&0u64.to_le_bytes())?;
@@ -620,6 +702,36 @@ fn save_tdb<T: VectorType>(
             w.write_all(&chunk.to_le_bytes())?;
         }
     }
+
+    // 6. Unique Constraint 权威定义块。Posting 仍在可重建的 .pidx，约束定义属于主数据。
+    let unique_definitions = memtable.unique_index_definitions();
+    let mut unique_bytes = Vec::new();
+    unique_bytes.extend_from_slice(UNIQUE_BLOCK_MAGIC);
+    unique_bytes.extend_from_slice(&UNIQUE_BLOCK_VERSION.to_le_bytes());
+    unique_bytes.extend_from_slice(
+        &u32::try_from(unique_definitions.len())
+            .map_err(|_| TriviumError::InvalidInput("唯一约束数量过多".into()))?
+            .to_le_bytes(),
+    );
+    for fields in unique_definitions {
+        unique_bytes.extend_from_slice(
+            &u16::try_from(fields.len())
+                .map_err(|_| TriviumError::InvalidInput("唯一约束字段数量过多".into()))?
+                .to_le_bytes(),
+        );
+        for field in fields {
+            let field = field.as_bytes();
+            unique_bytes.extend_from_slice(
+                &u32::try_from(field.len())
+                    .map_err(|_| TriviumError::InvalidInput("唯一约束字段名过长".into()))?
+                    .to_le_bytes(),
+            );
+            unique_bytes.extend_from_slice(field);
+        }
+    }
+    let unique_crc = crc32fast::hash(&unique_bytes);
+    unique_bytes.extend_from_slice(&unique_crc.to_le_bytes());
+    w.write_all(&unique_bytes)?;
 
     w.flush()?;
     let file = w
@@ -729,7 +841,15 @@ pub fn load<T: VectorType>(
         // marker 无效时直接走 metadata-only 路径，依赖 WAL 恢复数据，
         // 不再尝试加载可能不一致的 .vec 文件。
         let marker_path = flush_ok_path_from_db(path);
-        let flush_ok_valid = validate_flush_marker(&marker_path, path, &vec_file_path);
+        let marker = std::fs::read(&marker_path)
+            .ok()
+            .and_then(|bytes| decode_flush_marker(&bytes).ok());
+        let payload_path = marker
+            .as_ref()
+            .map(|marker| payload_path_for_generation(path, marker.generation))
+            .unwrap_or_default();
+        let flush_ok_valid =
+            validate_flush_marker(&marker_path, path, &vec_file_path, &payload_path);
 
         if flush_ok_valid {
             // marker 有效：安全加载 .vec
@@ -745,7 +865,13 @@ pub fn load<T: VectorType>(
                 &vec_file_path,
                 &mmap,
             )?;
-            // 尝试从 BQ Block 恢复签名
+            let payload_generation = std::fs::read(&marker_path)
+                .ok()
+                .and_then(|bytes| decode_flush_marker(&bytes).ok())
+                .filter(|marker| marker.payload_size.is_some())
+                .map(|marker| marker.generation);
+            install_payload_sidecar_if_present(&mut mt, path, payload_generation)?;
+            // Payload 已就绪后再恢复依赖它的派生索引和约束。
             load_bq_block(&mut mt, bytes, bq_layout)?;
             load_property_indexes(
                 &mut mt,
@@ -754,6 +880,7 @@ pub fn load<T: VectorType>(
                 missing_index_policy,
                 mmap_property_postings,
             )?;
+            load_unique_constraints(&mut mt, bytes, version, bq_layout)?;
             if mmap_property_postings {
                 load_mapped_graph(&mut mt, path)?;
             }
@@ -790,6 +917,7 @@ pub fn load<T: VectorType>(
             missing_index_policy,
             mmap_property_postings,
         )?;
+        load_unique_constraints(&mut mt, bytes, version, bq_layout)?;
         // 尝试加载 QuIVer 索引
         load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
         if load_text_sidecar {
@@ -797,6 +925,30 @@ pub fn load<T: VectorType>(
         }
         Ok(mt)
     }
+}
+
+fn install_payload_sidecar_if_present<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    db_path: &str,
+    expected_generation: Option<u64>,
+) -> Result<()> {
+    let Some(expected_generation) = expected_generation else {
+        // v1/v2 marker 从未声明 Payload sidecar；即使目录中残留同名文件也不得采用。
+        return Ok(());
+    };
+    let path = payload_path_for_generation(db_path, expected_generation);
+    if !Path::new(&path).exists() {
+        return Err(TriviumError::CorruptedFile(
+            "提交标记声明的 Payload sidecar 缺失".into(),
+        ));
+    }
+    let (generation, mmap, records) = PayloadStore::open_sidecar(Path::new(&path))?;
+    if generation != expected_generation {
+        return Err(TriviumError::CorruptedFile(
+            "Payload sidecar generation 与提交标记不一致".into(),
+        ));
+    }
+    memtable.install_payload_sidecar(mmap, records)
 }
 
 /// 分离向量 .vec 文件的加载
@@ -814,13 +966,23 @@ fn load_v2<T: VectorType>(
 ) -> Result<MemTable<T>> {
     let vec_pool = VecPool::<T>::open(Path::new(vec_file_path), dim, node_count)?;
     let mut memtable = MemTable::new_with_vec_pool(dim, next_id, vec_pool);
-    load_payloads(
-        &mut memtable,
-        bytes,
-        node_count,
-        payload_offset,
-        edge_offset,
-    )?;
+    if version >= 9 {
+        load_payload_slots(
+            &mut memtable,
+            bytes,
+            node_count,
+            payload_offset,
+            edge_offset,
+        )?;
+    } else {
+        load_payloads(
+            &mut memtable,
+            bytes,
+            node_count,
+            payload_offset,
+            edge_offset,
+        )?;
+    }
     load_edges(
         &mut memtable,
         bytes,
@@ -915,7 +1077,42 @@ fn load_v1_rom<T: VectorType>(
     Ok(memtable)
 }
 
-/// 解析 Payload Block，处理 Tombstone
+/// 解析 v9 Mmap 固定宽度 slot 目录。非零 NodeId 的长度字段必须为 0，raw JSON 由 .pld 提供。
+fn load_payload_slots<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    bytes: &[u8],
+    node_count: usize,
+    offset: usize,
+    end_offset: usize,
+) -> Result<()> {
+    let expected_end = node_count
+        .checked_mul(12)
+        .and_then(|size| offset.checked_add(size))
+        .ok_or_else(|| TriviumError::CorruptedFile("Payload slot 目录长度溢出".into()))?;
+    if expected_end != end_offset {
+        return Err(TriviumError::CorruptedFile(
+            "Payload slot 目录长度不匹配".into(),
+        ));
+    }
+    for index in 0..node_count {
+        let cursor = offset + index * 12;
+        let id = read_u64_le(bytes, cursor, "payload slot node_id")?;
+        let length = read_u32_le(bytes, cursor + 8, "payload slot length")?;
+        if length != 0 {
+            return Err(TriviumError::CorruptedFile(
+                "v9 Mmap Payload slot 长度必须为 0".into(),
+            ));
+        }
+        if id == 0 {
+            memtable.register_tombstone()?;
+        } else {
+            memtable.register_payload_slot(id)?;
+        }
+    }
+    Ok(())
+}
+
+/// 解析旧格式或 Rom 模式 Payload Block，处理 Tombstone。
 fn load_payloads<T: VectorType>(
     memtable: &mut MemTable<T>,
     bytes: &[u8],
@@ -1014,6 +1211,7 @@ struct BqDiskLayout {
     count: usize,
     chunks_per_signature: usize,
     data_start: usize,
+    end_offset: usize,
 }
 
 fn parse_bq_layout(
@@ -1072,6 +1270,7 @@ fn parse_bq_layout(
             count,
             chunks_per_signature,
             data_start: count_end,
+            end_offset: file_len,
         }));
     }
 
@@ -1110,19 +1309,110 @@ fn parse_bq_layout(
     let expected_end = header_end
         .checked_add(data_bytes)
         .ok_or_else(|| TriviumError::CorruptedFile("BQ 块结束偏移溢出".into()))?;
-    if expected_end != file_len {
+    if (version < 8 && expected_end != file_len) || (version >= 8 && expected_end > file_len) {
         return Err(TriviumError::CorruptedFile(format!(
             "BQ 块长度不匹配 (BQ block length mismatch): 期望 {expected_end}，实际 {file_len}"
         )));
     }
-    if count == 0 {
+    if count == 0 && version < 8 {
         return Ok(None);
     }
     Ok(Some(BqDiskLayout {
         count,
         chunks_per_signature,
         data_start: header_end,
+        end_offset: expected_end,
     }))
+}
+
+fn load_unique_constraints<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    bytes: &[u8],
+    version: u16,
+    layout: Option<BqDiskLayout>,
+) -> Result<()> {
+    if version < 8 {
+        return Ok(());
+    }
+    let start = layout.map_or(bytes.len(), |layout| layout.end_offset);
+    let block = bytes.get(start..).ok_or_else(|| {
+        TriviumError::CorruptedFile(
+            "唯一约束块偏移无效 (Invalid unique constraint block offset)".into(),
+        )
+    })?;
+    if block.len() < 14 {
+        return Err(TriviumError::CorruptedFile(
+            "唯一约束块被截断 (Unique constraint block is truncated)".into(),
+        ));
+    }
+    let payload_end = block.len() - 4;
+    let expected_crc = u32::from_le_bytes(
+        block[payload_end..]
+            .try_into()
+            .map_err(|_| TriviumError::CorruptedFile("唯一约束块校验和无效".into()))?,
+    );
+    if crc32fast::hash(&block[..payload_end]) != expected_crc {
+        return Err(TriviumError::CorruptedFile(
+            "唯一约束块 CRC32 不匹配 (Unique constraint block CRC32 mismatch)".into(),
+        ));
+    }
+    let mut cursor = 0usize;
+    if block.get(..4) != Some(UNIQUE_BLOCK_MAGIC.as_slice()) {
+        return Err(TriviumError::CorruptedFile(
+            "唯一约束块魔数无效 (Invalid unique constraint block magic)".into(),
+        ));
+    }
+    cursor += 4;
+    let block_version = read_u16_le(block, cursor, "unique version")?;
+    cursor += 2;
+    if block_version != UNIQUE_BLOCK_VERSION {
+        return Err(TriviumError::CorruptedFile(format!(
+            "不支持的唯一约束块版本 (Unsupported unique constraint block version): {block_version}"
+        )));
+    }
+    let count = read_u32_le(block, cursor, "unique count")? as usize;
+    cursor += 4;
+    let mut definitions = Vec::new();
+    definitions.try_reserve_exact(count).map_err(|error| {
+        TriviumError::CapacityAllocationFailed {
+            reason: format!("恢复唯一约束时分配失败: {error}"),
+        }
+    })?;
+    for _ in 0..count {
+        let field_count = read_u16_le(block, cursor, "unique field count")? as usize;
+        cursor += 2;
+        if field_count == 0 {
+            return Err(TriviumError::CorruptedFile("唯一约束字段列表为空".into()));
+        }
+        let mut fields = Vec::new();
+        fields.try_reserve_exact(field_count).map_err(|error| {
+            TriviumError::CapacityAllocationFailed {
+                reason: format!("恢复唯一约束字段时分配失败: {error}"),
+            }
+        })?;
+        for _ in 0..field_count {
+            let field_len = read_u32_le(block, cursor, "unique field length")? as usize;
+            cursor += 4;
+            let field_bytes = block
+                .get(cursor..cursor.saturating_add(field_len))
+                .ok_or_else(|| TriviumError::CorruptedFile("唯一约束字段被截断".into()))?;
+            cursor = cursor.saturating_add(field_len);
+            let field = std::str::from_utf8(field_bytes).map_err(|error| {
+                TriviumError::CorruptedFile(format!("唯一约束字段不是 UTF-8: {error}"))
+            })?;
+            if field.is_empty() {
+                return Err(TriviumError::CorruptedFile("唯一约束字段不能为空".into()));
+            }
+            fields.push(field.to_owned());
+        }
+        definitions.push(fields);
+    }
+    if cursor != payload_end {
+        return Err(TriviumError::CorruptedFile(
+            "唯一约束块存在尾随数据 (Trailing unique constraint data)".into(),
+        ));
+    }
+    memtable.restore_unique_index_definitions(&definitions)
 }
 
 fn load_bq_block<T: VectorType>(

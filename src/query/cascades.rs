@@ -6,13 +6,14 @@
 //! 上限时立即剪枝；它是统计感知的成本优化器，而非穷举意义上的全局最优搜索。
 
 use super::tql_ast::{
-    PipelineStage, Predicate, QueryEntry, ReturnClause, ReturnExprKind, TqlCompOp, TqlExpr,
-    TqlLiteral, TqlQuery,
+    GraphAlgorithmKind, PipelineStage, Predicate, QueryEntry, ReturnClause, ReturnExprKind,
+    TqlCompOp, TqlExpr, TqlLiteral, TqlQuery,
 };
 use crate::VectorType;
 use crate::storage::memtable::MemTable;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 pub type GroupId = usize;
 
@@ -24,6 +25,11 @@ pub enum LogicalOperator {
     Expand,
     Filter,
     Rank,
+    TextSearch,
+    DppDiversify,
+    FistaResidual,
+    NmfTopics,
+    SaPpr,
     GraphAlgorithm,
     Return,
 }
@@ -111,7 +117,14 @@ pub enum PhysicalOperator {
     ExactRerankHeap,
     RankAlreadyOrdered,
     AnnExactRerank,
+    DppDiversify,
+    FistaResidualRecall,
+    NmfTopics,
+    SaPprDepthBounded,
     GraphAlgorithm,
+    WeightedDijkstra,
+    YenKShortestPaths,
+    NodeSimilarity,
     ReturnProjection,
 }
 
@@ -157,6 +170,85 @@ pub struct PlannedStage {
     pub budget_bytes: usize,
     pub exact: bool,
     pub materialized: bool,
+    pub estimate_source: EstimateSource,
+    pub estimate_confidence: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EstimateSource {
+    Exact,
+    IndexStatistics,
+    CachedColumnPair,
+    Sampled,
+    Heuristic,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StatsRequirement {
+    pub graph: bool,
+    pub property: bool,
+    pub column_pairs: bool,
+    pub cross_modal: bool,
+}
+
+impl StatsRequirement {
+    fn for_query(query: &TqlQuery) -> Self {
+        let mut requirement = Self {
+            graph: false,
+            property: false,
+            column_pairs: false,
+            cross_modal: false,
+        };
+        let mut property_origin_available = false;
+        for stage in &query.pipeline {
+            match stage {
+                PipelineStage::Expand(_)
+                | PipelineStage::GraphAlgorithm(_)
+                | PipelineStage::AllPaths(_)
+                | PipelineStage::ShortestPaths(_)
+                | PipelineStage::WeightedPaths(_)
+                | PipelineStage::YenPaths(_)
+                | PipelineStage::NodeSimilarity(_)
+                | PipelineStage::Iterate(_) => {
+                    requirement.graph = true;
+                    requirement.cross_modal |= property_origin_available;
+                    property_origin_available = false;
+                }
+                PipelineStage::Filter(predicate) => {
+                    if predicate_is_property_only(predicate) {
+                        requirement.property = true;
+                        let mut fields = Vec::new();
+                        collect_predicate_fields(predicate, &mut fields);
+                        fields.sort();
+                        fields.dedup();
+                        requirement.column_pairs |= fields.len() > 1;
+                    }
+                    property_origin_available = predicate_property_origin(predicate).is_some();
+                }
+                PipelineStage::With(_) => {}
+                PipelineStage::Rank(_)
+                | PipelineStage::SetCombine(_)
+                | PipelineStage::Diversify(_)
+                | PipelineStage::Residual(_)
+                | PipelineStage::Topics(_) => {
+                    property_origin_available = false;
+                }
+                PipelineStage::SaPpr(_) => {
+                    requirement.graph = true;
+                    property_origin_available = false;
+                }
+            }
+        }
+        requirement
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanningProfile {
+    pub total_ns: u64,
+    pub stats_ns: u64,
+    pub memo_ns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -179,6 +271,10 @@ pub struct CascadesPlan {
     pub explored_expressions: usize,
     pub pruned_expressions: usize,
     pub total_estimated_cost: f64,
+    pub estimated_memo_bytes: usize,
+    pub stats_requirement: StatsRequirement,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning_profile: Option<PlanningProfile>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -204,20 +300,41 @@ pub fn optimize_pipeline<T: VectorType>(
     mt: &MemTable<T>,
     budget: OptimizerBudget,
 ) -> CascadesPlan {
-    let graph = mt.graph_stats();
-    let property_stats = mt
-        .property_index_stats()
-        .into_iter()
-        .map(|stats| (stats.field.clone(), stats))
-        .collect::<BTreeMap<_, _>>();
-    let pair_stats = mt
-        .column_pair_stats()
-        .into_iter()
-        .map(|stats| {
-            let key = ordered_field_pair(&stats.left_field, &stats.right_field);
-            (key, stats)
-        })
-        .collect::<BTreeMap<_, _>>();
+    optimize_pipeline_with_profile(query, mt, budget, false)
+}
+
+/// 生成 Cascades 计划，并按需采集规划阶段耗时。
+pub fn optimize_pipeline_with_profile<T: VectorType>(
+    query: &TqlQuery,
+    mt: &MemTable<T>,
+    budget: OptimizerBudget,
+    profile: bool,
+) -> CascadesPlan {
+    let total_started = profile.then(Instant::now);
+    let requirements = StatsRequirement::for_query(query);
+    let stats_started = profile.then(Instant::now);
+    let graph = requirements.graph.then(|| mt.graph_stats());
+    let property_stats = if requirements.property {
+        mt.property_index_stats()
+            .into_iter()
+            .map(|stats| (stats.field.clone(), stats))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+    let pair_stats = if requirements.column_pairs {
+        mt.column_pair_stats()
+            .into_iter()
+            .map(|stats| {
+                let key = ordered_field_pair(&stats.left_field, &stats.right_field);
+                (key, stats)
+            })
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
+    let stats_ns = stats_started.map_or(0, |started| elapsed_ns(started.elapsed()));
+    let memo_started = profile.then(Instant::now);
     let mut input_origin = query_entry_property_origin(query);
     let mut groups = Vec::new();
     let mut stages = Vec::new();
@@ -271,8 +388,15 @@ pub fn optimize_pipeline<T: VectorType>(
                 }],
             ),
             PipelineStage::Expand(expand) => {
+                let fallback_graph;
+                let graph = if let Some(graph) = graph.as_ref() {
+                    graph
+                } else {
+                    fallback_graph = empty_graph_stats();
+                    &fallback_graph
+                };
                 let base_fanout = if expand.expand.labels.is_empty() {
-                    histogram_fanout(&graph)
+                    histogram_fanout(graph)
                 } else {
                     expand
                         .expand
@@ -288,7 +412,7 @@ pub fn optimize_pipeline<T: VectorType>(
                 let fanout = input_origin
                     .as_ref()
                     .and_then(|(field, value)| mt.cross_modal_stats(field, value))
-                    .filter(|stats| stats.generation == mt.generation() && stats.sampled >= 2)
+                    .filter(|stats| stats.sampled >= 2)
                     .map_or(base_fanout, |stats| {
                         (base_fanout * stats.fanout_skew)
                             .clamp(0.0, graph.max_out_degree.max(1) as f64)
@@ -354,15 +478,171 @@ pub fn optimize_pipeline<T: VectorType>(
                 }
                 (LogicalOperator::Filter, alternatives)
             }
-            PipelineStage::GraphAlgorithm(_)
-            | PipelineStage::AllPaths(_)
+            PipelineStage::Diversify(stage) => (
+                LogicalOperator::DppDiversify,
+                vec![PhysicalAlternative {
+                    operator: PhysicalOperator::DppDiversify,
+                    estimated_cost: input_rows as f64 * stage.top_k as f64,
+                    estimated_rows: stage.top_k.min(input_rows),
+                    temp_bytes: input_rows.saturating_mul(mt.dim()).saturating_mul(4),
+                    vector_page_reads: pages(input_rows.saturating_mul(mt.dim()).saturating_mul(4)),
+                    payload_page_reads: 0,
+                    graph_page_reads: 0,
+                    exact: false,
+                    materialized: true,
+                }],
+            ),
+            PipelineStage::Residual(stage) => (
+                LogicalOperator::FistaResidual,
+                vec![PhysicalAlternative {
+                    operator: PhysicalOperator::FistaResidualRecall,
+                    estimated_cost: input_rows as f64 * input_rows as f64 * stage.iterations as f64,
+                    estimated_rows: stage.top_k.min(mt.node_count()),
+                    temp_bytes: input_rows.saturating_mul(input_rows).saturating_mul(4),
+                    vector_page_reads: pages(
+                        mt.node_count().saturating_mul(mt.dim()).saturating_mul(4),
+                    ),
+                    payload_page_reads: 0,
+                    graph_page_reads: 0,
+                    exact: true,
+                    materialized: true,
+                }],
+            ),
+            PipelineStage::Topics(stage) => (
+                LogicalOperator::NmfTopics,
+                vec![PhysicalAlternative {
+                    operator: PhysicalOperator::NmfTopics,
+                    estimated_cost: input_rows as f64
+                        * mt.dim() as f64
+                        * stage.topics as f64
+                        * stage.iterations as f64,
+                    estimated_rows: input_rows,
+                    temp_bytes: input_rows.saturating_mul(stage.topics).saturating_mul(4),
+                    vector_page_reads: pages(input_rows.saturating_mul(mt.dim()).saturating_mul(4)),
+                    payload_page_reads: 0,
+                    graph_page_reads: 0,
+                    exact: false,
+                    materialized: true,
+                }],
+            ),
+            PipelineStage::SaPpr(_) => (
+                LogicalOperator::SaPpr,
+                vec![PhysicalAlternative {
+                    operator: PhysicalOperator::SaPprDepthBounded,
+                    estimated_cost: input_rows as f64
+                        * graph
+                            .as_ref()
+                            .map_or(1.0, |stats| stats.avg_out_degree.max(1.0)),
+                    estimated_rows: mt.node_count().min(input_rows.saturating_mul(4)),
+                    temp_bytes: input_rows
+                        .saturating_mul(std::mem::size_of::<crate::query::pipeline::NodeRow>()),
+                    vector_page_reads: 0,
+                    payload_page_reads: 0,
+                    graph_page_reads: pages(input_rows.saturating_mul(32)),
+                    exact: false,
+                    materialized: true,
+                }],
+            ),
+            PipelineStage::GraphAlgorithm(stage) => {
+                let average_degree = graph
+                    .as_ref()
+                    .map_or(1.0, |stats| stats.avg_out_degree.max(1.0));
+                let edge_work = input_rows as f64 * average_degree;
+                let multiplier = match stage.algorithm {
+                    GraphAlgorithmKind::TriangleCount => average_degree,
+                    GraphAlgorithmKind::Hits => 20.0,
+                    _ => 1.0,
+                };
+                let metric_bytes = match stage.algorithm {
+                    GraphAlgorithmKind::TriangleCount | GraphAlgorithmKind::Hits => {
+                        std::mem::size_of::<(u64, f64)>() * 2
+                    }
+                    _ => std::mem::size_of::<u64>(),
+                };
+                (
+                    LogicalOperator::GraphAlgorithm,
+                    vec![PhysicalAlternative {
+                        operator: PhysicalOperator::GraphAlgorithm,
+                        estimated_cost: edge_work * multiplier,
+                        estimated_rows: input_rows,
+                        temp_bytes: input_rows.saturating_mul(
+                            std::mem::size_of::<crate::query::pipeline::NodeRow>()
+                                .saturating_add(metric_bytes),
+                        ),
+                        vector_page_reads: 0,
+                        payload_page_reads: 0,
+                        graph_page_reads: pages(input_rows.saturating_mul(32)),
+                        exact: true,
+                        materialized: true,
+                    }],
+                )
+            }
+            PipelineStage::WeightedPaths(_) => (
+                LogicalOperator::GraphAlgorithm,
+                vec![PhysicalAlternative {
+                    operator: PhysicalOperator::WeightedDijkstra,
+                    estimated_cost: input_rows as f64
+                        * graph
+                            .as_ref()
+                            .map_or(1.0, |stats| stats.avg_out_degree.max(1.0)),
+                    estimated_rows: input_rows,
+                    temp_bytes: input_rows
+                        .saturating_mul(std::mem::size_of::<crate::query::pipeline::NodeRow>() * 2),
+                    vector_page_reads: 0,
+                    payload_page_reads: 0,
+                    graph_page_reads: pages(input_rows.saturating_mul(48)),
+                    exact: true,
+                    materialized: true,
+                }],
+            ),
+            PipelineStage::YenPaths(stage) => (
+                LogicalOperator::GraphAlgorithm,
+                vec![PhysicalAlternative {
+                    operator: PhysicalOperator::YenKShortestPaths,
+                    estimated_cost: input_rows as f64
+                        * stage.k as f64
+                        * graph
+                            .as_ref()
+                            .map_or(1.0, |stats| stats.avg_out_degree.max(1.0)),
+                    estimated_rows: input_rows.saturating_mul(stage.k),
+                    temp_bytes: input_rows
+                        .saturating_mul(stage.k)
+                        .saturating_mul(std::mem::size_of::<crate::query::pipeline::NodeRow>()),
+                    vector_page_reads: 0,
+                    payload_page_reads: 0,
+                    graph_page_reads: pages(input_rows.saturating_mul(stage.k).saturating_mul(48)),
+                    exact: true,
+                    materialized: true,
+                }],
+            ),
+            PipelineStage::NodeSimilarity(stage) => (
+                LogicalOperator::GraphAlgorithm,
+                vec![PhysicalAlternative {
+                    operator: PhysicalOperator::NodeSimilarity,
+                    estimated_cost: (input_rows.saturating_mul(input_rows.saturating_sub(1)) / 2)
+                        as f64,
+                    estimated_rows: stage.top_k,
+                    temp_bytes: stage
+                        .top_k
+                        .saturating_mul(std::mem::size_of::<crate::query::pipeline::NodeRow>()),
+                    vector_page_reads: 0,
+                    payload_page_reads: 0,
+                    graph_page_reads: pages(input_rows.saturating_mul(32)),
+                    exact: true,
+                    materialized: true,
+                }],
+            ),
+            PipelineStage::AllPaths(_)
             | PipelineStage::ShortestPaths(_)
             | PipelineStage::SetCombine(_)
             | PipelineStage::Iterate(_) => (
                 LogicalOperator::GraphAlgorithm,
                 vec![PhysicalAlternative {
                     operator: PhysicalOperator::GraphAlgorithm,
-                    estimated_cost: input_rows as f64 * graph.avg_out_degree.max(1.0),
+                    estimated_cost: input_rows as f64
+                        * graph
+                            .as_ref()
+                            .map_or(1.0, |stats| stats.avg_out_degree.max(1.0)),
                     estimated_rows: input_rows,
                     temp_bytes: input_rows
                         .saturating_mul(std::mem::size_of::<crate::query::pipeline::NodeRow>()),
@@ -461,7 +741,20 @@ pub fn optimize_pipeline<T: VectorType>(
             best_alternative: best,
         });
         parent = Some(group_id);
-        stages.push(planned(Some(stage_index), &selected, 0));
+        let mut planned_stage = planned(Some(stage_index), &selected, 0);
+        if let PipelineStage::Filter(predicate) = stage {
+            if predicate_uses_pair_stats(predicate, &pair_stats) {
+                planned_stage.estimate_source = EstimateSource::CachedColumnPair;
+                planned_stage.estimate_confidence = 0.8;
+            } else if predicate_has_index_stats(predicate, &property_stats) {
+                planned_stage.estimate_source = EstimateSource::IndexStatistics;
+                planned_stage.estimate_confidence = 0.9;
+            } else {
+                planned_stage.estimate_source = EstimateSource::Heuristic;
+                planned_stage.estimate_confidence = 0.35;
+            }
+        }
+        stages.push(planned_stage);
 
         if matches!(stage, PipelineStage::Expand(_))
             && downstream_requires_similarity(query, stage_index + 1)
@@ -509,6 +802,13 @@ pub fn optimize_pipeline<T: VectorType>(
         .map(|rule| (rule.stage_index, rule.stage_index + 1))
         .collect();
     let total_estimated_cost = stages.iter().map(|stage| stage.estimated_cost).sum();
+    let estimated_memo_bytes = estimate_memo_bytes(&groups);
+    let memo_ns = memo_started.map_or(0, |started| elapsed_ns(started.elapsed()));
+    let planning_profile = total_started.map(|started| PlanningProfile {
+        total_ns: elapsed_ns(started.elapsed()),
+        stats_ns,
+        memo_ns,
+    });
     CascadesPlan {
         status,
         groups,
@@ -520,6 +820,48 @@ pub fn optimize_pipeline<T: VectorType>(
         explored_expressions: explored,
         pruned_expressions: pruned,
         total_estimated_cost,
+        estimated_memo_bytes,
+        stats_requirement: requirements,
+        planning_profile,
+    }
+}
+
+fn elapsed_ns(elapsed: std::time::Duration) -> u64 {
+    elapsed.as_nanos().min(u64::MAX as u128) as u64
+}
+
+fn estimate_memo_bytes(groups: &[MemoGroup]) -> usize {
+    groups.iter().fold(0usize, |bytes, group| {
+        bytes
+            .saturating_add(std::mem::size_of::<MemoGroup>())
+            .saturating_add(
+                group
+                    .expressions
+                    .len()
+                    .saturating_mul(std::mem::size_of::<GroupExpression>()),
+            )
+            .saturating_add(
+                group
+                    .alternatives
+                    .len()
+                    .saturating_mul(std::mem::size_of::<PhysicalAlternative>()),
+            )
+    })
+}
+
+fn empty_graph_stats() -> crate::storage::memtable::GraphStats {
+    crate::storage::memtable::GraphStats {
+        node_count: 0,
+        edge_count: 0,
+        isolated_node_count: 0,
+        label_count: 0,
+        avg_out_degree: 0.0,
+        avg_in_degree: 0.0,
+        max_out_degree: 0,
+        max_in_degree: 0,
+        label_stats: BTreeMap::new(),
+        out_degree_histogram: Vec::new(),
+        in_degree_histogram: Vec::new(),
     }
 }
 
@@ -694,12 +1036,46 @@ fn planned(
         budget_bytes,
         exact: alternative.exact,
         materialized: alternative.materialized,
+        estimate_source: estimate_source_for(&alternative.operator),
+        estimate_confidence: estimate_confidence_for(&alternative.operator),
+    }
+}
+
+fn estimate_source_for(operator: &PhysicalOperator) -> EstimateSource {
+    match operator {
+        PhysicalOperator::ExactVectorSearch
+        | PhysicalOperator::QuiverVectorSearch
+        | PhysicalOperator::NodeScan
+        | PhysicalOperator::ScopeProjection
+        | PhysicalOperator::RankAlreadyOrdered => EstimateSource::Exact,
+        PhysicalOperator::PropertyHashLookup
+        | PhysicalOperator::PropertyOrderedLookup
+        | PhysicalOperator::PropertyCompositeLookup
+        | PhysicalOperator::PropertyBitmapLookup
+        | PhysicalOperator::PropertyIndexIntersection
+        | PhysicalOperator::GraphExpandIncoming
+        | PhysicalOperator::GraphExpandLabelDirectory => EstimateSource::IndexStatistics,
+        PhysicalOperator::GraphExpandSerial
+        | PhysicalOperator::GraphExpandParallel
+        | PhysicalOperator::ExpandExactRerank => EstimateSource::Sampled,
+        _ => EstimateSource::Heuristic,
+    }
+}
+
+fn estimate_confidence_for(operator: &PhysicalOperator) -> f32 {
+    match estimate_source_for(operator) {
+        EstimateSource::Exact => 1.0,
+        EstimateSource::IndexStatistics => 0.9,
+        EstimateSource::CachedColumnPair => 0.8,
+        EstimateSource::Sampled => 0.7,
+        EstimateSource::Heuristic => 0.35,
     }
 }
 
 fn source_rows(query: &TqlQuery, node_count: usize) -> usize {
     match &query.entry {
         QueryEntry::Search { top_k, .. } => (*top_k).min(node_count),
+        QueryEntry::Text { clause } => clause.top_k.min(node_count),
         QueryEntry::Find { .. } | QueryEntry::Match { .. } | QueryEntry::OptionalMatch { .. } => {
             node_count
         }
@@ -720,8 +1096,15 @@ fn downstream_requires_similarity(query: &TqlQuery, start: usize) -> bool {
         PipelineStage::Rank(_) => true,
         PipelineStage::Expand(_)
         | PipelineStage::GraphAlgorithm(_)
+        | PipelineStage::Diversify(_)
+        | PipelineStage::Residual(_)
+        | PipelineStage::Topics(_)
+        | PipelineStage::SaPpr(_)
         | PipelineStage::AllPaths(_)
         | PipelineStage::ShortestPaths(_)
+        | PipelineStage::WeightedPaths(_)
+        | PipelineStage::YenPaths(_)
+        | PipelineStage::NodeSimilarity(_)
         | PipelineStage::SetCombine(_)
         | PipelineStage::Iterate(_) => false,
     }) || query
@@ -824,6 +1207,45 @@ fn estimate_predicate_selectivity(
     }
 }
 
+fn predicate_uses_pair_stats(
+    predicate: &Predicate,
+    pair_stats: &BTreeMap<(String, String), crate::index::property::ColumnPairStats>,
+) -> bool {
+    match predicate {
+        Predicate::And(left, right) => {
+            predicate_property_field(left)
+                .zip(predicate_property_field(right))
+                .is_some_and(|(left, right)| {
+                    pair_stats.contains_key(&ordered_field_pair(left, right))
+                })
+                || predicate_uses_pair_stats(left, pair_stats)
+                || predicate_uses_pair_stats(right, pair_stats)
+        }
+        Predicate::Or(left, right) => {
+            predicate_uses_pair_stats(left, pair_stats)
+                || predicate_uses_pair_stats(right, pair_stats)
+        }
+        Predicate::Not(inner) => predicate_uses_pair_stats(inner, pair_stats),
+        _ => false,
+    }
+}
+
+fn predicate_has_index_stats(
+    predicate: &Predicate,
+    stats: &BTreeMap<String, crate::index::property::PropertyIndexStats>,
+) -> bool {
+    match predicate {
+        Predicate::Compare { left, right, .. } => [left, right].iter().any(|expression| {
+            matches!(expression, TqlExpr::Property { field, .. } if stats.contains_key(field))
+        }),
+        Predicate::And(left, right) | Predicate::Or(left, right) => {
+            predicate_has_index_stats(left, stats) || predicate_has_index_stats(right, stats)
+        }
+        Predicate::Not(inner) => predicate_has_index_stats(inner, stats),
+        Predicate::DocFilter { .. } => false,
+    }
+}
+
 fn ordered_field_pair(left: &str, right: &str) -> (String, String) {
     if left <= right {
         (left.to_owned(), right.to_owned())
@@ -902,13 +1324,17 @@ fn source_alternative<T: VectorType>(
         {
             PhysicalOperator::GraphFirstSource
         }
+        QueryEntry::Text { .. } => PhysicalOperator::TextFirstSource,
         QueryEntry::Match { .. } | QueryEntry::OptionalMatch { .. } => PhysicalOperator::NodeScan,
     };
     let approximate = operator == PhysicalOperator::QuiverVectorSearch;
+    let text_source = operator == PhysicalOperator::TextFirstSource;
     PhysicalAlternative {
         operator,
         estimated_cost: if approximate {
             rows.max(1).ilog2() as f64 * mt.dim() as f64
+        } else if text_source {
+            rows as f64
         } else {
             mt.node_count() as f64 * mt.dim().max(1) as f64
         },
@@ -1014,7 +1440,10 @@ fn properties_for(operator: &PhysicalOperator) -> PhysicalProperties {
             ScoreProperty::Graph,
             PathProperty::Unavailable,
         ),
-        PhysicalOperator::GraphAlgorithm => (
+        PhysicalOperator::GraphAlgorithm
+        | PhysicalOperator::WeightedDijkstra
+        | PhysicalOperator::YenKShortestPaths
+        | PhysicalOperator::NodeSimilarity => (
             OrderingProperty::NodeId,
             ExactnessProperty::Exact,
             MaterializationProperty::Materialized,

@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> **版本**: v0.8.5
+> **版本**: v0.8.6
 > **定位**: 统一查询 DSL — 融合文档过滤、图模式匹配、向量检索于一体  
 > **前置依赖**: 零外部依赖，纯 Rust 实现
 
@@ -13,6 +13,7 @@
 - [FIND — 文档过滤查询](#find--文档过滤查询)
 - [MATCH — 图模式匹配](#match--图模式匹配)
 - [SEARCH — 向量检索](#search--向量检索)
+- [TEXT — BM25 / AC 文本召回](#文本召回入口)
 - [WHERE — 统一谓词系统](#where--统一谓词系统)
 - [RETURN / ORDER BY / LIMIT / OFFSET](#return--order-by--limit--offset)
 - [操作符速查表](#操作符速查表)
@@ -27,7 +28,7 @@
 
 ## 概述
 
-TQL 是 TriviumDB 的统一查询语言，也是面向三模数据的 **自由 DIY 混合查询管线**。它不是把几条预设 RAG 流程包装成语法糖，而是让开发者把向量召回、属性过滤、图模式、图扩展、图算法、路径、集合运算、迭代、聚合和重排作为算子，按照自己的业务语义自由编排。
+TQL 是 TriviumDB 的统一查询语言，也是面向三模数据的 **自由 DIY 混合查询管线**。它不是把几条预设 RAG 流程包装成语法糖，而是让开发者把向量召回、BM25/AC 文本召回、属性过滤、图模式、图扩展、图算法、FISTA、DPP、NMF、路径、集合运算、迭代、聚合和重排作为算子，按照自己的业务语义自由编排。
 
 这种自由不是无边界的字符串拼接：每个阶段都有明确输入/输出类型、作用域、确定性规则和预算切片，完整查询仍由 Parser、Cascades 与 Pipeline 统一验证和优化。
 
@@ -36,7 +37,8 @@ TQL 是 TriviumDB 的统一查询语言，也是面向三模数据的 **自由 D
 | `FIND` | MongoDB 风格文档过滤与属性索引规划 |
 | `MATCH` / `OPTIONAL MATCH` | 图模式、可变长路径与 GraphFirst |
 | `SEARCH` | 向量源、确定性扩展与跨模管线 |
-| `WITH` | 命名 NodeSet、图算法、集合、路径、迭代与聚合组合 |
+| `TEXT` | BM25、Aho-Corasick 或两者混合的稀疏文本召回 |
+| `WITH` | 命名 NodeSet、认知算子、图算法、集合、路径、迭代与聚合组合 |
 
 **设计哲学**：
 
@@ -110,7 +112,7 @@ RETURN doc, ref
 
 ## FIND — 文档过滤查询
 
-`FIND` 入口对全库节点的 JSON Payload 进行条件过滤，功能完全覆盖旧的 `db.filter()` 和 `db.filter_where()` API。
+`FIND` 入口对全库节点的 JSON Payload 进行条件过滤，功能完全覆盖旧的 `db.filter()` 和 `db.filter_where()` API。无可用属性索引时，Planner 在 `EXPLAIN` 中标记 `cold_payload_scan`；执行器按 Payload 目录顺序访问冷数据，并受 lookup/parse 工作预算约束。高频字段应建立 Hash、Ordered ART、Composite ART、Bitmap 或 N-gram 索引，先缩小 NodeId 候选再执行必要的 residual predicate。
 
 ### 基础语法
 
@@ -328,8 +330,8 @@ SEARCH VECTOR [v1, v2, ...] TOP k (EXPAND [...])? (WHERE 谓词)? RETURN ...
 -- 找最相似的 5 个节点
 SEARCH VECTOR [0.1, 0.2, 0.3] TOP 5 RETURN *
 
--- 支持负数分量
-SEARCH VECTOR [0.1, -0.48, 0.8] TOP 10 RETURN *
+-- 支持负数和科学计数法分量
+SEARCH VECTOR [1e-5, -4.8E-1, 8e-1] TOP 10 RETURN *
 ```
 
 ### 带图扩散 (EXPAND)
@@ -386,9 +388,11 @@ WHERE _.score > 0.8
 RETURN *
 ```
 
-> 💡 `SEARCH` 的 WHERE 过滤在向量打分和 EXPAND 之后执行，作为最终的候选集筛选。
+> 💡 不带 `EXPAND` 且 `WHERE` 是已索引的等值或 AND 等值文档过滤时，Planner 会先取得属性索引候选，再在过滤集合内精确向量排序并返回 Top-K。这样 `TOP 10 WHERE {type: "event"}` 表示 event 集合中的 Top 10。
+>
+> 无可用属性索引、范围/OR/通用表达式或带 `EXPAND` 的查询保留候选后过滤路径；可能少于 TOP 指定数量，但始终执行最终精确谓词校验。
 
-> `SEARCH` 进入统一 NodeSet/Cascades 管线；物理访问路径由统计、索引可用性和预算共同决定。需要认知检索、文本双路召回或 Hook 时仍使用 `search_advanced()`；两者语义不同，不应仅按“快/慢入口”区分。
+> `SEARCH`、`TEXT` 和认知阶段都进入统一 NodeSet/Cascades 管线；物理访问路径由统计、索引可用性和预算共同决定。需要组件可开关但顺序固定的官方认知模板、Hook 或有状态疲劳不应期时使用 `search_advanced()`；需要改变无状态算子顺序时使用 TQL。
 
 ---
 
@@ -531,13 +535,102 @@ RETURN related, similarity(related) AS sim
 ORDER BY sim DESC LIMIT 10
 ```
 
-可组合阶段包括 `EXPAND`、`FILTER/WHERE`、`RANK`、PageRank、WCC、Degree/Betweenness、Leiden、Label Propagation、SA-PPR、`ALL_PATHS`、`SHORTEST_PATHS`、`UNION/INTERSECT/EXCEPT` 与 `ITERATE`。每阶段接受预算切片，并在 EXPLAIN 中暴露成本、预计行数、临时字节和物理实现。
+可组合阶段包括 `EXPAND`、`FILTER/WHERE`、`RANK`、PageRank、WCC、SCC、K-Core、Articulation Points、Triangle Count、Local Clustering Coefficient、HITS、Harmonic Centrality、Node Similarity、Degree/Betweenness、Leiden、Label Propagation、SA-PPR、`TEXT BM25/AC/HYBRID`、`RESIDUAL`、`DIVERSIFY`、`TOPICS`、`SA_PPR_CONFIG`、`WEIGHTED_PATHS`、`YEN_PATHS`、`ALL_PATHS`、`SHORTEST_PATHS`、`UNION/INTERSECT/EXCEPT` 与 `ITERATE`。每阶段接受预算切片，并在 EXPLAIN 中暴露成本、预计行数、临时字节和物理实现。
+
+### 结构图算法
+
+```sql
+K_CORE seed MODE INDUCED LABEL related AS scored
+WITH scored
+RETURN scored, core_number(scored) AS core
+ORDER BY core DESC
+```
+
+`SCC`、`K_CORE`、`ARTICULATION_POINTS`、`TRIANGLE_COUNT` 与 `HITS` 均消费命名 NodeSet。`MODE` 支持 `INDUCED`、`EXPAND HOPS n` 和 `BOUNDARY HOPS n`；扩张模式可指定 `OUTGOING`、`INCOMING` 或 `BOTH` 以及 `LABELS [...]`，算法读取边还可通过单值 `LABEL` 过滤。SCC 输出 `community()`；其余结果通过 `core_number()`、`triangle_count()`、`clustering_coefficient()`、`authority_score()` 和 `hub_score()` 投影。算法按 NodeId 稳定顺序串行执行，工作区分配、构图边访问、三角交集和 HITS 迭代均受硬预算约束，超限直接报错而不截断。
+
+### 文本召回入口
+
+```sql
+TEXT BM25 "rust memory safety" TOP 100 K1 1.2 B 0.75 AS hits
+WITH hits
+RETURN hits, text_score(hits) AS score
+ORDER BY score DESC
+```
+
+`TEXT` 支持：
+
+| 类型 | 语义 |
+|---|---|
+| `BM25` | 使用 TextIndex 的 BM25 相关度召回 |
+| `AC` | 使用 Aho-Corasick 关键词命中召回 |
+| `HYBRID` | 将 BM25 与 AC 分数相加，`AC_WEIGHT` 控制 AC 权重 |
+
+可选参数为 `K1`、`B` 和 `AC_WEIGHT`。结果按 `score DESC, NodeId ASC` 确定性排序。查询文本最多 4096 字节、按空白拆分最多 256 个 token；`TOP` 和文本索引规模受管线节点预算约束，越界时 fail-closed。
+
+### DPP 多样化
+
+```sql
+SEARCH VECTOR [1, 0] TOP 100 AS seed
+WITH seed
+DIVERSIFY seed TOP 10 QUALITY_WEIGHT 1 AS diverse
+WITH diverse
+RETURN diverse, diversity_score(diverse) AS diversity
+```
+
+DPP 从输入的 `similarity`、`text_score` 或 `graph_score` 中选择质量分数。候选池最多 512 个节点，`TOP` 不得超过输入候选数；向量读取和临时矩阵均计入预算。`diversity_score()` 表示确定性选择次序的边际排名分数，不替代原质量分数。
+
+### 参数化 SA-PPR
+
+```sql
+SEARCH VECTOR [1, 0] TOP 10 AS seed
+WITH seed
+SA_PPR_CONFIG seed DEPTH 4 ALPHA 0.15 MAX_EDGES 64 MIN_WEIGHT 0 LABELS [related, cites] AS expanded
+WITH expanded
+RETURN expanded, graph_score(expanded) AS score
+```
+
+`DEPTH`、`ALPHA`、`MAX_EDGES`、`MIN_WEIGHT` 和可选的 `LABELS` 显式控制有限深度扩散。该算子仍是 Depth-Bounded SA-PPR，不等同于迭代至收敛的标准 PageRank。
+
+### FISTA 残差召回
+
+```sql
+SEARCH VECTOR [1, 0] TOP 100 AS seed
+WITH seed
+RESIDUAL seed BY VECTOR [0, 1] TOP 50 LAMBDA 0.1 THRESHOLD 0.3 ITERATIONS 80 AS shadow
+WITH shadow
+RETURN shadow, residual_score(shadow) AS score
+```
+
+`RESIDUAL` 用输入候选向量拟合查询向量。残差范数不超过 `THRESHOLD` 时返回空 NodeSet；超过阈值时执行显式第二次精确向量召回。候选最多 512、迭代最多 256；Gram 矩阵在分配前检查溢出和临时内存预算，第二次召回也计入向量读取预算。
+
+### NMF 主题分配
+
+```sql
+SEARCH VECTOR [1, 0] TOP 100 AS seed
+WITH seed
+TOPICS seed K 8 ITERATIONS 50 AS clustered
+WITH clustered
+RETURN clustered, topic(clustered) AS topic_id, topic_score(clustered) AS confidence
+```
+
+`TOPICS` 对候选向量执行确定性 NMF，并把 W 矩阵的主导主题映射回节点。候选最多 512、`K` 最大 32 且不得超过候选数、迭代最多 256；V/W/H 矩阵在分配前接受内存预算检查。当前输出逐节点主题编号与权重，不输出可跨阶段传递的 H 矩阵 artifact。
 
 ## 表达式、聚合与空值
 
-表达式支持 `+ - * /`、括号优先级、参数、属性、一等分数、`COALESCE`、`IS NULL/IS NOT NULL`、`path()` 与 `path_length()`。除零、非数值算术和非有限结果返回 Null，不 panic。
+表达式支持 `+ - * /`、括号优先级、参数、属性、一等分数、`COALESCE`、`IS NULL/IS NOT NULL`、`path()` 与 `path_length()`。认知管线新增 `text_score()`、`diversity_score()`、`residual_score()`、`topic()` 与 `topic_score()`；未携带对应分数的行返回 Null。除零、非数值算术和非有限结果返回 Null，不 panic。
 
-聚合支持 `COUNT/SUM/AVG/MIN/MAX/COLLECT` 与 aggregate `DISTINCT`。RETURN 中非聚合表达式构成隐式分组键；空输入 `COUNT(*)=0`，其他无值聚合返回 Null。Rust 的 `tql()` 与 Python/Node 动态语言入口均返回统一一等值；`tql_nodes()` 保留给只需要节点绑定的 Rust 调用方，`tql_values()` 是兼容别名。
+聚合支持 `COUNT/SUM/AVG/MIN/MAX/COLLECT` 与 aggregate `DISTINCT`。RETURN 中非聚合表达式构成隐式分组键；`DISTINCT b.id`、`DISTINCT id(b)` 和 `DISTINCT b.field` 均按实际投影值去重。空输入 `COUNT(*)=0`，其他无值聚合返回 Null。Rust 的 `tql()` 与 Python/Node 动态语言入口均返回统一一等值；`tql_nodes()` 保留给只需要节点绑定的 Rust 调用方，`tql_values()` 是兼容别名。
+
+## 向量更新
+
+TQL mutation 可在 `MATCH` 目标集合上原子更新向量：
+
+```sql
+MATCH (n {id: 42})
+SET VECTOR(n) == [1e-5, 0.2, -0.3]
+```
+
+目标匹配集不受查询返回行上限静默截断。向量维度必须与数据库一致，且所有分量必须为有限值；任一目标或向量校验失败时，事务整体不提交。该语法当前使用数字字面量；需要参数化或批量向量写入时使用事务 API。
 
 ## Prepared TQL
 
@@ -549,7 +642,7 @@ print(prepared.parameter_names())
 rows = db.execute_prepared_tql(prepared, {"x": 0.2, "y": 0.8, "bonus": 4})
 ```
 
-`SEARCH VECTOR` 的方括号内可混合有限数字字面量与 Prepared 数值参数，例如 `[0.1, $y, -0.3]`。参数只在 bind 阶段写入连续向量，绑定完成后复用与字面量完全相同的 QuIVer/精确检索热路径，不增加候选打分开销。
+`SEARCH VECTOR` 的方括号内可混合有限数字字面量与 Prepared 数值参数，例如 `[1e-5, $y, -3E-1]`。十进制字面量支持 `e`/`E` 科学计数法以及正负指数；不完整指数和溢出到非有限值的数字会在解析期 fail-closed。参数只在 bind 阶段写入连续向量，绑定完成后复用与字面量完全相同的 QuIVer/精确检索热路径，不增加候选打分开销。
 
 Node 使用 `prepareTql/executePreparedTql`，Rust 使用 `prepare_tql/execute_prepared_tql`。缺参、额外参数、非数值向量参数和非有限数值全部 fail-closed；同一 Prepared 对象可重复绑定执行。
 
@@ -563,7 +656,11 @@ WITH route
 RETURN path(route) AS nodes, path_length(route) AS hops
 ```
 
-Path 当前是一等 NodeId 序列；`path_length` 返回边数。集合阶段公开 `UNION/INTERSECT/EXCEPT`，结果按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。路径与集合均受节点数、字节和遍历预算约束。
+Path 当前是一等 NodeId 序列；`path_length` 返回边数。`WEIGHTED_PATHS` 使用非负有限边权执行确定性 Dijkstra，`weighted_distance()` 返回总成本；`YEN_PATHS ... K n` 返回最多 n 条最短简单路径，`path_rank()` 从 1 开始标记顺序。等成本路径按完整 NodeId 序列决胜。
+
+`NODE_SIMILARITY input TOP n CUTOFF x [LABEL label] AS pairs` 在输入诱导无向图上计算邻居集合 Jaccard，相似节点对通过 `pair_left()`、`pair_right()` 与 `node_similarity()` 投影。PairSet 以 `(left,right)` 为独立行身份，不会因共享左节点而被 NodeSet 去重；节点对数量、邻居交集工作量、结果数和临时字节均受硬预算约束。
+
+集合阶段公开 `UNION/INTERSECT/EXCEPT`，普通 NodeSet 仍按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。所有路径与集合算法均受节点数、字节和遍历预算约束。
 
 ## 历史 API 迁移
 
@@ -606,11 +703,13 @@ Path 当前是一等 NodeId 序列；`path_length` 返回边数。集合阶段�
 Query       := Entry (WHERE Predicate)? (RankClause)? RETURN ReturnClause
                (ORDER BY OrderList)? (LIMIT Int)? (OFFSET Int)?
 
-Entry       := MatchEntry | FindEntry | SearchEntry
+Entry       := MatchEntry | FindEntry | SearchEntry | TextEntry
 
 MatchEntry  := MATCH Pattern
 FindEntry   := FIND DocFilter
 SearchEntry := SEARCH VECTOR '[' NumList ']' TOP Int (ExpandClause)?
+TextEntry   := TEXT (BM25 | AC | HYBRID) String TOP Int
+               (K1 Number)? (B Number)? (AC_WEIGHT Number)?
 
 Pattern     := NodePat (EdgePat NodePat)*
 NodePat     := '(' Ident? ('{' DocBody '}')? ')'
@@ -687,17 +786,21 @@ TQL 和 `search_advanced()` 共用底层数据、QuIVer、图与预算设施，�
 |---|---|---|
 | 主要目标 | 固定工业 RAG 检索管线 | 任意三模算子组合 |
 | 向量访问 | QuIVer / exact fallback | Cascades 选择向量源与重排 |
-| 图能力 | SA-PPR 扩散 | EXPAND、路径、PageRank/WCC/Leiden 等 |
-| 文本/认知 | AC+BM25、FISTA、DPP、Hook | 通过 TQL 算子与属性/向量/图组合 |
+| 图能力 | SA-PPR 扩散，组件可开关、顺序固定 | EXPAND、路径、PageRank/WCC/Leiden、参数化 SA-PPR 等自由编排 |
+| 文本/认知 | AC+BM25、FISTA、DPP、Hook 与疲劳不应期，均由 `SearchConfig` 控制 | `TEXT`、`RESIDUAL`、`DIVERSIFY`、`TOPICS`、`SA_PPR_CONFIG` 及一等分数表达式 |
+| 状态性 | 疲劳不应期会更新进程内检索状态 | 普通 TQL 认知算子无状态、可重复；不开放疲劳不应期 |
 | 结果 | SearchHit | Node/标量/Path/List/Null 绑定行 |
 
-两者长期共存：固定低开销 RAG 流程优先使用 `search*`，需要跨阶段优化、聚合、路径或图算法组合时使用 TQL。
+两者长期共存并共享 BM25、AC、FISTA、DPP、NMF 和图扩散底层实现：固定低开销 RAG 流程优先使用 `search_advanced()`；需要改变算子顺序、保留中间 NodeSet、聚合、路径或图算法组合时使用 TQL。
 
 ### 当前限制
 
 | 限制 | 说明 | 计划 |
 |------|------|------|
 | MATCH 模式方向 | MATCH 边模式仍以显式有向模式为主；SEARCH EXPAND 已支持 OUTGOING/INCOMING/BOTH | 后续扩展 |
+| 认知算子 Prepared 参数 | `TEXT` 参数、`RESIDUAL` 向量和认知算子参数当前使用字面量；Prepared 逐维参数目前只覆盖 `SEARCH VECTOR` | 后续扩展 |
+| NMF 集合 artifact | `TOPICS` 投影逐节点主题与权重，不在阶段间传递 H 矩阵 | 按真实需求评估 |
+| 有状态疲劳算子 | Refractory Fatigue 会改变进程内状态，因此不进入普通确定性 TQL | 使用 `search_advanced()` |
 | RANK score 投影 | GraphFirst score 仅参与排序，不作为 RETURN 字段暴露 | 后续扩展 |
 | 子查询组合 | 不支持将任意 SEARCH 结果作为 MATCH 子查询输入 | 后续扩展 |
 | GraphFirst 大集合 ANN | RANK 对合法 anchor 集合执行精确评分，不切换 bitmap-filtered ANN | 按真实需求评估 |

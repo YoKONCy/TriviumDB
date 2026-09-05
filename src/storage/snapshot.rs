@@ -60,12 +60,27 @@ fn checksum_file(path: &Path) -> std::io::Result<(u64, u32)> {
     Ok((size, hasher.finalize()))
 }
 
+fn payload_generation_suffix(db_path: &str) -> Option<String> {
+    let marker = std::fs::read(format!("{db_path}.flush_ok")).ok()?;
+    if marker.len() != 53 || marker.get(..4) != Some(b"TFMK") || marker.get(4) != Some(&3) {
+        return None;
+    }
+    let generation = u64::from_le_bytes(marker.get(5..13)?.try_into().ok()?);
+    Some(format!(".pld.{generation}"))
+}
+
 fn generation_suffixes(db_path: &str) -> Vec<String> {
-    GENERATION_SUFFIXES
+    let mut suffixes = GENERATION_SUFFIXES
         .into_iter()
         .filter(|suffix| Path::new(&format!("{db_path}{suffix}")).exists())
         .map(str::to_string)
-        .collect()
+        .collect::<Vec<_>>();
+    if let Some(payload) = payload_generation_suffix(db_path)
+        && Path::new(&format!("{db_path}{payload}")).exists()
+    {
+        suffixes.push(payload);
+    }
+    suffixes
 }
 
 pub fn write_manifest(
@@ -149,7 +164,8 @@ pub fn validate_manifest(
     }
     let mut declared = std::collections::HashSet::new();
     for file in &manifest.files {
-        if !GENERATION_SUFFIXES.contains(&file.suffix.as_str())
+        let valid_payload = payload_generation_suffix(db_path).as_deref() == Some(&file.suffix);
+        if (!GENERATION_SUFFIXES.contains(&file.suffix.as_str()) && !valid_payload)
             || !declared.insert(file.suffix.as_str())
         {
             return Err(TriviumError::ImmutableArtifactInvalid {
@@ -157,13 +173,20 @@ pub fn validate_manifest(
             });
         }
     }
-    for suffix in GENERATION_SUFFIXES {
-        let exists = Path::new(&format!("{db_path}{suffix}")).exists();
-        if exists != declared.contains(suffix) {
-            return Err(TriviumError::ImmutableArtifactInvalid {
-                reason: format!("generation 文件集合与 manifest 不一致: {suffix}"),
-            });
-        }
+    let mut expected = GENERATION_SUFFIXES
+        .into_iter()
+        .filter(|suffix| Path::new(&format!("{db_path}{suffix}")).exists())
+        .map(str::to_string)
+        .collect::<std::collections::HashSet<_>>();
+    if let Some(payload) = payload_generation_suffix(db_path)
+        && Path::new(&format!("{db_path}{payload}")).exists()
+    {
+        expected.insert(payload);
+    }
+    if expected != declared.into_iter().map(str::to_string).collect() {
+        return Err(TriviumError::ImmutableArtifactInvalid {
+            reason: "generation 文件集合与 manifest 不一致".into(),
+        });
     }
     for file in &manifest.files {
         let file_path = PathBuf::from(format!("{db_path}{}", file.suffix));

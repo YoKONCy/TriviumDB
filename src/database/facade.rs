@@ -106,6 +106,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
         self.inner.index_memory_stats()
     }
 
+    pub fn payload_memory_stats(&self) -> crate::observability::PayloadMemoryStats {
+        self.inner.payload_memory_stats()
+    }
+
     pub fn storage_write_stats(&self) -> crate::observability::StorageWriteStats {
         self.inner.storage_write_stats()
     }

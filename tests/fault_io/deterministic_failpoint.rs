@@ -1,4 +1,5 @@
 use triviumdb::Database;
+use triviumdb::storage::wal::{Wal, WalEntry};
 use triviumdb::test_hooks::{IoPoint, fail_io_at};
 
 const DIM: usize = 4;
@@ -40,6 +41,59 @@ fn seed(path: &str) {
             .unwrap();
     }
     database.flush().unwrap();
+}
+
+fn v2_wal(path: &str) -> Vec<u8> {
+    #[allow(dead_code)]
+    #[derive(serde::Serialize)]
+    enum V2<T> {
+        TxBegin {
+            tx_id: u64,
+        },
+        TxCommit {
+            tx_id: u64,
+        },
+        Insert {
+            id: u64,
+            vector: Vec<T>,
+            payload: String,
+        },
+    }
+    let data = bincode::serialize(&V2::Insert::<f32> {
+        id: 9,
+        vector: vec![1.0; DIM],
+        payload: serde_json::json!({"legacy": true}).to_string(),
+    })
+    .unwrap();
+    let mut bytes = vec![b'T', b'V', b'W', b'L', 2, 0];
+    bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&data);
+    bytes.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
+    std::fs::write(format!("{path}.wal"), &bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn wal_v2迁移各发布阶段故障均保持原文件且可重试() {
+    for point in [
+        IoPoint::WalMigrationCreate,
+        IoPoint::WalMigrationWrite,
+        IoPoint::WalMigrationSync,
+        IoPoint::WalMigrationRename,
+    ] {
+        let path = path(&format!("migration_{point:?}"));
+        cleanup(&path);
+        let original = v2_wal(&path);
+        let guard = fail_io_at(point);
+        assert!(Wal::upgrade_legacy_wal::<f32>(&path).is_err());
+        drop(guard);
+        assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), original);
+        assert!(!std::path::Path::new(&format!("{path}.wal.upgrade.tmp")).exists());
+        assert!(Wal::upgrade_legacy_wal::<f32>(&path).unwrap());
+        let (entries, _) = Wal::read_entries::<f32>(&path).unwrap();
+        assert!(matches!(&entries[0], WalEntry::Insert { id: 9, .. }));
+        cleanup(&path);
+    }
 }
 
 #[test]

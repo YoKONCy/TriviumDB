@@ -1018,7 +1018,7 @@ pub(crate) fn approximate_search<T: VectorType>(
         query.payload_filter.is_none_or(|filter| {
             memtable
                 .get_payload(id)
-                .is_some_and(|payload| filter.matches(payload))
+                .is_some_and(|payload| filter.matches(&payload))
         })
     };
     let search_config = crate::index::quiver::QuIVerSearchConfig {
@@ -1110,7 +1110,7 @@ fn exact_rerank_candidates<T: VectorType>(
         .filter_map(|(id, vector_similarity)| {
             let payload = memtable.get_payload(id)?;
             let property_signal = if let Some(filter) = query.payload_filter {
-                if !filter.matches(payload) {
+                if !filter.matches(&payload) {
                     return None;
                 }
                 1.0
@@ -1177,7 +1177,7 @@ pub(crate) fn exact_ground_truth<T: VectorType>(
         };
         let property_signal = if let Some(filter) = query.payload_filter {
             cost.payload_checks += 1;
-            if !filter.matches(payload) {
+            if !filter.matches(&payload) {
                 continue;
             }
             1.0

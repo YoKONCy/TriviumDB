@@ -7,12 +7,52 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const contract = require('../contracts/public_cases.json')
 const { TriviumDB } = require('../../index.js')
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'triviumdb-node-public-api-'))
 const file = path.join(root, 'api.tdb')
 
+function runSharedContract(root) {
+  assert.equal(contract.schema_version, 1)
+  const db = new TriviumDB(path.join(root, 'shared-contract.tdb'), {
+    dim: contract.setup.dimension,
+  })
+  for (const node of contract.setup.nodes) {
+    db.insertWithId(node.id, node.vector, node.payload)
+  }
+  for (const edge of contract.setup.edges) {
+    db.link(edge.source, edge.target, edge.label, edge.weight)
+  }
+  for (const testCase of contract.cases) {
+    const expected = testCase.expected
+    if (testCase.operation === 'get_payload') {
+      const payload = db.getPayload(testCase.node_id)
+      assert.equal(payload[expected.field], expected.value, testCase.name)
+    } else if (testCase.operation === 'prepared_tql') {
+      const prepared = db.prepareTql(testCase.tql)
+      const rows = db.executePreparedTql(prepared, testCase.parameters || {})
+      assert.equal(rows.length, expected.row_count, testCase.name)
+      assert.equal(rows[0][expected.column], expected.value, testCase.name)
+    } else if (testCase.operation === 'tql_path') {
+      const rows = db.tql(testCase.tql)
+      assert.deepEqual(rows[0].path, expected.path.map(String), testCase.name)
+    } else if (testCase.operation === 'prepared_missing_parameter') {
+      const prepared = db.prepareTql(testCase.tql)
+      assert.throws(
+        () => db.executePreparedTql(prepared, testCase.parameters || {}),
+        error => expected.error_contains_any.some(needle => String(error).includes(needle)),
+        testCase.name,
+      )
+    } else {
+      throw new Error(`未知共享契约操作: ${testCase.operation}`)
+    }
+  }
+  db.close()
+}
+
 try {
+  runSharedContract(root)
   assert.throws(
     () => new TriviumDB(file, 2),
     /object|对象|options/i,
@@ -82,8 +122,8 @@ try {
   assert.deepEqual(indexes.find(item => item.kind === 'composite').fields, ['tenant', 'region'])
 
   const storage = db.storageInfo()
-  assert.equal(storage.database_format_current, 7)
-  assert.equal(storage.property_index_format, 4)
+  assert.equal(storage.database_format_current, 9)
+  assert.equal(storage.property_index_format, 6)
   assert.equal(storage.node_count, 2)
 
   const vectorPrepared = db.prepareTql('SEARCH VECTOR [$x, $y] TOP 1 RETURN *')

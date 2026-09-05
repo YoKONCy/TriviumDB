@@ -7,8 +7,9 @@ use triviumdb::graph::reachability::{
 use triviumdb::query::parallel::QueryParallelismBudget;
 use triviumdb::query::pipeline::{
     DegreeCentralityOperator, ExactRerank, ExactVectorSearch, Expand, ExpandExactRerank,
-    GraphSubsetMode, Limit, NodeIdsSource, NodeSet, PayloadFilter, PipelineBudget, PipelineContext,
-    PipelineOperator, PropertyLookup, ScoreKind, SetOperation, combine_sets, execute_pipeline,
+    GraphMetric, GraphSubsetMode, Limit, NodeIdsSource, NodeRow, NodeSet, PayloadFilter,
+    PipelineBudget, PipelineContext, PipelineOperator, PropertyLookup, ScoreKind, ScoreValue,
+    SetOperation, combine_sets, execute_pipeline,
 };
 use triviumdb::storage::memtable::MemTable;
 
@@ -78,6 +79,8 @@ fn budget() -> PipelineBudget {
         max_nodes: 100,
         max_node_set_bytes: 1024 * 1024,
         max_vector_read_bytes: 1024 * 1024,
+        max_payload_lookups: 100,
+        max_payload_parsed_bytes: 1024 * 1024,
         traversal: TraversalBudget {
             max_visited_nodes: 100,
             max_examined_edges: 100,
@@ -110,7 +113,46 @@ fn 并行预算小任务串行且线程上限生效() {
 }
 
 #[test]
-fn nodeset_去重排序且集合运算合并来源() {
+fn nodeset_dedup_将后续行合并进保留行且加权距离与路径同源() {
+    let mut rows = vec![NodeRow::new(9), NodeRow::new(9)];
+    rows[0].path = Some(vec![1, 9]);
+    rows[0].provenance.source_ids = vec![1];
+    rows[0]
+        .set_graph_metric(
+            GraphMetric::WeightedDistance,
+            ScoreValue {
+                value: 1.0,
+                kind: ScoreKind::Exact,
+            },
+        )
+        .unwrap();
+    rows[1].path = Some(vec![9]);
+    rows[1].provenance.source_ids = vec![9];
+    rows[1]
+        .set_graph_metric(
+            GraphMetric::WeightedDistance,
+            ScoreValue {
+                value: 0.0,
+                kind: ScoreKind::Exact,
+            },
+        )
+        .unwrap();
+
+    let output = NodeSet::from_rows(rows);
+    assert_eq!(output.len(), 1);
+    assert_eq!(output.rows()[0].path, Some(vec![9]));
+    assert_eq!(
+        output.rows()[0]
+            .graph_metric(GraphMetric::WeightedDistance)
+            .unwrap()
+            .value,
+        0.0
+    );
+    assert_eq!(output.rows()[0].provenance.source_ids, vec![1, 9]);
+}
+
+#[test]
+fn nodeset_去重排序与集合运算合并来源() {
     let left = NodeSet::from_ids([3, 1, 1, 2]);
     let right = NodeSet::from_ids([2, 4]);
     assert_eq!(
@@ -167,7 +209,7 @@ fn vector_expand_rerank_filter_limit_四阶段语义正确() {
         }),
         Box::new(Limit { limit: 2 }),
     ];
-    let mut context = PipelineContext::new(&mt, budget());
+    let mut context = PipelineContext::with_profile(&mt, budget(), true);
     let output = execute_pipeline(&mut context, &operators).unwrap();
     assert_eq!(
         output.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
@@ -397,8 +439,9 @@ fn 并行_expand_全局预算仍然_fail_closed() {
 }
 
 #[test]
-fn 管线阶段节点向量与图预算均提前拒绝() {
-    let mt = graph();
+fn 管线阶段节点向量图与_payload_预算均提前拒绝() {
+    let mut mt = graph();
+    mt.configure_payload_cache(0, 0);
     let mut tiny = budget();
     tiny.max_stages = 1;
     let mut context = PipelineContext::new(&mt, tiny);
@@ -438,4 +481,21 @@ fn 管线阶段节点向量与图预算均提前拒绝() {
         }),
     ];
     assert!(execute_pipeline(&mut context, &operators).is_err());
+
+    let mut tiny = budget();
+    tiny.max_payload_lookups = 0;
+    let mut context = PipelineContext::new(&mt, tiny);
+    let operators: Vec<Box<dyn PipelineOperator<f32>>> = vec![
+        Box::new(NodeIdsSource { ids: vec![1] }),
+        Box::new(PayloadFilter {
+            filter: Filter::eq("kind", json!("root")),
+        }),
+    ];
+    assert!(matches!(
+        execute_pipeline(&mut context, &operators),
+        Err(triviumdb::TriviumError::PayloadQueryBudgetExceeded {
+            dimension: "lookups",
+            ..
+        })
+    ));
 }

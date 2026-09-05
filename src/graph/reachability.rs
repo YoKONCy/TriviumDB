@@ -516,9 +516,10 @@ pub fn query_subgraph<T: VectorType>(
     let nodes = ids
         .into_iter()
         .filter_map(|id| {
-            db.get_payload(id)
-                .cloned()
-                .map(|payload| SubgraphNode { id, payload })
+            db.get_payload(id).map(|payload| SubgraphNode {
+                id,
+                payload: (*payload).clone(),
+            })
         })
         .collect();
     Ok(SubgraphResult {

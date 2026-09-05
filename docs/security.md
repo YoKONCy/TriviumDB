@@ -1,6 +1,6 @@
 # TriviumDB 安全特性详解
 
-> 基于 v0.8.5 当前源码的完整文档，覆盖并发安全、数据完整性、格式版本门禁、预算、ReadOnly/Immutable 零写、输入验证与跨平台 I/O 加固。
+> 基于 v0.8.6 当前源码的完整文档，覆盖并发安全、数据完整性、格式版本门禁、预算、ReadOnly/Immutable 零写、输入验证与跨平台 I/O 加固。
 
 ---
 
@@ -153,23 +153,24 @@ if len > 256 * 1024 * 1024 {
 
 ---
 
-### 8. Mmap 双文件一致性标记（`.flush_ok` v2）
+### 8. Mmap 三文件一致性标记（`.flush_ok` v3）
 
 **实现位置**：`storage/file_format.rs`（写与读取）
 
-Mmap 模式下，`.tdb` 和 `.vec` 均写入成功后，才原子写 `.flush_ok` 标记。v2 标记共 41 字节：
+Mmap 模式下，`.tdb`、`.vec` 和 generation 化 `.pld.<generation>` 均落盘后，才原子写 `.flush_ok` 标记。v3 标记共 53 字节：
 
 ```text
 magic(4) + version(1) + generation(8)
-+ tdb_size(8) + vec_size(8)
-+ tdb_crc32(4) + vec_crc32(4) + marker_crc32(4)
++ tdb_size(8) + vec_size(8) + payload_size(8)
++ tdb_crc32(4) + vec_crc32(4) + payload_crc32(4) + marker_crc32(4)
 ```
 
-- `tdb_crc32` / `vec_crc32` 是 `.tdb` 与 `.vec` 的**整文件 CRC32**，可发现等长位翻转、扇区撕裂等大小校验抓不到的损坏；空 `.vec`（纯 Rom/无向量库）使用明确的空文件 CRC。
-- `marker_crc32` 保护标记自身，防止 marker 字节被部分破坏后"恰好看起来合法"。
-- v1 标记（29 字节，仅 generation + size）保持有界兼容读取；ReadWrite 在下一次显式 flush 时自然升级为 v2，打开时不做隐式写入。
-- 校验失败时**fail-closed**：ReadOnly/Immutable 字节级零写并拒绝打开；ReadWrite 不再降级为"忽略 `.vec` 的零向量骨架恢复"——那会在 WAL 无法完整重建基础向量时产生"节点存在、向量全零"的伪恢复状态。现在统一拒绝打开，由用户从备份或上一代际恢复。
-- 发布路径（`.vec` 落盘 → `.tdb` 落盘 → marker 原子替换）由真实子进程强杀测试逐阶段验证：任何阶段断电后，重开只允许"旧完整代际"或"新完整代际"。
+- 三个文件 CRC 可发现等长位翻转和扇区撕裂；`marker_crc32` 保护提交标记本身。
+- 只有 v3 marker 明确声明的 Payload generation 才允许加载；v1/v2 marker 旁的游离 `.pld` 不参与旧快照。
+- v1（29 字节）与 v2（41 字节）保持只读兼容；ReadWrite 在下一次显式 flush 时升级为 v3，打开时不隐式迁移。
+- generation 化 Payload 文件避免 Windows 上替换仍被 Reader mmap 的同名文件；marker 提交后旧 generation 才失去可见性，并在引用释放后 best-effort 回收。
+- 校验失败时 fail-closed：ReadOnly/Immutable 字节级零写并拒绝打开；ReadWrite 不构造缺向量或缺 Payload 的伪恢复状态。
+- 发布路径由格式变异和子进程强杀测试覆盖，重开只允许读取完整提交 generation。
 
 ---
 

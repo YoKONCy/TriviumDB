@@ -119,6 +119,8 @@ pub enum MutationOp<T: VectorType> {
         label: String,
         weight: f32,
     },
+    /// 更新向量
+    UpdateVector { id: NodeId, vector: Vec<T> },
     /// 更新字段
     UpdatePayload {
         id: NodeId,
@@ -239,11 +241,25 @@ pub fn execute_tql_with_limits<T: VectorType>(
             let mut executable = query.clone();
             executable.explain = false;
             executable.analyze = false;
+            if !executable.pipeline.is_empty() {
+                let (set, _, _, profile) = execute_pipeline_set(&executable, memtable, true)?;
+                let mut rows = set.into_rows();
+                apply_offset_limit(&mut rows, executable.offset, executable.limit);
+                return Ok(generate_explain_plan(
+                    query,
+                    memtable,
+                    Some((
+                        rows.len(),
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        profile,
+                    )),
+                ));
+            }
             let rows = execute_tql_with_limits(&executable, memtable, limits)?;
             return Ok(generate_explain_plan(
                 query,
                 memtable,
-                Some((rows.len(), started.elapsed().as_secs_f64() * 1000.0)),
+                Some((rows.len(), started.elapsed().as_secs_f64() * 1000.0, None)),
             ));
         }
         return Ok(generate_explain_plan(query, memtable, None));
@@ -302,6 +318,12 @@ pub fn execute_tql_with_limits<T: VectorType>(
             execute_search(vector, *top_k, expand.as_ref(), query, memtable, scan_limit)?,
             false,
         ),
+        QueryEntry::Text { .. } => {
+            return Err(TriviumError::QueryExecution(
+                "TEXT 入口必须通过可组合管线执行 (TEXT entry requires composable pipeline execution)"
+                    .into(),
+            ));
+        }
     };
 
     let truncated = results.len() > row_limit;
@@ -354,10 +376,10 @@ pub fn execute_tql_with_limits<T: VectorType>(
 fn test_disable_fusion() -> bool {
     #[cfg(feature = "test-hooks")]
     {
-        return matches!(
+        matches!(
             crate::test_hooks::query_strategy(),
             crate::test_hooks::QueryExecutionStrategy::DisableFusion
-        );
+        )
     }
     #[cfg(not(feature = "test-hooks"))]
     false
@@ -366,7 +388,7 @@ fn test_disable_fusion() -> bool {
 fn test_parallelism_budget() -> crate::query::parallel::QueryParallelismBudget {
     #[cfg(feature = "test-hooks")]
     {
-        return match crate::test_hooks::query_strategy() {
+        match crate::test_hooks::query_strategy() {
             crate::test_hooks::QueryExecutionStrategy::ForceSerial => {
                 crate::query::parallel::QueryParallelismBudget {
                     max_threads: 1,
@@ -380,31 +402,39 @@ fn test_parallelism_budget() -> crate::query::parallel::QueryParallelismBudget {
                 }
             }
             _ => crate::query::parallel::QueryParallelismBudget::default(),
-        };
+        }
     }
     #[cfg(not(feature = "test-hooks"))]
     crate::query::parallel::QueryParallelismBudget::default()
 }
 
+#[derive(Debug, Clone)]
+struct PipelineExecutionProfile {
+    plan: crate::query::cascades::CascadesPlan,
+    metrics: Vec<crate::query::pipeline::PipelineStageMetrics>,
+}
+
+type PipelineSetResult = (
+    crate::query::pipeline::NodeSet,
+    String,
+    HashMap<String, TqlExpr>,
+    Option<PipelineExecutionProfile>,
+);
+
 fn execute_pipeline_set<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
-) -> Result<
-    (
-        crate::query::pipeline::NodeSet,
-        String,
-        HashMap<String, TqlExpr>,
-    ),
-    TriviumError,
-> {
+    profile: bool,
+) -> Result<PipelineSetResult, TriviumError> {
     let source_vector = match &query.entry {
         QueryEntry::Search { vector, .. } => Some(vector.as_slice()),
         _ => None,
     };
-    let plan = crate::query::cascades::optimize_pipeline(
+    let plan = crate::query::cascades::optimize_pipeline_with_profile(
         query,
         mt,
         crate::query::cascades::OptimizerBudget::default(),
+        profile,
     );
     let mut operators: Vec<Box<dyn crate::query::pipeline::PipelineOperator<T>>> = match (
         &query.entry,
@@ -446,6 +476,25 @@ fn execute_pipeline_set<T: VectorType>(
             },
             _,
         ) => crate::query::pipeline::lower_search_entry(vector, *top_k, expand.as_ref()),
+        (QueryEntry::Text { clause }, _) => {
+            vec![Box::new(crate::query::pipeline::TextSearchSource {
+                query: clause.query.clone(),
+                top_k: clause.top_k,
+                k1: clause.k1,
+                b: clause.b,
+                ac_weight: clause.ac_weight,
+                include_bm25: matches!(
+                    clause.kind,
+                    crate::query::tql_ast::TextSearchKind::Bm25
+                        | crate::query::tql_ast::TextSearchKind::Hybrid
+                ),
+                include_ac: matches!(
+                    clause.kind,
+                    crate::query::tql_ast::TextSearchKind::Ac
+                        | crate::query::tql_ast::TextSearchKind::Hybrid
+                ),
+            })]
+        }
         (
             QueryEntry::Find {
                 filter: crate::filter::Filter::Eq(field, value),
@@ -455,6 +504,11 @@ fn execute_pipeline_set<T: VectorType>(
             field: field.clone(),
             value: value.clone(),
         })],
+        (QueryEntry::Find { filter }, Some(crate::query::cascades::PhysicalOperator::NodeScan)) => {
+            vec![Box::new(crate::query::pipeline::FilteredNodeScanSource {
+                filter: filter.clone(),
+            })]
+        }
         _ => {
             let mut source_query = query.clone();
             source_query.pipeline.clear();
@@ -572,25 +626,56 @@ fn execute_pipeline_set<T: VectorType>(
                         graph.input, current_name, graph.input, current_name
                     )));
                 }
-                let mode = crate::query::pipeline::GraphSubsetMode::Induced;
+                let subset_direction = |direction: EdgeDirection| match direction {
+                    EdgeDirection::Forward => {
+                        crate::graph::reachability::ReachabilityDirection::Outgoing
+                    }
+                    EdgeDirection::Backward => {
+                        crate::graph::reachability::ReachabilityDirection::Incoming
+                    }
+                    EdgeDirection::Both => crate::graph::reachability::ReachabilityDirection::Both,
+                };
+                let mode = match &graph.subset {
+                    crate::query::tql_ast::GraphSubsetSpec::Induced => {
+                        crate::query::pipeline::GraphSubsetMode::Induced
+                    }
+                    crate::query::tql_ast::GraphSubsetSpec::Expand {
+                        hops,
+                        labels,
+                        direction,
+                    } => crate::query::pipeline::GraphSubsetMode::Expand {
+                        hops: *hops,
+                        labels: labels.clone(),
+                        direction: subset_direction(*direction),
+                    },
+                    crate::query::tql_ast::GraphSubsetSpec::Boundary {
+                        hops,
+                        labels,
+                        direction,
+                    } => crate::query::pipeline::GraphSubsetMode::Boundary {
+                        hops: *hops,
+                        labels: labels.clone(),
+                        direction: subset_direction(*direction),
+                    },
+                };
                 match graph.algorithm {
                     GraphAlgorithmKind::PageRank => {
                         operators.push(Box::new(crate::query::pipeline::PageRankOperator {
                             mode,
                             config: Default::default(),
-                            label_filter: None,
+                            label_filter: graph.label_filter.clone(),
                         }))
                     }
                     GraphAlgorithmKind::Wcc => {
                         operators.push(Box::new(crate::query::pipeline::WccOperator {
                             mode,
-                            label_filter: None,
+                            label_filter: graph.label_filter.clone(),
                         }))
                     }
                     GraphAlgorithmKind::Degree => {
                         operators.push(Box::new(crate::query::pipeline::DegreeCentralityOperator {
                             mode,
-                            label_filter: None,
+                            label_filter: graph.label_filter.clone(),
                         }))
                     }
                     GraphAlgorithmKind::LabelPropagation => {
@@ -600,7 +685,7 @@ fn execute_pipeline_set<T: VectorType>(
                                 max_iterations: 32,
                                 min_community_size: 1,
                             },
-                            label_filter: None,
+                            label_filter: graph.label_filter.clone(),
                         }))
                     }
                     GraphAlgorithmKind::Leiden => {
@@ -612,6 +697,45 @@ fn execute_pipeline_set<T: VectorType>(
                                 compute_centroids: false,
                             },
                         }))
+                    }
+                    GraphAlgorithmKind::Scc
+                    | GraphAlgorithmKind::KCore
+                    | GraphAlgorithmKind::ArticulationPoints
+                    | GraphAlgorithmKind::TriangleCount
+                    | GraphAlgorithmKind::Hits
+                    | GraphAlgorithmKind::HarmonicCentrality => {
+                        let algorithm = match graph.algorithm {
+                            GraphAlgorithmKind::Scc => {
+                                crate::query::pipeline::StructuralAlgorithm::Scc
+                            }
+                            GraphAlgorithmKind::KCore => {
+                                crate::query::pipeline::StructuralAlgorithm::KCore
+                            }
+                            GraphAlgorithmKind::ArticulationPoints => {
+                                crate::query::pipeline::StructuralAlgorithm::ArticulationPoints
+                            }
+                            GraphAlgorithmKind::TriangleCount => {
+                                crate::query::pipeline::StructuralAlgorithm::TriangleCount
+                            }
+                            GraphAlgorithmKind::Hits => {
+                                crate::query::pipeline::StructuralAlgorithm::Hits
+                            }
+                            GraphAlgorithmKind::HarmonicCentrality => {
+                                crate::query::pipeline::StructuralAlgorithm::HarmonicCentrality
+                            }
+                            _ => {
+                                return Err(TriviumError::QueryExecution(
+                                    "图算法 lowering 不一致".into(),
+                                ));
+                            }
+                        };
+                        operators.push(Box::new(crate::query::pipeline::StructuralGraphOperator {
+                            mode,
+                            algorithm,
+                            label_filter: graph.label_filter.clone(),
+                            max_iterations: 20,
+                            tolerance: 1e-6,
+                        }));
                     }
                     GraphAlgorithmKind::SaPpr => {
                         operators.push(Box::new(crate::query::pipeline::SaPprOperator {
@@ -637,6 +761,51 @@ fn execute_pipeline_set<T: VectorType>(
                     label_filter: paths.label.clone(),
                 }));
                 current_name = paths.output.clone();
+            }
+            PipelineStage::WeightedPaths(paths) => {
+                if paths.input != current_name {
+                    return Err(TriviumError::QueryExecution(format!(
+                        "WEIGHTED_PATHS 输入 {} 不是当前 NodeSet {}",
+                        paths.input, current_name
+                    )));
+                }
+                operators.push(Box::new(
+                    crate::query::pipeline::WeightedShortestPathsOperator {
+                        targets: paths.targets.clone(),
+                        label_filter: paths.label.clone(),
+                    },
+                ));
+                current_name = paths.output.clone();
+            }
+            PipelineStage::YenPaths(paths) => {
+                if paths.input != current_name {
+                    return Err(TriviumError::QueryExecution(format!(
+                        "YEN_PATHS 输入 {} 不是当前 NodeSet {}",
+                        paths.input, current_name
+                    )));
+                }
+                operators.push(Box::new(
+                    crate::query::pipeline::YenKShortestPathsOperator {
+                        targets: paths.targets.clone(),
+                        label_filter: paths.label.clone(),
+                        k: paths.k,
+                    },
+                ));
+                current_name = paths.output.clone();
+            }
+            PipelineStage::NodeSimilarity(stage) => {
+                if stage.input != current_name {
+                    return Err(TriviumError::QueryExecution(format!(
+                        "NODE_SIMILARITY 输入 {} 不是当前 NodeSet {}",
+                        stage.input, current_name
+                    )));
+                }
+                operators.push(Box::new(crate::query::pipeline::NodeSimilarityOperator {
+                    label_filter: stage.label.clone(),
+                    top_k: stage.top_k,
+                    cutoff: stage.cutoff,
+                }));
+                current_name = stage.output.clone();
             }
             PipelineStage::SetCombine(combine) => {
                 if combine.input != current_name {
@@ -711,6 +880,44 @@ fn execute_pipeline_set<T: VectorType>(
                 }));
                 current_name = iterate.output.clone();
             }
+            PipelineStage::Diversify(stage) => {
+                operators.push(Box::new(crate::query::pipeline::DppDiversify {
+                    top_k: stage.top_k,
+                    quality_weight: stage.quality_weight,
+                }));
+                current_name = stage.output.clone();
+            }
+            PipelineStage::Residual(stage) => {
+                operators.push(Box::new(crate::query::pipeline::FistaResidualRecall {
+                    query: stage
+                        .vector
+                        .iter()
+                        .map(|value| T::from_f32(*value as f32))
+                        .collect(),
+                    top_k: stage.top_k,
+                    lambda: stage.lambda,
+                    threshold: stage.threshold,
+                    iterations: stage.iterations,
+                }));
+                current_name = stage.output.clone();
+            }
+            PipelineStage::Topics(stage) => {
+                operators.push(Box::new(crate::query::pipeline::NmfTopics {
+                    topics: stage.topics,
+                    iterations: stage.iterations,
+                }));
+                current_name = stage.output.clone();
+            }
+            PipelineStage::SaPpr(stage) => {
+                operators.push(Box::new(crate::query::pipeline::SaPprOperator {
+                    max_depth: stage.max_depth,
+                    restart_alpha: stage.restart_alpha,
+                    labels: stage.labels.clone(),
+                    max_edges_per_node: stage.max_edges_per_node,
+                    min_edge_weight: stage.min_edge_weight,
+                }));
+                current_name = stage.output.clone();
+            }
             PipelineStage::Filter(predicate) => {
                 let predicate = if plan
                     .merged_filter_pairs
@@ -765,7 +972,7 @@ fn execute_pipeline_set<T: VectorType>(
             }
         }
     }
-    let mut context = crate::query::pipeline::PipelineContext::new(
+    let mut context = crate::query::pipeline::PipelineContext::with_profile(
         mt,
         crate::query::pipeline::PipelineBudget {
             max_nodes: MAX_BUDGET,
@@ -786,9 +993,14 @@ fn execute_pipeline_set<T: VectorType>(
             parallelism: test_parallelism_budget(),
             ..Default::default()
         },
+        profile,
     );
     let set = crate::query::pipeline::execute_pipeline(&mut context, &operators)?;
-    Ok((set, current_name, scalar_aliases))
+    let execution_profile = profile.then_some(PipelineExecutionProfile {
+        plan,
+        metrics: context.metrics,
+    });
+    Ok((set, current_name, scalar_aliases, execution_profile))
 }
 
 fn execute_pipeline_node_query<T: VectorType>(
@@ -801,7 +1013,7 @@ fn execute_pipeline_node_query<T: VectorType>(
             "节点结果 API 无法承载标量列，请使用 tql_values (Node-only result API cannot carry scalar columns; use tql_values)".into(),
         ));
     }
-    let (set, current_name, scalar_aliases) = execute_pipeline_set(query, mt)?;
+    let (set, current_name, scalar_aliases, _) = execute_pipeline_set(query, mt, false)?;
     let mut pipeline_rows = set.rows().to_vec();
     sort_pipeline_rows(&mut pipeline_rows, &query.order_by, &scalar_aliases, mt);
     apply_offset_limit(&mut pipeline_rows, query.offset, query.limit);
@@ -864,10 +1076,16 @@ fn project_legacy_value_row<T: VectorType>(
                     row.get(var).cloned().map_or(TqlValue::Null, TqlValue::Node)
                 }
             }
-            ReturnExprKind::Property(var, field) => row
-                .get(var)
-                .and_then(|node| node.payload.get(field).cloned())
-                .map_or(TqlValue::Null, json_to_tql_value),
+            ReturnExprKind::Property(var, field) => row.get(var).map_or(TqlValue::Null, |node| {
+                if field == "id" {
+                    TqlValue::Int(node.id as i64)
+                } else {
+                    node.payload
+                        .get(field)
+                        .cloned()
+                        .map_or(TqlValue::Null, json_to_tql_value)
+                }
+            }),
             ReturnExprKind::Scalar(expr) => runtime_to_tql_value(match &query.entry {
                 QueryEntry::Find { .. } => row.get("_").map_or(RuntimeValue::Null, |node| {
                     eval_tql_expr_single(expr, node.id, mt)
@@ -914,7 +1132,7 @@ pub fn execute_tql_values_with_limits<T: VectorType>(
             .map(|row| project_legacy_value_row(query, row, mt))
             .collect();
     }
-    let (set, current_name, scalar_aliases) = execute_pipeline_set(query, mt)?;
+    let (set, current_name, scalar_aliases, _) = execute_pipeline_set(query, mt, false)?;
     let mut rows = set.rows().to_vec();
     if pipeline_has_aggregation(&query.returns) {
         let mut values =
@@ -1299,6 +1517,30 @@ fn collect_predicate_equalities(
     }
 }
 
+fn filter_is_equality_conjunction(filter: &Filter) -> bool {
+    match filter {
+        Filter::Eq(field, _) => field != "id",
+        Filter::And(filters) => {
+            !filters.is_empty() && filters.iter().all(filter_is_equality_conjunction)
+        }
+        _ => false,
+    }
+}
+
+fn collect_filter_equalities(filter: &Filter, output: &mut Vec<(String, serde_json::Value)>) {
+    match filter {
+        Filter::Eq(field, value) if field != "id" => {
+            output.push((field.clone(), value.clone()));
+        }
+        Filter::And(filters) => {
+            for filter in filters {
+                collect_filter_equalities(filter, output);
+            }
+        }
+        _ => {}
+    }
+}
+
 struct PipelinePredicateFilter {
     predicate: Predicate,
 }
@@ -1397,6 +1639,32 @@ fn eval_pipeline_row_expr<T: VectorType>(
             .graph_score
             .map(|score| RuntimeValue::Float(score.value as f64))
             .unwrap_or(RuntimeValue::Null),
+        TqlExpr::GraphMetric { metric, .. } => {
+            crate::query::pipeline::graph_metric_from_name(metric)
+                .and_then(|metric| row.graph_metric(metric))
+                .map(|score| RuntimeValue::Float(score.value as f64))
+                .unwrap_or(RuntimeValue::Null)
+        }
+        TqlExpr::TextScore { .. } => row
+            .text_score
+            .map(|score| RuntimeValue::Float(score.value as f64))
+            .unwrap_or(RuntimeValue::Null),
+        TqlExpr::DiversityScore { .. } => row
+            .diversity_score
+            .map(|score| RuntimeValue::Float(score.value as f64))
+            .unwrap_or(RuntimeValue::Null),
+        TqlExpr::ResidualScore { .. } => row
+            .residual_score
+            .map(|score| RuntimeValue::Float(score.value as f64))
+            .unwrap_or(RuntimeValue::Null),
+        TqlExpr::Topic { .. } => row
+            .topic_id
+            .map(|topic| RuntimeValue::Int(topic as i64))
+            .unwrap_or(RuntimeValue::Null),
+        TqlExpr::TopicScore { .. } => row
+            .topic_score
+            .map(|score| RuntimeValue::Float(score.value as f64))
+            .unwrap_or(RuntimeValue::Null),
         TqlExpr::Depth { .. } => row
             .provenance
             .min_depth
@@ -1423,6 +1691,18 @@ fn eval_pipeline_row_expr<T: VectorType>(
             .path
             .as_ref()
             .map(|path| RuntimeValue::Int(path.len().saturating_sub(1) as i64))
+            .unwrap_or(RuntimeValue::Null),
+        TqlExpr::PathRank { .. } => row
+            .path_rank
+            .map(|rank| RuntimeValue::Int(rank as i64))
+            .unwrap_or(RuntimeValue::Null),
+        TqlExpr::PairLeft { .. } => row
+            .pair
+            .map(|(left, _)| RuntimeValue::Int(left as i64))
+            .unwrap_or(RuntimeValue::Null),
+        TqlExpr::PairRight { .. } => row
+            .pair
+            .map(|(_, right)| RuntimeValue::Int(right as i64))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::Binary { left, op, right } => eval_binary(
             eval_pipeline_row_expr(left, row, mt),
@@ -1455,7 +1735,7 @@ fn eval_pipeline_row_predicate<T: VectorType>(
         ),
         Predicate::DocFilter { filter, .. } => mt
             .get_payload(row.id)
-            .is_some_and(|payload| filter.matches(payload)),
+            .is_some_and(|payload| filter.matches(&payload)),
         Predicate::And(left, right) => {
             eval_pipeline_row_predicate(left, row, mt)
                 && eval_pipeline_row_predicate(right, row, mt)
@@ -1557,8 +1837,7 @@ fn execute_find<T: VectorType>(
     let ordered_plan = find_ordered_find_plan(query, filter, mt);
     let ordered_output = ordered_plan.is_some();
     let candidate_limit = (query.predicate.is_none()
-        && (filter_is_single_ordered_range(filter)
-            || matches!(filter, Filter::Eq(field, _) if field != "id")))
+        && !matches!(filter, Filter::Eq(field, _) if field == "id"))
     .then_some(row_limit);
     let access_plan = ordered_plan
         .clone()
@@ -1590,7 +1869,7 @@ fn execute_find<T: VectorType>(
         };
 
         // 索引已完整覆盖简单等值条件时，只读取 Payload 供投影使用。
-        if !filter_covered && !filter.matches(payload) {
+        if !filter_covered && !filter.matches(&payload) {
             continue;
         }
 
@@ -1632,13 +1911,6 @@ fn execute_find<T: VectorType>(
 
     Ok((results, ordered_output))
 }
-fn filter_is_single_ordered_range(filter: &Filter) -> bool {
-    matches!(
-        filter,
-        Filter::Gt(..) | Filter::Gte(..) | Filter::Lt(..) | Filter::Lte(..) | Filter::Range(..)
-    )
-}
-
 fn find_ordered_find_plan<T: VectorType>(
     query: &TqlQuery,
     filter: &Filter,
@@ -1691,7 +1963,10 @@ fn execute_match<T: VectorType>(
 
     let match_plan = plan_match(pattern, mt, optional);
     let planned_pattern = &match_plan.pattern;
-    let full_scan = matches!(match_plan.access_path, AccessPath::FullNodeScan);
+    let full_scan = matches!(
+        match_plan.access_path,
+        AccessPath::FullNodeScan | AccessPath::ColdPayloadScan
+    );
     let start_candidates: Box<dyn Iterator<Item = NodeId> + '_> = if full_scan {
         Box::new(mt.active_node_ids())
     } else {
@@ -2020,7 +2295,42 @@ fn execute_search<T: VectorType>(
     mt: &MemTable<T>,
     row_limit: usize,
 ) -> Result<TqlResult<T>, TriviumError> {
-    let operators = crate::query::pipeline::lower_search_entry(vector, top_k, expand);
+    let mut operators = crate::query::pipeline::lower_search_entry(vector, top_k, expand);
+    let post_filter = if expand.is_none() {
+        query
+            .predicate
+            .as_ref()
+            .and_then(|predicate| match predicate {
+                Predicate::DocFilter { filter, .. } if filter_is_equality_conjunction(filter) => {
+                    let mut equalities = Vec::new();
+                    collect_filter_equalities(filter, &mut equalities);
+                    let candidates = if equalities.len() == 1 {
+                        mt.find_by_property_index(&equalities[0].0, &equalities[0].1)
+                    } else {
+                        mt.find_by_composite_property_index(&equalities)
+                            .map(|(_, ids)| ids)
+                            .or_else(|| mt.find_by_bitmap_intersection(&equalities))
+                    }?;
+                    Some((filter.clone(), candidates))
+                }
+                _ => None,
+            })
+    } else {
+        None
+    };
+    if let Some((filter, candidates)) = post_filter {
+        operators = vec![
+            Box::new(crate::query::pipeline::NodeIdsSource { ids: candidates }),
+            Box::new(crate::query::pipeline::ExactRerank {
+                query: vector
+                    .iter()
+                    .map(|value| T::from_f32(*value as f32))
+                    .collect(),
+                top_k: Some(top_k),
+            }),
+            Box::new(crate::query::pipeline::PayloadFilter { filter }),
+        ];
+    }
     let mut context = crate::query::pipeline::PipelineContext::new(
         mt,
         crate::query::pipeline::PipelineBudget {
@@ -2098,7 +2408,7 @@ fn eval_predicate_env<T: VectorType>(
 
             match id {
                 Some(nid) => match mt.get_payload(nid) {
-                    Some(payload) => filter.matches(payload),
+                    Some(payload) => filter.matches(&payload),
                     None => false,
                 },
                 None => false,
@@ -2126,7 +2436,7 @@ fn eval_predicate_single<T: VectorType>(pred: &Predicate, id: NodeId, mt: &MemTa
         }
 
         Predicate::DocFilter { filter, .. } => match mt.get_payload(id) {
-            Some(payload) => filter.matches(payload),
+            Some(payload) => filter.matches(&payload),
             None => false,
         },
 
@@ -2173,9 +2483,19 @@ fn eval_tql_expr<T: VectorType>(
         TqlExpr::IsNull { expr, negated } => RuntimeValue::Bool(
             matches!(eval_tql_expr(expr, env, var_map, mt), RuntimeValue::Null) != *negated,
         ),
-        TqlExpr::Path { .. } | TqlExpr::PathLength { .. } => RuntimeValue::Null,
+        TqlExpr::Path { .. }
+        | TqlExpr::PathLength { .. }
+        | TqlExpr::PathRank { .. }
+        | TqlExpr::PairLeft { .. }
+        | TqlExpr::PairRight { .. } => RuntimeValue::Null,
         TqlExpr::Similarity { .. }
         | TqlExpr::GraphScore { .. }
+        | TqlExpr::GraphMetric { .. }
+        | TqlExpr::TextScore { .. }
+        | TqlExpr::DiversityScore { .. }
+        | TqlExpr::ResidualScore { .. }
+        | TqlExpr::Topic { .. }
+        | TqlExpr::TopicScore { .. }
         | TqlExpr::Depth { .. }
         | TqlExpr::PathStrength { .. }
         | TqlExpr::PathCount { .. }
@@ -2219,12 +2539,21 @@ fn eval_tql_expr_single<T: VectorType>(
         ),
         TqlExpr::Similarity { .. }
         | TqlExpr::GraphScore { .. }
+        | TqlExpr::GraphMetric { .. }
+        | TqlExpr::TextScore { .. }
+        | TqlExpr::DiversityScore { .. }
+        | TqlExpr::ResidualScore { .. }
+        | TqlExpr::Topic { .. }
+        | TqlExpr::TopicScore { .. }
         | TqlExpr::Depth { .. }
         | TqlExpr::PathStrength { .. }
         | TqlExpr::PathCount { .. }
         | TqlExpr::Community { .. }
         | TqlExpr::Path { .. }
-        | TqlExpr::PathLength { .. } => RuntimeValue::Null,
+        | TqlExpr::PathLength { .. }
+        | TqlExpr::PathRank { .. }
+        | TqlExpr::PairLeft { .. }
+        | TqlExpr::PairRight { .. } => RuntimeValue::Null,
         TqlExpr::Property { field, .. } => {
             if field == "id" {
                 return RuntimeValue::Int(id as i64);
@@ -2350,7 +2679,7 @@ fn matches_filter_with_id<T: VectorType>(
             .any(|f| matches_filter_with_id(f, node_id, mt)),
         // 其他操作符：回退到标准 payload 匹配
         _ => match mt.get_payload(node_id) {
-            Some(payload) => filter.matches(payload),
+            Some(payload) => filter.matches(&payload),
             None => false,
         },
     }
@@ -2385,12 +2714,21 @@ fn extract_order_key<T>(expr: &TqlExpr, row: &HashMap<String, Node<T>>) -> Runti
         | TqlExpr::Parameter(_)
         | TqlExpr::Similarity { .. }
         | TqlExpr::GraphScore { .. }
+        | TqlExpr::GraphMetric { .. }
+        | TqlExpr::TextScore { .. }
+        | TqlExpr::DiversityScore { .. }
+        | TqlExpr::ResidualScore { .. }
+        | TqlExpr::Topic { .. }
+        | TqlExpr::TopicScore { .. }
         | TqlExpr::Depth { .. }
         | TqlExpr::PathStrength { .. }
         | TqlExpr::PathCount { .. }
         | TqlExpr::Community { .. }
         | TqlExpr::Path { .. }
-        | TqlExpr::PathLength { .. } => RuntimeValue::Null,
+        | TqlExpr::PathLength { .. }
+        | TqlExpr::PathRank { .. }
+        | TqlExpr::PairLeft { .. }
+        | TqlExpr::PairRight { .. } => RuntimeValue::Null,
         TqlExpr::Binary { left, op, right } => eval_binary(
             extract_order_key(left, row),
             *op,
@@ -2452,7 +2790,7 @@ fn build_node<T: VectorType>(id: NodeId, mt: &MemTable<T>) -> Option<Node<T>> {
     Some(Node {
         id,
         vector: vector.to_vec(),
-        payload: payload.clone(),
+        payload: (*payload).clone(),
         edges,
     })
 }
@@ -2486,12 +2824,21 @@ fn expr_first_var(expr: &TqlExpr) -> Option<&String> {
         TqlExpr::Variable(var)
         | TqlExpr::Similarity { var }
         | TqlExpr::GraphScore { var }
+        | TqlExpr::GraphMetric { var, .. }
+        | TqlExpr::TextScore { var }
+        | TqlExpr::DiversityScore { var }
+        | TqlExpr::ResidualScore { var }
+        | TqlExpr::Topic { var }
+        | TqlExpr::TopicScore { var }
         | TqlExpr::Depth { var }
         | TqlExpr::PathStrength { var }
         | TqlExpr::PathCount { var }
         | TqlExpr::Community { var }
         | TqlExpr::Path { var }
         | TqlExpr::PathLength { var }
+        | TqlExpr::PathRank { var }
+        | TqlExpr::PairLeft { var }
+        | TqlExpr::PairRight { var }
         | TqlExpr::Property { var, .. } => Some(var),
         TqlExpr::Binary { left, right, .. } => {
             expr_first_var(left).or_else(|| expr_first_var(right))
@@ -2519,12 +2866,21 @@ fn collect_vars_from_kind(kind: &ReturnExprKind, out: &mut Vec<String>) {
                 TqlExpr::Variable(var)
                 | TqlExpr::Similarity { var }
                 | TqlExpr::GraphScore { var }
+                | TqlExpr::GraphMetric { var, .. }
+                | TqlExpr::TextScore { var }
+                | TqlExpr::DiversityScore { var }
+                | TqlExpr::ResidualScore { var }
+                | TqlExpr::Topic { var }
+                | TqlExpr::TopicScore { var }
                 | TqlExpr::Depth { var }
                 | TqlExpr::PathStrength { var }
                 | TqlExpr::PathCount { var }
                 | TqlExpr::Community { var }
                 | TqlExpr::Path { var }
                 | TqlExpr::PathLength { var }
+                | TqlExpr::PathRank { var }
+                | TqlExpr::PairLeft { var }
+                | TqlExpr::PairRight { var }
                 | TqlExpr::Property { var, .. } => Some(var),
                 TqlExpr::Binary { left, right, .. } => {
                     expr_first_var(left).or_else(|| expr_first_var(right))
@@ -2666,12 +3022,38 @@ fn distinct_expr_value<T: VectorType>(
                     .unwrap_or(serde_json::Value::Null)
             }
         }
-        ReturnExprKind::Property(v, field) => row
-            .get(v)
-            .and_then(|node| node.payload.get(field).cloned())
-            .unwrap_or(serde_json::Value::Null),
-        ReturnExprKind::Scalar(_) => serde_json::Value::Null,
+        ReturnExprKind::Property(v, field) => row.get(v).map_or(serde_json::Value::Null, |node| {
+            if field == "id" {
+                serde_json::json!(node.id)
+            } else {
+                node.payload
+                    .get(field)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null)
+            }
+        }),
+        ReturnExprKind::Scalar(expr) => distinct_scalar_expr_value(row, expr),
         ReturnExprKind::Aggregate(_, _) => serde_json::Value::Null,
+    }
+}
+
+fn distinct_scalar_expr_value<T: VectorType>(
+    row: &HashMap<String, Node<T>>,
+    expr: &TqlExpr,
+) -> serde_json::Value {
+    match expr {
+        TqlExpr::Property { var, field } => row.get(var).map_or(serde_json::Value::Null, |node| {
+            if field == "id" {
+                serde_json::json!(node.id)
+            } else {
+                node.payload
+                    .get(field)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null)
+            }
+        }),
+        TqlExpr::Literal(literal) => tql_literal_to_json(literal),
+        _ => serde_json::Value::Null,
     }
 }
 
@@ -2891,9 +3273,16 @@ fn resolve_inner_json<T: VectorType>(
 ) -> Option<serde_json::Value> {
     match inner {
         ReturnExprKind::Var(v) => row.get(v).map(|n| serde_json::json!(n.id)),
-        ReturnExprKind::Property(v, field) => {
-            row.get(v).and_then(|node| node.payload.get(field).cloned())
-        }
+        ReturnExprKind::Property(v, field) => row.get(v).map(|node| {
+            if field == "id" {
+                serde_json::json!(node.id)
+            } else {
+                node.payload
+                    .get(field)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null)
+            }
+        }),
         _ => None,
     }
 }
@@ -2940,7 +3329,7 @@ fn collect_cross_modal_origins(
 fn generate_explain_plan<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
-    actual: Option<(usize, f64)>,
+    actual: Option<(usize, f64, Option<PipelineExecutionProfile>)>,
 ) -> TqlResult<T> {
     let mut plan = serde_json::Map::new();
 
@@ -2963,6 +3352,10 @@ fn generate_explain_plan<T: VectorType>(
             };
             ("SEARCH".to_string(), detail)
         }
+        QueryEntry::Text { clause } => (
+            format!("TEXT {:?}", clause.kind),
+            format!("TOP {}", clause.top_k),
+        ),
     };
     plan.insert("entry".into(), serde_json::json!(entry_type));
     plan.insert("detail".into(), serde_json::json!(entry_detail));
@@ -2984,7 +3377,9 @@ fn generate_explain_plan<T: VectorType>(
             let planned = plan_match(pattern, mt, true);
             (planned.access_path, planned.estimated_rows, false)
         }
-        QueryEntry::Search { .. } => (AccessPath::FullNodeScan, mt.node_count(), false),
+        QueryEntry::Search { .. } | QueryEntry::Text { .. } => {
+            (AccessPath::FullNodeScan, mt.node_count(), false)
+        }
     };
     plan.insert(
         "access_path".into(),
@@ -3002,12 +3397,16 @@ fn generate_explain_plan<T: VectorType>(
         AccessPath::BitmapPropertyIndex { fields } => {
             format!("bitmap_property_index ({})", fields.join(", "))
         }
+        AccessPath::NgramPropertyIndex { field } => {
+            format!("ngram_property_index ({field})")
+        }
         AccessPath::PropertyIndexIntersection { fields } => {
             format!("property_index_intersection ({})", fields.join(", "))
         }
         AccessPath::EdgeLabelIndex { labels } => {
             format!("label_index pushdown (labels: [{}])", labels.join(", "))
         }
+        AccessPath::ColdPayloadScan => "cold_payload_scan".to_owned(),
         AccessPath::FullNodeScan => "full_scan".to_owned(),
     };
     plan.insert("candidate_strategy".into(), serde_json::json!(strategy));
@@ -3140,6 +3539,7 @@ fn generate_explain_plan<T: VectorType>(
         access_path,
         AccessPath::PropertyIndex { .. }
             | AccessPath::OrderedPropertyIndex { .. }
+            | AccessPath::NgramPropertyIndex { .. }
             | AccessPath::PropertyIndexIntersection { .. }
     ) {
         optimizations.push("property index candidates");
@@ -3207,10 +3607,48 @@ fn generate_explain_plan<T: VectorType>(
             }),
         );
     }
-    if let Some((actual_rows, elapsed_ms)) = actual {
+    if let Some((actual_rows, elapsed_ms, pipeline_profile)) = actual {
         plan.insert("analyze".into(), serde_json::json!(true));
         plan.insert("actual_rows".into(), serde_json::json!(actual_rows));
         plan.insert("elapsed_ms".into(), serde_json::json!(elapsed_ms));
+        if let Some(profile) = pipeline_profile {
+            plan.insert(
+                "planning_profile".into(),
+                serde_json::to_value(&profile.plan.planning_profile)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            plan.insert(
+                "estimated_memo_bytes".into(),
+                serde_json::json!(profile.plan.estimated_memo_bytes),
+            );
+            let stages = profile
+                .metrics
+                .iter()
+                .enumerate()
+                .map(|(index, metrics)| {
+                    let planned = profile.plan.stages.get(index);
+                    let estimated_rows = planned.map_or(0, |stage| stage.estimated_rows);
+                    let error_ratio = if estimated_rows == 0 {
+                        None
+                    } else {
+                        Some(metrics.output_rows as f64 / estimated_rows as f64)
+                    };
+                    serde_json::json!({
+                        "operator": metrics.operator,
+                        "input_rows": metrics.input_rows,
+                        "actual_rows": metrics.output_rows,
+                        "estimated_rows": estimated_rows,
+                        "estimate_error_ratio": error_ratio,
+                        "elapsed_ns": metrics.elapsed_ns,
+                        "node_set_bytes": metrics.node_set_bytes,
+                        "vector_read_bytes": metrics.vector_read_bytes,
+                        "estimate_source": planned.map(|stage| stage.estimate_source),
+                        "estimate_confidence": planned.map(|stage| stage.estimate_confidence),
+                    })
+                })
+                .collect::<Vec<_>>();
+            plan.insert("pipeline_stage_actuals".into(), serde_json::json!(stages));
+        }
     } else {
         plan.insert("analyze".into(), serde_json::json!(false));
     }
@@ -3276,12 +3714,21 @@ fn format_tql_expr(expr: &TqlExpr) -> String {
         TqlExpr::Property { var, field } => format!("{var}.{field}"),
         TqlExpr::Similarity { var } => format!("similarity({var})"),
         TqlExpr::GraphScore { var } => format!("graph_score({var})"),
+        TqlExpr::GraphMetric { var, metric } => format!("{metric}({var})"),
+        TqlExpr::TextScore { var } => format!("text_score({var})"),
+        TqlExpr::DiversityScore { var } => format!("diversity_score({var})"),
+        TqlExpr::ResidualScore { var } => format!("residual_score({var})"),
+        TqlExpr::Topic { var } => format!("topic({var})"),
+        TqlExpr::TopicScore { var } => format!("topic_score({var})"),
         TqlExpr::Depth { var } => format!("depth({var})"),
         TqlExpr::PathStrength { var } => format!("path_strength({var})"),
         TqlExpr::PathCount { var } => format!("path_count({var})"),
         TqlExpr::Community { var } => format!("community({var})"),
         TqlExpr::Path { var } => format!("path({var})"),
         TqlExpr::PathLength { var } => format!("path_length({var})"),
+        TqlExpr::PathRank { var } => format!("path_rank({var})"),
+        TqlExpr::PairLeft { var } => format!("pair_left({var})"),
+        TqlExpr::PairRight { var } => format!("pair_right({var})"),
         TqlExpr::Parameter(name) => format!("${name}"),
         TqlExpr::Binary { left, op, right } => format!(
             "({} {:?} {})",
@@ -3405,6 +3852,9 @@ pub fn execute_tql_mutation<T: VectorType>(
     match &mutation.action {
         MutationAction::Create(create) => execute_create(create, &mutation.source, mt),
         MutationAction::Set(assignments) => execute_set(assignments, &mutation.source, mt),
+        MutationAction::SetVector { var, vector } => {
+            execute_set_vector(var, vector, &mutation.source, mt)
+        }
         MutationAction::Delete { vars, detach } => {
             execute_delete(vars, *detach, &mutation.source, mt)
         }
@@ -3474,6 +3924,42 @@ fn execute_create<T: VectorType>(
     }
 
     Ok(ops)
+}
+
+fn execute_set_vector<T: VectorType>(
+    var: &str,
+    vector: &[f64],
+    source: &Option<MutationSource>,
+    mt: &MemTable<T>,
+) -> Result<Vec<MutationOp<T>>, TriviumError> {
+    if vector.len() != mt.dim() {
+        return Err(TriviumError::DimensionMismatch {
+            expected: mt.dim(),
+            got: vector.len(),
+        });
+    }
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(TriviumError::InvalidVector {
+            reason: "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)".into(),
+        });
+    }
+    let source = source.as_ref().ok_or_else(|| {
+        TriviumError::QueryParse("SET VECTOR requires a preceding MATCH clause".into())
+    })?;
+    let query = build_match_query(&source.pattern, source.predicate.as_ref());
+    let results = execute_tql_with_limits(&query, mt, TqlLimits::UNLIMITED)?;
+    let converted = vector
+        .iter()
+        .map(|value| T::from_f32(*value as f32))
+        .collect::<Vec<_>>();
+    Ok(results
+        .iter()
+        .filter_map(|row| row.get(var))
+        .map(|node| MutationOp::UpdateVector {
+            id: node.id,
+            vector: converted.clone(),
+        })
+        .collect())
 }
 
 /// SET 指令生成

@@ -63,6 +63,10 @@ pub struct Config {
     pub expected_nodes: Option<usize>,
     /// TriviumDB 内核内存预算（字节），0 表示不限制。
     pub memory_limit: usize,
+    /// Payload 解析缓存总字节上限，0 表示禁用缓存。
+    pub payload_cache_bytes: usize,
+    /// 单条 Payload 可进入解析缓存的最大估算字节数。
+    pub payload_cache_entry_bytes: usize,
     pub access_mode: AccessMode,
     pub missing_index_policy: MissingIndexPolicy,
     /// TQL 默认结果行上限；None 按风险分级，Some(0) 不设默认上限。
@@ -81,6 +85,8 @@ impl Default for Config {
             load_text_index: false,
             expected_nodes: None,
             memory_limit: 0,
+            payload_cache_bytes: 64 * 1024 * 1024,
+            payload_cache_entry_bytes: 8 * 1024 * 1024,
             access_mode: AccessMode::ReadWrite,
             missing_index_policy: MissingIndexPolicy::Fallback,
             max_query_rows: None,

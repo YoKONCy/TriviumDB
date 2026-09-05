@@ -6,6 +6,7 @@ pub const DIM: usize = 4;
 pub const ALL_ROLES: &[FileRole] = &[
     FileRole::Tdb,
     FileRole::Vec,
+    FileRole::Payload,
     FileRole::FlushMarker,
     FileRole::Wal,
     FileRole::PropertyIndex,
@@ -25,7 +26,16 @@ pub fn path(name: &str) -> String {
         .into_owned()
 }
 
+fn payload_generation_path(path: &str) -> Option<String> {
+    let marker = std::fs::read(format!("{path}.flush_ok")).ok()?;
+    let generation = u64::from_le_bytes(marker.get(5..13)?.try_into().ok()?);
+    Some(format!("{path}.pld.{generation}"))
+}
+
 pub fn cleanup(path: &str) {
+    if let Some(payload) = payload_generation_path(path) {
+        std::fs::remove_file(payload).ok();
+    }
     for role in ALL_ROLES {
         std::fs::remove_file(format!("{path}{}", role.suffix())).ok();
     }
@@ -33,6 +43,7 @@ pub fn cleanup(path: &str) {
         ".lock",
         ".tmp",
         ".vec.tmp",
+        ".pld.tmp",
         ".pidx.tmp",
         ".gidx.tmp",
         ".ready",
@@ -70,6 +81,14 @@ pub fn seed(name: &str) -> String {
 pub fn copy_roles(source: &str, target: &str, roles: &[FileRole]) {
     cleanup(target);
     for role in roles {
+        if *role == FileRole::Payload {
+            if let Some(source_file) = payload_generation_path(source) {
+                let marker = std::fs::read(format!("{source}.flush_ok")).unwrap();
+                let generation = u64::from_le_bytes(marker[5..13].try_into().unwrap());
+                std::fs::copy(source_file, format!("{target}.pld.{generation}")).unwrap();
+            }
+            continue;
+        }
         let source_file = format!("{source}{}", role.suffix());
         if std::path::Path::new(&source_file).exists() {
             std::fs::copy(source_file, format!("{target}{}", role.suffix())).unwrap();
@@ -78,13 +97,20 @@ pub fn copy_roles(source: &str, target: &str, roles: &[FileRole]) {
 }
 
 pub fn directory_snapshot(path: &str) -> BTreeMap<String, Vec<u8>> {
-    ALL_ROLES
+    let mut snapshot = ALL_ROLES
         .iter()
+        .filter(|role| **role != FileRole::Payload)
         .filter_map(|role| {
             let file = format!("{path}{}", role.suffix());
             std::fs::read(&file).ok().map(|bytes| (file, bytes))
         })
-        .collect()
+        .collect::<BTreeMap<_, _>>();
+    if let Some(file) = payload_generation_path(path)
+        && let Ok(bytes) = std::fs::read(&file)
+    {
+        snapshot.insert(file, bytes);
+    }
+    snapshot
 }
 
 pub fn assert_read_only_zero_write(path: &str) {

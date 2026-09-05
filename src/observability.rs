@@ -20,6 +20,21 @@ pub struct IndexMemoryStats {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PayloadMemoryStats {
+    pub directory_bytes: usize,
+    pub delta_raw_bytes: usize,
+    pub parsed_cache_bytes: usize,
+    pub parsed_cache_entries: usize,
+    pub pinned_cache_entries: usize,
+    pub mapped_file_bytes: usize,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_evictions: u64,
+    pub payload_lookups: u64,
+    pub payload_parsed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct StorageWriteStats {
     pub wal_bytes: u64,
     pub sidecar_bytes: u64,

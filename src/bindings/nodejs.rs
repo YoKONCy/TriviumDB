@@ -172,6 +172,9 @@ pub mod nodejs {
             crate::error::TriviumError::QueryParse(_) => "TDB_QUERY_PARSE",
             crate::error::TriviumError::QueryExecution(_) => "TDB_QUERY_EXECUTION",
             crate::error::TriviumError::QueryRowBudgetExceeded { .. } => "TDB_QUERY_BUDGET",
+            crate::error::TriviumError::PayloadQueryBudgetExceeded { .. } => {
+                "TDB_PAYLOAD_BUDGET_EXCEEDED"
+            }
             crate::error::TriviumError::DimensionMismatch { .. } => "TDB_DIMENSION_MISMATCH",
             crate::error::TriviumError::NodeNotFound(_) => "TDB_NODE_NOT_FOUND",
             crate::error::TriviumError::HookExecutionError(_) => "TDB_HOOK_EXECUTION",
@@ -441,6 +444,8 @@ pub mod nodejs {
         pub load_text_index: Option<bool>,
         pub expected_nodes: Option<f64>,
         pub memory_limit_mb: Option<f64>,
+        pub payload_cache_mb: Option<f64>,
+        pub payload_cache_entry_mb: Option<f64>,
         pub access_mode: Option<String>,
         pub missing_index_policy: Option<String>,
         pub max_query_rows: Option<f64>,
@@ -820,6 +825,8 @@ pub mod nodejs {
                     load_text_index: None,
                     expected_nodes: None,
                     memory_limit_mb: None,
+                    payload_cache_mb: None,
+                    payload_cache_entry_mb: None,
                     access_mode: None,
                     missing_index_policy: None,
                     max_query_rows: None,
@@ -840,6 +847,17 @@ pub mod nodejs {
             let memory_limit = memory_limit_mb
                 .checked_mul(1024 * 1024)
                 .ok_or_else(|| napi::Error::from_reason("memoryLimitMb 换算字节时溢出"))?;
+            let mb_to_bytes = |value: Option<f64>, name: &str, default_mb: usize| {
+                value
+                    .map(|value| parse_safe_usize(value, name))
+                    .transpose()?
+                    .unwrap_or(default_mb)
+                    .checked_mul(1024 * 1024)
+                    .ok_or_else(|| napi::Error::from_reason(format!("{name} 换算字节时溢出")))
+            };
+            let payload_cache_bytes = mb_to_bytes(options.payload_cache_mb, "payloadCacheMb", 64)?;
+            let payload_cache_entry_bytes =
+                mb_to_bytes(options.payload_cache_entry_mb, "payloadCacheEntryMb", 8)?;
             let max_query_rows = options
                 .max_query_rows
                 .map(|value| parse_safe_usize(value, "maxQueryRows"))
@@ -852,6 +870,8 @@ pub mod nodejs {
                 load_text_index: options.load_text_index.unwrap_or(false),
                 expected_nodes,
                 memory_limit,
+                payload_cache_bytes,
+                payload_cache_entry_bytes,
                 access_mode: parse_access_mode(options.access_mode.as_deref())?,
                 missing_index_policy: parse_missing_index_policy(
                     options.missing_index_policy.as_deref(),
@@ -1427,6 +1447,26 @@ pub mod nodejs {
                         .map_err(|e| napi::Error::from_reason(e.to_string()))
                 }
             }
+        }
+
+        #[napi]
+        pub fn delete_many_atomic(&mut self, ids: Vec<f64>) -> napi::Result<u32> {
+            let ids = ids.into_iter().map(|id| id as u64).collect::<Vec<_>>();
+            let deleted =
+                dispatch!(self, mut db => db.delete_many_atomic(&ids)).map_err(to_napi_error)?;
+            u32::try_from(deleted).map_err(|_| napi::Error::from_reason("删除数量超出 u32"))
+        }
+
+        #[napi]
+        pub fn compare_and_set_payload_field(
+            &mut self,
+            id: f64,
+            field: String,
+            expected: serde_json::Value,
+            replacement: serde_json::Value,
+        ) -> napi::Result<()> {
+            dispatch!(self, mut db => db.compare_and_set_payload_field(id as u64, &field, &expected, replacement))
+                .map_err(to_napi_error)
         }
 
         /// 删除节点（三层原子联删：向量 + Payload + 所有关联边）
@@ -2080,6 +2120,62 @@ pub mod nodejs {
         /// ```js
         /// db.createIndex('name')   // 之后 tql('FIND {name: "Alice"} RETURN *') 使用 O(1) 索引
         /// ```
+        #[napi]
+        pub fn indexed_lookup(
+            &self,
+            equalities: serde_json::Value,
+            max_results: Option<u32>,
+        ) -> napi::Result<Vec<f64>> {
+            let object = equalities.as_object().ok_or_else(|| {
+                napi::Error::from_reason("equalities 必须是对象 (equalities must be an object)")
+            })?;
+            let equalities = object
+                .iter()
+                .map(|(field, value)| (field.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            dispatch!(self, db => db.indexed_lookup(&equalities, max_results.unwrap_or(10_000) as usize))
+                .map(|ids| ids.into_iter().map(|id| id as f64).collect())
+                .map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn create_ngram_index(&mut self, field: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.create_ngram_index(&field)).map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn drop_ngram_index(&mut self, field: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.drop_ngram_index(&field)).map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn substring_lookup(
+            &self,
+            field: String,
+            needle: String,
+            max_results: Option<u32>,
+        ) -> napi::Result<Vec<f64>> {
+            dispatch!(self, db => db.substring_lookup(&field, &needle, max_results.unwrap_or(10_000) as usize))
+                .map(|ids| ids.into_iter().map(|id| id as f64).collect())
+                .map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn create_unique_index(&mut self, field: String) -> napi::Result<()> {
+            dispatch!(self, mut db => db.create_unique_index(&field)).map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn create_unique_composite_index(&mut self, fields: Vec<String>) -> napi::Result<()> {
+            dispatch!(self, mut db => db.create_unique_composite_index(&fields))
+                .map_err(to_napi_error)
+        }
+
+        #[napi]
+        pub fn list_unique_indexes(&self) -> Vec<Vec<String>> {
+            dispatch!(self, db => db.list_unique_indexes())
+        }
+
         #[napi]
         pub fn create_index(&mut self, field: String) -> napi::Result<()> {
             dispatch!(self, mut db => db.create_index(&field)).map_err(to_napi_error)

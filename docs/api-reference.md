@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: v0.8.5
+> **版本**: v0.8.6
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -67,11 +67,13 @@ with triviumdb.TriviumDB("my_data.tdb", dim=1536) as db:
 | `auto_build_quiver` | `bool` | `True` | 是否允许查询准备阶段自动构建 QuIVer；纯 `flush()` 不构建 ANN |
 | `expected_nodes` | `int \| None` | `None` | 预计总节点数；仅预留核心容器、不持久化、不是硬上限 |
 | `memory_limit_mb` | `int` | `0` | TriviumDB 内核内存预算（MiB）；0 表示不限制 |
+| `payload_cache_mb` | `int` | `64` | Payload 解析缓存总预算（MiB）；0 表示禁用，淘汰不影响结果 |
+| `payload_cache_entry_mb` | `int` | `8` | 单条解析后 Payload 可进入缓存的最大估算大小（MiB）；超大条目不驻留 |
 | `access_mode` | `str` | `"read_write"` | `read_write` 使用排他锁；`read_only` 使用共享锁；`immutable` 验证 manifest 后无锁打开 |
 
 `search_with_context` / `searchWithContext` 返回的上下文除阶段耗时和候选数外，还包含 `observations`：`estimated_heap_bytes`、`mmap_vector_bytes`、`node_count`、查询路由与 QuIVer `ef_search`；Linux 额外提供进程 RSS、累计主缺页和次缺页。缺页计数是进程累计值，调用方应计算相邻采样差值。
 
-> ⚠️ **强烈建议 `dim <= 3072`。** 数据库存储和精确 BruteForce 检索支持 3073–65536 维，但 QuIVer 仅支持 1–3072 维。高于 3072 维时，自动 QuIVer 构建会被安全跳过，搜索回退到 BruteForce；显式构建 QuIVer 会返回错误，不会 panic。若数据规模可能达到 1 万节点以上并依赖 ANN 性能，请在建库前选择不超过 3072 维的 embedding 模型或先做降维。
+> ⚠️ **强烈建议 `dim <= 3072`。** 数据库存储和精确 BruteForce 检索支持 3073–65536 维，但 QuIVer 仅支持 1–3072 维。高于 3072 维时，自动 QuIVer 构建会被安全跳过，搜索回退到 BruteForce；显式构建 QuIVer 会返回错误，不会 panic。若数据规模可能达到当前维度的动态 QuIVer 阈值并依赖 ANN 性能，请在建库前选择不超过 3072 维的 embedding 模型或先做降维。
 
 ### 只读访问模式
 
@@ -97,7 +99,7 @@ Rust 可使用 `Database::<f32>::open_read_only(path, dim)`，或在 `Config` �
 - 不创建数据库、WAL、sidecar 或一致性标记；
 - 不截断、回放或清理 WAL；检测到待恢复 WAL 时返回 `RecoveryRequired`；
 - 不删除损坏或错配的 TextIndex/QuIVer sidecar；
-- `.tdb/.vec/.flush_ok` 代际不完整时拒绝打开，不执行 metadata-only 降级；
+- `.tdb/.vec/.pld.<generation>/.flush_ok` 代际不完整时拒绝打开，不执行 metadata-only 降级；
 - 禁止 CRUD、事务提交、TQL mutation、索引修改、QuIVer 构建、flush 和 compact；
 - `close()` 和 Drop 不执行持久化；
 - QuIVer 不可用时保持内存只读并走安全检索路径，不写回磁盘。
@@ -112,7 +114,7 @@ Writer 可在完成持久化后原子生成 generation manifest：
 db.publish_generation_manifest("generation-42")?;
 ```
 
-Python 使用 `db.publish_generation_manifest("generation-42")`，Node.js 使用 `db.publishGenerationManifest("generation-42")`。该操作会先执行安全 `flush()`，随后为当前 `.tdb`、`.vec`、`.flush_ok` 及已存在的 TextIndex/QuIVer sidecar 记录文件大小和 CRC32，并最后原子发布 `<path>.manifest.json`。
+Python 使用 `db.publish_generation_manifest("generation-42")`，Node.js 使用 `db.publishGenerationManifest("generation-42")`。该操作会先执行安全 `flush()`，随后为当前 `.tdb`、`.vec`、`.pld.<generation>`、`.flush_ok` 及已存在的 TextIndex/QuIVer sidecar 记录文件大小和 CRC32，并最后原子发布 `<path>.manifest.json`。
 
 发布完成后可在不需要 `.lock` 和 `.wal` 的部署目录中使用：
 
@@ -298,6 +300,8 @@ const db = new TriviumDB('my_data.tdb', {
   storageMode: 'mmap',
   expectedNodes: 3_600_000,
   memoryLimitMb: 28 * 1024,
+  payloadCacheMb: 64,
+  payloadCacheEntryMb: 8,
   autoBuildQuiver: false,
 })
 db.reserveNodes(200_000)
@@ -749,7 +753,7 @@ let results = db.search_batch(
 
 ### search_advanced — 认知管线检索
 
-内置认知管线的全功能入口。通过 `SearchConfig` 参数化控制 FISTA 残差寻隐、SA-PPR 有限深度扩散、DPP 多样性采样等高级特性。SA-PPR 是带个性化重启的有限深度 Spreading Activation，不是迭代至收敛的标准 PageRank。
+内置认知管线的全功能便利入口。通过 `SearchConfig` 参数化控制 AC+BM25 文本召回、FISTA 残差寻隐、SA-PPR 有限深度扩散、DPP 多样性采样与疲劳不应期等高级特性。各组件仍可独立启停，但执行顺序是官方固定模板；需要自由改变无状态组件顺序时，使用 TQL 的 `TEXT`、`RESIDUAL`、`SA_PPR_CONFIG`、`DIVERSIFY` 和 `TOPICS`。两条入口共享底层算法，不是替代关系。SA-PPR 是带个性化重启的有限深度 Spreading Activation，不是迭代至收敛的标准 PageRank。
 
 **Python：**
 ```python
@@ -832,7 +836,9 @@ let results = db.search_advanced(&query_vec, &config)?;
 | `custom_query_text` | `str`| `None` | (可选) 手动传入用于文本匹配的原始文本 |
 | `force_brute_force` | `bool` | `false`| 强制使用暴力搜索，禁用 QuIVer 图索引（用于基准测试和需要精确结果的场景） |
 
-> 💡 所有参数均内置安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]。传入越界值不会崩溃，而是被静默钳平。
+> `search_advanced()` 提供“组件可开关、顺序固定”的便利模板：文本/向量召回 → FISTA 残差 → SA-PPR → Payload 过滤 → DPP。TQL 提供“组件与顺序均可编排”的无状态管线，并增加 NMF 主题分配；Refractory Fatigue 和 Hook 仍保留在高级 API，因为它们具有状态或回调语义。
+
+> 所有参数均执行安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]。
 
 > 💡 当 `enable_advanced_pipeline = false` 时，`search_advanced` 的行为与 `search` 完全一致。
 
@@ -1417,8 +1423,10 @@ TriviumDB v0.7.0 起采用自研的 **QuIVer** SOTA 级 ANN 图索引，全自�
 
 | 条件 | 检索引擎 | 召回行为 |
 |------|----------|----------|
-| < 1 万节点 或 QuIVer 未就绪 | **BruteForce** | 100% 精确召回，零误差 |
-| ≥ 1 万节点 + 索引就绪 | **QuIVer (BQ + Vamana)** | BQ 签名 + 图导航 + f32 精排，Recall@10 > 97% |
+| 低于当前维度的动态阈值 或 QuIVer 未就绪 | **BruteForce** | 100% 精确召回，零误差 |
+| 达到动态阈值 + 索引就绪 | **QuIVer (BQ + Vamana)** | BQ 签名 + 图导航 + f32 精排，Recall@10 > 97% |
+
+自动阈值按 `ceil(8,000,000 / dim)` 计算并限制在 2,500–10,000 节点；384/768 维为 10,000，1024 维约 7,813，1536 维约 5,209，3072 维约 2,605。
 
 QuIVer 索引支持增量 Insert/Delete/Update，无需全量重建。索引以 `.tdb.quiver` 持久化，并通过 `.tdb.quiver.meta` 的主数据代际、文件尺寸、节点数、维度与 CRC 校验后 mmap 加载。TextIndex 对应 `.tdb.text` 和 `.tdb.text.meta`。
 

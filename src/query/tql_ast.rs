@@ -39,15 +39,77 @@ pub struct RankClause {
     pub top_k: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextSearchKind {
+    Bm25,
+    Ac,
+    Hybrid,
+}
+
+#[derive(Debug, Clone)]
+pub struct TextSearchClause {
+    pub kind: TextSearchKind,
+    pub query: String,
+    pub top_k: usize,
+    pub k1: f32,
+    pub b: f32,
+    pub ac_weight: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiversifyStage {
+    pub input: String,
+    pub output: String,
+    pub top_k: usize,
+    pub quality_weight: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResidualStage {
+    pub input: String,
+    pub output: String,
+    pub vector: Vec<f64>,
+    pub top_k: usize,
+    pub lambda: f32,
+    pub threshold: f32,
+    pub iterations: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct TopicsStage {
+    pub input: String,
+    pub output: String,
+    pub topics: usize,
+    pub iterations: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SaPprStage {
+    pub input: String,
+    pub output: String,
+    pub max_depth: usize,
+    pub restart_alpha: f32,
+    pub max_edges_per_node: usize,
+    pub min_edge_weight: f32,
+    pub labels: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone)]
 pub enum PipelineStage {
     With(WithStage),
     Expand(PipelineExpandStage),
     Filter(Predicate),
     Rank(RankClause),
+    Diversify(DiversifyStage),
+    Residual(ResidualStage),
+    Topics(TopicsStage),
+    SaPpr(SaPprStage),
     GraphAlgorithm(GraphAlgorithmStage),
     AllPaths(AllPathsStage),
     ShortestPaths(ShortestPathsStage),
+    WeightedPaths(WeightedPathsStage),
+    YenPaths(YenPathsStage),
+    NodeSimilarity(NodeSimilarityStage),
     SetCombine(SetCombineStage),
     Iterate(IterateStage),
 }
@@ -60,6 +122,27 @@ pub enum GraphAlgorithmKind {
     LabelPropagation,
     Leiden,
     SaPpr,
+    Scc,
+    KCore,
+    ArticulationPoints,
+    TriangleCount,
+    Hits,
+    HarmonicCentrality,
+}
+
+#[derive(Debug, Clone)]
+pub enum GraphSubsetSpec {
+    Induced,
+    Expand {
+        hops: usize,
+        labels: Option<Vec<String>>,
+        direction: EdgeDirection,
+    },
+    Boundary {
+        hops: usize,
+        labels: Option<Vec<String>>,
+        direction: EdgeDirection,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +150,8 @@ pub struct GraphAlgorithmStage {
     pub input: String,
     pub output: String,
     pub algorithm: GraphAlgorithmKind,
+    pub subset: GraphSubsetSpec,
+    pub label_filter: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +196,32 @@ pub struct ShortestPathsStage {
     pub input: String,
     pub output: String,
     pub targets: Vec<u64>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WeightedPathsStage {
+    pub input: String,
+    pub output: String,
+    pub targets: Vec<u64>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct YenPathsStage {
+    pub input: String,
+    pub output: String,
+    pub targets: Vec<u64>,
+    pub k: usize,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeSimilarityStage {
+    pub input: String,
+    pub output: String,
+    pub top_k: usize,
+    pub cutoff: f64,
     pub label: Option<String>,
 }
 
@@ -160,6 +271,8 @@ pub enum QueryEntry {
         top_k: usize,
         expand: Option<ExpandClause>,
     },
+    /// BM25、AC 或两者相加的文本召回入口。
+    Text { clause: TextSearchClause },
 }
 
 /// 图路径模式：交替的节点模式和边模式
@@ -274,6 +387,18 @@ pub enum TqlExpr {
     Similarity { var: String },
     /// 图算法分数列。
     GraphScore { var: String },
+    /// 指定算法的有界命名图指标。
+    GraphMetric { var: String, metric: String },
+    /// 文本召回分数列。
+    TextScore { var: String },
+    /// DPP 选择时的边际多样性分数。
+    DiversityScore { var: String },
+    /// FISTA 残差召回分数。
+    ResidualScore { var: String },
+    /// NMF 主导主题编号。
+    Topic { var: String },
+    /// NMF 主导主题权重。
+    TopicScore { var: String },
     /// 图扩展最小深度。
     Depth { var: String },
     /// 有界路径强度。
@@ -286,6 +411,12 @@ pub enum TqlExpr {
     Path { var: String },
     /// 当前行携带路径的边数。
     PathLength { var: String },
+    /// Yen 路径排名，从 1 开始。
+    PathRank { var: String },
+    /// PairSet 左节点 ID。
+    PairLeft { var: String },
+    /// PairSet 右节点 ID。
+    PairRight { var: String },
     /// 字面量值
     Literal(TqlLiteral),
 }
@@ -408,6 +539,8 @@ pub enum MutationAction {
     Create(CreateAction),
     /// SET a.name = "Bob", a.age = 30
     Set(Vec<SetAssignment>),
+    /// SET VECTOR(a) = [0.1, 0.2]
+    SetVector { var: String, vector: Vec<f64> },
     /// DELETE a
     Delete { vars: Vec<String>, detach: bool },
 }
