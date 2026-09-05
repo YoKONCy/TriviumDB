@@ -122,7 +122,7 @@ jobs:
           cargo check --lib --features nodejs
           cargo test --workspace -- --test-threads=1
           cargo clippy --workspace --all-targets -- -D warnings
-          npm ci
+          npm install --no-audit --no-fund
           npx --yes --package typescript tsc --noEmit --skipLibCheck triviumdb.d.ts
 
   # ═══════════════════════════════════════════════════════════
