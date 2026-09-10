@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "triviumdb"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "aho-corasick",
  "bincode",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "triviumdb-cli"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2513,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "triviumdb-server"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "async-stream",
  "axum",

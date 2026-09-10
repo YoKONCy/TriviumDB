@@ -1,5 +1,8 @@
 use serde_json::json;
 use triviumdb::Database;
+use triviumdb::filter::{ComparableValue, Filter, RangeOp};
+use triviumdb::query::planner::{AccessPath, plan_filter_with_limit};
+use triviumdb::storage::memtable::MemTable;
 
 const DIM: usize = 4;
 
@@ -28,6 +31,7 @@ fn build(name: &str) -> (String, Database<f32>) {
             .insert(
                 &[sequence as f32, 0.0, 0.0, 0.0],
                 json!({
+                    "sequence": sequence,
                     "group": format!("group_{}", sequence % 10),
                     "rare": format!("rare_{sequence}"),
                     "side": if sequence == 199 { "target" } else { "source" },
@@ -188,6 +192,84 @@ fn planner_复合与_bitmap_访问路径和扫描结果一致() {
         r#"EXPLAIN FIND {$or: [{group: "group_1"}, {group: "group_3"}]} RETURN *"#,
     );
     assert_eq!(bitmap["access_path"]["kind"], "bitmap_property_index");
+
+    drop(db);
+    cleanup(&path);
+}
+
+#[test]
+fn planner_find_limit_保留安全提前停止且不截断残余过滤() {
+    let mut mt = MemTable::<f32>::new(DIM);
+    for sequence in 0..200usize {
+        mt.insert(
+            &[sequence as f32, 0.0, 0.0, 0.0],
+            json!({
+                "sequence": sequence,
+                "group": format!("group_{}", sequence % 10),
+                "side": if sequence == 199 { "target" } else { "source" },
+            }),
+        )
+        .unwrap();
+    }
+
+    let unindexed =
+        plan_filter_with_limit(&Filter::Eq("group".into(), json!("group_1")), Some(10), &mt);
+    assert!(matches!(unindexed.access_path, AccessPath::FullNodeScan));
+    assert!(unindexed.candidates.is_empty());
+
+    mt.register_ordered_property_index("sequence");
+    let range = Filter::Range(
+        "sequence".into(),
+        RangeOp::Gte,
+        ComparableValue::Number(0.into()),
+    );
+    let ordered = plan_filter_with_limit(&range, Some(10), &mt);
+    assert!(matches!(
+        ordered.access_path,
+        AccessPath::OrderedPropertyIndex { .. }
+    ));
+    assert_eq!(ordered.candidates.len(), 10);
+
+    let residual_filter = Filter::And(vec![range, Filter::Eq("side".into(), json!("target"))]);
+    let residual = plan_filter_with_limit(&residual_filter, Some(1), &mt);
+    assert!(matches!(
+        residual.access_path,
+        AccessPath::OrderedPropertyIndex { .. }
+    ));
+    assert_eq!(residual.candidates.len(), 200);
+    assert_eq!(
+        residual
+            .candidates
+            .iter()
+            .filter_map(|id| mt.get_payload(*id))
+            .filter(|payload| residual_filter.matches(payload))
+            .count(),
+        1
+    );
+
+    let (path, mut db) = build("find_limit_runtime");
+    let before = db.payload_memory_stats().payload_lookups;
+    let rows = db
+        .tql_nodes(r#"FIND {group: "group_1"} RETURN * LIMIT 10"#)
+        .unwrap();
+    let unindexed_lookups = db.payload_memory_stats().payload_lookups - before;
+    assert_eq!(rows.len(), 10);
+    assert!(unindexed_lookups < 200);
+
+    db.create_ordered_index("sequence").unwrap();
+    let before = db.payload_memory_stats().payload_lookups;
+    let rows = db
+        .tql_nodes("FIND {sequence: {$gte: 0}} RETURN * LIMIT 10")
+        .unwrap();
+    let ordered_lookups = db.payload_memory_stats().payload_lookups - before;
+    assert_eq!(rows.len(), 10);
+    assert!(ordered_lookups <= 11);
+
+    let rows = db
+        .tql_nodes(r#"FIND {sequence: {$gte: 0}, side: "target"} RETURN * LIMIT 1"#)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["_"].payload["side"], "target");
 
     drop(db);
     cleanup(&path);

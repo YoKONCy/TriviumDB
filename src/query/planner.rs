@@ -131,8 +131,18 @@ pub fn plan_filter_with_limit<T: VectorType>(
         };
     }
     if let Some((field, op, inclusive, value)) = ordered_range(filter)
-        && let Some(candidates) =
-            mt.find_by_property_range(field, op, inclusive, &value, false, None)
+        && let Some(candidates) = mt.find_by_property_range(
+            field,
+            op,
+            inclusive,
+            &value,
+            false,
+            if is_single_ordered_range(filter) {
+                limit
+            } else {
+                None
+            },
+        )
     {
         return NodeAccessPlan {
             access_path: AccessPath::OrderedPropertyIndex {
@@ -143,7 +153,15 @@ pub fn plan_filter_with_limit<T: VectorType>(
             candidates,
         };
     }
-    plan_filter(filter, mt)
+    let plan = plan_filter(filter, mt);
+    if limit.is_some() && matches!(plan.access_path, AccessPath::ColdPayloadScan) {
+        return NodeAccessPlan {
+            access_path: AccessPath::FullNodeScan,
+            estimated_rows: plan.estimated_rows,
+            candidates: Vec::new(),
+        };
+    }
+    plan
 }
 
 pub fn plan_filter<T: VectorType>(filter: &Filter, mt: &MemTable<T>) -> NodeAccessPlan {
@@ -373,6 +391,13 @@ fn materialize_full_scan<T: VectorType>(plan: &mut NodeAccessPlan, mt: &MemTable
     if matches!(plan.access_path, AccessPath::FullNodeScan) && plan.candidates.is_empty() {
         plan.candidates = mt.all_node_ids();
     }
+}
+
+fn is_single_ordered_range(filter: &Filter) -> bool {
+    matches!(
+        filter,
+        Filter::Gt(..) | Filter::Gte(..) | Filter::Lt(..) | Filter::Lte(..) | Filter::Range(..)
+    )
 }
 
 fn ordered_range(filter: &Filter) -> Option<(&str, Ordering, bool, serde_json::Value)> {
