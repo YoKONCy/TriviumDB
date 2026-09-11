@@ -109,6 +109,7 @@ RUST_LOG=triviumdb_server=info,triviumdb=warn ./triviumdb-server
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | `/` 或 `/ui` | 内置 Web Console 前端视窗（Navicat 风格三模管理与可视化教程） |
 | GET | `/health/live` | 纯事件循环存活探针，不获取 Database 锁 |
 | GET | `/health/ready` | Writer/read capacity 就绪状态；不可服务时返回 503 |
 | GET | `/health/details` | 脱敏运行状态、队列、读写等待和 QuIVer 预热状态 |

@@ -1365,3 +1365,20 @@ async fn 请求体上限使用标准payload_too_large状态码() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(json(response).await["code"], "PAYLOAD_TOO_LARGE");
 }
+
+#[tokio::test]
+async fn webui根路径与ui路由返回200及html页面() {
+    let (app, _directory) = app("webui").await;
+    let response = request(app.clone(), "GET", "/", None, &[]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/html; charset=utf-8"
+    );
+    let body = text(response).await;
+    assert!(body.contains("TriviumDB Web Console"));
+    assert!(body.contains("三模数据库可视化实战教程"));
+
+    let ui_response = request(app, "GET", "/ui", None, &[]).await;
+    assert_eq!(ui_response.status(), StatusCode::OK);
+}
