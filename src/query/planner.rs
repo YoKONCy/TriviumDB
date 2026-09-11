@@ -101,6 +101,24 @@ pub fn plan_filter_with_limit<T: VectorType>(
     limit: Option<usize>,
     mt: &MemTable<T>,
 ) -> NodeAccessPlan {
+    // 无可用属性索引、也无可下推的有序索引时，带 LIMIT 的查询可以直接给出惰性全节点扫描，
+    // 由执行器边扫边过滤、凑够行数即停。这个短路必须发生在进入 plan_filter 之前：
+    // plan_filter 的兜底分支会物化整库 NodeId（O(n) 分配），而它给出的候选随后又会被本函数
+    // 末尾的替换逻辑丢弃，导致每次查询白付一次全库物化。
+    let ordered = ordered_range(filter);
+    let has_ordered_index = matches!(
+        filter,
+        Filter::Gt(..) | Filter::Gte(..) | Filter::Lt(..) | Filter::Lte(..) | Filter::Range(..)
+    ) && ordered
+        .as_ref()
+        .is_some_and(|(field, ..)| mt.has_ordered_property_index(field));
+    if limit.is_some() && !filter_has_usable_index(filter, mt) && !has_ordered_index {
+        return NodeAccessPlan {
+            access_path: AccessPath::FullNodeScan,
+            estimated_rows: mt.node_count(),
+            candidates: Vec::new(),
+        };
+    }
     if let Filter::Eq(field, value) = filter
         && field != "id"
         && let Some(candidates) = mt.find_by_property_index_limit(field, value, limit)
@@ -529,6 +547,26 @@ fn difference_sorted(left: &[NodeId], right: &[NodeId]) -> Vec<NodeId> {
         left_index += 1;
     }
     output
+}
+
+/// 判断过滤器是否存在可用属性索引（LIMIT 早停短路判定的输入）。
+///
+/// 口径与 v0.8.6 一致：等值字段存在属性索引或 bitmap 索引即视为可用，`And`/`Or` 递归
+/// 命中任一子条件即可；有序/复合索引由调用方单独判定。这里刻意只做索引存在性检查，
+/// 不做候选查找，避免在规划阶段产生额外开销。
+fn filter_has_usable_index<T: VectorType>(filter: &Filter, mt: &MemTable<T>) -> bool {
+    match filter {
+        Filter::Eq(field, _) if field != "id" => {
+            mt.has_property_index(field)
+                || mt
+                    .find_by_bitmap_property_index(field, &serde_json::Value::Null)
+                    .is_some()
+        }
+        Filter::And(filters) | Filter::Or(filters) => filters
+            .iter()
+            .any(|filter| filter_has_usable_index(filter, mt)),
+        _ => false,
+    }
 }
 
 fn filter_equalities(filter: &Filter) -> Vec<(String, serde_json::Value)> {

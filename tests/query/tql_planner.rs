@@ -304,6 +304,38 @@ fn planner_有无索引执行结果差分一致() {
     cleanup(&path);
 }
 
+#[test]
+fn planner_无索引限流不物化整库_node_id() {
+    let mut mt = MemTable::<f32>::new(DIM);
+    for sequence in 0..200usize {
+        mt.insert(
+            &[sequence as f32, 0.0, 0.0, 0.0],
+            json!({
+                "sequence": sequence,
+                "group": format!("group_{}", sequence % 10),
+            }),
+        )
+        .unwrap();
+    }
+
+    // 无属性索引 + LIMIT：必须直接给出惰性全节点扫描，且过程中不得整库物化 NodeId。
+    let before = mt.id_materializations();
+    let planned =
+        plan_filter_with_limit(&Filter::Eq("group".into(), json!("group_1")), Some(10), &mt);
+    assert!(matches!(planned.access_path, AccessPath::FullNodeScan));
+    assert!(planned.candidates.is_empty());
+    assert_eq!(
+        mt.id_materializations(),
+        before,
+        "unindexed FIND ... LIMIT must not materialize the full id set"
+    );
+
+    // 对照：不带 LIMIT 时仍走完整规划，兜底候选物化一次（计数必须随之增长，证明计数有效）。
+    let full = plan_filter_with_limit(&Filter::Eq("group".into(), json!("group_1")), None, &mt);
+    assert_eq!(full.candidates.len(), 200);
+    assert!(mt.id_materializations() > before);
+}
+
 fn canonical(
     rows: &[std::collections::HashMap<String, triviumdb::node::Node<f32>>],
 ) -> Vec<Vec<u64>> {
