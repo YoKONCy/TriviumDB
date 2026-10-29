@@ -649,6 +649,31 @@ pub(crate) struct WorkspaceReservation {
     maintenance: bool,
 }
 
+impl WorkspaceReservation {
+    /// 扩容先准入，再把新增预留转入当前凭证；缩容和异常退出均准确归还账本。
+    pub(crate) fn resize(&mut self, bytes: usize) -> Result<()> {
+        if bytes > self.bytes {
+            let extra = bytes - self.bytes;
+            let mut addition = if self.maintenance {
+                self.runtime.reserve_maintenance_workspace(extra)?
+            } else {
+                self.runtime.reserve_workspace(extra)?
+            };
+            self.bytes = bytes;
+            addition.bytes = 0;
+        } else if bytes < self.bytes {
+            let mut state = lock(&self.runtime.0.state);
+            if self.maintenance {
+                state.maintenance_bytes -= self.bytes - bytes;
+            } else {
+                state.workspace_bytes -= self.bytes - bytes;
+            }
+            self.bytes = bytes;
+        }
+        Ok(())
+    }
+}
+
 impl Drop for WorkspaceReservation {
     fn drop(&mut self) {
         let mut state = lock(&self.runtime.0.state);
@@ -760,6 +785,33 @@ impl ResourcePool {
 mod tests {
     use super::*;
     use rayon::prelude::*;
+
+    #[test]
+    fn 工作区扩缩容拒绝与释放准确维护两类账本() {
+        let runtime = ResourceRuntime::new(ResourceLimits {
+            memory_limit: 1024,
+            maintenance_memory_limit: 256,
+            max_threads: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut foreground = runtime.reserve_workspace(512).unwrap();
+        assert!(foreground.resize(800).is_err());
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 512);
+        foreground.resize(128).unwrap();
+        let mut maintenance = runtime.reserve_maintenance_workspace(512).unwrap();
+        foreground.resize(300).unwrap();
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 300);
+        assert!(foreground.resize(600).is_err());
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 300);
+        assert!(maintenance.resize(800).is_err());
+        assert_eq!(runtime.stats().reserved_maintenance_bytes, 512);
+        maintenance.resize(128).unwrap();
+        drop(maintenance);
+        drop(foreground);
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+        assert_eq!(runtime.stats().reserved_maintenance_bytes, 0);
+    }
 
     #[test]
     fn 前台用满额度仍保留维护工作区与独立任务名额() {

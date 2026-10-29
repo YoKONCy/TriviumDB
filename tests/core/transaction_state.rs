@@ -349,6 +349,7 @@ fn shared_transaction_contract() {
                 };
                 assert_contents(&db);
                 let replay_path = format!("{path}.replay");
+                std::fs::copy(&path, &replay_path).unwrap();
                 std::fs::copy(format!("{path}.wal"), format!("{replay_path}.wal")).unwrap();
                 let mut replay = Database::<T>::open_with_config(&replay_path, config).unwrap();
                 assert_contents(&replay);

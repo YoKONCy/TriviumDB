@@ -173,8 +173,9 @@ fn COV2_04_contains_and_dim() {
 /// migrate_to — 维度迁移
 #[test]
 fn COV2_05_migrate_to() {
-    let path = tmp_db("migrate_src");
-    let new_path = tmp_db("migrate_dst");
+    let root = super::support::TestDir::new("migration_dimensions");
+    let path = root.file("source.tdb");
+    let new_path = root.file("target.tdb");
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
     let id1 = db

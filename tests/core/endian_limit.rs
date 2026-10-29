@@ -210,6 +210,10 @@ fn 测试_恢复next_id耗尽后插入应返回错误而非回绕() {
     file.write_all(&u64::MAX.to_le_bytes()).unwrap();
     file.sync_all().unwrap();
     drop(file);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let crc = crc32fast::hash(&bytes[..70]);
+    bytes[70..74].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&path, bytes).unwrap();
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
     let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
         db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))

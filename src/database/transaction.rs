@@ -51,7 +51,9 @@ impl<T: VectorType> Drop for ApplicationGuard<'_, T> {
         if !self.complete {
             self.mt.require_recovery();
             lock_or_recover(self.wal).release_writer();
-            lock_or_recover(self.lifecycle).recovery_required = true;
+            lock_or_recover(self.lifecycle)
+                .recovery_required
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -77,6 +79,20 @@ fn next_transaction_id(counter: &std::sync::atomic::AtomicU64) -> Result<u64> {
 /// - 幂等性：已存在的 ID 会被跳过
 /// - 无论是否跳过插入，都推进 `next_id` 防止 ID 复用
 pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<T>) -> Result<()> {
+    let extra = match &entry {
+        WalEntry::Insert { payload, .. } => mt
+            .estimate_reserve_bytes(1)?
+            .saturating_add(payload.len().saturating_mul(64)),
+        WalEntry::UpdatePayload { payload, .. } => payload.len().saturating_mul(64),
+        WalEntry::Link {
+            label, metadata, ..
+        } => label
+            .len()
+            .saturating_mul(5)
+            .saturating_add(metadata.len().saturating_mul(64)),
+        _ => 0,
+    };
+    mt.check_load_allocation(extra)?;
     match entry {
         WalEntry::Insert {
             id,
@@ -121,6 +137,9 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
                 )));
             }
             if mt.contains(src) && mt.contains(dst) {
+                mt.check_load_allocation(
+                    mt.estimate_edge_write_bytes(src, dst, &label, &metadata)?,
+                )?;
                 mt.upsert_edge(src, dst, label, weight, metadata)?;
             }
         }
@@ -999,7 +1018,9 @@ mod guard_tests {
                 assert_eq!(mt.quiver_sync_paused(), previous);
                 assert_eq!(mt.unique_updates_paused(), previous);
                 assert_eq!(
-                    lock_or_recover(&db.lifecycle.0).recovery_required,
+                    lock_or_recover(&db.lifecycle.0)
+                        .recovery_required
+                        .load(std::sync::atomic::Ordering::Acquire),
                     panicking
                 );
                 drop(mt);

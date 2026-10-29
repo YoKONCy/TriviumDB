@@ -136,15 +136,9 @@ fn 共享json契约由rust适配器完整执行() {
                 let prepared = database.prepare_tql(case.tql.as_deref().unwrap()).unwrap();
                 let error = database
                     .execute_prepared_tql(&prepared, &HashMap::new())
-                    .unwrap_err()
-                    .to_string();
-                assert!(
-                    case.expected["error_contains_any"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|needle| error.contains(needle.as_str().unwrap()))
-                );
+                    .unwrap_err();
+                assert_eq!(error.code(), case.expected["error_code"].as_str().unwrap());
+                assert_eq!(error.details(), case.expected["error_details"]);
             }
             "text_lifecycle" => {
                 let keyword = case.parameters["keyword"].as_str().unwrap();

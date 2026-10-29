@@ -1,8 +1,8 @@
 //! Write-Ahead Log 的版本化格式、写入与崩溃恢复。
 //!
 //! 每条记录采用 `len + bincode + CRC32`，事务通过 Begin/Commit 封条过滤未提交操作。
-//! 恢复只消费连续且校验成功的前缀，遇到截断、CRC 或反序列化错误立即停止，绝不
-//! 跨过损坏边界猜测后续字节。旧版本头只允许持有 Writer 排他锁的打开流程升级；
+//! 物理未写完的尾帧只恢复完整前缀；完整帧的 CRC、长度或解码损坏返回错误并保留日志。
+//! 恢复不跨过损坏边界猜测后续字节。旧版本头只允许持有 Writer 排他锁的打开流程升级；
 //! WAL v2 通过独立历史类型解码并原子转写为 v3，未知非空版本始终 fail-closed。
 
 use crate::error::{Result, TriviumError};
@@ -600,7 +600,8 @@ impl Wal {
     ///
     /// 每条记录都会校验 CRC32：
     ///   - 校验通过 → 回放
-    ///   - 校验失败 / 截断 → 安全停止，丢弃后续残缺数据
+    ///   - 完整帧校验失败 → 返回损坏错误，调用方保留原日志
+    ///   - 尾帧物理截断 → 只恢复完整提交前缀
     pub fn read_entries<T: serde::de::DeserializeOwned>(
         db_path: &str,
     ) -> Result<(Vec<WalEntry<T>>, u64)> {
@@ -615,6 +616,78 @@ impl Wal {
     /// 逐条交付已提交操作；只暂存当前事务，回调失败时立即停止。
     pub(crate) fn replay_entries<T: serde::de::DeserializeOwned>(
         db_path: &str,
+        visit: impl FnMut(WalEntry<T>) -> Result<()>,
+    ) -> Result<u64> {
+        Self::replay_entries_limited(db_path, 0, &std::cell::Cell::new(0), visit)
+    }
+
+    /// 旧 WAL 先在预算内转换并回放；持久化迁移由打开流程全部准入后执行。
+    pub(crate) fn replay_for_open<T: serde::de::DeserializeOwned + serde::Serialize>(
+        db_path: &str,
+        limit: usize,
+        current: &std::cell::Cell<usize>,
+        visit: impl FnMut(WalEntry<T>) -> Result<()>,
+    ) -> Result<u64> {
+        let path = format!("{db_path}.wal");
+        let mut file = File::open(&path)?;
+        let mut header = [0u8; WAL_HEADER_SIZE as usize];
+        if file.read_exact(&mut header).is_ok()
+            && &header[..4] == WAL_MAGIC
+            && u16::from_le_bytes([header[4], header[5]]) == LEGACY_WAL_VERSION_V2
+        {
+            Self::admit_legacy_migration(db_path, limit, current.get())?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            let entries = decode_legacy_v2_frames::<T>(&bytes)?;
+            let mut converted = Vec::new();
+            for entry in &entries {
+                write_framed_entry(&mut converted, entry)?;
+            }
+            return Self::replay_entries_from_reader_limited(
+                std::io::Cursor::new(converted),
+                visit,
+                limit,
+                current,
+            )
+            .map(|offset| offset.saturating_add(WAL_HEADER_SIZE));
+        }
+        Self::replay_entries_limited(db_path, limit, current, visit)
+    }
+
+    pub(crate) fn admit_legacy_migration(
+        db_path: &str,
+        limit: usize,
+        current: usize,
+    ) -> Result<()> {
+        let mut file = match File::open(format!("{db_path}.wal")) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut header = [0u8; WAL_HEADER_SIZE as usize];
+        if file.read_exact(&mut header).is_ok()
+            && &header[..4] == WAL_MAGIC
+            && u16::from_le_bytes([header[4], header[5]]) == LEGACY_WAL_VERSION_V2
+        {
+            let extra = usize::try_from(file.metadata()?.len())
+                .unwrap_or(usize::MAX)
+                .saturating_mul(64);
+            if limit > 0 && current.saturating_add(extra) > limit {
+                return Err(TriviumError::CapacityReservationRejected {
+                    requested_nodes: 0,
+                    estimated_bytes: extra,
+                    current_bytes: current,
+                    memory_limit: limit,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replay_entries_limited<T: serde::de::DeserializeOwned>(
+        db_path: &str,
+        limit: usize,
+        current: &std::cell::Cell<usize>,
         visit: impl FnMut(WalEntry<T>) -> Result<()>,
     ) -> Result<u64> {
         let wal_path = format!("{}.wal", db_path);
@@ -646,7 +719,12 @@ impl Wal {
                     supported: WAL_VERSION,
                 });
             }
-            let offset = Self::replay_entries_from_reader(BufReader::new(file), visit)?;
+            let offset = Self::replay_entries_from_reader_limited(
+                BufReader::new(file),
+                visit,
+                limit,
+                current,
+            )?;
             return offset
                 .checked_add(WAL_HEADER_SIZE)
                 .ok_or_else(|| TriviumError::CorruptedFile("WAL 安全边界溢出".into()));
@@ -675,9 +753,30 @@ impl Wal {
     }
 
     fn replay_entries_from_reader<T: serde::de::DeserializeOwned>(
+        reader: impl Read,
+        visit: impl FnMut(WalEntry<T>) -> Result<()>,
+    ) -> Result<u64> {
+        Self::replay_entries_from_reader_limited(reader, visit, 0, &std::cell::Cell::new(0))
+    }
+
+    fn replay_entries_from_reader_limited<T: serde::de::DeserializeOwned>(
         mut reader: impl Read,
         mut visit: impl FnMut(WalEntry<T>) -> Result<()>,
+        limit: usize,
+        current: &std::cell::Cell<usize>,
     ) -> Result<u64> {
+        let admit = |extra: usize| -> Result<()> {
+            if limit > 0 && current.get().saturating_add(extra) > limit {
+                return Err(TriviumError::CapacityReservationRejected {
+                    requested_nodes: 0,
+                    estimated_bytes: extra,
+                    current_bytes: current.get(),
+                    memory_limit: limit,
+                });
+            }
+            Ok(())
+        };
+        let mut pending_encoded_bytes = 0usize;
         let mut data = Vec::new();
         let mut physical_offset: u64 = 0;
         let mut record_count = 0usize;
@@ -698,9 +797,18 @@ impl Wal {
 
             // 合理性检查：单条不超过 256MB
             if len > MAX_WAL_ENTRY_SIZE {
-                break; // 损坏的 len 字段
+                return Err(TriviumError::CorruptedFile(format!(
+                    "WAL 帧长度超过上限，偏移 {physical_offset} (WAL frame length exceeds limit): {len}"
+                )));
             }
 
+            // 同时计入帧、事务暂存、JSON 解码及应用副本，准入先于扩容和反序列化。
+            admit(
+                pending_encoded_bytes
+                    .saturating_add(len)
+                    .saturating_mul(64)
+                    .saturating_add(data.capacity()),
+            )?;
             // 复用帧缓冲，并按实际读入量扩容；截断的恶意长度不会触发整帧分配。
             data.clear();
             while data.len() < len {
@@ -734,14 +842,9 @@ impl Wal {
             let computed_crc = crc32fast::hash(&data);
 
             if stored_crc != computed_crc {
-                // CRC 不匹配 → 数据损坏，停止回放
-                tracing::error!(
-                    "WAL CRC 校验不匹配 (CRC mismatch)，第 {} 条记录: 存储={:#010x}, 计算={:#010x}。停止恢复 (Stopping recovery)",
-                    record_count,
-                    stored_crc,
-                    computed_crc
-                );
-                break;
+                return Err(TriviumError::CorruptedFile(format!(
+                    "WAL 完整帧 CRC 不匹配，记录 {record_count}、偏移 {physical_offset} (Complete WAL frame CRC mismatch): stored={stored_crc:#010x}, computed={computed_crc:#010x}"
+                )));
             }
 
             // 成功读取一条物理上合法的记录，推进物理游标
@@ -750,22 +853,20 @@ impl Wal {
                 .ok_or_else(|| TriviumError::CorruptedFile("WAL 帧偏移溢出".into()))?;
 
             // 反序列化
-            let entry = match bincode::deserialize::<WalEntry<T>>(&data) {
-                Ok(entry) => entry,
-                Err(e) => {
-                    tracing::error!(
-                        "WAL 反序列化错误 (Deserialize error)，第 {} 条记录: {}。停止恢复 (Stopping recovery)",
-                        record_count,
-                        e
-                    );
-                    break;
-                }
-            };
+            use bincode::Options;
+            let entry = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_limit(len as u64)
+                .deserialize::<WalEntry<T>>(&data)
+                .map_err(|error| TriviumError::CorruptedFile(format!(
+                    "WAL 完整帧无法解码，记录 {record_count} (Cannot decode complete WAL frame): {error}"
+                )))?;
             record_count = record_count.saturating_add(1);
             match entry {
                 WalEntry::TxBegin { tx_id } => {
                     current_tx_id = Some(tx_id);
                     pending_tx.clear();
+                    pending_encoded_bytes = 0;
                 }
                 WalEntry::TxCommit { tx_id } => {
                     if current_tx_id == Some(tx_id) {
@@ -773,6 +874,7 @@ impl Wal {
                             visit(operation)?;
                         }
                         current_tx_id = None;
+                        pending_encoded_bytes = 0;
                         safe_commit_offset = physical_offset;
                     }
                 }
@@ -784,6 +886,7 @@ impl Wal {
                             }
                         })?;
                         pending_tx.push(other);
+                        pending_encoded_bytes = pending_encoded_bytes.saturating_add(len);
                     } else {
                         visit(other)?;
                         safe_commit_offset = physical_offset;
@@ -1011,24 +1114,33 @@ mod streaming_tests {
                     panic!("事务标记不应交付给回放回调");
                 }
                 Ok(())
-            })
-            .unwrap();
-            (ids, offset)
+            });
+            offset.map(|offset| (ids, offset))
         };
         for cut in 0..=bytes.len() {
-            assert_eq!(parse(&bytes[..cut]), expected(cut), "截断位置：{cut}");
+            assert_eq!(
+                parse(&bytes[..cut]).unwrap(),
+                expected(cut),
+                "截断位置：{cut}"
+            );
         }
         let mut start = 0;
         while start < bytes.len() {
             let len = u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()) as usize;
             let mut corrupted = bytes.clone();
             corrupted[start + 4 + len] ^= 1;
-            assert_eq!(parse(&corrupted), expected(start), "坏帧位置：{start}");
-            // CRC 合法但枚举无法解码时，仍只能保留此前已提交前缀。
+            assert!(
+                matches!(parse(&corrupted), Err(TriviumError::CorruptedFile(_))),
+                "坏帧位置：{start}"
+            );
+            // CRC 合法但完整枚举无法解码时，也必须拒绝整个恢复操作。
             corrupted[start + 4..start + 8].copy_from_slice(&u32::MAX.to_le_bytes());
             let crc = crc32fast::hash(&corrupted[start + 4..start + 4 + len]);
             corrupted[start + 4 + len..start + 8 + len].copy_from_slice(&crc.to_le_bytes());
-            assert_eq!(parse(&corrupted), expected(start));
+            assert!(matches!(
+                parse(&corrupted),
+                Err(TriviumError::CorruptedFile(_))
+            ));
             start += 8 + len;
         }
     }

@@ -193,7 +193,7 @@ impl QuIVer {
             .map(|&neighbor| {
                 (
                     self.bq_store
-                        .distance(parent as usize, neighbor as usize, self.dim),
+                        .distance_in_bounds(parent as usize, neighbor as usize, self.dim),
                     neighbor,
                 )
             })
@@ -201,7 +201,7 @@ impl QuIVer {
         if !self.layer0.contains(parent, child) {
             candidates.push((
                 self.bq_store
-                    .distance(parent as usize, child as usize, self.dim),
+                    .distance_in_bounds(parent as usize, child as usize, self.dim),
                 child,
             ));
         }

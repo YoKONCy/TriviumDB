@@ -12,6 +12,7 @@ pub(super) enum Input<'a, T> {
 }
 
 pub(super) struct Scope<'a, T: VectorType> {
+    pub memory: &'a QueryMemory,
     pub query: &'a TqlQuery,
     pub mt: &'a MemTable<T>,
     pub limits: &'a TqlLimits,
@@ -259,7 +260,7 @@ fn kind_value<T: VectorType>(
     scope: &Scope<'_, T>,
 ) -> Result<TqlValue<T>, TriviumError> {
     if let Input::Pipeline(row) = input {
-        return pipeline_kind_value(kind, row, scope.mt);
+        return pipeline_kind_value(kind, row, scope.mt, scope.memory);
     }
     let Input::Nodes(nodes, edge) = input else {
         return Ok(TqlValue::Null);
@@ -293,6 +294,7 @@ fn kind_value<T: VectorType>(
                         scope,
                     ),
                     scope.mt,
+                    scope.memory,
                 )?
             } else {
                 nodes.get(var).map_or(TqlValue::Null, |node| {
@@ -308,7 +310,7 @@ fn kind_value<T: VectorType>(
             }
         }
         ReturnExprKind::Scalar(expr) => {
-            runtime_to_tql_value(expression(expr, input, scope), scope.mt)?
+            runtime_to_tql_value(expression(expr, input, scope), scope.mt, scope.memory)?
         }
         ReturnExprKind::Aggregate(..) => {
             return Err(TriviumError::QueryExecution(
@@ -494,6 +496,7 @@ pub(super) fn finish<T: VectorType>(
     scope: &Scope<'_, T>,
 ) -> Result<Vec<Row<T>>, TriviumError> {
     validate_return_columns(&scope.query.returns)?;
+    admit_return_workspace(inputs, scope)?;
     let expressions = match &scope.query.returns {
         ReturnClause::Expressions(items) => Some(items.as_slice()),
         _ => None,
@@ -640,9 +643,10 @@ pub(super) fn into_nodes<T: VectorType>(
                             TqlValue::Node(node) if node.id == id => Some(node.clone()),
                             _ => None,
                         });
-                        let node = projected
-                            .or_else(|| build_node(id, scope.mt))
-                            .ok_or(TriviumError::NodeNotFound(id))?;
+                        let node = match projected {
+                            Some(node) => node,
+                            None => scope.memory.snapshot(id, scope.mt)?,
+                        };
                         bindings.insert(name, node);
                     }
                 }
@@ -693,4 +697,179 @@ pub(super) fn into_nodes<T: VectorType>(
     }
     apply_projection_pruning(&scope.query.returns, &mut output);
     Ok(output)
+}
+
+// 返回、分组、去重与排序可能同时持有输入快照、键及输出副本，先准入再复制。
+fn admit_return_workspace<T: VectorType>(
+    inputs: &[Input<'_, T>],
+    scope: &Scope<'_, T>,
+) -> Result<(), TriviumError> {
+    let columns = match &scope.query.returns {
+        ReturnClause::Expressions(items) => items.len(),
+        ReturnClause::Variables(names) => names.len(),
+        ReturnClause::All => 1,
+    };
+    let grouped = matches!(&scope.query.returns, ReturnClause::Expressions(items) if items.iter().any(|item| is_aggregate(&item.kind) || item.distinct));
+    let copies = columns
+        .saturating_add(scope.query.order_by.len().saturating_mul(8))
+        .saturating_add(if grouped { 8 } else { 3 });
+    let mut bytes = inputs.len().checked_mul(512).ok_or_else(memory::overflow)?;
+    for input in inputs {
+        match input {
+            Input::Nodes(nodes, edge) => {
+                for node in nodes.values() {
+                    bytes = bytes
+                        .checked_add(memory::snapshot_bytes(node)?)
+                        .ok_or_else(memory::overflow)?;
+                }
+                if let Some((_, edge)) = edge {
+                    bytes = bytes
+                        .checked_add(crate::storage::payload_store::query_clone_peak(
+                            &edge.metadata,
+                        ))
+                        .and_then(|v| v.checked_add(edge.label.len()))
+                        .ok_or_else(memory::overflow)?;
+                }
+            }
+            Input::Pipeline(row) => {
+                bytes = bytes
+                    .checked_add(pipeline_return_bytes(row, scope)?)
+                    .ok_or_else(memory::overflow)?;
+            }
+        }
+    }
+    scope
+        .memory
+        .retain(bytes.checked_mul(copies).ok_or_else(memory::overflow)?)
+}
+
+fn pipeline_binding_bytes<T: VectorType>(
+    row: &crate::query::pipeline::NodeRow,
+    var: &str,
+    field: Option<&str>,
+    scope: &Scope<'_, T>,
+) -> Result<usize, TriviumError> {
+    let value = row.bindings.as_ref().and_then(|bindings| bindings.get(var));
+    let node = match value {
+        Some(RuntimeValue::Node(id)) => Some(*id),
+        None => Some(row.id),
+        _ => None,
+    };
+    if let Some(id) = node {
+        return if !scope.mt.contains(id) || field == Some("id") {
+            Ok(64)
+        } else if field.is_some() {
+            scope.mt.payload_query_peak(id)
+        } else {
+            memory::node_bytes(id, scope.mt)
+        };
+    }
+    Ok(match (value, field) {
+        (Some(RuntimeValue::Json(value)), field) => field
+            .map_or(Some(value), |key| value.get(key))
+            .map_or(64, crate::storage::payload_store::query_clone_peak),
+        (Some(RuntimeValue::Str(value)), None) => value.len().saturating_add(64),
+        (Some(RuntimeValue::Path(value)), None) => value.len().saturating_mul(8).saturating_add(64),
+        (Some(RuntimeValue::Edge(edge)), None | Some("metadata")) => {
+            crate::storage::payload_store::query_clone_peak(&edge.metadata)
+                .saturating_add(edge.label.len())
+                .saturating_add(256)
+        }
+        (Some(RuntimeValue::Edge(edge)), Some("label")) => edge.label.len().saturating_add(64),
+        _ => 64,
+    })
+}
+
+fn pipeline_expr_bytes<T: VectorType>(
+    expr: &TqlExpr,
+    row: &crate::query::pipeline::NodeRow,
+    scope: &Scope<'_, T>,
+) -> Result<usize, TriviumError> {
+    match expr {
+        TqlExpr::Variable(var) => pipeline_binding_bytes(row, var, None, scope),
+        TqlExpr::Property { var, field } => pipeline_binding_bytes(row, var, Some(field), scope),
+        TqlExpr::Literal(TqlLiteral::Str(value)) => Ok(value.len().saturating_add(64)),
+        TqlExpr::Binary { left, right, .. } => pipeline_expr_bytes(left, row, scope)?
+            .checked_add(pipeline_expr_bytes(right, row, scope)?)
+            .ok_or_else(memory::overflow),
+        TqlExpr::Coalesce(items) => items.iter().try_fold(0usize, |sum, item| {
+            sum.checked_add(pipeline_expr_bytes(item, row, scope)?)
+                .ok_or_else(memory::overflow)
+        }),
+        TqlExpr::IsNull { expr, .. } => pipeline_expr_bytes(expr, row, scope),
+        TqlExpr::Path { .. } => Ok(row
+            .path
+            .as_ref()
+            .map_or(64, |path| path.len().saturating_mul(8).saturating_add(64))),
+        TqlExpr::Similarity { .. } => Ok(scope
+            .mt
+            .dim()
+            .saturating_mul(std::mem::size_of::<T>())
+            .saturating_add(256)),
+        _ => Ok(64),
+    }
+}
+
+fn pipeline_kind_bytes<T: VectorType>(
+    kind: &ReturnExprKind,
+    row: &crate::query::pipeline::NodeRow,
+    scope: &Scope<'_, T>,
+) -> Result<usize, TriviumError> {
+    match kind {
+        ReturnExprKind::Var(var) if var == "*" => Ok(64),
+        ReturnExprKind::Var(var) => pipeline_binding_bytes(row, var, None, scope),
+        ReturnExprKind::Property(var, field) => {
+            pipeline_binding_bytes(row, var, Some(field), scope)
+        }
+        ReturnExprKind::Scalar(expr) => pipeline_expr_bytes(expr, row, scope),
+        ReturnExprKind::Aggregate(_, inner) => pipeline_kind_bytes(inner, row, scope),
+    }
+}
+
+// 管线只为实际求值的列计量；常量、标量别名和节点 ID 投影保持轻量。
+fn pipeline_return_bytes<T: VectorType>(
+    row: &crate::query::pipeline::NodeRow,
+    scope: &Scope<'_, T>,
+) -> Result<usize, TriviumError> {
+    let mut bytes = 256usize;
+    match &scope.query.returns {
+        ReturnClause::Expressions(items) => {
+            for item in items {
+                bytes = bytes
+                    .checked_add(pipeline_kind_bytes(&item.kind, row, scope)?)
+                    .ok_or_else(memory::overflow)?;
+            }
+        }
+        ReturnClause::Variables(names) => {
+            for name in names {
+                bytes = bytes
+                    .checked_add(pipeline_binding_bytes(row, name, None, scope)?)
+                    .ok_or_else(memory::overflow)?;
+            }
+        }
+        ReturnClause::All => {
+            if let Some((_, names)) = scope.pipeline {
+                for name in names {
+                    bytes = bytes
+                        .checked_add(pipeline_binding_bytes(row, name, None, scope)?)
+                        .ok_or_else(memory::overflow)?;
+                }
+            }
+        }
+    }
+    for order in &scope.query.order_by {
+        let alias = if let (TqlExpr::Variable(name), ReturnClause::Expressions(items)) =
+            (&order.expr, &scope.query.returns)
+        {
+            items.iter().find(|item| item.alias.as_ref() == Some(name))
+        } else {
+            None
+        };
+        let cost = match alias {
+            Some(item) => pipeline_kind_bytes(&item.kind, row, scope)?,
+            None => pipeline_expr_bytes(&order.expr, row, scope)?,
+        };
+        bytes = bytes.checked_add(cost).ok_or_else(memory::overflow)?;
+    }
+    Ok(bytes)
 }

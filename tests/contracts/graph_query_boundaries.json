@@ -1,0 +1,12 @@
+{
+  "nodes": [{"id": 1, "kind": "source"}, {"id": 2, "kind": "middle"}, {"id": 3, "kind": "target"}],
+  "edges": [[1, 2, "red"], [1, 2, "blue"], [2, 3, "red"], [2, 3, "blue"]],
+  "counts": [
+    {"query": "MATCH (a)-[]->(b {kind: 'middle'}) RETURN COUNT(*) AS total", "expected": 2},
+    {"query": "MATCH (b {kind: 'middle'})<-[]-(a) RETURN COUNT(*) AS total", "expected": 2},
+    {"query": "MATCH (a)-[:red|blue]->(b {kind: 'middle'}) RETURN COUNT(*) AS total", "expected": 2},
+    {"query": "MATCH (a)-[e]->(b {kind: 'middle'}) RETURN COUNT(*) AS total", "expected": 2},
+    {"query": "MATCH (a)-[]->(b)-[]->(c {kind: 'target'}) RETURN COUNT(*) AS total", "expected": 4},
+    {"query": "MATCH (a {id: 1})-[:red|blue*1..1]->(b)-[]->(c {id: 3}) RETURN COUNT(*) AS total", "expected": 4}
+  ]
+}

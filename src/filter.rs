@@ -90,22 +90,18 @@ impl Filter {
 
             Filter::Ne(key, val) => payload.get(key) != Some(val),
 
-            Filter::Gt(key, threshold) => payload
-                .get(key)
-                .and_then(Value::as_f64)
-                .is_some_and(|value| value > *threshold),
-            Filter::Gte(key, threshold) => payload
-                .get(key)
-                .and_then(Value::as_f64)
-                .is_some_and(|value| value >= *threshold),
-            Filter::Lt(key, threshold) => payload
-                .get(key)
-                .and_then(Value::as_f64)
-                .is_some_and(|value| value < *threshold),
-            Filter::Lte(key, threshold) => payload
-                .get(key)
-                .and_then(Value::as_f64)
-                .is_some_and(|value| value <= *threshold),
+            Filter::Gt(key, threshold) => {
+                legacy_numeric_range(payload.get(key), *threshold, RangeOp::Gt)
+            }
+            Filter::Gte(key, threshold) => {
+                legacy_numeric_range(payload.get(key), *threshold, RangeOp::Gte)
+            }
+            Filter::Lt(key, threshold) => {
+                legacy_numeric_range(payload.get(key), *threshold, RangeOp::Lt)
+            }
+            Filter::Lte(key, threshold) => {
+                legacy_numeric_range(payload.get(key), *threshold, RangeOp::Lte)
+            }
             Filter::Range(key, op, threshold) => payload
                 .get(key)
                 .is_some_and(|value| compare_value(value, threshold, *op)),
@@ -401,6 +397,19 @@ fn compare_ordered<T: PartialOrd>(value: T, threshold: T, op: RangeOp) -> bool {
         RangeOp::Lt => value < threshold,
         RangeOp::Lte => value <= threshold,
     }
+}
+
+fn legacy_numeric_range(value: Option<&Value>, threshold: f64, op: RangeOp) -> bool {
+    let Some(Value::Number(actual)) = value else {
+        return false;
+    };
+    if let Some(expected) = serde_json::Number::from_f64(threshold) {
+        return compare_numbers(actual, &expected, op);
+    }
+    // 保留旧 API 的无穷边界与 NaN 语义；有限整数只在精确数值域内比较。
+    actual
+        .as_f64()
+        .is_some_and(|value| compare_ordered(value, threshold, op))
 }
 
 /// 整数保持 i128 比较域；与浮点比较时先分离整数部分和小数部分。

@@ -543,7 +543,7 @@ fn 显式LIMIT可覆盖配置行上限但OFFSET仍受内存硬上限() {
     let overflow = db.tql_nodes("MATCH (n) RETURN n").unwrap_err();
     assert!(matches!(
         overflow,
-        triviumdb::TriviumError::QueryExecution(_)
+        triviumdb::TriviumError::QueryRowBudgetExceeded { budget: 2 }
     ));
     let rows = db.tql_nodes("MATCH (n) RETURN n LIMIT 3").unwrap();
     assert_eq!(
@@ -586,11 +586,17 @@ fn Break仅允许普通查询返回部分结果() {
     let aggregate_error = db
         .tql_values("MATCH (n) RETURN count(*) AS total")
         .unwrap_err();
-    assert!(aggregate_error.to_string().contains("超过 2 行上限"));
+    assert!(matches!(
+        aggregate_error,
+        triviumdb::TriviumError::QueryRowBudgetExceeded { budget: 2 }
+    ));
     let ordered_error = db
         .tql_nodes("MATCH (n) RETURN n ORDER BY n.kind")
         .unwrap_err();
-    assert!(ordered_error.to_string().contains("超过 2 行上限"));
+    assert!(matches!(
+        ordered_error,
+        triviumdb::TriviumError::QueryRowBudgetExceeded { budget: 2 }
+    ));
 
     drop(db);
     cleanup(&path);

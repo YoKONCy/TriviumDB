@@ -67,8 +67,9 @@ fn COV6_01_fista_shadow_query() {
 /// migrate_to 带边迁移 (mod.rs L878-896)
 #[test]
 fn COV6_02_migrate_with_edges() {
-    let path = tmp_db("mig_edge");
-    let new_path = tmp_db("mig_edge_new");
+    let root = super::support::TestDir::new("migration_edges");
+    let path = root.file("source.tdb");
+    let new_path = root.file("target.tdb");
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
     let id1 = db
@@ -83,13 +84,13 @@ fn COV6_02_migrate_with_edges() {
     db.link(id1, id2, "knows", 0.8).unwrap();
     db.link(id2, id3, "likes", 0.6).unwrap();
 
-    let (new_db, migrated) = db.migrate_to(&new_path, 8).unwrap();
+    let (mut new_db, migrated) = db.migrate_to(&new_path, 8).unwrap();
     assert_eq!(migrated.len(), 3);
     let edges = new_db.get_edges(id1).unwrap();
     assert!(!edges.is_empty(), "边应迁移");
 
-    cleanup(&path);
-    cleanup(&new_path);
+    new_db.close().unwrap();
+    db.close().unwrap();
 }
 
 /// NMF 乘法更新 (cognitive L278-410)

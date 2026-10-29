@@ -44,6 +44,10 @@ fn files(path: &str) -> BTreeMap<String, Vec<u8>> {
 fn 跨端wal样本保留完整id向量payload和边() {
     let root = TestDir::new("numeric_fixture_contract");
     let path = root.file("sample.tdb");
+    Database::<f32>::open_with_config(&path, config(StorageMode::Mmap))
+        .unwrap()
+        .close()
+        .unwrap();
     std::fs::write(
         format!("{path}.wal"),
         include_bytes!("../fixtures/numeric_ids/wal_v3.bin"),
@@ -451,6 +455,7 @@ fn id_endpoints<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(
         assert!(db.tql_mut("CREATE (n)").is_err());
         assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
         let replay = root.file(&format!("replay_{mode:?}.tdb"));
+        std::fs::copy(&path, &replay).unwrap();
         std::fs::copy(format!("{path}.wal"), format!("{replay}.wal")).unwrap();
         let mut recovered = Database::<T>::open_with_config(&replay, config(mode)).unwrap();
         assert_eq!(

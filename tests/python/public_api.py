@@ -14,6 +14,8 @@ from index_graph_boundaries import run_index_graph_boundaries
 from query_numeric_indexes import run_query_numeric_indexes
 from tql_semantics import run_tql_semantics
 from tql_boundaries import run_tql_boundaries
+from error_contracts import run_error_contract
+from kernel_boundaries import run_kernel_boundaries
 
 
 def run_transaction_contract(root: str) -> None:
@@ -68,6 +70,7 @@ def run_transaction_contract(root: str) -> None:
 
                 check(db)
                 replay_file = file + ".replay"
+                shutil.copyfile(file, replay_file)
                 shutil.copyfile(file + ".wal", replay_file + ".wal")
                 replay = triviumdb.TriviumDB(replay_file, **options)
                 try:
@@ -295,7 +298,8 @@ def run_shared_contract(root: str) -> None:
             try:
                 db.execute_prepared_tql(prepared, case.get("parameters", {}))
             except RuntimeError as error:
-                assert any(needle in str(error) for needle in expected["error_contains_any"])
+                assert error.code == expected["error_code"]
+                assert error.details == expected["error_details"]
             else:
                 raise AssertionError(case["name"])
         elif case["operation"] == "text_lifecycle":
@@ -400,6 +404,8 @@ def main() -> None:
         run_lifecycle_contract(root)
         run_resource_contract(root)
         run_shared_contract(root)
+        run_error_contract(root)
+        run_kernel_boundaries(root)
         run_transaction_contract(root)
         run_write_boundaries(root)
         run_index_graph_boundaries(root)
@@ -470,8 +476,8 @@ def main() -> None:
         ]
 
         storage = db.storage_info()
-        assert storage["database_format_current"] == 9
-        assert storage["property_index_format"] == 7
+        assert storage["database_format_current"] == 10
+        assert storage["property_index_format"] == 8
         assert storage["node_count"] == 2
 
         vector_prepared = db.prepare_tql(
@@ -491,7 +497,8 @@ def main() -> None:
         try:
             db.execute_prepared_tql(prepared, {})
         except RuntimeError as error:
-            assert "缺少参数" in str(error) or "missing parameter" in str(error)
+            assert error.code == "TDB_MISSING_QUERY_PARAMETER"
+            assert error.details == {"parameter": "bonus"}
         else:
             raise AssertionError("缺少 Prepared TQL 参数必须失败")
 
@@ -504,7 +511,8 @@ def main() -> None:
         try:
             db.tql_mut('FIND {kind: "a"} RETURN *')
         except RuntimeError as error:
-            assert "API 已移除" in str(error) or "API removed" in str(error)
+            assert error.code == "TDB_API_MIGRATION_REQUIRED"
+            assert error.details["removed_api"] == "tql_mut(read query)"
         else:
             raise AssertionError("tql_mut 读查询必须失败")
         db.close()

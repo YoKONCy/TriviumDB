@@ -138,6 +138,18 @@ fn 发布前中断必须恢复旧基础与全部增量并支持再次持久化()
             Err(TriviumError::RecoveryRequired { .. })
         ));
         assert_eq!(fixture.files(), before, "拒绝只读打开时必须保持字节级零写");
+        assert!(matches!(
+            Database::<half::f16>::open(&fixture.path, DIM),
+            Err(TriviumError::DtypeMismatch {
+                stored: "f32",
+                requested: "f16"
+            })
+        ));
+        assert_eq!(
+            fixture.files(),
+            before,
+            "错误类型不得触发备份恢复或文件清理"
+        );
         let mut database = fixture.open(StorageMode::Mmap);
         for _ in 0..2 {
             let mut ids = database.all_node_ids().unwrap();

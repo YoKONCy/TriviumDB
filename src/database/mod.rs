@@ -11,6 +11,7 @@
 pub mod config;
 pub mod facade;
 mod lifecycle;
+mod migration;
 pub use lifecycle::{InstanceMemoryStats, InstanceStats, ShutdownPhase, ShutdownStatus};
 pub(crate) mod pipeline;
 pub mod transaction;
@@ -36,6 +37,7 @@ use fs2::FileExt;
 use rayon::prelude::*;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
@@ -223,7 +225,7 @@ impl<T: VectorType> QuiverBuildHandle<T> {
         resource_task.detach();
         let operation_guard = {
             let mut state = lock_or_recover(&self.lifecycle.0);
-            if state.recovery_required {
+            if state.recovery_required.load(Ordering::Acquire) {
                 return Err(TriviumError::WalClosed);
             }
             if state.lifecycle != DatabaseLifecycle::Open {
@@ -286,7 +288,7 @@ enum DatabaseLifecycle {
 }
 
 struct LifecycleState {
-    recovery_required: bool,
+    recovery_required: Arc<AtomicBool>,
     lifecycle: DatabaseLifecycle,
     active_operations: usize,
     group_commit_owner: Option<std::thread::ThreadId>,
@@ -334,7 +336,10 @@ impl Drop for GroupCommitGuard {
 
 impl OperationGuard {
     fn check_recovery(&self) -> Result<()> {
-        if lock_or_recover(&self.lifecycle.0).recovery_required {
+        if lock_or_recover(&self.lifecycle.0)
+            .recovery_required
+            .load(Ordering::Acquire)
+        {
             Err(TriviumError::WalClosed)
         } else {
             Ok(())
@@ -428,7 +433,7 @@ impl<T: VectorType> SearchHandle<T> {
 
     fn enter_operation(&self) -> Result<OperationGuard> {
         let mut state = lock_or_recover(&self.lifecycle.0);
-        if state.recovery_required {
+        if state.recovery_required.load(Ordering::Acquire) {
             return Err(TriviumError::WalClosed);
         }
         if state.lifecycle != DatabaseLifecycle::Open {
@@ -549,7 +554,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     fn enter_operation_kind(&self, maintenance: bool) -> Result<OperationGuard> {
         let mut state = lock_or_recover(&self.lifecycle.0);
-        if state.recovery_required {
+        if state.recovery_required.load(Ordering::Acquire) {
             return Err(TriviumError::WalClosed);
         }
         if state.lifecycle != DatabaseLifecycle::Open {
@@ -610,6 +615,16 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         runtime: crate::resources::ResourceRuntime,
         reservation: crate::resources::DatabaseReservation,
     ) -> Result<Self> {
+        Self::open_reserved_with_lock(path, config, runtime, reservation, None)
+    }
+
+    fn open_reserved_with_lock(
+        path: &str,
+        config: Config,
+        runtime: crate::resources::ResourceRuntime,
+        reservation: crate::resources::DatabaseReservation,
+        reserved_lock: Option<std::fs::File>,
+    ) -> Result<Self> {
         let dim = config.dim;
 
         // ═══ 维度安全校验 ═══
@@ -652,23 +667,31 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 "只读模式要求数据库文件已存在: {path}"
             )));
         }
-        let lock_file = match config.access_mode {
-            AccessMode::ReadWrite => Some(
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .read(true)
-                    .write(true)
-                    .open(&lock_path)?,
-            ),
-            AccessMode::ReadOnly => Some(std::fs::OpenOptions::new().read(true).open(&lock_path)?),
-            AccessMode::Immutable => None,
+        let reserved_lock_held = reserved_lock.is_some();
+        let lock_file = if let Some(lock) = reserved_lock {
+            Some(lock)
+        } else {
+            match config.access_mode {
+                AccessMode::ReadWrite => Some(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .read(true)
+                        .write(true)
+                        .open(&lock_path)?,
+                ),
+                AccessMode::ReadOnly => {
+                    Some(std::fs::OpenOptions::new().read(true).open(&lock_path)?)
+                }
+                AccessMode::Immutable => None,
+            }
         };
-        let locked = match (config.access_mode, lock_file.as_ref()) {
-            (AccessMode::ReadWrite, Some(file)) => file.try_lock_exclusive().is_ok(),
-            (AccessMode::ReadOnly, Some(file)) => file.try_lock_shared().is_ok(),
-            (AccessMode::Immutable, None) => true,
-            _ => false,
-        };
+        let locked = reserved_lock_held
+            || match (config.access_mode, lock_file.as_ref()) {
+                (AccessMode::ReadWrite, Some(file)) => file.try_lock_exclusive().is_ok(),
+                (AccessMode::ReadOnly, Some(file)) => file.try_lock_shared().is_ok(),
+                (AccessMode::Immutable, None) => true,
+                _ => false,
+            };
         if !locked {
             return Err(TriviumError::DatabaseLocked(format!(
                 "Database '{}' is already opened with an incompatible access mode",
@@ -676,72 +699,65 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             )));
         }
 
-        file_format::recover_publication(path, config.access_mode == AccessMode::ReadWrite)?;
+        file_format::recover_publication::<T>(path, config.access_mode == AccessMode::ReadWrite)?;
 
         if config.access_mode == AccessMode::Immutable {
             crate::storage::snapshot::validate_manifest(path, std::any::type_name::<T>(), dim)?;
         }
+        if !std::path::Path::new(path).exists() && Wal::needs_recovery(path) {
+            return Err(TriviumError::CorruptedFile("缺少带类型的基础检查点，请用原版本恢复并导出 (Typed checkpoint missing; recover and export with the original version)".into()));
+        }
         let mut memtable = if std::path::Path::new(path).exists() {
-            file_format::load_with_payload_cache(
+            file_format::load_with_memory_limit(
                 path,
                 config.storage_mode,
                 config.load_text_index,
                 config.access_mode == AccessMode::ReadWrite,
                 config.missing_index_policy,
                 config.access_mode != AccessMode::ReadWrite,
-                Some((config.payload_cache_bytes, config.payload_cache_entry_bytes)),
+                config.memory_limit,
             )?
         } else {
             MemTable::new(dim)
         };
 
+        if memtable.dim() != dim {
+            return Err(TriviumError::DimensionMismatch {
+                expected: memtable.dim(),
+                got: dim,
+            });
+        }
         memtable.set_text_memory_limit(config.memory_limit);
         // 恢复必须从第一条记录开始使用调用方预算，避免先填充默认解析缓存再淘汰。
-        memtable
-            .configure_payload_cache(config.payload_cache_bytes, config.payload_cache_entry_bytes);
-        if config.access_mode == AccessMode::ReadWrite {
-            Wal::upgrade_legacy_wal::<T>(path)?;
-        }
+        memtable.begin_loading(config.memory_limit);
+        memtable.attach_resources(runtime.clone(), reservation);
 
         if Wal::needs_recovery(path) && config.access_mode != AccessMode::ReadWrite {
             return Err(TriviumError::RecoveryRequired {
                 wal_path: format!("{}.wal", path),
             });
         }
+        let mut recovered_offset = None;
         if Wal::needs_recovery(path) {
             let mut entry_count = 0usize;
-            let valid_offset = Wal::replay_entries::<T>(path, |entry| {
-                transaction::replay_entry(&mut memtable, entry)?;
-                entry_count = entry_count.saturating_add(1);
-                Ok(())
-            })?;
+            let restored_bytes = std::cell::Cell::new(memtable.estimated_memory_bytes());
+            let valid_offset =
+                Wal::replay_for_open::<T>(path, config.memory_limit, &restored_bytes, |entry| {
+                    transaction::replay_entry(&mut memtable, entry)?;
+                    memtable.check_load_allocation(0)?;
+                    restored_bytes.set(memtable.estimated_memory_bytes());
+                    entry_count = entry_count.saturating_add(1);
+                    Ok(())
+                })?;
 
             // 回放按完整提交后的事实重建唯一所有者，验证通过后再修改 WAL。
             let unique_definitions = memtable.unique_index_definitions();
             memtable.restore_unique_index_definitions(&unique_definitions)?;
 
-            // 内存恢复成功后才截断损坏或未提交尾部；回放失败保留原 WAL 供重试。
-            let wal_path = format!("{}.wal", path);
-            let wal_file = std::fs::OpenOptions::new().write(true).open(&wal_path)?;
-            wal_file.set_len(valid_offset)?;
-            wal_file.sync_all()?;
+            memtable.check_load_allocation(0)?;
 
-            if entry_count > 0 {
-                tracing::info!(
-                    "已从 WAL 恢复 {} 条记录，安全截断至偏移 {}",
-                    entry_count,
-                    valid_offset
-                );
-            } else {
-                tracing::info!(
-                    "已清除损坏/未提交的 WAL 数据，回退至偏移 {} (Cleared corrupt/uncommitted WAL, truncated to {})",
-                    valid_offset,
-                    valid_offset
-                );
-            }
+            recovered_offset = Some((valid_offset, entry_count));
         }
-
-        memtable.attach_resources(runtime.clone(), reservation);
 
         // TextIndex 由 sidecar 精确恢复；缺失时保持为空，避免打开数据库时
         // 无条件扫描全部 Payload 并改变用户显式 index_text() 的索引语义。
@@ -768,10 +784,42 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             memtable.try_reserve_for_insert(additional)?;
         }
 
+        memtable.check_load_allocation(0)?;
+        memtable.finish_loading(config.payload_cache_bytes, config.payload_cache_entry_bytes)?;
+        // 所有加载、恢复与容量准入完成后才修改 WAL 尾部或迁移空检查点。
+        if config.access_mode == AccessMode::ReadWrite {
+            if std::path::Path::new(path).exists() {
+                file_format::upgrade_empty_checkpoint(&mut memtable, path, config.storage_mode)?;
+            } else {
+                file_format::initialize::<T>(path, dim)?;
+            }
+        }
+        if config.access_mode == AccessMode::ReadWrite {
+            Wal::admit_legacy_migration(
+                path,
+                config.memory_limit,
+                memtable.estimated_memory_bytes(),
+            )?;
+            Wal::upgrade_legacy_wal::<T>(path)?;
+        }
+        if let Some((offset, entry_count)) = recovered_offset {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(format!("{path}.wal"))?;
+            file.set_len(offset)?;
+            file.sync_all()?;
+            tracing::info!(
+                entry_count,
+                offset,
+                "WAL 恢复与尾部截断完成 (WAL recovery and tail truncation completed)"
+            );
+        }
+
         let wal = match config.access_mode {
             AccessMode::ReadWrite => Wal::open_with_sync(path, config.sync_mode)?,
             AccessMode::ReadOnly | AccessMode::Immutable => Wal::disabled(path, config.sync_mode),
         };
+        let recovery_required = memtable.recovery_latch();
         Ok(Self {
             db_path: normalized_path.to_string_lossy().into_owned(),
             memtable: Arc::new(RwLock::new(memtable)),
@@ -796,7 +844,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             lifecycle: Arc::new((
                 Mutex::new(LifecycleState {
                     lifecycle: DatabaseLifecycle::Open,
-                    recovery_required: false,
+                    recovery_required,
                     active_operations: 0,
                     group_commit_owner: None,
                     shutdown_phase: ShutdownPhase::Open,
@@ -1002,6 +1050,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let _operation = self.enter_operation()?;
 
         self.require_write_access("build_quiver_index")?;
+        if crate::vector::is_binary_vector::<T>() {
+            return Err(TriviumError::InvalidInput("u64 使用汉明精确检索，QuIVer 构建支持浮点向量 (u64 uses exact Hamming retrieval; QuIVer construction supports floating-point vectors)".into()));
+        }
         let cfg = config.unwrap_or_default();
         let (_workspace, snapshot) = {
             let mt = read_or_recover(&self.memtable);
@@ -2193,9 +2244,20 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         depth: usize,
         labels: Option<&[String]>,
     ) -> Result<Vec<NodeId>> {
-        self.read_operation(|| {
+        self.read_operation(|| -> Result<Vec<NodeId>> {
             use std::collections::{HashMap, VecDeque};
             let mt = read_or_recover(&self.memtable);
+            if !mt.contains(id) || depth == 0 {
+                return Ok(Vec::new());
+            }
+            let bytes = 4usize
+                .checked_mul(192)
+                .and_then(|bytes| bytes.checked_add(256))
+                .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                    reason: "邻域工作区估算溢出 (Neighborhood workspace estimate overflowed)"
+                        .into(),
+                })?;
+            let mut workspace = mt.resource_runtime().reserve_workspace(bytes)?;
             let mut distances = HashMap::new();
             let mut queue = VecDeque::new();
             distances.insert(id, 0usize);
@@ -2212,9 +2274,18 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         }) {
                             continue;
                         }
+                        let projected = distances.len().saturating_add(1).max(4);
                         if let std::collections::hash_map::Entry::Vacant(entry) =
                             distances.entry(edge.target_id)
                         {
+                            let bytes = projected
+                                .checked_mul(192)
+                                .and_then(|bytes| bytes.checked_add(256))
+                                .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                                    reason: "邻域工作区估算溢出 (Neighborhood workspace estimate overflowed)"
+                                        .into(),
+                                })?;
+                            workspace.resize(bytes)?;
                             entry.insert(current_depth + 1);
                             queue.push_back(edge.target_id);
                         }
@@ -2227,8 +2298,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 .map(|(node_id, distance)| (distance, node_id))
                 .collect();
             result.sort_unstable();
-            result.into_iter().map(|(_, node_id)| node_id).collect()
-        })
+            Ok(result.into_iter().map(|(_, node_id)| node_id).collect())
+        })?
     }
 
     pub fn neighbors(&self, id: NodeId, depth: usize) -> Result<Vec<NodeId>> {
@@ -2520,37 +2591,29 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 "唯一索引字段不能为空 (Unique index field cannot be empty)".into(),
             ));
         }
-        write_or_recover(&self.memtable).build_property_index(
-            crate::index::property::PropertyIndexKind::Hash,
-            &[field.to_owned()],
-            true,
-            self.memory_limit,
-        )?;
-        self.flush_inner()
+        self.change_property_schema(|mt| {
+            mt.build_property_index(
+                crate::index::property::PropertyIndexKind::Hash,
+                &[field.to_owned()],
+                true,
+                self.memory_limit,
+            )?;
+            Ok(true)
+        })
     }
 
     pub fn create_unique_composite_index(&mut self, fields: &[String]) -> Result<()> {
         let _operation = self.enter_operation()?;
         self.require_write_access("create_unique_composite_index")?;
-        if fields.len() < 2
-            || fields.iter().any(String::is_empty)
-            || fields
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                != fields.len()
-        {
-            return Err(TriviumError::InvalidInput(
-                "复合唯一索引至少需要两个非空且不重复的字段 (Composite unique index requires at least two distinct non-empty fields)".into(),
-            ));
-        }
-        write_or_recover(&self.memtable).build_property_index(
-            crate::index::property::PropertyIndexKind::Composite,
-            fields,
-            true,
-            self.memory_limit,
-        )?;
-        self.flush_inner()
+        self.change_property_schema(|mt| {
+            mt.build_property_index(
+                crate::index::property::PropertyIndexKind::Composite,
+                fields,
+                true,
+                self.memory_limit,
+            )?;
+            Ok(true)
+        })
     }
 
     pub fn list_unique_indexes(&self) -> Result<Vec<Vec<String>>> {
@@ -2608,15 +2671,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn drop_composite_index(&mut self, fields: &[String]) -> Result<()> {
         let _operation = self.enter_operation()?;
         self.require_write_access("drop_composite_index")?;
-        let was_unique = read_or_recover(&self.memtable)
-            .unique_index_definitions()
-            .iter()
-            .any(|definition| definition == fields);
-        write_or_recover(&self.memtable).drop_composite_property_index(fields);
-        if was_unique {
-            self.flush_inner()?;
-        }
-        Ok(())
+        self.change_property_schema(|mt| {
+            let was_unique = mt
+                .unique_index_definitions()
+                .iter()
+                .any(|definition| definition == fields);
+            mt.drop_composite_property_index(fields);
+            Ok(was_unique)
+        })
     }
 
     pub fn drop_bitmap_index(&mut self, field: &str) -> Result<()> {
@@ -2651,15 +2713,36 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn drop_index(&mut self, field: &str) -> Result<()> {
         let _operation = self.enter_operation()?;
         self.require_write_access("drop_index")?;
-        let was_unique = read_or_recover(&self.memtable)
-            .unique_index_definitions()
-            .iter()
-            .any(|definition| definition.as_slice() == [field]);
+        self.change_property_schema(|mt| {
+            let was_unique = mt
+                .unique_index_definitions()
+                .iter()
+                .any(|definition| definition.as_slice() == [field]);
+            mt.drop_property_index(field);
+            Ok(was_unique)
+        })
+    }
+
+    /// 约束变更与检查点共用写锁；发布结果不明确时隔离实例，由重开按提交点恢复。
+    fn change_property_schema(
+        &self,
+        change: impl FnOnce(&mut MemTable<T>) -> Result<bool>,
+    ) -> Result<()> {
+        reject_hook_reentrant_write()?;
         let mut mt = write_or_recover(&self.memtable);
-        mt.drop_property_index(field);
-        drop(mt);
-        if was_unique {
-            self.flush_inner()?;
+        mt.ensure_readable()?;
+        let mut wal = lock_or_recover(&self.wal);
+        wal.ensure_writable()?;
+        if !change(&mut mt)? {
+            return Ok(());
+        }
+        if let Err(error) =
+            file_format::checkpoint(&mut mt, &mut wal, &self.db_path, self.storage_mode, false)
+        {
+            // 既覆盖提交前失败，也覆盖提交后 WAL 清理失败，禁止继续使用未确认的约束状态。
+            mt.require_recovery();
+            wal.release_writer();
+            return Err(error);
         }
         Ok(())
     }
@@ -2884,7 +2967,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 let (ops, mut next_id) = {
                     let mt = read_or_recover(&self.memtable);
                     (
-                        crate::query::tql_executor::execute_tql_mutation(&mutation, &mt)?,
+                        crate::query::tql_executor::execute_tql_mutation_with_limits(
+                            &mutation,
+                            &mt,
+                            self.tql_limits.clone(),
+                        )?,
                         mt.next_id_value(),
                     )
                 };
@@ -2963,25 +3050,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                             tx_ops.push(transaction::TxOp::UpdatePayload { id, payload });
                             affected += 1;
                         }
-                        MutationOp::DeleteNode { id, detach } => {
-                            if detach {
-                                let edges_to_remove: Vec<(u64, u64)> = {
-                                    let mt = read_or_recover(&self.memtable);
-                                    let mut edges = Vec::new();
-                                    if let Some(out_edges) = mt.get_edges(id) {
-                                        for edge in out_edges {
-                                            edges.push((id, edge.target_id));
-                                        }
-                                    }
-                                    for &src_id in mt.get_incoming_sources(id) {
-                                        edges.push((src_id, id));
-                                    }
-                                    edges
-                                };
-                                for (s, d) in edges_to_remove {
-                                    tx_ops.push(transaction::TxOp::Unlink { src: s, dst: d });
-                                }
-                            }
+                        MutationOp::DeleteNode { id, .. } => {
+                            // 事务删除统一清理关联边；整批节点共享同一预检与 WAL 提交边界。
                             tx_ops.push(transaction::TxOp::Delete { id });
                             affected += 1;
                         }
@@ -3178,55 +3248,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         T: serde::Serialize + serde::de::DeserializeOwned,
     {
         let _operation = self.enter_operation()?;
-        let mt = read_or_recover(&self.memtable);
-        let mut node_ids = mt.all_node_ids();
-        node_ids.sort();
-
-        let mut new_db = Database::<T>::open_with_runtime(
-            new_path,
-            Config {
-                dim: new_dim,
-                memory_limit: self.memory_limit,
-                ..Default::default()
-            },
-            self.resource_runtime.clone(),
-        )?;
-
-        let zero_vec = vec![T::zero(); new_dim];
-        for &nid in &node_ids {
-            if let Some(payload) = mt.get_payload(nid) {
-                new_db.insert_with_id(nid, &zero_vec, (*payload).clone())?;
-            }
-        }
-
-        for &nid in &node_ids {
-            if let Some(edges) = mt.get_edges(nid) {
-                for edge in edges {
-                    if mt.get_payload(edge.target_id).is_some() {
-                        new_db.upsert_edge(
-                            nid,
-                            edge.target_id,
-                            &edge.label,
-                            edge.weight,
-                            edge.metadata.clone(),
-                        )?;
-                    }
-                }
-            }
-        }
-
-        new_db.flush()?;
-        tracing::info!(
-            "维度迁移完成: {} → {}，共迁移 {} 个节点 (Dimension migration done: {} → {}, {} nodes migrated)",
-            mt.dim(),
-            new_dim,
-            node_ids.len(),
-            mt.dim(),
-            new_dim,
-            node_ids.len()
-        );
-
-        Ok((new_db, node_ids))
+        migration::migrate(self, new_path, new_dim)
     }
 
     // ════════════════════════════════════════════════════════
@@ -3279,6 +3301,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Database::open(&dir.join("test.tdb").to_string_lossy(), 3).unwrap()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn 约束发布失败隔离已准入共享查询() {
+        use crate::test_hooks::{IoPoint, fail_io_at};
+        let mut db = open_db(&format!("schema_quarantine_{}", std::process::id()));
+        db.insert_with_id(1, &[1., 0., 0.], json!({"email":"one"}))
+            .unwrap();
+        db.flush().unwrap();
+        let handle = db.search_handle();
+        let admitted = handle.enter_operation().unwrap();
+        {
+            let _failure = fail_io_at(IoPoint::PropertySidecarWrite);
+            assert!(matches!(
+                db.create_unique_index("email"),
+                Err(TriviumError::Io(_))
+            ));
+        }
+        assert!(matches!(
+            admitted.check_recovery(),
+            Err(TriviumError::WalClosed)
+        ));
+        assert!(matches!(
+            handle.enter_operation(),
+            Err(TriviumError::WalClosed)
+        ));
+        drop(admitted);
+        drop(handle);
+        let path = db.db_path.clone();
+        drop(db);
+        let mut recovered = Database::<f32>::open(&path, 3).unwrap();
+        assert!(recovered.list_unique_indexes().unwrap().is_empty());
+        assert_eq!(
+            recovered.get_payload(1).unwrap(),
+            Some(json!({"email":"one"}))
+        );
+        recovered.close().unwrap();
+        drop(recovered);
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn 向量映射失效会隔离writer与已准入句柄() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut db = open_db(&format!("mapping_quarantine_{}", std::process::id()));
+        let path = db.db_path.clone();
+        db.insert_with_id(1, &[1.0, 0.0, 0.0], json!({"state":"accepted"}))
+            .unwrap();
+        db.flush().unwrap();
+        let handle = db.search_handle();
+        let admitted = handle.enter_operation().unwrap();
+        let blocker = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(3)
+            .open(format!("{path}.vec"))
+            .unwrap();
+        db.update_vector(1, &[0.0, 1.0, 0.0]).unwrap();
+        assert!(matches!(db.flush(), Err(TriviumError::Io(_))));
+        assert!(matches!(
+            admitted.check_recovery(),
+            Err(TriviumError::WalClosed)
+        ));
+        assert!(matches!(
+            lock_or_recover(&db.wal).ensure_writable(),
+            Err(TriviumError::WalClosed)
+        ));
+        drop(blocker);
+        drop(admitted);
+        drop(handle);
+        drop(db);
+        let mut recovered = Database::<f32>::open(&path, 3).unwrap();
+        let node = recovered.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, vec![0.0, 1.0, 0.0]);
+        assert_eq!(node.payload, json!({"state":"accepted"}));
+        recovered.close().unwrap();
+        drop(recovered);
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
     }
 
     #[test]

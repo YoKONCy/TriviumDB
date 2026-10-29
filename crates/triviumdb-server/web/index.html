@@ -2131,7 +2131,7 @@
       <span id="statusHealth" class="status-pill" title="引擎整体就绪状态 (来自 /health/details 的 status)"></span>
       <span id="statusQueue">写队列: 0</span>
       <span id="statusReads">并发读: 0</span>
-      <span id="statusVersion">TriviumDB Server v0.9.0-beta.3</span>
+      <span id="statusVersion">TriviumDB Server v0.9.0-beta.4</span>
     </div>
   </footer>
 
@@ -2966,7 +2966,7 @@ CREATE ({name: "Bob", type: "person", citations: 120, department: "AI Lab"})
           const data = await res.json();
           connBadge.className = 'status-badge live';
           connText.textContent = `在线 (${data.status})`;
-          document.getElementById('statusVersion').textContent = `TriviumDB Server v${data.version || '0.9.0-beta.3'}`;
+          document.getElementById('statusVersion').textContent = `TriviumDB Server v${data.version || '0.9.0-beta.4'}`;
         } else {
           connBadge.className = 'status-badge dead';
           connText.textContent = `就绪异常 (${res.status})`;

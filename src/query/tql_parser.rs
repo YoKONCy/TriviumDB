@@ -8,10 +8,14 @@ use super::tql_ast::*;
 use super::tql_lexer::{ParseErrorAt, TqlToken};
 use crate::filter::Filter;
 
+pub const MAX_TQL_NESTING: usize = 128;
+pub const MAX_TQL_OPERATORS: usize = 128;
+
 pub struct TqlParser {
     tokens: Vec<TqlToken>,
     pos: usize,
     depth: usize,
+    input_checked: bool,
     /// 与 tokens 平行的字节起始位置（用于错误诊断）
     positions: Option<Vec<usize>>,
 }
@@ -22,6 +26,7 @@ impl TqlParser {
             tokens,
             pos: 0,
             depth: 0,
+            input_checked: false,
             positions: None,
         }
     }
@@ -32,6 +37,7 @@ impl TqlParser {
             tokens,
             pos: 0,
             depth: 0,
+            input_checked: false,
             positions: Some(positions),
         }
     }
@@ -72,7 +78,89 @@ impl TqlParser {
     //  顶层入口
     // ═══════════════════════════════════════════════════════════════
 
+    fn validate_input(&mut self) -> Result<(), String> {
+        if self.input_checked {
+            return Ok(());
+        }
+        if self.tokens.len() > super::tql_lexer::MAX_TQL_TOKENS {
+            return Err("TQL token 数量超过限制 (TQL token limit exceeded)".into());
+        }
+        let mut delimiters = Vec::new();
+        let mut literal_depth = 0usize;
+        let mut operators = 0usize;
+        for token in &self.tokens {
+            let opening = match token {
+                TqlToken::LParen => Some(0),
+                TqlToken::LBracket => Some(1),
+                TqlToken::LBrace => Some(2),
+                _ => None,
+            };
+            if let Some(kind) = opening {
+                if delimiters.len() == MAX_TQL_NESTING {
+                    return Err(format!(
+                        "TQL 嵌套超过 {MAX_TQL_NESTING} 层 (TQL nesting limit exceeded)"
+                    ));
+                }
+                delimiters.push(kind);
+                literal_depth += usize::from(kind != 0);
+                continue;
+            }
+            let closing = match token {
+                TqlToken::RParen => Some(0),
+                TqlToken::RBracket => Some(1),
+                TqlToken::RBrace => Some(2),
+                _ => None,
+            };
+            if let Some(kind) = closing {
+                if delimiters.pop() != Some(kind) {
+                    return Err("TQL 括号不匹配 (Unmatched TQL delimiter)".into());
+                }
+                literal_depth -= usize::from(kind != 0);
+                continue;
+            }
+            // 字面量中的负号和通配符不生成递归表达式；向量维度保持原有范围。
+            if literal_depth == 0
+                && matches!(
+                    token,
+                    TqlToken::Not
+                        | TqlToken::And
+                        | TqlToken::Or
+                        | TqlToken::Plus
+                        | TqlToken::Dash
+                        | TqlToken::Star
+                        | TqlToken::Slash
+                )
+            {
+                operators += 1;
+                if operators > MAX_TQL_OPERATORS {
+                    return Err(format!(
+                        "TQL 运算复杂度超过 {MAX_TQL_OPERATORS} (TQL operator limit exceeded)"
+                    ));
+                }
+            }
+        }
+        if !delimiters.is_empty() {
+            return Err("TQL 括号未闭合 (Unclosed TQL delimiter)".into());
+        }
+        self.input_checked = true;
+        Ok(())
+    }
+
+    fn expect_end(&self) -> Result<(), String> {
+        if self.pos == self.tokens.len()
+            || (self.at(&TqlToken::Eof) && self.pos + 1 == self.tokens.len())
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "TQL 语句尾部存在多余输入 (Unexpected trailing TQL input): {:?}",
+                self.peek()
+            ))
+        }
+    }
+
     pub fn parse_query(&mut self) -> Result<TqlQuery, String> {
+        self.validate_input()?;
         // 0. EXPLAIN 前缀（可选）
         let explain = if self.at(&TqlToken::Explain) {
             self.advance();
@@ -162,6 +250,7 @@ impl TqlParser {
             limit,
             offset,
         };
+        self.expect_end()?;
         validate_pipeline_scope(&query)?;
         super::tql_executor::validate_return_columns(&query.returns)
             .map_err(|error| error.to_string())?;
@@ -1726,7 +1815,8 @@ impl TqlParser {
 
     /// 顶层语句解析：判断是读查询还是写操作
     pub fn parse_statement(&mut self) -> Result<TqlStatement, String> {
-        match self.peek() {
+        self.validate_input()?;
+        let statement = match self.peek() {
             // 写操作入口
             TqlToken::Create => {
                 let mutation = self.parse_create()?;
@@ -1745,7 +1835,9 @@ impl TqlParser {
                 let query = self.parse_query()?;
                 Ok(TqlStatement::Query(query))
             }
-        }
+        }?;
+        self.expect_end()?;
+        Ok(statement)
     }
 
     /// 探测 MATCH 之后是否跟着 DML（SET/DELETE/CREATE）

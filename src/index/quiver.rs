@@ -604,7 +604,10 @@ impl ExperimentalBuildView<'_> {
             BinaryHeap::with_capacity(ef * 2);
         let mut results: BinaryHeap<(NonNanF32, u32)> = BinaryHeap::with_capacity(ef + 1);
 
-        let d = NonNanF32(self.sigs.distance_to_sig(entry as usize, q_sig, self.dim) as f32);
+        let d = NonNanF32(
+            self.sigs
+                .distance_to_sig_in_bounds(entry as usize, q_sig, self.dim) as f32,
+        );
         visited.set(entry as usize);
         candidates.push(Reverse((d, entry)));
         results.push((d, entry));
@@ -629,7 +632,11 @@ impl ExperimentalBuildView<'_> {
                 }
                 visited.set(nb as usize);
 
-                let nd = NonNanF32(self.sigs.distance_to_sig(nb as usize, q_sig, self.dim) as f32);
+                let nd = NonNanF32(
+                    self.sigs
+                        .distance_to_sig_in_bounds(nb as usize, q_sig, self.dim)
+                        as f32,
+                );
                 if results.len() < ef || nd < results.peek().unwrap().0 {
                     candidates.push(Reverse((nd, nb)));
                     results.push((nd, nb));
@@ -650,12 +657,18 @@ impl ExperimentalBuildView<'_> {
             return;
         }
 
-        let my_sig = self.sigs.get_sig(idx as usize);
+        let my_sig = self.sigs.get_sig_in_bounds(idx as usize);
         let candidates_sym = self.beam_search_l0_locked(&my_sig, 0, self.ef, visited);
         let mut candidates: Vec<(u32, u32)> = candidates_sym
             .into_iter()
             .filter(|&(_, id)| id != idx)
-            .map(|(_, id)| (self.sigs.distance(idx as usize, id as usize, self.dim), id))
+            .map(|(_, id)| {
+                (
+                    self.sigs
+                        .distance_in_bounds(idx as usize, id as usize, self.dim),
+                    id,
+                )
+            })
             .collect();
 
         let samples = self.ef.min(128).max(self.m0 * 2);
@@ -670,7 +683,11 @@ impl ExperimentalBuildView<'_> {
             state ^= state >> 31;
             let id = (state % self.n) as u32;
             if id != idx {
-                candidates.push((self.sigs.distance(idx as usize, id as usize, self.dim), id));
+                candidates.push((
+                    self.sigs
+                        .distance_in_bounds(idx as usize, id as usize, self.dim),
+                    id,
+                ));
             }
         }
 
@@ -679,7 +696,7 @@ impl ExperimentalBuildView<'_> {
         candidates.sort_unstable_by_key(|&(d, _)| d);
 
         if candidates.is_empty() {
-            candidates.push((self.sigs.distance(idx as usize, 0, self.dim), 0));
+            candidates.push((self.sigs.distance_in_bounds(idx as usize, 0, self.dim), 0));
         }
 
         let selected =
@@ -695,7 +712,13 @@ impl ExperimentalBuildView<'_> {
             let mut nb_candidates: Vec<(u32, u32)> = current
                 .into_iter()
                 .filter(|&n| n != nb)
-                .map(|n| (self.sigs.distance(nb as usize, n as usize, self.dim), n))
+                .map(|n| {
+                    (
+                        self.sigs
+                            .distance_in_bounds(nb as usize, n as usize, self.dim),
+                        n,
+                    )
+                })
                 .collect();
             nb_candidates.sort_unstable_by_key(|&(_, id)| id);
             nb_candidates.dedup_by_key(|&mut (_, id)| id);
@@ -712,7 +735,7 @@ impl ExperimentalBuildView<'_> {
         }
 
         let prof = self.profile.enabled;
-        let my_sig = self.sigs.get_sig(idx as usize);
+        let my_sig = self.sigs.get_sig_in_bounds(idx as usize);
         let t_beam = if prof { Some(Instant::now()) } else { None };
         let candidates_sym = self.beam_search_l0_locked(&my_sig, 0, self.ef, visited);
         if let Some(t) = t_beam {
@@ -723,7 +746,13 @@ impl ExperimentalBuildView<'_> {
         let mut candidates: Vec<(u32, u32)> = candidates_sym
             .into_iter()
             .filter(|&(_, id)| id != idx)
-            .map(|(_, id)| (self.sigs.distance(idx as usize, id as usize, self.dim), id))
+            .map(|(_, id)| {
+                (
+                    self.sigs
+                        .distance_in_bounds(idx as usize, id as usize, self.dim),
+                    id,
+                )
+            })
             .collect();
 
         let samples = self.ef.min(128).max(self.m0 * 2);
@@ -738,7 +767,11 @@ impl ExperimentalBuildView<'_> {
             state ^= state >> 31;
             let id = (state % self.n) as u32;
             if id != idx {
-                candidates.push((self.sigs.distance(idx as usize, id as usize, self.dim), id));
+                candidates.push((
+                    self.sigs
+                        .distance_in_bounds(idx as usize, id as usize, self.dim),
+                    id,
+                ));
             }
         }
 
@@ -747,7 +780,7 @@ impl ExperimentalBuildView<'_> {
         candidates.sort_unstable_by_key(|&(d, _)| d);
 
         if candidates.is_empty() {
-            candidates.push((self.sigs.distance(idx as usize, 0, self.dim), 0));
+            candidates.push((self.sigs.distance_in_bounds(idx as usize, 0, self.dim), 0));
         }
 
         let selected =
@@ -777,7 +810,13 @@ impl ExperimentalBuildView<'_> {
                 let mut nb_candidates: Vec<(u32, u32)> = current
                     .into_iter()
                     .filter(|&n| n != nb)
-                    .map(|n| (self.sigs.distance(nb as usize, n as usize, self.dim), n))
+                    .map(|n| {
+                        (
+                            self.sigs
+                                .distance_in_bounds(nb as usize, n as usize, self.dim),
+                            n,
+                        )
+                    })
                     .collect();
                 nb_candidates.sort_unstable_by_key(|&(_, id)| id);
                 nb_candidates.dedup_by_key(|&mut (_, id)| id);
@@ -800,7 +839,13 @@ impl ExperimentalBuildView<'_> {
                     let mut nb_candidates: Vec<(u32, u32)> = current
                         .into_iter()
                         .filter(|&n| n != nb)
-                        .map(|n| (self.sigs.distance(nb as usize, n as usize, self.dim), n))
+                        .map(|n| {
+                            (
+                                self.sigs
+                                    .distance_in_bounds(nb as usize, n as usize, self.dim),
+                                n,
+                            )
+                        })
                         .collect();
                     nb_candidates.sort_unstable_by_key(|&(_, id)| id);
                     nb_candidates.dedup_by_key(|&mut (_, id)| id);
@@ -836,7 +881,13 @@ impl ExperimentalBuildView<'_> {
         let mut cand: Vec<(u32, u32)> = current
             .into_iter()
             .filter(|&n| n != node)
-            .map(|n| (self.sigs.distance(node as usize, n as usize, self.dim), n))
+            .map(|n| {
+                (
+                    self.sigs
+                        .distance_in_bounds(node as usize, n as usize, self.dim),
+                    n,
+                )
+            })
             .collect();
         cand.sort_unstable_by_key(|&(_, id)| id);
         cand.dedup_by_key(|&mut (_, id)| id);
@@ -1107,7 +1158,7 @@ impl QuIVer {
             return;
         }
 
-        let my_sig = self.bq_store.get_sig(idx as usize);
+        let my_sig = self.bq_store.get_sig_in_bounds(idx as usize);
         let mut cur_node = self.entry_point;
 
         // ── 高层贪心下降（BQ 距离，不需要 f32 向量） ──
@@ -1116,13 +1167,15 @@ impl QuIVer {
             if ul_idx < self.upper_layers.len() {
                 loop {
                     let mut changed = false;
-                    let cur_d = self
-                        .bq_store
-                        .distance(idx as usize, cur_node as usize, self.dim);
+                    let cur_d =
+                        self.bq_store
+                            .distance_in_bounds(idx as usize, cur_node as usize, self.dim);
                     let mut best_d = cur_d;
 
                     for &nb in &self.upper_layers[ul_idx][cur_node as usize] {
-                        let nd = self.bq_store.distance(idx as usize, nb as usize, self.dim);
+                        let nd =
+                            self.bq_store
+                                .distance_in_bounds(idx as usize, nb as usize, self.dim);
                         if nd < best_d {
                             cur_node = nb;
                             best_d = nd;
@@ -1157,7 +1210,8 @@ impl QuIVer {
                 .into_iter()
                 .map(|(_, id)| {
                     (
-                        self.bq_store.distance(idx as usize, id as usize, self.dim),
+                        self.bq_store
+                            .distance_in_bounds(idx as usize, id as usize, self.dim),
                         id,
                     )
                 })
@@ -1184,12 +1238,20 @@ impl QuIVer {
                         .layer0
                         .neighbors(nb)
                         .iter()
-                        .map(|&n| (self.bq_store.distance(nb as usize, n as usize, self.dim), n))
+                        .map(|&n| {
+                            (
+                                self.bq_store
+                                    .distance_in_bounds(nb as usize, n as usize, self.dim),
+                                n,
+                            )
+                        })
                         .collect();
 
                     // 如果 idx 还不在 nb 的邻居中，加入候选
                     if !self.layer0.contains(nb, idx) {
-                        let d = self.bq_store.distance(nb as usize, idx as usize, self.dim);
+                        let d =
+                            self.bq_store
+                                .distance_in_bounds(nb as usize, idx as usize, self.dim);
                         nb_candidates.push((d, idx));
                     }
 
@@ -1212,11 +1274,19 @@ impl QuIVer {
                 for &nb in &selected {
                     let mut nb_candidates: Vec<(u32, u32)> = self.upper_layers[ul][nb as usize]
                         .iter()
-                        .map(|&n| (self.bq_store.distance(nb as usize, n as usize, self.dim), n))
+                        .map(|&n| {
+                            (
+                                self.bq_store
+                                    .distance_in_bounds(nb as usize, n as usize, self.dim),
+                                n,
+                            )
+                        })
                         .collect();
 
                     if !self.upper_layers[ul][nb as usize].contains(&idx) {
-                        let d = self.bq_store.distance(nb as usize, idx as usize, self.dim);
+                        let d =
+                            self.bq_store
+                                .distance_in_bounds(nb as usize, idx as usize, self.dim);
                         nb_candidates.push((d, idx));
                     }
 
@@ -1329,7 +1399,7 @@ impl QuIVer {
                     .distance_to_sig_cheap_384(node as usize, q_sig);
             }
             self.bq_store
-                .distance_to_sig_cheap(node as usize, q_sig, self.dim)
+                .distance_to_sig_cheap_in_bounds(node as usize, q_sig, self.dim)
         };
         let d = NonNanF32(scorer.score(self.ids[entry as usize], cheap_distance(entry)) as f32);
         visited.set(entry as usize);
@@ -1368,10 +1438,11 @@ impl QuIVer {
 
         let mut res: Vec<(NonNanF32, u32)> = results.into_vec();
         for item in &mut res {
-            item.0 = NonNanF32(
-                self.bq_store
-                    .distance_to_sig(item.1 as usize, q_sig, self.dim) as f32,
-            );
+            item.0 = NonNanF32(self.bq_store.distance_to_sig_in_bounds(
+                item.1 as usize,
+                q_sig,
+                self.dim,
+            ) as f32);
         }
         res.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         res
@@ -1394,7 +1465,7 @@ impl QuIVer {
         let mut signal_results = BinaryHeap::with_capacity(ef.saturating_add(1));
         let distance = |node: u32| {
             self.bq_store
-                .distance_to_sig_cheap(node as usize, q_sig, self.dim)
+                .distance_to_sig_cheap_in_bounds(node as usize, q_sig, self.dim)
         };
         let add = |node: u32,
                    discovered: &mut Bitset,
@@ -1538,7 +1609,7 @@ impl QuIVer {
             candidates.push(source);
         }
         for candidate in &mut candidates {
-            candidate.0 = NonNanF32(self.bq_store.distance_to_sig(
+            candidate.0 = NonNanF32(self.bq_store.distance_to_sig_in_bounds(
                 candidate.1 as usize,
                 q_sig,
                 self.dim,
@@ -1606,10 +1677,11 @@ impl QuIVer {
 
         let mut candidates = scratch.results.drain().collect::<Vec<_>>();
         for candidate in &mut candidates {
-            candidate.0 = NonNanF32(
-                self.bq_store
-                    .distance_to_sig(candidate.1 as usize, q_sig, 384) as f32,
-            );
+            candidate.0 = NonNanF32(self.bq_store.distance_to_sig_in_bounds(
+                candidate.1 as usize,
+                q_sig,
+                384,
+            ) as f32);
         }
         candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         candidates
@@ -1641,7 +1713,7 @@ impl QuIVer {
 
         let d = NonNanF32(
             self.bq_store
-                .distance_to_sig(entry as usize, q_sig, self.dim) as f32,
+                .distance_to_sig_in_bounds(entry as usize, q_sig, self.dim) as f32,
         );
         visited.set(entry as usize);
         candidates.push(Reverse((d, entry)));
@@ -1658,8 +1730,11 @@ impl QuIVer {
                     continue;
                 }
                 visited.set(nb as usize);
-                let nd =
-                    NonNanF32(self.bq_store.distance_to_sig(nb as usize, q_sig, self.dim) as f32);
+                let nd = NonNanF32(self.bq_store.distance_to_sig_in_bounds(
+                    nb as usize,
+                    q_sig,
+                    self.dim,
+                ) as f32);
                 if results.len() < ef || nd < results.peek().unwrap().0 {
                     candidates.push(Reverse((nd, nb)));
                     results.push((nd, nb));
@@ -1696,7 +1771,7 @@ impl QuIVer {
 
             // Vamana Prune: dist_to_selected < alpha * dist_to_target
             let dominated = selected.iter().any(|&s| {
-                let dist_to_selected = sigs.distance(cid as usize, s as usize, dim);
+                let dist_to_selected = sigs.distance_in_bounds(cid as usize, s as usize, dim);
                 (dist_to_selected as f32) < alpha * (dist_to_target as f32)
             });
 
@@ -1830,7 +1905,9 @@ impl QuIVer {
             let (sum, count) = slots.windows(2).fold((0u64, 0usize), |(sum, count), pair| {
                 (
                     sum.saturating_add(u64::from(
-                        index.bq_store.distance(pair[0], pair[1], index.dim),
+                        index
+                            .bq_store
+                            .distance_in_bounds(pair[0], pair[1], index.dim),
                     )),
                     count + 1,
                 )
@@ -1926,7 +2003,7 @@ impl QuIVer {
             mapped_candidates += 1;
             let candidate = (
                 self.bq_store
-                    .distance_to_sig(internal, &signature, self.dim),
+                    .distance_to_sig_in_bounds(internal, &signature, self.dim),
                 id,
             );
             if best.len() < limit {
@@ -1995,11 +2072,13 @@ impl QuIVer {
             }
             loop {
                 let mut changed = false;
-                let mut best =
-                    self.bq_store
-                        .distance_to_sig(entry as usize, &query_signature, self.dim);
+                let mut best = self.bq_store.distance_to_sig_in_bounds(
+                    entry as usize,
+                    &query_signature,
+                    self.dim,
+                );
                 for &neighbor in &self.upper_layers[upper][entry as usize] {
-                    let distance = self.bq_store.distance_to_sig(
+                    let distance = self.bq_store.distance_to_sig_in_bounds(
                         neighbor as usize,
                         &query_signature,
                         self.dim,
@@ -2094,12 +2173,14 @@ impl QuIVer {
             if ul < self.upper_layers.len() {
                 loop {
                     let mut changed = false;
-                    let cur_d = self
-                        .bq_store
-                        .distance_to_sig(cur_node as usize, &q_sig, dim);
+                    let cur_d =
+                        self.bq_store
+                            .distance_to_sig_in_bounds(cur_node as usize, &q_sig, dim);
                     let mut best_d = cur_d;
                     for &nb in &self.upper_layers[ul][cur_node as usize] {
-                        let nd = self.bq_store.distance_to_sig(nb as usize, &q_sig, dim);
+                        let nd = self
+                            .bq_store
+                            .distance_to_sig_in_bounds(nb as usize, &q_sig, dim);
                         if nd < best_d {
                             cur_node = nb;
                             best_d = nd;
@@ -2363,7 +2444,7 @@ impl QuIVer {
                 continue;
             }
 
-            let my_sig = self.bq_store.get_sig(idx as usize);
+            let my_sig = self.bq_store.get_sig_in_bounds(idx as usize);
             let mut cur_node = self.entry_point;
 
             // 高层贪心下降（BQ 距离）
@@ -2372,10 +2453,14 @@ impl QuIVer {
                 if ul_idx < self.upper_layers.len() {
                     loop {
                         let mut changed = false;
-                        let cur_d = self.bq_store.distance(idx as usize, cur_node as usize, dim);
+                        let cur_d =
+                            self.bq_store
+                                .distance_in_bounds(idx as usize, cur_node as usize, dim);
                         let mut best_d = cur_d;
                         for &nb in &self.upper_layers[ul_idx][cur_node as usize] {
-                            let nd = self.bq_store.distance(idx as usize, nb as usize, dim);
+                            let nd =
+                                self.bq_store
+                                    .distance_in_bounds(idx as usize, nb as usize, dim);
                             if nd < best_d {
                                 cur_node = nb;
                                 best_d = nd;
@@ -2407,7 +2492,13 @@ impl QuIVer {
                 };
                 let candidates: Vec<(u32, u32)> = candidates_sym
                     .into_iter()
-                    .map(|(_, id)| (self.bq_store.distance(idx as usize, id as usize, dim), id))
+                    .map(|(_, id)| {
+                        (
+                            self.bq_store
+                                .distance_in_bounds(idx as usize, id as usize, dim),
+                            id,
+                        )
+                    })
                     .collect();
 
                 let max_nb = if l == 0 { self.m0 } else { self.m };
@@ -2425,10 +2516,18 @@ impl QuIVer {
                             .layer0
                             .neighbors(nb)
                             .iter()
-                            .map(|&n| (self.bq_store.distance(nb as usize, n as usize, dim), n))
+                            .map(|&n| {
+                                (
+                                    self.bq_store
+                                        .distance_in_bounds(nb as usize, n as usize, dim),
+                                    n,
+                                )
+                            })
                             .collect();
                         if !self.layer0.contains(nb, idx) {
-                            let d = self.bq_store.distance(nb as usize, idx as usize, dim);
+                            let d =
+                                self.bq_store
+                                    .distance_in_bounds(nb as usize, idx as usize, dim);
                             nb_candidates.push((d, idx));
                         }
                         nb_candidates.sort_unstable_by_key(|&(d, _)| d);
@@ -2759,7 +2858,7 @@ impl QuIVer {
                 continue;
             }
 
-            let my_sig = self.bq_store.get_sig(idx as usize);
+            let my_sig = self.bq_store.get_sig_in_bounds(idx as usize);
             let mut cur_node = self.entry_point;
 
             for l in ((level + 1)..=self.max_level).rev() {
@@ -2767,10 +2866,14 @@ impl QuIVer {
                 if ul_idx < self.upper_layers.len() {
                     loop {
                         let mut changed = false;
-                        let cur_d = self.bq_store.distance(idx as usize, cur_node as usize, dim);
+                        let cur_d =
+                            self.bq_store
+                                .distance_in_bounds(idx as usize, cur_node as usize, dim);
                         let mut best_d = cur_d;
                         for &nb in &self.upper_layers[ul_idx][cur_node as usize] {
-                            let nd = self.bq_store.distance(idx as usize, nb as usize, dim);
+                            let nd =
+                                self.bq_store
+                                    .distance_in_bounds(idx as usize, nb as usize, dim);
                             if nd < best_d {
                                 cur_node = nb;
                                 best_d = nd;
@@ -2800,7 +2903,13 @@ impl QuIVer {
                 };
                 let candidates: Vec<(u32, u32)> = candidates_sym
                     .into_iter()
-                    .map(|(_, id)| (self.bq_store.distance(idx as usize, id as usize, dim), id))
+                    .map(|(_, id)| {
+                        (
+                            self.bq_store
+                                .distance_in_bounds(idx as usize, id as usize, dim),
+                            id,
+                        )
+                    })
                     .collect();
 
                 let max_nb = if l == 0 { self.m0 } else { self.m };
@@ -2819,10 +2928,18 @@ impl QuIVer {
                             .layer0
                             .neighbors(nb)
                             .iter()
-                            .map(|&n| (this.bq_store.distance(nb as usize, n as usize, dim), n))
+                            .map(|&n| {
+                                (
+                                    this.bq_store
+                                        .distance_in_bounds(nb as usize, n as usize, dim),
+                                    n,
+                                )
+                            })
                             .collect();
                         if !this.layer0.contains(nb, idx) {
-                            let d = this.bq_store.distance(nb as usize, idx as usize, dim);
+                            let d =
+                                this.bq_store
+                                    .distance_in_bounds(nb as usize, idx as usize, dim);
                             nb_candidates.push((d, idx));
                         }
                         nb_candidates.sort_unstable_by_key(|&(d, _)| d);
@@ -3023,6 +3140,21 @@ impl QuIVer {
     #[inline]
     pub fn active_count(&self) -> usize {
         self.n - self.tombstones.iter().filter(|&&t| t).count()
+    }
+
+    /// sidecar 的活跃 ID 与冷向量 slot 必须逐项对应当前事实；墓碑不参与覆盖。
+    pub(crate) fn matches_fact_slots<T: crate::VectorType>(
+        &self,
+        mt: &crate::storage::memtable::MemTable<T>,
+    ) -> bool {
+        self.dim == mt.dim()
+            && self.active_count() == mt.node_count()
+            && self
+                .ids
+                .iter()
+                .zip(&self.slot_indices)
+                .zip(&self.tombstones)
+                .all(|((&id, &slot), &deleted)| deleted || mt.active_id_at_slot(slot) == Some(id))
     }
 
     /// 节点总数（含 tombstone）
@@ -3280,7 +3412,8 @@ impl QuIVer {
             .iter()
             .map(|chunk| u64::from_le_bytes(*chunk))
             .collect();
-        let bq_store = Bq2Store::from_raw(pos_data, strong_data, chunks);
+        let bq_store = Bq2Store::from_raw(pos_data, strong_data, chunks)
+            .map_err(|error| invalid(error.to_string()))?;
         off = strong_end;
 
         // Layer0 FlatAdj
@@ -3514,6 +3647,28 @@ pub fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn 事实slot核对拒绝交换越界重复和不完整覆盖() {
+        let mut mt = crate::storage::memtable::MemTable::<f32>::new(2);
+        mt.insert_with_id(1, &[1., 0.], serde_json::json!({}))
+            .unwrap();
+        mt.insert_with_id(2, &[0., 1.], serde_json::json!({}))
+            .unwrap();
+        let mut index = QuIVer::new(2, &QuIVerConfig::default());
+        index.batch_build(&[1., 0., 0., 1.], &[1, 2], &[0, 1]);
+        assert!(index.matches_fact_slots(&mt));
+        index.slot_indices.swap(0, 1);
+        assert!(!index.matches_fact_slots(&mt));
+        index.slot_indices = vec![0, usize::MAX];
+        assert!(!index.matches_fact_slots(&mt));
+        index.slot_indices = vec![0, 1];
+        index.ids[1] = 1;
+        assert!(!index.matches_fact_slots(&mt));
+        index.ids[1] = 2;
+        index.tombstones[0] = true;
+        assert!(!index.matches_fact_slots(&mt));
+    }
+
     /// 构造 N 个正交基向量（dim 维），每个向量只在第 i%dim 维为 1.0
     #[allow(dead_code)] // 测试辅助函数，保留备用
     fn make_orthogonal_vectors(n: usize, dim: usize) -> Vec<f32> {
@@ -3560,7 +3715,7 @@ mod tests {
         let distance = |node: u32| {
             index
                 .bq_store
-                .distance_to_sig_cheap(node as usize, q_sig, index.dim)
+                .distance_to_sig_cheap_in_bounds(node as usize, q_sig, index.dim)
         };
         let mut sequence = vec![index.ids[entry as usize]];
         let initial = NonNanF32(distance(entry) as f32);
@@ -3589,11 +3744,11 @@ mod tests {
         }
         let mut output = results.into_vec();
         for item in &mut output {
-            item.0 = NonNanF32(
-                index
-                    .bq_store
-                    .distance_to_sig(item.1 as usize, q_sig, index.dim) as f32,
-            );
+            item.0 = NonNanF32(index.bq_store.distance_to_sig_in_bounds(
+                item.1 as usize,
+                q_sig,
+                index.dim,
+            ) as f32);
         }
         output.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         (output, sequence)
@@ -3627,7 +3782,7 @@ mod tests {
                             *id,
                             index
                                 .bq_store
-                                .distance_to_sig(internal, &signature, index.dim),
+                                .distance_to_sig_in_bounds(internal, &signature, index.dim),
                         )
                     })
                 })

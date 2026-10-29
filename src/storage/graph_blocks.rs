@@ -1,18 +1,15 @@
-//! 业务图 `.gidx` sidecar 的持久化与 mmap 惰性解码。
+//! 业务图 `.gidx` sidecar 的持久化与校验后映射。
 //!
-//! 文件保存按源节点分块的权威出边数据，并携带入边和 Label 派生目录。打开阶段只
-//! 校验头、范围和 CRC 并建立块索引；具体出边通过 OnceLock 首次访问时解码，避免
-//! ReadOnly/Immutable 启动时全图物化。任何截断、越界或版本错误都在返回数据前拒绝。
+//! 文件保存按源节点分块的出边副本，并携带入边和 Label 派生目录。打开阶段验证
+//! 所有边记录、目录和主文件事实，成功后发布完整只读视图。
 
 use crate::error::{Result, TriviumError};
 use crate::node::{Edge, NodeId};
 use crate::storage::fs::robust_rename_and_sync;
 use memmap2::Mmap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::ops::Range;
 use std::path::Path;
-use std::sync::OnceLock;
 
 const MAGIC: &[u8; 4] = b"TGIX";
 pub const VERSION: u16 = 3;
@@ -20,8 +17,7 @@ const HEADER_SIZE: usize = 24;
 
 #[derive(Debug)]
 struct GraphBlock {
-    range: Range<usize>,
-    decoded: OnceLock<Vec<Edge>>,
+    edges: Vec<Edge>,
 }
 
 #[derive(Debug)]
@@ -31,11 +27,19 @@ pub struct MappedGraphStore {
     incoming: HashMap<NodeId, Vec<NodeId>>,
     labels: HashMap<String, Vec<(NodeId, NodeId)>>,
     edge_count: usize,
-    heap_bytes: std::sync::atomic::AtomicUsize,
+    heap_bytes: usize,
 }
 
 impl MappedGraphStore {
     pub fn open(db_path: &str, expected_nodes: usize) -> Result<Option<Self>> {
+        Self::open_with_admission(db_path, expected_nodes, |_| Ok(()))
+    }
+
+    pub(crate) fn open_with_admission(
+        db_path: &str,
+        expected_nodes: usize,
+        mut admit: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Option<Self>> {
         let path = format!("{db_path}.gidx");
         if !Path::new(&path).exists() {
             return Ok(None);
@@ -56,6 +60,11 @@ impl MappedGraphStore {
             ));
         }
         let version = read_u16(&mmap, 4, "version")?;
+        if read_u16(&mmap, 6, "flags")? != 0 {
+            return Err(corrupted(
+                "图索引保留位无效 (Invalid graph index reserved bits)",
+            ));
+        }
         if !(1..=VERSION).contains(&version) {
             return Err(corrupted(
                 "图块 sidecar 版本不受支持 (Unsupported graph block sidecar version)",
@@ -68,15 +77,17 @@ impl MappedGraphStore {
                 "图块 sidecar generation 不匹配 (Graph block generation mismatch)",
             ));
         }
+        if block_count > payload_end.saturating_sub(HEADER_SIZE) / 24 {
+            return Err(corrupted(
+                "图块数量超出文件边界 (Graph block count exceeds file bounds)",
+            ));
+        }
 
         let mut cursor = HEADER_SIZE;
         if version >= 3 {
             let main_size = read_u64(&mmap, cursor, "main_size")?;
-            let main_crc = read_u32(&mmap, cursor + 8, "main_crc")?;
             cursor += 12;
-            if main_size != std::fs::metadata(db_path)?.len()
-                || main_crc != crate::storage::file_format::file_crc32(db_path)?
-            {
+            if main_size != std::fs::metadata(db_path)?.len() {
                 return Err(corrupted(
                     "图索引与主文件事实不匹配 (Graph index does not match main file facts)",
                 ));
@@ -85,9 +96,38 @@ impl MappedGraphStore {
             // 旧格式缺少事实绑定，由调用方保留主文件中已读取的权威图。
             return Ok(None);
         }
+        let main_file = std::fs::File::open(db_path)?;
+        // SAFETY: 主文件只读映射仅在本次校验期间使用，所有偏移均检查范围。
+        let main = unsafe { Mmap::map(&main_file) }.map_err(TriviumError::Io)?;
+        if main.len() as u64 != read_u64(&mmap, HEADER_SIZE, "main_size")?
+            || crc32fast::hash(&main) != read_u32(&mmap, HEADER_SIZE + 8, "main_crc")?
+        {
+            return Err(corrupted(
+                "图索引与主文件事实不匹配 (Graph index does not match main file facts)",
+            ));
+        }
+        if main.len() < 58 || &main[..4] != b"TVDB" {
+            return Err(corrupted(
+                "图索引对应主文件头无效 (Invalid graph index main header)",
+            ));
+        }
+        let main_version = read_u16(&main, 4, "main_version")?;
+        if !(crate::storage::file_format::MINIMUM_SUPPORTED_VERSION
+            ..=crate::storage::file_format::CURRENT_VERSION)
+            .contains(&main_version)
+            || (main_version >= 10
+                && (main.len() < 74
+                    || crc32fast::hash(&main[..70]) != read_u32(&main, 70, "main_header_crc")?))
+        {
+            return Err(corrupted(
+                "图索引对应主文件版本或校验无效 (Invalid graph index main version or checksum)",
+            ));
+        }
         let mut blocks = HashMap::with_capacity(block_count);
         let mut incoming: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         let mut labels: HashMap<String, Vec<(NodeId, NodeId)>> = HashMap::new();
+        let mut actual_incoming: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut actual_labels: HashMap<String, Vec<(NodeId, NodeId)>> = HashMap::new();
         let mut edge_count = 0usize;
         for _ in 0..block_count {
             let src = read_u64(&mmap, cursor, "source")?;
@@ -98,8 +138,13 @@ impl MappedGraphStore {
             cursor += 4;
             let crc = read_u32(&mmap, cursor, "block_crc")?;
             cursor += 4;
-            let _reserved = read_u32(&mmap, cursor, "reserved")?;
+            let reserved = read_u32(&mmap, cursor, "reserved")?;
             cursor += 4;
+            if src == 0 || count == 0 || reserved != 0 || count > len / 20 {
+                return Err(corrupted(
+                    "图块源节点、数量或保留位无效 (Invalid graph block source, count or reserved bits)",
+                ));
+            }
             let end = cursor
                 .checked_add(len)
                 .ok_or_else(|| corrupted("图块偏移溢出"))?;
@@ -109,31 +154,31 @@ impl MappedGraphStore {
             if crc32fast::hash(data) != crc {
                 return Err(corrupted("图块 CRC32 不匹配 (Graph block CRC32 mismatch)"));
             }
-            if version == 1 {
-                let decoded = decode_edges(data, count)?;
-                for edge in &decoded {
-                    incoming.entry(edge.target_id).or_default().push(src);
-                    labels
-                        .entry(edge.label.clone())
-                        .or_default()
-                        .push((src, edge.target_id));
-                }
+            admit(len.saturating_mul(64))?;
+            let mut decoded = decode_edges(data, count)?;
+            decoded.sort_by(|a, b| a.target_id.cmp(&b.target_id).then(a.label.cmp(&b.label)));
+            if decoded.windows(2).any(|pair| {
+                pair[0].target_id == pair[1].target_id && pair[0].label == pair[1].label
+            }) {
+                return Err(corrupted(
+                    "图块包含重复边 (Graph block contains duplicate edges)",
+                ));
             }
-            if blocks
-                .insert(
-                    src,
-                    GraphBlock {
-                        range: cursor..end,
-                        decoded: OnceLock::new(),
-                    },
-                )
-                .is_some()
-            {
+            for edge in &decoded {
+                actual_incoming.entry(edge.target_id).or_default().push(src);
+                actual_labels
+                    .entry(edge.label.clone())
+                    .or_default()
+                    .push((src, edge.target_id));
+            }
+            if blocks.insert(src, GraphBlock { edges: decoded }).is_some() {
                 return Err(corrupted(
                     "图块包含重复源节点 (Duplicate graph source block)",
                 ));
             }
-            edge_count = edge_count.saturating_add(count);
+            edge_count = edge_count
+                .checked_add(count)
+                .ok_or_else(|| corrupted("图边计数溢出 (Graph edge count overflow)"))?;
             cursor = end;
         }
         if version >= 2 {
@@ -145,7 +190,11 @@ impl MappedGraphStore {
             cursor = cursor
                 .checked_add(4)
                 .ok_or_else(|| corrupted("目录偏移溢出"))?;
-            let _reserved = read_u32(&mmap, cursor, "directory_reserved")?;
+            if read_u32(&mmap, cursor, "directory_reserved")? != 0 {
+                return Err(corrupted(
+                    "图目录保留位无效 (Invalid graph directory reserved bits)",
+                ));
+            }
             cursor = cursor
                 .checked_add(4)
                 .ok_or_else(|| corrupted("目录偏移溢出"))?;
@@ -172,7 +221,11 @@ impl MappedGraphStore {
                 directory_cursor = checked_advance(directory_cursor, 8, "incoming_target")?;
                 let count = read_u32(directory, directory_cursor, "incoming_sources")? as usize;
                 directory_cursor = checked_advance(directory_cursor, 4, "incoming_sources")?;
-                let _reserved = read_u32(directory, directory_cursor, "incoming_reserved")?;
+                if read_u32(directory, directory_cursor, "incoming_reserved")? != 0 {
+                    return Err(corrupted(
+                        "反向目录保留位无效 (Invalid incoming reserved bits)",
+                    ));
+                }
                 directory_cursor = checked_advance(directory_cursor, 4, "incoming_reserved")?;
                 total_incoming = total_incoming
                     .checked_add(count)
@@ -192,14 +245,22 @@ impl MappedGraphStore {
                     directory_cursor = checked_advance(directory_cursor, 8, "incoming_source")?;
                 }
                 sources.sort_unstable();
-                sources.dedup();
+                if sources.is_empty() || sources.windows(2).any(|pair| pair[0] == pair[1]) {
+                    return Err(corrupted(
+                        "反向目录为空或重复 (Empty or duplicated incoming directory)",
+                    ));
+                }
                 if incoming.insert(target, sources).is_some() {
                     return Err(corrupted("反向目录包含重复目标节点"));
                 }
             }
             let label_count = read_u32(directory, directory_cursor, "label_count")? as usize;
             directory_cursor = checked_advance(directory_cursor, 4, "label_count")?;
-            let _reserved = read_u32(directory, directory_cursor, "label_reserved")?;
+            if read_u32(directory, directory_cursor, "label_reserved")? != 0 {
+                return Err(corrupted(
+                    "标签目录保留位无效 (Invalid label reserved bits)",
+                ));
+            }
             directory_cursor = checked_advance(directory_cursor, 4, "label_reserved")?;
             if label_count > edge_count {
                 return Err(corrupted("标签目录条目数量不合理"));
@@ -242,7 +303,11 @@ impl MappedGraphStore {
                     pairs.push((source, target));
                 }
                 pairs.sort_unstable();
-                pairs.dedup();
+                if pairs.is_empty() || pairs.windows(2).any(|pair| pair[0] == pair[1]) {
+                    return Err(corrupted(
+                        "标签目录为空或重复 (Empty or duplicated label directory)",
+                    ));
+                }
                 if labels.insert(label, pairs).is_some() {
                     return Err(corrupted("标签目录包含重复标签"));
                 }
@@ -265,6 +330,65 @@ impl MappedGraphStore {
             pairs.sort_unstable();
             pairs.dedup();
         }
+        for sources in actual_incoming.values_mut() {
+            sources.sort_unstable();
+            sources.dedup();
+        }
+        for pairs in actual_labels.values_mut() {
+            pairs.sort_unstable();
+        }
+        if incoming != actual_incoming || labels != actual_labels {
+            return Err(corrupted(
+                "图目录与边块不一致 (Graph directories do not match edge blocks)",
+            ));
+        }
+        let mut main_cursor = usize::try_from(read_u64(&main, 42, "main_edge_offset")?)
+            .map_err(|_| corrupted("主文件边偏移溢出 (Main edge offset overflow)"))?;
+        let main_end = usize::try_from(read_u64(&main, 50, "main_bq_offset")?)
+            .map_err(|_| corrupted("主文件边边界溢出 (Main edge boundary overflow)"))?;
+        if main_cursor < 58 || main_cursor > main_end || main_end > main.len() {
+            return Err(corrupted(
+                "主文件边块范围无效 (Invalid main edge block range)",
+            ));
+        }
+        let mut verified = HashSet::new();
+        while main_cursor < main_end {
+            let (source, edge) = crate::storage::file_format::read_graph_edge(
+                &main,
+                &mut main_cursor,
+                main_end,
+                main_version,
+                &mut admit,
+            )?;
+            let block = blocks.get(&source).ok_or_else(|| {
+                corrupted("图索引缺少主文件源节点 (Graph index is missing a main source)")
+            })?;
+            let position = block
+                .edges
+                .binary_search_by(|candidate| {
+                    candidate
+                        .target_id
+                        .cmp(&edge.target_id)
+                        .then(candidate.label.cmp(&edge.label))
+                })
+                .map_err(|_| {
+                    corrupted("图索引缺少主文件边 (Graph index is missing a main edge)")
+                })?;
+            let candidate = &block.edges[position];
+            if !verified.insert((source, position))
+                || candidate.weight.to_bits() != edge.weight.to_bits()
+                || candidate.metadata != edge.metadata
+            {
+                return Err(corrupted(
+                    "图索引内容与主文件事实不一致 (Graph index content does not match main facts)",
+                ));
+            }
+        }
+        if verified.len() != edge_count {
+            return Err(corrupted(
+                "图索引包含额外边 (Graph index contains extra edges)",
+            ));
+        }
         let heap_bytes = blocks.capacity() * std::mem::size_of::<(NodeId, GraphBlock)>()
             + incoming.capacity() * std::mem::size_of::<(NodeId, Vec<NodeId>)>()
             + labels.capacity() * std::mem::size_of::<(String, Vec<(NodeId, NodeId)>)>()
@@ -277,6 +401,23 @@ impl MappedGraphStore {
                 .map(|(label, pairs)| {
                     label.capacity() + pairs.capacity() * std::mem::size_of::<(NodeId, NodeId)>()
                 })
+                .sum::<usize>()
+            + blocks
+                .values()
+                .map(|block| {
+                    block.edges.capacity() * std::mem::size_of::<Edge>()
+                        + block
+                            .edges
+                            .iter()
+                            .map(|edge| {
+                                edge.label.capacity()
+                                    + crate::storage::payload_store::estimate_json_memory(
+                                        &edge.metadata,
+                                    )
+                                    .saturating_sub(std::mem::size_of::<serde_json::Value>())
+                            })
+                            .sum::<usize>()
+                })
                 .sum::<usize>();
         Ok(Some(Self {
             mmap,
@@ -284,32 +425,17 @@ impl MappedGraphStore {
             incoming,
             labels,
             edge_count,
-            heap_bytes: std::sync::atomic::AtomicUsize::new(heap_bytes),
+            heap_bytes,
         }))
     }
 
     pub fn edges(&self, source: NodeId) -> Option<&[Edge]> {
         let block = self.blocks.get(&source)?;
-        Some(block.decoded.get_or_init(|| {
-            let edges =
-                decode_edges(&self.mmap[block.range.clone()], usize::MAX).unwrap_or_default();
-            let bytes = edges.capacity() * std::mem::size_of::<Edge>()
-                + edges
-                    .iter()
-                    .map(|edge| {
-                        edge.label.capacity()
-                            + crate::storage::payload_store::estimate_json_memory(&edge.metadata)
-                                .saturating_sub(std::mem::size_of::<serde_json::Value>())
-                    })
-                    .sum::<usize>();
-            self.heap_bytes
-                .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-            edges
-        }))
+        Some(&block.edges)
     }
 
     pub(crate) fn heap_memory_bytes(&self) -> usize {
-        self.heap_bytes.load(std::sync::atomic::Ordering::Relaxed)
+        self.heap_bytes
     }
 
     pub fn incoming(&self, target: NodeId) -> &[NodeId] {
@@ -455,6 +581,11 @@ fn decode_edges(bytes: &[u8], expected: usize) -> Result<Vec<Edge>> {
         cursor += 8;
         let label_len = read_u32(bytes, cursor, "label_len")? as usize;
         cursor += 4;
+        if label_len > u16::MAX as usize {
+            return Err(corrupted(
+                "图块标签超过主文件格式上限 (Graph label exceeds main format limit)",
+            ));
+        }
         let metadata_len = read_u32(bytes, cursor, "metadata_len")? as usize;
         cursor += 4;
         let weight = f32::from_le_bytes(read_array::<4>(bytes, cursor, "weight")?);
@@ -490,7 +621,7 @@ fn decode_edges(bytes: &[u8], expected: usize) -> Result<Vec<Edge>> {
             metadata,
         });
     }
-    if expected != usize::MAX && edges.len() != expected {
+    if edges.len() != expected {
         return Err(corrupted(
             "图块边数量不匹配 (Graph block edge count mismatch)",
         ));

@@ -74,7 +74,7 @@ fn payload_generation_suffix(db_path: &str) -> Option<String> {
     Some(format!(".pld.{generation}"))
 }
 
-fn generation_suffixes(db_path: &str) -> Vec<String> {
+pub(crate) fn generation_suffixes(db_path: &str) -> Vec<String> {
     let mut suffixes = GENERATION_SUFFIXES
         .into_iter()
         .filter(|suffix| Path::new(&format!("{db_path}{suffix}")).exists())

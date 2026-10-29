@@ -9,6 +9,8 @@ pub mod nodejs;
 
 #[cfg(feature = "nodejs")]
 mod node_hook_refs;
+#[cfg(feature = "nodejs")]
+mod node_json;
 
 #[cfg(feature = "python")]
 pub mod python;

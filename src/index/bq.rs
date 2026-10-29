@@ -146,14 +146,23 @@ impl Bq2Signature {
     ///   x86: AVX-512 VPOPCNTDQ → AVX2 (nibble-lookup) → 标量
     ///   ARM: NEON (vcntq_u8) → 标量
     #[inline]
-    pub fn distance(&self, other: &Self, dim: usize) -> u32 {
+    pub fn distance(&self, other: &Self, dim: usize) -> crate::Result<u32> {
+        if dim > MAX_BQ_DIM {
+            return Err(bq_input_error());
+        }
+        Ok(self.distance_in_bounds(other, dim))
+    }
+
+    fn distance_in_bounds(&self, other: &Self, dim: usize) -> u32 {
+        // SAFETY: 公共入口已检查 dim，四个固定数组均覆盖 dim.div_ceil(64) 个 u64。
         if !dim.is_multiple_of(64) {
             return self.distance_scalar(other, dim);
         }
         #[cfg(target_arch = "x86_64")]
         {
             #[cfg(not(coverage))]
-            if !*FORCE_NO_AVX512
+            if dim.is_multiple_of(64)
+                && !*FORCE_NO_AVX512
                 && is_x86_feature_detected!("avx512vpopcntdq")
                 && is_x86_feature_detected!("avx512f")
             {
@@ -919,7 +928,60 @@ pub struct Bq2Store {
     n: usize,
 }
 
+fn bq_input_error() -> crate::TriviumError {
+    crate::TriviumError::InvalidInput(
+        "BQ 签名索引、维度或存储几何无效 (Invalid BQ signature index, dimension or storage geometry)".into(),
+    )
+}
+
 impl Bq2Store {
+    fn checked_row(&self, idx: usize, dim: usize) -> crate::Result<std::ops::Range<usize>> {
+        if self.chunks == 0
+            || self.chunks > MAX_BQ_CHUNKS
+            || dim > MAX_BQ_DIM
+            || dim.div_ceil(64) > self.chunks
+            || idx >= self.n
+        {
+            return Err(bq_input_error());
+        }
+        let start = idx.checked_mul(self.chunks).ok_or_else(bq_input_error)?;
+        let end = start.checked_add(self.chunks).ok_or_else(bq_input_error)?;
+        if end > self.pos.len() || end > self.strong.len() {
+            return Err(bq_input_error());
+        }
+        Ok(start..end)
+    }
+
+    pub fn distance_to_sig(
+        &self,
+        idx: usize,
+        other: &Bq2Signature,
+        dim: usize,
+    ) -> crate::Result<u32> {
+        self.checked_row(idx, dim)?;
+        Ok(self.distance_to_sig_in_bounds(idx, other, dim))
+    }
+
+    pub fn distance_to_sig_cheap(
+        &self,
+        idx: usize,
+        other: &Bq2Signature,
+        dim: usize,
+    ) -> crate::Result<u32> {
+        self.checked_row(idx, dim)?;
+        Ok(self.distance_to_sig_cheap_in_bounds(idx, other, dim))
+    }
+
+    pub fn distance(&self, i: usize, j: usize, dim: usize) -> crate::Result<u32> {
+        self.checked_row(i, dim)?;
+        self.checked_row(j, dim)?;
+        Ok(self.distance_in_bounds(i, j, dim))
+    }
+
+    pub fn get_sig(&self, idx: usize) -> crate::Result<Bq2Signature> {
+        self.checked_row(idx, self.chunks.saturating_mul(64))?;
+        Ok(self.get_sig_in_bounds(idx))
+    }
     /// 创建空的紧凑存储
     pub fn new(dim: usize) -> Self {
         let chunks = if dim == 0 { 1 } else { dim.div_ceil(64) };
@@ -989,7 +1051,10 @@ impl Bq2Store {
 
     /// 重建完整的 Bq2Signature（栈上临时对象）
     #[inline]
-    pub fn get_sig(&self, idx: usize) -> Bq2Signature {
+    pub(crate) fn get_sig_in_bounds(&self, idx: usize) -> Bq2Signature {
+        // 构建和加载保证节点属于签名存储；仍检查整行，避免未来内部调用产生越界裸指针。
+        self.checked_row(idx, self.chunks.saturating_mul(64))
+            .expect("已验证的 BQ 节点必须有完整签名");
         let mut sig = Bq2Signature::empty();
         let off = idx * self.chunks;
         sig.pos[..self.chunks].copy_from_slice(&self.pos[off..off + self.chunks]);
@@ -1000,7 +1065,11 @@ impl Bq2Store {
     /// 预取第 idx 个签名到 L1 cache（减少 beam search 中的 cache miss）
     #[inline]
     pub fn prefetch_sig(&self, idx: usize) {
-        let off = idx * self.chunks;
+        let Ok(row) = self.checked_row(idx, self.chunks.saturating_mul(64)) else {
+            return;
+        };
+        let off = row.start;
+        // SAFETY: 预取地址落在已验证的整行内；第二缓存行仅在该行有至少九个 u64 时使用。
         // 预取 pos 和 strong 的起始 cache line（64 bytes = 8 个 u64）
         // 对 768-d (12 chunks)，pos 96B = 2 cache lines，strong 96B = 2 cache lines
         unsafe {
@@ -1030,7 +1099,15 @@ impl Bq2Store {
 
     /// 计算存储中第 idx 个签名与外部签名的距离（零拷贝）
     #[inline]
-    pub fn distance_to_sig(&self, idx: usize, other: &Bq2Signature, dim: usize) -> u32 {
+    pub(crate) fn distance_to_sig_in_bounds(
+        &self,
+        idx: usize,
+        other: &Bq2Signature,
+        dim: usize,
+    ) -> u32 {
+        // SAFETY: 图节点范围经构建/加载验证；整行检查同时覆盖两个存储平面和外部固定数组。
+        self.checked_row(idx, dim)
+            .expect("已验证的 BQ 节点和维度必须覆盖完整行");
         let off = idx * self.chunks;
         bq2_distance_raw(
             self.pos[off..].as_ptr(),
@@ -1042,11 +1119,20 @@ impl Bq2Store {
     }
 
     #[inline]
-    pub fn distance_to_sig_cheap(&self, idx: usize, other: &Bq2Signature, dim: usize) -> u32 {
+    pub(crate) fn distance_to_sig_cheap_in_bounds(
+        &self,
+        idx: usize,
+        other: &Bq2Signature,
+        dim: usize,
+    ) -> u32 {
+        // SAFETY: 完整行和固定签名长度已验证；SIMD 只读这些平面的有效维度。
+        self.checked_row(idx, dim)
+            .expect("已验证的 BQ 节点和维度必须覆盖完整行");
         let off = idx * self.chunks;
         #[cfg(all(target_arch = "x86_64", not(coverage)))]
         {
-            if !*FORCE_NO_AVX512
+            if dim.is_multiple_of(64)
+                && !*FORCE_NO_AVX512
                 && is_x86_feature_detected!("avx512vpopcntdq")
                 && is_x86_feature_detected!("avx512f")
             {
@@ -1073,8 +1159,13 @@ impl Bq2Store {
         let chunks = dim.div_ceil(64);
         let mut acc = 0u32;
         for i in 0..chunks {
-            acc += (self.pos[off + i] ^ other.pos[i]).count_ones();
-            acc += (self.strong[off + i] ^ other.strong[i]).count_ones();
+            let mask = if i + 1 == chunks && !dim.is_multiple_of(64) {
+                (1u64 << (dim % 64)) - 1
+            } else {
+                u64::MAX
+            };
+            acc += ((self.pos[off + i] ^ other.pos[i]) & mask).count_ones();
+            acc += ((self.strong[off + i] ^ other.strong[i]) & mask).count_ones();
         }
         acc
     }
@@ -1083,7 +1174,11 @@ impl Bq2Store {
     pub(crate) fn distance_to_sig_cheap_384(&self, idx: usize, other: &Bq2Signature) -> u32 {
         #[cfg(target_arch = "x86_64")]
         {
-            let off = idx * 6;
+            // SAFETY: 读取六个 u64 前验证整行；行间距使用存储自己的 chunks。
+            let off = self
+                .checked_row(idx, 384)
+                .expect("384 维路由节点必须有完整 BQ 行")
+                .start;
             unsafe {
                 bq2_distance_cheap_popcnt_384(
                     self.pos.as_ptr().add(off),
@@ -1095,13 +1190,18 @@ impl Bq2Store {
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
-            self.distance_to_sig_cheap(idx, other, 384)
+            self.distance_to_sig_cheap_in_bounds(idx, other, 384)
         }
     }
 
     /// 计算两个存储中签名的距离（零拷贝）
     #[inline]
-    pub fn distance(&self, i: usize, j: usize, dim: usize) -> u32 {
+    pub(crate) fn distance_in_bounds(&self, i: usize, j: usize, dim: usize) -> u32 {
+        // SAFETY: 两个图节点来自已验证的拓扑；独立检查两行后才交付指针。
+        self.checked_row(i, dim)
+            .expect("已验证的 BQ 左节点必须有完整签名");
+        self.checked_row(j, dim)
+            .expect("已验证的 BQ 右节点必须有完整签名");
         let off_i = i * self.chunks;
         let off_j = j * self.chunks;
         bq2_distance_raw(
@@ -1135,21 +1235,78 @@ impl Bq2Store {
     }
 
     /// 从裸数据恢复（反序列化用）
-    pub fn from_raw(pos: Vec<u64>, strong: Vec<u64>, chunks: usize) -> Self {
-        assert_eq!(pos.len(), strong.len(), "pos/strong 长度必须一致");
-        let n = pos.len().checked_div(chunks).unwrap_or(0);
-        Self {
+    pub fn from_raw(pos: Vec<u64>, strong: Vec<u64>, chunks: usize) -> crate::Result<Self> {
+        if chunks == 0
+            || chunks > MAX_BQ_CHUNKS
+            || pos.len() != strong.len()
+            || !pos.len().is_multiple_of(chunks)
+        {
+            return Err(bq_input_error());
+        }
+        let n = pos.len() / chunks;
+        Ok(Self {
             pos,
             strong,
             chunks,
             n,
-        }
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_safety_公共距离入口拒绝空存储越界与超大维度() {
+        let signature = Bq2Signature::empty();
+        let empty = Bq2Store::new(64);
+        for index in [0, 1, usize::MAX] {
+            assert!(matches!(
+                empty.distance_to_sig(index, &signature, 64),
+                Err(crate::TriviumError::InvalidInput(_))
+            ));
+            assert!(empty.distance_to_sig_cheap(index, &signature, 64).is_err());
+            assert!(empty.distance(index, 0, 64).is_err());
+            assert!(empty.get_sig(index).is_err());
+            empty.prefetch_sig(index);
+        }
+        let mut one = Bq2Store::new(64);
+        one.push_sig(&signature);
+        for dim in [65, MAX_BQ_DIM + 1, usize::MAX] {
+            assert!(one.distance_to_sig(0, &signature, dim).is_err());
+            assert!(one.distance_to_sig_cheap(0, &signature, dim).is_err());
+            assert!(one.distance(0, 0, dim).is_err());
+        }
+        assert!(signature.distance(&signature, usize::MAX).is_err());
+        for (pos, strong, chunks) in [
+            (vec![], vec![], 0),
+            (vec![0], vec![], 1),
+            (vec![0; 3], vec![0; 3], 2),
+            (vec![], vec![], usize::MAX),
+        ] {
+            assert!(Bq2Store::from_raw(pos, strong, chunks).is_err());
+        }
+        assert_eq!(one.distance_to_sig(0, &signature, 64).unwrap(), 192);
+        assert_eq!(one.distance_to_sig_cheap(0, &signature, 64).unwrap(), 0);
+    }
+
+    #[test]
+    fn memory_safety_便宜距离屏蔽签名尾部并覆盖最后有效行() {
+        for dim in [1, 63, 65, 383, 385, 767, 769, MAX_BQ_DIM - 1] {
+            let chunks = dim.div_ceil(64);
+            let mut query = Bq2Signature::empty();
+            query.pos[..chunks].fill(u64::MAX);
+            query.strong[..chunks].fill(u64::MAX);
+            let store =
+                Bq2Store::from_raw(vec![0; chunks * 2], vec![0; chunks * 2], chunks).unwrap();
+            assert_eq!(
+                store.distance_to_sig_cheap(1, &query, dim).unwrap(),
+                (dim * 2) as u32
+            );
+            assert!(store.distance_to_sig(2, &query, dim).is_err());
+        }
+    }
 
     // 按维解码后直接计算内积，独立于生产实现的分组位计数公式。
     fn reference_distance(left: &Bq2Signature, right: &Bq2Signature, dim: usize) -> u32 {
@@ -1214,11 +1371,14 @@ mod tests {
                 store.push_from_vector(&vector);
             }
             for (row, signature) in signatures.iter().enumerate() {
-                assert_eq!(store.get_sig(row), *signature);
+                assert_eq!(store.get_sig(row).unwrap(), *signature);
                 let last = signatures.last().unwrap();
                 let expected = reference_distance(signature, last, dim);
-                assert_eq!(store.distance(row, signatures.len() - 1, dim), expected);
-                assert_eq!(store.distance_to_sig(row, last, dim), expected);
+                assert_eq!(
+                    store.distance(row, signatures.len() - 1, dim).unwrap(),
+                    expected
+                );
+                assert_eq!(store.distance_to_sig(row, last, dim).unwrap(), expected);
             }
         }
     }
@@ -1246,8 +1406,8 @@ mod tests {
         let v2 = vec![1.0f32, -1.0, 1.0, -1.0];
         let sig1 = Bq2Signature::from_vector(&v1);
         let sig2 = Bq2Signature::from_vector(&v2);
-        let dist = sig1.distance(&sig2, 4);
-        assert!(dist > sig1.distance(&sig1, 4));
+        let dist = sig1.distance(&sig2, 4).unwrap();
+        assert!(dist > sig1.distance(&sig1, 4).unwrap());
     }
 
     #[test]
@@ -1264,7 +1424,7 @@ mod tests {
             sig2.strong.as_ptr(),
             4,
         );
-        assert_eq!(dist, sig1.distance(&sig2, 4));
+        assert_eq!(dist, sig1.distance(&sig2, 4).unwrap());
 
         let raw_dist = bq2_distance_raw(
             sig1.pos.as_ptr(),
@@ -1370,14 +1530,17 @@ mod tests {
             query.strong.as_ptr(),
             384,
         );
-        assert_eq!(store.distance_to_sig(6, &query, 384), expected);
+        assert_eq!(store.distance_to_sig(6, &query, 384).unwrap(), expected);
         let expected_cheap = (0..6)
             .map(|index| {
                 (store.pos_data()[36 + index] ^ query.pos[index]).count_ones()
                     + (store.strong_data()[36 + index] ^ query.strong[index]).count_ones()
             })
             .sum::<u32>();
-        assert_eq!(store.distance_to_sig_cheap(6, &query, 384), expected_cheap);
+        assert_eq!(
+            store.distance_to_sig_cheap(6, &query, 384).unwrap(),
+            expected_cheap
+        );
     }
 
     #[test]
@@ -1454,8 +1617,8 @@ mod tests {
         store.push_from_vector(&[-1.0f32, -2.0, -3.0, -4.0]);
         assert_eq!(store.len(), 2);
 
-        let dist01 = store.distance(0, 1, 4);
-        let dist00 = store.distance(0, 0, 4);
+        let dist01 = store.distance(0, 1, 4).unwrap();
+        let dist00 = store.distance(0, 0, 4).unwrap();
         assert!(dist01 > dist00);
     }
 
@@ -1467,6 +1630,6 @@ mod tests {
         store.push_from_vector(&v1);
         store.push_from_vector(&v2);
 
-        assert!(store.distance(0, 0, 128) < store.distance(0, 1, 128));
+        assert!(store.distance(0, 0, 128).unwrap() < store.distance(0, 1, 128).unwrap());
     }
 }

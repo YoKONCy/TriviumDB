@@ -13,7 +13,7 @@ if (process.env.TRIVIUM_NODE_CHILD_PATH) {
     db.close()
     process.exit(2)
   } catch (error) {
-    assert.match(String(error), /Database locked|数据库已锁定/)
+    assert.equal(error.code, 'TDB_DATABASE_LOCKED')
     process.exit(0)
   }
 }

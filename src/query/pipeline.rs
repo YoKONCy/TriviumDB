@@ -687,12 +687,7 @@ impl<T: VectorType> PipelineOperator<T> for ExactVectorSearch<T> {
     }
 
     fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
-        if self.query.len() != context.memtable.dim() {
-            return Err(TriviumError::DimensionMismatch {
-                expected: context.memtable.dim(),
-                got: self.query.len(),
-            });
-        }
+        crate::vector::validate_query_vector(&self.query, context.memtable.dim())?;
         let ids = context.memtable.all_node_ids();
         context.charge_vectors(ids.len())?;
         let mut scored = ids
@@ -746,13 +741,12 @@ impl<T: VectorType> PipelineOperator<T> for QuiverVectorSearch<T> {
     }
 
     fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
-        if self.query.len() != context.memtable.dim() {
-            return Err(TriviumError::DimensionMismatch {
-                expected: context.memtable.dim(),
-                got: self.query.len(),
-            });
-        }
-        let Some(index) = context.memtable.quiver() else {
+        crate::vector::validate_query_vector(&self.query, context.memtable.dim())?;
+        let Some(index) = context
+            .memtable
+            .quiver()
+            .filter(|_| !crate::vector::is_binary_vector::<T>())
+        else {
             return ExactVectorSearch {
                 query: self.query.clone(),
                 top_k: self.top_k,
@@ -764,11 +758,17 @@ impl<T: VectorType> PipelineOperator<T> for QuiverVectorSearch<T> {
             .iter()
             .map(|value| value.to_f32())
             .collect::<Vec<_>>();
+        let mut vector_error = None;
         let hits = index.search(
             &query,
             |slot, output| {
-                let Some((_, vector)) = context.memtable.active_vector_at_slot(slot) else {
-                    return false;
+                let vector = match context.memtable.active_vector_at_slot(slot) {
+                    Ok(Some((_, vector))) => vector,
+                    Ok(None) => return false,
+                    Err(error) => {
+                        vector_error = Some(error);
+                        return false;
+                    }
                 };
                 output.clear();
                 output.extend(vector.iter().map(|value| value.to_f32()));
@@ -780,6 +780,9 @@ impl<T: VectorType> PipelineOperator<T> for QuiverVectorSearch<T> {
                 rerank_limit: Some(self.ef_search.max(self.top_k)),
             },
         );
+        if let Some(error) = vector_error {
+            return Err(error);
+        }
         context.charge_vectors(hits.len())?;
         Ok(NodeSet::from_rows(
             hits.into_iter()
@@ -957,6 +960,7 @@ impl<T: VectorType> PipelineOperator<T> for FistaResidualRecall<T> {
     }
 
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        crate::vector::validate_query_vector(&self.query, context.memtable.dim())?;
         const MAX_CANDIDATES: usize = 512;
         const MAX_ITERATIONS: usize = 256;
         if input.is_empty()
@@ -1196,12 +1200,7 @@ impl<T: VectorType> PipelineOperator<T> for ExactRerank<T> {
     }
 
     fn apply(&self, mut input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
-        if self.query.len() != context.memtable.dim() {
-            return Err(TriviumError::DimensionMismatch {
-                expected: context.memtable.dim(),
-                got: self.query.len(),
-            });
-        }
+        crate::vector::validate_query_vector(&self.query, context.memtable.dim())?;
         context.charge_vectors(input.len())?;
         let threads = context.budget.parallelism.threads(input.len());
         let score_row = |mut row: NodeRow| {

@@ -371,12 +371,10 @@ fn WAL_解析器_10000轮随机字节绝不panic() {
 // ════════════════════════════════════════════════════════════════
 
 /// 在有效的 WAL 字节流后追加各种垃圾尾部，
-/// 验证引擎总是能恢复有效前缀的所有条目。
+/// 完整坏帧和非法长度必须拒绝；物理未写完的尾帧恢复独立样例的五条前缀。
 #[test]
 fn WAL_有效前缀加垃圾尾部_前缀条目必须完整恢复() {
     let valid_wal = build_valid_wal_bytes();
-    let (baseline, _) = Wal::read_entries_from_reader::<f32>(Cursor::new(&valid_wal)).unwrap();
-    let baseline_count = baseline.len();
 
     // 各种垃圾尾部 pattern
     let garbage_patterns: Vec<Vec<u8>> = vec![
@@ -424,21 +422,36 @@ fn WAL_有效前缀加垃圾尾部_前缀条目必须完整恢复() {
 
         assert!(result.is_ok(), "垃圾 pattern #{} 导致解析器 panic", i);
 
-        let (entries, _) = result.unwrap().unwrap();
-        assert_eq!(
-            entries.len(),
-            baseline_count,
-            "垃圾 pattern #{}: 有效前缀的 {} 条记录应完整恢复，实际 {}",
-            i,
-            baseline_count,
-            entries.len()
-        );
+        let result = result.unwrap();
+        if i == 5 {
+            let (entries, _) = result.unwrap();
+            assert_eq!(entries.len(), 5);
+            assert!(
+                matches!(&entries[0], WalEntry::Insert {id:1,vector,payload} if vector == &[1.,0.,0.,0.] && payload == r#"{"name":"alice"}"#)
+            );
+            assert!(
+                matches!(&entries[1], WalEntry::Insert {id:2,vector,payload} if vector == &[0.,1.,0.,0.] && payload == r#"{"name":"bob"}"#)
+            );
+            assert!(
+                matches!(&entries[2], WalEntry::Link {src:1,dst:2,label,weight,metadata} if label == "knows" && *weight == 1. && metadata == "null")
+            );
+            assert!(
+                matches!(&entries[3], WalEntry::Insert {id:3,vector,payload} if vector == &[0.,0.,1.,0.] && payload == r#"{"name":"charlie"}"#)
+            );
+            assert!(
+                matches!(&entries[4], WalEntry::UpdatePayload {id:1,payload} if payload == r#"{"name":"alice","age":30}"#)
+            );
+        } else {
+            assert!(
+                matches!(result, Err(triviumdb::TriviumError::CorruptedFile(_))),
+                "坏帧 pattern {i} 必须返回损坏错误"
+            );
+        }
     }
 
     eprintln!(
-        "  ✅ 有效前缀+垃圾尾部: {} 种 pattern 下 {} 条前缀记录均完整恢复",
-        garbage_patterns.len(),
-        baseline_count
+        "完整坏帧拒绝、物理尾帧恢复验证完成 (Complete bad frames rejected; incomplete tails recovered): {} patterns",
+        garbage_patterns.len()
     );
 }
 

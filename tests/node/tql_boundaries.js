@@ -60,6 +60,7 @@ module.exports = function tqlBoundaries(root, TriviumDB) {
   } finally { numeric.close() }
 
   const file = path.join(root, 'boundaries-full-id.tdb')
+  new TriviumDB(file, { dim: 2, autoBuildQuiver: false }).close()
   fs.copyFileSync(path.join(__dirname, '../fixtures/numeric_ids/full_u64_v3.bin'), file + '.wal')
   const large = new TriviumDB(file, { dim: 2, autoBuildQuiver: false })
   try {

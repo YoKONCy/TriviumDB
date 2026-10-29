@@ -8,6 +8,8 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const contract = require('../contracts/public_cases.json')
+const { runErrorContract } = require('./error_contracts')
+const { runKernelBoundaries } = require('./kernel_boundaries')
 const { TriviumDB, ResourceRuntime, verifySnapshot, restoreSnapshot } = require('../../index.js')
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'triviumdb-node-public-api-'))
@@ -42,6 +44,7 @@ function runTransactionContract(root) {
           }
           check(db)
           const replayFile = file + '.replay'
+          fs.copyFileSync(file, replayFile)
           fs.copyFileSync(file + '.wal', replayFile + '.wal')
           const replay = new TriviumDB(replayFile, options)
           try { check(replay) } finally { replay.close() }
@@ -245,7 +248,11 @@ function runSharedContract(root) {
       const prepared = db.prepareTql(testCase.tql)
       assert.throws(
         () => db.executePreparedTql(prepared, testCase.parameters || {}),
-        error => expected.error_contains_any.some(needle => String(error).includes(needle)),
+        error => {
+          assert.equal(error.code, expected.error_code)
+          assert.deepEqual(error.details, expected.error_details)
+          return true
+        },
         testCase.name,
       )
     } else if (testCase.operation === 'text_lifecycle') {
@@ -351,6 +358,8 @@ async function main() {
     runLifecycleContract(root)
     runResourceContract(root)
     runSharedContract(root)
+    await runErrorContract(root)
+    runKernelBoundaries(root)
     runTransactionContract(root)
     await require('./write_boundaries.js')(root, TriviumDB)
     await require('./numeric_boundaries.js')(root, TriviumDB)
@@ -425,8 +434,8 @@ async function main() {
     assert.deepEqual(indexes.find(item => item.kind === 'composite').fields, ['tenant', 'region'])
 
     const storage = db.storageInfo()
-    assert.equal(storage.database_format_current, 9)
-    assert.equal(storage.property_index_format, 7)
+    assert.equal(storage.database_format_current, 10)
+    assert.equal(storage.property_index_format, 8)
     assert.equal(storage.node_count, 2)
 
     const vectorPrepared = db.prepareTql('SEARCH VECTOR [$x, $y] TOP 1 RETURN *')
@@ -439,7 +448,11 @@ async function main() {
     const preparedRows = db.executePreparedTql(prepared, { bonus: 4 })
     assert.equal(preparedRows.length, 1)
     assert.equal(preparedRows[0].score, 5)
-    assert.throws(() => db.executePreparedTql(prepared, {}), /missing parameter|缺少参数/)
+    assert.throws(() => db.executePreparedTql(prepared, {}), error => {
+      assert.equal(error.code, 'TDB_MISSING_QUERY_PARAMETER')
+      assert.deepEqual(error.details, { parameter: 'bonus' })
+      return true
+    })
 
     const pathRows = db.tql('SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed shortest_paths seed TO [2] LABEL next AS route WITH route RETURN path(route) AS path')
     assert.deepEqual(pathRows[0].path, ['1', '2'])
@@ -471,7 +484,7 @@ async function main() {
 
     assert.throws(
       () => db.tqlMut('FIND {kind: "a"} RETURN *'),
-      /TDB_API_MIGRATION_REQUIRED/,
+      error => error.code === 'TDB_API_MIGRATION_REQUIRED',
     )
     db.close()
   } finally {

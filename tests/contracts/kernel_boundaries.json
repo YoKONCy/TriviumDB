@@ -1,0 +1,7 @@
+{
+  "dtypes": ["f32", "f16", "u64"],
+  "dimension": 2,
+  "nodes": [{"id": 1, "vector": [1, 0], "payload": {"x": 1}}, {"id": 2, "vector": [0, 1], "payload": {"x": 2}}],
+  "invalid_mutations": ["MATCH (n) SET n.x == 9 WHERE n.x == 999", "MATCH (n) DELETE n WHERE n.x == 999", "CREATE (n {x:9}) garbage"],
+  "invalid_read": "MATCH (n) RETURN n LIMIT 1 WHERE n.x == 2"
+}

@@ -369,6 +369,10 @@ impl From<TriviumError> for ApiError {
                 false,
             ),
             TriviumError::QueryCancelled => Self::timeout(),
+            TriviumError::MissingQueryParameter { .. }
+            | TriviumError::UnexpectedQueryParameter { .. } => {
+                Self::invalid_request(error.to_string())
+            }
             TriviumError::QueryRowBudgetExceeded { budget } => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "QUERY_ROW_BUDGET_EXCEEDED",
@@ -568,4 +572,26 @@ fn encode_value(value: TqlValue<f32>) -> Result<serde_json::Value, ApiError> {
         TqlValue::Object(value) => serde_json::json!({"type":"object","value":value}),
         TqlValue::Null => serde_json::json!({"type": "null"}),
     })
+}
+
+#[cfg(test)]
+mod structured_error_tests {
+    use super::*;
+
+    #[test]
+    fn prepared参数错误作为无效请求返回() {
+        for error in [
+            TriviumError::MissingQueryParameter {
+                parameter: "required".into(),
+            },
+            TriviumError::UnexpectedQueryParameter {
+                parameter: "extra".into(),
+            },
+        ] {
+            let response = ApiError::from(error);
+            assert_eq!(response.status, StatusCode::BAD_REQUEST);
+            assert_eq!(response.code, "INVALID_REQUEST");
+            assert!(!response.retryable);
+        }
+    }
 }

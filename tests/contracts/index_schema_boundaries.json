@@ -1,0 +1,6 @@
+{
+  "definitions": [["a\u0000b", "c"], ["a", "b\u0000c"], ["引号\"反斜杠\\", "路径.字段"], ["\u0000", "c"]],
+  "payload": {"a\u0000b": 1, "a": 9, "b": 9, "c": 2, "b\u0000c": 3, "引号\"反斜杠\\": 4, "路径.字段": 5, "\u0000": 6, "__proto__": {"preserved": true}, "nested": [{"key\u0000suffix": "完整保留"}, null, false]},
+  "query": "FIND {a: 9, b: 9, c: 2} RETURN *",
+  "expected_ids": [1]
+}

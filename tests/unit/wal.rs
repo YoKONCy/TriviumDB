@@ -571,7 +571,7 @@ fn wal拒绝历史无头记录并提示迁移() {
 }
 
 #[test]
-fn wal_crc_错误时停止恢复() {
+fn wal_crc_错误时拒绝恢复() {
     // 构造一条有效记录
     let entry = WalEntry::Insert::<f32> {
         id: 1,
@@ -592,8 +592,10 @@ fn wal_crc_错误时停止恢复() {
     buf.extend_from_slice(&data);
     buf.extend_from_slice(&0xDEADBEEFu32.to_le_bytes()); // 坏 CRC
 
-    let (entries, _) = Wal::read_entries_from_reader::<f32>(Cursor::new(&buf)).unwrap();
-    assert_eq!(entries.len(), 1, "CRC 错误后应只恢复第一条");
+    assert!(matches!(
+        Wal::read_entries_from_reader::<f32>(Cursor::new(&buf)),
+        Err(triviumdb::TriviumError::CorruptedFile(_))
+    ));
 }
 
 #[test]
@@ -603,6 +605,8 @@ fn wal_len过大_合理性检查() {
     buf.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     buf.extend_from_slice(&[0xAA; 100]);
 
-    let (entries, _) = Wal::read_entries_from_reader::<f32>(Cursor::new(&buf)).unwrap();
-    assert!(entries.is_empty(), "超大 len 应触发安全停止");
+    assert!(matches!(
+        Wal::read_entries_from_reader::<f32>(Cursor::new(&buf)),
+        Err(triviumdb::TriviumError::CorruptedFile(_))
+    ));
 }

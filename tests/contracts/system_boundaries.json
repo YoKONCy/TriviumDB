@@ -1,0 +1,13 @@
+{
+  "dtypes": ["f32", "f16", "u64"],
+  "nodes": [1, 2, 3, 4],
+  "edges": [[1, 2, "red"], [1, 2, "blue"], [2, 1, "red"], [1, 1, "self"], [3, 1, "outside"], [3, 4, "keep"]],
+  "delete_queries": ["MATCH (n) WHERE n.id <= 2 DETACH DELETE n", "MATCH (a)-[:red]->(b) WHERE a.id <= 2 AND b.id <= 2 DETACH DELETE b, a"],
+  "remaining_ids": [3, 4],
+  "runtime_mb": 16,
+  "maintenance_mb": 2,
+  "database_mb": 2,
+  "blocked_quota_mb": 14,
+  "winner_id": 1,
+  "reachable_ids": [2]
+}

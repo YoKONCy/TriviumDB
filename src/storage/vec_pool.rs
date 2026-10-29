@@ -53,6 +53,7 @@ pub struct VecPool<T: VectorType> {
     ///   - false → 追加路径：O(delta) I/O，只写新增数据
     ///   - true  → 全量重写路径：O(total) I/O，将 COW 脏页固化回磁盘
     has_dirty_base: bool,
+    recovery_required: bool,
 }
 
 /// 向 OS 内核提交 mmap 访问模式建议（`madvise` 封装）
@@ -89,6 +90,7 @@ impl<T: VectorType> VecPool<T> {
             merged: Vec::new(),
             merged_valid: false,
             has_dirty_base: false,
+            recovery_required: false,
         }
     }
 
@@ -397,7 +399,14 @@ impl<T: VectorType> VecPool<T> {
     /// **全量重写路径**（`has_dirty_base == true`，或首次写入）：
     ///   - I/O 代价 = O(总数据量)，将 COW 脏页固化回磁盘
     ///   - 适合有 delete/update 的场景
+    pub(crate) fn recovery_required(&self) -> bool {
+        self.recovery_required
+    }
+
     pub fn flush(&mut self, vec_path: &Path) -> Result<usize> {
+        if self.recovery_required {
+            return Err(TriviumError::WalClosed);
+        }
         #[cfg(windows)]
         self.startup_file.take();
         let total = self.total_count();
@@ -407,8 +416,10 @@ impl<T: VectorType> VecPool<T> {
             // P1 fix: 先释放 mmap，再删文件（Windows 强制锁定）
             self.mmap = None;
             self.mmap_count = 0;
-            if vec_path.exists() {
-                std::fs::remove_file(vec_path).ok();
+            match std::fs::remove_file(vec_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
             self.delta.clear();
             self.has_dirty_base = false;
@@ -438,6 +449,8 @@ impl<T: VectorType> VecPool<T> {
     ///   - 数据库发布前先保留独立的旧代文件；追加中断时恢复旧代，再回放 WAL。
     ///   - 单独使用 VecPool 不提供跨文件恢复，调用方必须负责发布协议。
     fn flush_append(&mut self, vec_path: &Path) -> Result<usize> {
+        // 文件可能已在上一次失败中部分追加；此后由基础检查点与 WAL 恢复。
+        self.recovery_required = true;
         let append_count = self.delta_count();
         let elem_size = std::mem::size_of::<T>();
 
@@ -482,6 +495,7 @@ impl<T: VectorType> VecPool<T> {
 
         self.vec_path = Some(vec_path.to_path_buf());
         self.has_dirty_base = false;
+        self.recovery_required = false;
         self.invalidate_cache();
 
         tracing::debug!(
@@ -524,6 +538,8 @@ impl<T: VectorType> VecPool<T> {
         //    COW 脏页数据已在步骤 1 写入 .tmp，释放安全。
         self.mmap = None;
 
+        self.recovery_required = true;
+
         // 3. 原子替换
         robust_rename_and_sync(&tmp_path, vec_path)?;
 
@@ -552,6 +568,7 @@ impl<T: VectorType> VecPool<T> {
 
         self.vec_path = Some(vec_path.to_path_buf());
         self.has_dirty_base = false;
+        self.recovery_required = false;
         self.invalidate_cache();
 
         tracing::debug!(

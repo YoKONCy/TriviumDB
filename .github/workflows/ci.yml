@@ -72,6 +72,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 验证发布来源校验行为
+        run: python -m unittest discover -s tests/tools -p test_release_source.py
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
@@ -127,8 +130,17 @@ jobs:
         shell: bash
         run: cargo test --target ${{ matrix.target }} --lib --tests -- --test-threads=1
 
+      - name: 验证 release 小栈解析与图遍历边界
+        if: runner.os == 'Linux'
+        run: |
+          cargo test --release --target ${{ matrix.target }} --test query parser_limits -- --test-threads=1
+          cargo test --release --target ${{ matrix.target }} --test query match_boundaries -- --test-threads=1
+
       - name: 运行规划器物化回归测试
         run: cargo test --target ${{ matrix.target }} --test query --features test-hooks tql_planner -- --test-threads=1
+
+      - name: 验证路径执行中的取消
+        run: cargo test --target ${{ matrix.target }} --test query --features test-hooks match_boundaries -- --test-threads=1
 
       - name: 运行确定性交错与物理策略差分测试
         run: cargo test --target ${{ matrix.target }} --features test-hooks --test concurrency --test differential -- --test-threads=1
@@ -204,6 +216,10 @@ jobs:
 
       - name: 验证 Python 公共 API 契约
         run: python tests/python/public_api.py
+
+      - name: 验证全部核心错误的 Python 映射
+        if: runner.os == 'Windows'
+        run: cargo test --lib --features python 核心错误完整映射到_python异常 -- --nocapture
 
       - name: 验证 Python 类型存根与 Wheel 内容
         shell: bash

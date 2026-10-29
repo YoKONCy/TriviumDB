@@ -16,6 +16,12 @@ pub enum TriviumError {
     #[error("向量维度不匹配 (Vector dimension mismatch): 期望 {expected}，实际 {got}")]
     DimensionMismatch { expected: usize, got: usize },
 
+    #[error("向量类型不匹配 (Vector dtype mismatch): stored={stored}, requested={requested}")]
+    DtypeMismatch {
+        stored: &'static str,
+        requested: &'static str,
+    },
+
     #[error("节点不存在 (Node not found): {0}")]
     NodeNotFound(u64),
 
@@ -72,6 +78,14 @@ pub enum TriviumError {
     /// 查询执行错误
     #[error("查询执行错误 (Query execution error): {0}")]
     QueryExecution(String),
+
+    #[error("Prepared TQL 缺少参数 ${parameter} (Prepared TQL is missing parameter ${parameter})")]
+    MissingQueryParameter { parameter: String },
+
+    #[error(
+        "Prepared TQL 收到额外参数 ${parameter} (Prepared TQL received unexpected parameter ${parameter})"
+    )]
+    UnexpectedQueryParameter { parameter: String },
 
     /// 查询因客户端取消或请求 deadline 到期而协作式终止。
     #[error("查询已取消 (Query cancelled)")]
@@ -132,7 +146,9 @@ pub enum TriviumError {
     CapacityAllocationFailed { reason: String },
 
     /// 共享运行时拒绝内存、任务或工作线程准入；调用方可根据维度决定重试策略。
-    #[error("共享资源预算耗尽：{resource}，请求 {requested}，已使用 {used}，上限 {limit}")]
+    #[error(
+        "共享资源预算耗尽 (Resource budget exceeded): {resource}，请求 {requested}，已使用 {used}，上限 {limit}"
+    )]
     ResourceBudgetExceeded {
         resource: &'static str,
         requested: usize,
@@ -140,14 +156,14 @@ pub enum TriviumError {
         limit: usize,
     },
 
-    #[error("快照目标已经存在：{path}")]
+    #[error("快照目标已经存在 (Snapshot destination exists): {path}")]
     SnapshotDestinationExists { path: String },
 
-    #[error("快照已重命名但目录同步未能确认：{path}，{reason}")]
+    #[error("快照已重命名但目录同步未能确认 (Snapshot publication uncertain): {path}，{reason}")]
     SnapshotPublicationUncertain { path: String, reason: String },
 
     /// 关闭工作任务未能正常完成，数据和锁仍由关闭状态持有。
-    #[error("关闭任务失败：{reason}")]
+    #[error("关闭任务失败 (Shutdown failed): {reason}")]
     ShutdownFailed { reason: String },
 
     /// 数据库已经关闭或正在关闭。
@@ -194,4 +210,160 @@ pub enum TriviumError {
     Generic(String),
 }
 
+impl TriviumError {
+    /// 三端共享的稳定错误码；消息可翻译，控制流依赖错误码与字段。
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "TDB_IO",
+            Self::Serialization(_) => "TDB_SERIALIZATION",
+            Self::DimensionMismatch { .. } => "TDB_DIMENSION_MISMATCH",
+            Self::DtypeMismatch { .. } => "TDB_DTYPE_MISMATCH",
+            Self::NodeNotFound(_) => "TDB_NODE_NOT_FOUND",
+            Self::InvalidVector { .. } => "TDB_INVALID_VECTOR",
+            Self::PayloadTooLarge { .. } => "TDB_PAYLOAD_TOO_LARGE",
+            Self::UniqueConstraintViolation { .. } => "TDB_UNIQUE_CONSTRAINT",
+            Self::ConditionalUpdateNotMatched { .. } => "TDB_CONDITIONAL_UPDATE_NOT_MATCHED",
+            Self::NodeAlreadyExists(_) => "TDB_NODE_ALREADY_EXISTS",
+            Self::DatabaseLocked(_) => "TDB_DATABASE_LOCKED",
+            Self::ReadOnlyViolation { .. } => "TDB_READ_ONLY",
+            Self::RecoveryRequired { .. } => "TDB_RECOVERY_REQUIRED",
+            Self::ImmutableArtifactInvalid { .. } => "TDB_IMMUTABLE_ARTIFACT",
+            Self::GenerationBusy { .. } => "TDB_GENERATION_BUSY",
+            Self::CorruptedFile(_) => "TDB_CORRUPTED_FILE",
+            Self::QueryParse(_) => "TDB_QUERY_PARSE",
+            Self::QueryExecution(_) => "TDB_QUERY_EXECUTION",
+            Self::MissingQueryParameter { .. } => "TDB_MISSING_QUERY_PARAMETER",
+            Self::UnexpectedQueryParameter { .. } => "TDB_UNEXPECTED_QUERY_PARAMETER",
+            Self::QueryCancelled => "TDB_QUERY_CANCELLED",
+            Self::QueryRowBudgetExceeded { .. } => "TDB_QUERY_BUDGET",
+            Self::PayloadQueryBudgetExceeded { .. } => "TDB_PAYLOAD_BUDGET_EXCEEDED",
+            Self::TraversalBudgetExceeded { .. } => "TDB_TRAVERSAL_BUDGET_EXCEEDED",
+            Self::HookExecutionError(_) => "TDB_HOOK_EXECUTION",
+            Self::HookLoadError(_) => "TDB_HOOK_LOAD",
+            Self::WalClosed => "TDB_WAL_CLOSED",
+            Self::CapacityReservationRejected { .. } => "TDB_CAPACITY_RESERVATION_REJECTED",
+            Self::CapacityAllocationFailed { .. } => "TDB_CAPACITY_ALLOCATION_FAILED",
+            Self::ResourceBudgetExceeded { .. } => "QueueFull",
+            Self::SnapshotDestinationExists { .. } => "TDB_SNAPSHOT_EXISTS",
+            Self::SnapshotPublicationUncertain { .. } => "TDB_SNAPSHOT_PUBLICATION_UNCERTAIN",
+            Self::ShutdownFailed { .. } => "TDB_SHUTDOWN_FAILED",
+            Self::DatabaseClosed => "TDB_DATABASE_CLOSED",
+            Self::UnsupportedWalVersion { .. } => "TDB_UNSUPPORTED_WAL_VERSION",
+            Self::UnsupportedDatabaseVersion { .. } => "TDB_UNSUPPORTED_DATABASE_VERSION",
+            Self::ApiMigrationRequired { .. } => "TDB_API_MIGRATION_REQUIRED",
+            Self::UnsupportedSidecarVersion { .. } => "TDB_UNSUPPORTED_SIDECAR_VERSION",
+            Self::InvalidInput(_) => "TDB_INVALID_INPUT",
+            Self::Generic(_) => "TDB_ERROR",
+        }
+    }
+
+    /// 错误特有的字段；整数保持原始位宽，由绑定按语言数值域转换。
+    pub fn details(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Self::Io(error) => {
+                json!({"io_kind": format!("{:?}", error.kind()), "os_code": error.raw_os_error()})
+            }
+            Self::Serialization(error) => json!({"reason": error.to_string()}),
+            Self::DimensionMismatch { expected, got } => json!({"expected": expected, "got": got}),
+            Self::DtypeMismatch { stored, requested } => {
+                json!({"stored": stored, "requested": requested})
+            }
+            Self::NodeNotFound(id)
+            | Self::NodeAlreadyExists(id)
+            | Self::ConditionalUpdateNotMatched { id } => json!({"id": id}),
+            Self::UniqueConstraintViolation {
+                fields,
+                existing_id,
+                conflicting_id,
+            } => {
+                json!({"fields": fields, "existing_id": existing_id, "conflicting_id": conflicting_id})
+            }
+            Self::PayloadTooLarge {
+                size_bytes,
+                max_bytes,
+            } => json!({"size_bytes": size_bytes, "max_bytes": max_bytes}),
+            Self::ReadOnlyViolation { operation } => json!({"operation": operation}),
+            Self::RecoveryRequired { wal_path } => json!({"wal_path": wal_path}),
+            Self::GenerationBusy { generation_id } => json!({"generation_id": generation_id}),
+            Self::MissingQueryParameter { parameter }
+            | Self::UnexpectedQueryParameter { parameter } => json!({"parameter": parameter}),
+            Self::QueryRowBudgetExceeded { budget } => json!({"budget": budget}),
+            Self::PayloadQueryBudgetExceeded {
+                dimension,
+                used,
+                budget,
+            } => json!({"dimension": dimension, "used": used, "budget": budget}),
+            Self::TraversalBudgetExceeded {
+                dimension,
+                visited_nodes,
+                examined_edges,
+                peak_frontier_size,
+                depth_reached,
+            } => {
+                json!({"dimension": dimension, "visited_nodes": visited_nodes, "examined_edges": examined_edges, "peak_frontier_size": peak_frontier_size, "depth_reached": depth_reached})
+            }
+            Self::CapacityReservationRejected {
+                requested_nodes,
+                estimated_bytes,
+                current_bytes,
+                memory_limit,
+            } => {
+                json!({"requested_nodes": requested_nodes, "estimated_bytes": estimated_bytes, "current_bytes": current_bytes, "memory_limit": memory_limit})
+            }
+            Self::ResourceBudgetExceeded {
+                resource,
+                requested,
+                used,
+                limit,
+            } => {
+                json!({"resource": resource, "requested": requested, "used": used, "limit": limit})
+            }
+            Self::SnapshotDestinationExists { path } => json!({"path": path}),
+            Self::SnapshotPublicationUncertain { path, reason } => {
+                json!({"path": path, "reason": reason})
+            }
+            Self::UnsupportedWalVersion { found, supported } => {
+                json!({"found": found, "supported": supported})
+            }
+            Self::UnsupportedDatabaseVersion {
+                found,
+                minimum_supported,
+                current,
+            } => {
+                json!({"found": found, "minimum_supported": minimum_supported, "current": current})
+            }
+            Self::UnsupportedSidecarVersion {
+                component,
+                found,
+                minimum_supported,
+                current,
+                action,
+            } => {
+                json!({"component": component, "found": found, "minimum_supported": minimum_supported, "current": current, "action": action})
+            }
+            Self::ApiMigrationRequired {
+                removed_api,
+                replacement,
+            } => json!({"removed_api": removed_api, "replacement": replacement}),
+            Self::InvalidVector { reason }
+            | Self::ImmutableArtifactInvalid { reason }
+            | Self::CapacityAllocationFailed { reason }
+            | Self::ShutdownFailed { reason } => json!({"reason": reason}),
+            Self::DatabaseLocked(reason)
+            | Self::CorruptedFile(reason)
+            | Self::QueryParse(reason)
+            | Self::QueryExecution(reason)
+            | Self::HookExecutionError(reason)
+            | Self::HookLoadError(reason)
+            | Self::InvalidInput(reason)
+            | Self::Generic(reason) => json!({"reason": reason}),
+            Self::QueryCancelled | Self::WalClosed | Self::DatabaseClosed => json!({}),
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, TriviumError>;
+
+#[cfg(test)]
+pub(crate) mod tests;

@@ -22,7 +22,7 @@
 > TriviumDB 为 Agent、RAG 和知识图谱应用提供进程内的向量、图与文档存储。宿主应用通过 Rust、Python 或 Node.js API 管理数据库实例、查询和持久化。
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
-[![Python](https://img.shields.io/badge/Python-3.9+-blue?logo=python)](https://pypi.org/)
+[![Python 3.9–3.12](https://img.shields.io/badge/Python-3.9%E2%80%933.12-blue?logo=python)](https://pypi.org/)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![arXiv](https://img.shields.io/badge/arXiv-2605.02171-b31b1b.svg)](https://arxiv.org/abs/2605.02171)
 
@@ -180,15 +180,15 @@ pnpm add triviumdb
 cargo add triviumdb
 ```
 
-`0.9.0-beta.3` 完善事务与 WAL 恢复、属性及图索引一致性、完整整数域和三端输入校验，并统一 Cascades 管线中的投影快照、实体绑定、聚合与排序语义：
+`0.9.0-beta.4` 加强存储类型与派生索引的事实一致性、WAL 完整性、查询预算和 Reader 租约，完善原生三模统一查询在 Cascades 规划下的图匹配、数值与事务语义，Rust、Python、Node.js 共享这些内核能力：
 
 ```bash
-pip install "triviumdb==0.9.0b3"
-npm install triviumdb@0.9.0-beta.3
-cargo add triviumdb@0.9.0-beta.3
+pip install "triviumdb==0.9.0b4"
+npm install triviumdb@0.9.0-beta.4
+cargo add triviumdb@0.9.0-beta.4
 ```
 
-版本内容见 [0.9.0-beta.3 变更说明](docs/changes/0.9.0-beta.3.md)。
+版本内容见 [0.9.0-beta.4 变更说明](docs/changes/0.9.0-beta.4.md)。
 
 > 🧪 **尝鲜：HTTP 服务端版（nightly）** —— TriviumDB 的正式产品形态始终是**嵌入式数据库**（进程内 Library，即装即用，无需部署）。仓库中的 `triviumdb-server` 提供了一个可选的 HTTP 壳（多客户端并发读写、OCC、流式 NDJSON 等），目前处于 **nightly 预览状态**，仅供尝鲜和跟踪演进方向，协议随时可能变更，请勿用于生产。详见 [Server 说明（nightly）](docs/server.md)；一切 API 与用法说明仍以嵌入式版本为准。
 
@@ -384,7 +384,9 @@ finally:
 
 **QuIVer**（Quantized Index for Vector Retrieval）是 TriviumDB 自研的近似最近邻（ANN）图索引。使用 **BQ 快速构图 + 无训练 SM-L2 导航 + 原始向量余弦精排**；导航结合两位编码与每向量幅值信息计算重建平方 L2，召回和吞吐取决于数据、参数与精排预算。
 
-> 📖 [QuIVer 架构与配置](docs/quiver.md) · [基准测试指南](benches/README.md) · [0.9.0-beta.3 变更说明](docs/changes/0.9.0-beta.3.md)
+`f32/f16` 浮点 Embedding 使用余弦检索与 QuIVer 加速；`u64` SimHash 指纹使用保留完整位模式的精确汉明检索。
+
+> 📖 [QuIVer 架构与配置](docs/quiver.md) · [基准测试指南](benches/README.md) · [0.9.0-beta.4 变更说明](docs/changes/0.9.0-beta.4.md)
 
 > ⚠️ **维度建议：强烈建议数据库向量维度不超过 3072。** TriviumDB 的通用存储与精确 BruteForce 检索允许更高维度，但 QuIVer 的 BQ 签名安全上限是 3072 维。超过该维度时引擎不会自动构建 QuIVer，检索会稳定回退到 BruteForce；手动构建 QuIVer 会返回明确错误。高维数据库仍可使用，但无法获得 QuIVer ANN 加速，内存和计算开销也会显著增加。
 

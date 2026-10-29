@@ -127,15 +127,28 @@ impl std::fmt::Display for ParseErrorAt {
 
 impl std::error::Error for ParseErrorAt {}
 
+/// 输入字节与 token 上限在解析树分配前生效。
+pub const MAX_TQL_INPUT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_TQL_TOKENS: usize = 262_144;
+
 pub struct TqlLexer {
     chars: Vec<char>,
     pos: usize,
     /// 与 chars 平行：chars[i] 在原始输入字符串中的字节起始偏移
     char_byte_offsets: Vec<usize>,
+    input_too_large: bool,
 }
 
 impl TqlLexer {
     pub fn new(input: &str) -> Self {
+        if input.len() > MAX_TQL_INPUT_BYTES {
+            return Self {
+                chars: Vec::new(),
+                pos: 0,
+                char_byte_offsets: vec![0],
+                input_too_large: true,
+            };
+        }
         let chars: Vec<char> = input.chars().collect();
         let mut char_byte_offsets = Vec::with_capacity(chars.len() + 1);
         let mut byte = 0usize;
@@ -148,6 +161,7 @@ impl TqlLexer {
             chars,
             pos: 0,
             char_byte_offsets,
+            input_too_large: false,
         }
     }
 
@@ -216,9 +230,19 @@ impl TqlLexer {
         &mut self,
         mut positions: Option<&mut Vec<usize>>,
     ) -> Result<Vec<TqlToken>, String> {
+        if self.input_too_large {
+            return Err(format!(
+                "TQL 输入超过 {MAX_TQL_INPUT_BYTES} 字节 (TQL input byte limit exceeded)"
+            ));
+        }
         let mut tokens = Vec::new();
 
         loop {
+            if tokens.len() >= MAX_TQL_TOKENS {
+                return Err(format!(
+                    "TQL token 数量超过 {MAX_TQL_TOKENS} (TQL token limit exceeded)"
+                ));
+            }
             self.skip_whitespace();
 
             match self.peek() {

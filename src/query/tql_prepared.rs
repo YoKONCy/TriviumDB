@@ -77,14 +77,18 @@ impl PreparedTql {
             .iter()
             .find(|name| !values.contains_key(*name))
         {
-            return Err(TriviumError::QueryExecution(format!(
-                "Prepared TQL 缺少参数 ${name} (Prepared TQL is missing parameter ${name})"
-            )));
+            return Err(TriviumError::MissingQueryParameter {
+                parameter: name.clone(),
+            });
         }
-        if let Some(name) = values.keys().find(|name| !self.parameters.contains(*name)) {
-            return Err(TriviumError::QueryExecution(format!(
-                "Prepared TQL 收到额外参数 ${name} (Prepared TQL received unexpected parameter ${name})"
-            )));
+        if let Some(name) = values
+            .keys()
+            .filter(|name| !self.parameters.contains(*name))
+            .min()
+        {
+            return Err(TriviumError::UnexpectedQueryParameter {
+                parameter: name.clone(),
+            });
         }
         let mut query = self.query.clone();
         bind_query(&mut query, values)?;
@@ -182,9 +186,11 @@ fn bind_query(
                     "Prepared 向量槽位重复 (Duplicate prepared vector slot)".into(),
                 ));
             }
-            let value = values.get(name).ok_or_else(|| {
-                TriviumError::QueryExecution(format!("Prepared TQL 缺少参数 ${name}"))
-            })?;
+            let value = values
+                .get(name)
+                .ok_or_else(|| TriviumError::MissingQueryParameter {
+                    parameter: name.clone(),
+                })?;
             let slot = vector.get_mut(*index).ok_or_else(|| {
                 TriviumError::QueryExecution(
                     "Prepared 向量槽位越界 (Prepared vector slot is out of bounds)".into(),
@@ -270,9 +276,11 @@ fn bind_expr(
 ) -> Result<(), TriviumError> {
     match expr {
         TqlExpr::Parameter(name) => {
-            let value = values.get(name).ok_or_else(|| {
-                TriviumError::QueryExecution(format!("Prepared TQL 缺少参数 ${name}"))
-            })?;
+            let value = values
+                .get(name)
+                .ok_or_else(|| TriviumError::MissingQueryParameter {
+                    parameter: name.clone(),
+                })?;
             *expr = TqlExpr::Literal(match value {
                 TqlParamValue::Int(value) => TqlLiteral::Int(*value),
                 TqlParamValue::UInt(value) => TqlLiteral::UInt(*value),
@@ -300,5 +308,34 @@ fn bind_expr(
         }
         TqlExpr::IsNull { expr, .. } => bind_expr(expr, values),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod parameter_error_tests {
+    use super::*;
+
+    #[test]
+    fn 参数错误按名称稳定报告且包含具体字段() {
+        let query =
+            super::super::tql_parser::parse_tql("MATCH (n) RETURN $a AS first, $b AS second")
+                .unwrap();
+        let prepared = PreparedTql::from_query(query);
+        let missing = prepared.bind(&HashMap::new()).unwrap_err();
+        assert!(
+            matches!(missing, TriviumError::MissingQueryParameter { parameter } if parameter == "a")
+        );
+        for extras in [["z", "c"], ["c", "z"]] {
+            let mut values = HashMap::from([
+                ("a".into(), TqlParamValue::Int(1)),
+                ("b".into(), TqlParamValue::Int(2)),
+            ]);
+            for name in extras {
+                values.insert(name.into(), TqlParamValue::Int(0));
+            }
+            assert!(
+                matches!(prepared.bind(&values), Err(TriviumError::UnexpectedQueryParameter { parameter }) if parameter == "c")
+            );
+        }
     }
 }

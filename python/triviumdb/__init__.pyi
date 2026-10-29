@@ -19,6 +19,10 @@ ReachabilityDirection = Literal["outgoing", "incoming", "both"]
 
 
 __all__ = [
+    "TriviumDBError",
+    "InvalidInputError",
+    "CapacityError",
+    "SnapshotDestinationError",
     "ReadOnlyError",
     "RecoveryRequiredError",
     "ResourceBudgetError",
@@ -46,23 +50,39 @@ __all__ = [
 
 # Exceptions
 
-class ReadOnlyError(RuntimeError): ...
+class TriviumDBError(RuntimeError):
+    code: str
+    details: dict[str, Any]
 
-class RecoveryRequiredError(RuntimeError): ...
+class InvalidInputError(ValueError):
+    code: str
+    details: dict[str, Any]
 
-class ResourceBudgetError(RuntimeError):
+class CapacityError(MemoryError):
+    code: str
+    details: dict[str, Any]
+
+class SnapshotDestinationError(FileExistsError):
+    code: str
+    details: dict[str, Any]
+
+class ReadOnlyError(TriviumDBError): ...
+
+class RecoveryRequiredError(TriviumDBError): ...
+
+class ResourceBudgetError(TriviumDBError):
     resource: str
     requested: int
     used: int
     limit: int
 
-class SnapshotPublicationError(RuntimeError): ...
+class SnapshotPublicationError(TriviumDBError): ...
 
-class ImmutableArtifactError(RuntimeError): ...
+class ImmutableArtifactError(TriviumDBError): ...
 
-class GenerationBusyError(RuntimeError): ...
+class GenerationBusyError(TriviumDBError): ...
 
-class UnsupportedDatabaseVersionError(RuntimeError): ...
+class UnsupportedDatabaseVersionError(TriviumDBError): ...
 
 # Classes
 

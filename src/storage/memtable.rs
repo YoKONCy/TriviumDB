@@ -17,6 +17,10 @@ use crate::storage::payload_store::PayloadStore;
 use crate::storage::vec_pool::VecPool;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 const AUTO_QUIVER_TARGET_COMPONENTS: usize = 666_667;
 const AUTO_QUIVER_MIN_NODES: usize = 209;
@@ -553,7 +557,8 @@ pub struct MemTable<T: VectorType> {
     generation: u64,
     /// 最近一次完整检查点之后是否发生了需要持久化的变更。
     checkpoint_dirty: bool,
-    recovery_required: bool,
+    recovery_required: Arc<AtomicBool>,
+    load_memory_limit: usize,
     vector_generation: u64,
     property_generation: u64,
     graph_generation: u64,
@@ -667,7 +672,8 @@ impl<T: VectorType> MemTable<T> {
             next_id: 1, // 从 1 开始，保留 0 作为特殊标记
             generation: 0,
             checkpoint_dirty: true,
-            recovery_required: false,
+            recovery_required: Arc::new(AtomicBool::new(false)),
+            load_memory_limit: 0,
             vector_generation: 0,
             property_generation: 0,
             graph_generation: 0,
@@ -722,7 +728,8 @@ impl<T: VectorType> MemTable<T> {
             next_id,
             generation: 0,
             checkpoint_dirty: true,
-            recovery_required: false,
+            recovery_required: Arc::new(AtomicBool::new(false)),
+            load_memory_limit: 0,
             vector_generation: 0,
             property_generation: 0,
             graph_generation: 0,
@@ -1018,6 +1025,8 @@ impl<T: VectorType> MemTable<T> {
                     .into(),
             ));
         }
+        // 包含 JSON 校验临时 DOM、容器倍增和新记录原始字节。
+        self.check_load_allocation(payload_raw.len().saturating_mul(64).saturating_add(1024))?;
         let idx = self.indices_to_ids.len();
         self.payloads.insert_raw(id, payload_raw)?;
         self.active_ids.insert(id);
@@ -1034,6 +1043,7 @@ impl<T: VectorType> MemTable<T> {
 
     /// 从分离 Payload 格式加载时，仅恢复活动 slot；raw JSON 随后由已校验的 sidecar 安装。
     pub(crate) fn register_payload_slot(&mut self, id: NodeId) -> Result<()> {
+        self.check_load_allocation(1024)?;
         if id == 0 || id == NodeId::MAX || self.ids_to_indices.contains_key(&id) {
             return Err(TriviumError::CorruptedFile(
                 "Payload slot 包含非法或重复 NodeId".into(),
@@ -1055,6 +1065,7 @@ impl<T: VectorType> MemTable<T> {
 
     /// 从持久化文件加载时遇到逻辑删除节点（Tombstone），仅推进内部索引映射空洞
     pub fn register_tombstone(&mut self) -> Result<()> {
+        self.check_load_allocation(64)?;
         let idx = self.indices_to_ids.len();
         // NodeId=0 仅作为位置占位符，不在 payloads/ids_to_indices 中建立映射
         self.indices_to_ids.push(0);
@@ -1683,7 +1694,8 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub fn auto_quiver_build_needed(&self) -> bool {
-        self.dim <= crate::index::bq::MAX_BQ_DIM
+        !crate::vector::is_binary_vector::<T>()
+            && self.dim <= crate::index::bq::MAX_BQ_DIM
             && self.auto_build_quiver
             && self.payloads.len() >= auto_quiver_node_threshold(self.dim)
             && self.quiver_index.is_none()
@@ -1811,6 +1823,9 @@ impl<T: VectorType> MemTable<T> {
 
     /// 从持久化文件恢复 QuIVer 索引（跳过重建）
     pub fn set_quiver_index(&mut self, mut quiver: QuIVer) {
+        if crate::vector::is_binary_vector::<T>() {
+            return;
+        }
         self.checkpoint_dirty = true;
         if self.dim <= crate::index::bq::MAX_BQ_DIM {
             if let Err(error) = quiver.prepare_default_sm(|slot, buffer| {
@@ -1934,7 +1949,7 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub fn build_quiver(&mut self, config: &QuIVerConfig) {
-        if self.dim > crate::index::bq::MAX_BQ_DIM {
+        if crate::vector::is_binary_vector::<T>() || self.dim > crate::index::bq::MAX_BQ_DIM {
             self.quiver_index = None;
             return;
         }
@@ -1942,7 +1957,8 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub(crate) fn quiver_build_snapshot(&self) -> Option<QuiverBuildSnapshot> {
-        if self.dim > crate::index::bq::MAX_BQ_DIM
+        if crate::vector::is_binary_vector::<T>()
+            || self.dim > crate::index::bq::MAX_BQ_DIM
             || self.vec_pool.total_count() == 0
             || self.payloads.is_empty()
         {
@@ -1996,7 +2012,7 @@ impl<T: VectorType> MemTable<T> {
         source_generation: u64,
         index: QuIVer,
     ) -> bool {
-        if self.vector_generation != source_generation {
+        if crate::vector::is_binary_vector::<T>() || self.vector_generation != source_generation {
             return false;
         }
         self.quiver_index = Some(index);
@@ -2167,6 +2183,13 @@ impl<T: VectorType> MemTable<T> {
 
     pub(crate) fn get_payload_raw(&self, id: NodeId) -> Option<&[u8]> {
         self.payloads.raw(id)
+    }
+
+    pub(crate) fn payload_query_peak(&self, id: NodeId) -> Result<usize> {
+        let raw = self
+            .get_payload_raw(id)
+            .ok_or(TriviumError::NodeNotFound(id))?;
+        crate::storage::payload_store::query_decode_peak(raw)
     }
 
     pub(crate) fn payload_memory_stats(&self) -> PayloadMemoryStats {
@@ -2353,15 +2376,10 @@ impl<T: VectorType> MemTable<T> {
         limit: usize,
     ) -> Result<()> {
         use crate::index::property::{PropertyIndexKind, PropertyIndexRegistry};
-        if fields.is_empty()
-            || fields
-                .iter()
-                .any(|field| field.is_empty() || field.len() > 1024 * 1024)
-            || fields.iter().collect::<HashSet<_>>().len() != fields.len()
-            || (kind == PropertyIndexKind::Composite && fields.len() < 2)
-        {
-            return Err(TriviumError::InvalidInput("索引字段必须非空且互不重复，复合索引至少包含两个字段 (Index fields must be non-empty and distinct; composite indexes require at least two fields)".into()));
-        }
+        crate::index::property::validate_index_fields(
+            fields,
+            kind == PropertyIndexKind::Composite,
+        )?;
         if self.property_indexes.has_definition(kind, fields, unique) {
             return Ok(());
         }
@@ -2490,9 +2508,47 @@ impl<T: VectorType> MemTable<T> {
         self.property_indexes.unique_definitions()
     }
 
+    pub(crate) fn admit_index_rebuild(
+        &self,
+        kind: crate::index::property::PropertyIndexKind,
+        fields: &[String],
+        unique: bool,
+    ) -> Result<()> {
+        if self.load_memory_limit == 0 {
+            return Ok(());
+        }
+        let mut peak = 1024usize;
+        for id in self.payloads.ids() {
+            let raw = self.payloads.raw(id).ok_or_else(|| {
+                TriviumError::CorruptedFile("索引缺少 Payload (Index payload is missing)".into())
+            })?;
+            let parse_peak = raw.len().saturating_mul(64);
+            self.check_load_allocation(peak.saturating_add(parse_peak))?;
+            let payload = serde_json::from_slice(raw).map_err(|e| {
+                TriviumError::CorruptedFile(format!(
+                    "索引 Payload 无效 (Invalid index payload): {e}"
+                ))
+            })?;
+            peak = peak.saturating_add(PropertyIndexRegistry::estimate_build_row(
+                kind, fields, unique, &payload,
+            )?);
+            self.check_load_allocation(peak.saturating_add(parse_peak))?;
+        }
+        Ok(())
+    }
+
     pub fn restore_unique_index_definitions(&mut self, definitions: &[Vec<String>]) -> Result<()> {
         self.property_indexes.clear_unique_constraints();
         for fields in definitions {
+            self.admit_index_rebuild(
+                if fields.len() == 1 {
+                    crate::index::property::PropertyIndexKind::Hash
+                } else {
+                    crate::index::property::PropertyIndexKind::Composite
+                },
+                fields,
+                true,
+            )?;
             if fields.len() == 1 {
                 self.register_unique_property_index(&fields[0])?;
             } else {
@@ -3315,12 +3371,17 @@ impl<T: VectorType> MemTable<T> {
         self.indices_to_ids.len()
     }
 
-    pub(crate) fn active_vector_at_slot(&self, slot: usize) -> Option<(NodeId, &[T])> {
-        let id = *self.indices_to_ids.get(slot)?;
+    pub(crate) fn active_vector_at_slot(&self, slot: usize) -> Result<Option<(NodeId, &[T])>> {
+        let Some(&id) = self.indices_to_ids.get(slot) else {
+            return Ok(None);
+        };
         if id == 0 || !self.payloads.contains_key(&id) {
-            return None;
+            return Ok(None);
         }
-        self.vec_pool.get(slot).map(|vector| (id, vector))
+        let vector = self.vec_pool.get(slot).ok_or_else(|| {
+            TriviumError::CorruptedFile("活跃节点缺少向量 (Active node vector is missing)".into())
+        })?;
+        Ok(Some((id, vector)))
     }
 
     /// 返回活跃节点对应的内部槽位。只读借用期间槽位映射保持稳定。
@@ -3426,12 +3487,46 @@ impl<T: VectorType> MemTable<T> {
             + property_index_bytes
     }
 
+    pub(crate) fn begin_loading(&mut self, limit: usize) {
+        self.load_memory_limit = limit;
+        self.text_memory_limit = limit;
+        self.auto_build_quiver = false;
+        self.configure_payload_cache(0, 0);
+    }
+
+    pub(crate) fn check_load_allocation(&self, additional: usize) -> Result<()> {
+        self.ensure_additional_memory(self.load_memory_limit, additional)
+    }
+
+    pub(crate) fn finish_loading(
+        &mut self,
+        cache_bytes: usize,
+        cache_entry_bytes: usize,
+    ) -> Result<()> {
+        self.check_load_allocation(0)?;
+        let cache_bytes = if self.load_memory_limit == 0 {
+            cache_bytes
+        } else {
+            cache_bytes.min(
+                self.load_memory_limit
+                    .saturating_sub(self.estimated_memory_bytes()),
+            )
+        };
+        self.configure_payload_cache(cache_bytes, cache_entry_bytes.min(cache_bytes));
+        self.load_memory_limit = 0;
+        Ok(())
+    }
+
+    pub(crate) fn recovery_latch(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.recovery_required)
+    }
+
     pub(crate) fn require_recovery(&mut self) {
-        self.recovery_required = true;
+        self.recovery_required.store(true, Ordering::Release);
     }
 
     pub(crate) fn ensure_readable(&self) -> Result<()> {
-        if self.recovery_required {
+        if self.recovery_required.load(Ordering::Acquire) {
             Err(TriviumError::WalClosed)
         } else {
             Ok(())

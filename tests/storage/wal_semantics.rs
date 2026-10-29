@@ -77,6 +77,12 @@ fn reject<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(
                             .unwrap();
                         db.close().unwrap();
                     }
+                    if !std::path::Path::new(&path).exists() {
+                        Database::<T>::open_with_config(&path, config(mode))
+                            .unwrap()
+                            .close()
+                            .unwrap();
+                    }
                     {
                         let mut wal = Wal::open_with_sync(&path, SyncMode::Full).unwrap();
                         if !checkpoint {
@@ -257,6 +263,10 @@ fn valid_null_and_checkpoint_idempotence_remain_supported() {
         )
         .unwrap();
         db.close().unwrap();
+        Database::<f32>::open_with_config(&path, config(mode))
+            .unwrap()
+            .close()
+            .unwrap();
         {
             let mut wal = Wal::open_with_sync(&path, SyncMode::Full).unwrap();
             for entry in [
@@ -317,6 +327,10 @@ fn uncommitted_semantically_invalid_entry_is_not_replayed() {
         let dir = TestDir::new();
         let path = dir.path();
         let committed_offset;
+        Database::<f32>::open_with_config(&path, config(mode))
+            .unwrap()
+            .close()
+            .unwrap();
         {
             let mut wal = Wal::open_with_sync(&path, SyncMode::Full).unwrap();
             wal.append(&insert::<f32>(10, "{\"state\":\"committed\"}"))
@@ -344,6 +358,10 @@ fn last_valid_node_id_recovers_without_wrapping_allocator() {
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
         let dir = TestDir::new();
         let path = dir.path();
+        Database::<f32>::open_with_config(&path, config(mode))
+            .unwrap()
+            .close()
+            .unwrap();
         {
             let mut wal = Wal::open_with_sync(&path, SyncMode::Full).unwrap();
             wal.append(&insert::<f32>(u64::MAX - 1, "null")).unwrap();

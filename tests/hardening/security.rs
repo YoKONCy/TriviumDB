@@ -4,7 +4,7 @@
 //! 覆盖范围：
 //! - NaN / Inf 毒素向量静默注入拦截
 //! - WAL 幽灵事务（未闭合 Tx）的截断与丢弃
-//! - WAL 尾部物理损坏（CRC 不匹配/乱码）的截肢与继续写入能力
+//! - WAL 完整坏帧及非法长度拒绝、日志保留与恢复后继续写入
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -87,6 +87,7 @@ fn append_raw_wal_entry<T: serde::Serialize>(path: &str, entry: &WalEntry<T>, co
 fn 测试_WAL丢失TxCommit的幽灵事务_被正确截断并保护后续追加() {
     let path = tmp_db("wal_phantom_tx");
     cleanup(&path);
+    Database::<f32>::open(&path, DIM).unwrap().close().unwrap();
 
     // 1. 手动构造一个有头无尾的幽灵事务，以及一个后续的正常独立操作，模拟复杂的断电残留
     append_raw_wal_entry::<f32>(&path, &WalEntry::TxBegin { tx_id: 100 }, false);
@@ -124,9 +125,10 @@ fn 测试_WAL丢失TxCommit的幽灵事务_被正确截断并保护后续追加(
 }
 
 #[test]
-fn 测试_WAL遇尾部乱码死字节_精确截除防止污染() {
+fn 测试_WAL非法长度保留日志_恢复原件后可继续写入() {
     let path = tmp_db("wal_corrupted_tail");
     cleanup(&path);
+    Database::<f32>::open(&path, DIM).unwrap().close().unwrap();
 
     // 1. 正常的插入
     append_raw_wal_entry::<f32>(
@@ -139,14 +141,22 @@ fn 测试_WAL遇尾部乱码死字节_精确截除防止污染() {
         false,
     );
 
-    // 2. 尾部增加几个随机死字节乱码（模拟写了一半的崩溃）
+    let valid = std::fs::read(format!("{path}.wal")).unwrap();
+    // 完整长度字段超过 256 MiB 上限，属于明确的格式损坏。
     {
         let wal_path = format!("{}.wal", path);
         let mut file = OpenOptions::new().append(true).open(&wal_path).unwrap();
         file.write_all(&[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
     }
 
-    // 3. 第一次恢复：正常数据保留，乱码被识别并截断
+    let damaged = std::fs::read(format!("{path}.wal")).unwrap();
+    assert!(matches!(
+        Database::<f32>::open(&path, DIM),
+        Err(triviumdb::TriviumError::CorruptedFile(_))
+    ));
+    assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), damaged);
+    // 恢复独立保留的有效日志后，验收事实和后续写入。
+    std::fs::write(format!("{path}.wal"), valid).unwrap();
     {
         let mut db = Database::<f32>::open(&path, DIM).unwrap();
         assert_eq!(db.node_count().unwrap(), 1, "前半段正常数据应该被恢复");
@@ -156,14 +166,20 @@ fn 测试_WAL遇尾部乱码死字节_精确截除防止污染() {
             .unwrap();
     }
 
-    // 4. 第二次恢复：新数据没有被原先的乱码阻挡，完美读取
+    // 再次打开验证恢复后的新增数据。
     {
-        let db = Database::<f32>::open(&path, DIM).unwrap();
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
         assert_eq!(
             db.node_count().unwrap(),
             2,
-            "乱码被截除，后续的新数据完美恢复"
+            "完整日志恢复后，后续新增记录必须持久化"
         );
+        assert_eq!(db.get_payload(1).unwrap(), Some(serde_json::json!({})));
+        assert_eq!(
+            db.get_payload(2).unwrap(),
+            Some(serde_json::json!({"safe":"yes"}))
+        );
+        db.close().unwrap();
     }
 
     cleanup(&path);

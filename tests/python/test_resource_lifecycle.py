@@ -1,5 +1,6 @@
 """已关闭对象、原生句柄和跨语言 Hook 的生命周期回归。"""
 
+from contextlib import contextmanager
 import ctypes
 import gc
 import json
@@ -23,6 +24,18 @@ class Hook:
 
 
 class ResourceLifecycleTests(unittest.TestCase):
+    @contextmanager
+    def assert_core_error(self, code):
+        with self.assertRaises(triviumdb.TriviumDBError) as raised:
+            yield
+        self.assertEqual(raised.exception.code, code)
+        if code == "TDB_DATABASE_CLOSED":
+            self.assertEqual(raised.exception.details, {})
+        else:
+            self.assertEqual(set(raised.exception.details), {"reason"})
+            self.assertIsInstance(raised.exception.details["reason"], str)
+            self.assertTrue(raised.exception.details["reason"])
+
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="tdb Python 资源生命周期-"))
         self.held = []
@@ -96,7 +109,7 @@ class ResourceLifecycleTests(unittest.TestCase):
                         lambda: db.get_incoming_edges(CASE["node_id"]), lambda: db.neighbors(CASE["node_id"]),
                         db.graph_stats, db.validate_graph, db.list_unique_indexes, db.index_info, db.clear_search_state,
                     ]:
-                        with self.assertRaisesRegex(RuntimeError, "Database closed|数据库已关闭"):
+                        with self.assert_core_error("TDB_DATABASE_CLOSED"):
                             read()
                     self.assert_released(directory)
                     reader = triviumdb.TriviumDB(str(file), dim=CASE["dimension"], dtype=dtype, access_mode="read_only", auto_build_quiver=False)
@@ -130,7 +143,7 @@ class ResourceLifecycleTests(unittest.TestCase):
                 hook.db = db
             if mode == "rejected":
                 db.close()
-                with self.assertRaisesRegex(RuntimeError, "Database closed|数据库已关闭"):
+                with self.assert_core_error("TDB_DATABASE_CLOSED"):
                     db.set_hook(hook)
             else:
                 db.set_hook(hook)
@@ -208,12 +221,12 @@ class ResourceLifecycleTests(unittest.TestCase):
                     db.close()
                     self.assertTrue(db.close_timeout(0))
                     transaction.insert_with_id(1003, CASE["vector"], {})
-                    with self.assertRaisesRegex(RuntimeError, "Database closed|数据库已关闭"):
+                    with self.assert_core_error("TDB_DATABASE_CLOSED"):
                         transaction.commit()
                     rolled_back.rollback()
                     self.assertEqual(runtime.stats()["attached_databases"], 1)
                     self.assertEqual(runtime.stats()["reserved_database_bytes"], 8 * 1024 * 1024)
-                    with self.assertRaisesRegex(RuntimeError, "Database locked|数据库已锁定"):
+                    with self.assert_core_error("TDB_DATABASE_LOCKED"):
                         triviumdb.TriviumDB(str(file), dim=CASE["dimension"], dtype=dtype)
                     self.assertEqual(writer.node_count(), 1)
                     for pending in [1001, 1002, 1003]:
@@ -256,7 +269,7 @@ class ResourceLifecycleTests(unittest.TestCase):
                         {"n": {"id": CASE["later_node_id"], "payload": {"tenant": "agent-a", "state": "neighbor"}, "num_edges": 0}},
                     ])
                     if access == "read_only":
-                        with self.assertRaisesRegex(RuntimeError, "Database locked|数据库已锁定"):
+                        with self.assert_core_error("TDB_DATABASE_LOCKED"):
                             triviumdb.TriviumDB(str(file), dim=CASE["dimension"], dtype=dtype)
                     self.assertTrue(second.close_timeout(CASE["close_timeout_ms"]))
                     self.assert_released(directory)
@@ -264,7 +277,7 @@ class ResourceLifecycleTests(unittest.TestCase):
                     self.held.append(writer)
                     first.close()
                     second.close()
-                    with self.assertRaisesRegex(RuntimeError, "Database locked|数据库已锁定"):
+                    with self.assert_core_error("TDB_DATABASE_LOCKED"):
                         triviumdb.TriviumDB(str(file), dim=CASE["dimension"], dtype=dtype)
                     writer.update_payload(CASE["node_id"], {"phase": "updated"})
                     writer.close()
@@ -289,7 +302,7 @@ class ResourceLifecycleTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 db.close()
             self.assertNotEqual(db.shutdown_status()["phase"], "closed")
-            with self.assertRaisesRegex(RuntimeError, "Database locked|数据库已锁定"):
+            with self.assert_core_error("TDB_DATABASE_LOCKED"):
                 triviumdb.TriviumDB(str(file), dim=CASE["dimension"], dtype=dtype)
             obstacle.rmdir()
             self.assertTrue(db.close_timeout(CASE["close_timeout_ms"]))

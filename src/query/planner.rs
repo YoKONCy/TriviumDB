@@ -443,19 +443,25 @@ fn ordered_range(filter: &Filter) -> Option<(&str, Ordering, bool, serde_json::V
             .as_i64()
             .map(|number| number.unsigned_abs() < MAX_EXACT_INTEGER)
             .or_else(|| value.as_u64().map(|number| number < MAX_EXACT_INTEGER))
-            .unwrap_or(true);
+            .unwrap_or_else(|| {
+                value.as_f64().is_none_or(|number| {
+                    number.is_finite() && number.abs() < MAX_EXACT_INTEGER as f64
+                })
+            });
         precise.then_some(value)
+    }
+    fn legacy_bound(number: f64) -> Option<serde_json::Value> {
+        number
+            .is_finite()
+            .then(|| serde_json::json!(number))
+            .and_then(exact_ordered_bound)
     }
 
     match filter {
-        Filter::Gt(field, value) => {
-            Some((field, Ordering::Greater, false, serde_json::json!(value)))
-        }
-        Filter::Gte(field, value) => {
-            Some((field, Ordering::Greater, true, serde_json::json!(value)))
-        }
-        Filter::Lt(field, value) => Some((field, Ordering::Less, false, serde_json::json!(value))),
-        Filter::Lte(field, value) => Some((field, Ordering::Less, true, serde_json::json!(value))),
+        Filter::Gt(field, value) => Some((field, Ordering::Greater, false, legacy_bound(*value)?)),
+        Filter::Gte(field, value) => Some((field, Ordering::Greater, true, legacy_bound(*value)?)),
+        Filter::Lt(field, value) => Some((field, Ordering::Less, false, legacy_bound(*value)?)),
+        Filter::Lte(field, value) => Some((field, Ordering::Less, true, legacy_bound(*value)?)),
         Filter::Range(field, op, value) => {
             let value = match value {
                 crate::filter::ComparableValue::Number(value) => {

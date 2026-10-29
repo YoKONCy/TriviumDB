@@ -50,10 +50,20 @@ assert_type(db.instance_stats(), dict[str, Any])
 
 # 资源异常保留内核预算字段。
 def check_resource_error(error: triviumdb.ResourceBudgetError) -> None:
+    assert_type(error.code, str)
+    assert_type(error.details, dict[str, Any])
     assert_type(error.resource, str)
     assert_type(error.requested, int)
     assert_type(error.used, int)
     assert_type(error.limit, int)
+
+def check_core_error(error: triviumdb.TriviumDBError) -> None:
+    assert_type(error.code, str)
+    assert_type(error.details, dict[str, Any])
+
+def check_input_error(error: triviumdb.InvalidInputError) -> None:
+    assert_type(error.code, str)
+    assert_type(error.details, dict[str, Any])
 
 # ── graph edge fields ──
 edge = db.get_edges(1)[0]

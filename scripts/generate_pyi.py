@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 EXCEPTIONS = [
+    "TriviumDBError", "InvalidInputError", "CapacityError", "SnapshotDestinationError",
     "ReadOnlyError", "RecoveryRequiredError", "ResourceBudgetError", "SnapshotPublicationError",
     "ImmutableArtifactError", "GenerationBusyError",
     "UnsupportedDatabaseVersionError",
@@ -250,8 +251,11 @@ def build_stub(mod) -> str:
                                   for n in EXCEPTIONS + CLASS_ORDER + FUNCTIONS) + "]",
         "# Exceptions",
         *(f"class {e}({getattr(mod, e).__bases__[0].__name__}):"
-          + ("\n    resource: str\n    requested: int\n    used: int\n    limit: int"
-             if e == "ResourceBudgetError" else " ...") for e in EXCEPTIONS),
+          + ("\n    code: str\n    details: dict[str, Any]"
+             if e in {"TriviumDBError", "InvalidInputError", "CapacityError", "SnapshotDestinationError"} else "")
+          + ("\n    resource: str\n    requested: int\n    used: int\n    limit: int" if e == "ResourceBudgetError"
+             else "" if e in {"TriviumDBError", "InvalidInputError", "CapacityError", "SnapshotDestinationError"} else " ...")
+          for e in EXCEPTIONS),
         "# Classes",
         *(render_class(mod, c) for c in CLASS_ORDER),
         "# Functions",

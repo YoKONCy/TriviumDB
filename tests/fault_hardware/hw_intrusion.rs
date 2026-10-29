@@ -344,7 +344,7 @@ fn INTRUDE_02_MOVNTI非时序毒写_DMA级侵入() {
 
 /// 在有效的 WAL 文件尾部通过 asm 注入垃圾字节帧，
 /// 模拟断电时 WAL 写入被截断、尾部包含不完整/损坏的操作日志。
-/// 引擎的 WAL 回放器应：回放有效前缀 + 丢弃损坏尾部。
+/// 引擎对完整坏帧或非法长度返回损坏错误，并保留日志供恢复。
 #[test]
 fn INTRUDE_03_WAL尾部注入垃圾帧_回放容错() {
     let path = tmp_db("wal_inject");
@@ -375,7 +375,9 @@ fn INTRUDE_03_WAL尾部注入垃圾帧_回放容错() {
 
     // 在 WAL 尾部追加垃圾字节
     let wal_path = format!("{}.wal", path);
-    if std::path::Path::new(&wal_path).exists() {
+    let valid_wal = std::fs::read(&wal_path).unwrap();
+    let main_before = std::fs::read(&path).unwrap();
+    {
         let mut file = OpenOptions::new().append(true).open(&wal_path).unwrap();
         // 构造 64 字节的毒 payload（通过 asm 生成的 pattern）
         let mut poison = [0u8; 64];
@@ -405,42 +407,30 @@ fn INTRUDE_03_WAL尾部注入垃圾帧_回放容错() {
         file.write_all(&poison).unwrap();
     }
 
-    // 重新打开 — WAL 回放应该成功回放有效部分，丢弃尾部垃圾
+    let corrupted = std::fs::read(&wal_path).unwrap();
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
-    assert!(result.is_ok(), "WAL 尾部注入后不应 panic");
-
-    // WAL 尾部注入场景：5 个节点已 flush 到 .tdb 文件，必须能恢复
-    let db = result
-        .unwrap()
-        .expect("WAL 尾部垃圾不应导致加载失败：5 个已 flush 的节点应通过 .tdb 文件恢复");
-    assert!(
-        db.node_count().unwrap() >= 5,
-        "至少 5 个已 flush 的节点应存活，实际 {}",
-        db.node_count().unwrap()
-    );
-    assert!(
-        db.node_count().unwrap() <= 8,
-        "节点数不应超过原始写入的 8 个，实际 {}",
-        db.node_count().unwrap()
-    );
-    // 验证已 flush 节点的 payload 语义完整性
-    let mut valid_count = 0;
-    for &id in &db.all_node_ids().unwrap() {
-        if let Some(p) = db.get_payload(id).unwrap()
-            && p.get("valid").and_then(|v| v.as_bool()) == Some(true)
-        {
-            valid_count += 1;
-        }
-    }
+    assert!(matches!(
+        result.unwrap(),
+        Err(triviumdb::TriviumError::CorruptedFile(_))
+    ));
+    assert_eq!(std::fs::read(&wal_path).unwrap(), corrupted);
+    assert_eq!(std::fs::read(&path).unwrap(), main_before);
+    // 恢复独立保留的未损坏样本后验证所有已确认事实，拒绝打开不充当恢复成功。
+    std::fs::write(&wal_path, valid_wal).unwrap();
+    let mut recovered = Database::<f32>::open(&path, DIM).unwrap();
     assert_eq!(
-        valid_count, 5,
-        "5 个已 flush 的 valid=true 节点 payload 应完好"
+        recovered.all_node_ids().unwrap(),
+        (1..=8).collect::<Vec<_>>()
     );
-    eprintln!(
-        "  ✅ WAL 注入容错: {} 个节点存活，payload 完整性已验证",
-        db.node_count().unwrap()
-    );
-
+    for id in 1..=8 {
+        let expected = if id <= 5 {
+            serde_json::json!({"valid":true,"seq":id-1})
+        } else {
+            serde_json::json!({"wal_tail":true,"seq":id-1})
+        };
+        assert_eq!(recovered.get_payload(id).unwrap(), Some(expected));
+    }
+    recovered.close().unwrap();
     cleanup(&path);
 }
 

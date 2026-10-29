@@ -40,8 +40,10 @@ class ContextManagerTests(unittest.TestCase):
         path = self.path("closed.tdb")
         with triviumdb.TriviumDB(path, dim=2) as db:
             db.insert([1.0, 0.0], {})
-        with self.assertRaisesRegex(RuntimeError, "Database closed|数据库已关闭"):
+        with self.assertRaises(triviumdb.TriviumDBError) as raised:
             db.search([1.0, 0.0], top_k=1)
+        self.assertEqual(raised.exception.code, "TDB_DATABASE_CLOSED")
+        self.assertEqual(raised.exception.details, {})
 
     def test_manual_close_releases_lock(self):
         path = self.path("manual.tdb")

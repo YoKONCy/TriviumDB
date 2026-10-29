@@ -19,13 +19,34 @@ use std::path::Path;
 use std::sync::Arc;
 
 const MAGIC: &[u8; 4] = b"TPDX";
-pub const FORMAT_VERSION: u16 = 7;
+pub const FORMAT_VERSION: u16 = 8;
 const KEY_ENCODING_VERSION: u16 = 2;
 const HEADER_SIZE: usize = 36;
 const MAX_FIELD_BYTES: usize = 1024 * 1024;
+const MAX_COMPOSITE_DEFINITION_BYTES: usize = 8 * MAX_FIELD_BYTES;
 const MAX_KEY_BYTES: usize = 16 * 1024 * 1024;
 const NGRAM_WIDTH: usize = 3;
 const MAX_NGRAMS_PER_VALUE: usize = 4096;
+
+pub(crate) fn validate_index_fields(fields: &[String], composite: bool) -> Result<()> {
+    if fields.is_empty()
+        || fields
+            .iter()
+            .any(|field| field.is_empty() || field.len() > MAX_FIELD_BYTES)
+        || (composite
+            && (fields.len() < 2
+                || fields.len() > u16::MAX as usize
+                || fields
+                    .iter()
+                    .map(String::len)
+                    .try_fold(0usize, usize::checked_add)
+                    .is_none_or(|bytes| bytes > MAX_FIELD_BYTES)))
+        || fields.iter().collect::<HashSet<_>>().len() != fields.len()
+    {
+        return Err(TriviumError::InvalidInput("索引字段必须非空且互不重复，复合字段总长度最多 1 MiB、数量最多 65535 (Index fields must be non-empty and distinct; composite fields total at most 1 MiB and 65535 names)".into()));
+    }
+    Ok(())
+}
 
 fn text_ngrams(text: &str) -> Result<Vec<String>> {
     let chars = text.chars().collect::<Vec<_>>();
@@ -1922,18 +1943,6 @@ pub fn save_sidecar(
         )
         .chain(
             registry
-                .composite_indexes
-                .iter()
-                .map(|(definition, index)| {
-                    (
-                        definition.0.join("\0"),
-                        PersistedIndexRef::Composite(index),
-                        registry.unique_composite_indexes.contains(definition),
-                    )
-                }),
-        )
-        .chain(
-            registry
                 .bitmap_indexes
                 .iter()
                 .map(|(field, index)| (field.clone(), PersistedIndexRef::Bitmap(index), false)),
@@ -1945,6 +1954,19 @@ pub fn save_sidecar(
                 .map(|(field, index)| (field.clone(), PersistedIndexRef::Ngram(index), false)),
         )
         .collect();
+    for (definition, index) in &registry.composite_indexes {
+        validate_index_fields(&definition.0, true)?;
+        let encoded = serde_json::to_string(&definition.0).map_err(|error| {
+            TriviumError::InvalidInput(format!(
+                "复合字段列表编码失败 (Composite field encoding failed): {error}"
+            ))
+        })?;
+        fields.push((
+            encoded,
+            PersistedIndexRef::Composite(index),
+            registry.unique_composite_indexes.contains(definition),
+        ));
+    }
     fields.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
@@ -2129,7 +2151,12 @@ pub fn load_sidecar(
             ));
         }
         let field_len = read_u32(&bytes, &mut offset, "field_len")? as usize;
-        if field_len > MAX_FIELD_BYTES {
+        let field_limit = if kind == 2 && version >= 8 {
+            MAX_COMPOSITE_DEFINITION_BYTES
+        } else {
+            MAX_FIELD_BYTES
+        };
+        if field_len > field_limit {
             return Err(TriviumError::CorruptedFile(
                 "属性索引字段名过长 (Property index field is too long)".into(),
             ));
@@ -2137,14 +2164,34 @@ pub fn load_sidecar(
         let field = std::str::from_utf8(read_exact(&bytes, &mut offset, field_len, "field")?)
             .map_err(|_| TriviumError::CorruptedFile("属性索引字段名不是 UTF-8".into()))?
             .to_owned();
+        let composite_fields = if kind == 2 {
+            let fields = if version >= 8 {
+                serde_json::from_str::<Vec<String>>(&field).map_err(|error| {
+                    TriviumError::CorruptedFile(format!(
+                        "复合字段列表无效 (Invalid composite field list): {error}"
+                    ))
+                })?
+            } else {
+                field.split('\0').map(str::to_owned).collect()
+            };
+            validate_index_fields(&fields, true).map_err(|_| {
+                TriviumError::CorruptedFile("复合字段列表越界、为空或重复 (Composite field list is out of bounds, empty or duplicated)".into())
+            })?;
+            fields
+        } else {
+            if field.is_empty() {
+                return Err(TriviumError::CorruptedFile(
+                    "索引字段不能为空 (Index field cannot be empty)".into(),
+                ));
+            }
+            Vec::new()
+        };
         let duplicate = match kind {
             0 => registry.indexes.contains_key(&field),
             1 => registry.ordered_indexes.contains_key(&field),
             2 => registry
                 .composite_indexes
-                .contains_key(&CompositeDefinition(
-                    field.split('\0').map(str::to_owned).collect(),
-                )),
+                .contains_key(&CompositeDefinition(composite_fields.clone())),
             3 => registry.bitmap_indexes.contains_key(&field),
             4 => registry.ngram_indexes.contains_key(&field),
             _ => false,
@@ -2261,18 +2308,21 @@ pub fn load_sidecar(
         all_mapped_blocks.extend(mapped_blocks);
         all_mapped_posting_entries =
             all_mapped_posting_entries.saturating_add(mapped_posting_entries);
+        // 历史分隔符格式无法证明原始字段边界；唯一定义由主文件恢复，普通复合索引显式重建。
+        if kind == 2 && version < 8 {
+            continue;
+        }
         if unique {
             if kind == 0 {
                 registry.unique_indexes.insert(field.clone());
             } else {
                 registry
                     .unique_composite_indexes
-                    .insert(CompositeDefinition(
-                        field.split('\0').map(str::to_owned).collect(),
-                    ));
+                    .insert(CompositeDefinition(composite_fields.clone()));
             }
         }
-        if kind == 0 && !(prefer_mmap_postings && version >= 3) {
+        // 没有 posting 的 Hash 索引也保留字段定义，供只读目录与规划器使用。
+        if kind == 0 && (entry_count == 0 || !(prefer_mmap_postings && version >= 3)) {
             registry.indexes.insert(
                 field,
                 HashPropertyIndex {
@@ -2305,7 +2355,7 @@ pub fn load_sidecar(
                 art_entries.insert(key.0, ids);
             }
             registry.composite_indexes.insert(
-                CompositeDefinition(field.split('\0').map(str::to_owned).collect()),
+                CompositeDefinition(composite_fields),
                 CompositePropertyIndex {
                     entries: art_entries,
                     incomplete_count: expected_node_count

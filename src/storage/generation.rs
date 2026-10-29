@@ -26,27 +26,70 @@ pub struct CurrentGeneration {
 }
 
 #[derive(Debug, Clone)]
+enum RuntimePath {
+    Explicit(PathBuf),
+    DefaultBase(PathBuf),
+}
+
+#[derive(Debug, Clone)]
 pub struct GenerationStore {
     root: PathBuf,
-    runtime_root: PathBuf,
+    runtime_root: RuntimePath,
+    path_error: Option<(std::io::ErrorKind, String)>,
 }
 
 impl GenerationStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        let root = root.into();
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(canonical_store_identity(&root).to_string_lossy().as_bytes());
-        let runtime_root = std::env::temp_dir()
-            .join("triviumdb-runtime")
-            .join(format!("store-{:08x}", hasher.finalize()));
-        Self { root, runtime_root }
+        Self::from_paths(root.into(), None)
     }
 
     pub fn with_runtime_dir(root: impl Into<PathBuf>, runtime_root: impl Into<PathBuf>) -> Self {
+        Self::from_paths(root.into(), Some(runtime_root.into()))
+    }
+
+    fn from_paths(root: PathBuf, runtime_root: Option<PathBuf>) -> Self {
+        let mut path_error = None;
+        let mut anchor = |path: PathBuf| match std::path::absolute(&path) {
+            Ok(absolute) => absolute,
+            Err(error) => {
+                path_error = Some((
+                    error.kind(),
+                    format!("代际路径解析失败 (Generation path resolution failed): {error}"),
+                ));
+                path
+            }
+        };
+        let root = anchor(root);
+        let runtime_root = match runtime_root {
+            Some(path) => RuntimePath::Explicit(anchor(path)),
+            None => {
+                RuntimePath::DefaultBase(anchor(std::env::temp_dir().join("triviumdb-runtime")))
+            }
+        };
         Self {
-            root: root.into(),
-            runtime_root: runtime_root.into(),
+            root,
+            runtime_root,
+            path_error,
         }
+    }
+
+    fn ensure_path(&self) -> Result<()> {
+        if let Some((kind, reason)) = &self.path_error {
+            return Err(std::io::Error::new(*kind, reason.clone()).into());
+        }
+        Ok(())
+    }
+
+    fn runtime_directory(&self) -> Result<PathBuf> {
+        self.ensure_path()?;
+        let base = match &self.runtime_root {
+            RuntimePath::Explicit(directory) => return Ok(directory.clone()),
+            RuntimePath::DefaultBase(base) => base,
+        };
+        // 根目录存在后按规范路径确定身份，构造时机和常规路径别名共享锁空间。
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(self.root.canonicalize()?.to_string_lossy().as_bytes());
+        Ok(base.join(format!("store-{:08x}", hasher.finalize())))
     }
 
     pub fn root(&self) -> &Path {
@@ -54,6 +97,7 @@ impl GenerationStore {
     }
 
     pub fn generation_dir(&self, generation_id: &str) -> Result<PathBuf> {
+        self.ensure_path()?;
         validate_component(generation_id, "generation_id")?;
         Ok(self.root.join(generation_id))
     }
@@ -77,6 +121,7 @@ impl GenerationStore {
         generation_id: &str,
         database_file: &str,
     ) -> Result<CurrentGeneration> {
+        self.ensure_path()?;
         std::fs::create_dir_all(&self.root)?;
         let _management = self.lock_management_exclusive()?;
         let database_path = self.database_path(generation_id, database_file)?;
@@ -141,6 +186,7 @@ impl GenerationStore {
     }
 
     pub fn resolve_current(&self) -> Result<CurrentGeneration> {
+        self.ensure_path()?;
         let path = self.root.join("current.json");
         let bytes =
             std::fs::read(&path).map_err(|error| TriviumError::ImmutableArtifactInvalid {
@@ -169,7 +215,7 @@ impl GenerationStore {
         let current = self.resolve_current()?;
         let directory = self.generation_dir(&current.generation_id)?;
         let lease_path = self.reader_lock_path(&current.generation_id)?;
-        std::fs::create_dir_all(&self.runtime_root)?;
+        std::fs::create_dir_all(self.runtime_directory()?)?;
         let lease = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -215,7 +261,7 @@ impl GenerationStore {
             return Ok(());
         }
         let lease_path = self.reader_lock_path(generation_id)?;
-        std::fs::create_dir_all(&self.runtime_root)?;
+        std::fs::create_dir_all(self.runtime_directory()?)?;
         let lease = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -231,23 +277,25 @@ impl GenerationStore {
     }
 
     fn lock_management_shared(&self) -> Result<std::fs::File> {
-        std::fs::create_dir_all(&self.runtime_root)?;
+        let runtime_root = self.runtime_directory()?;
+        std::fs::create_dir_all(&runtime_root)?;
         let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open(self.runtime_root.join("generation.lock"))?;
+            .open(runtime_root.join("generation.lock"))?;
         file.lock_shared()?;
         Ok(file)
     }
 
     fn lock_management_exclusive(&self) -> Result<std::fs::File> {
-        std::fs::create_dir_all(&self.runtime_root)?;
+        let runtime_root = self.runtime_directory()?;
+        std::fs::create_dir_all(&runtime_root)?;
         let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open(self.runtime_root.join("generation.lock"))?;
+            .open(runtime_root.join("generation.lock"))?;
         file.lock_exclusive()?;
         Ok(file)
     }
@@ -255,15 +303,11 @@ impl GenerationStore {
     fn reader_lock_path(&self, generation_id: &str) -> Result<PathBuf> {
         validate_component(generation_id, "generation_id")?;
         let mut hasher = crc32fast::Hasher::new();
-        hasher.update(
-            canonical_store_identity(&self.root)
-                .to_string_lossy()
-                .as_bytes(),
-        );
+        hasher.update(self.root.canonicalize()?.to_string_lossy().as_bytes());
         hasher.update(&[0]);
         hasher.update(generation_id.as_bytes());
         Ok(self
-            .runtime_root
+            .runtime_directory()?
             .join(format!("reader-{:08x}.lock", hasher.finalize())))
     }
 }
@@ -308,16 +352,4 @@ fn validate_component(value: &str, field: &str) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-fn canonical_store_identity(root: &Path) -> PathBuf {
-    if let Ok(canonical) = root.canonicalize() {
-        return canonical;
-    }
-    if root.is_absolute() {
-        return root.to_path_buf();
-    }
-    std::env::current_dir()
-        .map(|directory| directory.join(root))
-        .unwrap_or_else(|_| root.to_path_buf())
 }

@@ -1,6 +1,6 @@
 # TriviumDB 安全特性详解
 
-> 本文说明当前内核的并发、数据完整性、格式校验、资源预算、ReadOnly/Immutable、输入验证与跨平台 I/O 实现。当前版本见[变更说明](changes/0.9.0-beta.3.md)，后续更新见[未发布变更](changes/unreleased.md)。
+> 本文说明当前内核的并发、数据完整性、格式校验、资源预算、ReadOnly/Immutable、输入验证与跨平台 I/O 实现。当前版本见[变更说明](changes/0.9.0-beta.4.md)，后续更新见[未发布变更](changes/unreleased.md)。
 
 ---
 
@@ -18,15 +18,15 @@
 
 ### 1. 进程级互斥锁（文件锁）
 
-**实现位置**：`database.rs:169-181`
+**实现位置**：[数据库打开与文件锁](../src/database/mod.rs)
 
 ```rust
 let lock_file = std::fs::OpenOptions::new()
     .create(true).write(true)
     .open(&lock_path)?;
 lock_file.try_lock_exclusive().map_err(|_| {
-    TriviumError::Generic(format!(
-        "Database '{}' is already opened by another process. ...", path, lock_path
+    TriviumError::DatabaseLocked(format!(
+        "数据库锁冲突 (Database lock conflict): {path}"
     ))
 })?;
 ```
@@ -66,7 +66,7 @@ QuIVer 构建：不得持有 MemTable guard 等待 singleflight Condvar
 
 ### 3. WAL 写入的锁隔离策略
 
-**实现位置**：`database.rs:279-293`（以 `insert` 为例）
+**实现位置**：[直写入口](../src/database/mod.rs)与[事务提交](../src/database/transaction.rs)
 
 写操作保持固定顺序 `MemTable write → WAL Mutex`。事务在持有 MemTable 写锁时完成 Dry-Run、容量预算和整批预留，随后获取 WAL 锁一次性追加事务，最后执行已验证的内存应用。Compaction 同样遵循该顺序，并在主数据保存成功后才清理 WAL。
 
@@ -101,7 +101,7 @@ QuIVer 构建：不得持有 MemTable guard 等待 singleflight Condvar
 
 ### 5. WAL CRC32 逐条校验
 
-**实现位置**：`storage/wal.rs:113-115`（写入），`wal.rs:232-244`（读取）
+**实现位置**：`storage/wal.rs`（写入），`storage/wal.rs`（读取）
 
 每条 WAL 记录的磁盘格式为：
 
@@ -122,12 +122,13 @@ writer.write_all(&checksum.to_le_bytes())?;
 // 恢复
 let computed_crc = crc32fast::hash(&data);
 if stored_crc != computed_crc {
-    tracing::error!("WAL CRC mismatch ... Stopping recovery.");
-    break; // 停止回放，丢弃后续数据
+    return Err(TriviumError::CorruptedFile(
+        "WAL 完整帧 CRC 不匹配 (Complete WAL frame CRC mismatch)".into(),
+    ));
 }
 ```
 
-**保证**：磁盘坏块、OS 写半条记录均可被检测。CRC 不匹配时**停止回放**而非跳过，防止损坏数据静默渗入。
+完整帧的 CRC 或反序列化校验失败、完整长度字段超过单帧上限时，打开返回 `CorruptedFile`，原 WAL 字节保持完整。只有物理未写完的长度、数据或 CRC 尾字段，以及缺少提交封条的尾事务，按已完成提交边界恢复。故障日志可随备份保留供诊断；从经过验证的完整日志或快照恢复后，再验收已确认记录。
 
 ---
 
@@ -135,7 +136,7 @@ if stored_crc != computed_crc {
 
 WAL 回放在帧与 CRC 校验之后继续验证业务内容：Payload 与边元数据必须是可解码的 JSON，向量满足数据库维度和有限数值要求，插入 ID 位于 `1..u64::MAX`。这些检查先于检查点幂等跳过；语义非法记录返回 `CorruptedFile`。合法 `null` 按 JSON 值保存。回放或应用失败传播错误，原 WAL 保留供诊断与重试；未提交事务由封条过滤，不参与业务回放。
 
-**实现位置**：`storage/wal.rs:214-217`
+**实现位置**：`storage/wal.rs`
 
 ```rust
 // 单条不超过 256MB
@@ -150,7 +151,7 @@ if len > 256 * 1024 * 1024 {
 
 ### 7. WAL 事务原子性（TxBegin / TxCommit 封条）
 
-**实现位置**：`storage/wal.rs:260-297`
+**实现位置**：`storage/wal.rs`
 
 崩溃恢复时对事务做两阶段过滤：只有见到匹配 `TxCommit` 的事务才会回放，否则整体丢弃：
 
@@ -185,49 +186,34 @@ magic(4) + version(1) + generation(8)
 - 发布前流式保存旧文件组，随后同步并发布 `.publish` 撤销日志。当前 `TPUB` v2 日志为 136 字节，记录主文件、向量、marker、QuIVer 及其元数据、文本及其元数据、属性和图索引的存在状态、长度、CRC、代际、存储模式和提交状态，并校验日志自身 CRC。读取同时支持历史 v1 日志。延期保存且正文保持原样时，可保留原文本文件并省去正文备份复制。
 - Mmap 在全部索引同步后发布 marker；Rom 在文件组同步后原子更新日志提交状态，并记录新主文件的长度与 CRC。ReadWrite 打开时检查提交点：未提交则校验备份、恢复旧文件组并回放 WAL；已提交则验证新代并清理日志。恢复复制保留备份，全部恢复文件同步后才清理日志及备份，支持恢复途中再次中断。
 - ReadOnly/Immutable 不执行恢复或清理；有待恢复日志/WAL 时返回 `RecoveryRequired`，保持字节级零写。无有效恢复基础的文件损坏返回 `CorruptedFile`，不构造缺向量、缺 Payload 或空库的伪恢复状态；已提交新代损坏不能回滚旧代。
-- 旧代备份消耗纳入发布的文件组大小所对应的磁盘读写和临时空间，复制使用有界缓冲。同一句柄失败重试保留最初备份，向量从现有 COW 映射和 delta 完整重写。主文件使用 v9、marker 使用 v3；待恢复发布由支持对应日志版本的内核完成。
+- 旧代备份消耗纳入发布的文件组大小所对应的磁盘读写和临时空间，复制使用有界缓冲。映射有效时，同一句柄失败重试保留最初备份；向量映射在替换过程中失效时，实例进入待恢复状态，共享查询句柄统一拒绝后续操作。释放实例后由可写打开恢复文件组并回放 WAL。主文件使用 v10、marker 使用 v3；待恢复发布由支持对应日志版本的内核完成。
 - 默认 `storage::publication_recovery` 用独立日志字节 oracle 验证恢复、损坏拒绝、提交点与只读零写；`test-hooks` 强杀矩阵要求完整恢复所有 `Full` 模式已同步事务，打开失败不能算通过。
+- 唯一约束创建/删除持有写锁完成文件组检查点。发布失败隔离实例及共享查询句柄，保留原始错误；释放后可写重开按实际提交点恢复约束与 WAL。预检拒绝保持当前实例可用。
+- `.pidx v8` 以 JSON 数组保存复合字段列表；历史复合 posting 通过事实扫描提供结果，唯一约束以主文件定义重建。`.gidx v3` 在采用前完成边记录、反向/标签目录和主文件事实的逐项验证；验证与 JSON 解码峰值参与加载预算准入，异常副本返回结构化损坏错误。
 
 ---
 
 ### 9. 文件魔数与最小尺寸校验
 
-**实现位置**：`storage/file_format.rs:257-267`
+**实现位置**：`storage/file_format.rs`
 
-```rust
-const MAGIC: &[u8; 4] = b"TVDB";
+载入先检查历史公共头的 58 字节、`TVDB` 魔数与支持的版本范围。v10 随后校验完整的 74 字节类型头：`VTYP`、dtype、元素宽度、reserved 和头部 CRC32。Rom 的向量块止于 `edge_offset`，Mmap 的 `.vec` 长度与 slot 数、维度、元素宽度精确对应。
 
-if mmap.len() < HEADER_SIZE as usize {
-    return Err(TriviumError::Generic("File too small for header".into()));
-}
-if &bytes[0..4] != MAGIC {
-    return Err(TriviumError::Generic(
-        format!("Invalid file magic: expected TVDB, got {:?}", &bytes[0..4])
-    ));
-}
-```
-
-防止加载非 TriviumDB 文件或截断损坏文件，同时避免后续偏移量计算出现越界读取。
+ReadWrite/ReadOnly 类型不匹配返回 `DtypeMismatch`，并保留 `stored`、`requested` 字段。发布恢复先验证可信备份的类型，再复制正式文件；Readonly 路径保持原文件组。历史仅 WAL 或无类型空检查点附带非空 WAL 的数据，先用原版本恢复并完成检查点后升级。
 
 ---
 
-### 10. 原子写入协议：write-tmp → fsync → rename
+### 10. 文件组原子发布
 
-**实现位置**：`storage/file_format.rs:142-240`，`storage/vec_pool.rs:flush_rewrite()`
+**实现位置**：[文件格式](../src/storage/file_format.rs)、[发布恢复](../src/storage/file_format/publication.rs)与[文件系统操作](../src/storage/fs.rs)。
 
-所有持久化路径均遵循：
-
-```
-① 写 .tmp 临时文件 → ② sync_all() → ③ robust_rename(tmp → 正式文件)
-```
-
-任何步骤崩溃，旧文件完好。`.tmp` 在下次启动时可安全忽略。
+发布顺序为临时文件写入、文件同步、原子替换、目录同步及最后的提交标记。发布日志记录文件组替换进度。重新打开时，恢复流程按提交点选择完整 generation；只读打开遇到待恢复发布时返回结构化错误。备份和复制使用[一致快照](lifecycle-snapshots.md#一致快照)接口捕获完整文件组。
 
 ---
 
 ### 11. WAL 三级落盘模式
 
-**实现位置**：`storage/wal.rs:48-68`
+**实现位置**：`storage/wal.rs`
 
 ```rust
 pub enum SyncMode {
@@ -241,7 +227,7 @@ pub enum SyncMode {
 
 ### 12. WAL Drop 安全刷盘
 
-**实现位置**：`storage/wal.rs:336-341`
+**实现位置**：`storage/wal.rs`
 
 `Database::drop` 时调用 `flush_writer()`，将 `BufWriter` 缓冲区主动刷入磁盘，防止正常退出时因 `Arc<Mutex<Wal>>` 析构链导致的静默数据丢失。
 
@@ -291,7 +277,7 @@ mmap 返回的地址始终页对齐（4096B）；`f32` 需 4B 对齐、`u64` 需
 
 ### 15. AVX2 SIMD 运行时 CPU 特性检测
 
-**实现位置**：`vector.rs:130-141`
+**实现位置**：`vector.rs`
 
 ```rust
 if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
@@ -307,7 +293,7 @@ cosine_similarity_scalar(a, b) // 安全标量回退
 
 ### 16. `bytemuck::Pod` 编译期内存安全约束
 
-**实现位置**：`vector.rs:13-14`
+**实现位置**：`vector.rs`
 
 ```rust
 pub trait VectorType: bytemuck::Zeroable + bytemuck::Pod + ...
@@ -319,15 +305,9 @@ pub trait VectorType: bytemuck::Zeroable + bytemuck::Pod + ...
 
 ### 17. 数组边界守卫
 
-**实现位置**：`database.rs`（QuIVer 精排分支）
+**实现位置**：[分段向量池](../src/storage/vec_pool.rs)、[检索与精排](../src/database/pipeline.rs)。
 
-```rust
-if offset + dim <= vectors.len() {
-    let score = T::similarity(query_vector, &vectors[offset..offset + dim]);
-}
-```
-
-访问 `flat_vectors` 时，始终通过 `offset + dim <= len` 守卫，防止 `mmap_count` 与实际数组大小不一致时的越界访问。
+向量池按 slot 和维度检查索引范围，并通过分段访问接口返回完整切片。mmap 基础层与增量层分别校验长度；精排通过同一访问接口读取向量。损坏的文件几何在打开阶段返回结构化错误。
 
 ---
 
@@ -354,23 +334,17 @@ QuIVer 构建有独立峰值预算，流式准备 BQ2 与默认 SM 状态，避�
 
 ---
 
-### 19. Cypher 引擎的 Lazy Evaluation 防 OOM 内存大爆炸
+### 19. TQL 中间结果与物化预算
 
-**实现位置**：`query/executor.rs:eval_expr_by_id()` 和路径扩展逻辑
+**实现位置**：[TQL 执行器](../src/query/tql_executor.rs)、[物理管线](../src/query/pipeline.rs)与[返回处理](../src/query/tql_return.rs)。
 
-```rust
-// 🚀 OOM 防御：我们只在中间计算层存储 NodeId，绝对不克隆包含 Vector 和 Payload 的巨型 Node 结构！
-let mut bindings_set: Vec<HashMap<String, u64>> = Vec::new();
-```
-
-由于图查询匹配（如 `(a)-[]->(b)-[]->(c)`）会产生爆炸性的笛卡尔积中间结果，若在每一步扩展中传递深拷贝的实体节点数据（包含高维向量、全量 JSON Payload），1 万条路径即会瞬间击穿几个 GB 的内存。
-TriviumDB 执行器在整条中间路径遍历中**仅保留轻量级 `u64` IDs**，所有的 `WHERE` 财产过滤条件使用即时查询计算，仅仅在最后的 `RETURN` 吐出最终小切片结果时，才去执行昂贵的 `build_node` 数据装填，物理上隔离了内存爆炸。
+候选阶段使用 NodeId、分数和按需保存的类型化绑定。WITH 在投影阶段捕获逐行值，EXPAND 保留源绑定；工作区准入同时计入绑定容器和动态内容。最终投影按表达式读取所需 Payload、向量或实体，行上限、Payload 读取和中间 NodeSet 分别按预算检查。
 
 ---
 
 ### 向量维度强校验
 
-**实现位置**：`storage/memtable.rs`，`database.rs:Transaction::commit()`
+**实现位置**：[MemTable](../src/storage/memtable.rs)与[事务预检](../src/database/transaction.rs)
 
 ```rust
 if vector.len() != self.dim {
@@ -384,13 +358,15 @@ if vector.len() != self.dim {
 
 ### 20. 查询向量 NaN / Infinity 检测
 
-**实现位置**：`database.rs:462-475`
+**实现位置**：[查询向量校验](../src/database/pipeline.rs)、[搜索句柄](../src/database/mod.rs)
 
 ```rust
 for item in qv {
     let f = item.to_f32();
     if f.is_nan() || f.is_infinite() {
-        return Err(TriviumError::Generic("Query vector contains NaN or Infinity".into()));
+        return Err(TriviumError::InvalidVector {
+            reason: "查询向量含非有限值 (Query vector contains non-finite values)".into(),
+        });
     }
 }
 ```
@@ -401,13 +377,13 @@ NaN 进入余弦计算会传染整个结果。在检索管线 L0 层直接拦截
 
 ### 21. 认知管线参数钳位（防数学奇点）
 
-**实现位置**：`database.rs:478-485`
+**实现位置**：[检索配置校验与规范化](../src/database/pipeline.rs)
 
 ```rust
-safe_cfg.top_k              = safe_cfg.top_k.max(1);
-safe_cfg.fista_lambda       = safe_cfg.fista_lambda.clamp(1e-5, 100.0);
-safe_cfg.teleport_alpha     = safe_cfg.teleport_alpha.clamp(0.0, 1.0);
-safe_cfg.dpp_quality_weight = safe_cfg.dpp_quality_weight.clamp(0.0, 10.0);
+config.top_k              = config.top_k.max(1);
+config.fista_lambda       = config.fista_lambda.clamp(1e-5, 100.0);
+config.teleport_alpha     = config.teleport_alpha.clamp(0.0, 1.0);
+config.dpp_quality_weight = config.dpp_quality_weight.clamp(0.0, 10.0);
 ```
 
 所有数学参数强制钳入合法范围：`fista_lambda` 过大全变 0，`teleport_alpha` 超出 `[0,1]` PPR 概率失去意义，`dpp_quality_weight` 过大导致 float 溢出。
@@ -416,7 +392,7 @@ safe_cfg.dpp_quality_weight = safe_cfg.dpp_quality_weight.clamp(0.0, 10.0);
 
 ### 22. 事务 Dry-Run 预检与极巨载荷拦截（零损伤回滚）
 
-**实现位置**：`database.rs:Transaction::commit()` 第一阶段及其他直写 API
+**实现位置**：[事务提交预检](../src/database/transaction.rs)与[直写 API](../src/database/mod.rs)
 
 所有业务验证（节点是否存在、ID 是否冲突、维度是否匹配、是否包含 NaN/Inf）在**纯内存虚拟状态**上完成，不触碰 MemTable 或 WAL。
 
@@ -444,7 +420,7 @@ if !self.payloads.contains_key(&id) {
 
 ### 24. QuIVer 索引与 FreeList 墓碑复用（零 Ghost Node）
 
-**实现位置**：`database.rs:delete()`，`storage/memtable.rs`，`index/quiver.rs`
+**实现位置**：[节点删除](../src/database/mod.rs)、[MemTable](../src/storage/memtable.rs)、[QuIVer](../src/index/quiver.rs)
 
 传统图索引（如 HNSW）在节点被逻辑删除后，会在索引图中留下幽灵引用，导致检索结果污染和性能退化。TriviumDB 通过 **FreeList 墓碑隐式复用机制** + **QuIVer 增量图维护** 彻底消除了该问题：
 
@@ -458,7 +434,7 @@ if !self.payloads.contains_key(&id) {
 
 ### 25. 图谱扩散防爆炸截断
 
-**实现位置**：`graph/traversal.rs:69-83`
+**实现位置**：`graph/traversal.rs`
 
 ```rust
 // 能量阈值守护：得分 ≤ 0 的节点不再传播（防负反馈循环）
@@ -501,7 +477,7 @@ Windows 杀毒软件在文件关闭瞬间抢占扫描，通常几毫秒后自动
 
 ### 28. WAL 清空使用 truncate 而非 remove+create
 
-**实现位置**：`storage/wal.rs:307-330`
+**实现位置**：`storage/wal.rs`
 
 `truncate(true)` 保留 inode，不触发杀软的"新文件扫描"；截断后立即写回固定 6 字节 WAL 版本头，避免 WAL clear 期间再次产生文件锁冲突。
 

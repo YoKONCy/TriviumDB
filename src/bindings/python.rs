@@ -11,39 +11,21 @@ pub mod python {
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyList};
 
-    pyo3::create_exception!(triviumdb, ReadOnlyError, pyo3::exceptions::PyRuntimeError);
+    pyo3::create_exception!(triviumdb, TriviumDBError, pyo3::exceptions::PyRuntimeError);
+    pyo3::create_exception!(triviumdb, InvalidInputError, pyo3::exceptions::PyValueError);
+    pyo3::create_exception!(triviumdb, CapacityError, pyo3::exceptions::PyMemoryError);
     pyo3::create_exception!(
         triviumdb,
-        RecoveryRequiredError,
-        pyo3::exceptions::PyRuntimeError
+        SnapshotDestinationError,
+        pyo3::exceptions::PyFileExistsError
     );
-    pyo3::create_exception!(
-        triviumdb,
-        ImmutableArtifactError,
-        pyo3::exceptions::PyRuntimeError
-    );
-    pyo3::create_exception!(
-        triviumdb,
-        GenerationBusyError,
-        pyo3::exceptions::PyRuntimeError
-    );
-    pyo3::create_exception!(
-        triviumdb,
-        UnsupportedDatabaseVersionError,
-        pyo3::exceptions::PyRuntimeError
-    );
-
-    pyo3::create_exception!(
-        triviumdb,
-        ResourceBudgetError,
-        pyo3::exceptions::PyRuntimeError
-    );
-
-    pyo3::create_exception!(
-        triviumdb,
-        SnapshotPublicationError,
-        pyo3::exceptions::PyRuntimeError
-    );
+    pyo3::create_exception!(triviumdb, ReadOnlyError, TriviumDBError);
+    pyo3::create_exception!(triviumdb, RecoveryRequiredError, TriviumDBError);
+    pyo3::create_exception!(triviumdb, ImmutableArtifactError, TriviumDBError);
+    pyo3::create_exception!(triviumdb, GenerationBusyError, TriviumDBError);
+    pyo3::create_exception!(triviumdb, UnsupportedDatabaseVersionError, TriviumDBError);
+    pyo3::create_exception!(triviumdb, ResourceBudgetError, TriviumDBError);
+    pyo3::create_exception!(triviumdb, SnapshotPublicationError, TriviumDBError);
 
     #[pyclass(name = "ResourceRuntime", frozen)]
     pub struct PyResourceRuntime {
@@ -85,62 +67,49 @@ pub mod python {
     }
 
     fn to_py_error(error: crate::error::TriviumError) -> PyErr {
-        match error {
-            crate::error::TriviumError::SnapshotPublicationUncertain { .. } => {
+        use crate::error::TriviumError;
+        let exception = match &error {
+            TriviumError::SnapshotPublicationUncertain { .. } => {
                 SnapshotPublicationError::new_err(error.to_string())
             }
-            crate::error::TriviumError::SnapshotDestinationExists { .. } => {
-                pyo3::exceptions::PyFileExistsError::new_err(error.to_string())
+            TriviumError::SnapshotDestinationExists { .. } => {
+                SnapshotDestinationError::new_err(error.to_string())
             }
-            crate::error::TriviumError::ResourceBudgetExceeded {
-                resource,
-                requested,
-                used,
-                limit,
-            } => {
-                let exception = ResourceBudgetError::new_err(error.to_string());
-                Python::with_gil(|py| {
-                    let value = exception.value(py);
-                    let attributes = value
-                        .setattr("resource", resource)
-                        .and_then(|_| value.setattr("requested", requested))
-                        .and_then(|_| value.setattr("used", used))
-                        .and_then(|_| value.setattr("limit", limit));
-                    match attributes {
-                        Ok(()) => exception,
-                        Err(error) => error,
-                    }
-                })
+            TriviumError::ResourceBudgetExceeded { .. } => {
+                ResourceBudgetError::new_err(error.to_string())
             }
-            crate::error::TriviumError::ReadOnlyViolation { .. } => {
-                ReadOnlyError::new_err(error.to_string())
-            }
-            crate::error::TriviumError::RecoveryRequired { .. } => {
+            TriviumError::ReadOnlyViolation { .. } => ReadOnlyError::new_err(error.to_string()),
+            TriviumError::RecoveryRequired { .. } => {
                 RecoveryRequiredError::new_err(error.to_string())
             }
-            crate::error::TriviumError::ImmutableArtifactInvalid { .. } => {
+            TriviumError::ImmutableArtifactInvalid { .. } => {
                 ImmutableArtifactError::new_err(error.to_string())
             }
-            crate::error::TriviumError::GenerationBusy { .. } => {
-                GenerationBusyError::new_err(error.to_string())
-            }
-            crate::error::TriviumError::UnsupportedDatabaseVersion { .. } => {
+            TriviumError::GenerationBusy { .. } => GenerationBusyError::new_err(error.to_string()),
+            TriviumError::UnsupportedDatabaseVersion { .. } => {
                 UnsupportedDatabaseVersionError::new_err(error.to_string())
             }
-            crate::error::TriviumError::ApiMigrationRequired { .. }
-            | crate::error::TriviumError::UnsupportedSidecarVersion { .. }
-            | crate::error::TriviumError::UnsupportedWalVersion { .. }
-            | crate::error::TriviumError::QueryParse(_)
-            | crate::error::TriviumError::QueryExecution(_)
-            | crate::error::TriviumError::QueryRowBudgetExceeded { .. }
-            | crate::error::TriviumError::PayloadQueryBudgetExceeded { .. } => {
-                pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+            TriviumError::CapacityReservationRejected { .. }
+            | TriviumError::CapacityAllocationFailed { .. } => {
+                CapacityError::new_err(error.to_string())
             }
-            crate::error::TriviumError::InvalidInput(message) => {
-                pyo3::exceptions::PyValueError::new_err(message)
+            TriviumError::InvalidInput(_) => InvalidInputError::new_err(error.to_string()),
+            _ => TriviumDBError::new_err(error.to_string()),
+        };
+        Python::with_gil(|py| -> PyResult<()> {
+            let value = exception.value(py);
+            value.setattr("code", error.code())?;
+            let details = error.details();
+            value.setattr("details", json_to_pyobject(py, &details)?)?;
+            // 保留资源预算等已有的直接属性，字段的权威值来自内核。
+            if let Some(fields) = details.as_object() {
+                for (name, field) in fields {
+                    value.setattr(name.as_str(), json_to_pyobject(py, field)?)?;
+                }
             }
-            _ => pyo3::exceptions::PyRuntimeError::new_err(error.to_string()),
-        }
+            Ok(())
+        })
+        .map_or_else(|conversion| conversion, |()| exception)
     }
 
     enum DbBackend {
@@ -1982,10 +1951,7 @@ pub mod python {
         #[pyo3(signature = (interval_secs=7200))]
         fn enable_auto_compaction(&mut self, interval_secs: u64) -> PyResult<()> {
             dispatch!(self, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(interval_secs)))
-                .map_err(|error| match error {
-                    crate::error::TriviumError::ResourceBudgetExceeded { .. } => to_py_error(error),
-                    _ => pyo3::exceptions::PyValueError::new_err(error.to_string()),
-                })
+                .map_err(to_py_error)
         }
 
         fn set_auto_build_quiver(&mut self, enabled: bool) -> PyResult<()> {
@@ -2006,14 +1972,7 @@ pub mod python {
 
         /// 为后续插入主动预留额外节点容量。
         fn reserve_nodes(&mut self, additional: usize) -> PyResult<()> {
-            dispatch!(self, db => db.reserve_nodes(additional)).map_err(|error| match error {
-                crate::error::TriviumError::ResourceBudgetExceeded { .. } => to_py_error(error),
-                crate::error::TriviumError::CapacityReservationRejected { .. }
-                | crate::error::TriviumError::CapacityAllocationFailed { .. } => {
-                    pyo3::exceptions::PyMemoryError::new_err(error.to_string())
-                }
-                _ => pyo3::exceptions::PyValueError::new_err(error.to_string()),
-            })
+            dispatch!(self, db => db.reserve_nodes(additional)).map_err(to_py_error)
         }
 
         /// 设置内核内存预算（MiB），0 表示不限制。
@@ -3078,6 +3037,13 @@ pub mod python {
 
     #[pymodule]
     pub fn triviumdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        m.add("TriviumDBError", m.py().get_type::<TriviumDBError>())?;
+        m.add("InvalidInputError", m.py().get_type::<InvalidInputError>())?;
+        m.add("CapacityError", m.py().get_type::<CapacityError>())?;
+        m.add(
+            "SnapshotDestinationError",
+            m.py().get_type::<SnapshotDestinationError>(),
+        )?;
         m.add("ReadOnlyError", m.py().get_type::<ReadOnlyError>())?;
         m.add(
             "RecoveryRequiredError",
@@ -3125,6 +3091,28 @@ pub mod python {
     #[cfg(test)]
     mod tests {
         use super::round_api_f32;
+
+        #[test]
+        fn 核心错误完整映射到_python异常() {
+            pyo3::prepare_freethreaded_python();
+            pyo3::Python::with_gil(|py| {
+                use pyo3::prelude::*;
+                let json = py.import("json").unwrap();
+                for (error, code, expected) in crate::error::tests::cases() {
+                    let exception = super::to_py_error(error);
+                    let value = exception.value(py);
+                    assert_eq!(
+                        value.getattr("code").unwrap().extract::<String>().unwrap(),
+                        code
+                    );
+                    let expected = json.call_method1("loads", (expected.to_string(),)).unwrap();
+                    assert!(
+                        value.getattr("details").unwrap().eq(expected).unwrap(),
+                        "{code}"
+                    );
+                }
+            });
+        }
 
         #[test]
         fn 边权重_api舍入到六位小数() {

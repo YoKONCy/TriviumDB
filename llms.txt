@@ -28,7 +28,7 @@ TriviumDB runs inside the host application. Applications use it for AI agent mem
 - [Shutdown, snapshots, and restore](https://raw.githubusercontent.com/YoKONCy/TriviumDB/master/docs/lifecycle-snapshots.md): Instance lifecycle, consistent directory snapshots, verification, and restore.
 - [Best practices](https://raw.githubusercontent.com/YoKONCy/TriviumDB/master/docs/best-practices.md): Data modeling, application integration, retrieval patterns, and resource configuration.
 
-- [0.9.0-beta.3 release notes](https://raw.githubusercontent.com/YoKONCy/TriviumDB/master/docs/changes/0.9.0-beta.3.md): Bilingual changes, Rust API migration, persisted index formats, and installation versions.
+- [0.9.0-beta.4 release notes](https://raw.githubusercontent.com/YoKONCy/TriviumDB/master/docs/changes/0.9.0-beta.4.md): Bilingual changes, Rust API migration, persisted index formats, and installation versions.
 
 ## Packages
 

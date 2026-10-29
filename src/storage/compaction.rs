@@ -348,7 +348,12 @@ impl CompactionThread {
                 if !mt.needs_checkpoint() {
                     return Ok(true);
                 }
-                file_format::save(&mut mt, &db_path, storage_mode)?;
+                if let Err(error) = file_format::save(&mut mt, &db_path, storage_mode) {
+                    if mt.ensure_readable().is_err() {
+                        wal.release_writer();
+                    }
+                    return Err(error);
+                }
                 #[cfg(feature = "test-hooks")]
                 crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeWalClear);
                 wal.clear()?;

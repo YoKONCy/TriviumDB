@@ -49,6 +49,8 @@ nightly < alpha < beta < rc < stable（无后缀） < hotfix
 - **Beta Tag**：`vX.Y.Z-beta.N`，只用于已达到公开测试条件的候选版本；发布到三端的预发布通道，不得覆盖或冒充 stable；
 - **Stable Tag**：`vX.Y.Z`，只能创建在 `master` 上已通过验收的 Release Commit，并触发三端正式发布；hotfix 使用下一个 stable 补丁 Tag；
 - Tag 一经推送不可修改或删除（受 Tag Ruleset 保护）；
+- Stable CD 通过共享的 `scripts/validate_release_source.py` 核对 Tag：提交位于 `master` 第一父链，关联同仓库已合并的 `dev → master` PR，PR 合并 SHA 与 Tag 一致，且该提交的 `master` push CI 最新运行成功。两条发布 workflow 使用同一校验；补发按原提交验收，允许 `master` 继续前进。Beta Tag 保持公开测试版本的独立质量门禁。
+- 校验器从 `github.workflow_sha` 标识的工作流提交加载到 Runner 临时目录，再检出目标 Tag。历史 Tag 使用对应版本的原始源码，来源校验由当前选定的工作流提供；无需改动已发布 Tag。
 - 提交 Release PR 前，必须确认 `Cargo.toml`、Python、Node、CLI/Server 的版本号及预发布标识完全一致。
 
 ### 提交 PR 前
@@ -263,6 +265,8 @@ The repository permits only these two kinds of Git tags, both of which must be i
 - **Stable tag**: `vX.Y.Z`, only on a validated Release Commit in `master`; a hotfix uses the next stable patch tag;
 - GitHub Actions publishes PyPI and NPM artifacts from the tag. The maintainer publishes crates.io locally from the same Release Commit with `cargo publish --locked`; repository workflows must not store or use a crates.io publishing token;
 - Pushed tags are immutable (protected by a Tag Ruleset);
+- Both stable CD workflows use `scripts/validate_release_source.py` to verify that the tag identifies a merge on master's first-parent history, matches a merged same-repository dev-to-master PR, and has successful latest master push CI for that exact commit. Recovery publishing validates the original release commit while allowing master to advance. Beta tags retain their separate public-testing quality gates.
+- The validator is copied from the workflow commit identified by `github.workflow_sha` into the runner's temporary directory before checking out the target tag. Historical tags retain their original source tree while the selected workflow supplies provenance validation, preserving published tags unchanged. See [GitHub workflow contexts](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#github-context).
 - Before opening a Release PR, verify that `Cargo.toml`, Python, Node, CLI/Server versions and prerelease identifiers are fully aligned.
 
 ### Before Opening a PR

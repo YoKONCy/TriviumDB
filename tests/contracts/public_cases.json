@@ -35,7 +35,7 @@
       "operation": "prepared_missing_parameter",
       "tql": "FIND {kind: \"alpha\"} AS seed WITH seed RETURN seed, $required AS value",
       "parameters": {},
-      "expected": {"error_contains_any": ["缺少参数", "missing parameter"]}
+      "expected": {"error_code": "TDB_MISSING_QUERY_PARAMETER", "error_details": {"parameter": "required"}}
     },
     {
       "name": "text_lifecycle",

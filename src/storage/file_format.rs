@@ -1,8 +1,8 @@
-//! `.tdb` 主文件与 `.vec/.flush_ok` 一致性协议。
+//! `.tdb/.vec/.pld.<generation>` 与 `.flush_ok` 文件组一致性协议。
 //!
-//! 主文件保存 Payload、边、slot 和 BQ 元数据，向量可内嵌或分离 mmap。读取路径严格
-//! 校验魔数、版本、偏移、长度和数量关系；写入采用临时文件、fsync、原子替换，并用
-//! `.flush_ok` 将主文件与分离向量文件绑定为同一代快照。
+//! Rom 主文件内嵌向量与 Payload；Mmap v9 的向量和原始 Payload 使用分离文件，主文件
+//! 保存边、slot 和必要元数据。读取校验魔数、版本、几何与 CRC；发布日志保护文件组替换，
+//! `.flush_ok` v3 将主文件、向量与 Payload 绑定到同一 generation。
 
 use crate::VectorType;
 use crate::database::StorageMode;
@@ -21,16 +21,250 @@ use std::path::Path;
 mod publication;
 pub(crate) use publication::recover as recover_publication;
 
+/// 从已关闭的独占暂存库发布全新文件组；目录项以硬链接原子创建，保留目标互斥锁。
+pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) -> Result<()> {
+    validate_checkpoint_type::<T>(source, &vec_path_from_db(source), source)?;
+    let generation = read_marker_generation(&flush_ok_path_from_db(source)).ok_or_else(|| {
+        TriviumError::CorruptedFile(
+            "迁移暂存库缺少提交标记 (Migration staging database has no commit marker)".into(),
+        )
+    })?;
+    if generation != 1 {
+        return Err(TriviumError::InvalidInput(
+            "迁移暂存库必须从第一代发布 (Migration staging database must publish generation one)"
+                .into(),
+        ));
+    }
+    let mut created = Vec::new();
+    let mut committed = false;
+    let result = (|| -> Result<()> {
+        publication::begin(target, generation, StorageMode::Mmap, false)?;
+        let suffixes = crate::storage::snapshot::generation_suffixes(source);
+        for suffix in suffixes
+            .iter()
+            .filter(|suffix| suffix.as_str() != ".flush_ok")
+            .map(String::as_str)
+            .chain(std::iter::once(".wal"))
+        {
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationPublishFile)?;
+            let destination = format!("{target}{suffix}");
+            // 源文件已经 fsync；同盘链接原子创建完整目录项，同时拒绝覆盖任何既有文件。
+            std::fs::hard_link(format!("{source}{suffix}"), &destination)?;
+            created.push(destination);
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::MigrationFilePublished);
+            if created.len() == 1 {
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationAfterFirstFile)?;
+            }
+        }
+        crate::storage::fs::sync_parent_directory(Path::new(target))?;
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationPublishMarker)?;
+        std::fs::hard_link(flush_ok_path_from_db(source), flush_ok_path_from_db(target))?;
+        committed = true;
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationAfterCommit)?;
+        crate::storage::fs::sync_parent_directory(Path::new(target))?;
+        publication::cleanup(target)?;
+        Ok(())
+    })();
+    if result.is_err() && !committed {
+        // 全新目标的发布只创建目录项；仅移除本次成功创建的链接，保留发生碰撞的外来文件。
+        for file in created
+            .into_iter()
+            .chain(std::iter::once(format!("{target}.publish.tmp")))
+        {
+            match std::fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if publication::pending(target) {
+            publication::cleanup(target)?;
+        }
+        crate::storage::fs::sync_parent_directory(Path::new(target))?;
+    }
+    result
+}
+
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
-pub const CURRENT_VERSION: u16 = 9;
+pub const CURRENT_VERSION: u16 = 10;
 pub const MINIMUM_SUPPORTED_VERSION: u16 = 5;
-const HEADER_SIZE: u64 = 58;
+const LEGACY_HEADER_SIZE: u64 = 58;
+const HEADER_SIZE: u64 = 74;
 const BQ_BLOCK_MAGIC: &[u8; 4] = b"TBQF";
 const BQ_BLOCK_VERSION: u16 = 1;
 const BQ_BLOCK_HEADER_SIZE: usize = 16;
 const UNIQUE_BLOCK_MAGIC: &[u8; 4] = b"TUQC";
 const UNIQUE_BLOCK_VERSION: u16 = 1;
+
+fn vector_dtype<T: VectorType>() -> Result<(u16, &'static str)> {
+    use std::any::TypeId;
+    let id = TypeId::of::<T>();
+    if id == TypeId::of::<f32>() {
+        Ok((1, "f32"))
+    } else if id == TypeId::of::<half::f16>() {
+        Ok((2, "f16"))
+    } else if id == TypeId::of::<u64>() {
+        Ok((3, "u64"))
+    } else {
+        Err(TriviumError::InvalidInput(
+            "持久化向量类型不受支持 (Unsupported persistent vector dtype)".into(),
+        ))
+    }
+}
+
+/// 新库在接收第一条 WAL 前持久化类型身份；空的 Rom 布局适用于两种存储模式。
+pub(crate) fn initialize<T: VectorType>(path: &str, dim: usize) -> Result<()> {
+    if crate::storage::wal::Wal::needs_recovery(path) {
+        return Err(TriviumError::CorruptedFile("缺少带类型的基础检查点，请用原版本恢复并导出 (Typed checkpoint missing; recover and export with the original version)".into()));
+    }
+    save_tdb(&mut MemTable::<T>::new(dim), path, 0, false)
+}
+
+pub(crate) fn upgrade_empty_checkpoint<T: VectorType>(
+    mt: &mut MemTable<T>,
+    path: &str,
+    mode: StorageMode,
+) -> Result<()> {
+    use std::io::Read;
+    if mt.internal_slot_count() != 0 {
+        return Ok(());
+    }
+    let mut prefix = [0u8; 6];
+    File::open(path)?.read_exact(&mut prefix)?;
+    if u16::from_le_bytes([prefix[4], prefix[5]]) < 10 {
+        // 空库仍可能持有索引定义，按文件组协议同步发布绑定主文件的 sidecar。
+        save(mt, path, mode)?;
+        mt.mark_checkpoint_clean();
+    }
+    Ok(())
+}
+
+fn validate_vector_identity<T: VectorType>(
+    bytes: &[u8],
+    version: u16,
+    dim: usize,
+    count: usize,
+    vector_offset: usize,
+    edge_offset: usize,
+    path: &str,
+    vec_path: &str,
+) -> Result<()> {
+    let (requested_tag, requested) = vector_dtype::<T>()?;
+    let elements = count.checked_mul(dim).ok_or_else(|| {
+        TriviumError::CorruptedFile("向量几何溢出 (Vector geometry overflow)".into())
+    })?;
+    let vector_bytes = if vector_offset == 0 {
+        match std::fs::metadata(vec_path) {
+            Ok(metadata) => usize::try_from(metadata.len()).map_err(|_| {
+                TriviumError::CorruptedFile("向量长度溢出 (Vector length overflow)".into())
+            })?,
+            Err(e) if count == 0 && e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(TriviumError::CorruptedFile(
+                    "检查点向量文件缺失 (Checkpoint vector file is missing)".into(),
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    } else {
+        edge_offset.checked_sub(vector_offset).ok_or_else(|| {
+            TriviumError::CorruptedFile("向量块边界倒置 (Reversed vector block bounds)".into())
+        })?
+    };
+    let stored_tag = if version >= 10 {
+        if bytes.len() < HEADER_SIZE as usize
+            || &bytes[58..62] != b"VTYP"
+            || read_u32_le(bytes, 66, "dtype reserved")? != 0
+            || crc32fast::hash(&bytes[..70]) != read_u32_le(bytes, 70, "header CRC")?
+        {
+            return Err(TriviumError::CorruptedFile(
+                "类型文件头校验失败 (Typed header validation failed)".into(),
+            ));
+        }
+        read_u16_le(bytes, 62, "dtype")?
+    } else if elements > 0 {
+        // 历史格式按完整向量块几何推导；三种受支持类型的元素宽度互不相同。
+        match vector_bytes
+            .checked_div(elements)
+            .filter(|width| elements.checked_mul(*width) == Some(vector_bytes))
+        {
+            Some(4) => 1,
+            Some(2) => 2,
+            Some(8) => 3,
+            _ => {
+                return Err(TriviumError::CorruptedFile(
+                    "历史向量块几何无效 (Invalid legacy vector geometry)".into(),
+                ));
+            }
+        }
+    } else {
+        if crate::storage::wal::Wal::needs_recovery(path) {
+            return Err(TriviumError::CorruptedFile("历史空检查点无法证明 WAL 类型，请用原版本恢复 (Legacy empty checkpoint cannot establish WAL dtype; recover with the original version)".into()));
+        }
+        requested_tag
+    };
+    let (stored, width) = match stored_tag {
+        1 => ("f32", 4),
+        2 => ("f16", 2),
+        3 => ("u64", 8),
+        _ => {
+            return Err(TriviumError::CorruptedFile(
+                "未知向量类型 (Unknown vector dtype)".into(),
+            ));
+        }
+    };
+    if version >= 10 && usize::from(read_u16_le(bytes, 64, "element width")?) != width {
+        return Err(TriviumError::CorruptedFile(
+            "向量类型与元素宽度不符 (Vector dtype and element width disagree)".into(),
+        ));
+    }
+    if stored_tag != requested_tag {
+        return Err(TriviumError::DtypeMismatch { stored, requested });
+    }
+    if elements.checked_mul(width) != Some(vector_bytes) {
+        return Err(TriviumError::CorruptedFile(
+            "向量块精确长度不符 (Vector block exact length mismatch)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// 发布恢复写入前核对可信基础文件的类型；备份向量使用独立路径。
+fn validate_checkpoint_type<T: VectorType>(
+    main: &str,
+    vectors: &str,
+    wal_base: &str,
+) -> Result<()> {
+    use std::io::Read;
+    let mut bytes = [0u8; HEADER_SIZE as usize];
+    let mut file = File::open(main)?;
+    file.read_exact(&mut bytes[..LEGACY_HEADER_SIZE as usize])?;
+    let version = read_u16_le(&bytes, 4, "version")?;
+    if version >= 10 {
+        file.read_exact(&mut bytes[LEGACY_HEADER_SIZE as usize..])?;
+    }
+    validate_vector_identity::<T>(
+        &bytes,
+        version,
+        read_u32_le(&bytes, 6, "dim")? as usize,
+        usize::try_from(read_u64_le(&bytes, 18, "slots")?).map_err(|_| {
+            TriviumError::CorruptedFile("槽位数量溢出 (Slot count overflow)".into())
+        })?,
+        usize::try_from(read_u64_le(&bytes, 34, "vectors")?).map_err(|_| {
+            TriviumError::CorruptedFile("向量偏移溢出 (Vector offset overflow)".into())
+        })?,
+        usize::try_from(read_u64_le(&bytes, 42, "edges")?)
+            .map_err(|_| TriviumError::CorruptedFile("边偏移溢出 (Edge offset overflow)".into()))?,
+        wal_base,
+        vectors,
+    )
+}
 
 // ══════ flush_ok 提交标记常量 ══════
 /// 标记魔数：Trivium Flush Marker
@@ -42,9 +276,8 @@ const FLUSH_MARKER_V2_SIZE: usize = 41;
 /// magic(4) + version(1) + generation(8) + sizes(24) + file CRCs(12) + marker CRC(4)
 const FLUSH_MARKER_SIZE: usize = 53;
 
-/// flush_ok 提交标记：记录 .tdb 和 .vec 的文件大小及单调递增的 generation 号
-///
-/// 格式：magic(u32) + version(u8) + generation(u64) + tdb_size(u64) + vec_size(u64)
+/// flush_ok v3 提交标记：generation、三份事实文件的长度与 CRC，以及标记自身的 CRC。
+/// 历史 v1/v2 标记按各自字段布局解码。
 struct FlushMarker {
     generation: u64,
     tdb_size: u64,
@@ -295,15 +528,19 @@ fn write_quiver_meta<T: VectorType>(memtable: &MemTable<T>, db_path: &str) -> st
     let quiver_path = quiver_path_from_db(db_path);
     let quiver_size = std::fs::metadata(&quiver_path)?.len();
     let quiver_crc = file_crc32(&quiver_path)?;
-    let mut bytes = Vec::with_capacity(48);
+    let mut bytes = Vec::with_capacity(60);
     bytes.extend_from_slice(b"QMET");
-    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&2u32.to_le_bytes());
     bytes.extend_from_slice(&tdb_size.to_le_bytes());
     bytes.extend_from_slice(&vec_size.to_le_bytes());
     bytes.extend_from_slice(&quiver_size.to_le_bytes());
     bytes.extend_from_slice(&(memtable.node_count() as u64).to_le_bytes());
     bytes.extend_from_slice(&(memtable.dim() as u32).to_le_bytes());
     bytes.extend_from_slice(&quiver_crc.to_le_bytes());
+    // 主文件绑定节点身份和 slot 映射；分离向量文件绑定完整向量事实。
+    bytes.extend_from_slice(&file_crc32(db_path)?.to_le_bytes());
+    bytes.extend_from_slice(&file_crc32_or_empty(vec_path_from_db(db_path))?.to_le_bytes());
+    bytes.extend_from_slice(&crc32fast::hash(&bytes).to_le_bytes());
     let mut file = File::create(&tmp)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
@@ -311,10 +548,15 @@ fn write_quiver_meta<T: VectorType>(memtable: &MemTable<T>, db_path: &str) -> st
 }
 
 fn validate_quiver_meta<T: VectorType>(memtable: &MemTable<T>, db_path: &str) -> bool {
-    let Ok(bytes) = std::fs::read(quiver_meta_path_from_db(db_path)) else {
+    use std::io::Read;
+    let Ok(mut file) = File::open(quiver_meta_path_from_db(db_path)) else {
         return false;
     };
-    if bytes.len() != 48 || &bytes[0..4] != b"QMET" {
+    let mut bytes = [0u8; 60];
+    if file.metadata().map(|metadata| metadata.len()).ok() != Some(60)
+        || file.read_exact(&mut bytes).is_err()
+        || &bytes[0..4] != b"QMET"
+    {
         return false;
     }
     let read_u64 =
@@ -323,7 +565,17 @@ fn validate_quiver_meta<T: VectorType>(memtable: &MemTable<T>, db_path: &str) ->
     let dim = u32::from_le_bytes(bytes[40..44].try_into().unwrap_or([0; 4])) as usize;
     let quiver_crc = u32::from_le_bytes(bytes[44..48].try_into().unwrap_or([0; 4]));
     let actual_quiver_crc = file_crc32(quiver_path_from_db(db_path)).unwrap_or(u32::MAX);
-    version == 1
+    version == 2
+        && crc32fast::hash(&bytes[..56])
+            == u32::from_le_bytes(bytes[56..60].try_into().unwrap_or([0; 4]))
+        && file_crc32(db_path).ok()
+            == Some(u32::from_le_bytes(
+                bytes[48..52].try_into().unwrap_or([0; 4]),
+            ))
+        && file_crc32_or_empty(vec_path_from_db(db_path)).ok()
+            == Some(u32::from_le_bytes(
+                bytes[52..56].try_into().unwrap_or([0; 4]),
+            ))
         && read_u64(8)
             == std::fs::metadata(db_path)
                 .map(|m| m.len())
@@ -402,7 +654,12 @@ pub fn save<T: VectorType>(
     } else {
         runtime.reserve_workspace(peak)?
     };
-    save_inner(memtable, path, mode)
+    memtable.ensure_readable()?;
+    let result = save_inner(memtable, path, mode);
+    if result.is_err() && memtable.vec_pool().recovery_required() {
+        memtable.require_recovery();
+    }
+    result
 }
 
 fn save_inner<T: VectorType>(
@@ -429,9 +686,9 @@ fn save_inner<T: VectorType>(
     let preserved_text_meta = memtable.deferred_text_metadata();
     if mode == StorageMode::Rom && publication::pending(path) {
         memtable.vec_pool_mut().detach_mmap();
-        publication::recover(path, true)?;
+        publication::recover::<T>(path, true)?;
     }
-    let retry = publication::resume(path, memtable.text_index_is_deferred())?;
+    let retry = publication::resume::<T>(path, memtable.text_index_is_deferred())?;
     let generation = match retry.or_else(|| read_marker_generation(&flush_ok_path_from_db(path))) {
         Some(generation) if retry.is_some() => generation,
         Some(previous) => previous
@@ -720,16 +977,25 @@ fn save_tdb<T: VectorType>(
     }
     let bq_offset = edge_offset + edge_block_size;
 
-    // 1. Header
-    w.write_all(MAGIC)?;
-    w.write_all(&CURRENT_VERSION.to_le_bytes())?;
-    w.write_all(&(dim as u32).to_le_bytes())?;
-    w.write_all(&memtable.next_id_value().to_le_bytes())?;
-    w.write_all(&node_count.to_le_bytes())?;
-    w.write_all(&payload_offset.to_le_bytes())?;
-    w.write_all(&vector_offset.to_le_bytes())?;
-    w.write_all(&edge_offset.to_le_bytes())?;
-    w.write_all(&bq_offset.to_le_bytes())?; // v5 新增
+    // 固定偏移保留历史字段，附加类型、元素宽度与文件头 CRC。
+    let (dtype_tag, _) = vector_dtype::<T>()?;
+    let mut header = Vec::with_capacity(HEADER_SIZE as usize);
+    header.extend_from_slice(MAGIC);
+    header.extend_from_slice(&CURRENT_VERSION.to_le_bytes());
+    header.extend_from_slice(&(dim as u32).to_le_bytes());
+    header.extend_from_slice(&memtable.next_id_value().to_le_bytes());
+    header.extend_from_slice(&node_count.to_le_bytes());
+    header.extend_from_slice(&payload_offset.to_le_bytes());
+    header.extend_from_slice(&vector_offset.to_le_bytes());
+    header.extend_from_slice(&edge_offset.to_le_bytes());
+    header.extend_from_slice(&bq_offset.to_le_bytes());
+    header.extend_from_slice(b"VTYP");
+    header.extend_from_slice(&dtype_tag.to_le_bytes());
+    header.extend_from_slice(&(std::mem::size_of::<T>() as u16).to_le_bytes());
+    header.extend_from_slice(&0u32.to_le_bytes());
+    let header_crc = crc32fast::hash(&header);
+    header.extend_from_slice(&header_crc.to_le_bytes());
+    w.write_all(&header)?;
 
     // 2. Mmap 模式仅写 slot；Rom 模式继续内嵌 Payload，保持单文件语义。
     for &nid in internal_indices {
@@ -841,25 +1107,25 @@ pub fn load<T: VectorType>(
     missing_index_policy: crate::database::MissingIndexPolicy,
     mmap_property_postings: bool,
 ) -> Result<MemTable<T>> {
-    load_with_payload_cache(
+    load_with_memory_limit(
         path,
         mode,
         load_text_sidecar,
         repair_sidecars,
         missing_index_policy,
         mmap_property_postings,
-        None,
+        0,
     )
 }
 
-pub(crate) fn load_with_payload_cache<T: VectorType>(
+pub(crate) fn load_with_memory_limit<T: VectorType>(
     path: &str,
     mode: StorageMode,
     load_text_sidecar: bool,
     repair_sidecars: bool,
     missing_index_policy: crate::database::MissingIndexPolicy,
     mmap_property_postings: bool,
-    payload_cache: Option<(usize, usize)>,
+    memory_limit: usize,
 ) -> Result<MemTable<T>> {
     let (mut memtable, version) = load_inner(
         path,
@@ -868,7 +1134,7 @@ pub(crate) fn load_with_payload_cache<T: VectorType>(
         repair_sidecars,
         missing_index_policy,
         mmap_property_postings,
-        payload_cache,
+        memory_limit,
     )?;
     // 索引恢复及完整性扫描结束后，向量映射恢复为按需驻留。
     memtable.finish_vector_loading()?;
@@ -893,9 +1159,18 @@ pub(crate) fn checkpoint<T: VectorType>(
     mode: StorageMode,
     skip_clean: bool,
 ) -> Result<()> {
+    memtable.ensure_readable()?;
     wal.ensure_writable()?;
     if !skip_clean || memtable.needs_checkpoint() {
-        save(memtable, path, mode)?;
+        if let Err(error) = save(memtable, path, mode) {
+            if memtable.ensure_readable().is_err() {
+                // 关闭 writer，拦住失效前已准入、仍在等待 MemTable 锁的写操作。
+                wal.release_writer();
+            }
+            return Err(error);
+        }
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::io_result(crate::test_hooks::IoPoint::CheckpointWalClear)?;
         wal.clear()?;
         memtable.mark_checkpoint_clean();
     }
@@ -909,13 +1184,13 @@ fn load_inner<T: VectorType>(
     repair_sidecars: bool,
     missing_index_policy: crate::database::MissingIndexPolicy,
     mmap_property_postings: bool,
-    payload_cache: Option<(usize, usize)>,
+    memory_limit: usize,
 ) -> Result<(MemTable<T>, u16)> {
     let file = File::open(path).map_err(TriviumError::Io)?;
 
     let mmap = unsafe { Mmap::map(&file) }.map_err(TriviumError::Io)?;
 
-    if mmap.len() < HEADER_SIZE as usize {
+    if mmap.len() < LEGACY_HEADER_SIZE as usize {
         return Err(TriviumError::CorruptedFile(
             "文件头过小 (File too small for header)".into(),
         ));
@@ -945,6 +1220,31 @@ fn load_inner<T: VectorType>(
     let edge_offset = read_u64_le(bytes, 42, "header edge_offset")? as usize;
 
     let bq_offset = read_u64_le(bytes, 50, "header bq_offset")? as usize;
+
+    if dim == 0
+        || payload_offset
+            < if version >= 10 {
+                HEADER_SIZE as usize
+            } else {
+                LEGACY_HEADER_SIZE as usize
+            }
+        || (vector_offset != 0 && vector_offset < payload_offset)
+        || edge_offset < payload_offset
+    {
+        return Err(TriviumError::CorruptedFile(
+            "文件块几何无效 (Invalid file block geometry)".into(),
+        ));
+    }
+    validate_vector_identity::<T>(
+        bytes,
+        version,
+        dim,
+        node_count,
+        vector_offset,
+        edge_offset,
+        path,
+        &vec_path_from_db(path),
+    )?;
 
     // ═══ 文件结构完整性校验 ═══
     // 防止引擎静默加载被截断的 .tdb 文件（扇区撕裂 / 断电 / 外部篡改）。
@@ -1012,6 +1312,7 @@ fn load_inner<T: VectorType>(
                 version,
                 &vec_file_path,
                 &mmap,
+                memory_limit,
             )?;
             let payload_generation = std::fs::read(&marker_path)
                 .ok()
@@ -1019,9 +1320,6 @@ fn load_inner<T: VectorType>(
                 .filter(|marker| marker.payload_size.is_some())
                 .map(|marker| marker.generation);
             install_payload_sidecar_if_present(&mut mt, path, payload_generation)?;
-            if let Some((max_bytes, max_entry_bytes)) = payload_cache {
-                mt.configure_payload_cache(max_bytes, max_entry_bytes);
-            }
             // 旧 BQ 块仅校验格式几何，不物化；Payload 就绪后恢复现用索引和约束。
             load_property_indexes(
                 &mut mt,
@@ -1059,10 +1357,8 @@ fn load_inner<T: VectorType>(
             edge_limit_offset,
             version,
             &mmap,
+            memory_limit,
         )?;
-        if let Some((max_bytes, max_entry_bytes)) = payload_cache {
-            mt.configure_payload_cache(max_bytes, max_entry_bytes);
-        }
         // 旧 BQ 块已校验，无需恢复未被当前查询使用的数组。
         load_property_indexes(
             &mut mt,
@@ -1098,7 +1394,11 @@ fn install_payload_sidecar_if_present<T: VectorType>(
             "提交标记声明的 Payload sidecar 缺失".into(),
         ));
     }
-    let (generation, mmap, records) = PayloadStore::open_sidecar(Path::new(&path))?;
+    let (generation, mmap, records) =
+        PayloadStore::open_sidecar_limited(Path::new(&path), |extra| {
+            memtable.check_load_allocation(extra)
+        })?;
+    memtable.check_load_allocation(records.len().saturating_mul(192))?;
     if generation != expected_generation {
         return Err(TriviumError::CorruptedFile(
             "Payload sidecar generation 与提交标记不一致".into(),
@@ -1119,9 +1419,11 @@ fn load_v2<T: VectorType>(
     version: u16,
     vec_file_path: &str,
     _tdb_mmap: &Mmap,
+    memory_limit: usize,
 ) -> Result<MemTable<T>> {
     let vec_pool = VecPool::<T>::open(Path::new(vec_file_path), dim, node_count)?;
     let mut memtable = MemTable::new_with_vec_pool(dim, next_id, vec_pool);
+    memtable.begin_loading(memory_limit);
     if version >= 9 {
         load_payload_slots(
             &mut memtable,
@@ -1161,8 +1463,10 @@ fn load_v1_rom<T: VectorType>(
     edge_limit_offset: usize,
     version: u16,
     tdb_mmap: &Mmap,
+    memory_limit: usize,
 ) -> Result<MemTable<T>> {
     let mut memtable = MemTable::new_with_next_id(dim, next_id);
+    memtable.begin_loading(memory_limit);
     let vector_bytes_per_elem = std::mem::size_of::<T>();
     let vector_elements = node_count.checked_mul(dim).ok_or_else(|| {
         TriviumError::CorruptedFile("向量元素数量溢出 (Vector element count overflow)".into())
@@ -1178,7 +1482,7 @@ fn load_v1_rom<T: VectorType>(
             TriviumError::CorruptedFile("向量块结束偏移溢出 (Vector block end overflow)".into())
         })?;
 
-    if vector_end > tdb_mmap.len() {
+    if vector_end != edge_offset || vector_end > tdb_mmap.len() {
         return Err(TriviumError::CorruptedFile(
             "向量块超出文件大小 (Vector block exceeds file size)".into(),
         ));
@@ -1193,6 +1497,7 @@ fn load_v1_rom<T: VectorType>(
         vector_offset,
     )?;
 
+    memtable.check_load_allocation(expected_vec_size.saturating_mul(2))?;
     let vec_block = &bytes[vector_offset..vector_end];
     let is_aligned = (vec_block.as_ptr() as usize).is_multiple_of(std::mem::align_of::<T>());
 
@@ -1314,52 +1619,100 @@ fn load_edges<T: VectorType>(
     version: u16,
 ) -> Result<()> {
     let mut cursor = edge_offset;
-    while cursor.saturating_add(18) <= file_len {
-        let src_id = read_u64_le(bytes, cursor, "edge src_id")?;
-        cursor += 8;
-        let dst_id = read_u64_le(bytes, cursor, "edge dst_id")?;
-        cursor += 8;
-        let label_len = read_u16_le(bytes, cursor, "edge label_len")? as usize;
-        cursor += 2;
-        if cursor.saturating_add(label_len).saturating_add(4) > file_len {
-            return Err(TriviumError::CorruptedFile(
-                "边记录被截断 (Edge record truncated)".into(),
-            ));
-        }
-        let label = String::from_utf8(bytes[cursor..cursor + label_len].to_vec()).map_err(|e| {
-            TriviumError::CorruptedFile(format!("标签解码错误 (Label decode error): {}", e))
+    while cursor < file_len {
+        let (src_id, edge) = read_graph_edge(bytes, &mut cursor, file_len, version, |extra| {
+            memtable.check_load_allocation(extra)
         })?;
-        cursor += label_len;
-        let weight = read_f32_le(bytes, cursor, "edge weight")?;
-        cursor += 4;
-        if !weight.is_finite() {
-            return Err(TriviumError::CorruptedFile(
-                "边权重不是有限浮点数 (Edge weight is not finite)".into(),
-            ));
-        }
-        let metadata = if version >= 7 {
-            let metadata_len = read_u32_le(bytes, cursor, "edge metadata_len")? as usize;
-            cursor += 4;
-            if cursor.saturating_add(metadata_len) > file_len {
-                return Err(TriviumError::CorruptedFile("边元数据被截断".into()));
-            }
-            let value =
-                serde_json::from_slice(&bytes[cursor..cursor + metadata_len]).map_err(|error| {
-                    TriviumError::CorruptedFile(format!("边元数据解析失败: {error}"))
-                })?;
-            cursor += metadata_len;
-            value
-        } else {
-            serde_json::Value::Null
-        };
-        memtable.upsert_edge(src_id, dst_id, label, weight, metadata)?;
-    }
-    if cursor != file_len {
-        return Err(TriviumError::CorruptedFile(
-            "边块尾部存在不完整数据 (Incomplete edge block tail)".into(),
-        ));
+        memtable.check_load_allocation(memtable.estimate_edge_write_bytes(
+            src_id,
+            edge.target_id,
+            &edge.label,
+            &edge.metadata,
+        )?)?;
+        memtable.upsert_edge(
+            src_id,
+            edge.target_id,
+            edge.label,
+            edge.weight,
+            edge.metadata,
+        )?;
     }
     Ok(())
+}
+
+/// 主文件加载和图 sidecar 事实比对共用有界解码器，JSON 分配前执行调用方准入。
+pub(crate) fn read_graph_edge(
+    bytes: &[u8],
+    cursor: &mut usize,
+    end: usize,
+    version: u16,
+    mut admit: impl FnMut(usize) -> Result<()>,
+) -> Result<(u64, crate::node::Edge)> {
+    let bytes = bytes.get(..end).ok_or_else(|| {
+        TriviumError::CorruptedFile("边块越界 (Edge block is out of bounds)".into())
+    })?;
+    let src = read_u64_le(bytes, *cursor, "edge source")?;
+    let dst = read_u64_le(bytes, cursor.saturating_add(8), "edge target")?;
+    let label_len = read_u16_le(bytes, cursor.saturating_add(16), "edge label length")? as usize;
+    *cursor = cursor
+        .checked_add(18)
+        .ok_or_else(|| TriviumError::CorruptedFile("边偏移溢出 (Edge offset overflow)".into()))?;
+    let label_end = cursor.checked_add(label_len).ok_or_else(|| {
+        TriviumError::CorruptedFile("边标签长度溢出 (Edge label length overflow)".into())
+    })?;
+    let label_bytes = bytes.get(*cursor..label_end).ok_or_else(|| {
+        TriviumError::CorruptedFile("边标签被截断 (Edge label is truncated)".into())
+    })?;
+    admit(label_len.saturating_mul(5).saturating_add(1024))?;
+    let label = std::str::from_utf8(label_bytes)
+        .map_err(|error| {
+            TriviumError::CorruptedFile(format!(
+                "边标签不是 UTF-8 (Edge label is not UTF-8): {error}"
+            ))
+        })?
+        .to_owned();
+    let weight = read_f32_le(bytes, label_end, "edge weight")?;
+    *cursor = label_end.checked_add(4).ok_or_else(|| {
+        TriviumError::CorruptedFile("边权重偏移溢出 (Edge weight offset overflow)".into())
+    })?;
+    if !weight.is_finite() {
+        return Err(TriviumError::CorruptedFile(
+            "边权重不是有限数 (Edge weight is not finite)".into(),
+        ));
+    }
+    let metadata = if version >= 7 {
+        let len = read_u32_le(bytes, *cursor, "edge metadata length")? as usize;
+        *cursor = cursor.checked_add(4).ok_or_else(|| {
+            TriviumError::CorruptedFile("边元数据偏移溢出 (Edge metadata offset overflow)".into())
+        })?;
+        let metadata_end = cursor.checked_add(len).ok_or_else(|| {
+            TriviumError::CorruptedFile("边元数据长度溢出 (Edge metadata length overflow)".into())
+        })?;
+        let raw = bytes.get(*cursor..metadata_end).ok_or_else(|| {
+            TriviumError::CorruptedFile("边元数据被截断 (Edge metadata is truncated)".into())
+        })?;
+        admit(
+            len.saturating_mul(64)
+                .saturating_add(label_len.saturating_mul(5))
+                .saturating_add(1024),
+        )?;
+        let value = serde_json::from_slice(raw).map_err(|error| {
+            TriviumError::CorruptedFile(format!("边元数据无效 (Invalid edge metadata): {error}"))
+        })?;
+        *cursor = metadata_end;
+        value
+    } else {
+        serde_json::Value::Null
+    };
+    Ok((
+        src,
+        crate::node::Edge {
+            target_id: dst,
+            label,
+            weight,
+            metadata,
+        },
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -1519,6 +1872,17 @@ fn load_unique_constraints<T: VectorType>(
     }
     let count = read_u32_le(block, cursor, "unique count")? as usize;
     cursor += 4;
+    memtable.check_load_allocation(
+        block
+            .len()
+            .saturating_mul(64)
+            .saturating_add(count.saturating_mul(128)),
+    )?;
+    if count > payload_end.saturating_sub(cursor) / 6 {
+        return Err(TriviumError::CorruptedFile(
+            "唯一约束数量超出块边界 (Unique constraint count exceeds block bounds)".into(),
+        ));
+    }
     let mut definitions = Vec::new();
     definitions.try_reserve_exact(count).map_err(|error| {
         TriviumError::CapacityAllocationFailed {
@@ -1530,6 +1894,11 @@ fn load_unique_constraints<T: VectorType>(
         cursor += 2;
         if field_count == 0 {
             return Err(TriviumError::CorruptedFile("唯一约束字段列表为空".into()));
+        }
+        if field_count > payload_end.saturating_sub(cursor) / 4 {
+            return Err(TriviumError::CorruptedFile(
+                "唯一约束字段数量超出块边界 (Unique field count exceeds block bounds)".into(),
+            ));
         }
         let mut fields = Vec::new();
         fields.try_reserve_exact(field_count).map_err(|error| {
@@ -1559,13 +1928,41 @@ fn load_unique_constraints<T: VectorType>(
             "唯一约束块存在尾随数据 (Trailing unique constraint data)".into(),
         ));
     }
+    memtable.check_load_allocation(
+        memtable
+            .node_count()
+            .saturating_mul(count)
+            .saturating_mul(256),
+    )?;
     memtable.restore_unique_index_definitions(&definitions)
 }
 
+fn admit_sidecar<T: VectorType>(mt: &MemTable<T>, path: &str, expansion: usize) -> Result<()> {
+    match std::fs::metadata(path) {
+        Ok(meta) => mt.check_load_allocation(
+            usize::try_from(meta.len())
+                .unwrap_or(usize::MAX)
+                .saturating_mul(expansion),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn load_mapped_graph<T: VectorType>(memtable: &mut MemTable<T>, db_path: &str) -> Result<()> {
-    if let Some(graph) =
-        crate::storage::graph_blocks::MappedGraphStore::open(db_path, memtable.node_count())?
-    {
+    let peak = match std::fs::metadata(format!("{db_path}.gidx")) {
+        Ok(meta) => usize::try_from(meta.len())
+            .unwrap_or(usize::MAX)
+            .saturating_mul(128),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
+    memtable.check_load_allocation(peak)?;
+    if let Some(graph) = crate::storage::graph_blocks::MappedGraphStore::open_with_admission(
+        db_path,
+        memtable.node_count(),
+        |extra| memtable.check_load_allocation(peak.saturating_add(extra)),
+    )? {
         memtable.set_mapped_graph(graph);
     }
     Ok(())
@@ -1581,6 +1978,7 @@ fn load_property_indexes<T: VectorType>(
     if !Path::new(&format!("{db_path}.pidx")).exists() {
         return Ok(());
     }
+    admit_sidecar(memtable, &format!("{db_path}.pidx"), 128)?;
     match crate::index::property::load_sidecar(
         db_path,
         memtable.node_count(),
@@ -1590,6 +1988,9 @@ fn load_property_indexes<T: VectorType>(
         Ok(Some(indexes)) => {
             if indexes.key_encoding_version() < 2 || !indexes.fact_bound {
                 let definitions = indexes.index_definitions();
+                for (kind, fields) in &definitions {
+                    memtable.admit_index_rebuild(*kind, fields, false)?;
+                }
                 memtable.rebuild_property_indexes_from_definitions(&definitions);
                 tracing::info!(
                     "属性索引旧键编码已在内存重建；下次显式 flush 发布新编码 (Legacy property index keys rebuilt in memory)"
@@ -1664,6 +2065,7 @@ fn load_text_index<T: VectorType>(
         }
         return Ok(());
     }
+    admit_sidecar(memtable, &text_path, 64)?;
     match read_deferred_text_index(db_path, deferred_text_metadata(db_path)) {
         Ok(index) => memtable.set_text_index(index),
         Err(error) => {
@@ -1687,6 +2089,10 @@ fn load_quiver_index<T: VectorType>(
     policy: crate::database::MissingIndexPolicy,
 ) -> Result<()> {
     use crate::index::quiver::QuIVer;
+
+    if crate::vector::is_binary_vector::<T>() {
+        return Ok(());
+    }
 
     let quiver_path = quiver_path_from_db(db_path);
     let qp = std::path::Path::new(&quiver_path);
@@ -1716,20 +2122,27 @@ fn load_quiver_index<T: VectorType>(
         return Ok(());
     }
 
+    admit_sidecar(memtable, &quiver_path, 8)?;
     match QuIVer::load_from_file(qp) {
-        Ok(quiver) => {
+        Ok(quiver) if quiver.matches_fact_slots(memtable) => {
             memtable.set_quiver_index(quiver);
             memtable.vec_pool_mut().advise_random();
+        }
+        Ok(_) => {
+            if policy == crate::database::MissingIndexPolicy::Error {
+                return Err(TriviumError::ImmutableArtifactInvalid {
+                    reason: "QuIVer ID 与 slot 不匹配 (QuIVer ID/slot mapping mismatch)".into(),
+                });
+            }
+            tracing::warn!(
+                "QuIVer ID 与 slot 不匹配，已拒绝 (QuIVer ID/slot mapping mismatch, rejected)"
+            );
         }
         Err(e) => {
             tracing::warn!(
                 "QuIVer 索引加载失败 (QuIVer index load failed)（将在首次查询时自动重建）: {}",
                 e
             );
-            // 删除损坏的文件
-            if repair_sidecars {
-                std::fs::remove_file(qp).ok();
-            }
             if policy == crate::database::MissingIndexPolicy::Error {
                 return Err(TriviumError::ImmutableArtifactInvalid {
                     reason: format!("QuIVer sidecar 损坏: {e}"),
@@ -1747,7 +2160,7 @@ pub(crate) fn validate_snapshot_metadata(
     expected_nodes: usize,
 ) -> Result<()> {
     use std::io::Read;
-    let mut bytes = [0u8; HEADER_SIZE as usize];
+    let mut bytes = [0u8; LEGACY_HEADER_SIZE as usize];
     std::fs::File::open(path)?.read_exact(&mut bytes)?;
     let version = read_u16_le(&bytes, 4, "快照头部版本")?;
     let dim = read_u32_le(&bytes, 6, "快照头部维度")? as usize;

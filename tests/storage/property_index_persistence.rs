@@ -241,13 +241,13 @@ fn 损坏属性索引按策略回退或报错() {
 }
 
 #[test]
-fn 属性索引_v5_posting块_crc_独立拒绝损坏() {
+fn 属性索引_posting块_crc_独立拒绝损坏() {
     let path = database_path("posting_block_crc");
     cleanup(&path);
     seed_database(&path);
     let sidecar = format!("{path}.pidx");
     let mut bytes = std::fs::read(&sidecar).unwrap();
-    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 7);
+    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 8);
 
     let field_len = u32::from_le_bytes(bytes[50..54].try_into().unwrap()) as usize;
     let entry_count_offset = 54 + field_len;

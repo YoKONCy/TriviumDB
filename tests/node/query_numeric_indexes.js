@@ -44,6 +44,7 @@ module.exports = function queryNumericIndexes(root, TriviumDB) {
   } finally { mixed.close() }
 
   const nestedFile = path.join(root, 'tql-nested-integers.tdb')
+  new TriviumDB(nestedFile, options).close()
   fs.copyFileSync(path.join(__dirname, '../fixtures/numeric_ids/full_u64_v3.bin'), nestedFile + '.wal')
   const nested = new TriviumDB(nestedFile, options)
   try {

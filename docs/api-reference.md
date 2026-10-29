@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> **版本**: `0.9.0-beta.3` 公共 API；见[变更说明](changes/0.9.0-beta.3.md)。
+> **版本**: `0.9.0-beta.4` 公共 API；见[变更说明](changes/0.9.0-beta.4.md)。
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 
@@ -209,6 +209,8 @@ generations/
 
 租约不会写入不可变 generation。默认 runtime 目录位于系统临时目录的 `triviumdb-runtime/store-<hash>`，也可以使用 `GenerationStore::with_runtime_dir(root, runtime_dir)` 指定可写位置。generation root 因此可以保持只读。
 
+构造时固定相对根目录和运行目录的绝对位置；默认锁空间在根目录存在后按规范路径解析，根目录创建前后的 Store 共享租约。跨进程参与者使用一致的规范根路径与运行目录配置；跨容器将运行目录设为共享可写挂载，并保持根目录挂载路径一致。Reader 存活期间保持根目录位置稳定。升级时先结束旧版本 Reader 进程，再恢复旧代回收。
+
 generation ID 和数据库文件名必须是单一安全路径组件，`..`、绝对路径和路径分隔符都会被拒绝。旧 Reader 在切代后继续读取原 generation，新 Reader 读取新的 current。调用方应在 Writer 关闭并移除非制品 `.wal/.lock` 后再分发 generation。
 
 CRC32 用于检测随机损坏，不提供对抗性防篡改或来源认证。不可信分发应由外层对 manifest 使用 SHA-256/BLAKE3 并进行数字签名。
@@ -242,7 +244,9 @@ db.set_sync_mode(SyncMode::Off)?;
 
 数据访问统一执行生命周期检查：Rust 的 `get`、`get_payload`、`get_edge`、`get_edges`、`get_incoming_edges`、`get_all_ids`、`all_node_ids`、`node_count`、`contains`、`neighbors`、`neighbors_with_labels`、`shortest_path`、`graph_stats`、`validate_graph`、`list_indexes`、`list_unique_indexes`、`index_info` 与 `clear_search_state` 返回 `Result`；`set_hook` 也返回 `Result<()>`。调用方使用 `?` 或显式处理错误。Python/Node 的打开状态返回类型保持一致，关闭后抛错。状态、资源统计和配置诊断继续可读。
 
-`flush()` 通过 `.publish` 撤销日志管理主数据、向量、QuIVer、文本、属性与图索引文件组。Mmap 在各文件同步后提交 marker，Rom 在同步后提交日志状态；ReadWrite `open()` 先完成中断恢复，再流式回放 WAL。备份使用有界缓冲，额外磁盘空间与纳入发布的旧文件组大小对应。主文件使用 v9、marker 使用 v3、发布日志使用 v2，并支持读取历史 v1 日志。协议见[恢复说明](security.md#8-mmap-三文件一致性标记flush_ok-v3)。
+`flush()` 通过 `.publish` 撤销日志管理主数据、向量、QuIVer、文本、属性与图索引文件组。Mmap 在各文件同步后提交 marker，Rom 在同步后提交日志状态；ReadWrite `open()` 先完成中断恢复，再流式回放 WAL。备份使用有界缓冲，额外磁盘空间与纳入发布的旧文件组大小对应。主文件使用 v10、marker 使用 v3、发布日志使用 v2，并支持读取历史 v1 日志。协议见[恢复说明](security.md#8-mmap-三文件一致性标记flush_ok-v3)。
+
+WAL 的完整帧发生 CRC、解码或超长字段损坏时，`open()` 返回 `CorruptedFile` 并保留完整日志；物理未写完的尾帧继续按提交边界恢复。QuIVer 元数据 v2 将索引绑定到主文件、向量内容及活跃 ID/slot；失配按 `missing_index_policy` 回退或报错。底层 BQ Rust 距离、签名读取和原始存储解码接口返回 `Result`，详见 [QuIVer 边界](quiver.md#索引事实绑定与-bq-边界)。
 
 **泛型类型参数 `T`：**
 
@@ -251,6 +255,12 @@ db.set_sync_mode(SyncMode::Off)?;
 | `f32` | 32 位浮点 | 标准 embedding（OpenAI、BGE 等） |
 | `half::f16` | 16 位半精度浮点 | 大规模数据集省内存 |
 | `u64` | 64 位无符号整数 | SimHash / 二值化向量 |
+
+`f32/f16` 使用余弦相似度；普通有限幅值保留 SIMD 路径，中间范数或分母出现上溢、下溢时使用 `f64` 回退计算，零向量得分为 `0`。`u64` 使用精确汉明匹配位数，单分量得分范围为 `0..64`，保持完整位模式；普通、高级、批量和 TQL 基础检索共享该度量。QuIVer 自动构建适用于浮点向量，显式为 `u64` 构建返回 `TDB_INVALID_INPUT`。
+
+`u64` 的 Hook 可观察浮点查询视图并调整配置；可观察的查询向量改写返回 `TDB_INVALID_INPUT`，基础检索继续使用原始整数切片。高级便利管线的浮点 FISTA/DPP 配置面向浮点向量。
+
+普通、精确、GraphFirst 与物理检索算子在候选生成前校验查询维度及有限值；NaN、正负 Infinity 返回 `TDB_INVALID_VECTOR`，空库和空 anchor 集合遵守相同规则。候选池扩展采用饱和算术，超大 Top-K 按实际候选返回结果。
 
 ---
 
@@ -644,6 +654,8 @@ const paths = db.reachable(1, {
 ### search_graph_first — 图候选集内精确向量排名
 
 GraphFirst 先由业务图查询产生 anchor ID 集合，再只在该集合内进行精确向量评分。输入 anchor 会按 NodeId 去重；超过 `max_anchor_nodes` 时直接报错，不会退化为全库搜索。
+
+anchor 容器与有界 Top-K 堆在分配前申请共享工作区，最终命中集合确定后再解析和复制 Payload。精确检索采用相同的最终物化步骤；工作区余额不足返回结构化资源预算错误，失败和完成均归还预留。
 
 ```python
 hits = db.search_graph_first(
@@ -1167,6 +1179,8 @@ WITH 按行保存求值结果与实体身份，后续扩展、过滤和返回使
 
 MATCH 内联 `id` 和节点的 `.id` 属性使用完整无符号节点 ID；`FIND` 与 `MATCHES` 文档条件读取 Payload 字段。单跳边变量在 WHERE、RETURN、COALESCE、聚合和空值判断中保持边绑定；OPTIONAL MATCH 为符合起点条件且无合格边的记录补齐 Null 列。
 
+MATCH 按物理边保留结果行重数：不同标签的平行边分别计行，双向单跳中的同一自环计一次；属性索引与反向计划保持这一语义。路径采用显式栈执行，有边模式的节点、邻边扫描、路径展开和回溯共享 100,000 步预算，每步检查取消与期限；路径栈和 visited 集合的峰值参与工作区准入。
+
 **Python：**
 ```python
 # 图遍历
@@ -1238,6 +1252,8 @@ Rust 使用 `TqlValue::Object(serde_json::Map<String, serde_json::Value>)` 承�
 支持 CREATE / SET / DELETE / DETACH DELETE 语法，返回受影响行数和新创建的节点 ID。
 
 多字段 SET 按节点累计，重复字段采用最后一次赋值。MATCH … CREATE 每条匹配建立独立的新节点作用域，零匹配返回零次创建。SET VECTOR 按目标 dtype 检查，u64 整数字面量覆盖完整范围；任一目标失败时整个 mutation 保持原子性。
+
+DETACH DELETE 按去重后的节点集合生成统一事务删除，由内核清理入边、出边、平行边与自环。相连节点和同一节点的重复匹配共享同一个 WAL 提交边界，集合外的节点与其剩余关系保持完整。
 
 **Python：**
 ```python
@@ -1347,12 +1363,43 @@ db.dropIndex('name')
 
 ## 存储格式观测与迁移错误
 
+### 三端结构化错误
+
+内核的 `TriviumError::code()` 和 `details()` 提供稳定错误码与类别所需字段。Python 的内核异常提供 `code: str`、`details: dict[str, Any]`；Node 的同步异常与异步 Promise 拒绝提供同名属性。消息用于诊断与展示，程序通过错误码和字段处理重试、输入修正与迁移。
+
+| 情况 | `code` | `details` 字段 |
+| --- | --- | --- |
+| 向量维度 | `TDB_DIMENSION_MISMATCH` | `expected`、`got` |
+| 节点不存在/重复 | `TDB_NODE_NOT_FOUND` / `TDB_NODE_ALREADY_EXISTS` | `id` |
+| 唯一约束 | `TDB_UNIQUE_CONSTRAINT` | `fields`、`existing_id`、`conflicting_id` |
+| Prepared 参数 | `TDB_MISSING_QUERY_PARAMETER` / `TDB_UNEXPECTED_QUERY_PARAMETER` | `parameter` |
+| 只读操作 | `TDB_READ_ONLY` | `operation` |
+| 查询行预算 | `TDB_QUERY_BUDGET` | `budget` |
+| Payload 查询预算 | `TDB_PAYLOAD_BUDGET_EXCEEDED` | `dimension`、`used`、`budget` |
+| 实例容量准入 | `TDB_CAPACITY_RESERVATION_REJECTED` | `requested_nodes`、`estimated_bytes`、`current_bytes`、`memory_limit` |
+| 共享资源准入 | `QueueFull` | `resource`、`requested`、`used`、`limit` |
+| 文件系统 | `TDB_IO` | `io_kind`、`os_code`；系统码可为 `null` |
+| 数据库格式版本 | `TDB_UNSUPPORTED_DATABASE_VERSION` | `found`、`minimum_supported`、`current` |
+| API 迁移 | `TDB_API_MIGRATION_REQUIRED` | `removed_api`、`replacement` |
+
+完整类别与字段由 [Rust 错误模型](../src/error.rs)及 [Node 类型声明](../triviumdb.d.ts)列出。Python 的 `TriviumDBError` 继承 `RuntimeError`；已有只读、恢复、代际和资源异常继承它。`InvalidInputError`、`CapacityError`、`SnapshotDestinationError` 分别继承 `ValueError`、`MemoryError`、`FileExistsError`，并提供同样的错误码与详情。SDK 参数提取阶段沿用各语言的参数类型异常。
+
+Node 错误详情中的安全整数使用 Number，超出 `Number.MAX_SAFE_INTEGER` 的整数使用十进制字符串；Python 与 Rust 保留原始整数精度。已有资源错误的 `resource/requested/used/limit` 直接属性继续提供，字段内容与 `details` 相同。
+
+```python
+try:
+    db.execute_prepared_tql(prepared, {})
+except triviumdb.TriviumDBError as error:
+    if error.code == "TDB_MISSING_QUERY_PARAMETER":
+        required_parameter = error.details["parameter"]
+```
+
 `storage_info/storageInfo` 是只读诊断入口，返回产品版本、`.tdb` 当前/最低版本、WAL/Property/Graph/QuIVer/Text/Manifest 格式、dim、node count、访问模式、估算内存和 sidecar 存在状态。它不会创建、修复或重写文件。
 
 ```python
 info = db.storage_info()
-print(info["database_format_current"])  # 9
-print(info["property_index_format"])    # 7
+print(info["database_format_current"])  # 10
+print(info["property_index_format"])    # 8
 print(info["sidecars"])
 ```
 
@@ -1577,13 +1624,19 @@ QuIVer 支持增量 Insert/Delete/Update，并保护入口导航树，入口升�
 
 ## 维度迁移
 
-> 文件格式兼容边界：当前 `.tdb` 为 v9，可读取 v5–v9；可写句柄在后续持久化时按当前格式发布。Mmap v9 的 raw Payload 位于 generation 绑定的 `.pld`，详见[持久化布局](features.md)。ReadOnly/Immutable 不升级、不写制品。早于 v5 的主文件必须通过旧内核导出迁移；未来版本明确拒绝。sidecar 独立版本化：`.pidx v7`、`.gidx v3`、`.text v2`、`.quiver v1`。
+> 文件格式兼容边界：当前 `.tdb` 为 v10，可读取 v5–v10；可写句柄在后续持久化时按当前格式发布。Mmap v9 的 raw Payload 位于 generation 绑定的 `.pld`，详见[持久化布局](features.md)。ReadOnly/Immutable 不升级、不写制品。早于 v5 的主文件必须通过旧内核导出迁移；未来版本明确拒绝。sidecar 独立版本化：`.pidx v8`、`.gidx v3`、`.text v2`、`.quiver v1`。
+
+复合索引字段列表按 JSON 数组保存，支持 NUL 和 Unicode 字段名；字段名总长度上限为 1 MiB，字段数量上限为 65,535。旧复合 posting 通过事实扫描保持结果，唯一约束从主文件恢复；普通复合索引可按原字段列表重新创建。唯一约束创建或删除在发布失败后返回原始错误，并将实例标为待恢复，后续读写返回 `TDB_WAL_CLOSED`。释放实例后可写重开，由发布提交点决定恢复旧定义或采用新定义。
+
+Mmap 只读打开在采用 `.gidx` 前校验所有边块、派生目录与主文件事实；语义或结构失配返回 `TDB_CORRUPTED_FILE`，保留原文件组。可写打开从主文件读取业务边，通过 `repair_graph_indexes` 显式发布重建副本。
 
 当需要更换 Embedding 模型（维度发生变化）时，使用 `migrate` 将旧库的结构迁移到新维度。
 
 ### migrate — 迁移到新维度
 
 将当前数据库的所有节点 Payload、图谱边复制到一个全新的数据库文件中，向量以零向量占位（因为维度变了，旧向量无法直接复用）。
+
+目标主文件或同名前缀的数据制品已经存在时，迁移在写入前返回 `TDB_IO`，`details.io_kind` 为 `AlreadyExists`。迁移在目标同盘的独占暂存目录完成构建与同步，持有目标写锁发布文件组并交接给返回实例；发布使用原子硬链接创建目录项，要求文件系统支持同盘硬链接。提交前失败只回收本次创建的文件，目标可重试；提交后错误保留完整新库，可按新维度重新打开检查。空闲 `.lock` 文件用于目标协调，支持失败后重试。
 
 **参数：**
 
@@ -1733,3 +1786,13 @@ Node 数量参数在转换为整数前检查原始 Number 的有限性、整数�
 WAL 追加、flush 或同步失败时返回原始错误并隔离该 writer。后续写入与检查点返回 `WalClosed`；调用方释放数据库句柄并重新打开后继续使用。恢复保留此前已确认数据，失败操作的结果按实际持久化的完整日志确定。业务方可使用稳定 ID 核对该操作后再重试。
 
 事务 WAL 完整提交后，若内存应用阶段发生错误或异常展开，实例及其共享搜索句柄进入恢复等待状态，数据操作返回 `WalClosed`。释放全部相关句柄并重新打开，恢复端应用完整提交事务。事务编号使用进程内单调计数，达到编号上限时返回参数错误。
+
+
+## 持久化类型、解析与打开准入
+
+- 文件头保存 dtype、元素宽度与 CRC32。ReadWrite/ReadOnly 使用其他 dtype 打开返回 `TDB_DTYPE_MISMATCH`，详情包含 `stored` 和 `requested`，取值为 `f32`、`f16`、`u64`。Rom 与 Mmap 共用此契约。
+- v5–v9 非空检查点通过完整向量块几何验证类型；无类型基础检查点的历史 WAL，以及空的无类型检查点附带非空 WAL，使用原版本、原 dtype 恢复并完成检查点或导出后再升级。v10 检查点需要支持 v10 的内核；回退使用升级前备份。
+- 发生向量文件替换或重映射失败时，原调用保留 I/O 错误。映射已经失效的实例及其共享句柄随后返回 `TDB_WAL_CLOSED`；释放这些实例后，重新以可写模式打开，恢复发布基础并回放 WAL。
+- TQL 字符串入口完整消费输入，语句尾部非法内容在生成写操作前返回 `TDB_QUERY_PARSE`。输入上限为 4 MiB、262,144 个 token、128 层括号嵌套和 128 个表达式运算符；已有递归预算共同约束表达式与谓词。向量及 JSON 字面量中的负号按字面量处理。
+- `memory_limit` 覆盖打开时的节点与图目录、Rom 向量堆副本、Payload 解码、派生索引恢复和 WAL 暂存。各阶段在分配前进行保守峰值准入，打开完成前核对总估算占用；预算不足返回 `TDB_CAPACITY_RESERVATION_REJECTED`，本次共享资源预留释放。原始 mmap 向量和 Payload 映射按文件映射管理，堆目录及解码工作区参与准入。
+- 打开阶段暂缓填充 Payload 解析缓存；恢复成功后，缓存上限取配置值与剩余实例堆预算中的较小值。索引反序列化的保守峰值可高于稳态估算；可提高打开预算或延期加载文本索引。WAL 截断、历史 WAL 迁移和空检查点升级在容量准入完成后执行。

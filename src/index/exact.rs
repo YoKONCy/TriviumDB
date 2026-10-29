@@ -62,6 +62,8 @@ pub fn search<T: VectorType>(
     query: &[T],
     top_k: usize,
 ) -> Result<Vec<SearchHit>> {
+    db.ensure_readable()?;
+    crate::vector::validate_query_vector(query, db.dim())?;
     let runtime = db.resource_runtime();
     let estimate = top_k
         .min(db.internal_slot_count())
@@ -82,12 +84,6 @@ fn search_inner<T: VectorType>(
     query: &[T],
     top_k: usize,
 ) -> Result<Vec<SearchHit>> {
-    if query.len() != db.dim() {
-        return Err(TriviumError::DimensionMismatch {
-            expected: db.dim(),
-            got: query.len(),
-        });
-    }
     if top_k == 0 {
         return Err(TriviumError::InvalidInput(
             "search_exact 的 top_k 必须大于 0".into(),
@@ -101,28 +97,66 @@ fn search_inner<T: VectorType>(
 
     let candidates = (0..db.internal_slot_count())
         .into_par_iter()
-        .fold(
+        .try_fold(
             || BinaryHeap::with_capacity(top_k),
             |mut heap, slot| {
-                if let Some((id, vector)) = db.active_vector_at_slot(slot) {
+                if let Some((id, vector)) = db.active_vector_at_slot(slot)? {
                     let score = T::similarity(query, vector);
                     if score.is_finite() {
                         insert_candidate(&mut heap, Candidate { id, score }, top_k);
                     }
                 }
-                heap
+                Ok::<_, TriviumError>(heap)
             },
         )
-        .reduce(
+        .try_reduce(
             || BinaryHeap::with_capacity(top_k),
             |mut left, right| {
                 for candidate in right {
                     insert_candidate(&mut left, candidate, top_k);
                 }
-                left
+                Ok(left)
             },
-        );
+        )?;
 
+    hydrate_candidates(db, candidates)
+}
+
+/// GraphFirst 只对去重后的合法 anchor 评分，先保留 Top-K，再读取 Payload。
+pub(crate) fn rank_unique_ids<T: VectorType>(
+    db: &MemTable<T>,
+    query: &[T],
+    ids: &[NodeId],
+    top_k: usize,
+) -> Result<Vec<SearchHit>> {
+    let k = top_k.min(ids.len());
+    if k == 0 {
+        return Ok(Vec::new());
+    }
+    let bytes = k
+        .checked_mul(std::mem::size_of::<Candidate>() * 2)
+        .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+            reason: "候选堆工作区溢出 (Candidate heap workspace overflowed)".into(),
+        })?;
+    let _workspace = db.resource_runtime().reserve_workspace(bytes)?;
+    let mut heap = BinaryHeap::with_capacity(k);
+    for &id in ids {
+        if let Some(slot) = db.internal_slot_of(id)
+            && let Some((_, vector)) = db.active_vector_at_slot(slot)?
+        {
+            let score = T::similarity(query, vector);
+            if score.is_finite() {
+                insert_candidate(&mut heap, Candidate { id, score }, k);
+            }
+        }
+    }
+    hydrate_candidates(db, heap)
+}
+
+fn hydrate_candidates<T: VectorType>(
+    db: &MemTable<T>,
+    candidates: BinaryHeap<Candidate>,
+) -> Result<Vec<SearchHit>> {
     let mut candidates = candidates.into_vec();
     candidates.sort_by(|left, right| {
         right
@@ -130,14 +164,29 @@ fn search_inner<T: VectorType>(
             .total_cmp(&left.score)
             .then_with(|| left.id.cmp(&right.id))
     });
-    Ok(candidates
+    let bytes = candidates.iter().try_fold(
+        candidates
+            .len()
+            .saturating_mul(std::mem::size_of::<SearchHit>()),
+        |sum, candidate| {
+            sum.checked_add(db.payload_query_peak(candidate.id)?)
+                .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                    reason: "精确结果工作区溢出 (Exact result workspace overflowed)".into(),
+                })
+        },
+    )?;
+    let _payload_workspace = db.resource_runtime().reserve_workspace(bytes)?;
+    candidates
         .into_iter()
-        .filter_map(|candidate| {
-            db.get_payload(candidate.id).map(|payload| SearchHit {
+        .map(|candidate| {
+            let payload = db
+                .try_get_payload(candidate.id)?
+                .ok_or(TriviumError::NodeNotFound(candidate.id))?;
+            Ok(SearchHit {
                 id: candidate.id,
                 score: candidate.score,
                 payload: (*payload).clone(),
             })
         })
-        .collect())
+        .collect()
 }

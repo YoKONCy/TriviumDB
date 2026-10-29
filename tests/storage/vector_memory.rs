@@ -301,6 +301,10 @@ fn wal与检查点索引恢复从开始遵守禁用解析缓存的配置() {
                     db.create_unique_index("id").unwrap();
                     db.close().unwrap();
                 } else {
+                    Database::<T>::open_with_config(&path, config)
+                        .unwrap()
+                        .close()
+                        .unwrap();
                     let mut wal = Wal::open_with_sync(&path, SyncMode::Off).unwrap();
                     for id in 1..=128 {
                         wal.append(&WalEntry::Insert {

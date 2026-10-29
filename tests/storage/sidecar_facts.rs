@@ -1,6 +1,5 @@
 //! 派生索引必须绑定事实内容；旧版无绑定索引通过事实重建或读取主文件保持一致。
-#[path = "../support/mod.rs"]
-mod support;
+use super::support;
 
 use serde_json::json;
 use triviumdb::database::{AccessMode, Config, MissingIndexPolicy, SearchConfig, StorageMode};

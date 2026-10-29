@@ -86,11 +86,12 @@ fn wal长度零_最大值_超出剩余和尾部垃圾不越过损坏边界() {
         width: 4,
         encoding: super::spec::FieldEncoding::U32Le,
     };
-    for value in [
-        BoundaryValue::Zero,
-        BoundaryValue::One,
-        BoundaryValue::Max,
-        BoundaryValue::BigEndianOne,
+    for (value, corrupt) in [
+        (BoundaryValue::Zero, true),
+        (BoundaryValue::One, true),
+        (BoundaryValue::Max, true),
+        // 16 MiB 合法长度遇到物理 EOF，属于尚未写完的尾帧。
+        (BoundaryValue::BigEndianOne, false),
     ] {
         let candidate = path(&format!("wal_length_{value:?}"));
         cleanup(&candidate);
@@ -99,9 +100,19 @@ fn wal长度零_最大值_超出剩余和尾部垃圾不越过损坏边界() {
             value,
         }
         .apply(&bytes);
-        std::fs::write(format!("{candidate}.wal"), changed).unwrap();
+        std::fs::write(format!("{candidate}.wal"), &changed).unwrap();
         let recovered = Wal::read_entries::<f32>(&candidate);
-        assert!(recovered.is_ok(), "帧损坏应安全截断而不是 panic: {value:?}");
+        if corrupt {
+            assert!(
+                matches!(recovered, Err(triviumdb::TriviumError::CorruptedFile(_))),
+                "{value:?}"
+            );
+        } else {
+            let (entries, offset) = recovered.unwrap();
+            assert!(entries.is_empty());
+            assert_eq!(offset, 6);
+        }
+        assert_eq!(std::fs::read(format!("{candidate}.wal")).unwrap(), changed);
         cleanup(&candidate);
     }
     let candidate = path("wal_tail_garbage");
@@ -111,8 +122,10 @@ fn wal长度零_最大值_超出剩余和尾部垃圾不越过损坏边界() {
         Mutation::Append(vec![0xa5; 31]).apply(&bytes),
     )
     .unwrap();
-    let recovered = Wal::read_entries::<f32>(&candidate).unwrap();
-    assert_eq!(recovered.0.len(), 2);
+    assert!(matches!(
+        Wal::read_entries::<f32>(&candidate),
+        Err(triviumdb::TriviumError::CorruptedFile(_))
+    ));
     cleanup(&candidate);
     cleanup(&source);
 }
@@ -121,6 +134,10 @@ fn wal长度零_最大值_超出剩余和尾部垃圾不越过损坏边界() {
 fn 未提交事务_缺commit与commit后残帧均保持原子恢复() {
     let source = path("wal_transaction_source");
     cleanup(&source);
+    Database::<f32>::open(&source, DIM)
+        .unwrap()
+        .close()
+        .unwrap();
     let mut wal = Wal::open_with_sync(&source, SyncMode::Full).unwrap();
     wal.append_batch(
         1,

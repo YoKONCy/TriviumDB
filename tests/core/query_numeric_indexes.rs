@@ -334,6 +334,10 @@ fn tql浮点比较与小分母遵守精确比较和有限结果契约() {
 fn 独立编码的无符号wal样本保留原始事实与嵌套整数() {
     let root = TestDir::new("unsigned_wal_fixture");
     let path = root.file("sample.tdb");
+    Database::<f32>::open_with_config(&path, config(StorageMode::Mmap))
+        .unwrap()
+        .close()
+        .unwrap();
     std::fs::write(
         format!("{path}.wal"),
         include_bytes!("../fixtures/numeric_ids/full_u64_v3.bin"),

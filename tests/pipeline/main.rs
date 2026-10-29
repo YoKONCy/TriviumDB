@@ -1,6 +1,9 @@
 #![allow(non_snake_case)]
 //! 按领域聚合的集成测试入口。
 
+#[path = "../support/mod.rs"]
+mod support;
+
 mod ablation;
 mod cascades_optimizer;
 mod pipeline_deep;

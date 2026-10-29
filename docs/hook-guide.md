@@ -2,7 +2,7 @@
 
 > 面向深度定制固定检索管线的开发者。Hook 作用于 `search*` 工业检索管线；TQL 的 Cascades/NodeSet 管线通过查询算子和 EXPLAIN 扩展，不经过这些 Hook。
 >
-> 对应 `0.9.0-beta.3`；FFI Hook ABI 使用 v2。见[变更说明](changes/0.9.0-beta.3.md)。
+> 对应 `0.9.0-beta.4`；FFI Hook ABI 使用 v2。见[变更说明](changes/0.9.0-beta.4.md)。
 
 ---
 

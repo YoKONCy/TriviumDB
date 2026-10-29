@@ -56,6 +56,10 @@ try {
   fs.mkdirSync(numericRoot)
   run(['-e', 'process.exitCode = 1; require(process.argv[1])(process.argv[2], require("triviumdb").TriviumDB).then(() => { process.exitCode = 0 }, error => { console.error(error) })',
     path.join(root, 'tests/node/numeric_boundaries.js'), numericRoot], consumer)
+  const kernelRoot = path.join(sample, 'kernel-boundaries')
+  fs.mkdirSync(kernelRoot)
+  run(['-e', 'process.exitCode = 1; const api = require("triviumdb"); require(process.argv[1]).runKernelBoundaries(process.argv[2], api.TriviumDB, api.ResourceRuntime); process.exitCode = 0',
+    path.join(root, 'tests/node/kernel_boundaries.js'), kernelRoot], consumer)
   console.log('npm 产物的 TypeScript 正反样例及原生运行行为验收通过')
 } finally {
   fs.rmSync(sample, { recursive: true, force: true })

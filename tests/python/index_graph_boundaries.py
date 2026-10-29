@@ -63,6 +63,7 @@ def run_index_graph_boundaries(root: str) -> None:
 
     file = Path(root) / "full-ids.tdb"
     sample = Path(__file__).parent.parent / "fixtures/numeric_ids/wal_v3.bin"
+    triviumdb.TriviumDB(str(file), dim=2, auto_build_quiver=False).close()
     Path(str(file) + ".wal").write_bytes(sample.read_bytes())
     db = triviumdb.TriviumDB(str(file), dim=2, auto_build_quiver=False)
     try:

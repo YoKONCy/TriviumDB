@@ -279,7 +279,7 @@ fn COV_04B_compact中断_vec已扩大_tdb未更新_已提交数据不丢() {
     let error = Database::<f32>::open(&path, DIM)
         .err()
         .expect("跨代际 .tdb/.vec 必须 fail-closed");
-    assert!(error.to_string().contains("generation"));
+    assert!(matches!(error, triviumdb::TriviumError::CorruptedFile(_)));
 
     cleanup(&path);
 }
@@ -451,6 +451,7 @@ fn COV_07_memory_limit_rejects_without_auto_flush() {
     let path = tmp_db("mem_limit");
 
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let main_before = std::fs::read(&path).unwrap();
     db.set_memory_limit(1024).unwrap();
     let wal_before = std::fs::metadata(format!("{path}.wal"))
         .map(|metadata| metadata.len())
@@ -470,8 +471,9 @@ fn COV_07_memory_limit_rejects_without_auto_flush() {
 
     assert!(inserted < 100, "内存预算必须在增长前拒绝");
     assert_eq!(db.node_count().unwrap(), inserted);
-    assert!(
-        !std::path::Path::new(&path).exists(),
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        main_before,
         "内存预算不得触发全量 checkpoint"
     );
     let wal_after = std::fs::metadata(format!("{path}.wal"))

@@ -111,6 +111,36 @@ pub const TDB_HEADER: &[FieldSpec] = &[
         width: 8,
         encoding: FieldEncoding::U64Le,
     },
+    FieldSpec {
+        name: "dtype_magic",
+        offset: 58,
+        width: 4,
+        encoding: FieldEncoding::Bytes,
+    },
+    FieldSpec {
+        name: "dtype",
+        offset: 62,
+        width: 2,
+        encoding: FieldEncoding::U16Le,
+    },
+    FieldSpec {
+        name: "element_width",
+        offset: 64,
+        width: 2,
+        encoding: FieldEncoding::U16Le,
+    },
+    FieldSpec {
+        name: "reserved",
+        offset: 66,
+        width: 4,
+        encoding: FieldEncoding::U32Le,
+    },
+    FieldSpec {
+        name: "header_crc",
+        offset: 70,
+        width: 4,
+        encoding: FieldEncoding::U32Le,
+    },
 ];
 
 pub const FLUSH_MARKER_V3: &[FieldSpec] = &[
@@ -302,7 +332,7 @@ pub const GRAPH_HEADER: &[FieldSpec] = &[
 #[test]
 fn 所有固定规格字段不重叠且完全落在声明头部内() {
     for (name, fields, size) in [
-        ("tdb", TDB_HEADER, 58),
+        ("tdb", TDB_HEADER, 74),
         ("flush", FLUSH_MARKER_V3, 53),
         ("wal", WAL_HEADER, 6),
         ("property", PROPERTY_HEADER, 48),

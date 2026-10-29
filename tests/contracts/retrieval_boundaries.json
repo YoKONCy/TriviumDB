@@ -1,0 +1,5 @@
+{
+  "binary": {"query": 16777217, "vectors": [[16777217], [16777216]], "expected_ids": [1, 2], "expected_scores": [64, 63]},
+  "metric": {"query": 1, "vectors": [[2], [1]], "expected_ids": [2, 1], "expected_scores": [64, 62]},
+  "float_scales": [1e20, 1e-30]
+}

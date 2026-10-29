@@ -50,11 +50,11 @@ pub(super) fn pending(path: &str) -> bool {
 }
 
 /// 同一句柄重试时沿用已校验的旧代备份，不能把半发布的新文件再次当作旧代备份。
-pub(super) fn resume(path: &str, preserve_text: bool) -> Result<Option<u64>> {
+pub(super) fn resume<T: VectorType>(path: &str, preserve_text: bool) -> Result<Option<u64>> {
     if !pending(path) {
         return Ok(None);
     }
-    match recover(path, false) {
+    match recover::<T>(path, false) {
         Err(TriviumError::RecoveryRequired { .. }) => {
             let journal = read_journal(path)?;
             if !preserve_text
@@ -291,7 +291,7 @@ fn decode(bytes: &[u8]) -> Result<(u64, [SavedFile; 3])> {
 }
 
 /// 返回是否回滚了未提交的文件；只读路径只检查，不创建、删除或修改文件。
-pub(crate) fn recover(path: &str, writable: bool) -> Result<bool> {
+pub(crate) fn recover<T: VectorType>(path: &str, writable: bool) -> Result<bool> {
     let journal = journal_path(path);
     let state = match read_journal(path) {
         Ok(state) => state,
@@ -330,6 +330,7 @@ pub(crate) fn recover(path: &str, writable: bool) -> Result<bool> {
             ));
         }
         if writable {
+            validate_checkpoint_type::<T>(path, &vec_path_from_db(path), path)?;
             cleanup(path)?;
         }
         return Ok(false);
@@ -359,6 +360,9 @@ pub(crate) fn recover(path: &str, writable: bool) -> Result<bool> {
     }
     if !writable {
         return Err(TriviumError::RecoveryRequired { wal_path: journal });
+    }
+    if files[0].is_some_and(|main| main.present) {
+        validate_checkpoint_type::<T>(&backup_path(path, 0), &backup_path(path, 1), path)?;
     }
     // 所有备份通过校验后才恢复正式文件；备份保留到恢复提交完成。
     for (index, saved) in files.iter().enumerate() {

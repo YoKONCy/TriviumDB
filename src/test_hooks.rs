@@ -39,6 +39,8 @@ pub enum ConcurrencyPoint {
     AfterPublicationRestore,
     AfterSidecarsPersisted,
     AfterPublicationCommitted,
+    MigrationFilePublished,
+    TqlPathStep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +64,11 @@ pub enum IoPoint {
     TextMetadataWrite,
     PropertySidecarWrite,
     GraphSidecarWrite,
+    CheckpointWalClear,
+    MigrationPublishFile,
+    MigrationAfterFirstFile,
+    MigrationPublishMarker,
+    MigrationAfterCommit,
     WalFlush,
     WalSync,
     WalMigrationCreate,

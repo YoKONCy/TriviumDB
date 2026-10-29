@@ -2,7 +2,7 @@
 
 > 高效使用 TriviumDB 的实战指南：从项目集成到性能调优，从数据建模到避坑指南。
 >
-> 本文按 `0.9.0-beta.3` 编写，见[变更说明](changes/0.9.0-beta.3.md)。
+> 本文按 `0.9.0-beta.4` 编写，见[变更说明](changes/0.9.0-beta.4.md)。
 
 ---
 
@@ -70,7 +70,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.9.0-beta.3"
+triviumdb = "0.9.0-beta.4"
 ```
 
 ### 30 秒入门模板
@@ -767,7 +767,7 @@ db_b = triviumdb.TriviumDB("shared.tdb", dim=768)  # 💥 文件锁冲突!
 - TriviumDB 保证从 `0.7.0` 开始的已发布数据库文件可由后续版本读取并迁移。
 - `0.7.0` 的 v5/32-chunk BQ 和 `0.7.1–0.8.x` 的 v5/48-chunk BQ 会被自动识别；可写句柄下一次 `flush()` 或 `close()` 原子升级为自描述 v6。
 - ReadOnly 可以读取受支持旧格式，但不会原地升级；Immutable 的 manifest 必须与现有文件字节匹配。
-- 当前主文件为 v9，可读取 v5–v9；早于 v5 使用对应旧版导出迁移。Mmap 的 Payload generation 文件与 `.tdb/.vec/.flush_ok` 一同管理，ReadOnly/Immutable 不升级格式。无头 WAL 不再自动解析。不要手工修改文件头或 sidecar 版本号。
+- 当前主文件为 v10，可读取 v5–v10；早于 v5 使用对应旧版导出迁移。Mmap 的 Payload generation 文件与 `.tdb/.vec/.flush_ok` 一同管理，ReadOnly/Immutable 不升级格式。无头 WAL 不再自动解析。不要手工修改文件头或 sidecar 版本号。
 - 当前内核遇到低于最低支持版本或高于当前版本的文件会明确返回版本错误并保持文件不变，不会猜测解析。
 
 文件格式升级与下文的 Embedding 维度迁移是两件不同的事：前者保留现有向量并由内核自动完成，后者用于更换向量模型和维度。

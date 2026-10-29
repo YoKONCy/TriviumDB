@@ -219,7 +219,15 @@ impl PayloadStore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn open_sidecar(path: &Path) -> Result<(u64, Mmap, MappedPayloadRecords)> {
+        Self::open_sidecar_limited(path, |_| Ok(()))
+    }
+
+    pub(crate) fn open_sidecar_limited(
+        path: &Path,
+        admit: impl Fn(usize) -> Result<()>,
+    ) -> Result<(u64, Mmap, MappedPayloadRecords)> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file) }?;
         let bytes = &mmap[..];
@@ -264,6 +272,7 @@ impl PayloadStore {
         {
             return Err(TriviumError::CorruptedFile("Payload 文件布局无效".into()));
         }
+        admit(count.saturating_mul(std::mem::size_of::<(NodeId, Range<usize>)>()))?;
         let mut records = Vec::new();
         records.try_reserve_exact(count).map_err(|error| {
             TriviumError::CapacityAllocationFailed {
@@ -302,6 +311,11 @@ impl PayloadStore {
                     "Payload 记录 CRC 不匹配: node_id={id}"
                 )));
             }
+            admit(
+                count
+                    .saturating_mul(24)
+                    .saturating_add(raw.len().saturating_mul(64)),
+            )?;
             validate_json(raw)?;
             records.push((id, offset..end));
             previous_id = id;
@@ -670,6 +684,112 @@ pub(crate) fn estimate_json_memory(value: &serde_json::Value) -> usize {
                     .map(|(key, value)| key.capacity() + estimate_json_memory(value))
                     .sum::<usize>()
         }
+    }
+}
+
+/// 对已校验 JSON 扫描结构，估算解码缓冲、容器和返回值克隆的保守峰值，不解析 Payload。
+pub(crate) fn query_decode_peak(raw: &[u8]) -> Result<usize> {
+    let (mut quoted, mut escaped, mut atom) = (false, false, false);
+    let (mut values, mut entries, mut objects) = (0usize, 0usize, 0usize);
+    let mut containers = [0u8; 128];
+    let mut depth = 0usize;
+    for &byte in raw {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => {
+                quoted = true;
+                atom = false;
+                values += 1;
+            }
+            b'[' | b'{' => {
+                if depth == containers.len() {
+                    return Err(TriviumError::CorruptedFile(
+                        "Payload 容器深度超限 (Payload container depth exceeded)".into(),
+                    ));
+                }
+                containers[depth] = if byte == b'{' { 0 } else { 2 };
+                depth += 1;
+                values += 1;
+                atom = false;
+            }
+            b':' => {
+                if depth == 0 {
+                    return Err(TriviumError::CorruptedFile(
+                        "Payload 对象结构无效 (Invalid Payload object structure)".into(),
+                    ));
+                }
+                if containers[depth - 1] == 0 {
+                    objects += 1;
+                    containers[depth - 1] = 1;
+                }
+                entries += 1;
+                atom = false;
+            }
+            b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                atom = false;
+            }
+            b',' | b' ' | b'\n' | b'\r' | b'\t' => atom = false,
+            _ if !atom => {
+                values += 1;
+                atom = true;
+            }
+            _ => {}
+        }
+    }
+    raw.len()
+        .checked_mul(3)
+        .and_then(|bytes| {
+            values
+                .checked_mul(std::mem::size_of::<serde_json::Value>() * 4)
+                .and_then(|extra| bytes.checked_add(extra))
+        })
+        .and_then(|bytes| {
+            entries
+                .checked_mul(256)
+                .and_then(|extra| bytes.checked_add(extra))
+        })
+        // 每个非空对象另计解码和返回副本的树根节点；空对象保持轻量。
+        .and_then(|bytes| {
+            objects
+                .checked_mul(2048)
+                .and_then(|extra| bytes.checked_add(extra))
+        })
+        .and_then(|bytes| bytes.checked_add(256))
+        .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+            reason: "查询 Payload 峰值估算溢出 (Query Payload peak estimate overflowed)".into(),
+        })
+}
+
+/// 查询复制已解析 JSON 时，连同对象树节点和容器余量一起预留。
+pub(crate) fn query_clone_peak(value: &serde_json::Value) -> usize {
+    let header = std::mem::size_of::<serde_json::Value>();
+    match value {
+        serde_json::Value::Object(values) if values.is_empty() => header,
+        serde_json::Value::Object(values) => values.iter().fold(
+            header
+                .saturating_add(1024)
+                .saturating_add(values.len().saturating_mul(128)),
+            |sum, (key, value)| {
+                sum.saturating_add(key.len())
+                    .saturating_add(query_clone_peak(value))
+            },
+        ),
+        serde_json::Value::Array(values) => values.iter().fold(
+            header.saturating_add(values.capacity().saturating_mul(header)),
+            |sum, value| sum.saturating_add(query_clone_peak(value)),
+        ),
+        serde_json::Value::String(value) => header.saturating_add(value.len()),
+        _ => header,
     }
 }
 

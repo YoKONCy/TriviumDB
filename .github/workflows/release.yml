@@ -22,12 +22,23 @@ jobs:
   version-gate:
     name: Version Gate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
     outputs:
       pypi_should_publish: ${{ steps.check_pypi.outputs.should_publish }}
       npm_should_publish: ${{ steps.check_npm.outputs.should_publish }}
       version: ${{ steps.extract.outputs.version }}
       channel: ${{ steps.extract.outputs.channel }}
     steps:
+      - name: 检出工作流版本的发布校验器
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: 保存发布校验器
+        run: cp scripts/validate_release_source.py "$RUNNER_TEMP/tdb-validate-release-source.py"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -51,16 +62,10 @@ jobs:
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "当前发布版本: $VERSION ($CHANNEL)"
 
-      - name: 验证 stable Tag 位于 master
-        shell: bash
-        run: |
-          if [[ "${{ steps.extract.outputs.channel }}" == "stable" ]]; then
-            git fetch origin master
-            if ! git merge-base --is-ancestor "$(git rev-parse HEAD)" "origin/master"; then
-              echo "stable Tag 必须指向 master 历史中的提交"
-              exit 1
-            fi
-          fi
+      - name: 校验 Release Commit 来源
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python "$RUNNER_TEMP/tdb-validate-release-source.py" --tag "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY"
 
 
       - name: 检查 PyPI 是否已发布

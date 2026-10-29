@@ -123,7 +123,12 @@ fn final_prune_retains_signature_exits_and_repair_restores_orphaned_nodes() {
         eager: false,
     };
     let mut candidates = (1..=64)
-        .map(|node| (index.bq_store.distance(0, node as usize, 65), node))
+        .map(|node| {
+            (
+                index.bq_store.distance_in_bounds(0, node as usize, 65),
+                node,
+            )
+        })
         .collect::<Vec<_>>();
     candidates.sort_unstable_by_key(|&(distance, _)| distance);
     let legacy = QuIVer::vamana_select(&index.bq_store, 0, &candidates, 32, 65, 1.2);
@@ -209,7 +214,7 @@ fn already_connected_graph_is_unchanged_and_full_rows_keep_tree_edges() {
     }
     let mut candidates = (1..=64)
         .chain([79])
-        .map(|node| (index.bq_store.distance(0, node as usize, 3), node))
+        .map(|node| (index.bq_store.distance_in_bounds(0, node as usize, 3), node))
         .collect::<Vec<_>>();
     candidates.sort_unstable_by_key(|&(distance, _)| distance);
     let selected = index.select_layer0_neighbors(0, &candidates);

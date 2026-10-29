@@ -41,6 +41,7 @@ module.exports = async function numericBoundaries(root, TriviumDB) {
 
   for (const storageMode of ['rom', 'mmap']) {
     const file = path.join(root, `numeric-outputs-${storageMode}.tdb`)
+    new TriviumDB(file, { ...options, storageMode }).close()
     fs.copyFileSync(path.join(__dirname, '../fixtures/numeric_ids/wal_v3.bin'), file + '.wal')
     const db = new TriviumDB(file, { ...options, storageMode })
     try {
@@ -51,7 +52,15 @@ module.exports = async function numericBoundaries(root, TriviumDB) {
       assert.deepEqual(db.searchGraphFirst([1, 0], [1], 4).map(hit => hit.id), [1])
       db.createIndex('group')
       db.createNgramIndex('group')
-      const unsafeId = error => error instanceof Error && error.message.includes('TDB_INVALID_INPUT')
+      db.createUniqueIndex('exact_id')
+      assert.throws(() => db.updatePayload(1, { exact_id: '9007199254740993' }), error => {
+        assert.equal(error.code, 'TDB_UNIQUE_CONSTRAINT')
+        assert.deepEqual(error.details, { fields: ['exact_id'], existing_id: '9007199254740993', conflicting_id: 1 })
+        assert.equal(error.existing_id, '9007199254740993')
+        return true
+      })
+      assert.equal(db.getPayload(1).exact_id, '1')
+      const unsafeId = error => error instanceof Error && error.code === 'TDB_INVALID_INPUT'
       for (const query of [
         () => db.searchExact([1, 0], 4),
         () => db.search([1, 0], 4, 0, 0),
@@ -90,8 +99,8 @@ module.exports = async function numericBoundaries(root, TriviumDB) {
     } finally { db.close() }
     const reader = new TriviumDB(file, { ...options, storageMode, accessMode: 'readOnly' })
     try {
-      assert.throws(() => reader.allNodeIds(), error => error.message.includes('TDB_INVALID_INPUT'))
-      assert.throws(() => reader.searchExact([1, 0], 4), error => error.message.includes('TDB_INVALID_INPUT'))
+      assert.throws(() => reader.allNodeIds(), error => error.code === 'TDB_INVALID_INPUT')
+      assert.throws(() => reader.searchExact([1, 0], 4), error => error.code === 'TDB_INVALID_INPUT')
       assert.deepEqual(reader.tql('FIND {group: "fixture"} RETURN *').map(row => row._.id).sort(),
         ['9007199254740991', '9007199254740992', '9007199254740993'])
     } finally { reader.close() }

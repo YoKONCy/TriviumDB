@@ -304,7 +304,7 @@ fn with与普通入口遵守行预算偏移预算和取消() {
             assert!(
                 matches!(
                     db.tql(&format!("{source} RETURN n")),
-                    Err(TriviumError::QueryExecution(_))
+                    Err(TriviumError::QueryRowBudgetExceeded { budget: 2 })
                 ),
                 "{source}"
             );

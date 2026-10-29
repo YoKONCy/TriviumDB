@@ -1,6 +1,6 @@
 # TriviumDB 支持特性详解
 
-> TriviumDB `0.9.0-beta.3` 的架构、核心能力与技术实现。版本记录见[变更说明](changes/0.9.0-beta.3.md)。
+> TriviumDB `0.9.0-beta.4` 的架构、核心能力与技术实现。版本记录见[变更说明](changes/0.9.0-beta.4.md)。
 
 ## 当前能力快照
 
@@ -10,6 +10,8 @@
 - **统一查询底座**：TQL Parser/AST、WITH 管线、Cascades 优化、Prepared TQL、Path 与一等值结果共同支撑上述自由组合；数字字面量支持科学计数法，MATCH 属性/ID 投影按实际值去重，`SET VECTOR` 通过原子 mutation 更新向量。
 - **统一返回与匹配写入**：MATCH、FIND、WITH 和单跳具名边共享分组、聚合、去重、别名排序与分页；COUNT 按表达式值计数。多字段 SET 按节点合并，CREATE 按完整匹配集建立独立变量作用域，SET VECTOR 保留完整 u64 整数并按 dtype 准入。
 - **系统保证**：确定性执行、查询/遍历/内存/并行预算、ReadOnly/Immutable 零写、generation 原子发布。
+- **事实绑定与类型检查**：`.tdb` v10 保存 dtype、元素宽度和头部 CRC；QuIVer 元数据 v2 绑定主文件、向量内容及活跃 ID/slot，图与属性 sidecar 在采用前检查当前事实。
+- **查询物化准入**：TQL、精确与 GraphFirst 检索、可达性及子图在复制 Payload、向量、边和 Metadata 前申请工作区；DML 匹配使用实例内存预算，返回阶段按实际求值列计量。
 - **跨语言能力**：Rust、Python、Node 同步提供四类属性索引管理、Prepared TQL、一等查询值和存储格式观测。
 - **多实例运行管理**：共享 `ResourceRuntime` 统一登记数据库配额和工作区，管理工作线程及前台/维护任务名额；共享与实例诊断提供预算余额、维护延期和故障详情。
 - **生命周期与状态迁移**：关闭请求、排空、限时等待、目录快照、校验及恢复，Rust/Python/Node 接口同步提供。
@@ -137,12 +139,11 @@ TriviumDB 提供两种互斥的存储模式（`StorageMode`），且**系统支�
 
 ### 1. Rom 模式（便携单文件优先）
 
-所有数据（向量 + Payload + 边）都被打包进一个致密的 `.tdb` 二进制文件中，启动时**全量装载进内存**。
-对于几十万节点规模的知识库，它是最理想的格式，只需拷贝一个 `.tdb` 即可完成库的转移，类似 SQLite。
+节点向量、Payload 和图边内嵌于 `.tdb`，启动时全量装载进内存。文本等索引使用独立 sidecar；运行期间还会使用 WAL、文件锁与文件组发布记录。`create_snapshot()` 捕获当前完整文件组并生成校验 manifest，适用于备份和跨目录迁移，见[一致快照](lifecycle-snapshots.md#一致快照)。
 
 ### 2. Mmap 模式（大规模零拷贝优先，默认）
 
-启动时，持续增长的大体积向量与已发布 raw Payload 分别位于 `.vec` 和 generation 化 `.pld.<generation>`；`.tdb` v9 保存节点 slot、关系边和必要元数据，不再重复内嵌完整 raw Payload。
+启动时，持续增长的大体积向量与已发布 raw Payload 分别位于 `.vec` 和 generation 化 `.pld.<generation>`；`.tdb` v10 保存节点 slot、关系边和必要元数据，不再重复内嵌完整 raw Payload。
 
 - **MAP_PRIVATE (COW)**：通过 `memmap2` 库将数 GB 的向量文件映射到操作系统的虚拟内存中。进程不会真的霸占物理内存，而是由 OS 根据查询压力按需（Page Fault）换入换出。
 - **分层向量池（VecPool）**：内存中维护 `基础层（mmap）+ 增量层（Vec）` 两段结构。新插入的向量只进增量层；delete/update 操作对基础层做 COW 写入，直到显式 `flush()` 时统一发布。
@@ -159,7 +160,7 @@ QuIVer 的 BQ、SM 位码与幅值、图拓扑和工作区位于匿名堆内存�
 
 正式查询直接扫描 mmap 基础层与内存增量层，过滤回退、残差和强制精确扫描共用这条路径。单层 `flat_vectors()` 直接借用已有内存；仅显式请求混合两层的连续切片时才生成 merged，并在写入后释放失效副本。Rom 写盘也逐段输出，切换为 Rom 拥有型存储时最多复制一次向量数据。
 
-当前查询不使用历史 `Vec<BqSignature>`。旧 Rust 整库签名接口仍可显式按需生成，容量计入堆内存估算；单条 getter 不分配整库数组。普通查询、flush、重开不物化旧数组。新快照保留原格式已允许的空 `TBQF` 缓存块（16 字节），不再为每个 slot 写入 384 字节。旧 v5 的 32/48-chunk 和后续自描述块继续验证格式几何，读取事实数据后不把旧缓存转成常驻状态；主文件仍为 v9。此处变化不涉及 QuIVer 的 BQ2/SM 位码与导航算法。
+当前查询不使用历史 `Vec<BqSignature>`。旧 Rust 整库签名接口仍可显式按需生成，容量计入堆内存估算；单条 getter 不分配整库数组。普通查询、flush、重开不物化旧数组。新快照保留原格式已允许的空 `TBQF` 缓存块（16 字节），不再为每个 slot 写入 384 字节。旧 v5 的 32/48-chunk 和后续自描述块继续验证格式几何，读取事实数据后不把旧缓存转成常驻状态；主文件使用 v10。此处变化不涉及 QuIVer 的 BQ2/SM 位码与导航算法。
 
 ### VecPool 混合 Flush 策略
 
@@ -204,9 +205,11 @@ QuIVer 按 slot 流式读取 FP16/FP32/mmap 向量，准备 BQ 编码与默认 S
 
 压实在持有 MemTable 写锁期间保存数据，并在保存成功后按 `MemTable → WAL` 锁顺序清理日志。宿主可配置周期维护，或使用 `disable_auto_compaction()` 撤销登记，在选定时段调用同步 `compact()`。关闭任务在已有操作排空后优先调度。
 
-### `.tdb` v9 与 Payload sidecar 布局
+### `.tdb` v10 与 Payload sidecar 布局
 
-Rom 模式仍将完整 Payload 写入单个 `.tdb`。Mmap 模式的 `.tdb` v9 只保存活跃 NodeId slot 和图/BQ 元数据，raw JSON 位于与提交 generation 绑定的 `.pld.<generation>`：
+v10 使用 74 字节文件头，持久化 `f32`、`f16`、`u64` 类型、元素宽度和文件头 CRC32；Rom 向量块及 Mmap `.vec` 的长度须精确等于 slot 数 × 维度 × 元素宽度。新库在容量准入成功后、第一条 WAL 写入前保存空的带类型检查点。
+
+Rom 模式仍将完整 Payload 写入单个 `.tdb`。Mmap 模式的 `.tdb` v10 只保存活跃 NodeId slot 和图/BQ 元数据，raw JSON 位于与提交 generation 绑定的 `.pld.<generation>`：
 
 ```text
 .tdb                 slot + graph + BQ metadata
@@ -217,7 +220,7 @@ Rom 模式仍将完整 Payload 写入单个 `.tdb`。Mmap 模式的 `.tdb` v9 �
 
 `.pld` 目录按 NodeId 严格递增，记录数据连续且每条带 CRC；header/目录 reserved、flags、offset、范围、JSON 完整性和整文件 CRC 均 fail-closed。Writer 先写临时文件并 fsync，再发布 generation marker；只有 marker v3 明确声明的 `.pld` 才可加载，旧 marker 附近的游离 sidecar 会被忽略。generation 文件名避免 Windows 上替换仍被旧 Reader mmap 的同名文件，旧 generation 在失去引用后 best-effort 回收。
 
-加载 v5-v8 时继续读取 `.tdb` 内嵌 Payload。ReadWrite 仅在显式 `flush()`/`compact()` 后迁移到 v9；ReadOnly/Immutable 只读兼容旧格式，不自动迁移、不创建 `.pld`、不修改任何制品。
+加载 v5-v8 时继续读取 `.tdb` 内嵌 Payload。ReadWrite 在后续持久化时发布 v10；空的历史检查点在首次可写打开准入成功后补齐类型身份。ReadOnly/Immutable 按原格式读取，保持原文件组。
 
 > **边持久化格式** 从 v7 起保存任意 JSON `metadata`，唯一键为 `(src, dst, label)`，重复 Upsert 原地覆盖权重与元数据。加载器继续兼容 v5/v6，旧边的元数据恢复为 `null`。BQ 元数据块仍采用从 v6 开始的自描述固定小端序布局。
 >
@@ -499,7 +502,7 @@ TQL 的 FIND 入口底层采用三层加速策略：
 
 ## 持久化属性索引体系
 
-属性索引由 `PropertyIndexRegistry` 统一管理，并持久化到 `.tdb.pidx`（当前 v7，旧格式按加载器支持范围处理）。posting 使用稳定 NodeId/slot 映射，CRUD、slot 复用、重启与 ReadOnly/Immutable 均有专项测试。
+属性索引由 `PropertyIndexRegistry` 统一管理，并持久化到 `.tdb.pidx`（当前 v8，旧格式按加载器支持范围处理）。posting 使用稳定 NodeId/slot 映射，CRUD、slot 复用、重启与 ReadOnly/Immutable 均有专项测试。
 
 **数值键编码 v2**：Ordered/Composite ART 的有序键使用统一的数值全序编码——`i64`/`u64`/`f64` 共享同一数值顺序，整数范围查询（如 `age: {$gte: 30}`）与浮点阈值不再因键前缀不同而错配为空集。等值索引（Hash/Bitmap）继续保留 JSON 数字的精确类型与值，可区分超过 f64 精度的相邻大整数；Filter 的范围比较也使用精确整数比较。数值边界的绝对值达到 2^53 时，有序范围查询回退精确扫描；有序索引包含此范围的数值键时，`ORDER BY` 按实际 Payload 数值排序后分页。整数比较覆盖完整 `i64/u64` 域，并支持与有限浮点数混合比较。旧 key v1 编码的 `.pidx` 在打开时有界读取并按索引定义在内存中重建为 v2 编码：ReadOnly/Immutable 保持零写，Writer 在下一次显式 flush 发布 v2 sidecar。
 
@@ -651,6 +654,8 @@ enum DbBackend {
 | `f16` | 2 B | 半精度 | 大规模数据集，内存减半，精度损失极小 |
 | `u64` | 8 B | 整数 | SimHash 等二值化/离散化向量 |
 
+浮点向量使用余弦评分和 QuIVer 加速；相似度内核在异常幅值下通过 `f64` 累加保持有限计算，常规幅值继续使用 SIMD。`u64` 指纹使用原始位模式的精确汉明评分，普通、高级、批量与 TQL 基础检索统一采用匹配位数，构图阈值只作用于浮点向量。
+
 ### 数据转换
 
 Python 侧的 `dict` 与 Rust 侧的 `serde_json::Value` 通过 `pyobject_to_json` / `json_to_pyobject` 双向无损转换。支持的 Python 类型：`None` / `bool` / `int` / `float` / `str` / `list` / `dict`。
@@ -791,14 +796,16 @@ v0.6.0 新增 ARM64 (aarch64) NEON SIMD 支持，与已有的 x86 AVX2 并列，
 
 ### 派生索引的事实绑定
 
-`.pidx v7` 同时记录主文件长度/CRC、节点数和按 NodeId 排序的原始 Payload 字节指纹。Payload 存放于 `.pld` 时，同长度更新也参与索引身份校验。失配由 `MissingIndexPolicy` 选择结构化报错或查询规划器扫描事实；旧版索引根据定义在内存中重建，ReadOnly 保持文件零写。
+`.pidx v8` 同时记录主文件长度/CRC、节点数和按 NodeId 排序的原始 Payload 字节指纹。复合字段列表使用 JSON 字符串数组编码，逐字节保留 NUL、引号、反斜杠和 Unicode 名称；每个字段及复合字段名总长度最多 1 MiB，复合字段数量为 2–65,535。Payload 存放于 `.pld` 时，同长度更新也参与索引身份校验。失配由 `MissingIndexPolicy` 选择结构化报错或查询规划器扫描事实。v1–v7 的复合 posting 由事实扫描提供结果，唯一约束按主文件中的完整字段列表恢复；普通复合索引可通过 `create_composite_index` 重新创建。其他旧版索引按加载器规则重建，ReadOnly 保持文件零写。
 
-`.gidx v3` 在节点数之外记录主文件长度与 CRC，绑定边权、标签和元数据所在的事实文件。失配返回损坏错误；Writer 可通过 `repair_graph_indexes()` 重建并持久化。历史 v1/v2 图索引由主文件图数据提供读取结果，后续显式持久化发布当前格式。只读图的入度按边数计算，多标签平行边共享来源时仍分别计数，查询分数、排序和完整性检查与可写图一致。
+Node 的 JSON 边界使用带长度的属性名处理 Payload、Metadata、过滤器、事务和查询结果，保留嵌套 NUL 字段与 `__proto__` 自有数据属性；标量数值沿用既有转换规则。非法 JSON 值与循环结构在写入前拒绝。
+
+`.gidx v3` 在节点数之外记录主文件长度与 CRC。打开时完整解码边块，校验数量、UTF-8、JSON、有限边权和重复边，并将反向/标签目录与边块逐项比对，再流式比对主文件中的端点、标签、边权与 Metadata。校验和堆分配准入完成后安装只读视图；失配返回 `CorruptedFile`。Writer 从主文件读取事实，可通过 `repair_graph_indexes()` 重建并持久化。历史 v1/v2 图索引由主文件图数据提供读取结果，后续显式持久化发布当前格式。只读图的入度按边数计算，多标签平行边共享来源时仍分别计数，查询分数、排序和完整性检查与可写图一致。
 
 
 ### 索引覆盖与图资源边界
 
-有序与复合索引按字段覆盖情况选择候选访问路径；含缺失字段、容器或混合排序类型的数据保留完整查询结果。复合唯一约束使用完整 JSON 标量键，保持大整数精度。删除唯一索引同步移除约束定义。
+有序与复合索引按字段覆盖情况选择候选访问路径；含缺失字段、容器或混合排序类型的数据保留完整查询结果。复合唯一约束使用完整 JSON 标量键，保持大整数精度。创建和删除唯一约束在同一写锁内完成变更与文件组发布；发布报错后实例进入待恢复状态，后续操作返回 `TDB_WAL_CLOSED`。释放实例并可写重开，提交前失败恢复旧约束，提交后失败采用新约束，再回放 WAL。
 
 图内存账本计入标签、Metadata、邻接容量、反向/标签索引与图统计的堆内容，普通修改按受影响条目增量更新。图写入在 WAL 前检查 65,535 UTF-8 字节标签上限和内存准入。Node 数量参数保留原始 Number 进行校验，数字 ID 输出采用安全整数边界，TQL 提供完整 u64 字符串 ID。
 

@@ -84,7 +84,8 @@ fn threshold_route<T: VectorType + serde::Serialize + serde::de::DeserializeOwne
         let (hits, context) = db
             .search_hybrid_with_context(None, Some(&query), &config)
             .unwrap();
-        assert_eq!(route(&context), 1);
+        let binary = std::any::TypeId::of::<T>() == std::any::TypeId::of::<u64>();
+        assert_eq!(route(&context), if binary { 0 } else { 1 });
         assert_eq!(hits.len(), 5);
         let mut ids = std::collections::HashSet::new();
         for hit in &hits {
@@ -114,7 +115,7 @@ fn threshold_route<T: VectorType + serde::Serialize + serde::de::DeserializeOwne
         let (_, context) = reopened
             .search_hybrid_with_context(None, Some(&query), &config)
             .unwrap();
-        assert_eq!(route(&context), 1);
+        assert_eq!(route(&context), if binary { 0 } else { 1 });
         assert_eq!(reopened.node_count().unwrap(), threshold);
         reopened.close().unwrap();
         std::fs::remove_dir_all(root).unwrap();
@@ -122,7 +123,7 @@ fn threshold_route<T: VectorType + serde::Serialize + serde::de::DeserializeOwne
 }
 
 #[test]
-fn 三种dtype和两种存储模式在新阈值实际切换并可重载() {
+fn 浮点dtype按阈值切换且二进制dtype保持汉明路由并可重载() {
     threshold_route::<f32>(128);
     threshold_route::<half::f16>(768);
     threshold_route::<u64>(1536);

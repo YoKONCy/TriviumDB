@@ -1,6 +1,6 @@
 //! 数据库配置与查询参数矩阵
 //!
-//! 从 database.rs 中独立拆分，包含：
+//! 数据库公开配置包含：
 //! - `StorageMode`: 存储引擎选择（Mmap / Rom）
 //! - `Config`: 数据库打开时的配置
 //! - `SearchConfig`: 混合检索管线的参数矩阵
@@ -10,10 +10,12 @@ use crate::storage::wal::SyncMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StorageMode {
-    /// Mmap 分离模式（默认）：高性能、海量数据，产生 `.tdb` 和 `.vec` 两个文件
+    /// Mmap 分离模式（默认）：`.tdb`、`.vec` 与 `.pld.<generation>` 保存事实，
+    /// `.flush_ok` 绑定发布代际；启用的索引使用各自 sidecar。完整备份使用快照接口。
     #[default]
     Mmap,
-    /// Rom 单文件模式：高便携性，所有数据保存在一个 `.tdb` 文件中（纯内存加载以获得极高并发）
+    /// Rom 模式：节点向量、Payload 与边内嵌 `.tdb`，打开时载入内存；
+    /// 文本等索引、WAL 和文件组发布记录按功能独立保存。
     Rom,
 }
 

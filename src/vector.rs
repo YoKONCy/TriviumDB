@@ -8,6 +8,60 @@ use crate::index::bq::FORCE_NO_AVX512;
 use half::f16;
 use std::fmt::Debug;
 
+/// 二进制指纹保持整数位模式，采用汉明匹配位数评分。
+pub(crate) fn is_binary_vector<T: VectorType>() -> bool {
+    std::any::TypeId::of::<T>() == std::any::TypeId::of::<u64>()
+}
+
+/// 检索入口在候选生成与工作区分配前统一验证维度和有限值。
+pub(crate) fn validate_query_vector<T: VectorType>(query: &[T], dim: usize) -> crate::Result<()> {
+    if query.len() != dim {
+        return Err(crate::TriviumError::DimensionMismatch {
+            expected: dim,
+            got: query.len(),
+        });
+    }
+    if query.iter().any(|value| !value.to_f32().is_finite()) {
+        return Err(crate::TriviumError::InvalidVector {
+            reason: "查询向量包含 NaN 或 Infinity (Query vector contains NaN or Infinity)".into(),
+        });
+    }
+    Ok(())
+}
+
+#[inline]
+fn finish_cosine(dot: f32, norm_a: f32, norm_b: f32, a: &[f32], b: &[f32]) -> f32 {
+    if norm_a.is_normal() && norm_b.is_normal() && dot.is_normal() {
+        let denominator = norm_a.sqrt() * norm_b.sqrt();
+        if denominator.is_normal() {
+            let score = dot / denominator;
+            if score.is_finite() {
+                return score.clamp(-1., 1.);
+            }
+        }
+    }
+    cosine_similarity_wide(a, b)
+}
+
+// f64 覆盖全部有限 f32 分量的乘积与可寻址切片累加范围，异常幅值回退不改变原始向量。
+#[cold]
+fn cosine_similarity_wide(a: &[f32], b: &[f32]) -> f32 {
+    let (mut dot, mut norm_a, mut norm_b) = (0f64, 0f64, 0f64);
+    for (&a, &b) in a.iter().zip(b) {
+        let (a, b) = (f64::from(a), f64::from(b));
+        dot += a * b;
+        norm_a += a * a;
+        norm_b += b * b;
+    }
+    if !dot.is_finite() || !norm_a.is_finite() || !norm_b.is_finite() {
+        return f32::NAN;
+    }
+    if norm_a == 0. || norm_b == 0. {
+        return 0.;
+    }
+    (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1., 1.) as f32
+}
+
 /// 定义通用向量类型的 Trait，支持多种引擎底层数据 (f32 / f16 / u64)
 pub trait VectorType:
     Sized
@@ -90,10 +144,7 @@ fn cosine_similarity_scalar(a: &[f32], b: &[f32]) -> f32 {
     let dot = dot0 + dot1;
     let norm_a = na0 + na1;
     let norm_b = nb0 + nb1;
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-    dot / (norm_a.sqrt() * norm_b.sqrt())
+    finish_cosine(dot, norm_a, norm_b, a, b)
 }
 
 /// AVX-512F 加速路径：每次并行处理 16 个 f32
@@ -151,10 +202,7 @@ unsafe fn cosine_similarity_avx512(a: &[f32], b: &[f32]) -> f32 {
             norm_a += a[i] * a[i];
             norm_b += b[i] * b[i];
         }
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 0.0;
-        }
-        dot / (norm_a.sqrt() * norm_b.sqrt())
+        finish_cosine(dot, norm_a, norm_b, a, b)
     }
 }
 
@@ -204,10 +252,7 @@ unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
             norm_a += a[i] * a[i];
             norm_b += b[i] * b[i];
         }
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 0.0;
-        }
-        dot / (norm_a.sqrt() * norm_b.sqrt())
+        finish_cosine(dot, norm_a, norm_b, a, b)
     }
 }
 
@@ -283,10 +328,7 @@ unsafe fn cosine_similarity_avx2_384_with_query_norm(
             _mm256_add_ps(norm2, norm3),
         ))
     };
-    if query_norm_squared == 0.0 || vector_norm_squared == 0.0 {
-        return 0.0;
-    }
-    dot / (query_norm_squared.sqrt() * vector_norm_squared.sqrt())
+    finish_cosine(dot, query_norm_squared, vector_norm_squared, query, vector)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -340,10 +382,7 @@ unsafe fn cosine_similarity_sse3(a: &[f32], b: &[f32]) -> f32 {
             norm_a += a[i] * a[i];
             norm_b += b[i] * b[i];
         }
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 0.0;
-        }
-        dot / (norm_a.sqrt() * norm_b.sqrt())
+        finish_cosine(dot, norm_a, norm_b, a, b)
     }
 }
 
@@ -384,10 +423,7 @@ unsafe fn cosine_similarity_neon(a: &[f32], b: &[f32]) -> f32 {
             norm_b += b[i] * b[i];
         }
 
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 0.0;
-        }
-        dot / (norm_a.sqrt() * norm_b.sqrt())
+        finish_cosine(dot, norm_a, norm_b, a, b)
     }
 }
 
@@ -547,6 +583,64 @@ impl VectorType for u64 {
 mod tests {
     use super::*;
     use half::f16;
+
+    #[test]
+    fn 所有余弦实现对极端有限尺度保持解析结果() {
+        for dim in [1, 2, 7, 8, 15, 16, 17, 383, 384, 385, 3072, 65536] {
+            for scale in [1e20f32, 1e-30, f32::MAX, f32::from_bits(1)] {
+                let a = vec![scale; dim];
+                let b = vec![-scale; dim];
+                let check = |name: &str, score: f32, expected: f32| {
+                    assert!(
+                        score.is_finite() && (score - expected).abs() < 2e-6,
+                        "{name}/{dim}/{scale}: {score}, 预期 {expected}"
+                    );
+                };
+                check("dispatch", cosine_similarity_f32(&a, &a), 1.);
+                check("scalar", cosine_similarity_scalar(&a, &b), -1.);
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if is_x86_feature_detected!("sse3") {
+                        // SAFETY: 已检查 CPU 特性，切片等长并由当前作用域持有。
+                        check("sse3", unsafe { cosine_similarity_sse3(&a, &a) }, 1.);
+                    }
+                    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                        // SAFETY: 已检查 AVX2/FMA，切片等长且所有 SIMD 尾部按长度处理。
+                        check("avx2", unsafe { cosine_similarity_avx2(&a, &b) }, -1.);
+                    }
+                    #[cfg(not(coverage))]
+                    if is_x86_feature_detected!("avx512f") {
+                        // SAFETY: 已检查 AVX-512F，切片等长并由当前作用域持有。
+                        check("avx512", unsafe { cosine_similarity_avx512(&a, &a) }, 1.);
+                    }
+                }
+                if dim == 384 {
+                    let norm = cosine_query_norm_f32_384(&a).unwrap_or(0.);
+                    check(
+                        "cached384",
+                        cosine_similarity_f32_384_with_query_norm(&a, &b, norm),
+                        -1.,
+                    );
+                }
+                check("zero", cosine_similarity_f32(&a, &vec![0.; dim]), 0.);
+            }
+        }
+    }
+
+    #[test]
+    fn 余弦缩放和抵消符合独立几何样例() {
+        for (a, b, expected) in [
+            ([3e20f32, 4e20], [1e-30, 0.], 0.6),
+            ([3e-30, 4e-30], [1e20, 0.], 0.6),
+            ([1e20, 1e20], [1e20, -1e20], 0.),
+        ] {
+            assert!((cosine_similarity_f32(&a, &b) - expected).abs() < 1e-6);
+        }
+        // 两个范数均正常，点积单独下溢；几何比例约为 1e-24，仍在 f32 表示范围内。
+        let score = cosine_similarity_f32(&[1e-30, 1e-18, 0.], &[1e-30, 0., 1e-18]);
+        assert!((score / 1e-24 - 1.).abs() < 1e-5, "点积下溢: {score}");
+        assert!((f16::similarity(&[f16::MAX; 384], &[f16::MAX; 384]) - 1.).abs() < 2e-6);
+    }
 
     #[test]
     fn test_cosine_similarity() {

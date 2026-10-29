@@ -258,7 +258,13 @@ fn main() {
             let mut bq_dists: Vec<(usize, u32)> = sigs
                 .iter()
                 .enumerate()
-                .map(|(i, s)| (i, s.distance(&q_sig, DIM)))
+                .map(|(i, s)| {
+                    (
+                        i,
+                        s.distance(&q_sig, DIM)
+                            .expect("基准签名覆盖固定维度 (Benchmark signatures cover DIM)"),
+                    )
+                })
                 .collect();
             bq_dists.sort_unstable_by_key(|x| x.1);
             let bq_topk: HashSet<usize> = bq_dists.iter().take(TOP_K).map(|x| x.0).collect();
@@ -272,7 +278,11 @@ fn main() {
         let t0 = Instant::now();
         let mut dummy = 0u32;
         for i in 0..iters {
-            dummy = dummy.wrapping_add(sigs[i % n].distance(&q_sig, DIM));
+            dummy = dummy.wrapping_add(
+                sigs[i % n]
+                    .distance(&q_sig, DIM)
+                    .expect("基准签名覆盖固定维度 (Benchmark signatures cover DIM)"),
+            );
         }
         let ns_per = t0.elapsed().as_nanos() as f64 / iters as f64;
         std::hint::black_box(dummy);
@@ -298,7 +308,13 @@ fn main() {
             let mut bq_dists: Vec<(usize, u32)> = sigs
                 .iter()
                 .enumerate()
-                .map(|(i, s)| (i, s.distance(&q_sig, DIM)))
+                .map(|(i, s)| {
+                    (
+                        i,
+                        s.distance(&q_sig, DIM)
+                            .expect("基准签名覆盖固定维度 (Benchmark signatures cover DIM)"),
+                    )
+                })
                 .collect();
             bq_dists.sort_unstable_by_key(|x| x.1);
             let bq_topk: HashSet<usize> = bq_dists.iter().take(TOP_K).map(|x| x.0).collect();
@@ -311,7 +327,11 @@ fn main() {
         let t0 = Instant::now();
         let mut dummy = 0u32;
         for i in 0..iters {
-            dummy = dummy.wrapping_add(sigs[i % n].distance(&q_sig, DIM));
+            dummy = dummy.wrapping_add(
+                sigs[i % n]
+                    .distance(&q_sig, DIM)
+                    .expect("基准签名覆盖固定维度 (Benchmark signatures cover DIM)"),
+            );
         }
         let ns_per = t0.elapsed().as_nanos() as f64 / iters as f64;
         std::hint::black_box(dummy);

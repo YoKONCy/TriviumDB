@@ -4,6 +4,24 @@ use std::thread;
 use std::time::Duration;
 use triviumdb::{DatabaseWriter, GenerationStore, TriviumError};
 
+mod lease_identity;
+#[path = "../support/mod.rs"]
+mod support;
+
+fn generation_child_command() -> std::process::Command {
+    let executable = std::env::current_exe().unwrap();
+    if std::env::var_os("TRIVIUM_TEST_QEMU_AARCH64").is_some() {
+        let mut command = std::process::Command::new("qemu-aarch64");
+        command
+            .arg("-L")
+            .arg("/usr/aarch64-linux-gnu")
+            .arg(executable);
+        command
+    } else {
+        std::process::Command::new(executable)
+    }
+}
+
 fn tmp_store(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "triviumdb_generation_{name}_{}",
@@ -28,9 +46,14 @@ fn generation跨进程租约辅助进程() {
     let Ok(root) = std::env::var("TRIVIUM_GENERATION_CHILD_ROOT") else {
         return;
     };
-    let runtime = std::env::var("TRIVIUM_GENERATION_CHILD_RUNTIME").unwrap();
     let ready = std::env::var("TRIVIUM_GENERATION_CHILD_READY").unwrap();
-    let store = GenerationStore::with_runtime_dir(root, runtime);
+    let store = match std::env::var("TRIVIUM_GENERATION_CHILD_RUNTIME") {
+        Ok(runtime) => GenerationStore::with_runtime_dir(root, runtime),
+        Err(_) => GenerationStore::new(root),
+    };
+    if let Some(cwd) = std::env::var_os("TRIVIUM_GENERATION_CHILD_CWD") {
+        std::env::set_current_dir(cwd).unwrap();
+    }
     let reader = store.open_current::<f32>(2).unwrap();
     std::fs::write(ready, reader.generation_id()).unwrap();
     loop {
@@ -333,17 +356,7 @@ fn 真实跨进程reader阻止回收且异常退出后租约自动释放() {
     publish(&store, "generation-2", 0.0);
     store.publish_current("generation-1", "data.tdb").unwrap();
     let ready = root.join("child-ready");
-    let executable = std::env::current_exe().unwrap();
-    let mut command = if std::env::var_os("TRIVIUM_TEST_QEMU_AARCH64").is_some() {
-        let mut command = std::process::Command::new("qemu-aarch64");
-        command
-            .arg("-L")
-            .arg("/usr/aarch64-linux-gnu")
-            .arg(executable);
-        command
-    } else {
-        std::process::Command::new(executable)
-    };
+    let mut command = generation_child_command();
     let mut child = command
         .arg("--exact")
         .arg("generation跨进程租约辅助进程")

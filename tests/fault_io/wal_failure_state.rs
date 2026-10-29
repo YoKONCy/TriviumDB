@@ -1,6 +1,5 @@
 //! 同步失败后的隔离状态必须覆盖普通、批量及事务写入，并经历进程退出和恢复。
-#[path = "../support/mod.rs"]
-mod support;
+use super::support;
 
 use serde_json::json;
 use triviumdb::database::{Config, StorageMode, TxBuilder};

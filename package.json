@@ -1,6 +1,6 @@
 {
   "name": "triviumdb",
-  "version": "0.9.0-beta.3",
+  "version": "0.9.0-beta.4",
   "description": "AI-native embedded database: Vector + Graph + Relational in one file",
   "main": "index.js",
   "types": "triviumdb.d.ts",

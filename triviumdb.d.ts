@@ -350,16 +350,68 @@ export interface ResourceStats {
   available_task_slots: number | null;
 }
 
+/** 错误详情中的大整数使用十进制字符串，其余整数使用安全 Number。 */
+export type ErrorInteger = number | string;
+
+/** 内核错误字段；错误码与字段名在 Rust、Python、Node 三端保持一致。 */
+export interface ErrorDetailsByCode {
+  TDB_IO: { io_kind: string; os_code: number | null };
+  TDB_SERIALIZATION: { reason: string };
+  TDB_DTYPE_MISMATCH: { stored: DType; requested: DType };
+  TDB_DIMENSION_MISMATCH: { expected: ErrorInteger; got: ErrorInteger };
+  TDB_NODE_NOT_FOUND: { id: ErrorInteger };
+  TDB_INVALID_VECTOR: { reason: string };
+  TDB_PAYLOAD_TOO_LARGE: { size_bytes: ErrorInteger; max_bytes: ErrorInteger };
+  TDB_UNIQUE_CONSTRAINT: { fields: string[]; existing_id: ErrorInteger; conflicting_id: ErrorInteger };
+  TDB_CONDITIONAL_UPDATE_NOT_MATCHED: { id: ErrorInteger };
+  TDB_NODE_ALREADY_EXISTS: { id: ErrorInteger };
+  TDB_DATABASE_LOCKED: { reason: string };
+  TDB_READ_ONLY: { operation: string };
+  TDB_RECOVERY_REQUIRED: { wal_path: string };
+  TDB_IMMUTABLE_ARTIFACT: { reason: string };
+  TDB_GENERATION_BUSY: { generation_id: string };
+  TDB_CORRUPTED_FILE: { reason: string };
+  TDB_QUERY_PARSE: { reason: string };
+  TDB_QUERY_EXECUTION: { reason: string };
+  TDB_MISSING_QUERY_PARAMETER: { parameter: string };
+  TDB_UNEXPECTED_QUERY_PARAMETER: { parameter: string };
+  TDB_QUERY_CANCELLED: Record<string, never>;
+  TDB_QUERY_BUDGET: { budget: ErrorInteger };
+  TDB_PAYLOAD_BUDGET_EXCEEDED: { dimension: string; used: ErrorInteger; budget: ErrorInteger };
+  TDB_TRAVERSAL_BUDGET_EXCEEDED: { dimension: 'visited_nodes' | 'examined_edges' | 'frontier_size' | 'depth'; visited_nodes: ErrorInteger; examined_edges: ErrorInteger; peak_frontier_size: ErrorInteger; depth_reached: ErrorInteger };
+  TDB_HOOK_EXECUTION: { reason: string };
+  TDB_HOOK_LOAD: { reason: string };
+  TDB_WAL_CLOSED: Record<string, never>;
+  TDB_CAPACITY_RESERVATION_REJECTED: { requested_nodes: ErrorInteger; estimated_bytes: ErrorInteger; current_bytes: ErrorInteger; memory_limit: ErrorInteger };
+  TDB_CAPACITY_ALLOCATION_FAILED: { reason: string };
+  QueueFull: ResourceBudgetDetails;
+  TDB_SNAPSHOT_EXISTS: { path: string };
+  TDB_SNAPSHOT_PUBLICATION_UNCERTAIN: { path: string; reason: string };
+  TDB_SHUTDOWN_FAILED: { reason: string };
+  TDB_DATABASE_CLOSED: Record<string, never>;
+  TDB_UNSUPPORTED_WAL_VERSION: { found: number; supported: number };
+  TDB_UNSUPPORTED_DATABASE_VERSION: { found: number; minimum_supported: number; current: number };
+  TDB_API_MIGRATION_REQUIRED: { removed_api: string; replacement: string };
+  TDB_UNSUPPORTED_SIDECAR_VERSION: { component: string; found: number; minimum_supported: number; current: number; action: string };
+  TDB_INVALID_INPUT: { reason: string };
+  TDB_ERROR: { reason: string };
+}
+
+export type TriviumDBError = {
+  [Code in keyof ErrorDetailsByCode]: Error & { code: Code; details: ErrorDetailsByCode[Code] }
+}[keyof ErrorDetailsByCode];
+
 /** QueueFull 错误上的附加字段；内存单位为字节，任务和线程单位为个数。 */
 export interface ResourceBudgetDetails {
   resource: string;
-  requested: number;
-  used: number;
-  limit: number;
+  requested: ErrorInteger;
+  used: ErrorInteger;
+  limit: ErrorInteger;
 }
 
 export interface ResourceBudgetError extends Error, ResourceBudgetDetails {
   code: 'QueueFull';
+  details: ResourceBudgetDetails;
 }
 
 export interface ResourceFailure {

@@ -40,7 +40,7 @@ function setupHook(mode) {
   const reference = new WeakRef(hook)
   if (mode === 'rejected') {
     db.close()
-    assert.throws(() => db.setHook(hook), /Database closed|数据库已关闭/)
+    assert.throws(() => db.setHook(hook), { code: 'TDB_DATABASE_CLOSED', details: {} })
   } else db.setHook(hook)
   if (mode === 'clear') db.clearHook()
   else if (mode === 'replace') db.setHook({})
@@ -119,8 +119,8 @@ async function registrationBudget() {
     first.requestShutdown()
     assert.equal(first.shutdownStatus().phase, 'draining')
     assert.equal(first.closeTimeout(0), false)
-    assert.throws(() => first.nodeCount(), /Database closed|数据库已关闭/)
-    assert.throws(() => new TriviumDB(firstSample.file, { dim: contract.dimension }), /Database locked|数据库已锁定/)
+    assert.throws(() => first.nodeCount(), { code: 'TDB_DATABASE_CLOSED', details: {} })
+    assert.throws(() => new TriviumDB(firstSample.file, { dim: contract.dimension }), { code: 'TDB_DATABASE_LOCKED' })
   } finally {
     fs.writeFileSync(release, '1')
     const results = await pending
@@ -175,8 +175,8 @@ function retainedValuesAndPathReplacement() {
       db.close()
       db.dispose()
       assert.equal(db.closeTimeout(0), true)
-      assert.throws(() => db.commitTransaction(operations), /Database closed|数据库已关闭/)
-      assert.throws(() => new TriviumDB(file, { dim: contract.dimension, dtype }), /Database locked|数据库已锁定/)
+      assert.throws(() => db.commitTransaction(operations), { code: 'TDB_DATABASE_CLOSED', details: {} })
+      assert.throws(() => new TriviumDB(file, { dim: contract.dimension, dtype }), { code: 'TDB_DATABASE_LOCKED' })
       assert.equal(runtime.stats().attached_databases, 1)
       assert.equal(runtime.stats().reserved_database_bytes, 8 * 1024 * 1024)
       assert.equal(writer.nodeCount(), 1)
@@ -219,13 +219,13 @@ function multipleReadersAndFailedClose() {
         { n: { id: String(contract.node_id), payload: contract.original_payload, numEdges: 1 } },
         { n: { id: String(contract.later_node_id), payload: { tenant: 'agent-a', state: 'neighbor' }, numEdges: 0 } },
       ])
-      if (accessMode === 'readOnly') assert.throws(() => new TriviumDB(file, { dim: contract.dimension, dtype }), /Database locked|数据库已锁定/)
+      if (accessMode === 'readOnly') assert.throws(() => new TriviumDB(file, { dim: contract.dimension, dtype }), { code: 'TDB_DATABASE_LOCKED' })
       assert.equal(second.closeTimeout(contract.close_timeout_ms), true)
       released(directory)
       const writer = new TriviumDB(file, { dim: contract.dimension, dtype, autoBuildQuiver: false })
       held.push(writer)
       first.close(); second.close()
-      assert.throws(() => new TriviumDB(file, { dim: contract.dimension, dtype }), /Database locked|数据库已锁定/)
+      assert.throws(() => new TriviumDB(file, { dim: contract.dimension, dtype }), { code: 'TDB_DATABASE_LOCKED' })
       writer.updatePayload(contract.node_id, { state: 'updated' })
       writer.close()
       assert.deepEqual(saved.payload, contract.original_payload)
@@ -244,7 +244,7 @@ function multipleReadersAndFailedClose() {
     assert.throws(() => db.flush())
     assert.throws(() => db.close())
     assert.notEqual(db.shutdownStatus().phase, 'closed')
-    assert.throws(() => new TriviumDB(file, { dim: contract.dimension, dtype }), /Database locked|数据库已锁定/)
+    assert.throws(() => new TriviumDB(file, { dim: contract.dimension, dtype }), { code: 'TDB_DATABASE_LOCKED' })
     fs.rmdirSync(obstacle)
     assert.equal(db.closeTimeout(contract.close_timeout_ms), true)
     released(directory)
@@ -281,7 +281,7 @@ async function main() {
           () => db.nodeCount(), () => db.allNodeIds(), () => db.getEdges(contract.node_id), () => db.getIncomingEdges(contract.node_id),
           () => db.neighbors(contract.node_id), () => db.getEdge(contract.node_id, 2, "关联"),
           () => db.graphStats(), () => db.validateGraph(), () => db.listUniqueIndexes(), () => db.indexInfo(), () => db.clearSearchState()]) {
-          assert.throws(read, /Database closed|数据库已关闭/)
+          assert.throws(read, { code: 'TDB_DATABASE_CLOSED', details: {} })
         }
         assert.equal(db.shutdownStatus().phase, 'closed')
         released(directory)
@@ -351,7 +351,7 @@ async function main() {
     const deadline = Date.now() + contract.close_timeout_ms
     while (!reopened) {
       try { reopened = new TriviumDB(file, { dim: 3, autoBuildQuiver: false }) }
-      catch (error) { assert.match(error.message, /Database locked|数据库已锁定/); assert(Date.now() < deadline, '工作线程退出后关闭任务未排空'); await next() }
+      catch (error) { assert.equal(error.code, 'TDB_DATABASE_LOCKED'); assert(Date.now() < deadline, '工作线程退出后关闭任务未排空'); await next() }
     }
     assert.equal(reopened.nodeCount(), 1)
     reopened.close()
