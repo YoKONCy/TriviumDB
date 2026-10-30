@@ -691,6 +691,7 @@ try {
     expect(await page.locator('#vlResultBody tr').count() === 3, `${BROWSER}/${theme}: vector hits`);
     await page.screenshot({ path: path.join(dir, 'vector-success.png') });
 
+    await page.evaluate(() => { document.getElementById('vlAdvanced').open = true; });
     await page.fill('#vlMinScore', '2');
     await page.click('#vlRunBtn');
     await waitVectorState(page, 'zero');
@@ -1257,7 +1258,8 @@ report.parts.fixAudit = {};
   {
     const { context, page, errors } = await newPage('light', { width: 1440, height: 900 });
     const brand = await page.evaluate(() => ({
-      text: document.querySelector('.sidebar-brand-copy')?.textContent.replace(/\s+/g, ' ').trim(),
+      // V4.1 R2：品牌搬到顶栏（侧栏专注对象/历史/片段）
+      text: document.querySelector('.header-brand-copy strong')?.textContent.replace(/\s+/g, ' ').trim(),
       hasSub: document.body.textContent.includes('星尘工作台'),
     }));
     expect(brand.text === 'TriviumDB' && !brand.hasSub, `品牌只保留 TriviumDB：${JSON.stringify(brand)}`);
@@ -1311,7 +1313,9 @@ report.parts.fixAudit = {};
       `面板里点「运行」应关闭面板并把该语句写回编辑器：${JSON.stringify(hist)}`);
 
     const vec = await page.evaluate(async () => {
-      document.querySelector('[data-action="quick-search"]').click();
+      // V4.1 R2：导航只切工作区；「按库维度生成向量示例」保留在侧栏片段段
+      document.querySelector('.side-tab[data-side-tab="snippets"]').click();
+      document.querySelector('[data-action="insert-vector-sample"]').click();
       await new Promise((r) => setTimeout(r, 900));
       const q = document.getElementById('tqlInput').value;
       const m = /\[([^\]]*)\]/.exec(q);
@@ -1613,6 +1617,7 @@ report.parts.fixAudit = {};
     expect(/耗时: [\d.]+ ms/.test(success.time), `向量成功应显示检索耗时：${JSON.stringify(success)}`);
 
     // min_score 高于相似度上限（1）以保证零命中，不依赖本库向量的具体分数
+    await page.evaluate(() => { document.getElementById('vlAdvanced').open = true; });
     await page.fill('#vlMinScore', '2');
     await page.click('#vlRunBtn');
     await waitVectorState(page, 'zero');
@@ -1838,6 +1843,9 @@ report.parts.fixAudit = {};
       hist: queryHistory.length,
       editor: document.getElementById('tqlInput').value,
     }));
+    // V4.1 R2：片段收进侧栏「片段」段；切段后点击
+    await page.click('.side-tab[data-side-tab="snippets"]');
+    await sleep(200);
     await page.click('.sidebar .nav-item[data-snippet]');
     await sleep(400);
     const sideAfter = await page.evaluate(() => ({
@@ -1849,7 +1857,8 @@ report.parts.fixAudit = {};
     expect(sideAfter.editor === 'FIND {type: "person"} RETURN * LIMIT 20',
       `片段应填入编辑器（实际 ${JSON.stringify(sideAfter.editor)}）`);
     expect(sideAfter.tab === 'queryPane', '片段应切回查询工作台');
-    await page.click('.sidebar .nav-item[data-action="quick-match"]');
+    // V4.1 R2：主导航是顶栏 tab（data-action 保留在 tab 上）
+    await page.click('[data-action="quick-match"]');
     await sleep(400);
     const navAfter = await page.evaluate(() => ({
       hist: queryHistory.length,
@@ -2078,7 +2087,9 @@ report.parts.fixAudit = {};
     const copied = await page.evaluate(() => window.__copied);
     expect(copied[0] === '10', `复制单元格内容应为 10，实际 ${JSON.stringify(copied)}`);
 
-    // CSV：真实下载事件 + 文件名
+    // CSV：真实下载事件 + 文件名（V4.1 R2 起导出收进「结果操作」菜单）
+    await page.click('#resultOpsBtn');
+    await sleep(150);
     const [download] = await Promise.all([
       page.waitForEvent('download', { timeout: 8000 }),
       page.click('#exportCsvBtn'),
@@ -2094,6 +2105,12 @@ report.parts.fixAudit = {};
   {
     const { context, page, errors } = await newPage('dark', { width: 1440, height: 900 });
     await page.waitForFunction(() => window.__TRIVIUM_APP_READY === true);
+    // V4.1 R2：导入默认进入审阅队列；本场景验证「关闭审阅后立即导入」的既有路径
+    await page.evaluate(() => {
+      const c = document.getElementById('txModeCheck');
+      c.checked = false;
+      c.dispatchEvent(new Event('change', { bubbles: true }));
+    });
     // 先保证库里一定有数据（空库时对象树只显示空态，无法验证分组）
     await page.evaluate(async () => {
       const rows = [
@@ -2223,6 +2240,12 @@ report.parts.fixAudit = {};
   {
     const { context, page, errors } = await newPage('light', { width: 1440, height: 900 });
     await page.waitForFunction(() => window.__TRIVIUM_APP_READY === true);
+    // V4.1 R2：界面编辑默认进入审阅队列；本场景验证「关闭审阅后立即写库」的既有路径
+    await page.evaluate(() => {
+      const c = document.getElementById('txModeCheck');
+      c.checked = false;
+      c.dispatchEvent(new Event('change', { bubbles: true }));
+    });
     // 造一条边，保证两列（a / b）都在
     await page.evaluate(async () => {
       const rows = [
@@ -2270,7 +2293,9 @@ report.parts.fixAudit = {};
     expect(await page.getAttribute('#gridHead th[data-column-key="a"]', 'aria-sort') === 'ascending',
       '拖列宽后点击表头仍应正常排序');
 
-    // 列显隐（工具栏「列」）
+    // 列显隐（V4.1 R2：先打开「结果操作」菜单，再点「列」）
+    await page.click('#resultOpsBtn');
+    await sleep(150);
     await page.click('#gridColumnsBtn');
     await sleep(250);
     expect(await page.evaluate(() => !document.getElementById('gridColMenu').hidden), '列面板应打开');
@@ -2335,6 +2360,12 @@ report.parts.fixAudit = {};
   {
     const { context, page, errors } = await newPage('light', { width: 1440, height: 900 });
     await page.waitForFunction(() => window.__TRIVIUM_APP_READY === true);
+    // V4.1 R2：本场景验证「关闭审阅后立即批量删除」的既有路径
+    await page.evaluate(() => {
+      const c = document.getElementById('txModeCheck');
+      c.checked = false;
+      c.dispatchEvent(new Event('change', { bubbles: true }));
+    });
     await page.evaluate(async () => {
       const rows = [8903, 8904, 8905].map((id) => ({
         id, vector: new Array(768).fill(0), payload: { name: `Batch ${id}`, type: 'batchtest' },
@@ -2569,7 +2600,7 @@ report.parts.fixAudit = {};
     expect((await fetch(`http://127.0.0.1:${port}/v1/nodes/${idA}`)).status === 404,
       '提交后节点应被删除');
 
-    // TQL 写语句在事务模式下被拦下（不发请求）
+    // TQL 写语句：有未提交的界面操作时必须被拦下（不发请求）
     const blockedWrites = [];
     const observeBlockedWrite = request => {
       if (request.method() === 'POST' && request.url().endsWith('/v1/tql')
@@ -2577,16 +2608,22 @@ report.parts.fixAudit = {};
     };
     page.on('request', observeBlockedWrite);
     const blocked = await page.evaluate(async () => {
+      const fake = { type: 'node', id: '999777', payload: { name: 'tx-blocked-seed' }, vector: [], edges: [] };
+      renderGrid([{ _: fake }]);
+      await deleteGridNode(fake);
+      const opsBefore = txOperations.length;
       const mut = document.getElementById('mutationCheck');
       mut.checked = true;
       mut.dispatchEvent(new Event('change', { bubbles: true }));
       setEditorValue('CREATE (n:person {name: "tx-blocked"})');
       await executeCurrentQuery();
-      return { toast: [...document.querySelectorAll('#toastStack .toast')].map((x) => x.textContent).slice(-1)[0] || '' };
+      return { opsBefore, toast: [...document.querySelectorAll('#toastStack .toast')].map((x) => x.textContent).slice(-1)[0] || '' };
     });
     page.off('request', observeBlockedWrite);
+    expect(blocked.opsBefore >= 1, `前置条件：应先有一个暂存的界面操作 ${JSON.stringify(blocked)}`);
     expect(blockedWrites.length === 0, `事务模式下 TQL 写语句不应发请求：${JSON.stringify(blockedWrites)}`);
-    expect(/事务|transaction/i.test(blocked.toast), `应给出明确提示：${JSON.stringify(blocked)}`);
+    expect(/事务|审阅|transaction|写入/.test(blocked.toast), `应给出明确提示：${JSON.stringify(blocked)}`);
+    await page.evaluate(() => { txOperations = []; syncTxBar(); renderGrid([]); });
 
     // 关闭标签 2 回到一个标签
     const beforeClose = await page.evaluate(() => document.querySelectorAll('#queryTabsList .query-tab').length);
@@ -2637,7 +2674,9 @@ report.parts.fixAudit = {};
     expect(tree.chip === true, '向量行应有胶囊');
     expect(Number(tree.badge) >= 2, `历史徽标应不少于 2：${tree.badge}`);
 
-    // 打开历史弹层
+    // 打开历史弹层（V4.1 R2：历史入口在侧栏「历史」段，先切段）
+    await page.click('.side-tab[data-side-tab="history"]');
+    await sleep(200);
     await page.click('#historyNavItem');
     await page.waitForFunction(() => !document.getElementById('historyOverlay').hidden, null, { timeout: 5000 });
     await sleep(300);

@@ -2,7 +2,7 @@
 
 Server 与 WebUI 处于 nightly 快速迭代阶段，布局、主题、交互和 HTTP 接口随开发调整。开发者按需要选择服务端自测、浏览器交互检查和截图记录。嵌入式 Core、Rust/Python/Node SDK 与 CLI 使用各自的正式验收流程。
 
-WebUI 位于 `crates/triviumdb-server/web/index.html`，由 Server 通过 `include_str!` 内嵌，页面修改后重新构建 Server。当前文档对应 0.9.0-beta.4 + V4 工作区统一验收。
+WebUI 位于 `crates/triviumdb-server/web/index.html`，由 Server 通过 `include_str!` 内嵌，页面修改后重新构建 Server。当前文档对应 0.9.0-beta.4 + V4.1 R2 工作区验收。
 
 ## 按需运行
 
@@ -15,6 +15,7 @@ WebUI 位于 `crates/triviumdb-server/web/index.html`，由 Server 通过 `inclu
 | V4 定向回归 | `scripts/webui-v4-regressions.mjs` | 真实 768 维候选/检索；TQL 与向量五态；两项 P2；390 教程/AI/面板焦点与 Esc；图探索顶部 hit-test（1440/1024/390 × 暗浅 × 查询舱/侧栏/统一面板）；桌面→手机断点生命周期（真实 GSAP，普通/reduced-motion）；390 向量参数标签/输入框遮挡；写入模式+只读查询不 500；DPR=2 位图 = CSS×2；触屏单指平移/双指捏合；长 payload 换行；结构/键盘（usp tablist、rail landmark、dock ↑↓/Enter、节点搜索 combobox、主/结果/panel tab ←/→ + roving）；390 结果表不横向溢出且滚动容器可聚焦；运行按钮宽度/图标稳定、历史点击高亮+聚焦、内置示例向量维度、查询舱默认 FIND、toast 去重、空闲不启动 aurora；390/900 搜索按钮真实点击+↑↓/Enter/Esc+焦点恢复；向量底栏与 TQL 分桶（加载/成功/零结果/失败/切回）；800 节点大图 Canvas fit 避让浮层（面板开关+窗口缩放）；非法 query-string 统一 problem JSON；教程说明块排版（非 pre-wrap、代码块无首尾空行）；Canvas 节点真实拖拽改变坐标且拖拽途中不弹面板、单击仍开详情；侧栏片段/导航不写查询历史；图工具条 1440/1024/390 自适应「更多」（不横向溢出、同一按钮不重复出现）；编辑器行号按软换行撑高、执行选中、取消运行（独立 canceled 状态）、表头排序（点击+Enter+aria-sort）、右键复制单元格、CSV 真实下载；对象树四组（类型/边标签/索引/向量）渲染、点行只填不执行、▶ 执行、索引创建与两步删除、节点/关系 CSV 导入落库与树刷新；列宽拖拽（排序后保持）、列显隐（表头与 CSV 同步）、双击编辑 payload（经 /v1/transactions 复核）、右键两步删除（Node 侧 404 复核）；批量选择（全选/半选、导出选中真实下载、批量删除后逐个 404 且未选中节点保留）；查询多标签（新建/切换恢复文本与结果/关闭）；事务模式（暂存不动库、回滚保留、提交后 404、TQL 写语句被拦）；侧栏对象树排版（组展开态/空组哑文字/向量胶囊/导入行）与查询历史弹层（元信息、分组切换、搜索、填入、删除、清空、Esc） |
 | WebGL 取景回归（真实 Sigma） | `scripts/webui-graph-fit.mjs` | 真实 CDN 加载 Sigma；1440/1024/390 × DPR 1/2 × 面板/抽屉开关；按钮 fit、后端切换、窗口缩放后节点/标签不压 HUD/查询舱/布局条/dock/统一面板，且不越出画布。Sigma 不可用直接失败，不用 Canvas 冒充 |
 | V4 组合矩阵 | `scripts/webui-v4-combos.mjs` | 3 视口 × 暗浅 × zh/en × TQL/向量 × 5 状态 = 120 组合/引擎；状态标记、横向溢出、关键按钮边界、rail/结果区遮挡 |
+| V4.1 R2 验收 | `scripts/webui-v41-r2-checks.mjs` | 真实 8 维库；3 视口 × 暗浅 × zh/en 外壳组合与关键控件中心点 hit-test；侧栏真实拖动/键盘/偏好/rail/断点往返；语言切换保留查询·结果·节点·向量输入；标量/聚合/多列/null 结果形状与导出一致性；对象树自定义/缺失类型与样本口径；跨工作区当前节点（表格→向量来源卡→命中动作→图定位）；48 节点图的收敛半径/标签预算/光晕与取景避让；写入审阅暂存/差异/失败保留/提交/放弃；向量旧响应隔离；axe-core 可用时自动扫描 |
 | 视觉回归 | `scripts/visual-baseline.mjs` | 固定视口、确定性布局和平台对应 PNG 基线的实际像素比对；`--record-only` / `--compare` / `--update` 显式选择记录、比对或更新 |
 
 浏览器工具的安装和运行：
@@ -31,6 +32,8 @@ WEBUI_BROWSER=chromium node scripts/webui-v4-regressions.mjs
 WEBUI_BROWSER=webkit node scripts/webui-v4-regressions.mjs
 WEBUI_BROWSER=chromium node scripts/webui-v4-combos.mjs
 WEBUI_BROWSER=webkit node scripts/webui-v4-combos.mjs
+WEBUI_BROWSER=chromium node scripts/webui-v41-r2-checks.mjs
+WEBUI_BROWSER=webkit node scripts/webui-v41-r2-checks.mjs
 node scripts/webui-graph-fit.mjs
 WEBUI_BROWSER=webkit node scripts/webui-graph-fit.mjs
 node scripts/visual-baseline.mjs

@@ -57,14 +57,17 @@ try {
             positions: graphNodes.map(n => [n.x, n.y]) };
         }));
       }
-      assert.deepEqual(samples[0].canvas, [1336, 819], '蓝本舞台尺寸必须精确匹配');
+      // V4.1 R2：侧栏 232（原 264）、工作区头 74、常驻当前节点条 42
+      assert.deepEqual(samples[0].canvas, [1368, 751], '蓝本舞台尺寸必须精确匹配');
       assert.deepEqual(
         samples[0].bitmap,
         samples[0].canvas.map(v => Math.round(v * samples[0].dpr)),
         '位图必须是 CSS 尺寸 × DPR（HiDPI 清晰度）'
       );
       assert.deepEqual(samples[0].positions, samples[1].positions, '重复初始化必须确定');
-      assert(samples[0].coverage >= 0.45, `覆盖率不足：${samples[0].coverage}`);
+      // V4.1 R2：舞台 1336×819（1.63）→ 1368×751（1.82）；seed-tree 由宽度受限，
+      // 纵向留白增加，覆盖率基线 0.45 → 0.40（仍要求铺满大部分舞台，不做空图放行）
+      assert(samples[0].coverage >= 0.40, `覆盖率不足：${samples[0].coverage}`);
       assert(samples[0].minEdge >= 90 && samples[0].minPair >= 90, '屏幕中心距不足 90px');
       // 访问查询画布后返回，不能再因隐藏画布缓存尺寸改变力学结果。
       await page.click('[data-tab="queryPane"]');
