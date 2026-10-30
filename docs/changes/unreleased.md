@@ -2,6 +2,8 @@
 
 后续变更以 `0.9.0-beta.4` 为基线；该版本内容见[中英文变更说明](0.9.0-beta.4.md)。
 
+- 修复后台关闭与主文件路径预检的竞态：Windows 原子替换可令句柄解析到 NTFS 已删除文件，旧入口据此派生租约路径而返回瞬态 `TDB_IO` / `NotFound` 或 `PermissionDenied`。现在先验证调用路径与规范路径指向同一文件；预检失败后仅核对已有协调文件，实际不兼容租约仍被持有时返回 `TDB_DATABASE_LOCKED`，租约已释放时持锁重读并验证协调文件身份后移交新实例。持续缺失、不可访问及身份不匹配仍保留错误；Immutable 不参与租约探测，失败路径不创建数据库或协调文件，原有只读零写、事务及持久化语义不变。
+
 - 新增嵌入式 Console v1 宿主协议，Rust、Python、Node 共用查询、图/向量、索引、原子事务和导入入口，并保留完整 u64 字符串 ID。会话默认只读、绑定具体实例；Rust 适配器只持有宿主弱引用，锁竞争及重入明确拒绝，卸载不关闭宿主数据库。HTTP 适配复用现有实例，客户端退出后的并发许可随真实任务结束释放；关闭失败继续保留锁以便重试。写计划和响应预算在 WAL 前准入，成功响应按字节限额编码。新增资源包导出和三端接入说明；HTML 与前端逻辑未改写，现有页面仍需前端负责人适配新传输，资源包明确标注此条件及 CDN 依赖。Server HTTP v1 保持原行为，磁盘格式和版本号不变。
 
 - 维度迁移发布使用不覆盖既有目标的原子重命名，替代暂存库与目标之间的硬链接。进程在发布期间被强杀后，Unix 打开入口不会再因遗留的第二个主文件链接挡住恢复；提交前按发布日志回滚，提交后保留完整目标，源库保持原样。源、目标目录均在提交点前后同步。底层文件系统必须支持排他原子重命名；不支持时返回 I/O 错误，不退回覆盖或非原子复制。
@@ -14,6 +16,8 @@
 ## Unreleased
 
 Subsequent changes build on `0.9.0-beta.4`. See the bilingual [release notes](0.9.0-beta.4.md).
+
+- Fixed a race between background close publication and main-file path preflight. During atomic replacement on Windows, a handle could resolve to an NTFS deleted-file path; deriving the lease path from it caused transient `TDB_IO` / `NotFound` or `PermissionDenied`. The opener now verifies that the requested and canonical paths identify the same file. Failed preflight checks only an existing coordination file: an incompatible active lease returns `TDB_DATABASE_LOCKED`; once the lease is available, the opener resolves the path under that lease, verifies the coordination-file identity and transfers the lease to the new instance. Persistent absence, inaccessible paths and identity mismatches retain errors. Immutable mode does not probe leases, and the failure path creates neither database nor coordination files. Physical zero-write read-only access, transaction semantics and durability remain unchanged.
 
 - Added the embedded Console v1 host protocol, with shared Rust, Python and Node entry points for queries, graph/vector operations, indexes, atomic transactions and imports, preserving full u64 IDs as strings. Sessions default to read-only and bind to a specific instance. The Rust adapter holds only a weak host reference, rejects lock contention and reentry, and detaches without closing the host database. The HTTP adapter reuses the existing instance and retains concurrency permits until actual work finishes after client disconnection; failed database close retains the lock for retry. Write-plan and response budgets are admitted before WAL publication, and successful responses use bounded encoding. Added resource-bundle export and integration documentation for all three languages. HTML and frontend logic remain unchanged: the existing page still requires frontend-owned transport adaptation, which the bundle declares along with its CDN dependencies. Server HTTP v1 behavior, disk formats and package versions remain unchanged.
 

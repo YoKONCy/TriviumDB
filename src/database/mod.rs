@@ -78,11 +78,35 @@ pub(crate) fn write_or_recover<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 
 fn normalized_database_path(path: &str) -> Result<PathBuf> {
     let requested = Path::new(path);
-    if requested.exists() {
+    if requested.try_exists()? {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit_for_path(
+            crate::test_hooks::ConcurrencyPoint::BeforeDatabasePathMetadata,
+            path,
+        );
         let metadata = requested.metadata().map_err(TriviumError::Io)?;
         reject_hard_link_alias(path, &metadata)?;
-        return requested.canonicalize().map_err(TriviumError::Io);
+        let normalized = requested.canonicalize()?;
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit_for_path(
+            crate::test_hooks::ConcurrencyPoint::BeforeDatabasePathIdentity,
+            path,
+        );
+        // Windows 发布期间句柄可能已指向 NTFS 已删除文件，不能据此派生协调文件路径。
+        if !same_file::is_same_file(requested, &normalized)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "数据库路径在解析期间变化 (Database path changed while resolving)",
+            )
+            .into());
+        }
+        return Ok(normalized);
     }
+    normalized_database_parent_path(path)
+}
+
+fn normalized_database_parent_path(path: &str) -> Result<PathBuf> {
+    let requested = Path::new(path);
     let file_name = requested.file_name().ok_or_else(|| {
         TriviumError::InvalidInput(format!(
             "数据库路径缺少文件名 (Database path has no file name): {path}"
@@ -96,6 +120,76 @@ fn normalized_database_path(path: &str) -> Result<PathBuf> {
         None => std::env::current_dir().map_err(TriviumError::Io)?,
     };
     Ok(parent.join(file_name))
+}
+
+/// 主文件发布可与锁外路径预检交错；只有实际租约冲突才转换为数据库锁错误。
+fn resolve_database_path(
+    path: &str,
+    mode: AccessMode,
+    reserved_lock: Option<std::fs::File>,
+) -> Result<(PathBuf, Option<std::fs::File>)> {
+    let original = match normalized_database_path(path) {
+        Ok(normalized) => return Ok((normalized, reserved_lock)),
+        Err(error) => error,
+    };
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit_for_path(
+        crate::test_hooks::ConcurrencyPoint::DatabasePathResolutionFailed,
+        path,
+    );
+    if !matches!(original, TriviumError::Io(_))
+        || mode == AccessMode::Immutable
+        || reserved_lock.is_some()
+    {
+        return Err(original);
+    }
+
+    let Ok(candidate) = normalized_database_parent_path(path) else {
+        return Err(original);
+    };
+    let mut lock_path = candidate.into_os_string();
+    lock_path.push(".lock");
+    // 仅打开已有协调文件，不在失败路径上创建文件或改变只读访问的物理事实。
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(mode == AccessMode::ReadWrite)
+        .open(&lock_path)
+    else {
+        return Err(original);
+    };
+    let locked = match mode {
+        AccessMode::ReadWrite => FileExt::try_lock_exclusive(&lock),
+        AccessMode::ReadOnly => FileExt::try_lock_shared(&lock),
+        AccessMode::Immutable => return Err(original),
+    };
+    if let Err(error) = locked {
+        let contended = fs2::lock_contended_error();
+        let conflict = error.kind() == std::io::ErrorKind::WouldBlock
+            || error
+                .raw_os_error()
+                .is_some_and(|code| Some(code) == contended.raw_os_error());
+        return Err(if conflict {
+            TriviumError::DatabaseLocked(format!(
+                "数据库已有不兼容的访问租约 (Database has an incompatible access lease): {path}"
+            ))
+        } else {
+            original
+        });
+    }
+
+    // 发布方可能已在预检失败后完成关闭；取得租约后重新解析，并把该租约移交打开过程。
+    // 主文件仍缺失时保留原错误，禁止把预检失败改成创建新库或恢复其他文件组。
+    if Path::new(path).metadata().is_err() {
+        return Err(original);
+    }
+    let normalized = normalized_database_path(path)?;
+    let mut normalized_lock = normalized.as_os_str().to_owned();
+    normalized_lock.push(".lock");
+    // 符号链接可能指向其他数据库；未经同一协调文件身份验证，不得复用猜测路径的租约。
+    if !same_file::is_same_file(&lock_path, &normalized_lock).unwrap_or(false) {
+        return Err(original);
+    }
+    Ok((normalized, Some(lock)))
 }
 
 #[cfg(unix)]
@@ -654,7 +748,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             std::fs::create_dir_all(parent_dir)?;
         }
 
-        let normalized_path = normalized_database_path(path)?;
+        let (normalized_path, reserved_lock) =
+            resolve_database_path(path, config.access_mode, reserved_lock)?;
         let path = normalized_path.to_str().ok_or_else(|| {
             TriviumError::InvalidInput(
                 "数据库规范路径不是有效 UTF-8 (Canonical database path is not valid UTF-8)".into(),
