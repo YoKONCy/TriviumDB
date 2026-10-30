@@ -859,10 +859,12 @@
       min-width: 0;
     }
     /* 桌面/平板：右侧统一面板 rail 常驻，给查询/向量工作区留出 48px 净空，
-       避免压住结果表最右列。独立图探索保持原宽度，不改变 V3 cockpit 几何。 */
+       避免压住结果表最右列。独立图探索保持原宽度，不改变 V3 cockpit 几何。
+       打开面板时保持同一净空（面板是 fixed 浮层）——否则开关面板会让表格重排，
+       第一次双击编辑的第二次点击会落到移位后的元素上，导致双击失效。 */
     @media (min-width: 701px) {
-      body:not(.panel-open) #queryPane,
-      body:not(.panel-open) #vectorLabPane { padding-right: 48px; }
+      #queryPane,
+      #vectorLabPane { padding-right: 48px; }
     }
     .tabs-bar {
       position: relative; /* ≤900 搜索浮层的定位锚点 */
@@ -1369,8 +1371,9 @@
     }
     table.data-grid td.grid-sel-td input,
     table.data-grid th.grid-sel-th input {
-      width: 13px;
-      height: 13px;
+      /* WCAG 2.2 target-size：可点击目标不小于 24×24（行高 32 仍放得下） */
+      width: 24px;
+      height: 24px;
       margin: 0;
       cursor: pointer;
       accent-color: var(--action-bg);
@@ -1591,6 +1594,16 @@
       font-size: 11px;
       color: var(--text-light);
       opacity: 0.85;
+    }
+    /* 有数据时的采样口径注脚（样本 N，上限 200） */
+    .ot-group-note {
+      padding: 1px 8px 5px;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      color: var(--text-faint);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     /* 维度 + QuIVer 状态做成胶囊，替代原来的两行小字 */
     .ot-chip {
@@ -1874,7 +1887,9 @@
     #graphCanvas, #standaloneGraphCanvas { touch-action: none; }
     .v2-hud { position: absolute; z-index: 9; display: flex; gap: 6px; }
     .v2-hud.left { left: 12px; top: 12px; max-width: calc(100% - 24px); flex-wrap: wrap; }
-    .v2-hud .btn { border-color: rgba(190, 214, 255, 0.22); background: rgba(9, 13, 26, 0.78); color: #eef4ff; border-radius: 999px; }
+    /* 星尘（深空）舞台上浮层文字必须比页面正文更亮：暗底胶囊 + 近白字，
+       否则在星点/星云渐变上会“发灰”。 */
+    .v2-hud .btn { border-color: rgba(190, 214, 255, 0.32); background: rgba(9, 13, 26, 0.90); color: #f4f8ff; border-radius: 999px; }
     .v2-cockpit {
       /* 第一行留给 HUD 与右侧视图工具条，查询舱固定第二行，避免互相压住 */
       position: absolute; z-index: 10; top: 56px; left: 50%; transform: translateX(-50%);
@@ -1907,11 +1922,11 @@
       border-radius: 10px; background: rgba(3, 6, 14, 0.78); color: #d8e6ff;
       padding: 8px 10px; font: 11.5px/1.7 var(--font-mono); outline: none;
     }
-    .v2-cockpit-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; color: #aebad4; font-size: 11px; }
+    .v2-cockpit-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; color: #cfdcf0; font-size: 11px; }
     .v2-cockpit-field input[type="range"] { flex: 1; accent-color: #63f2e7; }
     .v2-cockpit-hits { display: flex; flex-direction: column; gap: 6px; }
-    .v2-cockpit-hits-head { color: #72819f; font: 10px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
-    .v2-cockpit-empty { padding: 18px 10px; border: 1px dashed rgba(190, 214, 255, 0.16); border-radius: 10px; color: #72819f; font-size: 11.5px; text-align: center; }
+    .v2-cockpit-hits-head { color: #a6b8d4; font: 10px/1 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+    .v2-cockpit-empty { padding: 18px 10px; border: 1px dashed rgba(190, 214, 255, 0.22); border-radius: 10px; color: #a6b8d4; font-size: 11.5px; text-align: center; }
     /* V3-F 未运行空态：图标 + 一行说明（区别于已运行的无命中摘要） */
     .v2-cockpit-empty--idle { display: flex; flex-direction: column; align-items: center; gap: 7px; opacity: .92; }
     /* 查询舱命中列表（V2 蓝本 mini-results：ID + 相似度 + 类型 chips） */
@@ -1920,7 +1935,7 @@
     .v2-hit-id { display: flex; justify-content: space-between; gap: 8px; font: 12px/1 var(--font-mono); color: #eef4ff; overflow: hidden; }
     .v2-hit-sim { color: #63f2e7; flex: none; }
     .v2-hit-chips { margin-top: 5px; display: flex; gap: 5px; flex-wrap: wrap; }
-    .v2-hit-chip { height: 19px; padding: 0 7px; border-radius: 999px; border: 1px solid rgba(190, 214, 255, 0.15); color: #aebad4; font-size: 10px; display: inline-flex; align-items: center; }
+    .v2-hit-chip { height: 19px; padding: 0 7px; border-radius: 999px; border: 1px solid rgba(190, 214, 255, 0.22); color: #cfdcf0; font-size: 10px; display: inline-flex; align-items: center; }
     /* 查询舱编辑框语法高亮 overlay：pre 在下承色，textarea 在上透明字 + 青色光标 */
     .v2-cockpit-qwrap { position: relative; }
     .v2-cockpit-qhl {
@@ -1931,11 +1946,11 @@
     }
     .v2-cockpit-qhl .kw, .v2-cockpit-qhl .tk-keyword { color: #63f2e7; }
     .v2-cockpit-qhl .str, .v2-cockpit-qhl .tk-string, .v2-cockpit-qhl .tk-number { color: #f4cf6a; }
-    .v2-cockpit-qhl .tk-comment { color: #72819f; }
+    .v2-cockpit-qhl .tk-comment { color: #93a4c2; }
     .v2-cockpit-qwrap .v2-cockpit-query { position: relative; background: transparent; color: transparent; caret-color: #63f2e7; border-color: transparent; }
     .v2-cockpit-qwrap .v2-cockpit-query:focus { border-color: rgba(99, 242, 231, 0.4); }
     /* 结果抽屉：类型彩色胶囊 / 相似度渐变条（V2 蓝本 t-doc/t-grp/t-vec + score bar） */
-    .v2-dock-idx { color: #72819f; font-family: var(--font-mono); }
+    .v2-dock-idx { color: #a2b4d0; font-family: var(--font-mono); }
     .v2-dock-tag { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; font-size: 10.5px; font-weight: 650; color: #10110f; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .v2-dock-score { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-mono); color: #eef4ff; }
     .v2-dock-bar { width: 68px; height: 6px; border-radius: 99px; background: rgba(255, 255, 255, 0.08); overflow: hidden; display: inline-block; flex: none; }
@@ -1943,7 +1958,7 @@
     .v2-graph-controls {
       left: 50%; right: auto; bottom: 54px; transform: translateX(-50%);
       flex-wrap: nowrap; max-width: calc(100% - 32px); z-index: 11;
-      background: rgba(5, 8, 18, 0.84); border-color: rgba(190, 214, 255, 0.30);
+      background: rgba(5, 8, 18, 0.92); border-color: rgba(190, 214, 255, 0.34);
       backdrop-filter: blur(10px);
     }
     .v2-graph-controls .btn { font-size: 11.5px; padding-inline: 9px; }
@@ -1971,7 +1986,7 @@
       background: rgba(5, 8, 18, 0.92); box-shadow: 0 16px 38px rgba(0, 0, 0, 0.42);
     }
     .v2-more-menu.open { display: flex; }
-    .v2-more-menu .btn { justify-content: flex-start; min-width: 118px; border-color: transparent; background: transparent; color: #aebad4; }
+    .v2-more-menu .btn { justify-content: flex-start; min-width: 118px; border-color: transparent; background: transparent; color: #dbe6f8; }
     .v2-more-menu .btn:hover { background: rgba(99, 242, 231, 0.10); border-color: transparent; color: #fff; }
     .v2-dock {
       position: absolute; left: 12px; right: 12px; bottom: 0; z-index: 10; height: 36px;
@@ -1980,23 +1995,37 @@
     }
     .v2-dock.open { height: 194px; }
     .v2-dock-bar {
-      width: 100%; height: 35px; border: 0; background: transparent; color: #aebad4;
+      width: 100%; height: 35px; border: 0; background: transparent; color: #dbe6f8;
       display: flex; align-items: center; justify-content: space-between; padding: 0 12px;
       font: 11px/1 var(--font-mono); cursor: pointer;
     }
-    .v2-dock-body { padding: 0 12px 12px; color: #72819f; font-size: 12px; display: flex; flex-direction: column; min-height: 0; flex: 1; }
+    .v2-dock-body { padding: 0 12px 12px; color: #a6b6d0; font-size: 12px; display: flex; flex-direction: column; min-height: 0; flex: 1; }
     .v2-dock-empty { padding: 18px; border: 1px dashed rgba(190, 214, 255, 0.14); border-radius: 10px; text-align: center; }
     .v2-dock-tabs { display: flex; gap: 5px; padding: 0 0 6px; flex: none; }
-    .v2-dock-tab { height: 24px; padding: 0 10px; border: 1px solid transparent; border-radius: 999px; background: transparent; color: #72819f; font-size: 11px; cursor: pointer; }
+    .v2-dock-tab { height: 24px; padding: 0 10px; border: 1px solid transparent; border-radius: 999px; background: transparent; color: #a6b6d0; font-size: 11px; cursor: pointer; }
     .v2-dock-tab.active { color: #f4cf6a; background: rgba(216, 180, 106, 0.13); border-color: rgba(216, 180, 106, 0.20); }
     .v2-dock-view { flex: 1; min-height: 0; overflow: auto; }
     .v2-dock table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
-    .v2-dock th { position: sticky; top: 0; background: #0b0f1d; color: #72819f; font: 650 9.5px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(190, 214, 255, 0.22); }
-    .v2-dock td { padding: 5px 8px; border-bottom: 1px solid rgba(190, 214, 255, 0.08); color: #aebad4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+    .v2-dock th { position: sticky; top: 0; background: #0b0f1d; color: #a2b4d0; font: 650 9.5px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; text-align: left; padding: 6px 8px; border-bottom: 1px solid rgba(190, 214, 255, 0.22); }
+    .v2-dock td { padding: 5px 8px; border-bottom: 1px solid rgba(190, 214, 255, 0.08); color: #dbe6f8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
     .v2-dock tr { cursor: pointer; }
     .v2-dock tr:hover td, .v2-dock tr.active td { background: rgba(99, 242, 231, 0.08); color: #eef4ff; }
     .v2-dock tr:focus-visible { outline: 2px solid #63f2e7; outline-offset: -2px; }
     .v2-dock-json { margin: 0; padding: 8px 10px; border: 1px solid rgba(190, 214, 255, 0.14); border-radius: 9px; background: rgba(3, 6, 14, 0.7); color: #cfe6ff; font: 11px/1.65 var(--font-mono); white-space: pre-wrap; }
+
+    /* ===== 深空（星尘）舞台浮层：浮动工具条不能只靠 .btn 的 3% 白底，
+       半透明按钮直接压在星点/星云渐变上会发灰、字不够亮。
+       这里给暗底胶囊 + 近白字，与 .v2-hud 保持同一套“浮层比页面更亮”的层级 ===== */
+    [data-theme="dark"] .graph-float-toolbar .btn {
+      background: rgba(9, 13, 26, 0.90); border-color: rgba(190, 214, 255, 0.34); color: #f4f8ff;
+      box-shadow: 0 6px 16px rgba(2, 4, 10, 0.45);
+    }
+    [data-theme="dark"] .graph-float-toolbar .btn:hover:not(:disabled) {
+      background: rgba(20, 34, 52, 0.94); border-color: rgba(114, 220, 210, 0.60); color: #ffffff;
+    }
+    [data-theme="dark"] .graph-float-toolbar .btn.active {
+      background: #e7edf7; border-color: #e7edf7; color: #091714;
+    }
 
     /* ===== 浅色 C（暖石）舞台浮层适配（v3-refinement §A，蓝本未覆盖部分按暖石 token 推导）：
        浮层底 rgba(251,249,244,.94)+blur、边 #c8c0ad/#ddd5c4、文字 #242018/#5d574c/#8a8374、
@@ -3309,9 +3338,12 @@
       .vl-results .empty-placeholder { min-height: 0; padding: 14px 10px; }
       /* 结果表在 390 内换行显示，避免 payload 列被裁到视口外 */
       #vlResultTable { table-layout: fixed; width: 100%; }
-      #vlResultTable th:nth-child(1), #vlResultTable td:nth-child(1) { width: 32px; }
-      #vlResultTable th:nth-child(2), #vlResultTable td:nth-child(2) { width: 58px; }
+      /* 命中身份列（名称/类型/ID/摘要/动作）需要可用宽度；分数列固定窄 */
+      #vlResultTable th:nth-child(1), #vlResultTable td:nth-child(1) { width: 26px; }
+      #vlResultTable th:nth-child(2), #vlResultTable td:nth-child(2) { width: auto; }
       #vlResultTable th:nth-child(3), #vlResultTable td:nth-child(3) { width: 96px; }
+      /* 窄屏：payload 原文列让位给身份卡（摘要仍在身份卡内，详情抽屉有完整 JSON） */
+      #vlResultTable th:nth-child(4), #vlResultTable td:nth-child(4) { display: none; }
       #vlResultTable td { white-space: normal; overflow-wrap: anywhere; word-break: break-word; max-width: none; }
       #vlResultTable .score-bar { display: none; }
     }
@@ -3532,6 +3564,705 @@
       border-top: 1px solid var(--border-color);
       font-size: 10.5px; color: var(--text-light); user-select: none;
     }
+
+    /* ==========================================================
+       V4.1 R2 工作区外壳
+       ----------------------------------------------------------
+       1) 顶栏：品牌 + 查询/图探索/向量主导航 + 连接状态 + 语言/主题
+       2) 左栏：对象 / 历史 / 片段三段，200–340px 拖宽，收起为 64px
+       3) 工作区头：视图标题 + 说明 + 图内搜索
+       4) 当前节点条：跨三个工作区共享上下文
+       5) 待提交条：界面写操作的暂存入口（常驻计数）
+       6) 结果身份卡：节点值以「类型点 + 名称 + id + 摘要 + 维度」呈现
+       所有新选择器都带 r2-/entity-/context- 前缀或直接增强既有类，
+       不改动 V2-MAPPING §4 的测试锚点。
+       ========================================================== */
+    :root {
+      --sidebar-width: 232px;
+      --sidebar-rail-width: 64px;
+      --sidebar-min: 200px;
+      --sidebar-max: 340px;
+    }
+
+    /* ---------- 1. 顶栏 ---------- */
+    header.app-header {
+      gap: 14px;
+      padding-inline: 16px;
+      background: var(--bg-app);
+      border-bottom: 1px solid var(--border-color);
+    }
+    .header-brand {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      flex: none;
+      min-width: 0;
+    }
+    .header-brand .brand-mark { width: 27px; height: 27px; color: var(--text-main); }
+    .header-brand-copy { display: flex; flex-direction: column; min-width: 0; }
+    /* 桌面保留副标题的等宽小字，390 下隐藏（品牌只留 TriviumDB） */
+    .header-brand-copy strong {
+      font-family: var(--font-display);
+      font-size: 15.5px;
+      font-weight: 650;
+      letter-spacing: -0.025em;
+      line-height: 1.15;
+      white-space: nowrap;
+    }
+    .header-brand-copy small {
+      margin-top: 2px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-faint);
+      white-space: nowrap;
+    }
+    /* 主导航直接复用 .tabs-bar/.tab 结构（保留 id/role/roving tabindex 与事件），
+       仅把外观从「页签条」换成顶栏导航。 */
+    .tabs-bar.main-nav {
+      flex: 1;
+      min-width: 0;
+      height: auto;
+      padding: 0;
+      gap: 0;
+      background: transparent;
+      border-bottom: 0;
+      justify-content: flex-start;
+    }
+    .main-nav .tabs-scroll {
+      flex: 0 1 auto;
+      gap: 2px;
+      overflow-x: auto;
+      overflow-y: visible;
+      scrollbar-width: none;
+    }
+    .main-nav .tabs-scroll::-webkit-scrollbar { width: 0; height: 0; }
+    .main-nav .tab {
+      position: relative;
+      flex: none;
+      height: 34px;
+      padding: 0 13px;
+      gap: 7px;
+      border-radius: 8px;
+      font-size: 13px;
+      border: 1px solid transparent;
+    }
+    .main-nav .tab:hover { transform: none; background: var(--hover-wash); }
+    .main-nav .tab.active {
+      background: var(--bg-surface-secondary);
+      border-color: var(--border-color);
+      box-shadow: none;
+    }
+    .header-actions { gap: 6px; }
+    .header-status { margin-left: 0; }
+    /* 语言切换常驻右上角：桌面 + 手机都显示 */
+    .lang-switch {
+      display: flex;
+      gap: 2px;
+      padding: 2px;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: var(--bg-inset);
+      flex: none;
+    }
+    .lang-switch .seg-btn {
+      min-height: 26px;
+      padding: 0 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-muted);
+      background: transparent;
+      border: 0;
+    }
+    .lang-switch .seg-btn:hover { color: var(--text-main); background: var(--hover-wash); }
+    .lang-switch .seg-btn[aria-pressed="true"] {
+      color: var(--text-main);
+      background: var(--bg-surface-secondary);
+      font-weight: 650;
+    }
+
+    /* ---------- 2. 左栏：三段面板 + 拖宽 + rail ---------- */
+    aside.sidebar {
+      position: relative;
+      width: var(--sidebar-width);
+      background: var(--bg-app);
+      min-width: 0;
+      transition: width 180ms var(--ease-out);
+    }
+    body.sidebar-resizing aside.sidebar { transition: none; }
+    .side-head {
+      padding: 12px 12px 10px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: none;
+    }
+    .side-head > svg { color: var(--text-muted); flex: none; }
+    .side-head strong {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .side-head .side-head-tag {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      padding: 1px 6px;
+      border: 1px solid var(--border-color);
+      border-radius: 9999px;
+      color: var(--text-faint);
+      white-space: nowrap;
+    }
+    .side-head #refreshMetaBtn { margin-left: 0; }
+    .side-tabs {
+      display: flex;
+      gap: 3px;
+      padding: 8px 10px 6px;
+      flex: none;
+    }
+    .side-tab {
+      flex: 1;
+      min-width: 0;
+      min-height: 28px;
+      padding: 0 6px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 11.5px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .side-tab:hover { color: var(--text-main); background: var(--hover-wash); }
+    .side-tab[aria-selected="true"] {
+      color: var(--text-main);
+      background: var(--bg-surface-secondary);
+      border-color: var(--border-subtle);
+      font-weight: 600;
+    }
+    .side-panel {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 4px 8px 14px;
+    }
+    .side-panel[hidden] { display: none !important; }
+    .side-foot {
+      flex: none;
+      padding: 8px;
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .side-foot .ot-import { width: 100%; }
+    /* 拖宽命中区：8px，视觉上只在 hover/focus 时显一条 2px 强调线 */
+    .side-resize {
+      position: absolute;
+      top: 0;
+      right: -4px;
+      bottom: 0;
+      width: 9px;
+      z-index: 15;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      cursor: col-resize;
+      touch-action: none;
+    }
+    .side-resize::after {
+      content: '';
+      position: absolute;
+      inset: 0 auto 0 3px;
+      width: 2px;
+      border-radius: 2px;
+      background: transparent;
+      transition: background-color var(--motion-fast) var(--ease-out);
+    }
+    .side-resize:hover::after,
+    .side-resize:focus-visible::after,
+    body.sidebar-resizing .side-resize::after { background: var(--border-focus); opacity: 0.75; }
+    .side-resize:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
+    .rail-navigation { display: none; flex-direction: column; align-items: center; gap: 6px; padding: 10px 0; }
+    .rail-nav-btn {
+      width: 40px;
+      height: 38px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+    .rail-nav-btn:hover { background: var(--hover-wash); color: var(--text-main); }
+    .rail-nav-btn[aria-selected="true"] { background: var(--bg-surface-secondary); color: var(--text-main); border-color: var(--border-subtle); }
+    /* 收起态：64px，只留 rail 导航 + 恢复按钮 */
+    html[data-rail="1"] aside.sidebar { width: var(--sidebar-rail-width); }
+    html[data-rail="1"] .side-head,
+    html[data-rail="1"] .side-tabs,
+    html[data-rail="1"] .side-panel,
+    html[data-rail="1"] .side-resize,
+    html[data-rail="1"] .side-foot .ot-import,
+    html[data-rail="1"] .side-foot .sidebar-toggle-label { display: none; }
+    html[data-rail="1"] .rail-navigation { display: flex; flex: 1; }
+    html[data-rail="1"] .side-foot { border-top: 0; padding-top: 2px; }
+    html[data-rail="1"] .sidebar-toggle { justify-content: center; padding: 7px 0; }
+    /* 现有 .sidebar-toggle 图标在 rail 态翻转（保留旧行为） */
+    .sidebar-toggle { display: flex; align-items: center; gap: 8px; width: 100%; }
+    .sidebar-toggle:hover { background: var(--hover-wash); color: var(--text-main); }
+    .sidebar-toggle svg { flex: none; transition: transform 200ms var(--ease-out); }
+    html[data-rail="1"] .sidebar-toggle svg { transform: rotate(180deg); }
+
+    /* 侧栏历史段：最近条目卡片（点一下只填入） */
+    .side-history-list { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+    .side-history-card {
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 6px 8px 7px;
+      border-radius: 6px;
+    }
+    .side-history-card:hover { background: var(--hover-wash); }
+    .side-history-query {
+      display: block;
+      width: 100%;
+      border: 0;
+      padding: 0;
+      background: none;
+      color: var(--text-main);
+      font-size: 11.5px;
+      line-height: 1.5;
+      text-align: left;
+      cursor: pointer;
+      overflow-wrap: anywhere;
+      max-height: 3.1em;
+      overflow: hidden;
+    }
+    .side-history-query:hover { color: var(--action-bg); }
+    .side-history-card small {
+      display: block;
+      margin-top: 3px;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      color: var(--text-faint);
+    }
+    .side-history-all { margin-top: 8px; width: 100%; justify-content: center; }
+
+    /* ---------- 3. 工作区头 ---------- */
+    .workspace-top {
+      position: relative; /* ≤900 的节点搜索浮层以本行为锚点 */
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 10px 18px;
+      min-height: 56px;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-app);
+    }
+    .workspace-head-copy { min-width: 0; }
+    .workspace-eyebrow {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+      /* 9.5px 小字在浅色暖石底上 text-faint 只有 3.27:1，换 text-light（≥5:1） */
+      color: var(--text-light);
+      margin-bottom: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .workspace-title {
+      font-family: var(--font-display);
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      color: var(--text-main);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .workspace-desc {
+      margin-top: 2px;
+      font-size: 11px;
+      color: var(--text-light);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .workspace-head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: none; }
+
+    /* 结果操作菜单（低频导出/列显隐集中处） */
+    .result-ops { position: relative; display: inline-flex; }
+    .result-ops-menu {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 6px);
+      z-index: 120;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 156px;
+      padding: 6px;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      background: var(--bg-surface);
+      box-shadow: var(--shadow-md);
+    }
+    .result-ops-menu[hidden] { display: none !important; }
+    .result-ops-menu .btn {
+      justify-content: flex-start;
+      border-color: transparent;
+      background: transparent;
+      color: var(--text-main);
+    }
+    .result-ops-menu .btn:hover { background: var(--bg-surface-secondary); }
+
+    /* 向量来源卡与高级参数（主界面只突出来源/数量/运行） */
+    .vl-source-card {
+      margin-bottom: 12px;
+      padding: 10px;
+      border: 1px solid var(--border-focus);
+      border-radius: 8px;
+      background: var(--active);
+    }
+    .vl-source-card[hidden] { display: none !important; }
+    .vl-source-card-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      margin-bottom: 7px;
+      min-width: 0;
+    }
+    .vl-source-card-label { color: var(--text-muted); white-space: nowrap; }
+    .vl-source-card-name {
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .vl-source-card-dim {
+      margin-left: auto;
+      flex: none;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-light);
+    }
+    .vl-source-card .btn { width: 100%; min-height: 26px; font-size: 11px; }
+    .vl-advanced { margin-top: 8px; }
+    .vl-advanced-toggle {
+      cursor: pointer;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      padding: 3px 0;
+    }
+    .vl-advanced-toggle:hover { color: var(--text-main); }
+    .vl-advanced .vl-params { margin-top: 8px; }
+
+    /* ---------- 4. 当前节点条 ---------- */
+    .context-strip {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 42px;
+      padding: 6px 18px;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-surface);
+      font-size: 12px;
+    }
+    .context-label { color: var(--text-light); font-size: 11px; white-space: nowrap; }
+    .context-type-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-light); }
+    .context-name {
+      max-width: 220px;
+      border: 0;
+      padding: 0;
+      background: none;
+      color: var(--text-main);
+      font-size: 12.5px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+    }
+    .context-name:hover { color: var(--action-bg); }
+    .context-meta {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      color: var(--text-light);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 260px;
+    }
+    .context-strip .btn { min-height: 26px; padding: 2px 9px; font-size: 11px; }
+    /* 右侧统一面板是 fixed 360px：外壳的右侧动作必须让位，否则「详情/关系/相似」被面板盖住点不到 */
+    @media (min-width: 901px) {
+      body.panel-open .workspace-top,
+      body.panel-open .context-strip,
+      body.panel-open .pending-bar { padding-right: 372px; }
+    }
+    .context-strip .context-actions { display: flex; gap: 4px; margin-left: auto; flex: none; }
+    .context-clear { padding: 2px 7px; }
+
+    /* ---------- 5. 待提交条 ---------- */
+    .pending-bar {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 42px;
+      padding: 6px 18px;
+      background: var(--active);
+      border-bottom: 1px solid var(--border-color);
+      font-size: 12px;
+    }
+    .pending-bar .pending-count {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 650;
+      color: var(--action-bg);
+      white-space: nowrap;
+    }
+    .pending-bar .pending-hint { color: var(--text-muted); font-size: 11px; }
+    .pending-bar .pending-ops {
+      color: var(--text-light);
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 420px;
+    }
+    .pending-bar .pending-actions { display: flex; gap: 6px; margin-left: auto; flex: none; }
+    .pending-bar .btn { min-height: 27px; padding: 2px 10px; font-size: 11.5px; }
+
+    /* ---------- 6. 结果身份卡 ---------- */
+    .entity-cell { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+    .entity-icon {
+      flex: none;
+      width: 22px;
+      height: 22px;
+      margin-top: 1px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      background: var(--bg-surface-secondary);
+      border: 1px solid var(--border-color);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+    .entity-main { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+    .entity-name {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-main);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 320px;
+    }
+    .entity-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      /* 选中行背景是 --active-wash 叠加，text-light 只有 3.67:1；
+         text-muted 在同底色下 4.77:1（10px 也需要 4.5） */
+      color: var(--text-muted);
+    }
+    .entity-type {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 0 5px;
+      border-radius: 4px;
+      border: 1px solid var(--border-color);
+      color: var(--text-muted);
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .entity-type i { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+    .entity-summary {
+      margin-top: 2px;
+      font-size: 11px;
+      /* 与 entity-meta 同因：选中行底色下需 ≥4.5:1 */
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 340px;
+    }
+    .entity-open {
+      border: 0;
+      padding: 0;
+      background: none;
+      text-align: left;
+      cursor: pointer;
+      color: inherit;
+    }
+    .entity-open:hover .entity-name { color: var(--action-bg); }
+    /* 标量投影的类型小字（值本身仍按服务端返回展示） */
+    .scalar-type {
+      margin-left: 6px;
+      padding: 0 4px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      color: var(--text-faint);
+      vertical-align: 1px;
+    }
+
+    /* ---------- 向量命中：身份 + 分数 + 动作 ---------- */
+    .vl-hit-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .vl-hit-actions { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 2px; }
+    .vl-hit-actions .btn { min-height: 24px; padding: 1px 7px; font-size: 10.5px; }
+    #vlResultTable td { vertical-align: top; }
+    #vlResultTable .vl-hit-name { font-size: 12.5px; font-weight: 600; }
+
+    /* ---------- 写入审阅弹层 ---------- */
+    .review-list { display: flex; flex-direction: column; gap: 10px; }
+    .review-item {
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      background: var(--bg-inset);
+    }
+    .review-item-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .review-item-head .badge { font-size: 9.5px; }
+    .review-item-head strong { font-weight: 600; }
+    .review-item pre {
+      margin: 6px 0 0;
+      padding: 8px 10px;
+      border-radius: 5px;
+      background: var(--bg-app);
+      color: var(--text-muted);
+      font: 11px/1.7 var(--font-mono);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      max-height: 180px;
+      overflow: auto;
+    }
+    .review-empty { color: var(--text-light); font-size: 12px; padding: 18px; text-align: center; }
+
+    /* ---------- 窄屏（≤900 抽屉 / ≤700 紧凑 / ≤520 极窄） ---------- */
+    @media (max-width: 1150px) {
+      /* 平板宽度：顶栏只保留品牌、导航、连接状态、语言与主题图标。
+         教程/文档/AI 文案收成图标，代次徽章隐藏，避免导航被挤压重叠。 */
+      .header-brand-copy small { display: none; }
+      .main-nav .tab { padding-inline: 9px; font-size: 12.5px; }
+      .header-actions .btn span { display: none; }
+      .header-actions a.btn[href="https://triviumdb.com/"] { display: none; }
+      #headerGeneration { display: none; }
+      .context-meta { max-width: 160px; }
+      .pending-bar .pending-ops { max-width: 220px; }
+    }
+    @media (max-width: 900px) {
+      /* 抽屉方向：侧栏覆盖在工作区上（position 必须在此重新声明，
+         否则本文件后面写的桌面 position:relative 会覆盖更早的抽屉规则），隐藏拖宽把手 */
+      aside.sidebar {
+        position: fixed;
+        left: 0;
+        top: var(--header-height);
+        bottom: var(--status-height);
+        width: min(280px, 82vw);
+        z-index: 60;
+        background: var(--bg-app);
+        transform: translateX(-100%);
+        transition: transform 200ms var(--ease-out);
+        box-shadow: var(--shadow-lg);
+      }
+      html[data-sidebar-open="1"] aside.sidebar { transform: translateX(0); }
+      .side-resize { display: none; }
+      html[data-rail="1"] aside.sidebar { width: min(280px, 82vw); }
+      html[data-rail="1"] .side-head,
+      html[data-rail="1"] .side-tabs { display: flex; }
+      html[data-rail="1"] .side-panel { display: block; }
+      html[data-rail="1"] .rail-navigation { display: none; }
+      html[data-rail="1"] .side-foot .ot-import { display: flex; }
+      html[data-rail="1"] .side-foot .sidebar-toggle-label { display: inline; }
+      html[data-rail="1"] .sidebar-toggle { display: none; }
+      .workspace-top { padding: 8px 12px; min-height: 52px; }
+      .workspace-desc { display: none; }
+      .context-strip { padding: 5px 12px; min-height: 40px; }
+      .context-strip .context-actions .btn span { display: none; }
+      .context-name { max-width: 150px; }
+      .pending-bar { padding: 5px 12px; flex-wrap: wrap; gap: 6px; }
+      .pending-bar .pending-ops { max-width: 100%; flex-basis: 100%; }
+    }
+    @media (max-width: 700px) {
+      /* 手机顶栏两行：品牌 + 操作 / 主导航整行（与 R2 稿一致）。
+         抽屉与遮罩仍按 --header-height 定位，因此这里同步改高度变量。 */
+      :root { --header-height: 92px; }
+      header.app-header {
+        flex-wrap: wrap;
+        align-content: flex-start;
+        gap: 4px 8px;
+        padding: 7px 12px 0;
+      }
+      .header-brand { height: 30px; }
+      .header-brand-copy strong { font-size: 14px; }
+      .header-status { display: none; }
+      .tabs-bar.main-nav {
+        order: 3;
+        flex: 0 0 100%;
+        width: 100%;
+        height: 38px;
+        align-self: flex-end;
+      }
+      .main-nav .tabs-scroll { flex: 1; justify-content: space-between; gap: 4px; overflow-x: auto; }
+      .main-nav .tab {
+        flex: 1 1 auto;
+        justify-content: center;
+        font-size: 12px;
+        padding-inline: 6px;
+        height: 32px;
+      }
+
+      .header-actions { gap: 4px; }
+      .header-actions .btn span { display: none; }
+      .header-actions a.btn[href="https://triviumdb.com/"] { display: none; }
+      #headerGeneration { display: none; }
+      .workspace-title { font-size: 14px; }
+      .workspace-top { min-height: 50px; }
+      .context-strip .context-label { display: none; }
+      .entity-summary { max-width: 200px; }
+      /* 查询工具条在窄屏允许换行，避免右侧导出/列按钮被裁到视口外 */
+      .editor-toolbar { flex-wrap: wrap; row-gap: 6px; }
+      .toolbar-right { flex-wrap: wrap; }
+    }
+    @media (max-width: 520px) {
+      .header-brand-copy { display: none; }
+      .header-actions { gap: 3px; }
+      .main-nav .tab { padding-inline: 5px; gap: 5px; }
+      .main-nav .tab svg { display: none; }
+      .context-strip .context-actions { gap: 2px; }
+    }
   </style>
   <script>
     // 首屏前置：侧栏 rail 与界面语言在样式生效前恢复，避免展开态闪一下再收起
@@ -3617,7 +4348,35 @@
   <!-- 顶部导航栏 -->
   <header class="app-header">
     <h1 class="sr-only">TriviumDB Web Console</h1>
-    <div class="header-view-name" id="headerViewName">图与向量探索器</div>
+    <!-- 品牌回到顶栏：左栏不再承担「第二套同级导航」的品牌与模式入口 -->
+    <div class="header-brand">
+      <svg class="brand-mark" aria-hidden="true"><use href="#icon-brand"></use></svg>
+      <div class="header-brand-copy">
+        <strong>TriviumDB</strong>
+        <small data-i18n="header.tagline">Web Console</small>
+      </div>
+    </div>
+
+    <!-- 唯一一套主工作区导航：查询 / 图探索 / 向量。
+         结构沿用既有 .tabs-bar/.tab（id、role=tab、roving tabindex、data-tab 全部不变），
+         只把外观与位置搬到顶栏；查询结果图与独立图探索仍是两个不同 pane。 -->
+    <nav class="tabs-bar main-nav" aria-label="主工作区" data-i18n-aria-label="tabs.aria">
+      <div class="tabs-scroll" role="tablist" aria-label="工作台标签页" data-i18n-aria-label="tabs.aria">
+        <div class="tab active" data-tab="queryPane" data-action="quick-find" role="tab" id="tab-queryPane" aria-controls="queryPane" aria-selected="true" tabindex="0">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          <span data-i18n="tabs.query">TQL 查询控制台</span>
+        </div>
+        <div class="tab" data-tab="graphExplorePane" data-action="quick-match" role="tab" id="tab-graphExplorePane" aria-controls="graphExplorePane" aria-selected="false" tabindex="-1">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/></svg>
+          <span data-i18n="tabs.graph">独立图拓扑探索</span>
+        </div>
+        <div class="tab" data-tab="vectorLabPane" data-action="quick-search" role="tab" id="tab-vectorLabPane" aria-controls="vectorLabPane" aria-selected="false" tabindex="-1">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="4" y1="20" x2="12" y2="12"/><line x1="12" y1="12" x2="20" y2="4"/><circle cx="4" cy="20" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="20" cy="4" r="2"/></svg>
+          <span data-i18n="tabs.vector">向量检索</span>
+        </div>
+      </div>
+    </nav>
+
     <div class="header-status">
       <span id="connStatus" class="status-badge">
         <span class="status-dot"></span>
@@ -3632,6 +4391,11 @@
         data-i18n-aria-label="sidebar.open" data-i18n-title="sidebar.open">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="6.5" x2="20" y2="6.5"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17.5" x2="20" y2="17.5"/></svg>
       </button>
+      <!-- 界面语言：右上角常驻（桌面与手机都可见） -->
+      <div class="lang-switch seg" role="group" aria-label="界面语言" data-i18n-aria-label="sidebar.langAria">
+        <button class="seg-btn lang-btn" type="button" data-lang="zh" aria-pressed="true" data-i18n="lang.zh">中文</button>
+        <button class="seg-btn lang-btn" type="button" data-lang="en" aria-pressed="false" data-i18n="lang.en">英文</button>
+      </div>
       <button class="btn btn-quiet" id="openTutorialBtn"
         aria-label="打开可视化教程" data-i18n-aria-label="header.tutorialAria">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -3658,42 +4422,42 @@
     <div class="sidebar-scrim" id="sidebarScrim"></div>
     <!-- 左侧对象导航树 (Navicat 风格对象管理器) -->
     <aside class="sidebar">
-      <div class="sidebar-header sidebar-brand">
-        <div class="sidebar-brand-main">
-          <svg class="brand-mark" aria-hidden="true"><use href="#icon-brand"></use></svg>
-          <div class="sidebar-brand-copy">
-            <strong>TriviumDB</strong>
-          </div>
-        </div>
+      <div class="side-head">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="3"/><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"/><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"/></svg>
+        <strong data-i18n="sidebar.browser">数据浏览器</strong>
+        <span class="side-head-tag">DB</span>
         <button class="btn" id="refreshMetaBtn" style="padding: 2px 6px;" title="刷新元数据" data-i18n-title="sidebar.refresh">
           <svg width="14" height="14" aria-hidden="true"><use href="#icon-refresh"></use></svg>
         </button>
       </div>
-      <div class="sidebar-content">
-        <div class="sidebar-nav-label" data-i18n="sidebar.title">对象导航</div>
-        <div class="nav-section-title" data-i18n="sidebar.group.engine">三模数据引擎</div>
-        <div class="nav-item active" data-action="quick-find">
-          <div class="nav-item-left">
-            <svg class="nav-item-icon" aria-hidden="true"><use href="#icon-document"></use></svg>
-            <span data-i18n="sidebar.item.documents">文档</span>
-          </div>
-          <span class="badge" id="docCountBadge">FIND</span>
-        </div>
-        <div class="nav-item" data-action="quick-match">
-          <div class="nav-item-left">
-            <svg class="nav-item-icon" aria-hidden="true"><use href="#icon-graph"></use></svg>
-            <span data-i18n="sidebar.item.graph">图拓扑</span>
-          </div>
-          <span class="badge">MATCH</span>
-        </div>
-        <div class="nav-item" data-action="quick-search">
-          <div class="nav-item-left">
-            <svg class="nav-item-icon" aria-hidden="true"><use href="#icon-vector"></use></svg>
-            <span data-i18n="sidebar.item.vector">向量与 QuIVer</span>
-          </div>
-          <span class="badge">SEARCH</span>
-        </div>
 
+      <!-- rail 态（64px）导航：对象 / 历史 / 片段；点击展开侧栏并切到对应段 -->
+      <div class="rail-navigation" id="railNavigation" role="tablist" aria-orientation="vertical" aria-label="侧栏导航">
+        <button class="rail-nav-btn" id="railObjectsBtn" type="button" role="tab" data-side-rail="objects"
+          title="数据对象" data-i18n-title="sidebar.tab.objects" aria-label="数据对象" data-i18n-aria-label="sidebar.tab.objects">
+          <svg width="17" height="17" aria-hidden="true"><use href="#icon-database"></use></svg>
+        </button>
+        <button class="rail-nav-btn" id="railHistoryBtn" type="button" role="tab" data-side-rail="history"
+          title="查询历史" data-i18n-title="sidebar.tab.history" aria-label="查询历史" data-i18n-aria-label="sidebar.tab.history">
+          <svg width="17" height="17" aria-hidden="true"><use href="#icon-history"></use></svg>
+        </button>
+        <button class="rail-nav-btn" id="railSnippetsBtn" type="button" role="tab" data-side-rail="snippets"
+          title="代码片段" data-i18n-title="sidebar.tab.snippets" aria-label="代码片段" data-i18n-aria-label="sidebar.tab.snippets">
+          <svg width="17" height="17" aria-hidden="true"><use href="#icon-snippets"></use></svg>
+        </button>
+      </div>
+
+      <div class="side-tabs" role="tablist" aria-label="侧栏内容" data-i18n-aria-label="sidebar.tabsAria">
+        <button class="side-tab" type="button" role="tab" data-side-tab="objects" aria-selected="true" tabindex="0"
+          aria-controls="sidePanelObjects" data-i18n="sidebar.tab.objects">对象</button>
+        <button class="side-tab" type="button" role="tab" data-side-tab="history" aria-selected="false" tabindex="-1"
+          aria-controls="sidePanelHistory" data-i18n="sidebar.tab.history">历史</button>
+        <button class="side-tab" type="button" role="tab" data-side-tab="snippets" aria-selected="false" tabindex="-1"
+          aria-controls="sidePanelSnippets" data-i18n="sidebar.tab.snippets">片段</button>
+      </div>
+
+      <!-- 段 1：数据对象（类型 / 边标签 / 索引 / 向量） -->
+      <div class="side-panel sidebar-content" id="sidePanelObjects" role="tabpanel" aria-label="数据对象">
         <div class="nav-section-title ot-title">
           <span data-i18n="sidebar.group.data">数据对象</span>
           <button class="ot-refresh" id="objectTreeRefresh" type="button"
@@ -3705,20 +4469,11 @@
         <div class="object-tree" id="objectTree" aria-live="polite">
           <div class="ot-state" id="objectTreeState">加载中…</div>
         </div>
-        <!-- rail 态：对象树整体隐藏，只留这个图标入口（点击展开侧栏并把对象树滚进视野） -->
-        <button class="rail-objects-btn" id="railObjectsBtn" type="button"
-          title="数据对象" data-i18n-title="sidebar.group.data"
-          aria-label="对象树" data-i18n-aria-label="sidebar.objectsOpen">
-          <svg width="17" height="17" aria-hidden="true"><use href="#icon-database"></use></svg>
-        </button>
-        <!-- 注意：data-i18n 只挂在文案 span 上。挂在 button 上会把 textContent 整体覆盖，
-             既吞掉 ＋ 图标，也让 rail 态无法单独隐藏文案（只剩竖排文字）。 -->
-        <button class="ot-row ot-import" id="openImportBtn" type="button"
-          data-i18n-title="import.openTitle" title="导入 CSV / JSONL 数据">
-          <span class="ot-plus" aria-hidden="true">＋</span>
-          <span class="ot-row-name" data-i18n="import.open">导入数据…</span>
-        </button>
+        <div class="nav-section-hint" data-i18n="sidebar.objectsHint">点行只填入查询；行尾 ▶ 才执行。计数为有界采样的「样本」。</div>
+      </div>
 
+      <!-- 段 2：查询历史（入口弹层 + 最近条目快捷动作） -->
+      <div class="side-panel sidebar-content" id="sidePanelHistory" role="tabpanel" aria-label="查询历史" hidden>
         <div class="nav-section-title" data-i18n="sidebar.group.history">查询历史</div>
         <div class="nav-item" id="historyNavItem" data-action="open-history" role="button" tabindex="0"
           aria-haspopup="dialog" data-i18n-title="history.openTitle" title="查看查询历史">
@@ -3728,7 +4483,12 @@
           </div>
           <span class="badge" id="historyCountBadge">0</span>
         </div>
+        <div class="nav-section-hint" data-i18n="sidebar.historyHint">搜索、查看元信息，或只填入编辑器后再决定运行。</div>
+        <div class="side-history-list" id="sideHistoryList"></div>
+      </div>
 
+      <!-- 段 3：代码片段（点击只填入，不执行） -->
+      <div class="side-panel sidebar-content" id="sidePanelSnippets" role="tabpanel" aria-label="代码片段" hidden>
         <div class="nav-section-title" data-i18n="sidebar.group.snippets">常用代码片段</div>
         <div class="nav-section-hint" data-i18n="sidebar.group.snippetsHint">点击填入编辑器，不会自动执行</div>
         <div class="nav-item" data-snippet='FIND {type: "person"} RETURN * LIMIT 20'>
@@ -3761,16 +4521,29 @@
             <span data-i18n="sidebar.item.explain">剖析执行计划</span>
           </div>
         </div>
-
-      </div>
-      <div class="sidebar-footer">
-        <div class="sidebar-lang" role="group" aria-label="界面语言" data-i18n-aria-label="sidebar.langAria">
-          <span class="sidebar-lang-label" data-i18n="sidebar.lang">界面语言</span>
-          <div class="seg" role="group">
-            <button class="seg-btn lang-btn" type="button" data-lang="zh" aria-pressed="true">中文</button>
-            <button class="seg-btn lang-btn" type="button" data-lang="en" aria-pressed="false">English</button>
+        <!-- 原侧栏「向量与 QuIVer」入口的示例写入能力保留在片段段：显式点击才写入编辑器 -->
+        <div class="nav-item" data-action="insert-vector-sample" role="button" tabindex="0">
+          <div class="nav-item-left">
+            <svg class="nav-item-icon" aria-hidden="true"><use href="#icon-vector"></use></svg>
+            <span data-i18n="sidebar.item.vectorSample">插入向量检索示例</span>
           </div>
         </div>
+      </div>
+
+      <!-- 调宽分隔线：真实鼠标拖动 + 键盘左右键/Home/End，aria-valuenow 同步 -->
+      <div class="side-resize" id="sidebarResize" role="separator" tabindex="0"
+        aria-orientation="vertical" aria-label="调整侧栏宽度"
+        data-i18n-aria-label="sidebar.resizeAria"
+        aria-valuemin="200" aria-valuemax="340" aria-valuenow="232"></div>
+
+      <div class="side-foot sidebar-footer">
+        <!-- 注意：data-i18n 只挂在文案 span 上。挂在 button 上会把 textContent 整体覆盖，
+             既吞掉 ＋ 图标，也让 rail 态无法单独隐藏文案（只剩竖排文字）。 -->
+        <button class="ot-row ot-import" id="openImportBtn" type="button"
+          data-i18n-title="import.openTitle" title="导入 CSV / JSONL 数据">
+          <span class="ot-plus" aria-hidden="true">＋</span>
+          <span class="ot-row-name" data-i18n="import.open">导入数据…</span>
+        </button>
         <button class="sidebar-toggle" id="sidebarRailToggle" type="button" aria-expanded="true" title="收起侧栏 (Ctrl+B)">
           <svg width="14" height="14" aria-hidden="true"><use href="#icon-collapse"></use></svg>
           <span class="sidebar-toggle-label" data-i18n="sidebar.collapse">收起侧栏</span>
@@ -3778,39 +4551,61 @@
       </div>
     </aside>
 
-    <!-- 中央多标签页工作台 -->
+    <!-- 中央工作区：三个 pane（查询 / 图探索 / 向量）共享外层的标题、当前节点与待提交条 -->
     <main class="workspace">
-      <!-- 标签栏（键盘可达：role=tab + tabindex + aria-selected，激活在 setupTabs） -->
-      <div class="tabs-bar">
-        <div class="tabs-scroll" role="tablist" aria-label="工作台标签页" data-i18n-aria-label="tabs.aria">
-          <div class="tab active" data-tab="queryPane" role="tab" id="tab-queryPane" aria-controls="queryPane" aria-selected="true" tabindex="0">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-            <span data-i18n="tabs.query">TQL 查询控制台</span>
-          </div>
-          <div class="tab" data-tab="graphExplorePane" role="tab" id="tab-graphExplorePane" aria-controls="graphExplorePane" aria-selected="false" tabindex="0">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/></svg>
-            <span data-i18n="tabs.graph">独立图拓扑探索</span>
-          </div>
-          <div class="tab" data-tab="vectorLabPane" role="tab" id="tab-vectorLabPane" aria-controls="vectorLabPane" aria-selected="false" tabindex="0">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="20" x2="12" y2="12"/><line x1="12" y1="12" x2="20" y2="4"/><circle cx="4" cy="20" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="20" cy="4" r="2"/></svg>
-            <span data-i18n="tabs.vector">向量检索</span>
+      <!-- 工作区头：标题随主标签变化；图内搜索仍使用同一个输入框（≤900 由按钮展开） -->
+      <div class="workspace-top" id="workspaceTop">
+        <div class="workspace-head-copy">
+          <div class="workspace-eyebrow" data-i18n="workspace.eyebrow">TriviumDB · Web Console</div>
+          <div class="workspace-title" id="headerViewName">TQL 查询控制台</div>
+          <div class="workspace-desc" id="workspaceDesc" data-i18n="workspace.desc.query">任意 TQL 投影与聚合都按原列名展示；节点值附带身份摘要。</div>
+        </div>
+        <div class="workspace-head-actions">
+          <button class="btn node-search-toggle" id="nodeSearchToggle" type="button"
+            aria-label="搜索图内节点" data-i18n-aria-label="header.searchAria"
+            title="搜索图内节点" data-i18n-title="header.searchAria"
+            aria-expanded="false" aria-controls="nodeSearchWrap">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+          </button>
+          <div class="node-search-wrap" id="nodeSearchWrap">
+            <input class="node-search-input" id="nodeSearchInput" type="text" placeholder="搜索节点… (图内)"
+              data-i18n-placeholder="header.search" data-i18n-aria-label="header.searchAria"
+              autocomplete="off" spellcheck="false" aria-label="搜索图内节点"
+              role="combobox" aria-autocomplete="list" aria-haspopup="listbox"
+              aria-expanded="false" aria-controls="nodeSearchResults" aria-activedescendant="">
+            <div class="node-search-results" id="nodeSearchResults" role="listbox" aria-label="节点搜索结果" data-i18n-aria-label="header.searchResultsAria" hidden></div>
           </div>
         </div>
-        <!-- 图内节点搜索：放在 tab 行右侧，避免顶栏出现两段无锚点的浮空控件。
-             ≤900 时由 #nodeSearchToggle 展开为同一输入框的浮层（不复制 DOM）。 -->
-        <button class="btn node-search-toggle" id="nodeSearchToggle" type="button"
-          aria-label="搜索图内节点" data-i18n-aria-label="header.searchAria"
-          title="搜索图内节点" data-i18n-title="header.searchAria"
-          aria-expanded="false" aria-controls="nodeSearchWrap">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
-        </button>
-        <div class="node-search-wrap" id="nodeSearchWrap">
-          <input class="node-search-input" id="nodeSearchInput" type="text" placeholder="搜索节点… (图内)"
-            data-i18n-placeholder="header.search" data-i18n-aria-label="header.searchAria"
-            autocomplete="off" spellcheck="false" aria-label="搜索图内节点"
-            role="combobox" aria-autocomplete="list" aria-haspopup="listbox"
-            aria-expanded="false" aria-controls="nodeSearchResults" aria-activedescendant="">
-          <div class="node-search-results" id="nodeSearchResults" role="listbox" aria-label="节点搜索结果" data-i18n-aria-label="header.searchResultsAria" hidden></div>
+      </div>
+
+      <!-- 当前节点条：三个工作区共享同一上下文；只做定位/带入，不覆盖各自的查询与结果。
+           常驻占位（空态显示提示）——否则第一次选中节点会把这行撑开 42px，
+           刚点过的结果单元格整行下移，双击编辑的第二次点击会落空。 -->
+      <div class="context-strip" id="contextStrip">
+        <span class="context-label" data-i18n="context.label">当前节点</span>
+        <span class="context-type-dot" id="contextTypeDot"></span>
+        <button class="context-name" id="contextName" type="button"
+          data-i18n-title="context.openTitle" title="打开节点详情" disabled>—</button>
+        <span class="context-meta" id="contextMeta"></span>
+        <div class="context-actions" id="contextActions" hidden>
+          <button class="btn btn-quiet" id="contextDetailBtn" type="button" data-i18n="context.detail">详情</button>
+          <button class="btn btn-quiet" id="contextGraphBtn" type="button" data-i18n="context.graph">探索关系</button>
+          <button class="btn btn-quiet" id="contextVectorBtn" type="button" data-i18n="context.vector">查找相似</button>
+          <button class="btn btn-quiet context-clear" id="contextClearBtn" type="button"
+            aria-label="清除当前节点" data-i18n-aria-label="context.clear" data-i18n-title="context.clear" title="清除当前节点">✕</button>
+        </div>
+      </div>
+
+      <!-- 待提交条：界面写操作（编辑 / 删除 / 导入）暂存后的常驻入口。
+           TQL 写语句走单语句接口，不进入此队列（见工具栏写入模式说明）。 -->
+      <div class="pending-bar" id="txBar" hidden>
+        <span class="pending-count" id="txCount"></span>
+        <span class="pending-hint" data-i18n="tx.pendingHint">项界面修改待提交</span>
+        <span class="pending-ops" id="txSummary"></span>
+        <div class="pending-actions">
+          <button class="btn" id="txReviewBtn" type="button" data-i18n="tx.review">审阅差异</button>
+          <button class="btn" id="txRollbackBtn" type="button" data-i18n="tx.rollback">放弃</button>
+          <button class="btn btn-primary" id="txCommitBtn" type="button" data-i18n="tx.commit">提交</button>
         </div>
       </div>
 
@@ -3821,11 +4616,6 @@
           <div class="query-tabs-list" id="queryTabsList" role="tablist" aria-label="查询标签"></div>
           <button class="query-tab-add" id="queryTabAddBtn" type="button"
             title="新建查询标签 (Ctrl+T)" data-i18n-title="queryTabs.addTitle" data-i18n-aria-label="queryTabs.add" aria-label="新建查询标签">＋</button>
-          <span class="tx-bar" id="txBar" hidden>
-            <span class="tx-count" id="txCount"></span>
-            <button class="btn" id="txCommitBtn" type="button" data-i18n="tx.commit">提交</button>
-            <button class="btn" id="txRollbackBtn" type="button" data-i18n="tx.rollback">回滚</button>
-          </span>
         </div>
 
         <div class="editor-toolbar">
@@ -3842,18 +4632,30 @@
             <label class="checkbox-label" title="返回耗时剖析指标" data-i18n-title="toolbar.profileTitle">
               <input type="checkbox" id="profileCheck" checked> <span data-i18n="toolbar.profile">剖析</span>
             </label>
-            <label class="checkbox-label" title="事务模式：编辑/删除/导入先暂存，提交时一次原子生效"
+            <!-- 界面写操作默认先进入审阅队列：普通用户不会因为一次双击就把数据改掉。
+                 关掉后编辑/删除/导入立即写库（保留原有直接执行路径）。 -->
+            <label class="checkbox-label" title="写入审阅（默认）：编辑/删除/导入先暂存，提交时一次原子生效；关闭则立即写库"
               data-i18n-title="tx.modeTitle">
-              <input type="checkbox" id="txModeCheck"> <span data-i18n="tx.mode">事务</span>
+              <input type="checkbox" id="txModeCheck" checked> <span data-i18n="tx.mode">审阅</span>
             </label>
           </div>
           <div class="toolbar-right">
+            <!-- 主操作留在工具条：美化 / 清空是编辑器动作 -->
             <button class="btn" id="formatTqlBtn" title="格式化查询文本" data-i18n="toolbar.format" data-i18n-title="toolbar.formatTitle">美化 TQL</button>
             <button class="btn" id="clearEditorBtn" title="清空编辑器" data-i18n="toolbar.clear" data-i18n-title="toolbar.clearTitle">清空</button>
-            <button class="btn" id="exportJsonBtn" title="导出当前结果为 JSON" data-i18n="toolbar.export" data-i18n-title="toolbar.exportTitle">导出 JSON</button>
-            <button class="btn" id="exportCsvBtn" title="按当前表格（含排序）导出 CSV（UTF-8 BOM）" data-i18n="toolbar.exportCsv" data-i18n-title="toolbar.exportCsvTitle">导出 CSV</button>
-            <button class="btn" id="gridColumnsBtn" type="button" aria-haspopup="true" aria-expanded="false"
-              title="选择显示哪些列" data-i18n="grid.columns" data-i18n-title="grid.columnsTitle">列</button>
+            <!-- 低频结果操作收进菜单：导出 JSON / 导出 CSV / 列显隐（id 与事件全部保留） -->
+            <div class="result-ops">
+              <button class="btn" id="resultOpsBtn" type="button" aria-haspopup="true" aria-expanded="false"
+                title="结果操作：导出与列显隐" data-i18n-title="results.opsTitle">
+                <span data-i18n="results.ops">结果操作</span> ▾
+              </button>
+              <div class="result-ops-menu" id="resultOpsMenu" role="menu" hidden>
+                <button class="btn" id="exportJsonBtn" role="menuitem" title="导出当前结果为 JSON" data-i18n="toolbar.export" data-i18n-title="toolbar.exportTitle">导出 JSON</button>
+                <button class="btn" id="exportCsvBtn" role="menuitem" title="按当前表格（含排序）导出 CSV（UTF-8 BOM）" data-i18n="toolbar.exportCsv" data-i18n-title="toolbar.exportCsvTitle">导出 CSV</button>
+                <button class="btn" id="gridColumnsBtn" role="menuitem" type="button" aria-haspopup="true" aria-expanded="false"
+                  title="选择显示哪些列" data-i18n="grid.columns" data-i18n-title="grid.columnsTitle">列</button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -3888,7 +4690,7 @@
                 <table class="data-grid" id="gridTable">
                   <thead><tr id="gridHead"><th class="grid-sel-th"></th><th>#</th><th data-i18n="results.col.data">数据</th></tr></thead>
                   <tbody id="gridBody">
-                    <tr><td colspan="2">
+                    <tr><td colspan="3">
                       <div class="empty-cta">
                         <svg class="result-empty-icon" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
                         <div class="result-empty-title" data-i18n="results.empty.title">还没有查询结果</div>
@@ -4079,8 +4881,17 @@
                 <button class="vl-source-tab" id="vlSourceTabJson" type="button" aria-pressed="false" data-i18n="vector.sourceJson">② 粘贴 JSON</button>
               </div>
 
-              <!-- 来源 1：节点选择器（主入口） -->
+              <!-- 来源 1：节点选择器（主入口）。
+                   当前节点条带入的上下文显示在顶部来源卡；没有向量时如实说明并引导换来源。 -->
               <div id="vlSourceNode" class="vl-source-body">
+                <div class="vl-source-card" id="vlSourceCard" hidden>
+                  <div class="vl-source-card-head">
+                    <span class="vl-source-card-label" data-i18n="vector.contextSource">当前节点</span>
+                    <span class="vl-source-card-name" id="vlSourceCardName"></span>
+                    <span class="vl-source-card-dim" id="vlSourceCardDim"></span>
+                  </div>
+                  <button class="btn" id="vlUseContextBtn" type="button" data-i18n="vector.useContext">用当前节点向量</button>
+                </div>
                 <label class="vl-label" for="vlSelectorQuery" data-i18n="vector.selectorLabel">候选节点筛选 TQL</label>
                 <input class="vl-input" id="vlSelectorQuery" value='FIND {type: "person"} RETURN * LIMIT 50' spellcheck="false">
                 <button class="btn" id="vlLoadCandidatesBtn" data-i18n="vector.load">加载候选节点</button>
@@ -4098,15 +4909,21 @@
                 <div class="vl-hint vl-hint--neutral" id="vlDimHint" data-i18n="vector.dimHint">维度校验：选中节点后以该节点 vector 维度为准，否则以服务端返回为准</div>
               </div>
 
-              <!-- 检索参数 -->
+              <!-- 检索参数：主界面只突出来源 + 返回数量；min_score 收进高级区域（默认值与合法范围不变） -->
               <div class="vl-params">
-                <label class="vl-param">top_k
+                <label class="vl-param"><span data-i18n="vector.topKLabel">返回数量 top_k</span>
                   <input class="vl-input" id="vlTopK" type="number" min="1" max="10000" value="10">
                 </label>
-                <label class="vl-param">min_score
-                  <input class="vl-input" id="vlMinScore" type="number" step="0.05" value="-1">
-                </label>
               </div>
+              <details class="vl-advanced" id="vlAdvanced">
+                <summary class="vl-advanced-toggle" data-i18n="vector.advanced">高级参数</summary>
+                <div class="vl-params">
+                  <label class="vl-param">min_score
+                    <input class="vl-input" id="vlMinScore" type="number" step="0.05" value="-1">
+                  </label>
+                </div>
+                <div class="vl-hint vl-hint--neutral" data-i18n="vector.minScoreHelp">默认 -1 表示不过滤。分数是后端原始返回值（融合分），不是概率或置信度。</div>
+              </details>
             </div>
             <button class="btn btn-primary vl-run-btn" id="vlRunBtn" data-i18n="vector.run">▶ 向量检索</button>
           </section>
@@ -4124,8 +4941,15 @@
             <div class="vl-error" id="vlSearchError" hidden></div>
             <div class="vl-table-scroll" tabindex="0" role="region"
               aria-label="向量检索结果（可横向滚动）" data-i18n-aria-label="vector.resultsAria">
+              <!-- 列语义：排名 / 命中节点身份（名称·类型·ID·摘要·动作）/ 原始分数 / payload -->
               <table class="data-grid" id="vlResultTable" hidden>
-                <thead><tr><th>#</th><th>id</th><th>score</th><th>payload</th></tr></thead>
+                <!-- 身份列含可读摘要；payload 列保留原始 JSON（复制/核对用，窄屏隐藏） -->
+                <thead><tr>
+                  <th data-i18n="vector.col.rank">#</th>
+                  <th data-i18n="vector.col.hit">命中节点</th>
+                  <th data-i18n="vector.col.score">score</th>
+                  <th data-i18n="vector.col.payload">payload</th>
+                </tr></thead>
                 <tbody id="vlResultBody"></tbody>
               </table>
               <div class="empty-placeholder" id="vlEmpty">
@@ -4363,8 +5187,8 @@
   <div class="import-overlay" id="payloadEditor" hidden>
     <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="payloadEditorTitle">
       <div class="import-header">
-        <h2 id="payloadEditorTitle">编辑 payload</h2>
-        <button class="btn btn-quiet" id="payloadEditorClose" type="button" aria-label="关闭" title="关闭">✕</button>
+        <h2 id="payloadEditorTitle" data-i18n="payload.title">编辑 payload</h2>
+        <button class="btn btn-quiet" id="payloadEditorClose" type="button" aria-label="关闭" data-i18n-aria-label="common.close" data-i18n-title="common.close" title="关闭">✕</button>
       </div>
       <div class="import-body">
         <p class="import-hint" data-i18n="payload.hint">保存会用这里的 JSON 整体替换该节点的 payload（不是合并）。</p>
@@ -4375,6 +5199,27 @@
         <span class="import-status" id="payloadEditorStatus"></span>
         <button class="btn" id="payloadEditorCancel" type="button" data-i18n="import.cancel">取消</button>
         <button class="btn btn-primary" id="payloadEditorSave" type="button" data-i18n="payload.save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 写入审阅弹层：列出暂存的界面写操作、目标与前后差异；提交走 /v1/transactions -->
+  <div class="import-overlay" id="txReviewOverlay" hidden>
+    <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="txReviewTitle">
+      <div class="import-header">
+        <h2 id="txReviewTitle" data-i18n="tx.reviewTitle">审阅待提交的修改</h2>
+        <button class="btn btn-quiet" id="txReviewClose" type="button"
+          aria-label="关闭审阅" data-i18n-aria-label="common.close" data-i18n-title="common.close" title="关闭">✕</button>
+      </div>
+      <div class="import-body">
+        <p class="import-hint" data-i18n="tx.reviewHint">这些修改尚未写入数据库。提交时通过现有原子事务接口一次生效；放弃不写库。</p>
+        <div class="review-list" id="txReviewList"></div>
+      </div>
+      <div class="import-footer">
+        <span class="import-status" id="txReviewStatus"></span>
+        <button class="btn" id="txReviewCancelBtn" type="button" data-i18n="tx.keepStaged">返回</button>
+        <button class="btn" id="txReviewDiscardBtn" type="button" data-i18n="tx.discard">放弃这些修改</button>
+        <button class="btn btn-primary" id="txReviewCommitBtn" type="button" data-i18n="tx.commit">提交</button>
       </div>
     </div>
   </div>
@@ -4567,8 +5412,10 @@
       'ot.indexes': '索引',
       'ot.vector': '向量',
       'ot.vectorShort': '维度与索引',
+      'ot.unlabeled': '(未标注)',
       'ot.labelEmpty': '暂无边标签',
       'ot.sample': '样本 {n}',
+      'ot.sampleWithLimit': '样本 {n}（上限 {limit}）',
       'ot.nodes': '{n} 个节点',
       'ot.edgesCount': '{n} 条边',
       'ot.dim': '{n} 维',
@@ -4787,8 +5634,10 @@
       'ot.indexes': 'Indexes',
       'ot.vector': 'Vectors',
       'ot.vectorShort': 'Dimension & index',
+      'ot.unlabeled': '(unlabeled)',
       'ot.labelEmpty': 'No edge labels',
       'ot.sample': 'sample {n}',
+      'ot.sampleWithLimit': 'sample {n} (limit {limit})',
       'ot.nodes': '{n} nodes',
       'ot.edgesCount': '{n} edges',
       'ot.dim': '{n}-dim',
@@ -5297,8 +6146,13 @@
         'payload.notObject': 'payload 必须是 JSON 对象',
         'payload.saving': '保存中…',
         'payload.fields': '当前 payload 共 {n} 个字段',
+        'payload.preview': '整体替换预览：{total} 个字段 · 未修改 {same} · 修改 {changed} · 新增 {added} · 删除 {removed}',
+        'payload.previewInvalid': '当前文本不是合法 JSON 对象；保存前会报错，未修改的字段也不会丢。',
         'notice.rowLimit': '结果达到服务端行数上限 (10000)，可能被截断，建议增加 LIMIT 或使用属性投影',
         'common.closePrompt': '关闭提示',
+        'common.close': '关闭',
+        'lang.zh': '中文',
+        'lang.en': '英文',
         'tutorial.closeAria': '关闭教程',
         'ai.settingsCloseAria': '关闭 AI 设置',
         'gt.closeAria': '关闭 TQL 输入',
@@ -5321,6 +6175,84 @@
         'toast.injected': '注入完成（{count} 条语句），可直接运行第 2 / 3 关的查询',
         'toast.injectPartial': '注入完成 {ok}/{total}，部分语句失败请查看服务端日志',
         'tutorial.title': 'TriviumDB 三模数据库可视化实战教程',
+
+        /* V4.1 R2：统一外壳 / 侧栏 / 当前节点 / 写入审阅 */
+        'header.tagline': 'Web Console',
+        'sidebar.browser': '数据浏览器',
+        'sidebar.tab.objects': '对象',
+        'sidebar.tab.history': '历史',
+        'sidebar.tab.snippets': '片段',
+        'sidebar.tabsAria': '侧栏内容',
+        'sidebar.objectsHint': '点行只填入查询；行尾 ▶ 才执行。计数是「有界采样」的样本数，不是全库总数。',
+        'sidebar.historyHint': '最近条目点一下只填入编辑器，运行需要显式确认。',
+        'sidebar.resizeAria': '调整侧栏宽度',
+        'sidebar.resizeValue': '{n} 像素',
+        'sidebar.item.vectorSample': '插入向量检索示例',
+        'workspace.eyebrow': 'TriviumDB · Web Console',
+        'workspace.desc.query': '任意 TQL 投影、聚合与多节点列都按原列名展示；节点值附带身份摘要。',
+        'workspace.desc.graph': '收敛的节点视觉与上下文标签；悬停/选中增强关系，其余保持可发现。',
+        'workspace.desc.vector': '从当前节点或 JSON 取查询向量，看真实分数并继续打开节点或关系。',
+        'results.ops': '结果操作',
+        'results.opsTitle': '结果操作：导出与列显隐',
+        'vector.col.rank': '#',
+        'vector.col.hit': '命中节点',
+        'vector.col.score': 'score',
+        'vector.col.payload': 'payload',
+        'vector.topKLabel': '返回数量 top_k',
+        'vector.advanced': '高级参数',
+        'vector.minScoreHelp': '默认 -1 表示不过滤。分数是后端原始返回值（融合分），不是概率或置信度。',
+        'vector.contextSource': '当前节点',
+        'vector.useContext': '用当前节点向量',
+        'vector.useContextTitle': '把当前节点条里的节点作为查询向量来源',
+        'vector.contextNoVector': '节点 #{id} 没有向量，无法作为查询来源；可切换到「粘贴 JSON」或加载其它候选节点。',
+        'vector.useAsSource': '用作来源',
+        'vector.scoreRawTitle': '后端原始分数（不是概率/置信度）',
+        'context.label': '当前节点',
+        'context.emptyLabel': '未选择节点',
+        'context.emptyHint': '在结果 / 图 / 详情中选择节点即可跨工作区带入',
+        'context.openTitle': '打开节点详情',
+        'context.detail': '详情',
+        'context.graph': '探索关系',
+        'context.vector': '查找相似',
+        'context.clear': '清除当前节点',
+        'context.set': '已设为当前节点：{name}',
+        'context.cleared': '已清除当前节点',
+        'context.graphMissing': '该节点无法加入图探索',
+        'context.none': '还没有当前节点：先在结果表格、图或详情中选中一个节点',
+        'context.neighborsFailed': '节点已定位，但邻域加载失败：{msg}',
+        'entity.unnamed': '未命名节点 #{id}',
+        'entity.dim': '{n} 维',
+        'entity.noVector': '无向量',
+        'entity.missingType': '(缺少 type)',
+        'entity.openHint': '点击查看节点详情',
+        'tx.mode': '审阅',
+        'tx.modeTitle': '写入审阅（默认）：编辑 / 删除 / 导入先暂存，提交时一次原子生效；关闭则立即写库',
+        'tx.pendingCount': '{n} 项',
+        'tx.pendingHint': '界面修改待提交（TQL 写语句不进入此队列）',
+        'tx.review': '审阅差异',
+        'tx.reviewTitle': '审阅待提交的修改',
+        'tx.reviewHint': '这些修改尚未写入数据库。提交时通过现有原子事务接口一次生效；放弃不写库。',
+        'tx.review.empty': '暂存队列为空',
+        'tx.review.count': '共 {n} 项待提交',
+        'tx.review.before': '删除前的 payload 快照：',
+        'tx.review.snapshotUnavailable': '没有可用的修改前快照（该操作不是从结果表格发起的）。',
+        'tx.review.noChanges': 'payload 与修改前一致（仍会作为一次事务提交）。',
+        'tx.keepStaged': '返回',
+        'tx.discard': '放弃这些修改',
+        'tx.moreOps': '另有 {n} 项',
+        'tx.stagingOff': '写入审阅已关闭：新操作会立即写库；已暂存的操作仍可提交或放弃。',
+        'tx.tqlImmediate': 'TQL 写语句会立即生效，不进入写入审阅队列（审阅只覆盖界面编辑/删除/导入）',
+        'tx.source.edit': 'payload 编辑',
+        'tx.source.delete': '删除节点',
+        'tx.source.batchDelete': '批量删除',
+        'tx.source.import': '导入',
+        'tx.op.update': '更新 payload · #{id}',
+        'tx.op.delete': '删除节点 · #{id}',
+        'tx.op.insert': '新增节点 · #{id}',
+        'tx.op.newId': '服务端分配',
+        'tx.op.link': '新增关系 · {source} → {target} ({label})',
+        'tx.op.unknown': '未知操作 · {kind}',
+        'history.filled': '已填入编辑器（未执行）',
       },
       en: {
         'graph.loadWhole': 'Load full graph (top 100 edges)',
@@ -5668,8 +6600,13 @@
         'payload.notObject': 'payload must be a JSON object',
         'payload.saving': 'Saving…',
         'payload.fields': '{n} field(s) in the current payload',
+        'payload.preview': 'Whole-replacement preview: {total} field(s) · unchanged {same} · changed {changed} · added {added} · removed {removed}',
+        'payload.previewInvalid': 'The current text is not a valid JSON object; saving will fail and no unchanged field is lost.',
         'notice.rowLimit': 'Result reached the server row limit (10000); it may be truncated. Increase LIMIT or project fewer properties.',
         'common.closePrompt': 'Close notice',
+        'common.close': 'Close',
+        'lang.zh': 'Chinese',
+        'lang.en': 'English',
         'tutorial.closeAria': 'Close tutorial',
         'ai.settingsCloseAria': 'Close AI settings',
         'gt.closeAria': 'Close TQL input',
@@ -5692,6 +6629,84 @@
         'toast.injected': 'Injected {count} statements; you can run steps 2 / 3 now',
         'toast.injectPartial': 'Injected {ok}/{total}; some statements failed, check the server log',
         'tutorial.title': 'TriviumDB Tri-Model Console Tutorial',
+
+        /* V4.1 R2: unified shell / sidebar / current node / write review */
+        'header.tagline': 'Web Console',
+        'sidebar.browser': 'Data browser',
+        'sidebar.tab.objects': 'Objects',
+        'sidebar.tab.history': 'History',
+        'sidebar.tab.snippets': 'Snippets',
+        'sidebar.tabsAria': 'Sidebar content',
+        'sidebar.objectsHint': 'Clicking a row only fills the editor; the ▶ button runs it. Counts are bounded-sample figures, not database totals.',
+        'sidebar.historyHint': 'Clicking a recent entry only fills the editor; running needs an explicit action.',
+        'sidebar.resizeAria': 'Resize sidebar',
+        'sidebar.resizeValue': '{n} pixels',
+        'sidebar.item.vectorSample': 'Insert a vector search example',
+        'workspace.eyebrow': 'TriviumDB · Web Console',
+        'workspace.desc.query': 'Any TQL projection, aggregate or multi-node column keeps its original column names; node values get an identity summary.',
+        'workspace.desc.graph': 'Restrained node visuals with context labels; hover/selection strengthens relations and keeps the rest discoverable.',
+        'workspace.desc.vector': 'Take a query vector from the current node or JSON, read real scores, then open the node or its relations.',
+        'results.ops': 'Result actions',
+        'results.opsTitle': 'Result actions: exports and column visibility',
+        'vector.col.rank': '#',
+        'vector.col.hit': 'Matched node',
+        'vector.col.score': 'score',
+        'vector.col.payload': 'payload',
+        'vector.topKLabel': 'Return count top_k',
+        'vector.advanced': 'Advanced options',
+        'vector.minScoreHelp': 'Default -1 means no filtering. Scores are the raw backend values (fused score), not probabilities or confidence.',
+        'vector.contextSource': 'Current node',
+        'vector.useContext': 'Use current node vector',
+        'vector.useContextTitle': 'Use the node from the current-node strip as the query vector source',
+        'vector.contextNoVector': 'Node #{id} has no vector and cannot be a query source; switch to "Paste JSON" or load other candidates.',
+        'vector.useAsSource': 'Use as source',
+        'vector.scoreRawTitle': 'Raw backend score (not a probability/confidence)',
+        'context.label': 'Current node',
+        'context.emptyLabel': 'No node selected',
+        'context.emptyHint': 'Pick a node in the grid / graph / details to carry it across the three workspaces',
+        'context.openTitle': 'Open node details',
+        'context.detail': 'Details',
+        'context.graph': 'Explore relations',
+        'context.vector': 'Find similar',
+        'context.clear': 'Clear current node',
+        'context.set': 'Current node set to {name}',
+        'context.cleared': 'Current node cleared',
+        'context.graphMissing': 'This node could not be added to the graph explorer',
+        'context.none': 'No current node yet: select one in the result grid, graph or details first',
+        'context.neighborsFailed': 'Node located, but loading its neighborhood failed: {msg}',
+        'entity.unnamed': 'Unnamed node #{id}',
+        'entity.dim': '{n} dims',
+        'entity.noVector': 'no vector',
+        'entity.missingType': '(no type)',
+        'entity.openHint': 'Click to open node details',
+        'tx.mode': 'Review',
+        'tx.modeTitle': 'Write review (default): edits / deletes / imports are staged and applied atomically on commit; turn off to write immediately',
+        'tx.pendingCount': '{n} item(s)',
+        'tx.pendingHint': 'UI changes awaiting commit (TQL writes never enter this queue)',
+        'tx.review': 'Review diff',
+        'tx.reviewTitle': 'Review pending changes',
+        'tx.reviewHint': 'These changes are not written yet. Committing applies them atomically through the existing transaction endpoint; discarding writes nothing.',
+        'tx.review.empty': 'The staging queue is empty',
+        'tx.review.count': '{n} pending item(s)',
+        'tx.review.before': 'Payload snapshot before deletion:',
+        'tx.review.snapshotUnavailable': 'No pre-change snapshot is available (this operation did not originate from the result grid).',
+        'tx.review.noChanges': 'The payload matches the previous value (it will still be committed as one transaction).',
+        'tx.keepStaged': 'Back',
+        'tx.discard': 'Discard these changes',
+        'tx.moreOps': '{n} more',
+        'tx.stagingOff': 'Write review is off: new operations write immediately; already staged operations can still be committed or discarded.',
+        'tx.tqlImmediate': 'TQL writes apply immediately and never enter the write-review queue (the queue only covers UI edits / deletes / imports)',
+        'tx.source.edit': 'payload edit',
+        'tx.source.delete': 'node delete',
+        'tx.source.batchDelete': 'batch delete',
+        'tx.source.import': 'import',
+        'tx.op.update': 'Update payload · #{id}',
+        'tx.op.delete': 'Delete node · #{id}',
+        'tx.op.insert': 'Insert node · #{id}',
+        'tx.op.newId': 'server-assigned',
+        'tx.op.link': 'Insert relation · {source} → {target} ({label})',
+        'tx.op.unknown': 'Unknown operation · {kind}',
+        'history.filled': 'Filled into the editor (not executed)',
       }
     };
     Object.assign(I18N.zh, I18N_EXT.zh);
@@ -5867,6 +6882,21 @@
       if (tutorial) renderTutorialNav();
       const filterPanel = document.getElementById('graphFilterPanel');
       if (filterPanel && !filterPanel.hidden) renderGraphFilterPanels();
+      // 对象树是数据驱动的动态 DOM（分组标题、采样说明、chip 都在构建时用 t() 求值），
+      // 不像静态节点那样带 data-i18n；语言切换必须整树重建，
+      // 否则「类型 / 边标签 / 索引 / 向量」会停留在切换前语言的旧文案。
+      // 展开态由 objectTreeOpenState 记忆，重建不会把用户展开的组弹回默认。
+      if (typeof renderObjectTree === 'function') renderObjectTree();
+      // 同类问题：查询标签页标题、查询历史、事务计数条都是渲染时用 t() 求值的一次性 DOM，
+      // 不重建就会停留在切语言前的字面量（如「查询 1」「暂无历史记录」「事务中 · N 个待提交」）。
+      if (typeof renderQueryTabs === 'function') renderQueryTabs();
+      if (typeof renderHistory === 'function') renderHistory();
+      if (typeof renderSideHistory === 'function') renderSideHistory();
+      if (typeof syncTxBar === 'function') syncTxBar();
+      // 当前节点条 / 写入审阅弹层同样是运行时求值的动态 DOM
+      if (typeof renderContextStrip === 'function') renderContextStrip();
+      const txReview = document.getElementById('txReviewOverlay');
+      if (txReview && !txReview.hidden && typeof renderTxReview === 'function') renderTxReview();
       if (typeof graphColorMode !== 'undefined' && graphColorMode === 'community'
         && typeof nodeCommunities !== 'undefined' && nodeCommunities.size) {
         updateGraphLegend([...new Set(nodeCommunities.values())]);
@@ -5881,6 +6911,661 @@
       });
       applyI18n();
     }
+
+    // ==========================================
+    // V4.1 R2 外壳（任务 1）
+    //   a) 侧栏三段：对象 / 历史 / 片段（同一时刻只有一段可见）
+    //   b) 侧栏宽度 200–340（默认 232）：真实鼠标拖动 + separator 键盘 + 偏好持久化
+    //   c) 收起为 64px rail：图标可恢复对应段
+    //   d) 工作区标题/说明随主标签变化（文案全部走 I18N）
+    //   e) 当前节点条：三个工作区共享上下文，只做定位/带入
+    //   f) 待提交条 + 审阅弹层：界面写操作暂存后的常驻入口
+    // ==========================================
+    const SIDEBAR_WIDTH_KEY = 'tdb_sidebar_width';
+    const SIDEBAR_TAB_KEY = 'tdb_side_tab';
+    const SIDEBAR_DEFAULT_WIDTH = 232;
+    const SIDEBAR_MIN_WIDTH = 200;
+    const SIDEBAR_MAX_WIDTH = 340;
+    const SIDEBAR_KEY_STEP = 10;
+    const SIDE_PANELS = ['objects', 'history', 'snippets'];
+    let sidePanelTab = 'objects';
+
+    function clampSidebarWidth(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n <= 0) return SIDEBAR_DEFAULT_WIDTH;
+      return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(n)));
+    }
+
+    function currentSidebarWidth() {
+      const raw = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width'));
+      return clampSidebarWidth(Number.isFinite(raw) ? raw : SIDEBAR_DEFAULT_WIDTH);
+    }
+
+    // 侧栏宽度/收起变化后：Canvas 位图按新 CSS 尺寸重建，Sigma 重新量容器
+    let __sidebarReflowRaf = 0;
+    function scheduleWorkspaceReflow() {
+      if (__sidebarReflowRaf) return;
+      __sidebarReflowRaf = requestAnimationFrame(() => {
+        __sidebarReflowRaf = 0;
+        ['graphCanvas', 'standaloneGraphCanvas'].forEach((id) => {
+          const canvas = document.getElementById(id);
+          if (canvas && typeof syncCanvasSize === 'function') syncCanvasSize(canvas);
+        });
+        if (typeof redrawGraph === 'function') redrawGraph();
+        Object.keys(sigmaInstances || {}).forEach((key) => {
+          const inst = sigmaInstances[key];
+          if (!inst || !inst.sigma || inst.sigma.killed) return;
+          try {
+            if (typeof inst.sigma.resize === 'function') inst.sigma.resize();
+            if (typeof inst.sigma.refresh === 'function') inst.sigma.refresh();
+          } catch (_) { /* Sigma 内部尺寸异常不应阻断 UI */ }
+        });
+        // 可用区域变了（侧栏拖宽/收起/断点）：可见图重新取景，避免 fit 仍按旧尺寸
+        if (typeof graphNodes !== 'undefined' && graphNodes.length) {
+          try {
+            fitGraphView('query', false);
+            fitGraphView('standalone', false);
+          } catch (_) { /* 隐藏视图/未就绪实例：保持现有相机 */ }
+        }
+      });
+    }
+
+    function applySidebarWidth(value, persist) {
+      const width = clampSidebarWidth(value);
+      document.documentElement.style.setProperty('--sidebar-width', width + 'px');
+      const handle = document.getElementById('sidebarResize');
+      if (handle) {
+        handle.setAttribute('aria-valuenow', String(width));
+        handle.setAttribute('aria-valuetext', t('sidebar.resizeValue', { n: width }));
+      }
+      if (persist) safeStorageSet(SIDEBAR_WIDTH_KEY, String(width));
+      scheduleWorkspaceReflow();
+      return width;
+    }
+
+    function sidePanelEl(key) {
+      return document.getElementById('sidePanel' + key.charAt(0).toUpperCase() + key.slice(1));
+    }
+
+    function setSidePanelTab(tab, options = {}) {
+      const next = SIDE_PANELS.indexOf(tab) >= 0 ? tab : 'objects';
+      sidePanelTab = next;
+      document.querySelectorAll('.side-tabs .side-tab').forEach((btn) => {
+        const on = btn.dataset.sideTab === next;
+        btn.setAttribute('aria-selected', String(on));
+        btn.tabIndex = on ? 0 : -1;
+      });
+      SIDE_PANELS.forEach((key) => {
+        const panel = sidePanelEl(key);
+        if (panel) panel.hidden = key !== next;
+      });
+      document.querySelectorAll('[data-side-rail]').forEach((btn) => {
+        btn.setAttribute('aria-selected', String(btn.dataset.sideRail === next));
+      });
+      if (next === 'history') renderSideHistory();
+      if (options.persist !== false) safeStorageSet(SIDEBAR_TAB_KEY, next);
+    }
+
+    function setupSidePanel() {
+      const saved = safeStorageGet(SIDEBAR_TAB_KEY);
+      setSidePanelTab(SIDE_PANELS.indexOf(saved) >= 0 ? saved : 'objects', { persist: false });
+      const tablist = document.querySelector('.side-tabs');
+      if (tablist) {
+        tablist.addEventListener('click', (e) => {
+          const btn = e.target.closest('[data-side-tab]');
+          if (btn) setSidePanelTab(btn.dataset.sideTab);
+        });
+        tablist.addEventListener('keydown', (e) => {
+          const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
+          if (keys.indexOf(e.key) < 0) return;
+          const btns = [...tablist.querySelectorAll('[data-side-tab]')];
+          const index = btns.indexOf(document.activeElement);
+          if (index < 0) return;
+          e.preventDefault();
+          const nextIndex = e.key === 'Home' ? 0
+            : (e.key === 'End' ? btns.length - 1
+              : (index + (e.key === 'ArrowRight' ? 1 : btns.length - 1)) % btns.length);
+          setSidePanelTab(btns[nextIndex].dataset.sideTab);
+          btns[nextIndex].focus();
+        });
+      }
+      // rail 图标：展开侧栏并切到对应段；对象段额外把树滚进视野
+      document.querySelectorAll('[data-side-rail]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const target = btn.dataset.sideRail;
+          if (document.documentElement.dataset.rail === '1') setSidebarRail(false, true);
+          setSidePanelTab(target);
+          if (target === 'objects') revealObjectTree();
+          const focusTarget = document.querySelector(`.side-tab[data-side-tab="${target}"]`);
+          if (focusTarget) focusTarget.focus();
+        });
+      });
+    }
+
+    function setupSidebarResize() {
+      const handle = document.getElementById('sidebarResize');
+      const saved = safeStorageGet(SIDEBAR_WIDTH_KEY);
+      applySidebarWidth(saved === null || saved === '' ? SIDEBAR_DEFAULT_WIDTH : saved, false);
+      if (!handle) return;
+      let drag = null;
+
+      const onMove = (e) => {
+        if (!drag) return;
+        applySidebarWidth(drag.startWidth + (e.clientX - drag.startX), false);
+      };
+      const finish = () => {
+        if (!drag) return;
+        drag = null;
+        document.body.classList.remove('sidebar-resizing');
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', finish);
+        window.removeEventListener('pointercancel', finish);
+        safeStorageSet(SIDEBAR_WIDTH_KEY, String(currentSidebarWidth()));
+      };
+
+      handle.addEventListener('pointerdown', (e) => {
+        // 移动端是抽屉，不做宽度拖拽；rail 态也不拖
+        if (window.matchMedia && !window.matchMedia('(min-width: 901px)').matches) return;
+        if (document.documentElement.dataset.rail === '1') return;
+        e.preventDefault();
+        e.stopPropagation();
+        drag = { startX: e.clientX, startWidth: currentSidebarWidth() };
+        document.body.classList.add('sidebar-resizing');
+        try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', finish);
+        window.addEventListener('pointercancel', finish);
+      });
+      handle.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        applySidebarWidth(SIDEBAR_DEFAULT_WIDTH, true);
+      });
+      handle.addEventListener('keydown', (e) => {
+        const width = currentSidebarWidth();
+        let next = null;
+        if (e.key === 'ArrowLeft') next = width - SIDEBAR_KEY_STEP;
+        else if (e.key === 'ArrowRight') next = width + SIDEBAR_KEY_STEP;
+        else if (e.key === 'Home') next = SIDEBAR_MIN_WIDTH;
+        else if (e.key === 'End') next = SIDEBAR_MAX_WIDTH;
+        else if (e.key === 'Enter' || e.key === ' ') next = SIDEBAR_DEFAULT_WIDTH;
+        if (next === null) return;
+        e.preventDefault();
+        applySidebarWidth(next, true);
+      });
+    }
+
+    // 工作区标题/说明：主标签切换与语言切换都走这里
+    const WORKSPACE_DESC_KEYS = {
+      queryPane: 'workspace.desc.query',
+      graphExplorePane: 'workspace.desc.graph',
+      vectorLabPane: 'workspace.desc.vector',
+    };
+    function syncWorkspaceHeader(paneId) {
+      const active = paneId
+        ? document.getElementById('tab-' + paneId)
+        : document.querySelector('.tabs-bar .tab.active');
+      const id = (active && active.dataset.tab) || 'queryPane';
+      const title = document.getElementById('headerViewName');
+      if (title && active) title.textContent = active.textContent.trim();
+      const desc = document.getElementById('workspaceDesc');
+      const key = WORKSPACE_DESC_KEYS[id] || WORKSPACE_DESC_KEYS.queryPane;
+      if (desc) {
+        desc.setAttribute('data-i18n', key);
+        desc.textContent = t(key);
+      }
+      scheduleWorkspaceReflow();
+    }
+
+    // ---------- 当前节点（跨工作区上下文） ----------
+    let contextNode = null;
+
+    function nodePayloadOf(node) {
+      return node && node.payload && typeof node.payload === 'object' && !Array.isArray(node.payload)
+        ? node.payload : {};
+    }
+
+    function nodeTypeOf(node) {
+      const value = nodePayloadOf(node).type;
+      if (value === undefined || value === null) return null;
+      if (typeof value === 'string') return value.trim() || null;
+      return String(value);
+    }
+
+    function nodeNameOf(node) {
+      const payload = nodePayloadOf(node);
+      const candidate = payload.name ?? payload.title ?? payload.label;
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+      if (typeof candidate === 'number') return String(candidate);
+      return null;
+    }
+
+    function nodeDisplayLabel(node) {
+      return nodeNameOf(node) || t('entity.unnamed', { id: node && node.id !== undefined ? node.id : '?' });
+    }
+
+    // 紧凑 payload 摘要：只读，不修改原始对象；长值截断，复合值只标数量
+    function payloadSummaryOf(payload, maxLen = 96) {
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+      const parts = [];
+      let used = 0;
+      for (const [key, value] of Object.entries(payload)) {
+        if (used > maxLen) break;
+        let text;
+        if (value === null) text = 'null';
+        else if (typeof value === 'string') text = value.replace(/\s+/g, ' ').trim();
+        else if (typeof value === 'number' || typeof value === 'boolean') text = String(value);
+        else if (Array.isArray(value)) text = '[' + value.length + ']';
+        else if (typeof value === 'object') text = '{…}';
+        else text = String(value);
+        if (text.length > 34) text = text.slice(0, 34) + '…';
+        const piece = key + ': ' + text;
+        parts.push(piece);
+        used += piece.length + 3;
+      }
+      const out = parts.join(' · ');
+      return out.length > maxLen ? out.slice(0, maxLen) + '…' : out;
+    }
+
+    function nodeVectorDim(node) {
+      return Array.isArray(node && node.vector) ? node.vector.length : 0;
+    }
+
+    function normalizeContextNode(node) {
+      if (!node || (node.id === undefined && !node.payload)) return null;
+      return {
+        id: node.id,
+        label: node.label,
+        payload: node.payload && typeof node.payload === 'object' ? node.payload : {},
+        vector: Array.isArray(node.vector) ? node.vector : [],
+        type: node.type,
+      };
+    }
+
+    function setContextNode(node, options = {}) {
+      contextNode = normalizeContextNode(node);
+      renderContextStrip();
+      if (contextNode && options.toast) {
+        showToast(t('context.set', { name: nodeDisplayLabel(contextNode) }));
+      }
+      return contextNode;
+    }
+
+    function renderContextStrip() {
+      const strip = document.getElementById('contextStrip');
+      if (!strip) return;
+      // 常驻显示：空态只给提示，不撑开/收起整行（避免结果表格跳动）
+      strip.hidden = false;
+      const actions = document.getElementById('contextActions');
+      if (!contextNode) {
+        const nameBtnEmpty = document.getElementById('contextName');
+        if (nameBtnEmpty) {
+          nameBtnEmpty.textContent = t('context.emptyLabel');
+          nameBtnEmpty.title = t('context.emptyLabel');
+          nameBtnEmpty.disabled = true;
+        }
+        const dotEmpty = document.getElementById('contextTypeDot');
+        if (dotEmpty) dotEmpty.style.background = 'var(--text-light)';
+        const metaEmpty = document.getElementById('contextMeta');
+        if (metaEmpty) {
+          metaEmpty.textContent = t('context.emptyHint');
+          metaEmpty.title = metaEmpty.textContent;
+        }
+        if (actions) actions.hidden = true;
+        if (typeof renderVectorSourceCard === 'function') renderVectorSourceCard();
+        return;
+      }
+      const type = nodeTypeOf(contextNode);
+      const dot = document.getElementById('contextTypeDot');
+      if (dot) dot.style.background = type ? getNodeColor(type) : 'var(--text-light)';
+      const nameBtn = document.getElementById('contextName');
+      if (nameBtn) {
+        nameBtn.textContent = nodeDisplayLabel(contextNode);
+        nameBtn.title = nameBtn.textContent + ' · ' + t('context.openTitle');
+        nameBtn.disabled = false;
+      }
+      if (actions) actions.hidden = false;
+      const meta = document.getElementById('contextMeta');
+      if (meta) {
+        const dim = nodeVectorDim(contextNode)
+          ? t('entity.dim', { n: nodeVectorDim(contextNode) })
+          : t('entity.noVector');
+        meta.textContent = '#' + (contextNode.id === undefined ? '?' : contextNode.id)
+          + ' · ' + (type || t('entity.missingType')) + ' · ' + dim;
+        meta.title = meta.textContent;
+      }
+      if (typeof renderVectorSourceCard === 'function') renderVectorSourceCard();
+    }
+
+    function setupContextStrip() {
+      renderContextStrip();
+      const open = () => { if (contextNode) openNodeDrawer(contextNode); };
+      document.getElementById('contextName')?.addEventListener('click', open);
+      document.getElementById('contextDetailBtn')?.addEventListener('click', open);
+      document.getElementById('contextClearBtn')?.addEventListener('click', () => {
+        setContextNode(null);
+        showToast(t('context.cleared'));
+      });
+      document.getElementById('contextGraphBtn')?.addEventListener('click', () => {
+        if (contextNode) exploreContextNode(contextNode);
+      });
+      document.getElementById('contextVectorBtn')?.addEventListener('click', () => {
+        if (contextNode) useNodeAsVectorSource(contextNode);
+      });
+    }
+
+    // 「探索关系」：切到图探索；不在图里时只加入该节点 + 真实 1 跳邻域（服务端有界查询）
+    async function exploreContextNode(node) {
+      const id = String(node.id);
+      document.querySelector('[data-tab="graphExplorePane"]')?.click();
+      let hit = graphNodes.find((n) => String(n.id) === id);
+      if (!hit) {
+        mergeRowsIntoGraph([{ node: {
+          type: 'node',
+          id: node.id,
+          payload: node.payload || {},
+          vector: node.vector || [],
+        } }]);
+        hit = graphNodes.find((n) => String(n.id) === id);
+      }
+      if (!hit) {
+        showToast(t('context.graphMissing'));
+        return;
+      }
+      try {
+        await expandNeighborhoodIntoGraph(node.id, 1);
+      } catch (err) {
+        // 邻域失败不阻断：至少定位到该节点，并说明真实原因
+        showToast(t('context.neighborsFailed', { msg: err.message }));
+      }
+      const fresh = graphNodes.find((n) => String(n.id) === id) || hit;
+      flyToNode(fresh);
+    }
+
+    // ---------- 侧栏历史段：最近条目只填入，运行需显式点击 ----------
+    function sideHistoryMetaText(query) {
+      const meta = historyMeta.get(query);
+      if (!meta) return '';
+      const bits = [];
+      if (meta.kind) bits.push(t(meta.kind === 'write' ? 'history.kindWrite' : 'history.kindRead'));
+      if (meta.rows !== undefined && meta.rows !== null) bits.push(t('history.rows', { n: meta.rows }));
+      if (meta.elapsed !== undefined && meta.elapsed !== null) bits.push(t('history.elapsed', { ms: meta.elapsed }));
+      return bits.join(' · ');
+    }
+
+    function renderSideHistory() {
+      const host = document.getElementById('sideHistoryList');
+      if (!host) return;
+      host.replaceChildren();
+      const entries = (queryHistory || []).slice(0, 6);
+      if (!entries.length) {
+        const empty = document.createElement('p');
+        empty.className = 'nav-section-hint';
+        empty.textContent = t('history.empty');
+        host.appendChild(empty);
+        return;
+      }
+      entries.forEach((query) => {
+        const card = document.createElement('div');
+        card.className = 'side-history-card';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'side-history-query';
+        btn.title = query;
+        btn.textContent = query.length > 140 ? query.slice(0, 140) + '…' : query;
+        btn.addEventListener('click', () => {
+          setEditorValue(query);
+          applyInferredMutation(query);
+          document.querySelector('[data-tab="queryPane"]')?.click();
+          activeHistoryQuery = query;
+          renderHistory();
+          showToast(t('history.filled'));
+        });
+        card.appendChild(btn);
+        const meta = sideHistoryMetaText(query);
+        if (meta) {
+          const small = document.createElement('small');
+          small.textContent = meta;
+          card.appendChild(small);
+        }
+        host.appendChild(card);
+      });
+    }
+
+    // ---------- 待提交条 + 写审阅 ----------
+    // 操作的展示元信息（before 快照 / 来源）挂在 WeakMap 上：
+    // 提交时仍把原始 op 对象送给 /v1/transactions，不把 UI 字段混入契约。
+    const txOpMeta = new WeakMap();
+
+    function txModeOn() {
+      return !!document.getElementById('txModeCheck')?.checked;
+    }
+
+    function txOperationKind(op) {
+      if (!op || !op.op) return '?';
+      return String(op.op);
+    }
+
+    function txOperationSummary(op) {
+      if (!op) return '';
+      if (op.op === 'updatePayload') return t('tx.op.update', { id: op.id });
+      if (op.op === 'delete') return t('tx.op.delete', { id: op.id });
+      if (op.op === 'insert') return t('tx.op.insert', { id: op.id === undefined ? t('tx.op.newId') : op.id });
+      if (op.op === 'link') return t('tx.op.link', { source: op.source, target: op.target, label: op.label || '' });
+      return t('tx.op.unknown', { kind: txOperationKind(op) });
+    }
+
+    function txOperationsSummaryText() {
+      if (!txOperations.length) return '';
+      const parts = txOperations.slice(0, 3).map(txOperationSummary);
+      if (txOperations.length > 3) parts.push(t('tx.moreOps', { n: txOperations.length - 3 }));
+      return parts.join(' · ');
+    }
+
+    function syncTxBar() {
+      const bar = document.getElementById('txBar');
+      const count = document.getElementById('txCount');
+      const summary = document.getElementById('txSummary');
+      const commit = document.getElementById('txCommitBtn');
+      const rollback = document.getElementById('txRollbackBtn');
+      if (!bar) return;
+      const n = txOperations.length;
+      // 只有真的有暂存操作时才占一整行（避免空条常驻挤压工作区）
+      bar.hidden = n === 0;
+      if (count) count.textContent = t('tx.pendingCount', { n });
+      if (summary) summary.textContent = txOperationsSummaryText();
+      if (commit) commit.disabled = n === 0 || txCommitting;
+      if (rollback) rollback.disabled = n === 0 || txCommitting;
+      const review = document.getElementById('txReviewBtn');
+      if (review) review.disabled = n === 0 || txCommitting;
+    }
+
+    function openTxReview() {
+      renderTxReview();
+      const overlay = document.getElementById('txReviewOverlay');
+      if (overlay) overlay.hidden = false;
+      document.getElementById('txReviewClose')?.focus();
+    }
+
+    function closeTxReview() {
+      const overlay = document.getElementById('txReviewOverlay');
+      if (overlay) overlay.hidden = true;
+    }
+
+    // 顶层键差异：只展示真正变化的键（删除/新增/修改），不修改任何数据
+    function payloadDiffLines(before, after) {
+      const a = (before && typeof before === 'object' && !Array.isArray(before)) ? before : {};
+      const b = (after && typeof after === 'object' && !Array.isArray(after)) ? after : {};
+      const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
+      const lines = [];
+      keys.forEach((key) => {
+        const had = Object.prototype.hasOwnProperty.call(a, key);
+        const has = Object.prototype.hasOwnProperty.call(b, key);
+        if (!had && has) {
+          lines.push({ sign: '+', text: key + ': ' + JSON.stringify(b[key]) });
+          return;
+        }
+        if (had && !has) {
+          lines.push({ sign: '-', text: key + ': ' + JSON.stringify(a[key]) });
+          return;
+        }
+        if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) {
+          lines.push({ sign: '-', text: key + ': ' + JSON.stringify(a[key]) });
+          lines.push({ sign: '+', text: key + ': ' + JSON.stringify(b[key]) });
+        }
+      });
+      return lines;
+    }
+
+    function txReviewItem(op) {
+      const meta = txOpMeta.get(op) || {};
+      const item = document.createElement('div');
+      item.className = 'review-item';
+      const head = document.createElement('div');
+      head.className = 'review-item-head';
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = txOperationKind(op);
+      const title = document.createElement('strong');
+      title.textContent = txOperationSummary(op);
+      head.append(badge, title);
+      if (meta.source) {
+        const source = document.createElement('span');
+        source.className = 'badge';
+        source.textContent = meta.source;
+        head.appendChild(source);
+      }
+      item.appendChild(head);
+
+      if (op.op === 'updatePayload') {
+        const lines = payloadDiffLines(meta.before, op.payload);
+        if (!lines.length) {
+          const note = document.createElement('p');
+          note.className = 'nav-section-hint';
+          note.textContent = t('tx.review.noChanges');
+          item.appendChild(note);
+        } else {
+          const pre = document.createElement('pre');
+          lines.forEach((line) => {
+            const span = document.createElement('span');
+            span.style.display = 'block';
+            span.style.color = line.sign === '-' ? 'var(--danger)' : 'var(--success)';
+            span.textContent = line.sign + ' ' + line.text;
+            pre.appendChild(span);
+          });
+          item.appendChild(pre);
+        }
+      } else if (op.op === 'delete') {
+        const pre = document.createElement('pre');
+        pre.textContent = meta.before
+          ? t('tx.review.before') + '\n' + JSON.stringify(meta.before, null, 2)
+          : t('tx.review.snapshotUnavailable');
+        item.appendChild(pre);
+      } else if (op.op === 'insert') {
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify({ payload: op.payload, vectorDim: Array.isArray(op.vector) ? op.vector.length : 0 }, null, 2);
+        item.appendChild(pre);
+      } else if (op.op === 'link') {
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify({ source: op.source, target: op.target, label: op.label, weight: op.weight }, null, 2);
+        item.appendChild(pre);
+      }
+      return item;
+    }
+
+    function renderTxReview() {
+      const list = document.getElementById('txReviewList');
+      if (!list) return;
+      list.replaceChildren();
+      if (!txOperations.length) {
+        const empty = document.createElement('div');
+        empty.className = 'review-empty';
+        empty.textContent = t('tx.review.empty');
+        list.appendChild(empty);
+      } else {
+        txOperations.forEach((op) => list.appendChild(txReviewItem(op)));
+      }
+      const status = document.getElementById('txReviewStatus');
+      if (status) {
+        status.className = 'import-status';
+        status.textContent = txModeOn() ? t('tx.review.count', { n: txOperations.length }) : t('tx.stagingOff');
+      }
+      const commit = document.getElementById('txReviewCommitBtn');
+      const discard = document.getElementById('txReviewDiscardBtn');
+      if (commit) commit.disabled = !txOperations.length || txCommitting;
+      if (discard) discard.disabled = !txOperations.length || txCommitting;
+    }
+
+    // 结果操作菜单：导出 JSON / 导出 CSV / 列显隐（低频操作集中，主按钮仍在工具条）
+    function setupResultOpsMenu() {
+      const btn = document.getElementById('resultOpsBtn');
+      const menu = document.getElementById('resultOpsMenu');
+      if (!btn || !menu) return;
+      const close = (refocus) => {
+        menu.hidden = true;
+        btn.setAttribute('aria-expanded', 'false');
+        if (refocus) btn.focus();
+      };
+      const open = () => {
+        menu.hidden = false;
+        btn.setAttribute('aria-expanded', 'true');
+        const first = menu.querySelector('button');
+        if (first) first.focus();
+      };
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (menu.hidden) open(); else close(false);
+      });
+      menu.addEventListener('click', (e) => {
+        const item = e.target.closest('button');
+        if (!item) return;
+        // 列面板需要以按钮真实矩形定位：保持本菜单打开
+        if (item.id === 'gridColumnsBtn') return;
+        close(false);
+      });
+      document.addEventListener('click', (e) => {
+        if (menu.hidden) return;
+        if (menu.contains(e.target) || btn.contains(e.target)) return;
+        const colMenu = document.getElementById('gridColMenu');
+        if (colMenu && colMenu.contains(e.target)) return;
+        close(false);
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !menu.hidden) close(true);
+      });
+      menu.addEventListener('keydown', (e) => {
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+        e.preventDefault();
+        const items = [...menu.querySelectorAll('button')];
+        const index = items.indexOf(document.activeElement);
+        const next = e.key === 'ArrowDown'
+          ? (index + 1) % items.length
+          : (index - 1 + items.length) % items.length;
+        items[next].focus();
+      });
+    }
+
+    function setupTxReview() {
+      document.getElementById('txReviewBtn')?.addEventListener('click', openTxReview);
+      document.getElementById('txReviewClose')?.addEventListener('click', closeTxReview);
+      document.getElementById('txReviewCancelBtn')?.addEventListener('click', closeTxReview);
+      document.getElementById('txReviewOverlay')?.addEventListener('click', (e) => {
+        if (e.target && e.target.id === 'txReviewOverlay') closeTxReview();
+      });
+      document.getElementById('txReviewDiscardBtn')?.addEventListener('click', () => {
+        rollbackTransaction();
+        closeTxReview();
+      });
+      document.getElementById('txReviewCommitBtn')?.addEventListener('click', async () => {
+        const ok = await commitTransaction();
+        if (ok) closeTxReview();
+        else renderTxReview();   // 失败保留暂存与输入，可再次提交
+      });
+      document.addEventListener('keydown', (e) => {
+        const overlay = document.getElementById('txReviewOverlay');
+        if (e.key === 'Escape' && overlay && !overlay.hidden) closeTxReview();
+      });
+    }
+
     // 历史记录装载：存储值损坏（非法 JSON / 非字符串数组）时回退空数组
     function loadQueryHistory() {
       try {
@@ -6103,6 +7788,7 @@
       document.body.classList.add('panel-open');
       const rail = document.getElementById('uspRail');
       if (rail) rail.classList.add('usp-rail-hidden');
+      // 面板是 fixed 浮层：图取景在用户主动 fit 时按实际浮层矩形让位（不自动改变用户镜头）
       [['ai', 'uspTabAi', 'uspBodyAi', 'uspRailAiBtn'],
        ['detail', 'uspTabDetail', 'uspBodyDetail', 'uspRailDetailBtn'],
        ['filter', 'uspTabFilter', 'uspBodyFilter', 'uspRailFilterBtn']]
@@ -6405,10 +8091,15 @@ RETURN doc, t</div>
         btn.setAttribute('aria-expanded', String(!rail));
         btn.title = t(rail ? 'sidebar.expand' : 'sidebar.collapse') + ' (Ctrl+B)';
       }
+      // rail 图标与当前段联动（收起时仍能看出正在看哪一段）
+      document.querySelectorAll('[data-side-rail]').forEach((item) => {
+        item.setAttribute('aria-selected', String(item.dataset.sideRail === sidePanelTab));
+      });
       // 先让 applyI18n 刷新词条（含 data-i18n-title），再补 rail 专属悬停提示
       if (typeof applyI18n === 'function') applyI18n();
       syncRailHoverTitles();
       if (persist) safeStorageSet(SIDEBAR_RAIL_KEY, rail ? '1' : '0');
+      scheduleWorkspaceReflow();
     }
 
     // rail 态「数据对象」图标：展开侧栏 → 把对象树滚进视野 → 短暂高亮一次
@@ -6429,7 +8120,7 @@ RETURN doc, t</div>
       if (btn) btn.addEventListener('click', () => {
         setSidebarRail(document.documentElement.dataset.rail !== '1', true);
       });
-      document.getElementById('railObjectsBtn')?.addEventListener('click', revealObjectTree);
+      // rail 三个图标（对象/历史/片段）由 setupSidePanel 统一处理（展开 + 切段 + 聚焦）
       document.addEventListener('keydown', (e) => {
         if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'b') return;
         const target = e.target;
@@ -6535,6 +8226,11 @@ RETURN doc, t</div>
       initStarfield();
       setupSidebarRail();
       setupMobileSidebar();
+      setupSidePanel();       // V4.1 R2：侧栏三段（对象/历史/片段）+ rail 恢复
+      setupSidebarResize();   // V4.1 R2：200–340 拖宽 / 键盘 / 偏好
+      setupContextStrip();    // V4.1 R2：当前节点条
+      setupTxReview();        // V4.1 R2：写审阅弹层
+      setupResultOpsMenu();   // V4.1 R2：低频结果操作菜单
       setupLanguage();
       renderStatusBar();
       setupEventListeners();
@@ -6912,18 +8608,22 @@ RETURN doc, t</div>
         });
       });
 
-      // 对象导航：语义是「切换工作区」，同样不替用户执行查询。
-      // 高亮跟随点击（HTML 里的 active 是静态初始态，从不切换曾致高亮永久钉在「文档」）
+      // 主导航：只切工作区，不替用户改查询文本（旧侧栏入口会顺带写入示例查询，
+      // 放到顶栏后那样会覆盖用户正在编辑的语句，必须去掉）。
+      // data-action 仍保留在 tab 上，供既有脚本/命令面板按语义定位。
       document.querySelectorAll('[data-action]').forEach(el => {
         el.addEventListener('click', async () => {
           const action = el.dataset.action;
+          const isMainTab = !!el.dataset.tab;
           if (action === 'quick-find') {
-            document.querySelector('[data-tab="queryPane"]')?.click();
+            if (!isMainTab) document.querySelector('[data-tab="queryPane"]')?.click();
           } else if (action === 'quick-match') {
-            document.querySelector('[data-tab="graphExplorePane"]')?.click();
+            if (!isMainTab) document.querySelector('[data-tab="graphExplorePane"]')?.click();
             if (graphNodes.length === 0) showToast(t('sidebar.emptyGraph'));
           } else if (action === 'quick-search') {
-            document.querySelector('[data-tab="vectorLabPane"]')?.click();
+            if (!isMainTab) document.querySelector('[data-tab="vectorLabPane"]')?.click();
+          } else if (action === 'insert-vector-sample') {
+            document.querySelector('[data-tab="queryPane"]')?.click();
             // 维度随库配置（768/1024/…）：只填入示例，不替用户执行
             const ready = await insertVectorSampleQuery(5);
             if (ready) showToast(t('sidebar.snippetFilled'));
@@ -6951,6 +8651,8 @@ RETURN doc, t</div>
       if (!el) return;
       const tab = document.querySelector('.tabs-bar .tab.active');
       el.textContent = tab ? tab.textContent.trim() : t('tabs.query');
+      // 说明文案与主标签一起切换（语言切换也走这里）
+      if (typeof syncWorkspaceHeader === 'function') syncWorkspaceHeader(tab ? tab.dataset.tab : 'queryPane');
     }
     // 窄屏主标签：当前 tab 必须完整可见；只滚动内部 tabs-scroll，不移动页面。
     function ensureActiveTabVisible() {
@@ -7513,6 +9215,7 @@ RETURN doc, t</div>
                                 // 防止 fire-and-forget 查询的迟到渲染/落地跨测试边界污染断言
     let __queryAbort = null;    // 当前未决查询的 AbortController：新查询发出前中止旧流（含 NDJSON reader 取消）
     let __querySeq = 0;         // 查询序号：只有最新一次查询允许落地渲染/恢复按钮（防中止查询的迟到渲染覆盖新结果）
+    let __tqlImmediateHintShown = false; // 「TQL 写语句立即生效、不进审阅队列」每次会话提示一次
 
     // 执行文本：有选区时只跑选区（「执行选中」），否则跑全文。
     // 便于在一条编辑器里放多条语句，逐段验证而不必清空。
@@ -7545,11 +9248,16 @@ RETURN doc, t</div>
       const requestedMutation = document.getElementById('mutationCheck').checked;
       // 读语句永远走读路径（写入模式复选框是粘性的，不能把 FIND/MATCH 打成写请求）
       const isMutation = requestedMutation && !isReadOnlyTql(query);
-      // 事务模式只覆盖界面写操作；服务端没有交互式事务会话，TQL 写语句会立即生效，
-      // 与其假装被事务保护，不如明确拦下（文案给出替代路径）。
-      if (isMutation && txModeOn()) {
+      // 审阅队列只覆盖界面写操作；服务端没有交互式事务会话，TQL 写语句会立即生效。
+      // - 队列非空时：拦下，避免两种写入混进不明状态；
+      // - 队列为空时：允许执行（保留既有写入能力），首次给出「不进入审阅队列」提示。
+      if (isMutation && txOperations.length) {
         showToast(t('tx.blockedTql'));
         return;
+      }
+      if (isMutation && txModeOn() && !__tqlImmediateHintShown) {
+        __tqlImmediateHintShown = true;
+        showToast(t('tx.tqlImmediate'), 4200);
       }
       const isProfile = document.getElementById('profileCheck').checked;
 
@@ -8199,6 +9907,7 @@ RETURN doc, t</div>
       document.getElementById('payloadEditorClose')?.addEventListener('click', closePayloadEditor);
       document.getElementById('payloadEditorCancel')?.addEventListener('click', closePayloadEditor);
       document.getElementById('payloadEditorSave')?.addEventListener('click', savePayloadEditor);
+      document.getElementById('payloadEditorText')?.addEventListener('input', updatePayloadEditorHint);
       document.getElementById('payloadEditor')?.addEventListener('click', (e) => {
         if (e.target && e.target.id === 'payloadEditor') closePayloadEditor();
       });
@@ -8247,6 +9956,108 @@ RETURN doc, t</div>
     // 模块级函数：renderGrid 与 NDJSON 流式增量渲染（createStreamGrid）共用同一套
     // 单元格渲染逻辑。点击/键盘打开抽屉的行为由 tbody 事件委托统一处理
     // （虚拟滑窗下逐行绑定监听器会随窗口重建反复创建/丢弃，改为一次性委托）。
+    // 节点值识别：传输层 type:"node" 只是包裹形状；展示类型一律取 payload.type
+    function isNodeObject(value) {
+      return !!value && typeof value === 'object' && !Array.isArray(value)
+        && value.id !== undefined
+        && (value.type === 'node' || (value.payload && typeof value.payload === 'object'));
+    }
+
+    function nodeTypeInitial(type) {
+      const text = String(type || '').trim();
+      return text ? text.slice(0, 1).toUpperCase() : '·';
+    }
+
+    // 服务端标量投影的形状是 { type: 'int'|'float'|'string'|'bool', value }；
+    // 表格里显示可读的 value + 类型小字，JSON/复制/导出仍用原始对象（不篡改数据）。
+    function isScalarEnvelope(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+      const keys = Object.keys(value);
+      return keys.length === 2 && keys.indexOf('type') >= 0 && keys.indexOf('value') >= 0
+        && typeof value.type === 'string';
+    }
+
+    function buildScalarCell(value) {
+      const frag = document.createDocumentFragment();
+      const text = document.createElement('span');
+      text.textContent = value.value === null || value.value === undefined
+        ? 'null' : String(value.value);
+      frag.appendChild(text);
+      const chip = document.createElement('span');
+      chip.className = 'scalar-type';
+      chip.textContent = value.type;
+      chip.title = JSON.stringify(value);
+      frag.appendChild(chip);
+      return frag;
+    }
+
+    // 节点单元格的身份卡：类型点 + 名称 + 原始类型键 + id + 维度 + payload 摘要。
+    // 只读展示，不修改 node/payload；完整结构仍在 JSON 视图与详情抽屉。
+    function buildEntityCell(node) {
+      const type = nodeTypeOf(node);
+      const dim = nodeVectorDim(node);
+      const wrap = document.createElement('div');
+      wrap.className = 'entity-cell';
+      wrap.title = nodeDisplayLabel(node) + (type ? ' · ' + type : '');
+
+      const icon = document.createElement('span');
+      icon.className = 'entity-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = nodeTypeInitial(type);
+      if (type) icon.style.color = getNodeColor(type);
+      else icon.style.color = 'var(--text-light)';
+      wrap.appendChild(icon);
+
+      const main = document.createElement('div');
+      main.className = 'entity-main';
+      const name = document.createElement('span');
+      name.className = 'entity-name';
+      name.textContent = nodeDisplayLabel(node);
+      name.title = name.textContent;
+      main.appendChild(name);
+
+      const meta = document.createElement('span');
+      meta.className = 'entity-meta';
+      const typeChip = document.createElement('span');
+      typeChip.className = 'entity-type';
+      const dot = document.createElement('i');
+      dot.style.background = type ? getNodeColor(type) : 'var(--text-light)';
+      const typeText = document.createElement('span');
+      typeText.textContent = type || t('entity.missingType');
+      typeChip.append(dot, typeText);
+      meta.appendChild(typeChip);
+      const idText = document.createElement('span');
+      idText.textContent = '#' + (node.id === undefined ? '?' : node.id);
+      meta.appendChild(idText);
+      const dimText = document.createElement('span');
+      dimText.textContent = dim ? t('entity.dim', { n: dim }) : t('entity.noVector');
+      meta.appendChild(dimText);
+      main.appendChild(meta);
+      wrap.appendChild(main);
+
+      const summaryText = payloadSummaryOfEntity(node.payload);
+      if (summaryText) {
+        const summary = document.createElement('span');
+        summary.className = 'entity-summary';
+        summary.textContent = summaryText;
+        summary.title = summaryText;
+        main.appendChild(summary);
+      }
+      return wrap;
+    }
+
+    // 身份卡摘要：类型/名称已单独展示，摘要优先展示其余字段；全是身份字段时回退完整摘要
+    function payloadSummaryOfEntity(payload) {
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+      const rest = {};
+      Object.keys(payload).forEach((key) => {
+        if (key === 'name' || key === 'title' || key === 'type' || key === 'label') return;
+        rest[key] = payload[key];
+      });
+      const summary = payloadSummaryOf(rest);
+      return summary || payloadSummaryOf(payload);
+    }
+
     function buildGridRow(row, idx, cols) {
       const tr = document.createElement('tr');
       tr.dataset.rowIndex = String(idx);
@@ -8256,7 +10067,9 @@ RETURN doc, t</div>
       if (node) {
         tr.classList.add('row-clickable');
         tr.tabIndex = 0;
-        tr.setAttribute('role', 'button');
+        // 不加 role=button：行内还有复选框（focusable），button 嵌套交互不合法
+        // （axe nested-interactive）。隐式 row + Enter/Space 仍可打开详情。
+        tr.setAttribute('aria-label', t('grid.rowTitle'));
         tr.title = t('grid.rowTitle');
       }
       syncGridSelectionCell(tr, row);
@@ -8271,6 +10084,13 @@ RETURN doc, t</div>
           if (val === undefined || val === null) {
             td.textContent = 'null';
             td.style.color = 'var(--text-light)';
+          } else if (isNodeObject(val)) {
+            // 节点列渲染身份卡；值本身仍是原对象，复制/排序/导出读原始数据
+            td.classList.add('cell-node');
+            td.appendChild(buildEntityCell(val));
+          } else if (isScalarEnvelope(val)) {
+            td.classList.add('cell-scalar');
+            td.appendChild(buildScalarCell(val));
           } else if (typeof val === 'object') {
             td.textContent = JSON.stringify(val);
           } else {
@@ -8845,6 +10665,41 @@ RETURN doc, t</div>
     }
 
     // ---------- 节点 payload 编辑 / 删除 ----------
+    // 编辑器的实时预览：整体替换语义下，告诉用户哪些字段没动（不会丢）、哪些会变更/新增/删除。
+    function payloadDiffStats(before, after) {
+      const a = (before && typeof before === 'object' && !Array.isArray(before)) ? before : {};
+      const b = (after && typeof after === 'object' && !Array.isArray(after)) ? after : {};
+      const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+      let added = 0, removed = 0, changed = 0, same = 0;
+      keys.forEach((key) => {
+        const had = Object.prototype.hasOwnProperty.call(a, key);
+        const has = Object.prototype.hasOwnProperty.call(b, key);
+        if (!had) { added += 1; return; }
+        if (!has) { removed += 1; return; }
+        if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) changed += 1;
+        else same += 1;
+      });
+      return { added, removed, changed, same, total: keys.size };
+    }
+
+    function updatePayloadEditorHint() {
+      const hint = document.getElementById('payloadEditorHint');
+      const state = payloadEditorState;
+      const area = document.getElementById('payloadEditorText');
+      if (!hint || !state || !area) return;
+      let parsed = null;
+      try { parsed = JSON.parse(area.value); } catch (_) { parsed = null; }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        hint.textContent = t('payload.previewInvalid');
+        return;
+      }
+      const stats = payloadDiffStats(state.node && state.node.payload, parsed);
+      hint.textContent = t('payload.preview', {
+        total: stats.total, same: stats.same, changed: stats.changed,
+        added: stats.added, removed: stats.removed,
+      });
+    }
+
     function openPayloadEditor(node, rowIndex) {
       if (!node) { showToast(t('grid.editOnlyNode')); return; }
       payloadEditorState = { id: String(node.id), node, rowIndex };
@@ -8856,6 +10711,7 @@ RETURN doc, t</div>
       document.getElementById('payloadEditorHint').textContent = t('payload.fields', {
         n: Object.keys(node.payload || {}).length,
       });
+      updatePayloadEditorHint();
       const status = document.getElementById('payloadEditorStatus');
       status.textContent = '';
       status.className = 'import-status';
@@ -8910,16 +10766,18 @@ RETURN doc, t</div>
       status.className = 'import-status';
       status.textContent = t('payload.saving');
       if (txModeOn()) {
-        stageTxOperation({ op: 'updatePayload', id: writeId, payload });
+        stageTxOperation(
+          { op: 'updatePayload', id: writeId, payload },
+          { before: state.node ? state.node.payload : null, source: t('tx.source.edit') }
+        );
         if (state.node) state.node.payload = payload;
         if (typeof graphNodes !== 'undefined') {
           const hit = graphNodes.find((n) => String(n.id) === state.id);
           if (hit) hit.payload = payload;
         }
-        const id = state.id;
         closePayloadEditor();
+        // 本地乐观更新保持可读；stageTxOperation 已提示「已暂存（提交后生效）」
         if (gridRawRows) renderGrid(gridRawRows);
-        showToast(t('grid.updated', { id }));
         return;
       }
       try {
@@ -8960,11 +10818,16 @@ RETURN doc, t</div>
       try { writeIds = ids.map(parseWriteNodeId); }
       catch (err) { showToast(err.message); return; }
       if (txModeOn()) {
-        writeIds.forEach((id) => txOperations.push({ op: 'delete', id }));
+        writeIds.forEach((id) => {
+          const node = (gridRawRows || []).map((row) => findNodeInRow(row)).find((n) => n && String(n.id) === String(id));
+          const op = { op: 'delete', id };
+          if (node) txOpMeta.set(op, { before: node.payload, source: t('tx.source.batchDelete') });
+          txOperations.push(op);
+        });
         syncTxBar();
         applyLocalNodeRemoval(new Set(ids));
         gridSelection = new Set();
-        showToast(t('grid.selDeleted', { n: ids.length }));
+        showToast(t('tx.stagedToast'));
         return;
       }
       try {
@@ -9017,9 +10880,12 @@ RETURN doc, t</div>
       try { writeId = parseWriteNodeId(id); }
       catch (err) { showToast(err.message); return; }
       if (txModeOn()) {
-        stageTxOperation({ op: 'delete', id: writeId });
+        stageTxOperation(
+          { op: 'delete', id: writeId },
+          { before: node.payload, source: t('tx.source.delete') }
+        );
+        // 本地乐观移除；stageTxOperation 已提示「已暂存（提交后生效）」
         applyLocalNodeRemoval(new Set([id]));
-        showToast(t('grid.deleted', { id }));
         return;
       }
       try {
@@ -9066,7 +10932,7 @@ RETURN doc, t</div>
         gridSelection = new Set();
         syncGridSelectionBar();
         head.innerHTML = `<th class="grid-sel-th"></th><th>#</th><th>${escapeHtml(t('results.col.result'))}</th>`;
-        body.innerHTML = `<tr><td colspan="2"><div class="empty-cta">
+        body.innerHTML = `<tr><td colspan="3"><div class="empty-cta">
           <svg class="result-empty-icon" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
           <div class="result-empty-title" data-i18n="results.empty.rows">${escapeHtml(t('results.empty.rows'))}</div>
           <div class="result-empty-help" data-i18n="results.empty.rowsHelp">${escapeHtml(t('results.empty.rowsHelp'))}</div>
@@ -9510,23 +11376,9 @@ RETURN doc, t</div>
     let txOperations = [];
     let txCommitting = false;
 
-    function txModeOn() {
-      return !!document.getElementById('txModeCheck')?.checked;
-    }
-
-    function syncTxBar() {
-      const bar = document.getElementById('txBar');
-      const count = document.getElementById('txCount');
-      const commit = document.getElementById('txCommitBtn');
-      const rollback = document.getElementById('txRollbackBtn');
-      if (!bar) return;
-      bar.hidden = !txModeOn();
-      if (count) count.textContent = t('tx.staged', { n: txOperations.length });
-      if (commit) commit.disabled = txOperations.length === 0 || txCommitting;
-      if (rollback) rollback.disabled = txOperations.length === 0 || txCommitting;
-    }
-
-    function stageTxOperation(operation) {
+    // meta.before 只在审阅弹层展示；提交体仍是原始 TransactionOperation。
+    function stageTxOperation(operation, meta) {
+      if (meta) txOpMeta.set(operation, meta);
       txOperations.push(operation);
       syncTxBar();
       showToast(t('tx.stagedToast'));
@@ -9534,7 +11386,7 @@ RETURN doc, t</div>
     }
 
     async function commitTransaction() {
-      if (!txModeOn() || !txOperations.length || txCommitting) return;
+      if (!txModeOn() || !txOperations.length || txCommitting) return false;
       txCommitting = true;
       // 请求体一经发送便不会包含后续暂存项；响应只能确认本次快照中的操作。
       const submitted = txOperations.slice();
@@ -9543,6 +11395,11 @@ RETURN doc, t</div>
       const countEl = document.getElementById('txCount');
       if (countEl) countEl.textContent = t('tx.committing');
       if (bar) bar.setAttribute('aria-busy', 'true');
+      // 审阅弹层里的按钮同步禁用：双击/回车不会重复提交同一批操作
+      ['txReviewCommitBtn', 'txReviewDiscardBtn'].forEach((id) => {
+        const btn = document.getElementById(id);
+        if (btn) btn.disabled = true;
+      });
       syncTxBar();
       try {
         const res = await fetch(`${API_BASE}/v1/transactions`, {
@@ -9557,12 +11414,17 @@ RETURN doc, t</div>
         loadObjectTree();
         // 新暂存项尚未提交，保留它们的乐观视图，避免读库结果覆盖待提交的编辑。
         if (!txOperations.length) rerunActiveQueryTab();
+        return true;
       } catch (err) {
+        // 失败保留全部暂存操作；不自动重试，避免重复写入
         showToast(t('tx.failed', { msg: err.message }));
+        return false;
       } finally {
         txCommitting = false;
         if (bar) bar.removeAttribute('aria-busy');
         syncTxBar();
+        const reviewOverlay = document.getElementById('txReviewOverlay');
+        if (reviewOverlay && !reviewOverlay.hidden) renderTxReview();
       }
     }
 
@@ -9621,11 +11483,11 @@ RETURN doc, t</div>
         const node = row && (row.a || row.b || row.node);
         if (!node || node.type !== 'node') return;
         sampled += 1;
-        const type = node.payload && node.payload.type ? String(node.payload.type) : '(未标注)';
+        const type = node.payload && node.payload.type ? String(node.payload.type) : t('ot.unlabeled');
         types.set(type, (types.get(type) || 0) + 1);
         if (!dim && Array.isArray(node.vector) && node.vector.length) dim = node.vector.length;
         (node.edges || []).forEach((edge) => {
-          const label = edge && edge.label ? String(edge.label) : '(未标注)';
+          const label = edge && edge.label ? String(edge.label) : t('ot.unlabeled');
           labels.set(label, (labels.get(label) || 0) + 1);
         });
       });
@@ -9637,7 +11499,8 @@ RETURN doc, t</div>
 
     function objectQueryFor(kind, value) {
       if (kind === 'type') {
-        if (value === '(未标注)') return 'MATCH (a) RETURN a LIMIT 25';
+        // 兼容两种语言的哨兵值：切换语言后旧行可能还带着上一语言的字面量
+        if (value === '(未标注)' || value === t('ot.unlabeled')) return 'MATCH (a) RETURN a LIMIT 25';
         const safe = String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         return `FIND {type: "${safe}"} RETURN * LIMIT 25`;
       }
@@ -9691,13 +11554,20 @@ RETURN doc, t</div>
       row.dataset.otKind = kind;
       row.dataset.otValue = value;
       row.tabIndex = opts.static ? -1 : 0;
-      row.setAttribute('role', 'button');
+      // 行内含真实按钮（▶ 执行 / ✕ 删索引）时不能用 role=button：
+      // 交互控件嵌套会被读屏当成两个按钮（axe nested-interactive）。改为可聚焦的 group，
+      // 行点击 / Enter 逻辑保持不变。
+      const hasActionButton = !!(opts.run || opts.danger);
+      row.setAttribute('role', hasActionButton ? 'group' : 'button');
+      if (hasActionButton) row.setAttribute('aria-label', String(name));
       // 类型/边标签行支持右键菜单：hover 提示让这个能力可被发现（名称子元素自带同名 title）
       if (kind === 'type' || kind === 'label') row.title = t('ot.ctxHint');
-      // 类型 / 边标签用一个小色点区分，比整行缩进更容易扫读
+      // 类型 / 边标签用一个小色点区分，比整行缩进更容易扫读。
+      // 类型色由 getNodeColor 的稳定哈希决定（不随当前行顺序换色）。
       if (opts.dot) {
         const dot = document.createElement('span');
         dot.className = 'ot-dot' + (opts.dot === 'label' ? ' is-label' : '');
+        if (opts.dotColor) dot.style.background = opts.dotColor;
         row.appendChild(dot);
       }
       const nameEl = document.createElement('span');
@@ -9765,6 +11635,14 @@ RETURN doc, t</div>
       const body = document.createElement('div');
       body.className = 'ot-body';
       if (rows.length) {
+        // 采样口径必须与数据一起可见（有行时旧实现丢掉了 note，用户会以为计数是全库总数）
+        if (note) {
+          const noteEl = document.createElement('div');
+          noteEl.className = 'ot-group-note';
+          noteEl.textContent = note;
+          noteEl.title = note;
+          body.appendChild(noteEl);
+        }
         rows.forEach((row) => body.appendChild(row));
       } else if (note) {
         // 空组用一行哑文字，不做成「可点的行」（原来会渲染一个带计数的假行）
@@ -9782,13 +11660,11 @@ RETURN doc, t</div>
       closeObjectTreeMenu();
       const tree = document.getElementById('objectTree');
       if (!tree || !objectTreeModel) return;
-      const { sample, indexes, quiver, rowCount } = objectTreeModel;
+      const { sample, indexes, quiver } = objectTreeModel;
       tree.replaceChildren();
-      // 采样口径：rowCount 等于上限说明还有更多，样本数不等于总数，必须说清楚
-      const totalKnown = rowCount < OBJECT_TREE_SAMPLE_LIMIT;
-      const sampleNote = totalKnown
-        ? t('ot.nodes', { n: sample.sampled })
-        : t('ot.sample', { n: sample.sampled });
+      // 采样口径：即使这次返回行数小于上限，也仍是一次有界采样——
+      // 文案统一写「样本」，不把采样数包装成全库总数。
+      const sampleNote = t('ot.sampleWithLimit', { n: sample.sampled, limit: OBJECT_TREE_SAMPLE_LIMIT });
       if (!sample.sampled && !indexes.length) {
         const empty = document.createElement('div');
         empty.className = 'ot-state';
@@ -9797,7 +11673,12 @@ RETURN doc, t</div>
         return;
       }
       tree.appendChild(objectTreeGroup('ot.types', sample.types.length,
-        sample.types.map((item) => objectTreeRow('type', item.name, item.name, String(item.count), { run: true, dot: 'type' })),
+        sample.types.map((item) => objectTreeRow('type', item.name, item.name, String(item.count), {
+          run: true,
+          dot: 'type',
+          // 未知/缺失类型用中性色；已知类型用稳定哈希色，切语言不换色
+          dotColor: item.name === t('ot.unlabeled') ? 'var(--text-light)' : getNodeColor(item.name),
+        })),
         sampleNote));
       const labelsGroup = objectTreeGroup('ot.labels', sample.labels.length,
         sample.labels.map((item) => objectTreeRow('label', item.name, item.name, String(item.count), { run: true, dot: 'label' })),
@@ -10345,7 +12226,10 @@ RETURN doc, t</div>
             label: record.label,
             weight: record.weight,
           }));
-        ops.forEach((op) => txOperations.push(op));
+        ops.forEach((op) => {
+          txOpMeta.set(op, { source: t('tx.source.import') });
+          txOperations.push(op);
+        });
         syncTxBar();
         runBtn.disabled = false;
         status.className = 'import-status is-ok';
@@ -10443,6 +12327,7 @@ RETURN doc, t</div>
     // 向量检索实验台 (Vector Lab)
     // ==========================================
     let vlCandidates = [];   // 候选节点缓存（来自选择器 TQL）
+    let __vectorSeq = 0;     // 向量检索请求序号：旧响应不得覆盖新请求（切来源/连点/切标签都算新请求）
     let vlKnownDim = null;   // 已知服务端维度（取自最近一次选中的节点向量，用于 JSON 来源的长度预校验）
     let vlActiveVector = null; // 当前查询向量（顶部摘要槽 + 28px 热力条）
 
@@ -10509,6 +12394,14 @@ RETURN doc, t</div>
       });
       updateVectorSummary(null);
       setVectorIdle();
+      renderVectorSourceCard();
+      document.getElementById('vlUseContextBtn')?.addEventListener('click', () => {
+        if (!contextNode) {
+          showToast(t('context.none'));
+          return;
+        }
+        useNodeAsVectorSource(contextNode);
+      });
     }
 
     // 切换查询向量来源（节点选择器 / JSON 粘贴）
@@ -10566,6 +12459,83 @@ RETURN doc, t</div>
       updateVectorSummary(parsed);
     }
 
+    // 候选下拉框统一由 vlCandidates 重建（加载候选与「从节点带入」共用）
+    function renderVectorCandidateOptions(selectedId) {
+      const select = document.getElementById('vlNodeSelect');
+      if (!select) return;
+      select.innerHTML = '';
+      if (!vlCandidates.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.disabled = true;
+        option.selected = true;
+        option.textContent = t('vector.selectPlaceholder');
+        select.appendChild(option);
+        updateVectorSummary(null);
+        return;
+      }
+      vlCandidates.forEach((node, idx) => {
+        const label = nodeDisplayLabel(node);
+        const dimInfo = Array.isArray(node.vector) && node.vector.length
+          ? t('vector.dimSuffix', { dim: node.vector.length })
+          : t('vector.noVectorSuffix');
+        const option = document.createElement('option');
+        option.value = idx;
+        option.textContent = `#${node.id} ${label}${dimInfo}`;
+        select.appendChild(option);
+      });
+      const wanted = selectedId === undefined ? 0
+        : vlCandidates.findIndex((node) => String(node.id) === String(selectedId));
+      select.value = String(wanted >= 0 ? wanted : 0);
+      onVectorNodeSelected();
+    }
+
+    // 「用当前节点 / 命中节点做来源」：有向量直接用；缺向量时补一次真实节点读取，
+    // 仍没有就如实说明并提示换 JSON 来源（绝不伪造 embedding 或补零）。
+    async function useNodeAsVectorSource(node) {
+      if (!node) return;
+      document.querySelector('[data-tab="vectorLabPane"]')?.click();
+      switchVectorSource(true);
+      let full = node;
+      if (!Array.isArray(full.vector) || !full.vector.length) {
+        try {
+          const res = await fetch(`${API_BASE}/v1/nodes/${node.id}`);
+          if (res.ok) {
+            const body = await res.json();
+            if (body && body.node) full = body.node;
+          }
+        } catch (_) { /* 网络失败走下面的统一提示 */ }
+      }
+      const index = vlCandidates.findIndex((item) => String(item.id) === String(full.id));
+      if (index >= 0) vlCandidates[index] = full;
+      else vlCandidates.unshift(full);
+      renderVectorCandidateOptions(full.id);
+      if (!Array.isArray(full.vector) || !full.vector.length) {
+        showToast(t('vector.contextNoVector', { id: full.id }), 4200);
+      }
+    }
+
+    // 当前节点来源卡：显示名称/维度；无向量时按钮仍可点，由提示解释原因
+    function renderVectorSourceCard() {
+      const card = document.getElementById('vlSourceCard');
+      if (!card) return;
+      if (!contextNode) { card.hidden = true; return; }
+      card.hidden = false;
+      const name = document.getElementById('vlSourceCardName');
+      if (name) {
+        name.textContent = nodeDisplayLabel(contextNode);
+        name.title = name.textContent;
+      }
+      const dim = document.getElementById('vlSourceCardDim');
+      if (dim) {
+        const n = nodeVectorDim(contextNode);
+        dim.textContent = n ? t('entity.dim', { n }) : t('entity.noVector');
+        dim.title = dim.textContent;
+      }
+      const btn = document.getElementById('vlUseContextBtn');
+      if (btn) btn.title = t('vector.useContextTitle');
+    }
+
     // 执行选择器 TQL 并将返回节点填充到下拉框
     async function loadVectorCandidates() {
       const btn = document.getElementById('vlLoadCandidatesBtn');
@@ -10608,7 +12578,6 @@ RETURN doc, t</div>
           });
         });
         vlCandidates = nodes;
-        select.innerHTML = '';
 
         if (!nodes.length) {
           select.innerHTML = `<option value="" disabled selected>${escapeHtml(t('vector.selectEmpty'))}</option>`;
@@ -10617,19 +12586,8 @@ RETURN doc, t</div>
           return;
         }
 
-        nodes.forEach((node, idx) => {
-          const label = node.payload?.name || node.payload?.title || node.id;
-          const dimInfo = Array.isArray(node.vector)
-            ? t('vector.dimSuffix', { dim: node.vector.length })
-            : t('vector.noVectorSuffix');
-          const option = document.createElement('option');
-          option.value = idx;
-          option.textContent = `#${node.id} ${label}${dimInfo}`;
-          select.appendChild(option);
-        });
-        // 默认选中第一项并触发提示
-        select.value = '0';
-        onVectorNodeSelected();
+        // 默认选中第一项并触发提示（候选列表由统一函数重建）
+        renderVectorCandidateOptions();
       } catch (err) {
         hint.hidden = false;
         hint.textContent = t('vector.netFail', { msg: err.message });
@@ -10722,6 +12680,9 @@ RETURN doc, t</div>
     async function runVectorSearch() {
       const btn = document.getElementById('vlRunBtn');
       const errEl = document.getElementById('vlSearchError');
+      // 每次点击/回车都算一次新请求：旧请求迟到返回时按序号丢弃
+      const seq = ++__vectorSeq;
+      const isLatest = () => seq === __vectorSeq;
       errEl.hidden = true;
       resetVectorStatus();
 
@@ -10774,24 +12735,32 @@ RETURN doc, t</div>
           headers: { 'Content-Type': 'application/vnd.triviumdb.vector+f32' },
           body: vectorToBody(vector)
         });
+        // 旧请求迟到：不写状态、不改结果、不动按钮（新请求自己会收尾）
+        if (!isLatest()) return;
         const elapsed = (performance.now() - started).toFixed(1);
         vectorStatusState.elapsed = elapsed;
         renderStatusBar();
 
         if (!res.ok) {
           const err = await res.json().catch(() => ({ title: t('err.request'), detail: res.statusText }));
+          if (!isLatest()) return;
           renderVectorSearchError(err);
           return;
         }
         // 检索聚焦布局枢轴（优先级①）：记录本次成功检索使用的查询向量（slice 断开候选节点向量引用）
         lastQueryVector = vector.slice();
-        renderVectorResults(await res.json(), topK);
+        const data = await res.json();
+        if (!isLatest()) return;
+        renderVectorResults(data, topK);
       } catch (err) {
+        if (!isLatest()) return;
         renderVectorSearchError({ title: t('err.network'), detail: err.message });
       } finally {
-        btn.disabled = false;
-        btn.removeAttribute('aria-busy');
-        btn.textContent = t('vector.run');
+        if (isLatest()) {
+          btn.disabled = false;
+          btn.removeAttribute('aria-busy');
+          btn.textContent = t('vector.run');
+        }
       }
     }
 
@@ -10845,30 +12814,89 @@ RETURN doc, t</div>
           // DOM textContent 构建：hit.id / payload 为服务端数据路径，禁止插值进 innerHTML
           // （payload 正文此前仅 title 属性转义，正文未转义，可注入 img onerror 等）
           const tr = document.createElement('tr');
+          const hitNode = { type: 'node', id: hit.id, payload: hit.payload || {}, vector: Array.isArray(hit.vector) ? hit.vector : [] };
           const tdIdx = document.createElement('td');
           tdIdx.style.color = 'var(--text-light)';
           tdIdx.textContent = idx + 1;
-          const tdId = document.createElement('td');
-          tdId.style.fontFamily = 'var(--font-mono)';
-          tdId.textContent = String(hit.id ?? '');
+
+          // 命中身份：名称 + 原始类型 + ID + 摘要 + 行内动作（详情 / 关系 / 用作来源）
+          const tdHit = document.createElement('td');
+          const main = document.createElement('div');
+          main.className = 'vl-hit-main';
+          const name = document.createElement('button');
+          name.type = 'button';
+          name.className = 'entity-open vl-hit-name';
+          name.textContent = nodeDisplayLabel(hitNode);
+          name.title = t('entity.openHint');
+          name.addEventListener('click', () => {
+            setContextNode(hitNode, { toast: true });
+            openNodeDrawer(hitNode);
+          });
+          main.appendChild(name);
+          const meta = document.createElement('span');
+          meta.className = 'entity-meta';
+          const type = nodeTypeOf(hitNode);
+          const typeChip = document.createElement('span');
+          typeChip.className = 'entity-type';
+          const dot = document.createElement('i');
+          dot.style.background = type ? getNodeColor(type) : 'var(--text-light)';
+          const typeText = document.createElement('span');
+          typeText.textContent = type || t('entity.missingType');
+          typeChip.append(dot, typeText);
+          meta.appendChild(typeChip);
+          const idText = document.createElement('span');
+          idText.textContent = '#' + (hit.id === undefined || hit.id === null ? '?' : hit.id);
+          meta.appendChild(idText);
+          main.appendChild(meta);
+          const summaryText = payloadSummaryOfEntity(hit.payload);
+          if (summaryText) {
+            const summary = document.createElement('span');
+            summary.className = 'entity-summary';
+            summary.textContent = summaryText;
+            summary.title = summaryText;
+            main.appendChild(summary);
+          }
+          const actions = document.createElement('span');
+          actions.className = 'vl-hit-actions';
+          const mkAction = (labelKey, handler) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-quiet';
+            btn.textContent = t(labelKey);
+            btn.addEventListener('click', handler);
+            actions.appendChild(btn);
+          };
+          mkAction('context.detail', () => {
+            setContextNode(hitNode, { toast: true });
+            openNodeDrawer(hitNode);
+          });
+          mkAction('context.graph', () => {
+            setContextNode(hitNode, { toast: true });
+            exploreContextNode(hitNode);
+          });
+          mkAction('vector.useAsSource', () => useNodeAsVectorSource(hitNode));
+          main.appendChild(actions);
+          tdHit.appendChild(main);
+
           const payloadText = JSON.stringify(hit.payload ?? null);
           const payloadShort = payloadText.length > 200 ? payloadText.slice(0, 200) + '…' : payloadText;
           const scoreNum = Number(hit.score);
           // 单条命中或本批 score 全相同时满条，避免全部 0% 不可见
-          const t = (hits.length === 1 || sMax === sMin) ? 1 : ((scoreNum || 0) - sMin) / sRange;
+          const ratio = (hits.length === 1 || sMax === sMin) ? 1 : ((scoreNum || 0) - sMin) / sRange;
           const tdScore = document.createElement('td');
           const cell = document.createElement('div');
           cell.className = 'score-cell';
           const scoreSpan = document.createElement('span');
           scoreSpan.style.fontFamily = 'var(--font-mono)';
-          scoreSpan.title = String(hit.score);
-          scoreSpan.textContent = scoreNum.toFixed(6);
+          scoreSpan.title = t('vector.scoreRawTitle');
+          // 原样显示后端分数：不转成概率/置信度
+          scoreSpan.textContent = Number.isFinite(scoreNum) ? String(hit.score) : '—';
           const bar = document.createElement('div');
           bar.className = 'score-bar';
           bar.setAttribute('aria-hidden', 'true');
           const fill = document.createElement('i');
-          fill.style.width = (t * 100).toFixed(1) + '%';
-          fill.style.background = heatColor(t);
+          fill.style.width = (ratio * 100).toFixed(1) + '%';
+          fill.style.background = heatColor(ratio);
           bar.appendChild(fill);
           cell.append(scoreSpan, bar);
           tdScore.appendChild(cell);
@@ -10876,7 +12904,7 @@ RETURN doc, t</div>
           tdPayload.style.cssText = 'font-family: var(--font-mono); font-size: 11px;';
           tdPayload.title = payloadText;
           tdPayload.textContent = payloadShort;
-          tr.append(tdIdx, tdId, tdScore, tdPayload);
+          tr.append(tdIdx, tdHit, tdScore, tdPayload);
           body.appendChild(tr);
         });
       }
@@ -10975,10 +13003,11 @@ RETURN doc, t</div>
       const result = appendGraphRows(rows);
       if (result.addedNodes || result.addedEdges || result.changedEdges) {
         recomputeDegrees();
-        // 探索器首次载入走增量合并（非 renderGraph），同样需要首屏自动适配
-        if (wasEmpty && graphNodes.length && graphLayoutMode === 'force' && !physicsLockedByScale) {
+        // 首次载入或增量并入新节点：若用户没手动动过镜头，模拟收敛后自动适配一次。
+        // （旧实现只在「原本为空」时 fit，导致「查询已有图 + 加载全图」后新节点散到浮层下面）
+        if (graphLayoutMode === 'force' && !physicsLockedByScale
+          && (wasEmpty || result.addedNodes > 0) && !cameraTouchedByUser) {
           pendingGraphAutoFit = true;
-          cameraTouchedByUser = false;
         }
         applyGraphPhysicsPolicy();
         if (graphBackend === 'sigma') {
@@ -10988,6 +13017,8 @@ RETURN doc, t</div>
       }
       renderGraphFilterPanels();
       renderGraphDock();
+      // 静态布局/物理已停：立即消费一次，不等下一次 simulationStep
+      if (pendingGraphAutoFit && simulationRafId === null) consumePendingAutoFit();
       return result.addedNodes;
     }
 
@@ -11455,9 +13486,32 @@ RETURN doc, t</div>
       return Math.round(Math.min(1, Math.max(0, alpha)) * 255).toString(16).padStart(2, '0');
     }
 
-    // 节点半径：基础 16，度数每 +1 半径 +6%，度数 20 封顶（2 倍）
+    // 节点半径（V4.1 R2 收敛版）：普通节点是「较小但清晰」的色点，
+    // 基础 8px，度数每 +1 增 5%，上限 2 倍（枢纽 16px）。
+    // 视觉变小不代表点击目标变小：hitGraphNode 仍保留更大的命中半径。
+    const GRAPH_NODE_RADIUS_BASE = 8;
+    const GRAPH_NODE_RADIUS_GROWTH = 0.05;
+    const GRAPH_HOVER_HIT_EXTRA = 10;
     function nodeRadius(node) {
-      return 16 * (1 + Math.min(node.degree || 0, GRAPH_DEGREE_RADIUS_CAP) * 0.06);
+      return GRAPH_NODE_RADIUS_BASE
+        * (1 + Math.min(node.degree || 0, GRAPH_DEGREE_RADIUS_CAP) * GRAPH_NODE_RADIUS_GROWTH);
+    }
+
+    // 悬停节点（Canvas 专有；Sigma 由 hoverNodes 层反馈）。只用于细环，不改变选中态。
+    let hoveredNode = null;
+
+    // 选中节点的 1 跳邻居集合（字符串 id）：邻域增强与无关元素降权共用
+    function graphNeighborIds(node) {
+      const ids = new Set();
+      if (!node) return ids;
+      const key = String(node.id);
+      graphEdges.forEach((edge) => {
+        // 自环不构成「邻居」（否则选中节点会被自己当成邻居，视觉与标签优先级都会错）
+        if (String(edge.source) === String(edge.target)) return;
+        if (String(edge.source) === key) ids.add(String(edge.target));
+        else if (String(edge.target) === key) ids.add(String(edge.source));
+      });
+      return ids;
     }
 
     function clampGraphZoom(k) {
@@ -11471,7 +13525,7 @@ RETURN doc, t</div>
     function hitGraphNode(x, y, k) {
       const invK = 1 / clampGraphZoom(k);
       return graphNodes.find(n => isNodeVisible(n)
-        && Math.hypot(n.x - x, n.y - y) < (nodeRadius(n) + 4) * invK);
+        && Math.hypot(n.x - x, n.y - y) < (nodeRadius(n) + GRAPH_HOVER_HIT_EXTRA) * invK);
     }
 
     // 遍历边统计 source/target 出现次数写入 node.degree（图数据变化入口统一调用）
@@ -11843,8 +13897,10 @@ RETURN doc, t</div>
         if (clickedNode) {
           draggedNode = clickedNode;
           selectedNode = clickedNode;
+          hoveredNode = clickedNode;
           nodeDownAt = { x: e.clientX, y: e.clientY };
           nodeMoved = false;
+          redrawGraph();   // 选中/邻域强化立即生效，不等下一次移动
         } else {
           isDraggingCanvas = true;
           dragStart = { x: e.clientX, y: e.clientY };
@@ -11884,7 +13940,20 @@ RETURN doc, t</div>
           transform.y += e.clientY - dragStart.y;
           dragStart = { x: e.clientX, y: e.clientY };
           redrawGraph();
+        } else if (e.pointerType === 'mouse') {
+          // 悬停细环：真正跟随指针的命中检测（视觉变小后仍靠 hitGraphNode 的扩展半径）
+          const rect = canvas.getBoundingClientRect();
+          const mx = (e.clientX - rect.left - transform.x) / transform.k;
+          const my = (e.clientY - rect.top - transform.y) / transform.k;
+          const hover = hitGraphNode(mx, my, transform.k);
+          if (hover !== hoveredNode) {
+            hoveredNode = hover;
+            redrawGraph();
+          }
         }
+      });
+      canvas.addEventListener('pointerleave', () => {
+        if (hoveredNode) { hoveredNode = null; redrawGraph(); }
       });
 
       const endPointer = (e) => {
@@ -13322,6 +15391,19 @@ RETURN doc, t</div>
       return (nodeCount > GRAPH_PILL_NODE_THRESHOLD || k < GRAPH_PILL_ZOOM_THRESHOLD) ? 'pill' : 'normal';
     }
 
+    // 标签优先级（V4.1 R2）：0 选中/悬停，1 选中节点邻居，2 高度数枢纽，3 其余。
+    // 小图仍全量显示（保留既有排版断言）；密集图按优先级 + 预算裁剪标签噪声。
+    const GRAPH_HUB_DEGREE = 4;
+    const GRAPH_DENSE_LABEL_BUDGET = 28;
+    // 标签密度阈值独立于 pill LOD：48 节点的密集图已经需要按上下文裁剪标签
+    const GRAPH_DENSE_LABEL_NODES = 36;
+    function graphLabelPriority(node) {
+      if (selectedNode === node || hoveredNode === node) return 0;
+      if (selectedNode && graphAuroraNeighbors.has(String(node.id))) return 1;
+      if ((node.degree || 0) >= GRAPH_HUB_DEGREE) return 2;
+      return 3;
+    }
+
     // 画布背景板：跟随应用主题（PR-20 评审定版）——深色主题太空底渐变 + 确定性星点，
     // 浅色主题浅灰渐变（无星点），与 Sigma 容器 var(--bg-surface) 观感一致
     // 星点用固定种子 PRNG 生成，避免黄金比例序列形成可辨认的对角“栅格”
@@ -13532,19 +15614,21 @@ RETURN doc, t</div>
     }
 
     // 节点 glow 预算：小图全量呼吸；中大图只给选中/枢纽；超大图关闭。
+    // 轻氛围光晕（V4.1 R2 默认工作模式）：
+    // - 只在暗色 + 有选中节点时，为选中与其 1 跳邻居加一点光晕；
+    // - 浅色不加霓虹；reduced-motion / 关闭动效 / 超大图 一律 0；
+    // - 普通节点不再持续发光（旧版给全图 8~10px 光晕，是「所有东西都在抢注意力」的主因）。
     function graphAuroraGlow(node) {
       if (document.documentElement.getAttribute('data-theme') !== 'dark') return 0;
-      if (!isGraphMotionEnabled()) {
-        if (graphNodes.length > GRAPH_AURORA_MAX_NODES) return 0;
-        return selectedNode === node ? 18 : 8;
-      }
+      if (prefersReducedMotion()) return 0;   // reduced-motion：保留功能与选中环，不启用光晕
+      if (!selectedNode) return 0;
       if (graphNodes.length > GRAPH_AURORA_MAX_NODES) return 0;
-      if (graphNodes.length > GRAPH_AURORA_FULL_NODES) {
-        return selectedNode === node ? 15 : (node.degree >= 6 ? 6 : 0);
-      }
-      // 静态光晕：不再做正弦呼吸（空闲时整图看起来像在抖动）
-      return selectedNode === node ? 18 : 10;
+      if (selectedNode === node) return 7;
+      if (graphAuroraNeighbors.has(String(node.id))) return 3;
+      return 0;
     }
+    // 当前选中节点的邻居集合（drawGraphScene 每帧开头更新，供光晕/降权共用）
+    let graphAuroraNeighbors = new Set();
 
     // 场景绘制：把当前图数据按相机变换画到一个 canvas 上
     function drawGraphScene(ctx, t, canvas) {
@@ -13563,6 +15647,11 @@ RETURN doc, t</div>
       drawGraphPulses(ctx, performance.now());
 
       const labelMode = graphLabelMode(graphNodes.length, k);
+      // V4.1 R2：选中节点及其 1 跳邻域是重点，其余元素降权但保持可发现
+      const focusId = selectedNode ? String(selectedNode.id) : null;
+      graphAuroraNeighbors = graphNeighborIds(selectedNode);
+      const isRelatedEdge = (edge) => !focusId
+        || String(edge.source) === focusId || String(edge.target) === focusId;
       // 配色跟随主题（PR-20 评审定版）：深色主题暗底浅线；浅色主题用户定版
       // 浅蓝色调（#6b8cae 钢青蓝）+ 固定 0.4 透明度（两轮复评收敛：slate-600×0.35
       // 太浅、slate-700×0.45 过强）
@@ -13591,6 +15680,7 @@ RETURN doc, t</div>
         ctx.quadraticCurveTo(cx, cy, t.x, t.y);
         // 路径追踪高亮（0.8.8）：命中路径的边用琥珀色加粗（双主题下均可辨识）
         const onPath = pathHighlightEdges.has(graphEdgeKey(edge.source, edge.target, edge.label));
+        const hot = isRelatedEdge(edge);
         if (dark) {
           // B 派：源色 → 目标色渐变边，透明度随密度衰减
           const grad = ctx.createLinearGradient(s.x, s.y, t.x, t.y);
@@ -13598,8 +15688,12 @@ RETURN doc, t</div>
           grad.addColorStop(1, t.color || '#a78bfa');
           ctx.strokeStyle = onPath ? 'rgba(244, 207, 106, 0.96)' : grad;
           // 深空底上 0.53 的复合透明度实测过淡（V2 对照边几乎不可见），提到 ~0.63
-          ctx.globalAlpha = onPath ? 1 : Math.min(0.78, edgeAlpha + 0.28);
-          ctx.lineWidth = (onPath ? 3.2 : 1.5) * invK;
+          // 选中时：相关边更亮，无关边降到 ~0.3 但仍可见
+          ctx.globalAlpha = onPath ? 1
+            : (focusId
+              ? (hot ? Math.min(0.92, edgeAlpha + 0.45) : Math.min(0.30, edgeAlpha + 0.10))
+              : Math.min(0.78, edgeAlpha + 0.28));
+          ctx.lineWidth = (onPath ? 3.2 : (hot && focusId ? 1.9 : 1.5)) * invK;
           ctx.stroke();
           ctx.globalAlpha = 1;
           // 有向箭头：靠近目标节点边缘，不覆盖节点本体
@@ -13607,10 +15701,14 @@ RETURN doc, t</div>
           const headX = t.x - Math.cos(angle) * (nodeRadius(t) + 2) * invK;
           const headY = t.y - Math.sin(angle) * (nodeRadius(t) + 2) * invK;
           drawArrowHead(ctx, headX, headY, angle, (onPath ? 10 : 7.5) * invK,
-            onPath ? '#f4cf6a' : (t.color || '#aebad4'), onPath ? 0.96 : 0.78);
+            onPath ? '#f4cf6a' : (t.color || '#aebad4'),
+            onPath ? 0.96 : (focusId && !hot ? 0.32 : 0.78));
         } else {
-          ctx.strokeStyle = onPath ? 'rgba(214, 184, 129, 0.95)' : 'rgba(' + edgeBase + ', ' + edgeAlpha + ')';
-          ctx.lineWidth = (onPath ? 3 : 1.4) * invK;
+          // 浅色：相关边加深，无关边降到 0.2 但仍可见
+          ctx.strokeStyle = onPath
+            ? 'rgba(214, 184, 129, 0.95)'
+            : 'rgba(' + edgeBase + ', ' + (focusId ? (hot ? Math.min(0.92, edgeAlpha + 0.12) : 0.2) : edgeAlpha) + ')';
+          ctx.lineWidth = (onPath ? 3 : (hot && focusId ? 1.8 : 1.4)) * invK;
           ctx.stroke();
         }
 
@@ -13628,19 +15726,29 @@ RETURN doc, t</div>
           ctx.strokeStyle = dark ? 'rgba(5, 8, 18, 0.92)' : 'rgba(251, 249, 245, 0.95)';
           ctx.lineWidth = (dark ? 3 : 2.8) * invK;
           const edgeLabelText = truncateGraphLabel(edge.label, 24);
+          // 选中时无关边的标签一起降权，避免整图文字噪声
+          ctx.globalAlpha = (focusId && !hot) ? 0.32 : 1;
           ctx.strokeText(edgeLabelText, 0, -4 * invK);
           ctx.fillStyle = dark
             ? 'rgba(214, 228, 255, ' + Math.min(edgeAlpha + 0.42, 0.86) + ')'
             : 'rgba(' + edgeBase + ', ' + Math.min(edgeAlpha + 0.25, 0.9) + ')';
           ctx.fillText(edgeLabelText, 0, -4 * invK);
+          ctx.globalAlpha = 1;
           ctx.restore();
         }
       });
 
-      // 绘制节点；暗色图舞台使用 B 派径向 glow / 选中双环
+      // 绘制节点：默认是「较小色点」，只在悬停/选中/邻域加环；
+      // 选中后无关节点降权到 0.42（仍可发现），相关边与邻居保持完整对比度。
+      const hoverStroke = dark ? 'rgba(238, 244, 255, 0.85)' : 'rgba(36, 32, 24, 0.75)';
       graphNodes.forEach(node => {
         if (!isNodeVisible(node)) return;
         const r = nodeRadius(node) * invK;
+        const isSelected = selectedNode === node;
+        const isNeighbor = !!focusId && graphAuroraNeighbors.has(String(node.id));
+        const isHovered = hoveredNode === node;
+        const dimmed = !!focusId && !isSelected && !isNeighbor;
+        if (dimmed) ctx.globalAlpha = 0.42;
         const glow = graphAuroraGlow(node);
         ctx.save();
         if (glow > 0) {
@@ -13652,29 +15760,69 @@ RETURN doc, t</div>
         ctx.fillStyle = node.color;
         ctx.fill();
         ctx.restore();
+        // 基础描边（细）
         ctx.beginPath();
         ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
-        ctx.strokeStyle = selectedNode === node ? selectedStroke : nodeStroke;
-        ctx.lineWidth = (selectedNode === node ? 3 : 1) * invK;
+        ctx.strokeStyle = isSelected ? selectedStroke : nodeStroke;
+        ctx.lineWidth = (isSelected ? 2.2 : 1) * invK;
         ctx.stroke();
-        if (selectedNode === node) {
+        // 邻居：细环（不抢选中环）
+        if (isNeighbor && !isSelected) {
           ctx.beginPath();
-          ctx.arc(node.x, node.y, r + 6 * invK, 0, Math.PI * 2);
-          ctx.strokeStyle = dark ? 'rgba(244, 207, 106, 0.92)' : selectedStroke;
-          ctx.lineWidth = 2.2 * invK;
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.arc(node.x, node.y, r + 10 * invK, 0, Math.PI * 2);
-          ctx.strokeStyle = dark ? 'rgba(99, 242, 231, 0.32)' : 'rgba(158, 127, 71, 0.30)';
+          ctx.arc(node.x, node.y, r + 3 * invK, 0, Math.PI * 2);
+          ctx.strokeStyle = dark ? 'rgba(214, 228, 255, 0.34)' : 'rgba(60, 52, 40, 0.28)';
           ctx.lineWidth = invK;
           ctx.stroke();
         }
+        // 悬停：细环
+        if (isHovered && !isSelected) {
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r + 4 * invK, 0, Math.PI * 2);
+          ctx.strokeStyle = hoverStroke;
+          ctx.lineWidth = 1.2 * invK;
+          ctx.stroke();
+        }
+        // 选中：明确选择环（单环 + 外圈柔光，不做无限膨胀）
+        if (isSelected) {
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r + 5 * invK, 0, Math.PI * 2);
+          ctx.strokeStyle = dark ? 'rgba(244, 207, 106, 0.95)' : selectedStroke;
+          ctx.lineWidth = 2 * invK;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r + 9 * invK, 0, Math.PI * 2);
+          ctx.strokeStyle = dark ? 'rgba(99, 242, 231, 0.28)' : 'rgba(158, 127, 71, 0.26)';
+          ctx.lineWidth = invK;
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
       });
+
+      // 标签优先级与预算：先选中/邻居，再枢纽，最后按度数补足（密集图才裁剪）
+      const denseLabels = graphNodes.length >= GRAPH_DENSE_LABEL_NODES;
+      const labelBudget = denseLabels
+        ? Math.max(10, Math.round(GRAPH_DENSE_LABEL_BUDGET * Math.min(1, k)))
+        : Infinity;
+      const labelAllowed = new Set();
+      let labelExtras = 0;
+      graphNodes
+        .filter((node) => isNodeVisible(node))
+        .slice()
+        .sort((a, b) => (graphLabelPriority(a) - graphLabelPriority(b)) || ((b.degree || 0) - (a.degree || 0)))
+        .forEach((node) => {
+          const priority = graphLabelPriority(node);
+          if (priority <= 1) { labelAllowed.add(node); return; }
+          if (labelExtras >= labelBudget) return;
+          labelAllowed.add(node);
+          labelExtras += 1;
+        });
 
       // 标签单独一层绘制（pill 模式带底色，避免压在节点圆上）
       graphNodes.forEach(node => {
-        if (!isNodeVisible(node)) return;
+        if (!isNodeVisible(node) || !labelAllowed.has(node)) return;
+        const nodeDimmed = !!focusId && selectedNode !== node && !graphAuroraNeighbors.has(String(node.id));
         ctx.textAlign = 'center';
+        ctx.globalAlpha = nodeDimmed ? 0.38 : 1;
         if (labelMode === 'normal') {
           ctx.save();
           ctx.font = (11 * invK) + 'px ' + CANVAS_FONT_FAMILY;
@@ -13705,6 +15853,7 @@ RETURN doc, t</div>
           ctx.fillStyle = nodeLabel;
           ctx.fillText(text, node.x, py + 11.5 * invK);
         }
+        ctx.globalAlpha = 1;
       });
 
       ctx.restore();
@@ -13847,7 +15996,8 @@ RETURN doc, t</div>
         // 与 Canvas nodeRadius(16) 保持一致，切换后端时节点视觉尺寸不跳变
         graph.addNode(n.id, {
           x: p.x, y: p.y,
-          size: 16 * (1 + Math.min(n.degree || 0, GRAPH_DEGREE_RADIUS_CAP) * 0.06),
+          // 与 Canvas nodeRadius 完全同源：切换后端节点视觉尺寸不跳变
+          size: nodeRadius(n),
           label: n.label, color: n.color, hidden: !isNodeVisible(n)
         });
       });
@@ -13868,6 +16018,8 @@ RETURN doc, t</div>
             size: dark ? 1.5 : 1,
             type: dark ? 'arrow' : 'line',
             color: edgeColor,
+            // 6 位基色留给选中态重新着色（无关边降透明时不丢原始色）
+            __baseColor: dark && sourceNode ? sourceNode.color : (dark ? '#7dd3c7' : '#5f523b'),
             label: e.label || '',
             hidden: !isEdgeVisible(e)
           });
@@ -13898,22 +16050,54 @@ RETURN doc, t</div>
           openNodeDrawer(gnode);
         }
       });
+      // 悬停：Sigma 自带 hover 层；这里同步 hoveredNode 供标签优先级使用
+      sigma.on('enterNode', ({ node }) => { hoveredNode = nodeMap.get(node) || null; });
+      sigma.on('leaveNode', () => { hoveredNode = null; });
       sigmaInstances[viewId] = { sigma, graph, mapFn };
       syncSigmaSelection(viewId);
     }
 
-    // WebGL 没有 Canvas 的双环，选中节点用金色 + 放大做等价反馈
+    // 颜色 → 指定 alpha 的 8 位 hex（只处理 #rrggbb；其它格式原样返回）
+    function hexColorAlpha(color, alphaHex) {
+      const six = String(color || '').slice(0, 7);
+      return /^#[0-9a-f]{6}$/i.test(six) ? six + alphaHex : color;
+    }
+
+    // WebGL 没有 Canvas 的选择环：用「金色 + 略放大 + 邻域保持、无关降透明」表达同一套角色
     function syncSigmaSelection(viewId) {
       const inst = sigmaInstances[viewId];
       if (!inst || inst.sigma.killed) return;
+      const focusId = selectedNode ? String(selectedNode.id) : null;
+      const neighbors = graphNeighborIds(selectedNode);
+      const dimOthers = !!focusId && graphNodes.length <= GRAPH_RENDER_MAX_NODES;
       inst.graph.forEachNode((id) => {
         const n = nodeMap.get(id);
         if (!n) return;
-        const selected = selectedNode && String(selectedNode.id) === String(id);
-        inst.graph.setNodeAttribute(id, 'color', selected ? '#f4cf6a' : n.color);
-        inst.graph.setNodeAttribute(id, 'size',
-          (selected ? 20 : 16) * (1 + Math.min(n.degree || 0, GRAPH_DEGREE_RADIUS_CAP) * 0.06));
+        const selected = !!focusId && String(id) === focusId;
+        const neighbor = neighbors.has(String(id));
+        const color = selected ? '#f4cf6a'
+          : (dimOthers && !neighbor ? hexColorAlpha(n.color, '66') : n.color);
+        inst.graph.setNodeAttribute(id, 'color', color);
+        inst.graph.setNodeAttribute(id, 'size', nodeRadius(n) * (selected ? 1.35 : 1));
+        inst.graph.setNodeAttribute(id, 'zIndex', selected ? 3 : (neighbor ? 2 : 1));
       });
+      // 边：相关边保持原透明度，无关边降权；取消选中时恢复基色。
+      // 仅大图以下做（避免万级星云每次点选都全量重着色）。
+      if (dimOthers || !focusId) {
+        const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+        const baseAlpha = dark
+          ? alphaToHexByte(Math.min(0.78, graphEdgeAlpha(graphNodes.length) + 0.18))
+          : alphaToHexByte(lightGraphEdgeAlpha(graphNodes.length));
+        inst.graph.forEachEdge((edgeKey, attrs, source, target) => {
+          const base = attrs.__baseColor || (dark ? '#7dd3c7' : '#5f523b');
+          const hot = !focusId || String(source) === focusId || String(target) === focusId;
+          const hotAlpha = dark
+            ? alphaToHexByte(Math.min(0.9, graphEdgeAlpha(graphNodes.length) + 0.4)) : 'cc';
+          const dimAlpha = dark ? '26' : '4d';
+          const alpha = focusId ? (hot ? hotAlpha : dimAlpha) : baseAlpha;
+          inst.graph.setEdgeAttribute(edgeKey, 'color', hexColorAlpha(base, alpha));
+        });
+      }
       inst.sigma.refresh();
     }
 
@@ -14347,8 +16531,10 @@ RETURN doc, t</div>
           // 先只选中；抬起时若没位移才开抽屉（拖拽途中开面板会让画布跳动）
           saDragNode = hit;
           selectedNode = hit;
+          hoveredNode = hit;
           saNodeDownAt = { x: e.clientX, y: e.clientY };
           saNodeMoved = false;
+          redrawGraph();
         } else {
           saDragging = true;
           saDragStart = { x: e.clientX, y: e.clientY };
@@ -14388,7 +16574,19 @@ RETURN doc, t</div>
           e.preventDefault();
           return;
         }
-        if (!saDragging) return;
+        if (!saDragging) {
+          // 悬停细环（与查询图视图同一套命中半径）
+          if (e.pointerType !== 'mouse') return;
+          const rect = saCanvas.getBoundingClientRect();
+          const mx = (e.clientX - rect.left - standaloneTransform.x) / standaloneTransform.k;
+          const my = (e.clientY - rect.top - standaloneTransform.y) / standaloneTransform.k;
+          const hover = hitGraphNode(mx, my, standaloneTransform.k);
+          if (hover !== hoveredNode) {
+            hoveredNode = hover;
+            redrawGraph();
+          }
+          return;
+        }
         standaloneTransform.x += e.clientX - saDragStart.x;
         standaloneTransform.y += e.clientY - saDragStart.y;
         saDragStart = { x: e.clientX, y: e.clientY };
@@ -14407,6 +16605,9 @@ RETURN doc, t</div>
       };
       saCanvas.addEventListener('pointerup', saEndPointer);
       saCanvas.addEventListener('pointercancel', saEndPointer);
+      saCanvas.addEventListener('pointerleave', () => {
+        if (hoveredNode) { hoveredNode = null; redrawGraph(); }
+      });
       saCanvas.addEventListener('wheel', (e) => {
         e.preventDefault();
         standaloneTransform.k = clampGraphZoom(standaloneTransform.k * (e.deltaY < 0 ? 1.1 : 0.9));
@@ -14633,6 +16834,8 @@ RETURN doc, t</div>
 
     function openNodeDrawer(node) {
       currentDrawerNodeId = node.id !== undefined ? String(node.id) : null;
+      // 当前节点上下文：查询表格 / 图 / 向量结果打开详情都收敛到同一条
+      if (typeof setContextNode === 'function') setContextNode(node);
       scheduleGraphHashWrite(); // PR-21 深链：选中节点入 hash（selftest 页内部禁用）
       const drawerTitleEl = document.getElementById('drawerNodeTitle');
       drawerTitleEl.textContent = t('detail.node', { id: node.id, label: node.label });
@@ -16113,6 +18316,8 @@ RETURN doc, t</div>
       const container = document.getElementById('historyList');
       const badge = document.getElementById('historyCountBadge');
       if (badge) badge.textContent = String(queryHistory.length);
+      // 侧栏历史段与弹层共用同一份数据（最近 6 条只做快捷填入）
+      if (typeof renderSideHistory === 'function') renderSideHistory();
       if (!container) return;
       container.replaceChildren();
       const keyword = String(document.getElementById('historySearch')?.value || '').trim().toLowerCase();
@@ -17199,41 +19404,199 @@ RETURN doc, t</div>
 
       addAssert('i18n：外壳双语切换与恢复', 'i18n', async () => {
         setLanguage('en');
-        assert(document.documentElement.lang === 'en', 'lang 应切到 en');
-        assert(document.getElementById('tab-queryPane').textContent.includes('TQL Console'),
-          '主标签应切到英文，实际 ' + document.getElementById('tab-queryPane').textContent);
-        assert(document.getElementById('headerViewName').textContent.includes('TQL Console'),
-          '顶栏视图名应切英文，实际 ' + document.getElementById('headerViewName').textContent);
-        assert(document.querySelector('.sidebar .nav-item[data-action="quick-find"]').textContent.includes('Documents'),
-          '侧栏应切到英文');
-        assert(document.getElementById('loadWholeGraphBtn').textContent.includes('Load graph'),
-          '图探索主按钮应切英文');
-        assert(document.getElementById('vlSourceTabNode').textContent.includes('Pick a node'),
-          '向量实验台来源 tab 应切英文');
-        assert(document.getElementById('uspTabDetail').textContent.includes('Node details'),
-          '统一面板详情 tab 应切英文');
-        assert(document.querySelector('#aiChatDrawer strong').textContent.includes('AI Copilot'),
-          'AI 抽屉标题应切英文');
-        assert(document.getElementById('paletteInput').placeholder.includes('Search commands'),
-          '命令面板 placeholder 应切英文');
-        assert(document.querySelector('#tutorialStepsNav .tutorial-step-item').textContent.includes('Tri-model engine overview'),
-          '教程导航应切英文');
-        assert(document.querySelector('#graphFilterPanel .gf-section-title').textContent.includes('Node types'),
-          '过滤器分区标题应切英文');
-        assert(document.querySelector('#khopDepthSelect option').textContent.includes('hop'),
-          'k-hop 选项应切英文');
-        setLanguage('zh');
+        try {
+          assert(document.documentElement.lang === 'en', 'lang 应切到 en');
+          assert(document.getElementById('tab-queryPane').textContent.includes('TQL Console'),
+            '主标签应切到英文，实际 ' + document.getElementById('tab-queryPane').textContent);
+          assert(document.getElementById('headerViewName').textContent.includes('TQL Console'),
+            '顶栏视图名应切英文，实际 ' + document.getElementById('headerViewName').textContent);
+          // V4.1 R2：主导航搬到顶栏后，侧栏入口改为「对象/历史/片段」三段
+          assert(document.querySelector('.side-tab[data-side-tab="objects"]').textContent.includes('Objects'),
+            '侧栏段标题应切到英文');
+          assert(document.getElementById('workspaceDesc').textContent.includes('TQL projection'),
+            '工作区说明应切英文');
+          assert(document.getElementById('loadWholeGraphBtn').textContent.includes('Load graph'),
+            '图探索主按钮应切英文');
+          assert(document.getElementById('vlSourceTabNode').textContent.includes('Pick a node'),
+            '向量实验台来源 tab 应切英文');
+          assert(document.getElementById('uspTabDetail').textContent.includes('Node details'),
+            '统一面板详情 tab 应切英文');
+          assert(document.querySelector('#aiChatDrawer strong').textContent.includes('AI Copilot'),
+            'AI 抽屉标题应切英文');
+          assert(document.getElementById('paletteInput').placeholder.includes('Search commands'),
+            '命令面板 placeholder 应切英文');
+          assert(document.querySelector('#tutorialStepsNav .tutorial-step-item').textContent.includes('Tri-model engine overview'),
+            '教程导航应切英文');
+          assert(document.querySelector('#graphFilterPanel .gf-section-title').textContent.includes('Node types'),
+            '过滤器分区标题应切英文');
+          assert(document.querySelector('#khopDepthSelect option').textContent.includes('hop'),
+            'k-hop 选项应切英文');
+        } finally {
+          // 断言失败也必须恢复中文现场，否则后续中文断言会级联失败（掩盖真实缺陷）
+          setLanguage('zh');
+        }
         assert(document.documentElement.lang === 'zh-CN', 'lang 应恢复 zh-CN');
         assert(document.getElementById('tab-queryPane').textContent.includes('TQL 查询控制台'),
           '主标签应恢复中文');
         assert(document.getElementById('headerViewName').textContent.includes('TQL 查询控制台'),
           '顶栏视图名应恢复中文');
+        assert(document.querySelector('.side-tab[data-side-tab="objects"]').textContent.includes('对象'),
+          '侧栏段标题应恢复中文');
         assert(document.getElementById('loadWholeGraphBtn').textContent.includes('加载全图'),
           '图探索主按钮应恢复中文');
         assert(document.querySelector('#tutorialStepsNav .tutorial-step-item').textContent.includes('三模合一引擎总览'),
           '教程导航应恢复中文');
         assert(document.querySelector('#khopDepthSelect option').textContent.includes('跳'),
           'k-hop 选项应恢复中文');
+      });
+
+      // ---------- V4.1 R2 外壳 ----------
+      addAssert('V4.1 R2：主导航/侧栏三段/当前节点条', 'V4.1 R2', async () => {
+        assert(document.querySelectorAll('.tabs-bar .tab').length === 3, '主工作区应只有查询/图探索/向量三项');
+        assert(document.querySelectorAll('.side-tabs .side-tab').length === 3, '侧栏应有对象/历史/片段三段');
+        // 侧栏三段互斥
+        setSidePanelTab('history');
+        assert(!document.getElementById('sidePanelHistory').hidden, '历史段应可见');
+        assert(document.getElementById('sidePanelObjects').hidden, '对象段应隐藏');
+        setSidePanelTab('objects');
+        assert(!document.getElementById('sidePanelObjects').hidden, '对象段应恢复');
+        // 当前节点条：无节点隐藏，选中后出现，清除后隐藏
+        const previous = contextNode;
+        try {
+          setContextNode(null);
+          // 常驻占位：无节点时显示空态而不是整行收起（否则选中首个节点会撑开 42px，表格跳动）
+          assert(!document.getElementById('contextStrip').hidden, '当前节点条应常驻占位');
+          assert(document.getElementById('contextName').textContent === t('context.emptyLabel'),
+            '空态应显示未选择提示');
+          assert(document.getElementById('contextActions').hidden, '空态不应显示节点动作');
+          setContextNode({ id: '1001', payload: { name: 'Ada', type: 'person' }, vector: [1, 2, 3] });
+          assert(!document.getElementById('contextStrip').hidden, '选中节点后应显示当前节点条');
+          assert(document.getElementById('contextName').textContent.includes('Ada'), '当前节点条应显示名称');
+          assert(document.getElementById('contextMeta').textContent.includes('#1001'), '应显示原始 id');
+          assert(document.getElementById('contextMeta').textContent.includes('person'), '应显示 payload.type');
+          assert(document.getElementById('contextMeta').textContent.includes('3 维'), '应显示真实向量维度');
+          setContextNode(null);
+          assert(!document.getElementById('contextStrip').hidden
+            && document.getElementById('contextActions').hidden, '清除后应回到空态并收起动作');
+        } finally {
+          setContextNode(previous);
+        }
+      });
+
+      addAssert('V4.1 R2：侧栏宽度 200–340、键盘步进与偏好持久化', 'V4.1 R2', async () => {
+        const key = SIDEBAR_WIDTH_KEY;
+        const before = localStorage.getItem(key);
+        try {
+          assert(applySidebarWidth(150, false) === SIDEBAR_MIN_WIDTH, '低于下限应 clamp 到 200');
+          assert(applySidebarWidth(999, false) === SIDEBAR_MAX_WIDTH, '高于上限应 clamp 到 340');
+          const handle = document.getElementById('sidebarResize');
+          handle.focus();
+          handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+          assert(handle.getAttribute('aria-valuenow') === '200', 'Home 应到下限');
+          handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+          assert(handle.getAttribute('aria-valuenow') === '210', '→ 每次 +10');
+          handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+          assert(handle.getAttribute('aria-valuenow') === '340', 'End 应到上限');
+          handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+          assert(handle.getAttribute('aria-valuenow') === '330', '← 每次 -10');
+          applySidebarWidth(SIDEBAR_DEFAULT_WIDTH, true);
+          assert(localStorage.getItem(key) === String(SIDEBAR_DEFAULT_WIDTH), '宽度应写入偏好键');
+          assert(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width').trim() === '232px',
+            '默认宽度应回到 R2 的 232px');
+        } finally {
+          if (before === null) localStorage.removeItem(key);
+          else localStorage.setItem(key, before);
+          applySidebarWidth(SIDEBAR_DEFAULT_WIDTH, false);
+          document.getElementById('sidebarResize').blur();
+        }
+      });
+
+      addAssert('V4.1 R2：语言切换保留查询/结果/当前节点/向量输入', 'V4.1 R2', async () => {
+        const editorBefore = document.getElementById('tqlInput').value;
+        const vectorBefore = document.getElementById('vlJsonInput').value;
+        const selectorBefore = document.getElementById('vlSelectorQuery').value;
+        const previousNode = contextNode;
+        try {
+          setEditorValue('FIND {type: "paper"} RETURN * LIMIT 7');
+          document.getElementById('vlJsonInput').value = '[0.1, 0.2, 0.3]';
+          setContextNode({ id: '1002', payload: { name: 'Paper', type: 'paper' }, vector: [0.1, 0.2] });
+          renderGrid(FIND_ROWS);
+          const rowsBefore = document.querySelectorAll('#gridBody tr[data-row-index]').length;
+          setLanguage('en');
+          assert(document.getElementById('tqlInput').value === 'FIND {type: "paper"} RETURN * LIMIT 7',
+            '切换语言不得改写编辑器');
+          assert(document.getElementById('vlJsonInput').value === '[0.1, 0.2, 0.3]', '切换语言不得清空向量 JSON');
+          assert(document.getElementById('vlSelectorQuery').value === selectorBefore, '切换语言不得改候选筛选');
+          assert(document.querySelectorAll('#gridBody tr[data-row-index]').length === rowsBefore,
+            '切换语言不得清空结果');
+          assert(document.getElementById('contextName').textContent.includes('Paper'), '切换语言不得丢失当前节点');
+        } finally {
+          setLanguage('zh');
+          setEditorValue(editorBefore);
+          document.getElementById('vlJsonInput').value = vectorBefore;
+          setContextNode(previousNode);
+        }
+      });
+
+      addAssert('V4.1 R2：节点身份卡（原始类型/缺类型/维度/摘要）', 'V4.1 R2', async () => {
+        const rows = [
+          { a: { type: 'node', id: '2001', payload: { name: '身份卡', type: 'custom-kind', citations: 3, tags: ['x', 'y'] }, vector: [0.1, 0.2] } },
+          { a: { type: 'node', id: '2002', payload: { name: '缺类型节点' }, vector: [] } },
+          { count: { type: 'int', value: 7 } },
+        ];
+        renderGrid(rows);
+        const cards = document.querySelectorAll('#gridBody .entity-cell');
+        assert(cards.length === 2, '两个节点值应渲染身份卡，实际 ' + cards.length);
+        const first = cards[0].textContent;
+        assert(first.includes('身份卡') && first.includes('custom-kind') && first.includes('#2001'),
+          '身份卡应包含名称/原始类型/id：' + first);
+        assert(first.includes('2 维'), '身份卡应显示真实向量维度');
+        assert(first.includes('citations: 3'), '身份卡应显示 payload 摘要');
+        assert(cards[1].textContent.includes('(缺少 type)'), '缺失类型应如实标注');
+        assert(cards[1].textContent.includes('无向量'), '无向量应如实标注');
+        const scalar = document.querySelector('#gridBody .scalar-type');
+        assert(scalar && scalar.textContent === 'int', '标量投影应显示类型小字而非 JSON 包装');
+        assert(document.getElementById('gridBody').textContent.includes('7'), '标量值应可读');
+        renderGrid(FIND_ROWS);
+      });
+
+      addAssert('V4.1 R2：写入审阅弹层展示前后差异并可提交', 'V4.1 R2', async () => {
+        const check = document.getElementById('txModeCheck');
+        const originalChecked = check.checked;
+        const originalFetch = window.fetch;
+        const sent = [];
+        try {
+          check.checked = true;
+          check.dispatchEvent(new Event('change', { bubbles: true }));
+          stageTxOperation(
+            { op: 'updatePayload', id: 2001, payload: { name: 'After', type: 'custom-kind', citations: 9 } },
+            { before: { name: 'Before', type: 'custom-kind', citations: 3 }, source: 'payload 编辑' }
+          );
+          assert(!document.getElementById('txBar').hidden, '暂存后待提交条应出现');
+          openTxReview();
+          assert(!document.getElementById('txReviewOverlay').hidden, '审阅弹层应打开');
+          const text = document.getElementById('txReviewList').textContent;
+          assert(text.includes('citations') && text.includes('-') && text.includes('+'),
+            '审阅应展示前后差异行：' + text.slice(0, 120));
+          assert(text.includes('Before') && text.includes('After'), '审阅应包含前后值');
+          window.fetch = (url, opts) => {
+            sent.push({ url: String(url), body: opts && opts.body });
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({ generation: 'g-review' }) });
+          };
+          await commitTransaction();
+          const txCalls = sent.filter((s) => s.url.includes('/v1/transactions'));
+          assert(txCalls.length === 1, '提交应只发一次事务请求，实际 ' + txCalls.length);
+          assert(JSON.parse(txCalls[0].body).operations.length === 1, '提交体应只含暂存操作');
+          assert(txOperations.length === 0, '成功后应清空暂存');
+          assert(document.getElementById('txBar').hidden, '清空后待提交条应收起');
+        } finally {
+          window.fetch = originalFetch;
+          closeTxReview();
+          txOperations = [];
+          check.checked = originalChecked;
+          check.dispatchEvent(new Event('change', { bubbles: true }));
+          syncTxBar();
+        }
       });
 
       addAssert('结果视图切换：grid/graph/json 三视图互斥', '标签页', async () => {
@@ -17261,7 +19624,12 @@ RETURN doc, t</div>
       addAssert('renderGrid：节点行携带可点击 360° 入口', '渲染管线', async () => {
         const clickable = document.querySelectorAll('#gridBody tr.row-clickable');
         assert(clickable.length === FIND_ROWS.length, '所有节点行应可点击，实际 ' + clickable.length);
-        assert(clickable[0].getAttribute('role') === 'button' && clickable[0].tabIndex === 0, '节点行应键盘可达 (role=button + tabIndex)');
+        // V4.1 R2：行内有复选框，不能再声明 role=button（嵌套交互非法）；
+        // 用隐式 row + tabIndex + aria-label 保持键盘可达与可读名称
+        assert(!clickable[0].hasAttribute('role') || clickable[0].getAttribute('role') === 'row',
+          '节点行不应声明 button role（内含复选框）');
+        assert(clickable[0].tabIndex === 0 && clickable[0].getAttribute('aria-label'),
+          '节点行应键盘可达且有可读名称');
       });
 
       addAssert('mutation 结果渲染：受影响行数与 createdIds', '渲染管线', async () => {
@@ -17407,9 +19775,10 @@ RETURN doc, t</div>
         simulationRunning = false; // 停掉 rAF 循环，改为确定性手动 tick
         assert(graphNodes.length === 3, '应有 3 个节点，实际 ' + graphNodes.length);
         assert(graphEdges.length === 2, '应显示 2 条真实边，实际 ' + graphEdges.length);
-        const viewSize = canvasCssSize(canvas);
-        const halfW = viewSize.w / 2 - 70;
-        const halfH = viewSize.h / 2 - 70;
+        // 边界与真实力学同源（smallGraphPhysicsBounds），不再手写 viewSize/2-70：
+        // V4.1 R2 外壳（工作区头 + 常驻当前节点条）会让 720 高视口的图区变矮，
+        // 手写容差会把仍在力学边界内的节点误判为越界。
+        const bounds = smallGraphPhysicsBounds();
         for (let i = 0; i < 400; i++) { simulationAlpha = 0.6; tickPhysics(); }
         simulationAlpha = 0.005;
         for (let i = 0; i < graphNodes.length; i++) {
@@ -17418,8 +19787,9 @@ RETURN doc, t</div>
             assert(d > 40, '节点 ' + i + ' 与 ' + j + ' 重叠: dist=' + d.toFixed(1));
           }
           const n = graphNodes[i];
-          assert(Math.abs(n.x) <= halfW + 50 && Math.abs(n.y) <= halfH + 50,
-            '节点 ' + i + ' 越界: (' + n.x.toFixed(0) + ', ' + n.y.toFixed(0) + ')');
+          assert(Math.abs(n.x) <= bounds.halfW + 60 && Math.abs(n.y) <= bounds.halfH + 60,
+            '节点 ' + i + ' 越界: (' + n.x.toFixed(0) + ', ' + n.y.toFixed(0)
+            + ') bounds=' + bounds.halfW.toFixed(0) + 'x' + bounds.halfH.toFixed(0));
         }
         document.querySelector('[data-view="grid"]').click();
       });
@@ -18414,10 +20784,11 @@ RETURN doc, t</div>
       addAssert('事务模式：界面写操作暂存、提交一次原子发送、回滚丢弃', '事务模式', async () => {
         const check = document.getElementById('txModeCheck');
         const originalFetch = window.fetch;
+        const originalChecked = check.checked;
         const sent = [];
         check.checked = true;
         check.dispatchEvent(new Event('change', { bubbles: true }));
-        assert(!document.getElementById('txBar').hidden, '事务模式下应显示事务条');
+        assert(document.getElementById('txBar').hidden, '没有暂存操作时不占用待提交条');
         // 暂存一次删除：不得发请求
         window.fetch = (url, opts) => {
           sent.push({ url: String(url), body: opts && opts.body });
@@ -18428,6 +20799,8 @@ RETURN doc, t</div>
           renderGrid([{ _: node }]);
           await deleteGridNode(node);
           assert(txOperations.length === 1 && txOperations[0].op === 'delete', '删除应被暂存为一个 delete 操作');
+          assert(!document.getElementById('txBar').hidden, '有任何暂存操作时应显示待提交条');
+          assert(document.getElementById('txCount').textContent.indexOf('1') !== -1, '待提交条应显示数量');
           assert(sent.length === 0, '暂存阶段不应发出任何请求');
           assert(document.querySelectorAll('#gridBody tr[data-row-index]').length === 0, '暂存后本地应乐观移除该行');
           // 提交：一次请求，operation 原样带上
@@ -18444,7 +20817,7 @@ RETURN doc, t</div>
           assert(/0/.test(document.getElementById('txCount').textContent), '回滚后计数应归零');
         } finally {
           window.fetch = originalFetch;
-          check.checked = false;
+          check.checked = originalChecked;
           check.dispatchEvent(new Event('change', { bubbles: true }));
           syncTxBar();
           renderGrid([]);
@@ -18854,28 +21227,27 @@ RETURN doc, t</div>
         else localStorage.setItem('tdb_query_history', prev);
       });
 
-      addAssert('体验加固：侧栏快速动作高亮随点击与主标签联动', '体验加固', async () => {
-        // 回归钉：HTML 里的 active 曾是静态初始态，点击图拓扑/向量 QuIVer 后
-        // 高亮永久钉在「文档」（用户截图评审报告）
+      addAssert('体验加固：主导航只切工作区，侧栏三段互不越权', '体验加固', async () => {
+        // V4.1 R2：主导航收敛到顶栏，侧栏只负责对象/历史/片段。
+        // 回归钉：切工作区不得替用户跑查询；侧栏换段不得改变当前工作区。
         const pendingBefore = __activeQueryCount;
-        document.querySelector('.sidebar .nav-item[data-action="quick-match"]').click();
+        document.querySelector('[data-tab="graphExplorePane"]').click();
         await waitFor(() => document.querySelector('[data-tab="graphExplorePane"]').classList.contains('active'),
-          2000, '点击图拓扑应切到独立探索标签');
-        assert(document.querySelector('.sidebar .nav-item[data-action="quick-match"]').classList.contains('active'),
-          '点击图拓扑后 quick-match 应高亮');
-        assert(!document.querySelector('.sidebar .nav-item[data-action="quick-find"]').classList.contains('active'),
-          'quick-find 应取消高亮');
-        // 导航只切工作区：不得替用户跑查询（旧版会执行 MATCH 并写一条历史）
+          2000, '点击图探索应切到独立探索标签');
+        assert(!document.querySelector('[data-tab="queryPane"]').classList.contains('active'),
+          '查询标签应失活');
         assert(__activeQueryCount === pendingBefore, '导航点击不应发起查询，实际 pending ' + __activeQueryCount);
-        // 主标签联动：切独立探索/向量/查询台分别映射图拓扑/向量 QuIVer/文档
         document.querySelector('[data-tab="vectorLabPane"]').click();
-        assert(document.querySelector('.sidebar .nav-item[data-action="quick-search"]').classList.contains('active'),
-          '切向量标签应联动 quick-search');
+        assert(document.getElementById('vectorLabPane').classList.contains('active'), '应切到向量检索');
         document.querySelector('[data-tab="queryPane"]').click();
-        assert(document.querySelector('.sidebar .nav-item[data-action="quick-find"]').classList.contains('active'),
-          '切回查询台应联动 quick-find');
-        // 还原现场：点亮文档（不执行查询，后续断言会自己落地数据）
-        document.querySelector('.sidebar .nav-item[data-action="quick-find"]').click();
+        assert(document.getElementById('queryPane').classList.contains('active'), '应切回查询台');
+        // 侧栏换段：只影响左栏内容，不改主工作区
+        setSidePanelTab('history');
+        assert(!document.getElementById('sidePanelHistory').hidden, '历史段应显示');
+        assert(document.getElementById('sidePanelObjects').hidden, '对象段应隐藏');
+        assert(document.getElementById('queryPane').classList.contains('active'), '换侧栏段不应切走工作区');
+        setSidePanelTab('objects');
+        assert(!document.getElementById('sidePanelObjects').hidden, '应回到对象段');
       });
 
       addAssert('体验加固：侧栏片段只填入不执行（不再污染查询历史）', '体验加固', async () => {
@@ -18883,6 +21255,7 @@ RETURN doc, t</div>
         const before = document.getElementById('tqlInput').value;
         const pendingBefore = __activeQueryCount;
         const historyBefore = JSON.stringify(queryHistory);
+        setSidePanelTab('snippets');
         snippet.click();
         await waitFor(() => document.getElementById('tqlInput').value === snippet.dataset.snippet,
           2000, '点击片段应填入编辑器');
@@ -18891,35 +21264,43 @@ RETURN doc, t</div>
         assert(document.getElementById('tqlInput').value.length > 0, '编辑器应保留片段内容');
         // 还原编辑器，避免污染后续断言
         setEditorValue(before);
+        setSidePanelTab('objects');
       });
 
-      addAssert('侧栏 rail：只留图标，不出现逐字竖排（对象树/导入文案/片段说明隐藏）', '体验加固', async () => {
+      addAssert('侧栏 rail：只留图标，不出现逐字竖排（三段面板全部隐藏）', '体验加固', async () => {
         const railBefore = document.documentElement.dataset.rail;
         const railPrefBefore = localStorage.getItem('tdb_sidebar_rail');
         const tree = document.getElementById('objectTree');
-        const hint = document.querySelector('.nav-section-hint');
-        const importName = document.querySelector('.ot-import .ot-row-name');
-        const railBtn = document.getElementById('railObjectsBtn');
-        const nav = document.querySelector('.sidebar .nav-item[data-action="quick-find"]');
+        const objectsPanel = document.getElementById('sidePanelObjects');
+        const tabs = document.querySelector('.side-tabs');
+        const head = document.querySelector('.side-head');
+        const railObjects = document.getElementById('railObjectsBtn');
+        const railHistory = document.getElementById('railHistoryBtn');
         try {
           setSidebarRail(true, false);
-          assert(getComputedStyle(tree).display === 'none', 'rail 态应隐藏对象树（64px 内会逐字竖排）');
-          assert(getComputedStyle(hint).display === 'none', 'rail 态应隐藏片段说明文本');
-          assert(getComputedStyle(importName).display === 'none', 'rail 态「导入数据…」文案应隐藏');
-          assert(getComputedStyle(railBtn).display !== 'none', 'rail 态应保留数据对象图标入口');
+          assert(getComputedStyle(objectsPanel).display === 'none', 'rail 态应隐藏侧栏面板（64px 内会逐字竖排）');
+          assert(getComputedStyle(tabs).display === 'none', 'rail 态应隐藏段标签');
+          assert(getComputedStyle(head).display === 'none', 'rail 态应隐藏段头');
+          assert(getComputedStyle(railObjects).display !== 'none', 'rail 态应保留数据对象图标入口');
           await waitFor(() => document.querySelector('aside.sidebar').getBoundingClientRect().width < 70,
             1500, 'rail 宽度应收窄到 64px');
-          const content = document.querySelector('.sidebar-content');
-          assert(content.scrollWidth <= content.clientWidth + 1,
-            'rail 态侧栏不应横向溢出: ' + content.scrollWidth + ' > ' + content.clientWidth);
-          assert(nav.title && nav.title.length > 0, 'rail 态导航项应有悬停提示');
+          const railNav = document.getElementById('railNavigation');
+          assert(railNav.scrollWidth <= railNav.clientWidth + 1,
+            'rail 态侧栏不应横向溢出: ' + railNav.scrollWidth + ' > ' + railNav.clientWidth);
+          assert(railObjects.title && railObjects.title.length > 0, 'rail 图标应有悬停提示');
+          // 历史段图标：展开侧栏并切到历史段
+          railHistory.click();
+          assert(document.documentElement.dataset.rail !== '1', '点击历史图标应展开侧栏');
+          assert(!document.getElementById('sidePanelHistory').hidden, '应切到历史段');
+          setSidebarRail(true, false);
           // 数据对象入口：展开侧栏 + 对象树一次性高亮
-          railBtn.click();
+          railObjects.click();
           assert(document.documentElement.dataset.rail !== '1', '点击数据对象入口应展开侧栏');
-          assert(getComputedStyle(tree).display !== 'none', '展开后对象树应恢复显示');
+          assert(!objectsPanel.hidden, '展开后对象段应恢复显示');
           assert(tree.classList.contains('is-flash'), '展开后对象树应有一次高亮');
-          assert(!nav.dataset.railTip, '展开后应清理 rail 提示标记');
+          assert(getComputedStyle(tabs).display !== 'none', '展开后段标签应恢复显示');
         } finally {
+          setSidePanelTab('objects', { persist: false });
           setSidebarRail(railBefore === '1', false);
           if (railPrefBefore === null) localStorage.removeItem('tdb_sidebar_rail');
           else localStorage.setItem('tdb_sidebar_rail', railPrefBefore);
@@ -19404,7 +21785,8 @@ RETURN doc, t</div>
             assert(nodeTexts.length >= graphNodes.length, `k=${k} 应实际画出节点标签`);
             assert(nodeTexts.every(item => Math.abs(item.size - expectedFont) < 0.02), `k=${k} 节点字号应恒为 ${expectedFont}px`);
             assert(edgeTexts.length > 0 && edgeTexts.every(item => Math.abs(item.size - 10) < 0.02), `k=${k} 边字号应恒为 10px`);
-            for (const gap of [0, 6, 10]) {
+            // V4.1 R2：选择环改为 +5px 外环 + +9px 柔光（视觉半径仍不随缩放改变）
+            for (const gap of [0, 5, 9]) {
               assert(circles.some(r => Math.abs(r - nodeRadius(selectedNode) - gap) < 0.02), `k=${k} 半径/选中环 ${gap}px 不应随缩放改变`);
             }
           }
@@ -19423,8 +21805,9 @@ RETURN doc, t</div>
         graphFilters.hiddenTypes = new Set();
         try {
           for (const k of [0.05, 0.5, 3, 20]) {
-            assert(hitGraphNode(19 / k, 0, k) === node, `k=${k} 4px 容差内应命中`);
-            assert(!hitGraphNode(21 / k, 0, k), `k=${k} 容差外不应命中`);
+            // 视觉半径 8；命中半径额外 +10（小圆点也要好点）→ 18
+            assert(hitGraphNode(17 / k, 0, k) === node, `k=${k} 命中容差内应命中`);
+            assert(!hitGraphNode(19 / k, 0, k), `k=${k} 容差外不应命中`);
           }
           graphFilters.hiddenTypes.add(node.typeKey);
           assert(!hitGraphNode(0, 0, 1), '过滤隐藏节点后圆心也不可命中');
@@ -19445,7 +21828,8 @@ RETURN doc, t</div>
         renderGraph(MATCH_ROWS);
         assert(nodeMap.get('1').degree === 1, 'Alice 度数应为 1（一条边端点）');
         assert(nodeMap.get('2').degree === 2, 'Bob 度数应为 2（两条边端点）');
-        assert(nodeRadius({ degree: 0 }) === 16, '0 度应为基础半径 16');
+        assert(nodeRadius({ degree: 0 }) === GRAPH_NODE_RADIUS_BASE,
+          `0 度应为基础半径 ${GRAPH_NODE_RADIUS_BASE}（视觉收敛后不随缩放膨胀）`);
         assert(nodeRadius({ degree: 5 }) > nodeRadius({ degree: 1 }), '度数越大半径应越大');
         assert(nodeRadius({ degree: 99 }) === nodeRadius({ degree: 20 }), '度数 20 封顶（2 倍半径）');
         renderGraph(FIND_ROWS);

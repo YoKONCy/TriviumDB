@@ -279,7 +279,8 @@ async function runVectorStates(page, ctx) {
   await checkCommon(page, ctx, 'vector', 'success');
   if (ctx.takeShots) await page.screenshot({ path: path.join(ctx.dir, 'vector-success.png') });
 
-  // zero
+  // zero（V4.1 R2：min_score 收进「高级参数」折叠区，先展开）
+  await page.evaluate(() => { document.getElementById('vlAdvanced').open = true; });
   await page.fill('#vlMinScore', '2');
   await page.click('#vlRunBtn');
   await waitVector(page, 'zero');
