@@ -1,6 +1,6 @@
 # TriviumDB 支持特性详解
 
-> TriviumDB `0.9.0-beta.4` 的架构、核心能力与技术实现。版本记录见[变更说明](changes/0.9.0-beta.4.md)。
+> TriviumDB `0.9.0` 的架构、核心能力与技术实现。版本记录见[变更说明](changes/0.9.0.md)。
 
 ## 当前能力快照
 

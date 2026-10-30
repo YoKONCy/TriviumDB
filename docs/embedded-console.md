@@ -1,5 +1,7 @@
 # 嵌入式 Console 宿主接入
 
+适用版本：`0.9.0`。Rust、Python、Node 的宿主协议属于嵌入式接口；HTTP 适配及现有 WebUI 继续采用 nightly 开发通道。完整版本说明见 [0.9.0](changes/0.9.0.md)。
+
 Console v1 为 Rust、Python 和 Node.js 提供同一份 JSON 请求协议，直接操作宿主已经打开的 Embedded Database。内核不引入 HTTP 或桌面框架依赖；HTTP 适配位于独立的 nightly Server crate，桌面 IPC 可原样转发字符串。
 
 本次交付范围是宿主协议、权限、生命周期、HTTP 适配和资源打包。现有 HTML、CSS、界面状态及交互逻辑保持不变。当前 HTML 仍使用 Server HTTP v1；前端开发者需要把数据访问适配到 Console RPC v1，才能使用新的嵌入式入口。资源包的 manifest 明确记录这一条件，不能把当前 HTML 的复制视为已经完成组件挂载。
