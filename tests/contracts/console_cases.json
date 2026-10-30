@@ -1,0 +1,82 @@
+{
+  "dimension": 2,
+  "setup": [
+    {"id":1,"vector":[1,0],"payload":{"kind":"alpha"}},
+    {"id":2,"vector":[0,1],"payload":{"kind":"beta"}}
+  ],
+  "cases": [
+    {
+      "name":"参数化查询",
+      "options":{},
+      "command":{"operation":"query","query":"FIND {kind: \"alpha\"} AS seed WITH seed RETURN $bonus + 1 AS score","parameters":{"bonus":4}},
+      "expected":{"rows":[{"score":5}],"rowCount":1,"columns":[{"name":"score","kind":"scalar"}]}
+    },
+    {
+      "name":"有序批量节点读取",
+      "options":{},
+      "command":{"operation":"getNodes","ids":["2","1","77"]},
+      "expected":{"nodes":[{"id":"2","vector":[0.0,1.0],"payload":{"kind":"beta"},"edges":[]},{"id":"1","vector":[1.0,0.0],"payload":{"kind":"alpha"},"edges":[]}],"missingIds":["77"]}
+    },
+    {
+      "name":"事务保留完整高位ID",
+      "options":{"readOnly":false},
+      "command":{"operation":"transaction","operations":[{"op":"insert","id":"9007199254740993","vector":[1,1],"payload":{"kind":"large"}},{"op":"updatePayload","id":"1","payload":{"kind":"updated"}},{"op":"link","source":"9007199254740993","target":"2","label":"next","weight":0.5,"metadata":{"来源":"控制台"}}]},
+      "expected":{"createdIds":["9007199254740993"]},
+      "verify":[{"id":"1","vector":[1.0,0.0],"payload":{"kind":"updated"}},{"id":"9007199254740993","vector":[1.0,1.0],"payload":{"kind":"large"},"edges":[{"target":"2","label":"next","weight":0.5,"metadata":{"来源":"控制台"}}]}]
+    },
+    {
+      "name":"失败事务不留下首条插入",
+      "options":{"readOnly":false},
+      "command":{"operation":"transaction","operations":[{"op":"insert","id":"3","vector":[1,1],"payload":{"kind":"不得出现"}},{"op":"insert","id":"1","vector":[1,1],"payload":{}}]},
+      "error":{"code":"TDB_NODE_ALREADY_EXISTS","details":{"id":1}},
+      "absent":["3"],
+      "verify":[{"id":"1","vector":[1.0,0.0],"payload":{"kind":"alpha"}}]
+    },
+    {
+      "name":"原子节点导入",
+      "options":{"readOnly":false},
+      "command":{"operation":"importNodes","records":[{"id":"3","vector":[1,1],"payload":{"kind":"third"}},{"id":"4","vector":[1,0],"payload":{"kind":"fourth"}}]},
+      "expected":{"createdIds":["3","4"]},
+      "verify":[{"id":"3","vector":[1.0,1.0],"payload":{"kind":"third"}},{"id":"4","vector":[1.0,0.0],"payload":{"kind":"fourth"}}]
+    },
+    {
+      "name":"只读策略在内核入口拒绝写入",
+      "options":{},
+      "command":{"operation":"mutate","query":"CREATE (n {kind: \"不得出现\"})"},
+      "error":{"code":"TDB_READ_ONLY","details":{"operation":"console_request"}},
+      "verify":[{"id":"1","vector":[1.0,0.0],"payload":{"kind":"alpha"}}]
+    },
+    {
+      "name":"读查询工作集预算拒绝部分结果",
+      "options":{"maxOperations":1},
+      "command":{"operation":"query","query":"MATCH (n) RETURN n"},
+      "error":{"code":"TDB_QUERY_BUDGET","details":{"budget":1}}
+    },
+    {
+      "name":"写匹配预算在计划物化前拒绝",
+      "options":{"readOnly":false,"maxOperations":1},
+      "command":{"operation":"mutate","query":"MATCH (n) CREATE (m {kind: \"不得出现\"})"},
+      "error":{"code":"TDB_QUERY_BUDGET","details":{"budget":1}},
+      "verify":[{"id":"1","vector":[1.0,0.0],"payload":{"kind":"alpha"}},{"id":"2","vector":[0.0,1.0],"payload":{"kind":"beta"}}]
+    },
+    {
+      "name":"响应预算结构化拒绝",
+      "options":{"maxResponseBytes":1},
+      "command":{"operation":"getNodes","ids":["1"]},
+      "error":{"code":"TDB_CONSOLE_RESPONSE_TOO_LARGE","details":{"max_bytes":1,"committed":false}}
+    },
+    {
+      "name":"卸载后拒绝请求",
+      "options":{},
+      "detached":true,
+      "command":{"operation":"info"},
+      "error":{"code":"TDB_CONSOLE_SESSION_CLOSED","details":{}}
+    },
+    {
+      "name":"批量预算在操作前拒绝",
+      "options":{"maxOperations":2},
+      "command":{"operation":"getNodes","ids":["1","2","3"]},
+      "error":{"code":"QueueFull","details":{"resource":"console_operations","requested":3,"used":0,"limit":2}}
+    }
+  ]
+}

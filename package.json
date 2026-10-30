@@ -13,15 +13,15 @@
     "binaryName": "triviumdb"
   },
   "scripts": {
-    "build": "napi build --platform --release --features nodejs",
-    "build:debug": "napi build --platform --features nodejs",
+    "build": "napi build --platform --no-js --release --features nodejs",
+    "build:debug": "napi build --platform --no-js --features nodejs",
     "test:lifecycle": "node tests/node/lifecycle.js",
     "test:resource-lifecycle": "node --expose-gc tests/node/resource_lifecycle.js",
     "test:process-lifecycle": "node --expose-gc tests/node/process_lifecycle.js",
     "test:public-api": "node tests/node/public_api.js",
     "test:types": "tsc --project tests/node/types/tsconfig.json",
     "test:package": "node scripts/check_node_package.cjs",
-    "prepublishOnly": "napi build --platform --release --features nodejs"
+    "prepublishOnly": "napi build --platform --no-js --release --features nodejs"
   },
   "keywords": [
     "database",

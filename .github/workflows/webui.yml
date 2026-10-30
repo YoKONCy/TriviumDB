@@ -59,6 +59,9 @@ jobs:
       - name: 验证 Server 契约
         run: cargo test -p triviumdb-server
 
+      - name: 打包宿主接入资源
+        run: python scripts/package_console.py --output .tmp/console/triviumdb-console.zip
+
       - name: 构建 server（HTML 经 include_str! 内嵌，必须先构建）
         run: cargo build -p triviumdb-server
 
@@ -127,4 +130,5 @@ jobs:
             .tmp/visual-diff/
             .tmp/v4-regressions/
             .tmp/v4-combos/
+            .tmp/console/
           if-no-files-found: ignore

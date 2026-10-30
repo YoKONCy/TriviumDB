@@ -31,6 +31,7 @@ pub mod cognitive;
 /// FFI 绑定层（Python / Node.js）
 pub mod bindings;
 
+pub use database::console::{ConsoleFeature, ConsoleHost, ConsoleOptions, ConsoleSession};
 pub use database::{BatchSearchConfig, EdgeDirection, SearchConfig};
 pub use database::{
     Database, DatabaseReader, DatabaseWriter, InstanceMemoryStats, InstanceStats, ShutdownPhase,

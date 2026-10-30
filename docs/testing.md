@@ -6,6 +6,8 @@
 
 当前未发布加固增加 `tests/contracts/error_cases.json`：Rust、已构建 Python wheel 与 Node 原生模块通过真实 API 核对错误码及完整字段，覆盖 Prepared 参数、维度、节点、唯一约束、只读、行预算、迁移、关闭、锁、I/O 与格式版本。Rust 描述符及 Python 映射测试使用独立的全部错误变体样例；Node 另验大整数详情与 Promise 拒绝。语言参数提取错误按各语言类型契约验证。
 
+嵌入式 Console 使用 `tests/contracts/console_cases.json` 的独立样例验证三端请求、完整记录及重开持久化。`cargo test --features test-hooks --test core console_host -- --test-threads=1` 覆盖真实子进程文件锁竞争、持有旧会话时释放锁、同路径新实例隔离、Hook 屏障下取消/关闭、只读文件组完整字节及关闭失败重试；标为 ignored 的探针由父用例以必需参数实际执行。Server 的 `console_embedding` 验证真实请求内容、客户端退出后的许可归还与宿主锁；Node 已安装 tarball 的消费测试同时验证 N-API 前重入拒绝。`python -m unittest discover -s tests/tools -p test_console_bundle.py` 验证实际 ZIP 的完整 HTML、协议、文档、许可证及可复现内容。
+
 全部错误变体的 Python 映射测试由 Windows Python Binding 任务执行 `cargo test --lib --features python 核心错误完整映射到_python异常`，链接 Windows Python 运行时；跨平台 wheel 继续通过真实公开 API 用例验证交付行为。
 
 发布来源校验执行 `python -m unittest discover -s tests/tools -p test_release_source.py`，CI 编译检查任务显式运行。用例创建真实 Git 历史，网络边界使用独立 PR/CI 响应；验证普通祖先提交、错误仓库或分支、未合并 PR、错误 SHA、缺失/失败/取消 CI 的拒绝，以及 master 前进后的历史 Release 补发。两条 CD 直接运行同一个校验脚本。

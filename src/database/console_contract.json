@@ -1,0 +1,27 @@
+{
+  "protocolVersion": 1,
+  "request": {"version": 1, "requestId": "unique-active-request-id", "command": {"operation": "info"}},
+  "response": {"version": 1, "requestId": "unique-active-request-id", "data": {}},
+  "idEncoding": "decimal-string",
+  "binaryVectorComponentEncoding": "decimal-string",
+  "operations": {
+    "info": [],
+    "query": ["query", "parameters?"],
+    "mutate": ["query"],
+    "getNodes": ["ids"],
+    "search": ["vector", "topK", "expandDepth?", "minScore?"],
+    "subgraph": ["source", "depth?", "labels?", "maxNodes?"],
+    "edges": ["node", "incoming?"],
+    "path": ["source", "target", "maxDepth", "label?"],
+    "indexes": [],
+    "manageIndex": ["kind", "fields", "create"],
+    "buildQuiver": [],
+    "transaction": ["operations"],
+    "importNodes": ["records"],
+    "importEdges": ["records"]
+  },
+  "transactionOperations": ["insert", "updatePayload", "updateVector", "delete", "link", "unlink"],
+  "unsupported": ["open-path", "close-database", "interactive-transaction", "occ", "ndjson-streaming"],
+  "frontend": {"legacyHtmlTransport": "server-http-v1", "embeddedTransport": "console-rpc-v1", "requiresTransportAdapter": true},
+  "documentation": "docs/embedded-console.md"
+}

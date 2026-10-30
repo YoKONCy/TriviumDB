@@ -9,6 +9,7 @@
 //! - `mod.rs`（本文件）: Database 结构体 + CRUD + 生命周期管理
 
 pub mod config;
+pub mod console;
 pub mod facade;
 mod lifecycle;
 mod migration;
@@ -2918,11 +2919,28 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         parameters: &std::collections::HashMap<String, crate::query::tql_prepared::TqlParamValue>,
         control: crate::query::tql_executor::QueryControl,
     ) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
+        self.execute_prepared_tql_controlled(prepared, parameters, control, None)
+    }
+
+    pub(crate) fn execute_prepared_tql_controlled(
+        &self,
+        prepared: &crate::query::tql_prepared::PreparedTql,
+        parameters: &std::collections::HashMap<String, crate::query::tql_prepared::TqlParamValue>,
+        control: crate::query::tql_executor::QueryControl,
+        row_budget: Option<usize>,
+    ) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
         let query = prepared.bind(parameters)?;
         let mt = read_or_recover(&self.memtable);
         let mut limits = self.tql_limits.clone();
         limits.query_control = Some(control);
+        if let Some(budget) = row_budget {
+            limits.max_query_rows = Some(match limits.max_query_rows {
+                Some(current) if current > 0 => current.min(budget),
+                _ => budget,
+            });
+            limits.row_overflow = RowOverflowPolicy::Throw;
+        }
         crate::query::tql_executor::execute_tql_values_with_limits(&query, &mt, limits)
     }
 
@@ -2950,6 +2968,18 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         input: &str,
         max_id: NodeId,
     ) -> Result<crate::query::tql_executor::TqlMutResult> {
+        self.tql_mut_admitted(input, max_id, None, None, |_, _| Ok(()))
+    }
+
+    /// 传输层在写计划已确定、WAL 尚未写入时检查交付预算，不复制写入执行逻辑。
+    pub(crate) fn tql_mut_admitted(
+        &mut self,
+        input: &str,
+        max_id: NodeId,
+        plan_limit: Option<usize>,
+        control: Option<crate::query::tql_executor::QueryControl>,
+        admit: impl FnOnce(usize, usize) -> Result<()>,
+    ) -> Result<crate::query::tql_executor::TqlMutResult> {
         self.require_write_access("tql_mut")?;
         let _operation = self.enter_operation()?;
         use crate::query::tql_ast::TqlStatement;
@@ -2966,14 +2996,20 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             TqlStatement::Mutation(mutation) => {
                 let (ops, mut next_id) = {
                     let mt = read_or_recover(&self.memtable);
-                    (
+                    let mut limits = self.tql_limits.clone();
+                    if let Some(control) = control {
+                        limits.query_control = Some(control);
+                    }
+                    let ops = if let Some(limit) = plan_limit {
+                        crate::query::tql_executor::execute_tql_mutation_with_operation_budget(
+                            &mutation, &mt, limits, limit,
+                        )?
+                    } else {
                         crate::query::tql_executor::execute_tql_mutation_with_limits(
-                            &mutation,
-                            &mt,
-                            self.tql_limits.clone(),
-                        )?,
-                        mt.next_id_value(),
-                    )
+                            &mutation, &mt, limits,
+                        )?
+                    };
+                    (ops, mt.next_id_value())
                 };
 
                 let mut affected = 0usize;
@@ -3058,6 +3094,17 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     }
                 }
 
+                let created_count = tx_ops
+                    .iter()
+                    .filter(|op| {
+                        matches!(
+                            op,
+                            transaction::TxOp::Insert { .. }
+                                | transaction::TxOp::InsertWithId { .. }
+                        )
+                    })
+                    .count();
+                admit(affected, created_count)?;
                 let created_ids = self.commit_ops(tx_ops)?;
 
                 Ok(TqlMutResult {

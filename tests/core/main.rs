@@ -2,6 +2,7 @@
 //! 按领域聚合的集成测试入口。
 
 mod boundary;
+mod console_host;
 mod database_advanced;
 mod endian_limit;
 mod engine_deep;

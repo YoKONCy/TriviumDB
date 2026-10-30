@@ -2,6 +2,8 @@
 
 后续变更以 `0.9.0-beta.4` 为基线；该版本内容见[中英文变更说明](0.9.0-beta.4.md)。
 
+- 新增嵌入式 Console v1 宿主协议，Rust、Python、Node 共用查询、图/向量、索引、原子事务和导入入口，并保留完整 u64 字符串 ID。会话默认只读、绑定具体实例；Rust 适配器只持有宿主弱引用，锁竞争及重入明确拒绝，卸载不关闭宿主数据库。HTTP 适配复用现有实例，客户端退出后的并发许可随真实任务结束释放；关闭失败继续保留锁以便重试。写计划和响应预算在 WAL 前准入，成功响应按字节限额编码。新增资源包导出和三端接入说明；HTML 与前端逻辑未改写，现有页面仍需前端负责人适配新传输，资源包明确标注此条件及 CDN 依赖。Server HTTP v1 保持原行为，磁盘格式和版本号不变。
+
 - 维度迁移发布使用不覆盖既有目标的原子重命名，替代暂存库与目标之间的硬链接。进程在发布期间被强杀后，Unix 打开入口不会再因遗留的第二个主文件链接挡住恢复；提交前按发布日志回滚，提交后保留完整目标，源库保持原样。源、目标目录均在提交点前后同步。底层文件系统必须支持排他原子重命名；不支持时返回 I/O 错误，不退回覆盖或非原子复制。
 - 增加 Rom/Mmap 源库在首文件发布后、提交前及提交后强杀的回归，验证源文件组、目标节点/向量/Payload/业务边、只读零写，以及再次打开和持久化结果。普通硬链接别名仍按既有规则拒绝。
 - 迁移预检按实际文件系统规则识别主文件与任意同名前缀侧文件的大小写别名，遇到已有文件组时在创建目标租约、暂存库或发布日志前返回 `TDB_IO` / `AlreadyExists`，避免把新库第一代发布日志写到已有多代数据库。区分大小写的目录仍允许独立目标，实际空闲协调锁可复用；Unix 同时保留非 UTF-8 侧文件并拒绝悬空主文件链接。
@@ -12,6 +14,8 @@
 ## Unreleased
 
 Subsequent changes build on `0.9.0-beta.4`. See the bilingual [release notes](0.9.0-beta.4.md).
+
+- Added the embedded Console v1 host protocol, with shared Rust, Python and Node entry points for queries, graph/vector operations, indexes, atomic transactions and imports, preserving full u64 IDs as strings. Sessions default to read-only and bind to a specific instance. The Rust adapter holds only a weak host reference, rejects lock contention and reentry, and detaches without closing the host database. The HTTP adapter reuses the existing instance and retains concurrency permits until actual work finishes after client disconnection; failed database close retains the lock for retry. Write-plan and response budgets are admitted before WAL publication, and successful responses use bounded encoding. Added resource-bundle export and integration documentation for all three languages. HTML and frontend logic remain unchanged: the existing page still requires frontend-owned transport adaptation, which the bundle declares along with its CDN dependencies. Server HTTP v1 behavior, disk formats and package versions remain unchanged.
 
 - Dimension migration now publishes with exclusive atomic renames instead of hard links between staging and destination files. After a process is killed during publication, Unix opening no longer rejects the destination because of a leftover second main-file link: pre-commit state rolls back through the publication journal, committed targets retain complete data, and the source remains unchanged. Both source and destination directories are synchronized around the commit point. The filesystem must support exclusive atomic renaming; unsupported operations return an I/O error without falling back to replacement or non-atomic copying.
 - New regressions kill migrations from Rom and Mmap sources after the first file, before commit and after commit. They check source-file preservation, complete destination nodes/vectors/Payload/business edges, physical zero-write read-only access, reopening and persistence. Ordinary hard-link aliases remain rejected.

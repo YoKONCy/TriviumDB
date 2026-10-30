@@ -1,5 +1,6 @@
 //! TriviumDB Server HTTP 应用：并发读、Writer Actor、幂等写与 OCC。
 
+pub mod console;
 mod engine;
 mod protocol;
 
@@ -244,6 +245,11 @@ pub async fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
 }
 
 const WEBUI_HTML: &str = include_str!("../web/index.html");
+
+/// 导出现有控制台资源；传输接入与容器挂载由宿主及前端适配器负责。
+pub fn console_html() -> &'static str {
+    WEBUI_HTML
+}
 
 /// 内嵌页面内容指纹（构建期固定、进程内一次性计算）。
 /// 用弱 ETag：同一份内容可能按 gzip/identity 两种编码返回，语义等价。

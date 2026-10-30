@@ -220,6 +220,19 @@ pub(crate) fn cases() -> Vec<(E, &'static str, Value)> {
         ),
         (E::DatabaseClosed, "TDB_DATABASE_CLOSED", json!({})),
         (
+            E::ConsoleSessionClosed,
+            "TDB_CONSOLE_SESSION_CLOSED",
+            json!({}),
+        ),
+        (
+            E::ConsoleResponseTooLarge {
+                max_bytes: 8,
+                committed: true,
+            },
+            "TDB_CONSOLE_RESPONSE_TOO_LARGE",
+            json!({"max_bytes":8,"committed":true}),
+        ),
+        (
             E::UnsupportedWalVersion {
                 found: 4,
                 supported: 3,
