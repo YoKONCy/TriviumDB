@@ -52,6 +52,17 @@ impl QueryControl {
         self.cancelled.store(true, Ordering::Release);
     }
 
+    /// 传输层取消与内核预算共用同一标志，外部 deadline 只能缩短会话预算。
+    pub(crate) fn bounded_by(&self, deadline: Instant) -> Self {
+        Self {
+            cancelled: self.cancelled.clone(),
+            deadline: Some(
+                self.deadline
+                    .map_or(deadline, |current| current.min(deadline)),
+            ),
+        }
+    }
+
     pub fn check(&self) -> Result<(), TriviumError> {
         if self.cancelled.load(Ordering::Acquire)
             || self
@@ -3719,6 +3730,41 @@ pub fn execute_tql_mutation_with_limits<T: VectorType>(
     // 写操作的匹配集超限时整批拒绝，禁止使用读查询的部分结果策略。
     limits.row_overflow = crate::database::RowOverflowPolicy::Throw;
     limits.max_query_rows = Some(0);
+    execute_tql_mutation_planned(mutation, mt, limits)
+}
+
+/// 宿主显式预算在匹配集和写向量物化前准入；原有写入口仍保持自己的完整匹配契约。
+pub(crate) fn execute_tql_mutation_with_operation_budget<T: VectorType>(
+    mutation: &TqlMutation,
+    mt: &MemTable<T>,
+    mut limits: TqlLimits,
+    max_operations: usize,
+) -> Result<Vec<MutationOp<T>>, TriviumError> {
+    let per_match = match &mutation.action {
+        MutationAction::Create(create) => create.nodes.len().saturating_add(create.edges.len()),
+        MutationAction::Set(assignments) => assignments.len(),
+        MutationAction::SetVector { .. } => 1,
+        MutationAction::Delete { vars, .. } => vars.len(),
+    }
+    .max(1);
+    if per_match > max_operations || max_operations == 0 {
+        return Err(TriviumError::ResourceBudgetExceeded {
+            resource: "console_operations",
+            requested: per_match,
+            used: 0,
+            limit: max_operations,
+        });
+    }
+    limits.row_overflow = crate::database::RowOverflowPolicy::Throw;
+    limits.max_query_rows = Some(max_operations / per_match);
+    execute_tql_mutation_planned(mutation, mt, limits)
+}
+
+fn execute_tql_mutation_planned<T: VectorType>(
+    mutation: &TqlMutation,
+    mt: &MemTable<T>,
+    limits: TqlLimits,
+) -> Result<Vec<MutationOp<T>>, TriviumError> {
     let memory = QueryMemory::new(limits.memory_limit, mt);
     limits.check_cancelled()?;
     match &mutation.action {

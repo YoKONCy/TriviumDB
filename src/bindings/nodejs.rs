@@ -16,6 +16,35 @@ pub mod nodejs {
         serde_json::to_value(value).map(NodeJson)
     }
 
+    /// 会话只保存策略与取消状态，数据库仍由宿主持有。
+    #[napi(js_name = "ConsoleSession")]
+    pub struct JsConsoleSession {
+        inner: crate::ConsoleSession,
+    }
+
+    #[napi]
+    impl JsConsoleSession {
+        #[napi(constructor)]
+        pub fn new(env: Env, options_json: Option<String>) -> napi::Result<Self> {
+            crate::ConsoleSession::from_json(options_json.as_deref().unwrap_or("{}"))
+                .map(|inner| Self { inner })
+                .map_err(|error| to_napi_error(env, error))
+        }
+
+        #[napi]
+        pub fn detach(&self) {
+            self.inner.detach();
+        }
+        #[napi]
+        pub fn is_detached(&self) -> bool {
+            self.inner.is_detached()
+        }
+        #[napi]
+        pub fn cancel(&self, request_id: String) -> bool {
+            self.inner.cancel(&request_id)
+        }
+    }
+
     struct JsNativeHook {
         object: super::super::node_hook_refs::HookReference,
         owner_thread: std::thread::ThreadId,
@@ -2728,6 +2757,18 @@ pub mod nodejs {
             .map_err(|error| to_napi_error(env, error))
         }
 
+        /// 同步执行宿主控制台请求。
+        #[napi]
+        pub fn console_request(
+            &mut self,
+            env: Env,
+            session: &JsConsoleSession,
+            request_json: String,
+        ) -> napi::Result<String> {
+            dispatch!(self, mut db => db.console_request(&session.inner, &request_json))
+                .map_err(|error| to_napi_error(env, error))
+        }
+
         /// 执行 TQL 写操作（CREATE / SET / DELETE / DETACH DELETE）
         ///
         /// 返回 { affected: number, createdIds: number[] }
@@ -2740,6 +2781,7 @@ pub mod nodejs {
         /// db.tqlMut('MATCH (a {name: "Alice"}) SET a.age == 31')
         /// db.tqlMut('MATCH (a {name: "Alice"}) DELETE a')
         /// ```
+        /// 执行内核 TQL 写操作。
         #[napi]
         pub fn tql_mut(&mut self, env: Env, query: String) -> napi::Result<NodeJson> {
             let result =

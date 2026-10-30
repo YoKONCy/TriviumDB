@@ -27,6 +27,15 @@ from triviumdb import Edge, EdgeDirection, NodeView, SearchHit, Transaction, Tri
 
 db = TriviumDB("app.tdb", dim=8)
 
+# 控制台边界只收发原始 JSON 字符串，策略由宿主创建。
+console = triviumdb.ConsoleSession()
+assert_type(console.cancel("q1"), bool)
+assert_type(console.is_detached(), bool)
+assert_type(db.console_request(console, '{"version":1,"requestId":"q1","command":{"operation":"info"}}'), str)
+assert_type(console.detach(), None)
+triviumdb.ConsoleSession({})  # type: ignore[arg-type]
+db.console_request(console, {})  # type: ignore[arg-type]
+
 # ── module / constructor ──
 assert_type(db, TriviumDB)
 assert_type(triviumdb.init_logger(), None)

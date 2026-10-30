@@ -351,9 +351,15 @@ async function main() {
     const deadline = Date.now() + contract.close_timeout_ms
     while (!reopened) {
       try { reopened = new TriviumDB(file, { dim: 3, autoBuildQuiver: false }) }
-      catch (error) { assert.equal(error.code, 'TDB_DATABASE_LOCKED'); assert(Date.now() < deadline, '工作线程退出后关闭任务未排空'); await next() }
+      catch (error) {
+        assert.equal(error.code, 'TDB_DATABASE_LOCKED',
+          `工作线程重开返回非锁错误 (Worker reopen returned a non-lock error): ${error.message}; details=${JSON.stringify(error.details)}`)
+        assert(Date.now() < deadline, '工作线程退出后关闭任务未排空')
+        await next()
+      }
     }
     assert.equal(reopened.nodeCount(), 1)
+    assert.deepEqual(reopened.get(1), { id: 1, vector: [1, 2, 3], payload: {}, edges: [], numEdges: 0 })
     reopened.close()
     held.push(reopened)
     released(directory)

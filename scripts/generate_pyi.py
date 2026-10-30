@@ -34,10 +34,10 @@ EXCEPTIONS = [
 CLASS_ORDER = [
     "SearchHit", "GroupedSearchResult", "Edge", "IncomingEdge", "NodeView",
     "ReachabilityStep", "ReachabilityResult", "QueryRow", "HookContext",
-    "PreparedTql", "Transaction", "ResourceRuntime", "TriviumDB",
+    "PreparedTql", "Transaction", "ResourceRuntime", "ConsoleSession", "TriviumDB",
 ]
 FUNCTIONS = ["init_logger", "verify_snapshot", "restore_snapshot"]
-CONSTRUCTIBLE = {"TriviumDB", "ResourceRuntime"}  # 仅这两个类提供原生构造器
+CONSTRUCTIBLE = {"TriviumDB", "ResourceRuntime", "ConsoleSession"}  # 提供原生构造器的类
 
 # Dunders emitted from the method loop (__new__ is handled by the ctor branch).
 KEEP_DUNDERS = ["__len__", "__contains__", "__repr__", "__enter__", "__exit__"]
@@ -63,6 +63,7 @@ ATTRS = {
 
 # Param type by name. A param whose default is None is auto-wrapped in Optional.
 PARAM_TYPES = {
+    "options_json": "str", "request_json": "str", "request_id": "str", "session": "ConsoleSession",
     "vector": "Vector", "query_vector": "Vector",
     "vectors": "Sequence[Vector]", "query_vectors": "Sequence[Vector]",
     "ids": "Sequence[int]", "anchor_ids": "Sequence[int]",
@@ -112,7 +113,7 @@ QUALIFIED_PARAM_TYPES = {
 # not listed emits Any plus a warning, so a new Rust method is loud, not silent.
 RETURNS = {}
 for _ret, _quals in {
-    "None": "init_logger "
+    "None": "init_logger ConsoleSession.detach "
             "TriviumDB.set_sync_mode TriviumDB.load_ffi_hook TriviumDB.clear_hook "
             "TriviumDB.set_hook TriviumDB.insert_with_id TriviumDB.upsert_with_id "
             "TriviumDB.batch_insert_with_ids "
@@ -152,8 +153,9 @@ for _ret, _quals in {
     "Any | None": "TriviumDB.get_payload",
     "Transaction": "TriviumDB.transaction",
     "Any": "TriviumDB.publish_generation_manifest",
-    "str": "TriviumDB.__repr__ Transaction.__repr__ QueryRow.__repr__ HookContext.__repr__",
-    "bool": "TriviumDB.close_timeout TriviumDB.__contains__ TriviumDB.__exit__ Transaction.__exit__",
+    "str": "TriviumDB.console_request TriviumDB.__repr__ Transaction.__repr__ QueryRow.__repr__ HookContext.__repr__",
+    "bool": "ConsoleSession.cancel ConsoleSession.is_detached TriviumDB.close_timeout TriviumDB.__contains__ TriviumDB.__exit__ Transaction.__exit__",
+    '"ConsoleSession"': "ConsoleSession.__new__",
     '"ResourceRuntime"': "ResourceRuntime.__new__",
     '"TriviumDB"': "TriviumDB.__new__ TriviumDB.__enter__",
     '"Transaction"': "Transaction.__enter__",

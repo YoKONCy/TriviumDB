@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "console_contract": "console_cases.json",
   "setup": {
     "dimension": 2,
     "nodes": [

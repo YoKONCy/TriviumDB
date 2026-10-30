@@ -274,7 +274,7 @@ jobs:
         run: npm install
 
       - name: Build node module
-        run: npx napi build --platform --release --features nodejs --target ${{ matrix.target }}
+        run: npx napi build --platform --no-js --release --features nodejs --target ${{ matrix.target }}
         env:
           # Linux ARM64 交叉编译需要指定链接器
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}

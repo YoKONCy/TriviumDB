@@ -17,6 +17,14 @@ export type SyncMode = 'full' | 'normal' | 'off';
 
 export type DType = 'f32' | 'f16' | 'u64';
 
+/** 宿主可信代码创建的控制台策略与取消状态；不持有数据库文件锁。 */
+export class ConsoleSession {
+  constructor(optionsJson?: string | null);
+  detach(): void;
+  isDetached(): boolean;
+  cancel(requestId: string): boolean;
+}
+
 export interface JsSearchHit<T = any> {
   /** JavaScript 安全整数节点 ID；超范围结果使整个调用返回参数错误。 */
   id: number;
@@ -389,6 +397,8 @@ export interface ErrorDetailsByCode {
   TDB_SNAPSHOT_PUBLICATION_UNCERTAIN: { path: string; reason: string };
   TDB_SHUTDOWN_FAILED: { reason: string };
   TDB_DATABASE_CLOSED: Record<string, never>;
+  TDB_CONSOLE_SESSION_CLOSED: Record<string, never>;
+  TDB_CONSOLE_RESPONSE_TOO_LARGE: { max_bytes: ErrorInteger; committed: boolean };
   TDB_UNSUPPORTED_WAL_VERSION: { found: number; supported: number };
   TDB_UNSUPPORTED_DATABASE_VERSION: { found: number; minimum_supported: number; current: number };
   TDB_API_MIGRATION_REQUIRED: { removed_api: string; replacement: string };
@@ -876,6 +886,9 @@ export class TriviumDB {
    * ```
    */
   tql(query: string): any[];
+
+  /** 同步执行 Console v1 JSON 请求；节点 ID 与 u64 向量分量使用十进制字符串。 */
+  consoleRequest(session: ConsoleSession, requestJson: string): string;
   prepareTql(query: string): PreparedTql;
   executePreparedTql(prepared: PreparedTql, parameters: Record<string, string | number | boolean | null>): any[];
 

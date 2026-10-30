@@ -170,6 +170,14 @@ pub enum TriviumError {
     #[error("数据库已关闭 (Database closed)")]
     DatabaseClosed,
 
+    #[error("控制台会话已卸载 (Console session is detached)")]
+    ConsoleSessionClosed,
+
+    #[error(
+        "控制台响应超出大小上限 (Console response exceeds size limit): max_bytes={max_bytes}, committed={committed}"
+    )]
+    ConsoleResponseTooLarge { max_bytes: usize, committed: bool },
+
     /// WAL 格式版本高于当前内核支持范围。
     #[error("不支持的 WAL 版本 (Unsupported WAL version): 发现 {found}，当前支持 {supported}")]
     UnsupportedWalVersion { found: u16, supported: u16 },
@@ -248,6 +256,8 @@ impl TriviumError {
             Self::SnapshotPublicationUncertain { .. } => "TDB_SNAPSHOT_PUBLICATION_UNCERTAIN",
             Self::ShutdownFailed { .. } => "TDB_SHUTDOWN_FAILED",
             Self::DatabaseClosed => "TDB_DATABASE_CLOSED",
+            Self::ConsoleSessionClosed => "TDB_CONSOLE_SESSION_CLOSED",
+            Self::ConsoleResponseTooLarge { .. } => "TDB_CONSOLE_RESPONSE_TOO_LARGE",
             Self::UnsupportedWalVersion { .. } => "TDB_UNSUPPORTED_WAL_VERSION",
             Self::UnsupportedDatabaseVersion { .. } => "TDB_UNSUPPORTED_DATABASE_VERSION",
             Self::ApiMigrationRequired { .. } => "TDB_API_MIGRATION_REQUIRED",
@@ -284,6 +294,12 @@ impl TriviumError {
                 max_bytes,
             } => json!({"size_bytes": size_bytes, "max_bytes": max_bytes}),
             Self::ReadOnlyViolation { operation } => json!({"operation": operation}),
+            Self::ConsoleResponseTooLarge {
+                max_bytes,
+                committed,
+            } => {
+                json!({"max_bytes": max_bytes, "committed": committed})
+            }
             Self::RecoveryRequired { wal_path } => json!({"wal_path": wal_path}),
             Self::GenerationBusy { generation_id } => json!({"generation_id": generation_id}),
             Self::MissingQueryParameter { parameter }
@@ -358,7 +374,10 @@ impl TriviumError {
             | Self::HookLoadError(reason)
             | Self::InvalidInput(reason)
             | Self::Generic(reason) => json!({"reason": reason}),
-            Self::QueryCancelled | Self::WalClosed | Self::DatabaseClosed => json!({}),
+            Self::QueryCancelled
+            | Self::WalClosed
+            | Self::DatabaseClosed
+            | Self::ConsoleSessionClosed => json!({}),
         }
     }
 }

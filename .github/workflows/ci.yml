@@ -75,6 +75,9 @@ jobs:
       - name: 验证发布来源与摘要行为
         run: python -m unittest discover -s tests/tools -p 'test_release_*.py'
 
+      - name: 验证控制台资源交付
+        run: python -m unittest discover -s tests/tools -p 'test_console_bundle.py'
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
@@ -146,7 +149,9 @@ jobs:
         run: cargo test --target ${{ matrix.target }} --features test-hooks --test concurrency --test differential -- --test-threads=1
 
       - name: 运行事务应用异常与共享查询隔离测试
-        run: cargo test --target ${{ matrix.target }} --features test-hooks --lib database::transaction::guard_tests -- --test-threads=1
+        run: |
+          cargo test --target ${{ matrix.target }} --features test-hooks --lib database::transaction::guard_tests -- --test-threads=1
+          cargo test --target ${{ matrix.target }} --features test-hooks --test core console_host -- --test-threads=1
 
       - name: 运行定点 I/O 故障与发布阶段强杀测试
         run: cargo test --target ${{ matrix.target }} --features test-hooks --test fault_io --test fault_power -- --test-threads=1
