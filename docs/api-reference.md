@@ -2,7 +2,7 @@
 
 嵌入式 Console 新增 `ConsoleSession`、Rust `ConsoleHost` 和 `Database::console_request`；Python 对应 `db.console_request(session, request_json)`，Node 对应 `db.consoleRequest(session, requestJson)`。三端均收发原始 JSON 字符串，复用同一数据库实例与生命周期；权限、取消、完整 u64 ID、HTTP 适配及资源包见[宿主接入文档](embedded-console.md)。该入口不自动挂载或改写现有 HTML。
 
-> **版本**: `0.9.0-beta.4` 公共 API；见[变更说明](changes/0.9.0-beta.4.md)。
+> **版本**: `0.9.0` 公共 API；见[变更说明](changes/0.9.0.md)。
 > **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
 > **许可**: Apache-2.0
 

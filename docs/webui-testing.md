@@ -2,7 +2,7 @@
 
 Server 与 WebUI 处于 nightly 快速迭代阶段，布局、主题、交互和 HTTP 接口随开发调整。开发者按需要选择服务端自测、浏览器交互检查和截图记录。嵌入式 Core、Rust/Python/Node SDK 与 CLI 使用各自的正式验收流程。
 
-WebUI 位于 `crates/triviumdb-server/web/index.html`，由 Server 通过 `include_str!` 内嵌，页面修改后重新构建 Server。当前文档对应 0.9.0-beta.4 + V4.1 R2 工作区验收。
+WebUI 位于 `crates/triviumdb-server/web/index.html`，由 Server 通过 `include_str!` 内嵌，页面修改后重新构建 Server。当前文档对应 0.9.0 + V4.1 R2 工作区验收。
 
 ## 按需运行
 

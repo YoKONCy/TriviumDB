@@ -2,7 +2,7 @@
 
 > 从单元测试到属性测试、从覆盖率度量到变异测试：TriviumDB 的多层防御测试体系详解。
 >
-> 本文说明 `0.9.0-beta.4` 的测试与验收方法，见[变更说明](changes/0.9.0-beta.4.md)。
+> 本文说明 `0.9.0` 的测试与验收方法，见[变更说明](changes/0.9.0.md)。
 
 当前未发布加固增加 `tests/contracts/error_cases.json`：Rust、已构建 Python wheel 与 Node 原生模块通过真实 API 核对错误码及完整字段，覆盖 Prepared 参数、维度、节点、唯一约束、只读、行预算、迁移、关闭、锁、I/O 与格式版本。Rust 描述符及 Python 映射测试使用独立的全部错误变体样例；Node 另验大整数详情与 Promise 拒绝。语言参数提取错误按各语言类型契约验证。
 

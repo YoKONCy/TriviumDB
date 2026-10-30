@@ -1,6 +1,6 @@
 # TriviumDB Server（HTTP 服务端版）
 
-> **版本**: v0.9.0-beta.4 版本源码（Server 为 nightly 预览）；见[变更说明](changes/0.9.0-beta.4.md)。
+> **版本**: v0.9.0 版本源码（Server 为 nightly 预览）；见[变更说明](changes/0.9.0.md)。
 > **语言**: Rust（Axum + Tokio，仅服务端 crate，嵌入式核心零依赖侵入）
 > **许可**: Apache-2.0
 

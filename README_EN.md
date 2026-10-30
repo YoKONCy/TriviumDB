@@ -144,7 +144,7 @@ Suppose you're building an **AI conversation memory system** and the user says "
 
 **QuIVer** (Quantized Index for Vector Retrieval) is TriviumDB's in-house ANN graph index. QuIVer combines **fast BQ graph construction, training-free SM-L2 navigation, and cosine reranking of original vectors**. Navigation uses two-bit codes and per-vector magnitudes to score reconstructed squared L2; recall and throughput depend on the workload, parameters, and reranking budget.
 
-> 📖 [QuIVer architecture and configuration](docs/quiver.md) · [Benchmark guide](benches/README.md) · [0.9.0-beta.4 changes](docs/changes/0.9.0-beta.4.md)
+> 📖 [QuIVer architecture and configuration](docs/quiver.md) · [Benchmark guide](benches/README.md) · [0.9.0 changes](docs/changes/0.9.0.md)
 
 > ⚠️ **Dimension guidance: keeping database vectors at or below 3072 dimensions is strongly recommended.** TriviumDB storage and exact BruteForce retrieval support higher dimensions, but QuIVer's BQ signature safety limit is 3072 dimensions. Above this limit, automatic QuIVer construction is disabled and search safely falls back to BruteForce; manual QuIVer construction returns an explicit error. Higher-dimensional databases remain usable, but do not receive QuIVer ANN acceleration and incur substantially higher memory and compute costs.
 
@@ -255,15 +255,17 @@ Use as a library dependency:
 cargo add triviumdb
 ```
 
-`0.9.0-beta.4` strengthens typed storage, derived-index fact binding, WAL integrity, query budgets, and Reader leases. Native vector, graph, and document queries share graph matching, numeric, and transaction semantics under Cascades planning across Rust, Python, and Node.js:
+`0.9.0` is the stable release: Rust, Python and Node.js share the native tri-model core, Cascades query planning, atomic transactions, resource budgets and controlled shutdown. Console v1 adds a host interface that reuses an already-open instance, alongside stronger file-group recovery, migration publication and Windows file-lock boundaries. Server and WebUI retain the nightly channel.
 
 ```bash
-pip install "triviumdb==0.9.0b4"
-npm install triviumdb@0.9.0-beta.4
-cargo add triviumdb@0.9.0-beta.4
+pip install "triviumdb==0.9.0"
+npm install triviumdb@0.9.0
+cargo add triviumdb@0.9.0
 ```
 
-See the bilingual [0.9.0-beta.4 release notes](docs/changes/0.9.0-beta.4.md).
+See the bilingual [0.9.0 release notes](docs/changes/0.9.0.md).
+
+To add a management frontend to an embedded application, follow [Console host integration](docs/embedded-console.md) to reuse the same instance and file lock. The existing HTML still needs frontend-owned transport adaptation; the resource bundle declares that requirement and its CDN dependencies.
 
 > 🧪 **Early Preview: HTTP Server Edition (nightly)** — TriviumDB's primary product form remains an **embedded database** (an in-process library, no deployment required). The optional `triviumdb-server` crate in this repository adds an HTTP shell (multi-client concurrent reads/writes, OCC, streaming NDJSON, etc.) and is currently in **nightly preview**: the protocol may change at any time, so it is for experimentation only — do not use it in production. See [Server Guide (nightly)](docs/server.md) (Chinese); all API and usage documentation remains authoritative for the embedded edition.
 
