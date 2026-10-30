@@ -3,6 +3,7 @@
 use super::{Config, Database, read_or_recover};
 use crate::{Result, TriviumError, VectorType};
 use fs2::FileExt;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -27,15 +28,68 @@ fn ensure_empty(target: &str) -> Result<()> {
                 "迁移目标缺少文件名 (Migration destination has no file name)".into(),
             )
         })?;
-    let prefix = format!("{leaf}.");
-    let lock = format!("{leaf}.lock");
+    let occupied = || {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "迁移目标文件组已经存在 (Migration destination file group already exists): {target}"
+            ),
+        )
+    };
+    // 由文件系统解析主文件别名；悬空链接和目录也属于已有目标。
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return Err(occupied().into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let lock = parent.join(format!("{leaf}.lock"));
     for entry in std::fs::read_dir(parent)? {
         let entry = entry?;
         let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name == leaf || (name.starts_with(&prefix) && name != lock) {
-            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists,
-                format!("迁移目标文件组已经存在 (Migration destination file group already exists): {target}")).into());
+        let mut remaining = Path::new(&name);
+        let mut suffix = OsString::new();
+        // 不转换大小写或有损解码；逐个点边界探测同名前缀，让卷及目录决定别名规则。
+        while let (Some(stem), Some(extension)) = (remaining.file_stem(), remaining.extension()) {
+            let mut next = OsString::from(".");
+            next.push(extension);
+            next.push(&suffix);
+            suffix = next;
+            remaining = Path::new(stem);
+            let mut candidate = OsString::from(leaf);
+            candidate.push(&suffix);
+            let candidate = parent.join(candidate);
+            let metadata = match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) => metadata,
+                // 无关长文件名的后缀可能使拼接路径超限；它不可能是有效的目标制品。
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            // 仅真实协调锁可复用；大小写不同的独立文件、符号链接及目录均不得豁免。
+            if suffix
+                .to_str()
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".lock"))
+                && metadata.is_file()
+            {
+                match std::fs::symlink_metadata(&lock) {
+                    Ok(lock_metadata)
+                        if lock_metadata.is_file()
+                            && same_file::is_same_file(&candidate, &lock)? =>
+                    {
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            return Err(occupied().into());
         }
     }
     Ok(())
@@ -174,7 +228,7 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
     drop(mt);
     ensure_empty(&destination.target)?;
     crate::storage::file_format::publish_new_database::<T>(&stage_path, &destination.target)?;
-    // Windows 在目标映射建立前释放暂存硬链接，清理期间目标租约仍由当前调用持有。
+    // 文件已经排他移动，清理剩余暂存目录期间目标租约仍由当前调用持有。
     std::fs::remove_dir_all(&destination.directory)?;
     // 目标租约直接交给新实例，发布与打开之间保持排他性。
     let _task = source.resource_runtime.enter_task()?;
@@ -189,4 +243,160 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
         destination.lease.take(),
     )?;
     Ok((database, ids))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    struct TestDir(PathBuf);
+    impl TestDir {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "tdb_migration_preflight_{}_{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn files(&self) -> BTreeMap<OsString, Vec<u8>> {
+            std::fs::read_dir(&self.0)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), std::fs::read(entry.path()).unwrap())
+                })
+                .collect()
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn 迁移预检按实际文件系统识别主文件及多段侧文件别名() {
+        for (stored, requested, lookup) in [
+            ("TARGET.TDB", "target.tdb", "target.tdb"),
+            ("TARGET.TDB.wal", "target.tdb", "target.tdb.wal"),
+            ("TARGET.TDB.PLD.9", "target.tdb", "target.tdb.PLD.9"),
+            (
+                "TARGET.TDB.future.meta",
+                "target.tdb",
+                "target.tdb.future.meta",
+            ),
+            ("ÜBER.TDB.future.meta", "über.tdb", "über.tdb.future.meta"),
+            (".TARGET.TDB.extra", ".target.tdb", ".target.tdb.extra"),
+            ("target.tdb.", "target.tdb", "target.tdb."),
+        ] {
+            let root = TestDir::new();
+            std::fs::write(root.0.join(stored), "保留既有文件内容".as_bytes()).unwrap();
+            // 独立查询夹具路径是否实际解析为已有条目，不假定操作系统或卷的大小写规则。
+            let occupied = root.0.join(lookup).try_exists().unwrap();
+            let before = root.files();
+            let result = Destination::new(root.0.join(requested).to_str().unwrap());
+            if occupied {
+                assert!(
+                    matches!(result, Err(TriviumError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists),
+                    "必须在创建租约或暂存目录前拒绝：{stored}/{requested}"
+                );
+                assert_eq!(root.files(), before);
+            } else {
+                // 区分大小写的文件系统允许独立目标，既有条目内容仍须保留。
+                drop(result.unwrap());
+                assert_eq!(
+                    std::fs::read(root.0.join(stored)).unwrap(),
+                    before[&OsString::from(stored)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn 迁移预检仅复用实际协调锁且保留独立大小写文件() {
+        for stored in [
+            "target.tdb.lock",
+            "TARGET.TDB.lock",
+            "target.tdb.LOCK",
+            "TARGET.TDB.LOCK",
+        ] {
+            let root = TestDir::new();
+            std::fs::write(root.0.join(stored), "空闲协调锁".as_bytes()).unwrap();
+            let lock_exists = root.0.join("target.tdb.lock").try_exists().unwrap();
+            let in_group = root.0.join("target.tdb.LOCK").try_exists().unwrap();
+            let before = root.files();
+            let result = ensure_empty(root.0.join("target.tdb").to_str().unwrap());
+            if in_group && !lock_exists {
+                assert!(
+                    matches!(result, Err(TriviumError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+                );
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(root.files(), before);
+        }
+    }
+
+    // macOS Runner 在创建此类文件名时即返回 EILSEQ；原始字节夹具由 Linux 验证。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn 迁移预检保留非utf8侧文件() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = TestDir::new();
+        let mut name = b"target.tdb.".to_vec();
+        name.push(0xff);
+        std::fs::write(
+            root.0.join(OsString::from_vec(name)),
+            "非 UTF-8 侧文件".as_bytes(),
+        )
+        .unwrap();
+        let before = root.files();
+        assert!(
+            matches!(ensure_empty(root.0.join("target.tdb").to_str().unwrap()), Err(TriviumError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(root.files(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn 迁移预检拒绝悬空主文件及协调锁链接() {
+        use std::os::unix::fs::symlink;
+        let root = TestDir::new();
+        symlink(root.0.join("missing"), root.0.join("dangling.tdb")).unwrap();
+        assert!(
+            matches!(ensure_empty(root.0.join("dangling.tdb").to_str().unwrap()), Err(TriviumError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(
+            std::fs::read_link(root.0.join("dangling.tdb")).unwrap(),
+            root.0.join("missing")
+        );
+        std::fs::write(root.0.join("foreign"), b"foreign lock").unwrap();
+        symlink(root.0.join("foreign"), root.0.join("target.tdb.lock")).unwrap();
+        assert!(
+            matches!(ensure_empty(root.0.join("target.tdb").to_str().unwrap()), Err(TriviumError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(
+            std::fs::read(root.0.join("foreign")).unwrap(),
+            b"foreign lock"
+        );
+        assert_eq!(
+            std::fs::read_link(root.0.join("target.tdb.lock")).unwrap(),
+            root.0.join("foreign")
+        );
+    }
+
+    #[test]
+    fn 迁移预检允许无关长文件名() {
+        let root = TestDir::new();
+        let stored = format!("x.{}", "a".repeat(180));
+        let requested = format!("{}.tdb", "t".repeat(100));
+        std::fs::write(root.0.join(&stored), b"unrelated").unwrap();
+        let before = root.files();
+        ensure_empty(root.0.join(&requested).to_str().unwrap()).unwrap();
+        assert_eq!(root.files(), before);
+    }
 }

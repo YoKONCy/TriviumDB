@@ -1,5 +1,7 @@
 # nightly Server/WebUI 的手动开发诊断。界面与交互随开发调整，默认记录当前截图。
 # 开发者可按需运行交互自测，或显式选择历史截图比对与更新。
+# run_smoke 依次执行：页内自检 + ui-smoke、V4 定向回归、120 组合矩阵（均双引擎）。
+# Windows 双引擎的 Server 契约和浏览器断言必须通过；仍与嵌入式发布门禁独立配置。
 
 name: Nightly WebUI Diagnostics
 
@@ -51,8 +53,14 @@ jobs:
 
       - name: 安装 WebUI 测试依赖（不写入 package.json）
         run: |
-          npm i --no-save --ignore-scripts playwright@1.64.1 pixelmatch@8.0.0 pngjs@7.0.0
+          npm i --no-save --ignore-scripts playwright@1.64.1 pixelmatch@8.0.0 pngjs@7.0.0 gsap@3.13.0
           npx playwright install --with-deps chromium webkit
+
+      - name: 验证 Server 契约
+        run: cargo test -p triviumdb-server
+
+      - name: 打包宿主接入资源
+        run: python scripts/package_console.py --output .tmp/console/triviumdb-console.zip
 
       - name: 构建 server（HTML 经 include_str! 内嵌，必须先构建）
         run: cargo build -p triviumdb-server
@@ -66,6 +74,30 @@ jobs:
         env:
           SMOKE_BROWSER: webkit
         run: node scripts/ui-smoke.mjs
+
+      - name: V4 定向回归（chromium）
+        if: inputs.run_smoke
+        env:
+          WEBUI_BROWSER: chromium
+        run: node scripts/webui-v4-regressions.mjs
+
+      - name: V4 定向回归（webkit）
+        if: inputs.run_smoke
+        env:
+          WEBUI_BROWSER: webkit
+        run: node scripts/webui-v4-regressions.mjs
+
+      - name: V4 120 组合矩阵（chromium）
+        if: inputs.run_smoke
+        env:
+          WEBUI_BROWSER: chromium
+        run: node scripts/webui-v4-combos.mjs
+
+      - name: V4 120 组合矩阵（webkit）
+        if: inputs.run_smoke
+        env:
+          WEBUI_BROWSER: webkit
+        run: node scripts/webui-v4-combos.mjs
 
       - name: 视觉基线（生成模式，仅手动触发时）
         if: inputs.visual_mode == 'update'
@@ -96,4 +128,7 @@ jobs:
           path: |
             .tmp/visual-shots/
             .tmp/visual-diff/
+            .tmp/v4-regressions/
+            .tmp/v4-combos/
+            .tmp/console/
           if-no-files-found: ignore

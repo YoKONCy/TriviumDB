@@ -1,6 +1,6 @@
 # TriviumDB Server（HTTP 服务端版）
 
-> **版本**: v0.9.0-beta.4 版本源码（Server 为 nightly 预览）；见[变更说明](changes/0.9.0-beta.4.md)。
+> **版本**: v0.9.0 版本源码（Server 为 nightly 预览）；见[变更说明](changes/0.9.0.md)。
 > **语言**: Rust（Axum + Tokio，仅服务端 crate，嵌入式核心零依赖侵入）
 > **许可**: Apache-2.0
 
@@ -25,6 +25,8 @@ cargo add triviumdb
 - 生产环境仍不建议依赖 nightly Server。
 
 Server 适合提前体验多客户端访问、Writer Actor、Group Commit、OCC、健康监管、流式响应和批量导入。
+
+宿主已经打开嵌入式数据库时，使用独立的 `console::build_console_app` 接入 Console RPC v1，复用现有实例和文件锁。该适配器不再打开数据库、不启动 Server Writer Actor，也不提供其 OCC 或流式协议。前端传输适配与完整锁/关闭契约见[嵌入式 Console 宿主接入](embedded-console.md)。现有 `build_app(ServerConfig)` 与 `/ui` 的 HTTP v1 控制台继续保留原有行为。
 
 ---
 

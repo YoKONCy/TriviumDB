@@ -180,15 +180,17 @@ pnpm add triviumdb
 cargo add triviumdb
 ```
 
-`0.9.0-beta.4` 加强存储类型与派生索引的事实一致性、WAL 完整性、查询预算和 Reader 租约，完善原生三模统一查询在 Cascades 规划下的图匹配、数值与事务语义，Rust、Python、Node.js 共享这些内核能力：
+`0.9.0` 是正式版：Rust、Python、Node.js 共享原生三模内核、Cascades 查询规划、原子事务、资源预算和受控关闭；新增复用已打开实例的 Console v1 宿主接口，并完善文件组恢复、迁移发布和 Windows 文件锁边界。Server 与 WebUI 继续采用 nightly 通道。
 
 ```bash
-pip install "triviumdb==0.9.0b4"
-npm install triviumdb@0.9.0-beta.4
-cargo add triviumdb@0.9.0-beta.4
+pip install "triviumdb==0.9.0"
+npm install triviumdb@0.9.0
+cargo add triviumdb@0.9.0
 ```
 
-版本内容见 [0.9.0-beta.4 变更说明](docs/changes/0.9.0-beta.4.md)。
+版本内容见 [0.9.0 变更说明](docs/changes/0.9.0.md)。
+
+需要为嵌入式应用提供管理前端时，按[Console 宿主接入](docs/embedded-console.md)复用同一实例和文件锁；现有 HTML 仍需前端传输适配，资源包会标明这一条件及 CDN 依赖。
 
 > 🧪 **尝鲜：HTTP 服务端版（nightly）** —— TriviumDB 的正式产品形态始终是**嵌入式数据库**（进程内 Library，即装即用，无需部署）。仓库中的 `triviumdb-server` 提供了一个可选的 HTTP 壳（多客户端并发读写、OCC、流式 NDJSON 等），目前处于 **nightly 预览状态**，仅供尝鲜和跟踪演进方向，协议随时可能变更，请勿用于生产。详见 [Server 说明（nightly）](docs/server.md)；一切 API 与用法说明仍以嵌入式版本为准。
 
@@ -386,7 +388,7 @@ finally:
 
 `f32/f16` 浮点 Embedding 使用余弦检索与 QuIVer 加速；`u64` SimHash 指纹使用保留完整位模式的精确汉明检索。
 
-> 📖 [QuIVer 架构与配置](docs/quiver.md) · [基准测试指南](benches/README.md) · [0.9.0-beta.4 变更说明](docs/changes/0.9.0-beta.4.md)
+> 📖 [QuIVer 架构与配置](docs/quiver.md) · [基准测试指南](benches/README.md) · [0.9.0 变更说明](docs/changes/0.9.0.md)
 
 > ⚠️ **维度建议：强烈建议数据库向量维度不超过 3072。** TriviumDB 的通用存储与精确 BruteForce 检索允许更高维度，但 QuIVer 的 BQ 签名安全上限是 3072 维。超过该维度时引擎不会自动构建 QuIVer，检索会稳定回退到 BruteForce；手动构建 QuIVer 会返回明确错误。高维数据库仍可使用，但无法获得 QuIVer ANN 加速，内存和计算开销也会显著增加。
 

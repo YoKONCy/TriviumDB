@@ -257,6 +257,97 @@ fn 迁移拒绝已有或残留目标且完整保留原文件组() {
 }
 
 #[test]
+fn 迁移按文件系统规则拒绝已有目标别名并保持多代数据可重开() {
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let source_root = TestDir::new("migration_alias_source");
+        let target_root = TestDir::new("migration_alias_target");
+        let mut source =
+            Database::<f32>::open_with_config(&source_root.file("source.tdb"), config(mode, 1))
+                .unwrap();
+        source
+            .insert_with_id(7, &[1.], json!({"origin":"source"}))
+            .unwrap();
+        let existing = target_root.file("TARGET.TDB");
+        let requested = target_root.file("target.tdb");
+        let mut target = Database::<f32>::open_with_config(&existing, config(mode, 2)).unwrap();
+        // 两次提交建立非初始代，防止迁移的第一代日志被错误套用到既有数据库。
+        for id in [1, 2] {
+            target
+                .insert_with_id(id, &[id as f32, -1.], json!({"origin":"target","id":id}))
+                .unwrap();
+            target.flush().unwrap();
+        }
+        target
+            .upsert_edge(1, 2, "关联", 1.5, json!({"origin":"target"}))
+            .unwrap();
+        target.close().unwrap();
+        drop(target);
+        let aliases_existing = std::path::Path::new(&requested).try_exists().unwrap();
+        let before = files(&target_root.0);
+        let result = source.migrate_to(&requested, 3);
+        if aliases_existing {
+            assert!(
+                matches!(result, Err(TriviumError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+            );
+            assert_eq!(files(&target_root.0), before);
+        } else {
+            let (mut migrated, ids) = result.unwrap();
+            assert_eq!(ids, [7]);
+            assert_eq!(migrated.all_node_ids().unwrap(), [7]);
+            let node = migrated.get(7).unwrap().unwrap();
+            assert_eq!(node.vector, [0., 0., 0.]);
+            assert_eq!(node.payload, json!({"origin":"source"}));
+            assert!(node.edges.is_empty());
+            migrated.close().unwrap();
+            for (name, contents) in &before {
+                assert_eq!(std::fs::read(target_root.0.join(name)).unwrap(), *contents);
+            }
+        }
+        for _ in 0..2 {
+            let mut reopened =
+                Database::<f32>::open_with_config(&existing, config(mode, 2)).unwrap();
+            assert_eq!(reopened.all_node_ids().unwrap(), [1, 2]);
+            for id in [1, 2] {
+                let node = reopened.get(id).unwrap().unwrap();
+                assert_eq!(node.vector, [id as f32, -1.]);
+                assert_eq!(node.payload, json!({"origin":"target","id":id}));
+                assert_eq!(node.edges.len(), if id == 1 { 1 } else { 0 });
+            }
+            let edge = reopened.get_edge(1, 2, "关联").unwrap().unwrap();
+            assert_eq!(edge.weight, 1.5);
+            assert_eq!(edge.metadata, json!({"origin":"target"}));
+            reopened.flush().unwrap();
+            reopened.close().unwrap();
+        }
+        source.close().unwrap();
+    }
+}
+
+#[test]
+fn 新库迁移复用空闲锁的大小写别名并保持完整事实() {
+    let source_root = TestDir::new("migration_lock_alias_source");
+    let target_root = TestDir::new("migration_lock_alias_target");
+    let mut source = Database::<f32>::open(&source_root.file("source.tdb"), 1).unwrap();
+    source.insert_with_id(7, &[1.], json!({"id":7})).unwrap();
+    let lock = target_root.file("TARGET.TDB.LOCK");
+    std::fs::write(&lock, "空闲协调锁".as_bytes()).unwrap();
+    let target = target_root.file("target.tdb");
+    let (mut db, ids) = source.migrate_to(&target, 3).unwrap();
+    assert_eq!(ids, [7]);
+    db.close().unwrap();
+    drop(db);
+    let mut reopened = Database::<f32>::open_read_only(&target, 3).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), [7]);
+    let node = reopened.get(7).unwrap().unwrap();
+    assert_eq!(node.vector, [0., 0., 0.]);
+    assert_eq!(node.payload, json!({"id":7}));
+    assert!(node.edges.is_empty());
+    reopened.close().unwrap();
+    assert_eq!(std::fs::read(&lock).unwrap(), "空闲协调锁".as_bytes());
+    source.close().unwrap();
+}
+
+#[test]
 fn 新库迁移完整保存payload边元数据并可再次打开() {
     let source_root = TestDir::new("migration_complete_source");
     let target_root = TestDir::new("migration_complete_target");

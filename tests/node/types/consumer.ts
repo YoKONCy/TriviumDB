@@ -1,5 +1,5 @@
 import {
-  TriviumDB, ResourceRuntime, type TriviumDBOptions, type TransactionOperation,
+  TriviumDB, ResourceRuntime, ConsoleSession, type TriviumDBOptions, type TransactionOperation,
   type JsSearchHit, type PreparedTql, type ShutdownStatus, type StorageInfo,
   type TriviumDBError, type ErrorInteger, type DType,
 } from 'triviumdb';
@@ -40,6 +40,12 @@ export async function exercise(file: string): Promise<void> {
     autoBuildQuiver: false, loadTextIndex: true, memoryLimitMb: 8, runtime,
   };
   const db = new TriviumDB(file, options);
+  const console = new ConsoleSession();
+  const response: string = db.consoleRequest(console, '{"version":1,"requestId":"q1","command":{"operation":"info"}}');
+  const detached: boolean = console.isDetached();
+  const cancelled: boolean = console.cancel('q1');
+  void [response, detached, cancelled];
+  console.detach();
   try {
     const operations: TransactionOperation[] = [
       { type: 'insertWithId', id: 11, vector: [1, 0], payload: { kind: 'primary' } },
@@ -90,6 +96,10 @@ export async function exercise(file: string): Promise<void> {
 
 // 此函数只参与编译；每个错误样例都必须被声明拒绝，缺少诊断会触发 TS2578。
 export function rejectedInputs(db: TriviumDB): void {
+  // @ts-expect-error 配置通过 JSON 字符串传递。
+  new ConsoleSession({ readOnly: true });
+  // @ts-expect-error 请求必须是 JSON 字符串。
+  db.consoleRequest(new ConsoleSession(), {});
   // @ts-expect-error 数据类型只接受公开的三种枚举值。
   new TriviumDB('sample.tdb', { dtype: 'float32' });
   // @ts-expect-error 访问模式必须使用公开枚举。

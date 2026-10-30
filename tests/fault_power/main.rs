@@ -11,6 +11,12 @@ use triviumdb::database::Database;
 mod text_publication;
 
 #[cfg(feature = "test-hooks")]
+mod migration_publication;
+#[cfg(feature = "test-hooks")]
+#[path = "../support/mod.rs"]
+mod support;
+
+#[cfg(feature = "test-hooks")]
 use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
 
 const DIM: usize = 4;

@@ -265,6 +265,10 @@ try {
   log(`4/6 打开 ${BASE}/ui 执行冒烟路径`);
   browser = await playwright[BROWSER].launch();
   page = await browser.newPage();
+  const tqlRequests = [];
+  page.on('request', (req) => {
+    if (req.method() === 'POST' && req.url().includes('/v1/tql')) tqlRequests.push(req.url());
+  });
   page.on('pageerror', (err) => {
     console.error('[ui-smoke] 页面 JS 异常: ' + err.message);
   });
@@ -308,12 +312,16 @@ try {
   log('  ✓ 查询结果并入图探索 (graphNodes=' + mergedCount + ')');
   await page.evaluate(() => document.querySelector('[data-view="grid"]').click());
 
-  // 冒烟 3：依次切换三个主标签
+  // 冒烟 3：依次切换三个主标签（切换本身不得产生新的查询请求）
+  const tqlBeforeTabs = tqlRequests.length;
   for (const tabId of ['graphExplorePane', 'vectorLabPane', 'queryPane']) {
     await page.click(`[data-tab="${tabId}"]`);
     await page.waitForSelector(`#${tabId}.active`, { timeout: 5000 });
   }
-  log('  ✓ 三个主标签切换');
+  if (tqlRequests.length !== tqlBeforeTabs) {
+    throw new Error(`切换主标签不应执行查询，实际新增 ${tqlRequests.length - tqlBeforeTabs} 次`);
+  }
+  log('  ✓ 三个主标签切换（0 次查询）');
 
   // 冒烟 4：图规模护栏 —— 注入 700 节点，用 LIMIT 500 的 MATCH 出图验证不冻结：
   // >300 节点应自动暂停力学模拟（O(n²) tick 护栏）并显示提示条
@@ -353,7 +361,8 @@ try {
   await page.waitForFunction(
     () => {
       const tr = document.querySelector('#gridBody tr[data-row-index="90"]');
-      return tr && tr.children[0].textContent === '91' && tr.textContent.length > 5;
+      // 首格是批量选择（复选框），行号在 data-col-key="#" 上
+    return tr && (tr.querySelector('td[data-col-key="#"]') || {}).textContent === '91' && tr.textContent.length > 5;
     },
     null, { timeout: 5000 }
   );
@@ -435,10 +444,15 @@ try {
   // 冒烟 5.7：星云模式（PR-18）—— 真实 server 702 节点：单查询 MATCH 上限 10000 拉全图，
   // Sigma 专属 + 物理必关 + 静态聚类布局；WebGL 库不可达时星云中止 + toast（与 WebGL 冒烟同双路径）。
   // PR-20：退出改为恢复进入前快照——先摆 2 个种子节点作为快照源
-  await page.evaluate(() => renderGraph([
-    { a: { type: 'node', id: 's1', payload: { name: 'PreNebula A', type: 'person' }, vector: [] },
-      b: { type: 'node', id: 's2', payload: { name: 'PreNebula B', type: 'person' }, vector: [] } }
-  ]));
+  await page.evaluate(() => {
+    // 后续会真实打开详情并请求邻域；快照必须引用库内节点，不能用非法的 s1/s2 ID。
+    const ids = ['Smoke Alice', 'Smoke Bob'].map(name => graphNodes.find(n => n.label === name)?.id);
+    if (ids.some(id => id == null)) throw new Error('星云快照缺少库内种子节点');
+    renderGraph([
+      { a: { type: 'node', id: ids[0], payload: { name: 'PreNebula A', type: 'person' }, vector: [] },
+        b: { type: 'node', id: ids[1], payload: { name: 'PreNebula B', type: 'person' }, vector: [] } }
+    ]);
+  });
   // 清空前序步骤残留 toast：避免「任一 toast 存在」的等待条件被旧 toast 瞬间满足
   await page.evaluate(() => { const s = document.getElementById('toastStack'); if (s) s.textContent = ''; });
   await page.click('#nebulaModeBtn');

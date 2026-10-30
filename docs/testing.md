@@ -2,11 +2,15 @@
 
 > 从单元测试到属性测试、从覆盖率度量到变异测试：TriviumDB 的多层防御测试体系详解。
 >
-> 本文说明 `0.9.0-beta.4` 的测试与验收方法，见[变更说明](changes/0.9.0-beta.4.md)。
+> 本文说明 `0.9.0` 的测试与验收方法，见[变更说明](changes/0.9.0.md)。
 
 当前未发布加固增加 `tests/contracts/error_cases.json`：Rust、已构建 Python wheel 与 Node 原生模块通过真实 API 核对错误码及完整字段，覆盖 Prepared 参数、维度、节点、唯一约束、只读、行预算、迁移、关闭、锁、I/O 与格式版本。Rust 描述符及 Python 映射测试使用独立的全部错误变体样例；Node 另验大整数详情与 Promise 拒绝。语言参数提取错误按各语言类型契约验证。
 
+嵌入式 Console 使用 `tests/contracts/console_cases.json` 的独立样例验证三端请求、完整记录及重开持久化。`cargo test --features test-hooks --test core console_host -- --test-threads=1` 覆盖真实子进程文件锁竞争、持有旧会话时释放锁、同路径新实例隔离、Hook 屏障下取消/关闭、只读文件组完整字节及关闭失败重试；标为 ignored 的探针由父用例以必需参数实际执行。Server 的 `console_embedding` 验证真实请求内容、客户端退出后的许可归还与宿主锁；Node 已安装 tarball 的消费测试同时验证 N-API 前重入拒绝。`python -m unittest discover -s tests/tools -p test_console_bundle.py` 验证实际 ZIP 的完整 HTML、协议、文档、许可证及可复现内容。
+
 全部错误变体的 Python 映射测试由 Windows Python Binding 任务执行 `cargo test --lib --features python 核心错误完整映射到_python异常`，链接 Windows Python 运行时；跨平台 wheel 继续通过真实公开 API 用例验证交付行为。
+
+`cargo test --features test-hooks --test concurrency opening -- --test-threads=1` 用真实文件移动和路径屏障覆盖打开预检与发布交错：持有租约时准确返回锁冲突且数据制品不变；发布完成后持锁重读完整已提交事实；持续缺失时保留 I/O 错误并归还探测租约；Unix 验证规范路径取得后的调用路径身份，以及符号链接不能误用别名协调文件。Node 工作线程退出回归继续严格要求锁冲突，并验证重开的完整节点内容；意外错误输出原始消息及结构化详情。
 
 发布来源校验执行 `python -m unittest discover -s tests/tools -p test_release_source.py`，CI 编译检查任务显式运行。用例创建真实 Git 历史，网络边界使用独立 PR/CI 响应；验证普通祖先提交、错误仓库或分支、未合并 PR、错误 SHA、缺失/失败/取消 CI 的拒绝，以及 master 前进后的历史 Release 补发。两条 CD 直接运行同一个校验脚本。
 
@@ -712,7 +716,7 @@ cargo test --test contracts 共享json契约由rust适配器完整执行
 ## 类型、解析与加载边界回归
 
 - `tests/storage/wal_integrity.rs` 覆盖首、中、尾完整帧的 CRC 和合法 CRC 下的解码错误、非法长度、反复打开后原日志保持，以及物理尾帧的每个截断位置。恢复原始测试副本后核对三条已确认记录；原始日志保留和恢复成功分别断言。
-- `fault_io::migration_publication` 在真实发布屏障下直接竞争目标锁文件，独立证明排他租约被持有；Unix 核对硬链接路径拒绝，Windows 核对锁竞争错误。随后验证碰撞文件保留、提交前回收及提交后重开内容。
+- `fault_io::migration_publication` 在真实发布屏障下直接竞争目标锁文件，独立证明排他租约被持有；各平台均核对锁竞争错误。随后验证碰撞文件保留、提交前回收及提交后重开内容。
 - `tests/storage/quiver_facts.rs` 在 Rom/Mmap 中验证有效索引、相同长度的节点替换与向量更新、旧 sidecar 混入、历史 v1 元数据、严格错误与只读回退。`memory_safety_` 子集包含 BQ 空存储、越界、巨大维度、畸形几何、最后有效行和尾位断言，随现有 Miri job 执行。
 - `tests/query_memory` 使用带 epoch 的独立分配器测量查询线程的堆请求峰值。20 节点、400 条边和 512 KiB 查询上限覆盖普通、具名边、OPTIONAL 和 SET 的复制前拒绝；解除限额后核对完整计数、写入和重开内容。共享 SDK 契约另验证三种 dtype 下读写 TQL 的结构化预算错误及资源归还。
 
@@ -725,7 +729,10 @@ cargo test --test contracts 共享json契约由rust适配器完整执行
 - `tests/core/retrieval_validation.rs` 验证空库、持有库和重开后的 f32/f16 非有限输入、空 anchor、直接物理算子，以及 `usize::MAX` 附近的 Top-K/召回池在精确和索引路径的完整内容。Rust、Node 与 Python 共享 `graph_query_boundaries.json` 的计数需求；两端实际产物同时验证结构化非法向量错误。
 
 - `tests/core/retrieval_migration.rs` 以固定整数和几何样例验证各检索入口的完整 `u64` 位模式、汉明分数、Hook 改写拒绝、极端有限浮点自相似度、重开、已有迁移目标字节保持和完整新库迁移。内核向量用例覆盖标量、当前 CPU 支持的 SIMD、384 维缓存范数、极端尺度与零向量，预期来自独立几何关系。
+- `database::migration::tests` 用真实文件系统路径作为独立判据，核对主文件、多段与 Unicode 侧文件的大小写别名在目标租约及暂存目录创建前被拒绝，空闲锁别名可复用，区分大小写的目录允许独立目标。Linux 额外检查非 UTF-8 侧文件（macOS Runner 在创建该夹具时即返回 `EILSEQ`），Unix 检查悬空主文件与协调锁链接。`tests/core/retrieval_migration.rs` 对 Rom/Mmap 的已有多代数据库验证迁移拒绝后完整文件组不变、节点/向量/Payload/边可重复打开与持久化，并验证空闲锁别名下的新库完整迁移。
 - `tests/fault_io/migration_publication.rs` 验证暂存构建、首文件发布后、marker 提交前与提交后故障，核对原库、目标完整内容及重试；确定性交错验证目标锁和碰撞文件保留。Node/Python 通过共享 `retrieval_boundaries.json` 在安装制品上核对整数检索、有限浮点分数和迁移拒绝的结构化错误。
+- `cargo test --features test-hooks --test fault_power migration_publication -- --test-threads=1` 在首文件发布后、marker 提交前和提交后使用屏障确认并强杀子进程，不依赖析构清理。Rom/Mmap 源库均逐字节保留；提交前目标回滚，提交后核对完整节点、零向量、Payload 和边，再次持久化并重开。Unix 额外核对主文件只有一个链接；只读成功与拒绝路径均验证文件组零写。该用例模拟进程终止，不代替真实断电测试。
+- `python -m unittest discover -s tests/tools -p 'test_release_*.py'` 验证真实 Git 发布来源与发布摘要命令入口；摘要用例覆盖上传成功、失败、取消、上游阻断、既有版本跳过、门禁失败、两端不同结果及状态不一致，不能以 `should_publish` 代替实际作业结果。
 
 - `tests/fault_io/schema_publication.rs` 在发布前备份、属性/图副本写入和提交后 WAL 清理处注入故障，覆盖 Rom/Mmap、单字段/复合唯一约束及创建/删除。断言原始错误、持有句柄时读写隔离、已确认数据保留，以及按提交点重开后的约束、重复值判定和再次持久化。
 - `tests/storage/index_schema_boundaries.rs` 使用独立字段/记录样例验证 NUL、转义、Unicode 与同分隔符不同边界定义的往返、旧 v7 复合副本回退和只读零写；CRC 一致的畸形图样例覆盖 JSON、Metadata、有限边权变更、端点、目录、数量、UTF-8 和保留位，ReadOnly/Immutable 在采用前拒绝，文件组保持原样。正向样例核对平行标签、自环、大 ID 和完整容器 Metadata。两端 `kernel_boundaries` 使用共享字段契约在实际 SDK 产物中验收；Node 同时覆盖嵌套 NUL、`__proto__` 自有属性、CRUD/事务/图/TQL 输出和非法 JSON 拒绝后的 WAL 保持。

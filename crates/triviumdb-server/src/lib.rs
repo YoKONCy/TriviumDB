@@ -1,13 +1,17 @@
 //! TriviumDB Server HTTP 应用：并发读、Writer Actor、幂等写与 OCC。
 
+pub mod console;
 mod engine;
 mod protocol;
 
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    extract::{
+        DefaultBodyLimit, FromRequestParts, Path, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -21,15 +25,20 @@ use protocol::{
 };
 use serde::Deserialize;
 use std::{
+    hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::compression::{
+    CompressionLayer,
+    predicate::{DefaultPredicate, Predicate},
+};
 use triviumdb::database::{Config, StorageMode};
 use uuid::Uuid;
 
@@ -219,20 +228,73 @@ pub async fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         .layer(axum::middleware::from_fn(map_body_limit_error))
         .layer(DefaultBodyLimit::max(config.max_body_bytes))
         .layer(ServiceBuilder::new().layer(CatchPanicLayer::new()))
+        // 最外层：按 Accept-Encoding 压缩（HTML ≈780KB，弱网首屏差距明显）。
+        // 304 例外：RFC 9110 §15.4.5 规定 304 不得有响应体，而压缩层会把空体
+        // 包装成 gzip 帧（实测 20 字节）并附带 Content-Encoding，故在谓词里排除。
+        .layer(
+            CompressionLayer::new().compress_when(DefaultPredicate::new().and(
+                |status: StatusCode,
+                 _version: axum::http::Version,
+                 _headers: &HeaderMap,
+                 _extensions: &axum::http::Extensions| {
+                    status != StatusCode::NOT_MODIFIED
+                },
+            )),
+        )
         .with_state(state))
 }
 
 const WEBUI_HTML: &str = include_str!("../web/index.html");
 
-async fn webui_index() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            // 页面在编译期内嵌，升级 server 后必须让浏览器重新拉取，避免旧 UI 与新接口不匹配
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        WEBUI_HTML,
-    )
+/// 导出现有控制台资源；传输接入与容器挂载由宿主及前端适配器负责。
+pub fn console_html() -> &'static str {
+    WEBUI_HTML
+}
+
+/// 内嵌页面内容指纹（构建期固定、进程内一次性计算）。
+/// 用弱 ETag：同一份内容可能按 gzip/identity 两种编码返回，语义等价。
+fn webui_etag() -> &'static str {
+    static ETAG: OnceLock<String> = OnceLock::new();
+    ETAG.get_or_init(|| {
+        let mut hasher = DefaultHasher::new();
+        WEBUI_HTML.hash(&mut hasher);
+        format!("W/\"{:016x}-{}\"", hasher.finish(), WEBUI_HTML.len())
+    })
+}
+
+async fn webui_index(headers: HeaderMap) -> Response {
+    let etag = webui_etag();
+    // RFC 9110 §13.1.2：If-None-Match 必须使用弱比较（忽略 W/ 前缀，只比 opaque-tag），
+    // 否则浏览器/代理把同一内容的强形式 "tag" 回传时会错误地命中 200。
+    let not_modified = headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| if_none_match_matches(value, etag));
+    if not_modified {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        if let Ok(value) = HeaderValue::from_str(etag) {
+            response.headers_mut().insert(header::ETAG, value);
+        }
+        // 304 必须带上与 200 相同的缓存指令，否则中间缓存可能把「未修改」当成可长期缓存
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        return response;
+    }
+    let mut response = WEBUI_HTML.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    // 页面在编译期内嵌，升级 server 后必须让浏览器重新拉取，避免旧 UI 与新接口不匹配；
+    // 带 ETag 后重复加载走 304，不再每次重传整页
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if let Ok(value) = HeaderValue::from_str(etag) {
+        headers.insert(header::ETAG, value);
+    }
+    response
 }
 
 async fn live() -> Json<HealthResponse> {
@@ -568,7 +630,7 @@ async fn execute_prepared(
 
 async fn search_vector(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<VectorSearchQuery>,
+    ApiQuery(query): ApiQuery<VectorSearchQuery>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -655,7 +717,14 @@ async fn tql(
         ));
     }
     let deadline = std::time::Instant::now() + state.request_timeout;
-    if request.mutation {
+    // mutation 标志是「允许写入」，不是「强制走写路径」：读语句即使带了 mutation=true
+    // 也必须走读查询。否则 tql_mut(read query) 会以 500「API 已移除」返回，
+    // 而 UI 的写入模式复选框是粘性的，用户写过一次 CREATE 后所有查询都会 500。
+    let read_statement = matches!(
+        triviumdb::query::tql_parser::parse_tql_statement(query),
+        Ok(triviumdb::query::tql_ast::TqlStatement::Query(_))
+    );
+    if request.mutation && !read_statement {
         let result = state
             .engine
             .mutate(
@@ -900,7 +969,7 @@ fn graph_config(
 async fn get_neighbors(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
-    Query(query): Query<NeighborsQuery>,
+    ApiQuery(query): ApiQuery<NeighborsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let config = graph_config(query.depth, query.limit, query.labels, query.direction)?;
     let (mut result, version) = state
@@ -946,7 +1015,7 @@ async fn get_neighbors(
 async fn get_edges(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
-    Query(query): Query<EdgesQuery>,
+    ApiQuery(query): ApiQuery<EdgesQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     if query.limit == 0 || query.limit > 10_000 {
         return Err(ApiError::invalid_request(
@@ -1013,7 +1082,7 @@ async fn batch_get_nodes(
 async fn get_paths(
     State(state): State<Arc<AppState>>,
     Path((from, to)): Path<(u64, u64)>,
-    Query(query): Query<PathsQuery>,
+    ApiQuery(query): ApiQuery<PathsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     if query.max_hops == 0 || query.max_hops > 64 {
         return Err(ApiError::invalid_request(
@@ -1182,6 +1251,30 @@ fn decode_json<T>(request: Result<Json<T>, JsonRejection>) -> Result<Json<T>, Ap
     })
 }
 
+/// 查询参数提取器：axum 默认把 Query 反序列化失败渲染成 text/plain，
+/// 与项目统一的 problem JSON（ApiError）契约不一致。这里只替换拒绝响应的形状，
+/// 校验范围、400 状态与业务语义仍由 axum/serde 决定。
+struct ApiQuery<T>(T);
+
+impl<T, S> FromRequestParts<S> for ApiQuery<T>
+where
+    T: serde::de::DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Query(value) = Query::<T>::from_request_parts(parts, state)
+            .await
+            .map_err(query_rejection)?;
+        Ok(Self(value))
+    }
+}
+
+fn query_rejection(rejection: QueryRejection) -> ApiError {
+    ApiError::invalid_request(format!("查询参数无效 (Invalid query string): {rejection}"))
+}
+
 fn optional_header(
     headers: &HeaderMap,
     name: header::HeaderName,
@@ -1224,6 +1317,53 @@ fn optional_header_name(
     value.to_str().map(str::to_owned).map(Some).map_err(|_| {
         ApiError::invalid_request("HTTP Header 不是有效 ASCII (HTTP header is not valid ASCII)")
     })
+}
+
+/// 解析单个 entity-tag，返回去掉 `W/` 前缀后的 opaque-tag（保留引号，便于精确比较）。
+/// RFC 9110 §8.8.3：weak = %s"W/"，opaque-tag = DQUOTE *etagc DQUOTE。
+fn parse_entity_tag(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let opaque = value.strip_prefix("W/").unwrap_or(value);
+    if opaque.len() >= 2 && opaque.starts_with('"') && opaque.ends_with('"') {
+        // etagc 不含 DQUOTE：内部再出现引号说明不是合法的 opaque-tag
+        if !opaque[1..opaque.len() - 1].contains('"') {
+            return Some(opaque);
+        }
+    }
+    None
+}
+
+/// 按逗号切分 If-None-Match 列表；引号内的逗号属于 opaque-tag，不能当分隔符。
+fn if_none_match_tags(value: &str) -> Vec<&str> {
+    let mut tags = Vec::new();
+    let mut start = 0usize;
+    let mut in_quotes = false;
+    for (index, byte) in value.bytes().enumerate() {
+        match byte {
+            b'"' => in_quotes = !in_quotes,
+            b',' if !in_quotes => {
+                tags.push(&value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    tags.push(&value[start..]);
+    tags
+}
+
+/// RFC 9110 §13.1.2 弱比较：`W/"x"` 与 `"x"` 视为同一实体；`*` 匹配任意当前表示。
+fn if_none_match_matches(header: &str, current_etag: &str) -> bool {
+    if header.trim() == "*" {
+        return true;
+    }
+    let Some(current) = parse_entity_tag(current_etag) else {
+        return false;
+    };
+    if_none_match_tags(header)
+        .into_iter()
+        .filter_map(parse_entity_tag)
+        .any(|candidate| candidate == current)
 }
 
 fn is_strong_etag(value: &str) -> bool {
@@ -1372,4 +1512,41 @@ async fn not_found() -> ApiError {
         "请求的 HTTP 接口不存在 (The requested HTTP route does not exist)",
         false,
     )
+}
+
+#[cfg(test)]
+mod etag_weak_comparison_tests {
+    use super::{if_none_match_matches, parse_entity_tag};
+
+    #[test]
+    fn 弱比较忽略weak前缀() {
+        assert!(if_none_match_matches("W/\"abc\"", "W/\"abc\""));
+        assert!(if_none_match_matches("\"abc\"", "W/\"abc\""));
+        assert!(if_none_match_matches("W/\"abc\"", "\"abc\""));
+        assert!(!if_none_match_matches("\"abcd\"", "W/\"abc\""));
+    }
+
+    #[test]
+    fn 标签列表与通配符() {
+        assert!(if_none_match_matches(
+            "\"x\", W/\"abc\", \"y\"",
+            "W/\"abc\""
+        ));
+        assert!(if_none_match_matches("W/\"abc\", \"y\"", "\"abc\""));
+        assert!(!if_none_match_matches("\"x\", \"y\"", "W/\"abc\""));
+        assert!(if_none_match_matches("*", "W/\"abc\""));
+        assert!(if_none_match_matches(" * ", "\"abc\""));
+        // 引号内的逗号属于 opaque-tag，不能被当分隔符
+        assert!(if_none_match_matches("\"a,b\"", "W/\"a,b\""));
+        assert!(!if_none_match_matches("\"a\", \"b\"", "W/\"a,b\""));
+    }
+
+    #[test]
+    fn 非法标签不参与比较() {
+        assert!(!if_none_match_matches("abc", "W/\"abc\""));
+        assert!(!if_none_match_matches("\"abc", "W/\"abc\""));
+        assert!(!if_none_match_matches("\"a\"b\"", "W/\"a\"b\""));
+        assert_eq!(parse_entity_tag(" w/\"abc\" "), None);
+        assert_eq!(parse_entity_tag("W/\"abc\""), Some("\"abc\""));
+    }
 }

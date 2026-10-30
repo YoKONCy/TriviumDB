@@ -274,7 +274,7 @@ jobs:
         run: npm install
 
       - name: Build node module
-        run: npx napi build --platform --release --features nodejs --target ${{ matrix.target }}
+        run: npx napi build --platform --no-js --release --features nodejs --target ${{ matrix.target }}
         env:
           # Linux ARM64 交叉编译需要指定链接器
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
@@ -342,19 +342,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: [version-gate, release, release-npm]
     if: always()
+    permissions:
+      contents: read
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
       - name: 输出发布摘要
-        run: |
-          echo "## Release Summary: v${{ needs.version-gate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **crates.io**: 由维护者在本地手动发布" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ needs.version-gate.outputs.pypi_should_publish }}" = "true" ]; then
-            echo "- **PyPI**: ✅ 已发布 triviumdb==${{ needs.version-gate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- **PyPI**: ⏭️ 跳过（版本已存在）" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ "${{ needs.version-gate.outputs.npm_should_publish }}" = "true" ]; then
-            echo "- **NPM**: ✅ 已发布 triviumdb@${{ needs.version-gate.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- **NPM**: ⏭️ 跳过（版本已存在）" >> $GITHUB_STEP_SUMMARY
-          fi
+        env:
+          RELEASE_NEEDS: ${{ toJSON(needs) }}
+        run: python scripts/write_release_summary.py

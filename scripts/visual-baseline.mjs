@@ -177,6 +177,38 @@ const SEED_QUERIES = [
   'CREATE ({name: "Tri-Model DB", type: "topic"})',
 ];
 
+// 浅色浮层使用真实种子数据；复位教程、详情面板和另一浮层，避免顺序污染。
+async function prepareLightOverlay(page, target) {
+  await page.evaluate(() => {
+    document.getElementById('closeTutorialBtn').click();
+    collapseUnifiedPanel();
+    applyThemeAttributes('light');
+    document.querySelector('[data-tab="graphExplorePane"]').click();
+  });
+  const response = page.waitForResponse(res => res.url().endsWith('/v1/tql') && res.request().method() === 'POST');
+  await page.click('#loadWholeGraphBtn');
+  if (!(await response).ok()) throw new Error('浅色浮层截图的拓扑查询失败');
+  // MATCH 拓扑只含 Alice/Bob 关系的两个端点；另外两个种子是孤立节点。
+  await page.waitForFunction(() => graphNodes.length === 2 && graphEdges.length === 1, null, { timeout: 10000 });
+  await page.evaluate(target => {
+    const cockpit = document.getElementById('graphCockpit');
+    const dock = document.getElementById('graphDock');
+    if (cockpit.classList.contains('open') !== (target === 'cockpit')) {
+      document.getElementById('graphCockpitToggle').click();
+    }
+    if (dock.classList.contains('open') !== (target === 'dock')) {
+      document.getElementById('graphDockToggle').click();
+    }
+    const query = document.getElementById('graphCockpitQuery');
+    query.value = 'MATCH (a)-[r]->(b)\nRETURN a, r, b\nLIMIT 20';
+    query.dispatchEvent(new Event('input', { bubbles: true }));
+    renderCockpitHits(null); // 同时钉住 V3-F「未运行」空态。
+    setGraphLayoutMode('radial');
+  }, target);
+  await sleep(900);
+  await page.evaluate(() => fitGraphView('standalone'));
+}
+
 // ---------- 截图清单（全部确定性；Sigma 需 --with-sigma） ----------
 const SHOTS = [
   {
@@ -184,7 +216,7 @@ const SHOTS = [
     name: '00-sidebar-graph-active',
     setup: async (page) => {
       await page.evaluate(() => { applyThemeAttributes('light'); });
-      await page.evaluate(() => document.querySelector('.sidebar .nav-item[data-action="quick-match"]').click());
+      await page.evaluate(() => document.querySelector('[data-action="quick-match"]').click());
       await sleep(1500);
     },
   },
@@ -245,10 +277,94 @@ const SHOTS = [
       await sleep(600);
     },
   },
+  { name: '07-light-cockpit', setup: page => prepareLightOverlay(page, 'cockpit') },
+  { name: '08-light-dock', setup: page => prepareLightOverlay(page, 'dock') },
+  // ---- V4.1 R2：查询成功 / 通用标量 / 向量 / 写入审阅 / 收起侧栏 ----
+  {
+    name: '10-query-success',
+    setup: async (page) => {
+      await page.evaluate(() => {
+        document.getElementById('closeTutorialBtn').click();
+        collapseUnifiedPanel();
+        applyThemeAttributes('light');
+        document.querySelector('[data-tab="queryPane"]').click();
+        document.querySelector('[data-view="grid"]').click();
+        selectedNode = null;
+        setEditorValue('FIND {type: "person"} RETURN * LIMIT 10');
+        executeCurrentQuery();
+      });
+      await page.waitForFunction(() => document.getElementById('resultsContainer').dataset.resultState === 'success',
+        null, { timeout: 15000 });
+      await page.evaluate(() => setContextNode(null));
+      await sleep(700);
+    },
+  },
+  {
+    name: '11-query-generic-scalar',
+    setup: async (page) => {
+      await page.evaluate(() => {
+        setEditorValue('FIND {type: "person"} RETURN a.name AS name, a.citations AS citations LIMIT 5');
+        executeCurrentQuery();
+      });
+      await page.waitForFunction(() => document.getElementById('resultsContainer').dataset.resultState === 'success',
+        null, { timeout: 15000 });
+      await sleep(500);
+    },
+  },
+  {
+    name: '12-vector-results',
+    setup: async (page) => {
+      await page.evaluate(async () => {
+        // 固定 4 维向量节点：只用于视觉基线的确定性命中
+        await fetch('/v1/import/nodes', {
+          method: 'POST', headers: { 'Content-Type': 'application/x-ndjson' },
+          body: JSON.stringify({ id: 7001, vector: [0.1, 0.2, 0.3, 0.4], payload: { name: 'Vector Seed', type: 'seed' } }),
+        });
+        document.querySelector('[data-tab="vectorLabPane"]').click();
+        document.getElementById('vlSourceTabJson').click();
+        document.getElementById('vlJsonInput').value = '[0.1, 0.2, 0.3, 0.4]';
+        updateVectorJsonPreview();
+        document.getElementById('vlTopK').value = '5';
+        await runVectorSearch();
+      });
+      await page.waitForFunction(() => document.getElementById('vlResults').dataset.resultState === 'success',
+        null, { timeout: 15000 });
+      await sleep(500);
+    },
+  },
+  {
+    name: '13-write-review',
+    setup: async (page) => {
+      await page.evaluate(() => {
+        applyThemeAttributes('dark');
+        txOperations = [];
+        stageTxOperation(
+          { op: 'updatePayload', id: 7001, payload: { name: 'Vector Seed', type: 'seed', reviewed: true } },
+          { before: { name: 'Vector Seed', type: 'seed' }, source: 'payload 编辑' }
+        );
+        openTxReview();
+      });
+      await sleep(600);
+    },
+  },
+  {
+    name: '14-sidebar-rail-en',
+    setup: async (page) => {
+      await page.evaluate(() => {
+        closeTxReview();
+        txOperations = [];
+        syncTxBar();
+        setLanguage('en');
+        document.querySelector('[data-tab="queryPane"]').click();
+        setSidebarRail(true, false);
+      });
+      await sleep(900);
+    },
+  },
 ];
 if (WITH_SIGMA) {
   SHOTS.push({
-    name: '07-sigma-radial',
+    name: '09-sigma-radial',
     setup: async (page) => {
       await page.evaluate(() => { document.getElementById('closeTutorialBtn').click(); });
       await page.evaluate(() => { document.getElementById('toggleWebGLBtn').click(); });

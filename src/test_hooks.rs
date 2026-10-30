@@ -10,6 +10,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConcurrencyPoint {
+    BeforeDatabasePathMetadata,
+    BeforeDatabasePathIdentity,
+    DatabasePathResolutionFailed,
     BeforeSearchReadLock,
     BeforeSnapshotPublish,
     AfterSnapshotPublish,
@@ -40,6 +43,8 @@ pub enum ConcurrencyPoint {
     AfterSidecarsPersisted,
     AfterPublicationCommitted,
     MigrationFilePublished,
+    MigrationBeforeCommit,
+    MigrationCommitted,
     TqlPathStep,
 }
 

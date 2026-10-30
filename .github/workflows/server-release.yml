@@ -148,16 +148,28 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
           pattern: server-*
           merge-multiple: true
+      - name: 选择同版本双语发版说明
+        id: notes
+        shell: bash
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          NOTES="docs/changes/${VERSION}.md"
+          test -s "$NOTES"
+          echo "path=$NOTES" >> "$GITHUB_OUTPUT"
       - name: 发布 GitHub Release 附件
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          generate_release_notes: true
+          body_path: ${{ steps.notes.outputs.path }}
+          generate_release_notes: false
           prerelease: ${{ contains(env.RELEASE_TAG, '-beta.') }}
           files: |
             dist/*.tar.gz

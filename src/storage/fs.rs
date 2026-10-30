@@ -5,6 +5,89 @@
 
 use std::path::Path;
 
+/// 原子移动已同步的暂存文件；目标已存在时必须拒绝，不能退回覆盖或复制。
+/// 调用方在记录目录项归属后同步源、目标目录，并最后发布提交标记。
+pub(crate) fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = |value: &Path| {
+            std::ffi::CString::new(value.as_os_str().as_bytes()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "重命名路径包含 NUL (Rename path contains NUL)",
+                )
+            })
+        };
+        let from = path(from)?;
+        let to = path(to)?;
+        // SAFETY: 两个 CString 的有效长度均包含终止 NUL，c_char 对齐为 1；
+        // 缓冲在整个同步调用期间独占持有，系统只读且不保存指针或接管所有权。
+        // 内核原子检查排他标志，防止并发覆盖目标目录项。
+        let result = unsafe {
+            #[cfg(target_os = "linux")]
+            {
+                // 直接使用系统调用，兼容没有 renameat2 动态符号的旧版 glibc。
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    from.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            }
+            #[cfg(target_os = "macos")]
+            {
+                libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL)
+            }
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+        }
+        let path = |value: &Path| {
+            let mut wide: Vec<u16> = value.as_os_str().encode_wide().collect();
+            if wide.contains(&0) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "重命名路径包含 NUL (Rename path contains NUL)",
+                ));
+            }
+            wide.push(0);
+            Ok(wide)
+        };
+        let from = path(from)?;
+        let to = path(to)?;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+        // SAFETY: 两个 Vec<u16> 均满足 u16 对齐，有效长度包含终止 NUL，
+        // 整个同步调用期间独占持有；系统只读、不保存指针且不接管缓冲所有权。
+        // 不设置 REPLACE_EXISTING 或 COPY_ALLOWED，并发碰撞及跨卷移动均返回错误。
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) } != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (from, to);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "当前平台不支持排他原子重命名 (Exclusive atomic rename is unsupported)",
+        ))
+    }
+}
+
 pub(crate) fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
     let parent = path
         .parent()
@@ -100,6 +183,34 @@ pub(crate) fn robust_rename(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 排他移动保留完整内容且不会覆盖已有目标() {
+        let root =
+            std::env::temp_dir().join(format!("triviumdb_rename_new_{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let first = root.join("第一份.tmp");
+        let second = root.join("第二份.tmp");
+        let target = root.join("目标.tdb");
+        std::fs::write(&first, b"first complete file").unwrap();
+        std::fs::write(&second, b"second complete file").unwrap();
+        rename_new(&first, &target).unwrap();
+        assert!(!first.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"first complete file");
+        assert_eq!(
+            rename_new(&second, &target).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"first complete file");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second complete file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(target.metadata().unwrap().nlink(), 1);
+        }
+        // 目录由本用例独占创建，只含以上三条路径。
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// 回归测试：robust_rename_and_sync 正常重命名并同步父目录
     #[test]

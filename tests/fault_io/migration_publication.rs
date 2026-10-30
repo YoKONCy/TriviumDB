@@ -5,7 +5,7 @@ use triviumdb::database::{Config, StorageMode};
 use triviumdb::test_hooks::{IoPoint, fail_io_at};
 
 #[test]
-fn 发布持有目标锁且文件碰撞只回收本次创建的链接() {
+fn 发布持有目标锁且文件碰撞只回收本次移动的文件() {
     use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
     let source_root = TestDir::new("migration_collision_source");
     let target_root = TestDir::new("migration_collision_target");
@@ -34,10 +34,6 @@ fn 发布持有目标锁且文件碰撞只回收本次创建的链接() {
         fs2::lock_contended_error().raw_os_error()
     );
     let opening = Database::<f32>::open(&target, 2);
-    // Unix 路径检查先拒绝暂存文件的第二个硬链接；Windows 继续到目标锁检查。
-    #[cfg(unix)]
-    assert!(matches!(opening, Err(TriviumError::InvalidInput(_))));
-    #[cfg(not(unix))]
     assert!(matches!(opening, Err(TriviumError::DatabaseLocked(_))));
     std::fs::write(format!("{target}.vec"), b"outside publisher evidence").unwrap();
     gate.release();

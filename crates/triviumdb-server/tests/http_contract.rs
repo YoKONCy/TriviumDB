@@ -1382,3 +1382,251 @@ async fn webui根路径与ui路由返回200及html页面() {
         assert!(body.contains("三模数据库可视化实战教程"));
     }
 }
+
+#[tokio::test]
+async fn webui支持etag304与gzip压缩() {
+    let (app, _directory) = app("webui_cache").await;
+    let first = request(app.clone(), "GET", "/ui", None, &[]).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+    assert!(etag.starts_with("W/\""), "应为弱 ETag，实际 {etag}");
+    let body = text(first).await;
+    assert!(body.contains("TriviumDB Web Console"));
+
+    let second = request(
+        app.clone(),
+        "GET",
+        "/ui",
+        None,
+        &[("if-none-match", etag.as_str())],
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(second.headers()[header::ETAG].to_str().unwrap(), etag);
+    assert!(
+        second
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+
+    let compressed = request(app, "GET", "/ui", None, &[("accept-encoding", "gzip")]).await;
+    assert_eq!(compressed.status(), StatusCode::OK);
+    assert_eq!(
+        compressed.headers()[header::CONTENT_ENCODING],
+        "gzip",
+        "声明 gzip 时应压缩内嵌页面"
+    );
+    let bytes = compressed.into_body().collect().await.unwrap().to_bytes();
+    assert!(bytes.starts_with(&[0x1f, 0x8b]), "gzip magic 不匹配");
+}
+
+#[tokio::test]
+async fn if_none_match执行弱比较并保留304缓存头() {
+    let (app, _directory) = app("webui_weak_etag").await;
+    let first = request(app.clone(), "GET", "/ui", None, &[]).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+    assert!(etag.starts_with("W/\""), "应为弱 ETag，实际 {etag}");
+    let strong = etag.trim_start_matches("W/").to_owned();
+
+    // 强形式回传同一 opaque-tag 必须命中 304（RFC 9110 §13.1.2 弱比较）
+    let strong_hit = request(
+        app.clone(),
+        "GET",
+        "/ui",
+        None,
+        &[("if-none-match", strong.as_str())],
+    )
+    .await;
+    assert_eq!(strong_hit.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(strong_hit.headers()[header::ETAG].to_str().unwrap(), etag);
+    assert_eq!(
+        strong_hit.headers()[header::CACHE_CONTROL],
+        "no-cache",
+        "304 应带与 200 相同的缓存指令"
+    );
+    assert!(
+        strong_hit
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty(),
+        "304 不得带响应体"
+    );
+
+    // 标签列表（含无关项与引号内逗号）与通配符
+    let listed = format!("\"unrelated, tag\", {strong}");
+    let list_hit = request(
+        app.clone(),
+        "GET",
+        "/ui",
+        None,
+        &[("if-none-match", listed.as_str())],
+    )
+    .await;
+    assert_eq!(list_hit.status(), StatusCode::NOT_MODIFIED);
+    let wildcard = request(app.clone(), "GET", "/ui", None, &[("if-none-match", "*")]).await;
+    assert_eq!(wildcard.status(), StatusCode::NOT_MODIFIED);
+
+    // gzip 请求同一弱比较语义：304 且空体（不因编码不同退化为 200）
+    let gzip_hit = request(
+        app.clone(),
+        "GET",
+        "/ui",
+        None,
+        &[
+            ("if-none-match", strong.as_str()),
+            ("accept-encoding", "gzip"),
+        ],
+    )
+    .await;
+    assert_eq!(gzip_hit.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(gzip_hit.headers()[header::ETAG].to_str().unwrap(), etag);
+    assert!(
+        gzip_hit
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+
+    // 不匹配标签与非法标签都不能伪装成 304
+    let miss = request(
+        app.clone(),
+        "GET",
+        "/ui",
+        None,
+        &[("if-none-match", "\"0000-0\"")],
+    )
+    .await;
+    assert_eq!(miss.status(), StatusCode::OK);
+    assert!(text(miss).await.contains("TriviumDB Web Console"));
+    let invalid = request(
+        app,
+        "GET",
+        "/ui",
+        None,
+        &[("if-none-match", "not-a-quoted-tag")],
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn 非法查询参数返回统一problem_json而不是text_plain() {
+    let (app, _directory) = app("invalid_query_string").await;
+    // 先建立一个真实节点，确保 400 来自参数解析而不是节点不存在
+    let created = request(
+        app.clone(),
+        "POST",
+        "/v1/tql",
+        Some(serde_json::json!({
+            "query": "CREATE ({name: \"Alice\", type: \"person\"})",
+            "mutation": true
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+
+    for uri in [
+        "/v1/nodes/1/edges?limit=oops",
+        "/v1/nodes/1/edges?direction=sideways",
+        "/v1/nodes/1/neighbors?depth=oops",
+        "/v1/nodes/1/paths/to/1?maxHops=oops",
+    ] {
+        let response = request(app.clone(), "GET", uri, None, &[]).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri} 应返回 400"
+        );
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/json",
+            "{uri} 应返回统一 JSON 错误体，而不是 text/plain"
+        );
+        let body = json(response).await;
+        assert_eq!(body["code"], "INVALID_REQUEST", "{uri} 错误码应统一");
+        assert_eq!(body["status"], 400);
+        assert_eq!(body["retryable"], false);
+        assert!(
+            body["type"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("https://triviumdb.dev/errors/")),
+            "{uri} 应符合 problem JSON type 契约: {body}"
+        );
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains("查询参数无效") && value.len() > 12),
+            "{uri} detail 应可定位非法参数: {body}"
+        );
+    }
+
+    // 合法参数仍按原语义返回 200；越界的业务校验仍是 400 JSON（不是解析错误）
+    let ok = request(
+        app.clone(),
+        "GET",
+        "/v1/nodes/1/edges?limit=10&offset=0&direction=both",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let depth = request(
+        app.clone(),
+        "GET",
+        "/v1/nodes/1/neighbors?depth=9&limit=10",
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(depth.status(), StatusCode::BAD_REQUEST);
+    let depth_body = json(depth).await;
+    assert_eq!(depth_body["code"], "INVALID_REQUEST");
+    assert!(
+        depth_body["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("depth 必须为 1..=3")),
+        "原有业务校验语义与文案应保留: {depth_body}"
+    );
+    let vector = request(
+        app,
+        "POST",
+        "/v1/search/vector?top_k=oops",
+        None,
+        &[("content-type", "application/vnd.triviumdb.vector+f32")],
+    )
+    .await;
+    assert_eq!(vector.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(vector.headers()[header::CONTENT_TYPE], "application/json");
+}
+
+#[tokio::test]
+async fn 读语句带mutation标志走读路径而不是500() {
+    let (app, _directory) = app("read_with_mutation").await;
+    let response = request(
+        app,
+        "POST",
+        "/v1/tql",
+        Some(serde_json::json!({"query": "FIND {type: \"person\"} RETURN *", "mutation": true})),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "read query with mutation=true must fall back to the read path"
+    );
+    let body = json(response).await;
+    assert!(body.get("rows").is_some(), "expected read rows, got {body}");
+}

@@ -32,6 +32,33 @@ pub mod python {
         inner: crate::resources::ResourceRuntime,
     }
 
+    /// 控制台策略与取消状态不持有数据库或文件锁。
+    #[pyclass(name = "ConsoleSession", frozen)]
+    pub struct PyConsoleSession {
+        inner: crate::ConsoleSession,
+    }
+
+    #[pymethods]
+    impl PyConsoleSession {
+        #[new]
+        #[pyo3(signature = (options_json="{}"))]
+        fn new(options_json: &str) -> PyResult<Self> {
+            crate::ConsoleSession::from_json(options_json)
+                .map(|inner| Self { inner })
+                .map_err(to_py_error)
+        }
+
+        fn detach(&self) {
+            self.inner.detach();
+        }
+        fn is_detached(&self) -> bool {
+            self.inner.is_detached()
+        }
+        fn cancel(&self, request_id: &str) -> bool {
+            self.inner.cancel(request_id)
+        }
+    }
+
     #[pymethods]
     impl PyResourceRuntime {
         #[new]
@@ -2269,6 +2296,20 @@ pub mod python {
                 .collect()
         }
 
+        /// 原样传输 JSON 字符串，避免宿主 JavaScript 对 u64 的中间降精度。
+        fn console_request(
+            &mut self,
+            py: Python<'_>,
+            session: &PyConsoleSession,
+            request_json: &str,
+        ) -> PyResult<String> {
+            let session = session.inner.clone();
+            py.allow_threads(
+                || dispatch!(self, mut db => db.console_request(&session, request_json)),
+            )
+            .map_err(to_py_error)
+        }
+
         /// 执行 TQL 写操作（CREATE / SET / DELETE / DETACH DELETE）
         ///
         /// 返回 dict: {"affected": int, "created_ids": list[int]}
@@ -3070,6 +3111,7 @@ pub mod python {
             m.py().get_type::<SnapshotPublicationError>(),
         )?;
         m.add_class::<PyResourceRuntime>()?;
+        m.add_class::<PyConsoleSession>()?;
         m.add_class::<PyPreparedTql>()?;
         m.add_class::<PyTriviumDB>()?;
         m.add_class::<PySearchHit>()?;
