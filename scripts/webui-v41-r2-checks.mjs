@@ -286,7 +286,7 @@ try {
         });
         expect(shell.doc[0] <= shell.doc[1] + 1, `${label}: 页面不应横向溢出 ${shell.doc}`);
         expect(shell.body[0] <= shell.body[1] + 1, `${label}: body 不应横向溢出 ${shell.body}`);
-        expect(shell.navCount === 3, `${label}: 主导航应为 3 项`);
+        expect(shell.navCount === 4, `${label}: 主导航应为 4 项（新增节点文档工作区）`);
         expect(shell.langCount === 2, `${label}: 语言切换应常驻 2 个按钮`);
         expect(shell.docLang === (lang === 'en' ? 'en' : 'zh-CN'), `${label}: html lang 应跟随界面语言`);
         Object.entries(shell.hits).forEach(([key, hit]) => {
@@ -777,6 +777,194 @@ try {
         await context.close();
       }
       writeFileSync(path.join(OUT, 'axe.json'), JSON.stringify(axeReport, null, 2));
+    }
+  }
+
+  // ---------- S11. 文档工作区：真实读写（暂存 → 审阅 → 提交 → 冲突 → 重建基线） ----------
+  {
+    const prefix = 'S11 1440/dark';
+    const { context, page, errors } = await newPage({ width: 1440, height: 900, theme: 'dark' });
+    const txPosts = [];
+    const onReq = (req) => {
+      if (req.url().includes('/v1/transactions') && req.method() === 'POST') txPosts.push(req.postDataJSON());
+    };
+    page.on('request', onReq);
+    try {
+      await runQuery(page, 'FIND {type: "person"} RETURN * LIMIT 3');
+      // 入口走真实路径：结果行 → 节点详情 → 打开文档
+      await page.click('#gridBody tr[data-row-index="0"] .entity-name');
+      await page.waitForTimeout(450);
+      await page.click('#drawerOpenDocBtn');
+      await page.waitForSelector('#docPane.active', { timeout: 8000 });
+      const shell = await page.evaluate(() => ({
+        nav: document.querySelectorAll('.tabs-bar .tab').length,
+        active: document.querySelector('.tabs-bar .tab.active').dataset.tab,
+        docTabs: document.querySelectorAll('#docTabs [data-doc-tab]').length,
+        nodeId: document.getElementById('docNodeMeta').textContent.replace('#', ''),
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      }));
+      expect(shell.nav === 4, `${prefix}: 主导航应为 4 项，实际 ${shell.nav}`);
+      expect(shell.active === 'docPane', `${prefix}: 打开文档应切到文档工作区，实际 ${shell.active}`);
+      expect(shell.docTabs === 1, `${prefix}: 应只有一个文档标签，实际 ${shell.docTabs}`);
+      expect(shell.overflow <= 1, `${prefix}: 文档工作区不应横向溢出 ${shell.overflow}`);
+
+      const readPayload = () => page.evaluate(async (id) => {
+        const res = await fetch('/v1/nodes/' + id);
+        return (await res.json()).node.payload;
+      }, shell.nodeId);
+
+      const before = await readPayload();
+      const missing = await page.evaluate(() => !document.getElementById('docMissingBody').hidden);
+      if (missing) {
+        await page.click('#docCreateBody');
+        await page.waitForTimeout(200);
+      }
+      const afterCreate = await readPayload();
+      expect(JSON.stringify(afterCreate) === JSON.stringify(before),
+        `${prefix}: 创建正文只应改本地草稿，不得提前写库`);
+
+      await page.evaluate(() => {
+        const editor = document.getElementById('docEditor');
+        editor.value = (editor.value || '') + '\n\nruntime smoke';
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await page.waitForTimeout(250);
+      const dirtyLabel = await page.evaluate(() => document.getElementById('docDirtyLabel').textContent);
+      expect(/未暂存|Unstaged/.test(dirtyLabel), `${prefix}: 编辑后应提示未暂存更改，实际 ${dirtyLabel}`);
+
+      const postsBeforeStage = txPosts.length;
+      await page.click('#docStageBtn');
+      await page.waitForTimeout(450);
+      const staged = await page.evaluate(() => ({
+        barHidden: document.getElementById('txBar').hidden,
+        docQueue: document.getElementById('docQueueCount').textContent,
+      }));
+      expect(!staged.barHidden, `${prefix}: 暂存后待提交条应出现`);
+      expect(staged.docQueue === '1', `${prefix}: 文档待提交计数应为 1，实际 ${staged.docQueue}`);
+      expect(txPosts.length === postsBeforeStage, `${prefix}: 暂存阶段不得发出写请求`);
+
+      await page.evaluate(() => openTxReview());
+      await page.waitForTimeout(250);
+      const reviewText = await page.evaluate(() => document.getElementById('txReviewList').textContent);
+      expect(reviewText.length > 0, `${prefix}: 审阅弹层应有内容`);
+      await page.click('#txReviewCommitBtn');
+      await page.waitForTimeout(1200);
+      const committed = await page.evaluate(async (id) => {
+        const res = await fetch('/v1/nodes/' + id);
+        const body = await res.json();
+        const session = window.__docWorkspace.sessions()[0];
+        return { content: body.node.payload.content, submit: session && session.submit };
+      }, shell.nodeId);
+      expect(typeof committed.content === 'string' && committed.content.includes('runtime smoke'),
+        `${prefix}: 提交后节点正文应写入数据库，实际 ${JSON.stringify(committed.content)}`);
+      expect(committed.submit === 'acknowledged', `${prefix}: 提交成功后应为 acknowledged，实际 ${committed.submit}`);
+      await page.evaluate(() => closeTxReview());
+      await page.waitForTimeout(200);
+
+      // 外部并发写入后再提交：必须 409，且不得覆盖远端
+      await page.evaluate(() => {
+        const editor = document.getElementById('docEditor');
+        editor.value = editor.value + '\n\nsecond local edit';
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await page.waitForTimeout(250);
+      await page.click('#docStageBtn');
+      await page.waitForTimeout(500);
+      await page.evaluate(async (id) => {
+        await fetch('/v1/transactions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operations: [{ op: 'updatePayload', id: Number(id), payload: { content: 'remote wins', external: true } }] }),
+        });
+      }, shell.nodeId);
+      await page.waitForTimeout(300);
+      await page.evaluate(() => openTxReview());
+      await page.waitForTimeout(200);
+      await page.click('#txReviewCommitBtn');
+      await page.waitForTimeout(1200);
+      const conflict = await page.evaluate(async (id) => {
+        const res = await fetch('/v1/nodes/' + id);
+        const body = await res.json();
+        const session = window.__docWorkspace.sessions()[0];
+        return {
+          overlay: !document.getElementById('docConflictOverlay').hidden,
+          diff: document.getElementById('docConflictDiff').textContent,
+          submit: session && session.submit,
+          serverContent: body.node.payload.content,
+        };
+      }, shell.nodeId);
+      expect(conflict.overlay, `${prefix}: 版本冲突应打开三方对照弹层`);
+      expect(conflict.diff.includes('remote wins'), `${prefix}: 冲突弹层必须展示远端内容`);
+      expect(conflict.submit === 'conflict', `${prefix}: 冲突后会话应为 conflict，实际 ${conflict.submit}`);
+      expect(conflict.serverContent === 'remote wins', `${prefix}: 冲突提交不得覆盖远端内容，实际 ${conflict.serverContent}`);
+
+      await page.click('#docConflictRebase');
+      await page.waitForTimeout(400);
+      const rebased = await page.evaluate(() => ({
+        overlayHidden: document.getElementById('docConflictOverlay').hidden,
+        queue: document.getElementById('docQueueCount').textContent,
+        draft: document.getElementById('docEditor').value,
+      }));
+      expect(rebased.overlayHidden, `${prefix}: 以远端为基后应关闭冲突弹层`);
+      expect(rebased.queue === '0', `${prefix}: 重建基线后旧暂存必须撤回，实际 ${rebased.queue}`);
+      expect(rebased.draft.includes('second local edit'), `${prefix}: 重建基线不得丢弃本地草稿`);
+      await shot(page, 's11-doc-1440');
+      // 409 是本场景故意制造的业务冲突（浏览器会把非 2xx 资源记进 console），
+      // 只过滤这一条预期内的状态码，其余 console/pageerror 仍然零容忍。
+      const unexpected = errors.filter((entry) => !/status of 409/.test(entry));
+      expect(unexpected.length === 0, `${prefix}: 文档工作区 console/pageerror ${unexpected.join('; ')}`);
+    } finally {
+      page.off('request', onReq);
+      await context.close();
+    }
+  }
+
+  // 窄屏布局：只验证可用性与不溢出，不重复跑完整写入链路
+  {
+    const prefix = 'S11 390/light';
+    const { context, page, errors } = await newPage({ width: 390, height: 844, theme: 'light' });
+    try {
+      await runQuery(page, 'FIND {type: "person"} RETURN * LIMIT 3');
+      // 用真实结果行里的节点，避免拿不存在的 id 造出 404 噪声
+      const firstNode = await page.evaluate(() => {
+        const row = (gridDataRows && gridDataRows[0]) || null;
+        const node = nodeFromGridRow(row);
+        return node ? { id: String(node.id), payload: node.payload } : null;
+      });
+      expect(!!firstNode, `${prefix}: 需要至少一个节点用于窄屏布局检查`);
+      await page.evaluate((node) => {
+        window.__docWorkspace.open({ type: 'node', id: node.id, payload: node.payload, vector: [], edges: [] });
+      }, firstNode);
+      await page.waitForSelector('#docPane.active', { timeout: 8000 });
+      await page.waitForTimeout(400);
+      // 该节点的 payload 没有映射字段：窄屏下空态与「添加正文」都必须真实可点（历史原型缺陷回归点）
+      const missing = await page.evaluate(() => !document.getElementById('docMissingBody').hidden);
+      if (missing) {
+        const cta = await page.evaluate(() => {
+          const btn = document.getElementById('docCreateBody');
+          const rect = btn.getBoundingClientRect();
+          return { height: rect.height, top: rect.top, bottom: rect.bottom, inView: rect.top >= 0 && rect.bottom <= window.innerHeight };
+        });
+        expect(cta.height > 10 && cta.inView, `${prefix}: 空态的「添加正文」按钮必须在视口内可点 ${JSON.stringify(cta)}`);
+        await page.click('#docCreateBody');
+        await page.waitForTimeout(300);
+      }
+      const layout = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        missingHidden: document.getElementById('docMissingBody').hidden,
+        editorVisible: document.getElementById('docEditor').getBoundingClientRect().height > 80,
+        stageVisible: document.getElementById('docStageBtn').getBoundingClientRect().height > 10,
+        inspectorHidden: getComputedStyle(document.getElementById('docInspector')).display === 'none',
+      }));
+      expect(layout.overflow <= 1, `${prefix}: 不应横向溢出 ${layout.overflow}`);
+      expect(layout.missingHidden, `${prefix}: 添加正文后空态应收起`);
+      expect(layout.editorVisible, `${prefix}: 编辑区应保持可用`);
+      expect(layout.stageVisible, `${prefix}: 暂存按钮应在视口内`);
+      expect(layout.inspectorHidden, `${prefix}: 窄屏应收起上下文侧栏`);
+      await shot(page, 's11-doc-390');
+      expect(errors.length === 0, `${prefix}: console/pageerror ${errors.join('; ')}`);
+    } finally {
+      await context.close();
     }
   }
 
