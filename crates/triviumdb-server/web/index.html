@@ -4263,6 +4263,577 @@
       .main-nav .tab svg { display: none; }
       .context-strip .context-actions { gap: 2px; }
     }
+
+    /* ==========================================
+       文档工作区（dw = document workspace）
+       设计稿：.tmp/design-prototypes/document-workspace-v1
+       所有类名统一 dw- 前缀，避免与查询/图/向量工作区既有类名冲突。
+       颜色全部复用产品 token，明暗主题自动跟随。
+       ========================================== */
+    #docPane {
+      --dw-line: var(--border-color);
+      --dw-inset: var(--bg-inset);
+      --dw-panel: var(--bg-surface);
+      --dw-raised: var(--bg-surface-secondary);
+      --dw-doc: var(--tri-doc);
+      --dw-wash: rgba(114, 220, 210, 0.08);
+      --dw-mono-line: 22px;
+    }
+    [data-theme="light"] #docPane { --dw-wash: rgba(55, 108, 104, 0.08); }
+
+    .dw-shell {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 232px minmax(0, 1fr) 268px;
+      overflow: hidden;
+    }
+    .dw-side {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      border-right: 1px solid var(--dw-line);
+      background: var(--dw-inset);
+    }
+    .dw-side-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 14px 14px 10px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .dw-search {
+      margin: 0 10px 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--dw-line);
+      border-radius: 6px;
+      padding: 5px 8px;
+      color: var(--text-muted);
+      background: var(--dw-panel);
+    }
+    .dw-search input {
+      flex: 1;
+      min-width: 0;
+      border: 0;
+      background: none;
+      outline: none;
+      color: inherit;
+      font-size: 12px;
+    }
+    .dw-section-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 4px 14px 6px;
+      font-size: 10px;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .dw-file-list { flex: 1; min-height: 0; overflow: auto; padding: 0 6px; }
+    .dw-file {
+      width: 100%;
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      min-height: 54px;
+      padding: 8px 9px;
+      margin: 2px 0;
+      text-align: left;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+      position: relative;
+      cursor: pointer;
+    }
+    .dw-file:hover { background: var(--dw-raised); }
+    .dw-file.active { background: var(--dw-raised); border-color: var(--dw-line); }
+    .dw-file.active::before {
+      content: '';
+      position: absolute;
+      left: -1px;
+      top: 11px;
+      bottom: 11px;
+      width: 3px;
+      border-radius: 3px;
+      background: var(--dw-doc);
+    }
+    .dw-file-icon {
+      flex: none;
+      width: 24px;
+      height: 27px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--dw-line);
+      border-radius: 4px;
+      color: var(--dw-doc);
+      font: 10px var(--font-mono);
+    }
+    .dw-file-text { min-width: 0; flex: 1; }
+    .dw-file-title {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dw-file-meta {
+      display: block;
+      margin-top: 3px;
+      font: 10px var(--font-mono);
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dw-file-state { flex: none; font-size: 9px; color: var(--warning); }
+    .dw-list-empty { padding: 14px; font-size: 11px; color: var(--text-muted); line-height: 1.7; }
+    .dw-scope { padding: 8px 14px; font-size: 10px; color: var(--text-muted); line-height: 1.6; }
+    .dw-side-foot { border-top: 1px solid var(--dw-line); padding: 10px 12px; }
+    .dw-queue-row { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 6px; }
+    .dw-queue-count { margin-left: auto; font: 12px var(--font-mono); color: var(--dw-doc); }
+    .dw-side-foot .btn { width: 100%; justify-content: center; }
+
+    .dw-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--dw-panel); }
+    .dw-doc-tabs {
+      display: flex;
+      flex: none;
+      overflow-x: auto;
+      overflow-y: hidden;
+      background: var(--dw-inset);
+      border-bottom: 1px solid var(--dw-line);
+      height: 38px;
+    }
+    .dw-doc-tab {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex: none;
+      padding: 0 4px 0 8px;
+      border-right: 1px solid var(--dw-line);
+      border-top: 2px solid transparent;
+      white-space: nowrap;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .dw-doc-tab.active { border-top-color: var(--dw-doc); background: var(--dw-panel); color: var(--text-main); }
+    .dw-doc-tab button {
+      min-height: 26px;
+      padding: 2px 5px;
+      border: 0;
+      background: none;
+      color: inherit;
+      font-size: 11px;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    .dw-doc-tab button:hover { background: var(--dw-raised); }
+    .dw-doc-tab .dw-tab-close { color: var(--text-muted); }
+    .dw-doc-head {
+      flex: none;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 12px 16px 10px;
+    }
+    .dw-doc-head-text { min-width: 0; flex: 1; }
+    .dw-doc-title {
+      margin: 0 0 5px;
+      font: 600 18px/1.35 var(--font-display);
+      letter-spacing: -0.3px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dw-doc-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--text-muted); }
+    .dw-doc-actions { display: flex; gap: 6px; flex: none; }
+    .dw-doc-actions .btn { font-size: 12px; }
+    .dw-kbd-hint { font: 9px var(--font-mono); opacity: 0.7; }
+    .dw-toolbar {
+      flex: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 6px 12px;
+      border-top: 1px solid var(--dw-line);
+      border-bottom: 1px solid var(--dw-line);
+    }
+    .dw-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .dw-seg { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--dw-line); border-radius: 6px; background: var(--dw-inset); }
+    .dw-seg button {
+      min-height: 25px;
+      padding: 2px 9px;
+      font-size: 11px;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+    .dw-seg button.active { background: var(--dw-raised); color: var(--text-main); border-color: var(--dw-line); }
+    .dw-select {
+      background: var(--dw-inset);
+      border: 1px solid var(--dw-line);
+      border-radius: 5px;
+      padding: 4px 6px;
+      font-size: 11px;
+      color: inherit;
+      max-width: 130px;
+    }
+    .dw-banner {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 14px;
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-muted);
+      background: var(--dw-wash);
+      border-bottom: 1px solid var(--dw-line);
+    }
+    .dw-banner[hidden] { display: none; }
+    .dw-banner.warn { color: var(--warning); }
+    .dw-banner.error { color: var(--danger); background: rgba(238, 165, 170, 0.07); }
+    .dw-banner button {
+      margin-left: auto;
+      min-height: 22px;
+      padding: 1px 8px;
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      flex: none;
+    }
+    .dw-editor-area { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; }
+    .dw-editor-area[data-view="edit"] { grid-template-columns: 1fr; }
+    .dw-editor-area[data-view="preview"] { grid-template-columns: 1fr; }
+    .dw-editor-area[data-view="edit"] .dw-preview-pane { display: none; }
+    .dw-editor-area[data-view="preview"] .dw-source-pane { display: none; }
+    .dw-source-pane, .dw-preview-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .dw-source-pane { background: var(--dw-inset); }
+    .dw-preview-pane { border-left: 1px solid var(--dw-line); }
+    .dw-pane-head {
+      flex: none;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 12px;
+      font: 10px var(--font-mono);
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--dw-line);
+    }
+    .dw-pane-head button {
+      border: 0;
+      background: none;
+      color: var(--primary);
+      font: 10px var(--font-mono);
+      cursor: pointer;
+      padding: 2px 4px;
+    }
+    .dw-text-frame { position: relative; flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    .dw-gutter {
+      flex: none;
+      width: 44px;
+      padding: 14px 8px 40px 0;
+      text-align: right;
+      color: var(--text-muted);
+      opacity: 0.65;
+      font: 12px/var(--dw-mono-line) var(--font-mono);
+      white-space: pre;
+      overflow: hidden;
+      user-select: none;
+      background: var(--dw-inset);
+    }
+    .dw-source {
+      flex: 1;
+      min-width: 0;
+      max-width: 100%;
+      border: 0;
+      outline: none;
+      resize: none;
+      background: transparent;
+      padding: 14px 16px 40px 4px;
+      font: 12px/var(--dw-mono-line) var(--font-mono);
+      tab-size: 2;
+      color: var(--dw-doc);
+      white-space: pre;
+      overflow: auto;
+    }
+    .dw-source[readonly] { color: var(--text-muted); }
+    .dw-rendered {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 16px 20px 40px;
+      font-size: 12px;
+      line-height: 1.85;
+      overflow-wrap: anywhere;
+    }
+    .dw-rendered h1 { font: 600 22px/1.4 var(--font-display); margin: 0 0 14px; letter-spacing: -0.4px; }
+    .dw-rendered h2 { font: 600 16px/1.5 var(--font-display); margin: 20px 0 10px; color: var(--text-main); }
+    .dw-rendered h3 { font: 600 14px/1.5 var(--font-display); margin: 16px 0 8px; color: var(--text-main); }
+    .dw-rendered p { margin: 10px 0; color: var(--text-muted); }
+    .dw-rendered strong { color: var(--text-main); font-weight: 600; }
+    .dw-rendered code {
+      font: 11px var(--font-mono);
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: var(--dw-raised);
+      color: var(--dw-doc);
+    }
+    .dw-rendered pre {
+      margin: 10px 0;
+      padding: 12px;
+      border: 1px solid var(--dw-line);
+      border-radius: 6px;
+      background: var(--dw-inset);
+      white-space: pre-wrap;
+      overflow: auto;
+      font: 11px/1.8 var(--font-mono);
+      color: var(--dw-doc);
+    }
+    .dw-rendered blockquote {
+      margin: 14px 0;
+      padding: 8px 12px;
+      border-left: 2px solid var(--dw-doc);
+      background: var(--dw-raised);
+      color: var(--text-muted);
+    }
+    .dw-rendered ul { padding-left: 18px; color: var(--text-muted); }
+    .dw-rendered li { padding: 2px 0; }
+    .dw-rendered hr { border: 0; border-top: 1px solid var(--dw-line); margin: 18px 0; }
+    .dw-rendered a { color: var(--primary); }
+    .dw-caption {
+      font: 10px var(--font-mono);
+      letter-spacing: 1.1px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+    .dw-foot {
+      flex: none;
+      height: 26px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 12px;
+      border-top: 1px solid var(--dw-line);
+      font: 10px var(--font-mono);
+      color: var(--text-muted);
+    }
+    .dw-foot .dw-foot-right { margin-left: auto; display: flex; gap: 12px; }
+
+    .dw-find {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      padding: 5px 10px;
+      border-bottom: 1px solid var(--dw-line);
+      background: var(--dw-raised);
+      font-size: 11px;
+    }
+    .dw-find[hidden] { display: none; }
+    .dw-find input {
+      min-width: 0;
+      width: 132px;
+      padding: 3px 6px;
+      border: 1px solid var(--dw-line);
+      border-radius: 4px;
+      background: var(--dw-panel);
+      color: inherit;
+      font: 11px var(--font-mono);
+    }
+    .dw-find button {
+      min-height: 22px;
+      padding: 1px 7px;
+      border: 1px solid var(--dw-line);
+      border-radius: 4px;
+      background: var(--dw-panel);
+      color: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .dw-find-count { color: var(--text-muted); font: 10px var(--font-mono); min-width: 48px; }
+
+    .dw-inspect {
+      min-width: 0;
+      min-height: 0;
+      overflow: auto;
+      background: var(--dw-inset);
+      border-left: 1px solid var(--dw-line);
+    }
+    .dw-inspect-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--dw-line);
+      font-size: 12px;
+    }
+    .dw-inspect-section { padding: 14px; border-bottom: 1px solid var(--dw-line); }
+    .dw-inspect-section h2 {
+      margin: 0 0 10px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .dw-identity { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+    .dw-identity-symbol {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--dw-line);
+      border-radius: 8px;
+      background: var(--dw-raised);
+      color: var(--dw-doc);
+      font: 11px var(--font-mono);
+    }
+    .dw-identity strong { font: 13px var(--font-mono); }
+    .dw-identity small { display: block; margin-top: 3px; font-size: 10px; color: var(--text-muted); }
+    .dw-props { display: grid; grid-template-columns: 62px 1fr; gap: 8px 6px; margin: 0; font-size: 11px; }
+    .dw-props dt { color: var(--text-muted); }
+    .dw-props dd { margin: 0; word-break: break-all; }
+    .dw-mapping {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 7px 9px;
+      border: 1px solid var(--dw-line);
+      border-radius: 5px;
+      background: var(--dw-panel);
+      font: 11px var(--font-mono);
+    }
+    .dw-mapping button {
+      min-height: 22px;
+      padding: 0 4px;
+      border: 0;
+      background: none;
+      color: var(--primary);
+      font: 10px var(--font-sans);
+      cursor: pointer;
+    }
+    .dw-note { margin: 8px 0 0; font-size: 10px; line-height: 1.8; color: var(--text-muted); }
+    .dw-outline { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
+    .dw-outline button {
+      text-align: left;
+      min-height: 25px;
+      padding: 3px 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+      background: none;
+      border: 0;
+      border-left: 1px solid var(--dw-line);
+      cursor: pointer;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dw-outline button:hover { background: var(--dw-raised); color: var(--text-main); }
+    .dw-outline button.lv1 { color: var(--dw-doc); border-left: 2px solid var(--dw-doc); }
+    .dw-outline button.lv2 { padding-left: 18px; }
+    .dw-outline button.lv3 { padding-left: 28px; }
+    .dw-outline-empty { font-size: 10px; color: var(--text-muted); }
+
+    .dw-empty {
+      flex: 1;
+      display: grid;
+      place-content: center;
+      text-align: center;
+      gap: 8px;
+      padding: 28px;
+      color: var(--text-muted);
+    }
+    .dw-empty h2 { margin: 0; font-size: 17px; font-weight: 500; color: var(--text-main); }
+    .dw-empty p { margin: 0; font-size: 11px; line-height: 1.8; }
+    .dw-empty .btn { margin: 4px auto 0; }
+    .dw-missing { flex: 1; overflow: auto; padding: 16px; display: block; text-align: left; }
+    .dw-missing h2 { font-size: 15px; margin: 6px 0; }
+    .dw-missing p { font-size: 11px; margin: 6px 0; }
+    .dw-missing .btn { margin: 8px 0 0; }
+
+    .dw-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 1px 6px;
+      border: 1px solid var(--dw-line);
+      border-radius: 4px;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .dw-badge.doc { color: var(--dw-doc); border-color: color-mix(in srgb, var(--dw-doc) 45%, var(--dw-line)); }
+    .dw-dirty { color: var(--warning); }
+    .dw-ok { color: var(--success); }
+
+    .dw-diff { border: 1px solid var(--dw-line); border-radius: 6px; overflow: hidden; margin: 10px 0; }
+    .dw-diff h3 { margin: 0; padding: 7px 10px; font-size: 11px; background: var(--dw-raised); }
+    .dw-diff pre {
+      margin: 0;
+      padding: 10px;
+      max-height: 240px;
+      overflow: auto;
+      font: 11px/1.75 var(--font-mono);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--text-muted);
+    }
+    .dw-diff .dw-diff-line { display: block; min-height: 1.7em; padding: 0 6px; }
+    .dw-diff .dw-diff-line.changed { background: var(--dw-wash); border-left: 2px solid var(--primary); }
+    .dw-diff .dw-diff-line.changed.before { background: rgba(228, 189, 124, 0.1); border-left-color: var(--warning); }
+    .dw-narrow-only { display: none; }
+
+    @media (min-width: 1600px) {
+      .dw-shell { grid-template-columns: 248px minmax(0, 1fr) 288px; }
+      #docPane { --dw-mono-line: 23px; }
+      .dw-source { font-size: 13px; }
+    }
+    @media (max-width: 1200px) {
+      .dw-shell { grid-template-columns: 208px minmax(0, 1fr); }
+      .dw-inspect { display: none; }
+    }
+    @media (max-width: 860px) {
+      .dw-narrow-only { display: inline-flex; }
+      .dw-shell { grid-template-columns: minmax(0, 1fr); position: relative; }
+      .dw-side {
+        display: none;
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: min(280px, 86%);
+        z-index: 6;
+        box-shadow: var(--shadow-lg);
+      }
+      .dw-side.open { display: flex; }
+      .dw-editor-area { grid-template-columns: 1fr; }
+      .dw-editor-area[data-view="split"] { grid-template-rows: 1fr 1fr; }
+      .dw-editor-area[data-view="split"] .dw-preview-pane { border-left: 0; border-top: 1px solid var(--dw-line); }
+      .dw-doc-head { flex-wrap: wrap; padding: 10px 12px 8px; }
+      .dw-doc-actions { width: 100%; }
+      .dw-doc-actions .btn { flex: 1; justify-content: center; }
+      .dw-doc-title { font-size: 16px; }
+      .dw-toolbar { padding: 5px 8px; }
+      .dw-find input { width: 100px; }
+    }
   </style>
   <script>
     // 首屏前置：侧栏 rail 与界面语言在样式生效前恢复，避免展开态闪一下再收起
@@ -4373,6 +4944,10 @@
         <div class="tab" data-tab="vectorLabPane" data-action="quick-search" role="tab" id="tab-vectorLabPane" aria-controls="vectorLabPane" aria-selected="false" tabindex="-1">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="4" y1="20" x2="12" y2="12"/><line x1="12" y1="12" x2="20" y2="4"/><circle cx="4" cy="20" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="20" cy="4" r="2"/></svg>
           <span data-i18n="tabs.vector">向量检索</span>
+        </div>
+        <div class="tab" data-tab="docPane" data-action="quick-find" role="tab" id="tab-docPane" aria-controls="docPane" aria-selected="false" tabindex="-1">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h4"/><path d="M9 13h6M9 17h4"/></svg>
+          <span data-i18n="tabs.doc">节点文档</span>
         </div>
       </div>
     </nav>
@@ -4961,6 +5536,158 @@
           </section>
         </div>
       </div>
+
+      <!-- 标签页 4：节点文档工作区（JSON payload + 正文共享同一份草稿） -->
+      <div class="tab-pane" id="docPane" role="tabpanel" aria-labelledby="tab-docPane">
+        <div class="dw-shell">
+          <aside class="dw-side" id="docSideList" aria-label="节点文档列表">
+            <div class="dw-side-head">
+              <span data-i18n="doc.list.title">节点文档</span>
+              <span class="dw-badge" id="docListCount">0</span>
+            </div>
+            <label class="dw-search">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+              <input id="docListSearch" type="search" autocomplete="off" spellcheck="false"
+                data-i18n-placeholder="doc.list.search" placeholder="搜索标题或节点 ID" aria-label="搜索节点文档">
+            </label>
+            <div class="dw-section-label"><span data-i18n="doc.list.source">当前结果</span><span id="docListSource">-</span></div>
+            <div class="dw-file-list" id="docFileList"></div>
+            <div class="dw-scope" id="docListScope" data-i18n="doc.list.scope">仅显示当前查询返回范围，不代表库内全部文档。</div>
+            <div class="dw-side-foot">
+              <div class="dw-queue-row">
+                <span data-i18n="doc.queue.title">待提交更改</span>
+                <span class="dw-queue-count" id="docQueueCount">0</span>
+              </div>
+              <button class="btn" type="button" id="docSideReview" data-i18n="doc.queue.review">审阅更改</button>
+            </div>
+          </aside>
+
+          <main class="dw-main">
+            <div class="dw-doc-tabs" id="docTabs" role="tablist" aria-label="已打开的文档"></div>
+
+            <div id="docBody" style="display: contents">
+              <div class="dw-doc-head">
+                <button class="btn dw-narrow-only" type="button" id="docSideToggle" aria-label="打开节点列表">☰</button>
+                <div class="dw-doc-head-text">
+                  <h2 class="dw-doc-title" id="docTitle"></h2>
+                  <div class="dw-doc-meta">
+                    <span class="dw-badge doc" id="docTypeBadge">document</span>
+                    <span class="mono" id="docNodeMeta"></span>
+                    <span>·</span>
+                    <span id="docDirtyLabel"></span>
+                  </div>
+                </div>
+                <div class="dw-doc-actions">
+                  <button class="btn" type="button" id="docExportBtn" data-i18n="doc.export">导出草稿</button>
+                  <button class="btn btn-primary" type="button" id="docStageBtn">暂存更改 <span class="dw-kbd-hint">Ctrl S</span></button>
+                </div>
+              </div>
+
+              <div class="dw-toolbar">
+                <div class="dw-seg" role="group" aria-label="编辑对象">
+                  <button type="button" id="docModeBody" class="active" aria-pressed="true" data-i18n="doc.mode.body">正文</button>
+                  <button type="button" id="docModeJson" aria-pressed="false" data-i18n="doc.mode.json">JSON payload</button>
+                </div>
+                <div class="dw-tools">
+                  <select class="dw-select" id="docFormat" aria-label="正文显示格式">
+                    <option value="markdown">Markdown</option>
+                    <option value="text" data-i18n="doc.format.text">纯文本</option>
+                  </select>
+                  <button class="btn" type="button" id="docFormatJson" hidden data-i18n="doc.format.json">格式化</button>
+                  <div class="dw-seg" role="group" aria-label="编辑器布局">
+                    <button type="button" data-doc-view="edit" data-i18n="doc.view.edit">编辑</button>
+                    <button type="button" data-doc-view="split" class="active" data-i18n="doc.view.split">分屏</button>
+                    <button type="button" data-doc-view="preview" data-i18n="doc.view.preview">预览</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="dw-banner" id="docBanner" role="status" hidden>
+                <span id="docBannerText"></span>
+                <button type="button" id="docBannerAction" hidden></button>
+              </div>
+
+              <div class="dw-find" id="docFindBar" hidden>
+                <input id="docFindInput" type="text" placeholder="查找" aria-label="查找" spellcheck="false" data-i18n-placeholder="doc.find.placeholder">
+                <span class="dw-find-count" id="docFindCount">0/0</span>
+                <button type="button" id="docFindPrev" aria-label="上一个">↑</button>
+                <button type="button" id="docFindNext" aria-label="下一个">↓</button>
+                <input id="docReplaceInput" type="text" placeholder="替换为" aria-label="替换为" spellcheck="false" data-i18n-placeholder="doc.find.replace">
+                <button type="button" id="docReplaceOne" data-i18n="doc.find.one">替换</button>
+                <button type="button" id="docReplaceAll" data-i18n="doc.find.all">全部替换</button>
+                <button type="button" id="docFindClose" aria-label="关闭查找">✕</button>
+              </div>
+
+              <div class="dw-editor-area" id="docEditorArea" data-view="split">
+                <section class="dw-source-pane" aria-label="文档编辑器">
+                  <div class="dw-pane-head">
+                    <span id="docSourceLabel">MARKDOWN SOURCE</span>
+                    <button type="button" id="docSourcePath" title="更改正文来源字段">payload.content</button>
+                  </div>
+                  <div class="dw-text-frame" id="docTextFrame">
+                    <div class="dw-gutter" id="docGutter" aria-hidden="true"></div>
+                    <textarea class="dw-source" id="docEditor" wrap="off" spellcheck="false" aria-label="文档内容"></textarea>
+                  </div>
+                  <div class="dw-empty dw-missing" id="docMissingBody" hidden>
+                    <h2 data-i18n="doc.missing.title">这个节点还没有正文</h2>
+                    <p data-i18n="doc.missing.help">保留原有 payload，按所选字段添加正文；不会覆盖其他字段。</p>
+                    <button class="btn" type="button" id="docCreateBody" data-i18n="doc.missing.cta">添加正文到所选字段</button>
+                  </div>
+                </section>
+                <section class="dw-preview-pane" aria-label="内容预览">
+                  <div class="dw-pane-head"><span id="docPreviewLabel">LIVE PREVIEW</span><span data-i18n="doc.preview.sync">与当前草稿同步</span></div>
+                  <article class="dw-rendered" id="docPreview"></article>
+                </section>
+              </div>
+
+              <div class="dw-foot">
+                <span id="docCursor">Ln 1, Col 1</span>
+                <span id="docCharCount"></span>
+                <span id="docLossyHint" hidden></span>
+                <span class="dw-foot-right">
+                  <button class="btn" type="button" id="docFindToggle" style="min-height:20px;padding:0 6px;font-size:10px" data-i18n="doc.find.toggle">查找</button>
+                  <span>UTF-8</span>
+                </span>
+              </div>
+            </div>
+
+            <div class="dw-empty" id="docClosedState" hidden>
+              <h2 data-i18n="doc.empty.title">选择一个节点，开始编辑</h2>
+              <p data-i18n="doc.empty.help">从左侧节点列表打开正文或 JSON payload；入口也来自结果右键菜单与节点详情。</p>
+              <button class="btn" type="button" id="docOpenFirst" data-i18n="doc.empty.cta">打开节点列表</button>
+            </div>
+          </main>
+
+          <aside class="dw-inspect" id="docInspector" aria-label="节点上下文">
+            <div class="dw-inspect-head"><span data-i18n="doc.inspect.title">节点上下文</span><span class="dw-badge" id="docSubmitBadge">-</span></div>
+            <section class="dw-inspect-section">
+              <div class="dw-identity">
+                <span class="dw-identity-symbol">{ }</span>
+                <div><strong id="docInspectId">-</strong><small data-i18n="doc.inspect.sub">文档附属于节点</small></div>
+              </div>
+              <dl class="dw-props">
+                <dt data-i18n="doc.inspect.type">类型</dt><dd id="docInspectType">-</dd>
+                <dt data-i18n="doc.inspect.version">版本</dt><dd class="mono" id="docVersion">-</dd>
+                <dt data-i18n="doc.inspect.access">编辑状态</dt><dd id="docAccessStatus">-</dd>
+                <dt data-i18n="doc.inspect.vector">向量</dt><dd id="docVectorStatus">-</dd>
+              </dl>
+            </section>
+            <section class="dw-inspect-section">
+              <h2 data-i18n="doc.mapping.title">正文来源</h2>
+              <div class="dw-mapping"><span id="docMappingText">/content</span><button type="button" id="docMappingBtn" data-i18n="doc.mapping.change">更改</button></div>
+              <p class="dw-note" data-i18n="doc.mapping.note">一个节点一份 payload。正文只是所选字段的编辑视图，其余字段保留；不会写入 /format 等未定案字段。</p>
+            </section>
+            <section class="dw-inspect-section">
+              <h2 data-i18n="doc.outline.title">文档大纲</h2>
+              <div class="dw-outline" id="docOutline"></div>
+            </section>
+            <section class="dw-inspect-section">
+              <h2 data-i18n="doc.inspect.readonlyTitle">只读信息</h2>
+              <p class="dw-note" id="docInspectNote">关系与向量只在原工作区管理；正文编辑不会触发向量重建。</p>
+            </section>
+          </aside>
+        </div>
+      </div>
     </main>
   </div>
 
@@ -5034,6 +5761,7 @@
       <div class="node-detail-drawer" id="nodeDrawer">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
           <h2 id="drawerNodeTitle" data-i18n="detail.title">节点详情</h2>
+          <button class="btn" id="drawerOpenDocBtn" type="button" title="在文档工作区打开此节点" data-i18n="grid.openDocument" data-i18n-title="grid.openDocument">打开文档</button>
           <!-- 内层关闭按钮已移除：与面板 uspCollapseBtn 功能重合（双 X 问题），收起语义统一到面板 -->
         </div>
         <!-- Trinity 三平面：Payload / Vector / Edges（V3-G：图操作上移到 Payload 卡底部，四卡可同屏） -->
@@ -5220,6 +5948,77 @@
         <button class="btn" id="txReviewCancelBtn" type="button" data-i18n="tx.keepStaged">返回</button>
         <button class="btn" id="txReviewDiscardBtn" type="button" data-i18n="tx.discard">放弃这些修改</button>
         <button class="btn btn-primary" id="txReviewCommitBtn" type="button" data-i18n="tx.commit">提交</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文档工作区：关闭有未提交更改的标签（三选，替代内嵌 webview 不支持的原生 confirm） -->
+  <div class="import-overlay" id="docCloseOverlay" hidden>
+    <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="docCloseTitle">
+      <div class="import-header">
+        <h2 id="docCloseTitle" data-i18n="doc.close.title">此文档还有未提交更改</h2>
+      </div>
+      <div class="import-body">
+        <p class="import-hint" data-i18n="doc.close.hint">保留草稿后关闭标签，再次打开仍可继续编辑；已暂存的操作会继续留在审阅队列。</p>
+      </div>
+      <div class="import-footer">
+        <button class="btn" id="docCloseCancel" type="button" data-i18n="doc.close.keep">继续编辑</button>
+        <button class="btn" id="docCloseDiscard" type="button" data-i18n="doc.close.discard">放弃本节点更改</button>
+        <button class="btn btn-primary" id="docCloseKeepDraft" type="button" data-i18n="doc.close.saveAndClose">保留草稿并关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文档工作区：正文来源字段（JSON Pointer） -->
+  <div class="import-overlay" id="docMappingOverlay" hidden>
+    <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="docMappingTitle">
+      <div class="import-header">
+        <h2 id="docMappingTitle" data-i18n="doc.mapping.dialogTitle">选择正文来源字段</h2>
+        <button class="btn btn-quiet" id="docMappingClose" type="button" aria-label="关闭" title="关闭">✕</button>
+      </div>
+      <div class="import-body">
+        <p class="import-hint" data-i18n="doc.mapping.dialogHint">使用 JSON Pointer，例如 /content 或 /document/body。这只改变编辑视图，不移动、不删除原字段，也不会写入格式字段。</p>
+        <input class="dr-input" id="docMappingInput" type="text" spellcheck="false" style="width:100%;padding:8px 10px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-inset);color:inherit;font-family:var(--font-mono);font-size:12px" aria-label="正文来源字段">
+        <p class="import-hint" id="docMappingError" role="status"></p>
+      </div>
+      <div class="import-footer">
+        <button class="btn" id="docMappingCancel" type="button" data-i18n="import.cancel">取消</button>
+        <button class="btn btn-primary" id="docMappingApply" type="button" data-i18n="doc.mapping.apply">应用映射</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文档工作区：同一节点已有待提交更改时的显式三选（不静默覆盖） -->
+  <div class="import-overlay" id="docMergeOverlay" hidden>
+    <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="docMergeTitle">
+      <div class="import-header">
+        <h2 id="docMergeTitle" data-i18n="doc.merge.title">该节点已有待提交更改</h2>
+      </div>
+      <div class="import-body">
+        <p class="import-hint" id="docMergeHint" data-i18n="doc.merge.hint">另一个入口（payload 编辑 / 导入 / 文档）已暂存了此节点。选择合并会以队列中的最新 payload 为基，只覆盖本次正文或 JSON 变更。</p>
+      </div>
+      <div class="import-footer">
+        <button class="btn" id="docMergeCancel" type="button" data-i18n="import.cancel">取消</button>
+        <button class="btn" id="docMergeReplace" type="button" data-i18n="doc.merge.replace">替换整份 payload</button>
+        <button class="btn btn-primary" id="docMergeCombine" type="button" data-i18n="doc.merge.combine">合并并暂存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文档工作区：版本冲突（base / local / remote 三方，不做自动合并与强制覆盖） -->
+  <div class="import-overlay" id="docConflictOverlay" hidden>
+    <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="docConflictTitle" style="width:min(960px,94vw)">
+      <div class="import-header">
+        <h2 id="docConflictTitle" data-i18n="doc.conflict.title">版本冲突：服务端内容已变化</h2>
+        <button class="btn btn-quiet" id="docConflictClose" type="button" aria-label="关闭" title="关闭">✕</button>
+      </div>
+      <div class="import-body">
+        <p class="import-hint" id="docConflictHint" data-i18n="doc.conflict.hint">提交被节点 ETag 拒绝（未写入任何内容）。先对比远端与本地草稿，手工合并后重新审阅；首期不提供自动合并与强制覆盖。</p>
+        <div class="dw-diff" id="docConflictDiff"></div>
+      </div>
+      <div class="import-footer">
+        <button class="btn" id="docConflictKeepLocal" type="button" data-i18n="doc.conflict.keepLocal">保留本地草稿</button>
+        <button class="btn btn-primary" id="docConflictRebase" type="button" data-i18n="doc.conflict.rebase">以远端为基继续合并</button>
       </div>
     </div>
   </div>
@@ -6253,6 +7052,131 @@
         'tx.op.link': '新增关系 · {source} → {target} ({label})',
         'tx.op.unknown': '未知操作 · {kind}',
         'history.filled': '已填入编辑器（未执行）',
+        'tabs.doc': '节点文档',
+        'workspace.desc.doc': '节点 payload 与正文共用一份草稿：暂存后统一审阅，提交成功才算保存。',
+        'palette.action.navDoc': '切换到节点文档',
+        'palette.action.openDoc': '打开当前节点的文档',
+        'grid.openDocument': '打开文档',
+        'tx.source.doc': '文档编辑',
+        'doc.list.title': '节点文档',
+        'doc.list.search': '搜索标题或节点 ID',
+        'doc.list.source': '当前结果',
+        'doc.list.scope': '仅显示当前查询返回范围，不代表库内全部文档。',
+        'doc.list.empty': '没有可打开的节点。先运行一次只读查询，或从节点详情打开。',
+        'doc.list.sample': '{n} 个节点 · 采样范围',
+        'doc.list.sourceGrid': '查询结果',
+        'doc.list.sourceVector': '向量命中',
+        'doc.list.sourceNode': '当前节点',
+        'doc.list.jsonOnly': '仅 JSON',
+        'doc.queue.title': '待提交更改',
+        'doc.queue.review': '审阅更改',
+        'doc.export': '导出草稿',
+        'doc.mode.body': '正文',
+        'doc.mode.json': 'JSON payload',
+        'doc.format.text': '纯文本',
+        'doc.format.json': '格式化',
+        'doc.view.edit': '编辑',
+        'doc.view.split': '分屏',
+        'doc.view.preview': '预览',
+        'doc.find.placeholder': '查找',
+        'doc.find.replace': '替换为',
+        'doc.find.one': '替换',
+        'doc.find.all': '全部替换',
+        'doc.find.toggle': '查找',
+        'doc.missing.title': '这个节点还没有正文',
+        'doc.missing.help': '保留原有 payload，按所选字段添加正文；不会覆盖其他字段。',
+        'doc.missing.cta': '添加正文到所选字段',
+        'doc.preview.sync': '与当前草稿同步',
+        'doc.empty.title': '选择一个节点，开始编辑',
+        'doc.empty.help': '从左侧节点列表打开正文或 JSON payload；入口也来自结果右键菜单与节点详情。',
+        'doc.empty.cta': '打开节点列表',
+        'doc.inspect.title': '节点上下文',
+        'doc.inspect.sub': '文档附属于节点',
+        'doc.inspect.type': '类型',
+        'doc.inspect.version': '版本',
+        'doc.inspect.access': '编辑状态',
+        'doc.inspect.vector': '向量',
+        'doc.inspect.readonlyTitle': '只读信息',
+        'doc.inspect.note': '关系与向量只在原工作区管理；正文编辑不会触发向量重建。',
+        'doc.mapping.title': '正文来源',
+        'doc.mapping.change': '更改',
+        'doc.mapping.note': '一个节点一份 payload。正文只是所选字段的编辑视图，其余字段保留；不会写入 /format 等未定案字段。',
+        'doc.mapping.dialogTitle': '选择正文来源字段',
+        'doc.mapping.dialogHint': '使用 JSON Pointer，例如 /content 或 /document/body。这只改变编辑视图，不移动、不删除原字段，也不会写入格式字段。',
+        'doc.mapping.apply': '应用映射',
+        'doc.outline.title': '文档大纲',
+        'doc.outline.empty': '暂无标题',
+        'doc.close.title': '此文档还有未提交更改',
+        'doc.close.hint': '保留草稿后关闭标签，再次打开仍可继续编辑；已暂存的操作会继续留在审阅队列。',
+        'doc.close.keep': '继续编辑',
+        'doc.close.discard': '放弃本节点更改',
+        'doc.close.saveAndClose': '保留草稿并关闭',
+        'doc.merge.title': '该节点已有待提交更改',
+        'doc.merge.hint': '另一个入口（payload 编辑 / 导入 / 文档）已暂存了此节点。合并会以队列中的最新 payload 为基，只覆盖本次变更；替换会用本地草稿整份覆盖队列项。',
+        'doc.merge.replace': '替换整份 payload',
+        'doc.merge.combine': '合并并暂存',
+        'doc.conflict.title': '版本冲突：服务端内容已变化',
+        'doc.conflict.hint': '提交被节点 ETag 拒绝（未写入任何内容）。先对比远端与本地草稿，手工合并后重新审阅；首期不提供自动合并与强制覆盖。',
+        'doc.conflict.keepLocal': '保留本地草稿',
+        'doc.conflict.rebase': '以远端为基继续合并',
+        'doc.conflict.remote': '远端（服务端刚读到）',
+        'doc.conflict.local': '本地草稿',
+        'doc.conflict.base': '打开时的基线',
+        'doc.access.unknown': '未知（未确认）',
+        'doc.access.editable': '可编辑',
+        'doc.access.readonly': '只读',
+        'doc.access.heldByOther': '他人占用（模拟）',
+        'doc.access.expired': '资格失效（模拟）',
+        'doc.access.note': '无编辑租约：并发由节点 ETag 乐观校验，冲突会以 409 返回。',
+        'doc.submit.idle': '未提交',
+        'doc.submit.submitting': '提交中…',
+        'doc.submit.acknowledged': '已确认',
+        'doc.submit.rejected': '已拒绝',
+        'doc.submit.conflict': '冲突',
+        'doc.submit.outcomeUnknown': '结果待确认',
+        'doc.status.clean': '与基线一致',
+        'doc.status.dirty': '未暂存更改',
+        'doc.status.invalid': 'JSON 待修正',
+        'doc.status.staged': '已暂存，尚未提交',
+        'doc.status.stagedNew': '已暂存，另有新修改',
+        'doc.banner.invalid': 'JSON 格式无效：保留当前输入，修正后才能切到正文或暂存。',
+        'doc.banner.lossy': '包含超出 JavaScript 安全整数范围的数值或重复键：保存会改变原值，已禁止暂存。',
+        'doc.banner.readonly': '当前节点只读：可以查看与导出，不能修改或提交。',
+        'doc.banner.heldByOther': '此文档被其他编辑者占用（模拟状态，服务端未提供租约）。',
+        'doc.banner.expired': '编辑资格已失效（模拟状态）：草稿保留，提交已停止。',
+        'doc.banner.conflict': '服务端版本已变化：请对比远端与本地后手工合并。',
+        'doc.banner.unknown': '提交结果待确认：先重新读取服务端，避免重复提交。',
+        'doc.banner.noTxMode': '已开启写入审阅：文档暂存与提交走同一队列。',
+        'doc.toast.staged': '已暂存到审阅队列（未写入数据库）',
+        'doc.toast.stagedMerged': '已合并进该节点已有的待提交更改',
+        'doc.toast.draftRestored': '已恢复此节点的浏览器本地草稿',
+        'doc.toast.draftDropped': '本地草稿已损坏或版本不符，已丢弃',
+        'doc.toast.draftQuota': '浏览器存储不可用：草稿仅存在内存，请导出备份',
+        'doc.toast.exported': '草稿已导出',
+        'doc.toast.bodyCreated': '已按所选字段添加正文',
+        'doc.toast.formatted': '已格式化 JSON 显示',
+        'doc.toast.committed': '提交成功：{n} 项已确认',
+        'doc.toast.replayed': '服务端已确认（重放）',
+        'doc.toast.confirmedLate': '已确认：服务端存在本次提交的内容',
+        'doc.toast.findNone': '没有匹配项',
+        'doc.toast.replaced': '已替换 {n} 处',
+        'doc.toast.noDoc': '先在结果中选中一个节点',
+        'doc.toast.txMode': '已开启写入审阅：文档提交需要经同一队列',
+        'doc.err.jsonInvalid': 'JSON 无效：第 {line} 行第 {col} 列',
+        'doc.err.notObject': 'payload 必须是 JSON 对象',
+        'doc.err.pointerInvalid': '请输入有效路径，例如 /content',
+        'doc.err.pointerBlocked': '该路径包含不支持的键名',
+        'doc.err.pointerMid': '中间字段不是对象，请更换正文路径',
+        'doc.err.nonString': '该字段已有非文本数据，不会被覆盖；请更换路径或改用 JSON 编辑',
+        'doc.err.readonly': '当前节点只读，不能暂存',
+        'doc.err.notDirty': '没有需要暂存的更改',
+        'doc.err.invalid': '先修正 JSON，当前输入会保留',
+        'doc.err.lossy': '存在不可无损处理的数值或重复键，已阻止暂存',
+        'doc.err.nodeNotFound': '节点不存在（404）',
+        'doc.err.loadFailed': '读取节点失败：{msg}',
+        'doc.err.commitFailed': '提交失败：{msg}',
+        'doc.err.sizeLimit': 'payload 超过请求体上限（4 MiB），请缩小文档或改用更小的字段',
+        'doc.err.prefix': '文档',
       },
       en: {
         'graph.loadWhole': 'Load full graph (top 100 edges)',
@@ -6707,6 +7631,137 @@
         'tx.op.link': 'Insert relation · {source} → {target} ({label})',
         'tx.op.unknown': 'Unknown operation · {kind}',
         'history.filled': 'Filled into the editor (not executed)',
+        'tabs.doc': 'Node documents',
+        'workspace.desc.doc': 'One draft shared by the node payload and its body: stage, review, and only a confirmed commit counts as saved.',
+        'palette.action.navDoc': 'Switch to node documents',
+        'palette.action.openDoc': 'Open the current node as a document',
+        'grid.openDocument': 'Open document',
+        'tx.source.doc': 'document edit',
+        'doc.list.title': 'Node documents',
+        'doc.list.search': 'Search title or node ID',
+        'doc.list.source': 'Current result',
+        'doc.list.scope': 'Only the current query result range is listed; this is not the whole database.',
+        'doc.list.empty': 'No node to open. Run a read-only query first, or open one from node details.',
+        'doc.list.sample': '{n} nodes · sample range',
+        'doc.list.sourceGrid': 'query result',
+        'doc.list.sourceVector': 'vector hits',
+        'doc.list.sourceNode': 'current node',
+        'doc.list.jsonOnly': 'JSON only',
+        'doc.queue.title': 'Pending changes',
+        'doc.queue.review': 'Review changes',
+        'doc.export': 'Export draft',
+        'doc.mode.body': 'Body',
+        'doc.mode.json': 'JSON payload',
+        'doc.format.text': 'Plain text',
+        'doc.format.json': 'Format',
+        'doc.view.edit': 'Edit',
+        'doc.view.split': 'Split',
+        'doc.view.preview': 'Preview',
+        'doc.find.placeholder': 'Find',
+        'doc.find.replace': 'Replace with',
+        'doc.find.one': 'Replace',
+        'doc.find.all': 'Replace all',
+        'doc.find.toggle': 'Find',
+        'doc.missing.title': 'This node has no body yet',
+        'doc.missing.help': 'Keep the existing payload and add a body at the mapped field; other fields are untouched.',
+        'doc.missing.cta': 'Add a body at the mapped field',
+        'doc.preview.sync': 'Follows the current draft',
+        'doc.empty.title': 'Pick a node to start editing',
+        'doc.empty.help': 'Open the body or the JSON payload from the list; the result context menu and node details also open documents.',
+        'doc.empty.cta': 'Open the node list',
+        'doc.inspect.title': 'Node context',
+        'doc.inspect.sub': 'A document belongs to a node',
+        'doc.inspect.type': 'Type',
+        'doc.inspect.version': 'Version',
+        'doc.inspect.access': 'Access',
+        'doc.inspect.vector': 'Vector',
+        'doc.inspect.readonlyTitle': 'Read-only facts',
+        'doc.inspect.note': 'Relations and vectors stay in their own workspaces; editing a body never rebuilds the vector.',
+        'doc.mapping.title': 'Body source',
+        'doc.mapping.change': 'Change',
+        'doc.mapping.note': 'One payload per node. The body is an editing view of the mapped field; other fields are preserved. Undecided fields such as /format are never written.',
+        'doc.mapping.dialogTitle': 'Choose the body source field',
+        'doc.mapping.dialogHint': 'Use a JSON Pointer such as /content or /document/body. This only changes the editing view; it does not move or delete fields and never writes a format field.',
+        'doc.mapping.apply': 'Apply mapping',
+        'doc.outline.title': 'Outline',
+        'doc.outline.empty': 'No headings',
+        'doc.close.title': 'This document has uncommitted changes',
+        'doc.close.hint': 'Keeping the draft closes the tab and lets you continue later; staged operations stay in the review queue.',
+        'doc.close.keep': 'Keep editing',
+        'doc.close.discard': 'Discard changes for this node',
+        'doc.close.saveAndClose': 'Keep draft and close',
+        'doc.merge.title': 'This node already has pending changes',
+        'doc.merge.hint': 'Another entry (payload editor / import / documents) already staged this node. Merge uses the latest queued payload as the base and applies only this change; replace overwrites the queued item with the local draft.',
+        'doc.merge.replace': 'Replace the whole payload',
+        'doc.merge.combine': 'Merge and stage',
+        'doc.conflict.title': 'Version conflict: the server content changed',
+        'doc.conflict.hint': 'The commit was rejected by the node ETag and nothing was written. Compare the remote payload with your draft, merge manually, then review again. No auto-merge or force overwrite in this phase.',
+        'doc.conflict.keepLocal': 'Keep local draft',
+        'doc.conflict.rebase': 'Rebase onto remote and merge',
+        'doc.conflict.remote': 'Remote (just read)',
+        'doc.conflict.local': 'Local draft',
+        'doc.conflict.base': 'Baseline when opened',
+        'doc.access.unknown': 'Unknown (unconfirmed)',
+        'doc.access.editable': 'Editable',
+        'doc.access.readonly': 'Read-only',
+        'doc.access.heldByOther': 'Held by another editor (simulated)',
+        'doc.access.expired': 'Access expired (simulated)',
+        'doc.access.note': 'No edit lease: concurrency is checked optimistically with the node ETag, and conflicts come back as 409.',
+        'doc.submit.idle': 'Not committed',
+        'doc.submit.submitting': 'Submitting…',
+        'doc.submit.acknowledged': 'Acknowledged',
+        'doc.submit.rejected': 'Rejected',
+        'doc.submit.conflict': 'Conflict',
+        'doc.submit.outcomeUnknown': 'Outcome unknown',
+        'doc.status.clean': 'Matches baseline',
+        'doc.status.dirty': 'Unstaged changes',
+        'doc.status.invalid': 'JSON needs fixing',
+        'doc.status.staged': 'Staged, not committed',
+        'doc.status.stagedNew': 'Staged, plus newer edits',
+        'doc.banner.invalid': 'Invalid JSON: the current input is preserved. Fix it before switching to the body or staging.',
+        'doc.banner.lossy': 'The payload contains integers beyond the JavaScript safe range or duplicate keys; saving would change values, so staging is blocked.',
+        'doc.banner.readonly': 'This node is read-only: you can view and export, but not modify or commit.',
+        'doc.banner.heldByOther': 'Another editor holds this document (simulated state; the server provides no lease).',
+        'doc.banner.expired': 'Edit access expired (simulated state): the draft is kept and committing is stopped.',
+        'doc.banner.conflict': 'The server version changed: compare remote and local, then merge manually.',
+        'doc.banner.unknown': 'Commit outcome unknown: re-read the server before retrying to avoid duplicate writes.',
+        'doc.banner.noTxMode': 'Write review enabled: document staging and commits use the same queue.',
+        'doc.toast.staged': 'Staged in the review queue (nothing written yet)',
+        'doc.toast.stagedMerged': 'Merged into the pending change for this node',
+        'doc.toast.draftRestored': 'Restored the browser draft for this node',
+        'doc.toast.draftDropped': 'Local draft was corrupt or from another schema and was dropped',
+        'doc.toast.draftQuota': 'Browser storage unavailable: the draft lives in memory only, export a backup',
+        'doc.toast.exported': 'Draft exported',
+        'doc.toast.bodyCreated': 'Body added at the mapped field',
+        'doc.toast.formatted': 'JSON display formatted',
+        'doc.toast.committed': 'Committed: {n} item(s) acknowledged',
+        'doc.toast.replayed': 'Acknowledged by the server (replayed)',
+        'doc.toast.confirmedLate': 'Confirmed: the server holds this submission',
+        'doc.toast.findNone': 'No matches',
+        'doc.toast.replaced': 'Replaced {n} occurrence(s)',
+        'doc.toast.noDoc': 'Select a node in the results first',
+        'doc.toast.txMode': 'Write review enabled: document commits go through the same queue',
+        'doc.err.jsonInvalid': 'Invalid JSON at line {line}, column {col}',
+        'doc.err.notObject': 'The payload must be a JSON object',
+        'doc.err.pointerInvalid': 'Enter a valid path such as /content',
+        'doc.err.pointerBlocked': 'That path contains an unsupported key name',
+        'doc.err.pointerMid': 'A middle field is not an object; choose another body path',
+        'doc.err.nonString': 'That field already holds non-text data and will not be overwritten; change the path or use the JSON view',
+        'doc.err.readonly': 'This node is read-only and cannot be staged',
+        'doc.err.notDirty': 'Nothing to stage',
+        'doc.err.invalid': 'Fix the JSON first; the current input is preserved',
+        'doc.err.lossy': 'Unsafe numbers or duplicate keys block staging',
+        'doc.err.nodeNotFound': 'Node not found (404)',
+        'doc.err.loadFailed': 'Failed to load the node: {msg}',
+        'doc.err.commitFailed': 'Commit failed: {msg}',
+        'doc.err.sizeLimit': 'The payload exceeds the 4 MiB request limit; shrink the document',
+        'doc.err.pendingDelete': 'This node has a pending delete; resolve it in the review queue first, documents never overwrite it',
+        'doc.err.noVersion': 'Could not confirm the node version, so staging is blocked: writing without a version precondition would silently overwrite other edits',
+        'doc.err.noTxMode': 'Write review could not be enabled; staging was cancelled',
+        'doc.err.outcomeMismatch': 'The server content differs from this submission: the draft is kept, review it and commit again',
+        'doc.toast.conflictRebase': 'Rebased onto remote; the previous staging for this node was withdrawn, merge and stage again',
+        'doc.review.bodyDiff': 'Body line diff',
+        'doc.err.prefix': 'Document',
       }
     };
     Object.assign(I18N.zh, I18N_EXT.zh);
@@ -6895,6 +7950,8 @@
       if (typeof syncTxBar === 'function') syncTxBar();
       // 当前节点条 / 写入审阅弹层同样是运行时求值的动态 DOM
       if (typeof renderContextStrip === 'function') renderContextStrip();
+      // 文档工作区的标题/正文/大纲/状态都是渲染时求值的动态 DOM，切语言必须重建
+      if (typeof docRender === 'function') docRender();
       const txReview = document.getElementById('txReviewOverlay');
       if (txReview && !txReview.hidden && typeof renderTxReview === 'function') renderTxReview();
       if (typeof graphColorMode !== 'undefined' && graphColorMode === 'community'
@@ -7099,6 +8156,7 @@
       queryPane: 'workspace.desc.query',
       graphExplorePane: 'workspace.desc.graph',
       vectorLabPane: 'workspace.desc.vector',
+      docPane: 'workspace.desc.doc',
     };
     function syncWorkspaceHeader(paneId) {
       const active = paneId
@@ -7615,7 +8673,8 @@
     const TAB_SIDEBAR_MAP = {
       queryPane: 'quick-find',
       graphExplorePane: 'quick-match',
-      vectorLabPane: 'quick-search'
+      vectorLabPane: 'quick-search',
+      docPane: 'quick-find'
     };
     function syncSidebarHighlight(action) {
       document.querySelectorAll('.sidebar .nav-item[data-action]').forEach(el => {
@@ -10499,6 +11558,7 @@ RETURN doc, t</div>
         closeGridContextMenu();
         if (act === 'csv') { exportCsv(); return; }
         if (act === 'edit') { openPayloadEditor(node, gridActiveCell ? gridActiveCell.idx : -1); return; }
+        if (act === 'doc') { if (node) docOpen(node, 'grid'); return; }
         if (act === 'delete') {
           if (!node) return;
           // 两步确认：第一次只是把菜单项变成「确认删除 #id」，4 秒内再点才真正删
@@ -11391,6 +12451,24 @@ RETURN doc, t</div>
       // 请求体一经发送便不会包含后续暂存项；响应只能确认本次快照中的操作。
       const submitted = txOperations.slice();
       const count = submitted.length;
+      // 文档操作带节点版本：只注入 expectedNodes（节点级 OCC）。
+      // 绝不能把节点 ETag 填到全局 If-Match / expectedGeneration —— 那会要求整库代次一致。
+      const expectedNodes = {};
+      let docOpCount = 0;
+      submitted.forEach((op) => {
+        const meta = txOpMeta.get(op);
+        if (!meta || !meta.docSessionId || !meta.expectedVersion) return;
+        if (op.op !== 'updatePayload' && op.op !== 'delete') return;
+        expectedNodes[String(op.id)] = meta.expectedVersion;
+        docOpCount += 1;
+      });
+      const requestBody = { operations: submitted };
+      if (docOpCount) requestBody.expectedNodes = expectedNodes;
+      const requestHeaders = { 'Content-Type': 'application/json' };
+      // 幂等键只在同一批文档操作重试时保持不变；换键会把「响应丢了」变成重复写入。
+      if (docOpCount && typeof docCommitIdempotencyKey === 'function') {
+        requestHeaders['Idempotency-Key'] = docCommitIdempotencyKey(submitted);
+      }
       const bar = document.getElementById('txBar');
       const countEl = document.getElementById('txCount');
       if (countEl) countEl.textContent = t('tx.committing');
@@ -11404,19 +12482,30 @@ RETURN doc, t</div>
       try {
         const res = await fetch(`${API_BASE}/v1/transactions`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ operations: submitted }),
+          headers: requestHeaders,
+          body: JSON.stringify(requestBody),
         });
         const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+        if (!res.ok) {
+          const failure = new Error(body.detail || `HTTP ${res.status}`);
+          failure.status = res.status;
+          failure.code = body.code || null;
+          failure.problem = body;
+          throw failure;
+        }
         txOperations.splice(0, count);
         showToast(t('tx.committed', { n: count, gen: body.generation || '-' }));
+        if (docOpCount && typeof docOnCommitSuccess === 'function') {
+          docOnCommitSuccess(submitted);
+          if (body.replayed) showToast(t('doc.toast.replayed'));
+        }
         loadObjectTree();
         // 新暂存项尚未提交，保留它们的乐观视图，避免读库结果覆盖待提交的编辑。
         if (!txOperations.length) rerunActiveQueryTab();
         return true;
       } catch (err) {
         // 失败保留全部暂存操作；不自动重试，避免重复写入
+        if (docOpCount && typeof docOnCommitFailure === 'function') await docOnCommitFailure(submitted, err);
         showToast(t('tx.failed', { msg: err.message }));
         return false;
       } finally {
@@ -17789,7 +18878,19 @@ RETURN doc, t</div>
         { group: t('palette.group.ops'), label: t('palette.action.tutorial'), run: () => document.getElementById('openTutorialBtn').click() },
         { group: t('palette.group.nav'), label: t('palette.action.navQuery'), run: () => document.querySelector('[data-tab="queryPane"]').click() },
         { group: t('palette.group.nav'), label: t('palette.action.navGraph'), run: () => document.querySelector('[data-tab="graphExplorePane"]').click() },
-        { group: t('palette.group.nav'), label: t('palette.action.navVector'), run: () => document.querySelector('[data-tab="vectorLabPane"]').click() }
+        { group: t('palette.group.nav'), label: t('palette.action.navVector'), run: () => document.querySelector('[data-tab="vectorLabPane"]').click() },
+        { group: t('palette.group.nav'), label: t('palette.action.navDoc'), run: () => document.querySelector('[data-tab="docPane"]').click() },
+        {
+          group: t('palette.group.ops'),
+          label: t('palette.action.openDoc'),
+          run: () => {
+            const node = (typeof selectedNode !== 'undefined' && selectedNode && selectedNode.id !== undefined)
+              ? selectedNode
+              : (typeof docDrawerNode !== 'undefined' && docDrawerNode ? docDrawerNode : null);
+            if (!node) { showToast(t('doc.toast.noDoc')); return; }
+            docOpen(node, 'node');
+          }
+        }
       );
       return addAiPaletteItems(items);
     }
@@ -18963,6 +20064,1995 @@ RETURN doc, t</div>
   </script>
   <script>
     // ==========================================
+    // 文档工作区（F1~F4）
+    // 一个节点一份 JSON payload；正文是 payload 中某个字符串字段的另一种视图。
+    // 两类视图共用一份草稿：编辑 → 浏览器草稿 → Ctrl+S 暂存 → 审阅 → 提交。
+    // 只在服务端确认后才算保存；本文件不新增任何 HTTP 端点，也不获取数据库写锁。
+    // ==========================================
+    const DOC_POINTER_DEFAULT = '/content';
+    const DOC_DRAFT_SCHEMA = 1;
+    const DOC_DRAFT_PREFIX = 'tdb_doc_draft_v1:';
+    const DOC_INDEX_KEY = 'tdb_doc_index_v1';
+    const DOC_INDEX_MAX = 60;
+    const DOC_HISTORY_MAX = 200;
+    const DOC_COMMIT_TIMEOUT_MS = 20000;
+
+    let docSessions = [];          // 已打开文档（按打开顺序）
+    let docActiveSessionId = null;
+    let docSessionSeq = 0;
+    let docViewMode = 'split';
+    let docListFilter = '';
+    let docStorageOK = true;
+    let docPendingCloseId = null;
+    let docMergeTarget = null;
+    let docConflictSessionId = null;
+    let docFindState = { query: '', matches: [], index: -1 };
+    let docCommitKey = null;
+    let docCommitKeySig = '';
+    let docDrawerNode = null;
+    let docLastVectorHits = [];
+    let docHistoryTimer = 0;
+    let docStorage = {
+      get(key) { try { return localStorage.getItem(key); } catch (_) { return null; } },
+      set(key, value) { try { localStorage.setItem(key, value); return true; } catch (_) { return false; } },
+      remove(key) { try { localStorage.removeItem(key); } catch (_) { /* 存储不可用 */ } },
+    };
+
+    function docActive() {
+      return docSessions.find(s => s.sessionId === docActiveSessionId) || null;
+    }
+    function docById(id) {
+      return docSessions.find(s => s.sessionId === id) || null;
+    }
+    function docDbIdentity() {
+      const origin = (typeof location !== 'undefined' && location.origin) ? location.origin : 'app';
+      const path = (typeof location !== 'undefined' && location.pathname) ? (location.pathname || '/') : '/';
+      return { connectionId: origin, databaseId: path };
+    }
+    // 后端没有 databaseId（/health/ready 只回 status/version），草稿键暂以 origin+pathname 近似；
+    // 该缺陷已记录在规划文档的「作者确认项」中。
+    function docKeyOf(node) {
+      const id = docDbIdentity();
+      return id.connectionId + '|' + id.databaseId + '|' + String(node && node.id);
+    }
+    function docStorageKeyOf(key) {
+      return DOC_DRAFT_PREFIX + key;
+    }
+    function docTitleOf(payload, id) {
+      if (payload && typeof payload === 'object') {
+        const candidate = payload.title ?? payload.name ?? payload.label;
+        if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+      }
+      return '#' + id;
+    }
+    function docDeepClone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+    function docCanonical(value) {
+      try { return JSON.stringify(value); } catch (_) { return ''; }
+    }
+
+    // ---------- JSON 解析与错误定位 ----------
+    function docParsePayload(text) {
+      try {
+        const value = JSON.parse(text);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return { ok: false, error: { key: 'doc.err.notObject', vars: {} } };
+        }
+        return { ok: true, value };
+      } catch (err) {
+        const message = String((err && err.message) || err);
+        const matched = /position (\d+)/.exec(message);
+        let pos = matched ? Number(matched[1]) : text.length;
+        if (!Number.isFinite(pos) || pos < 0) pos = 0;
+        if (pos > text.length) pos = text.length;
+        const lines = text.slice(0, pos).split('\n');
+        return {
+          ok: false,
+          error: {
+            key: 'doc.err.jsonInvalid',
+            vars: { line: lines.length, col: lines[lines.length - 1].length + 1 },
+            raw: message,
+          },
+        };
+      }
+    }
+    function docErrorText(error) {
+      if (!error) return '';
+      return t(error.key || 'doc.err.notDirty', error.vars || {});
+    }
+
+    // ---------- JSON Pointer（RFC 6901 子集；拒绝原型链键） ----------
+    function docPointerKeys(pointer) {
+      if (typeof pointer !== 'string' || !pointer.startsWith('/') || pointer === '/') {
+        throw new Error(t('doc.err.pointerInvalid'));
+      }
+      if (/~(?![01])/.test(pointer)) throw new Error(t('doc.err.pointerInvalid'));
+      const keys = pointer.slice(1).split('/').map((k) => k.replace(/~1/g, '/').replace(/~0/g, '~'));
+      if (keys.some(k => !k || k === '__proto__' || k === 'prototype' || k === 'constructor')) {
+        throw new Error(t('doc.err.pointerBlocked'));
+      }
+      return keys;
+    }
+    // 四种正文态必须分开：缺失 / 空串 / null / 非字符串。
+    function docReadBody(payload, pointer) {
+      let cursor = payload;
+      let keys;
+      try { keys = docPointerKeys(pointer); } catch (err) { return { state: 'invalid', message: err.message }; }
+      for (const key of keys) {
+        if (cursor === null || typeof cursor !== 'object' || !Object.prototype.hasOwnProperty.call(cursor, key)) {
+          return { state: 'missing' };
+        }
+        cursor = cursor[key];
+      }
+      if (cursor === null) return { state: 'null' };
+      if (typeof cursor === 'string') return { state: cursor === '' ? 'empty' : 'string', value: cursor };
+      return { state: 'nonString', value: cursor };
+    }
+    function docWriteBody(payload, pointer, value, create) {
+      const keys = docPointerKeys(pointer);
+      let cursor = payload;
+      for (let i = 0; i < keys.length - 1; i += 1) {
+        const key = keys[i];
+        const has = Object.prototype.hasOwnProperty.call(cursor, key);
+        if (!has) {
+          if (!create) throw new Error(t('doc.err.pointerMid'));
+          cursor[key] = {};
+        }
+        if (cursor[key] === null || typeof cursor[key] !== 'object' || Array.isArray(cursor[key])) {
+          throw new Error(t('doc.err.pointerMid'));
+        }
+        cursor = cursor[key];
+      }
+      const last = keys[keys.length - 1];
+      cursor[last] = value;
+      return payload;
+    }
+    function docBodyTextOf(payload, pointer) {
+      const body = docReadBody(payload, pointer);
+      return (body.state === 'string' || body.state === 'empty') ? body.value : null;
+    }
+
+    // ---------- 无损扫描：安全整数之外的数值 / 重复键 ----------
+    // 服务端 serde_json 未启用 arbitrary_precision，浏览器 JSON.parse 也在 2^53 之后丢精度；
+    // 因此这里只能「检测并阻止」，不能宣称往返无损。
+    function docNumberUnsafe(literal) {
+      if (/^-?\d+$/.test(literal)) {
+        const value = Number(literal);
+        if (!Number.isSafeInteger(value)) return true;
+        return String(value) !== literal;
+      }
+      const value = Number(literal);
+      if (!Number.isFinite(value)) return true;
+      const digits = literal.replace(/^[-+]/, '').replace(/[eE].*$/, '').replace('.', '')
+        .replace(/^0+/, '').replace(/0+$/, '');
+      return digits.length > 15;
+    }
+    function docScanLossy(text) {
+      const numbers = [];
+      const duplicateKeys = [];
+      const stack = [];
+      let i = 0;
+      let line = 1;
+      let col = 1;
+      const total = text.length;
+      const step = (ch) => { if (ch === '\n') { line += 1; col = 1; } else { col += 1; } };
+      const readString = () => {
+        const startLine = line;
+        const startCol = col;
+        let out = '';
+        step(text[i]); i += 1;
+        while (i < total) {
+          const ch = text[i];
+          if (ch === '\\') {
+            const esc = text[i + 1];
+            if (esc === 'u') { out += String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16) || 0); i += 6; col += 6; continue; }
+            out += esc || ''; i += 2; col += 2; continue;
+          }
+          if (ch === '"') { step(ch); i += 1; return { value: out, line: startLine, col: startCol }; }
+          out += ch; step(ch); i += 1;
+        }
+        return { value: out, line: startLine, col: startCol };
+      };
+      while (i < total) {
+        const ch = text[i];
+        if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n') { step(ch); i += 1; continue; }
+        if (ch === '"') {
+          const literal = readString();
+          let peek = i;
+          while (peek < total && /\s/.test(text[peek])) peek += 1;
+          if (text[peek] === ':' && stack.length) {
+            const frame = stack[stack.length - 1];
+            if (frame.type === 'object') {
+              if (frame.keys.has(literal.value)) duplicateKeys.push({ key: literal.value, line: literal.line, col: literal.col });
+              frame.keys.add(literal.value);
+            }
+          }
+          continue;
+        }
+        if (ch === '{') { stack.push({ type: 'object', keys: new Set() }); step(ch); i += 1; continue; }
+        if (ch === '[') { stack.push({ type: 'array', keys: new Set() }); step(ch); i += 1; continue; }
+        if (ch === '}' || ch === ']') { stack.pop(); step(ch); i += 1; continue; }
+        if (ch === '-' || (ch >= '0' && ch <= '9')) {
+          const startLine = line;
+          const startCol = col;
+          let literal = '';
+          while (i < total && /[-+0-9.eE]/.test(text[i])) { literal += text[i]; step(text[i]); i += 1; }
+          if (docNumberUnsafe(literal)) numbers.push({ literal, line: startLine, col: startCol });
+          continue;
+        }
+        step(ch);
+        i += 1;
+      }
+      return { numbers, duplicateKeys };
+    }
+
+    // ---------- 会话 ----------
+    function docCreateSession(node, source) {
+      docSessionSeq += 1;
+      const payload = (node && node.payload && typeof node.payload === 'object' && !Array.isArray(node.payload))
+        ? docDeepClone(node.payload) : {};
+      const text = JSON.stringify(payload, null, 2);
+      const losses = docScanLossy(text);
+      return {
+        sessionId: 'doc-' + docSessionSeq,
+        key: docKeyOf(node),
+        nodeId: String(node.id),
+        node,
+        source: source || 'grid',
+        title: docTitleOf(payload, node.id),
+        pointer: DOC_POINTER_DEFAULT,
+        format: 'markdown',
+        basePayload: payload,
+        baseText: text,
+        draftPayload: docDeepClone(payload),
+        draftText: text,
+        staged: null,
+        load: 'loaded',
+        access: 'editable',
+        submit: 'idle',
+        version: (node && (node.version || node.etag)) || null,
+        generation: (node && node.generation) || null,
+        vectorDim: Array.isArray(node && node.vector) ? node.vector.length : 0,
+        editorMode: 'body',
+        restored: false,
+        losses,
+        parseError: null,
+        history: [],
+        historyIndex: -1,
+        composing: false,
+        requestSeq: 0,
+        needsRefresh: false,
+        remote: null,
+      };
+    }
+    function docContentState(session) {
+      if (!session) return 'clean';
+      if (session.parseError) return 'invalid';
+      // 两边的文本都由同一套 JSON.stringify(payload, null, 2) 生成，键序与缩进一致；
+      // 直接比文本即可，避免每次击键对 1 MB payload 做两次全量序列化（实测约 25 ms/次）。
+      return session.draftText === session.baseText ? 'clean' : 'dirty';
+    }
+    function docIsDirty(session) {
+      return docContentState(session) !== 'clean';
+    }
+    function docHasLosses(session) {
+      return !!(session && session.losses
+        && (session.losses.numbers.length || session.losses.duplicateKeys.length));
+    }
+    function docEditable(session) {
+      return !!session && session.access === 'editable';
+    }
+
+    // ---------- 候选节点（严格来自当前结果范围） ----------
+    function docNodeFromHit(hit) {
+      if (!hit || hit.id === undefined) return null;
+      return {
+        type: 'node',
+        id: String(hit.id),
+        payload: hit.payload || {},
+        vector: Array.isArray(hit.vector) ? hit.vector : [],
+        edges: [],
+      };
+    }
+    function docCandidateNodes() {
+      const out = [];
+      const seen = new Set();
+      const push = (node) => {
+        if (!node || node.id === undefined) return;
+        const id = String(node.id);
+        if (seen.has(id)) return;
+        seen.add(id);
+        out.push(node);
+      };
+      const activeTab = document.querySelector('.tabs-bar .tab.active');
+      const tab = activeTab ? activeTab.dataset.tab : 'queryPane';
+      if (tab === 'vectorLabPane' && docLastVectorHits.length) {
+        docLastVectorHits.forEach(hit => push(docNodeFromHit(hit)));
+        return { nodes: out, source: 'vector' };
+      }
+      if (Array.isArray(gridRawRows)) {
+        gridRawRows.forEach((row) => {
+          const node = (typeof nodeFromGridRow === 'function') ? nodeFromGridRow(row) : null;
+          if (node) push(node);
+        });
+      }
+      if (!out.length && typeof selectedNode !== 'undefined' && selectedNode && selectedNode.id !== undefined) {
+        push(selectedNode);
+        return { nodes: out, source: 'node' };
+      }
+      return { nodes: out, source: 'grid' };
+    }
+    function docListSourceLabel(source) {
+      if (source === 'vector') return t('doc.list.sourceVector');
+      if (source === 'node') return t('doc.list.sourceNode');
+      return t('doc.list.sourceGrid');
+    }
+    // ---------- 安全预览：只用手写 DOM，不执行 HTML、不加载外部资源 ----------
+    function docAppendInline(host, text) {
+      const patterns = [
+        { re: /`([^`\n]+)`/y, tag: 'code' },
+        { re: /\*\*([^*\n]+)\*\*/y, tag: 'strong' },
+        { re: /\[([^\]\n]+)\]\(([^)\s]+)\)/y, link: true },
+      ];
+      let index = 0;
+      let buffer = '';
+      const flush = () => {
+        if (buffer) { host.appendChild(document.createTextNode(buffer)); buffer = ''; }
+      };
+      while (index < text.length) {
+        let matched = false;
+        for (const pattern of patterns) {
+          pattern.re.lastIndex = index;
+          const m = pattern.re.exec(text);
+          if (!m) continue;
+          flush();
+          if (pattern.link) {
+            const url = m[2];
+            if (/^(https?:|mailto:)/i.test(url)) {
+              const link = document.createElement('a');
+              link.textContent = m[1];
+              link.href = url;
+              link.target = '_blank';
+              link.rel = 'noreferrer noopener';
+              host.appendChild(link);
+            } else {
+              host.appendChild(document.createTextNode(m[1] + ' (' + url + ')'));
+            }
+          } else {
+            const node = document.createElement(pattern.tag);
+            node.textContent = m[1];
+            host.appendChild(node);
+          }
+          index = pattern.re.lastIndex;
+          matched = true;
+          break;
+        }
+        if (!matched) { buffer += text[index]; index += 1; }
+      }
+      flush();
+    }
+    function docRenderMarkdown(text, host) {
+      const frag = document.createDocumentFragment();
+      const lines = String(text).split(/\r?\n/);
+      let list = null;
+      let code = null;
+      const flushList = () => { if (list) { frag.appendChild(list); list = null; } };
+      const flushCode = () => {
+        if (code) {
+          const pre = document.createElement('pre');
+          pre.textContent = code.join('\n');
+          frag.appendChild(pre);
+          code = null;
+        }
+      };
+      lines.forEach((line) => {
+        if (/^```/.test(line)) {
+          flushList();
+          if (code) flushCode(); else code = [];
+          return;
+        }
+        if (code) { code.push(line); return; }
+        const heading = /^(#{1,3}) (.*)$/.exec(line);
+        if (heading) {
+          flushList();
+          const el = document.createElement('h' + heading[1].length);
+          docAppendInline(el, heading[2]);
+          frag.appendChild(el);
+          return;
+        }
+        const item = /^[-*] (.*)$/.exec(line);
+        if (item) {
+          if (!list) list = document.createElement('ul');
+          const li = document.createElement('li');
+          docAppendInline(li, item[1]);
+          list.appendChild(li);
+          return;
+        }
+        flushList();
+        if (line.startsWith('> ')) {
+          const quote = document.createElement('blockquote');
+          docAppendInline(quote, line.slice(2));
+          frag.appendChild(quote);
+          return;
+        }
+        if (/^-{3,}$/.test(line.trim())) { frag.appendChild(document.createElement('hr')); return; }
+        if (line.trim()) {
+          const p = document.createElement('p');
+          docAppendInline(p, line);
+          frag.appendChild(p);
+        }
+      });
+      flushList();
+      flushCode();
+      host.replaceChildren(frag);
+    }
+
+    // ---------- 渲染 ----------
+    function docRender() {
+      docRenderTabs();
+      docRenderList();
+      docRenderQueueBadge();
+      const session = docActive();
+      const bodyHost = document.getElementById('docBody');
+      const closed = document.getElementById('docClosedState');
+      if (bodyHost) bodyHost.style.display = session ? 'contents' : 'none';
+      if (closed) closed.hidden = !!session;
+      if (!session) return;
+      docRenderHead(session);
+      docRenderEditor(session);
+      docRenderInspector(session);
+      docRenderBanner(session);
+    }
+
+    function docRenderTabs() {
+      const host = document.getElementById('docTabs');
+      if (!host) return;
+      host.replaceChildren();
+      docSessions.forEach((session) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'dw-doc-tab' + (session.sessionId === docActiveSessionId ? ' active' : '');
+        wrap.setAttribute('role', 'presentation');
+        wrap.dataset.docTabId = session.sessionId;
+        const label = document.createElement('button');
+        label.type = 'button';
+        label.setAttribute('role', 'tab');
+        label.setAttribute('aria-selected', String(session.sessionId === docActiveSessionId));
+        label.tabIndex = session.sessionId === docActiveSessionId ? 0 : -1;
+        label.dataset.docTab = session.sessionId;
+        label.textContent = session.title + (docIsDirty(session) ? ' ●' : '');
+        label.addEventListener('click', () => docActivate(session.sessionId));
+        label.addEventListener('keydown', (event) => docOnTabKeydown(event, session.sessionId));
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'dw-tab-close';
+        close.textContent = '×';
+        close.setAttribute('aria-label', t('doc.close.title') + ' · ' + session.title);
+        close.addEventListener('click', (event) => {
+          event.stopPropagation();
+          docRequestClose(session.sessionId);
+        });
+        wrap.append(label, close);
+        host.appendChild(wrap);
+      });
+    }
+
+    function docRenderList() {
+      const host = document.getElementById('docFileList');
+      if (!host) return;
+      host.replaceChildren();
+      const { nodes, source } = docCandidateNodes();
+      const sourceEl = document.getElementById('docListSource');
+      if (sourceEl) sourceEl.textContent = docListSourceLabel(source);
+      const countEl = document.getElementById('docListCount');
+      if (countEl) countEl.textContent = String(nodes.length);
+      const filter = docListFilter.trim().toLowerCase();
+      const rows = [];
+      nodes.forEach((node) => {
+        const title = docTitleOf(node.payload, node.id);
+        if (filter && !(title + ' ' + node.id).toLowerCase().includes(filter)) return;
+        rows.push({ node, title, session: docSessions.find(s => s.nodeId === String(node.id)) || null, outside: false });
+      });
+      docSessions.forEach((session) => {
+        if (nodes.some(n => String(n.id) === session.nodeId)) return;
+        if (filter && !(session.title + ' ' + session.nodeId).toLowerCase().includes(filter)) return;
+        rows.push({ node: session.node, title: session.title, session, outside: true });
+      });
+      if (!rows.length) {
+        const empty = document.createElement('div');
+        empty.className = 'dw-list-empty';
+        empty.textContent = t('doc.list.empty');
+        host.appendChild(empty);
+      }
+      rows.forEach(({ node, title, session, outside }) => {
+        const body = docReadBody(node.payload || {}, session ? session.pointer : DOC_POINTER_DEFAULT);
+        const hasBody = body.state === 'string' || body.state === 'empty';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'dw-file' + (session && session.sessionId === docActiveSessionId ? ' active' : '');
+        button.dataset.docNode = String(node.id);
+        const icon = document.createElement('span');
+        icon.className = 'dw-file-icon';
+        icon.textContent = hasBody ? 'M↓' : '{ }';
+        const text = document.createElement('span');
+        text.className = 'dw-file-text';
+        const titleEl = document.createElement('span');
+        titleEl.className = 'dw-file-title';
+        titleEl.textContent = title;
+        const meta = document.createElement('span');
+        meta.className = 'dw-file-meta';
+        meta.textContent = '#' + node.id + ' · ' + (hasBody ? (outside ? t('doc.list.sourceNode') : 'MARKDOWN') : t('doc.list.jsonOnly'));
+        text.append(titleEl, meta);
+        button.append(icon, text);
+        if (session && docIsDirty(session)) {
+          const dot = document.createElement('span');
+          dot.className = 'dw-file-state';
+          dot.textContent = '●';
+          dot.setAttribute('aria-label', t('doc.status.dirty'));
+          button.appendChild(dot);
+        }
+        button.addEventListener('click', () => docOpen(node, outside ? 'node' : source));
+        host.appendChild(button);
+      });
+      const scope = document.getElementById('docListScope');
+      if (scope) {
+        scope.textContent = nodes.length
+          ? t('doc.list.sample', { n: nodes.length }) + ' · ' + t('doc.list.scope')
+          : t('doc.list.empty');
+      }
+    }
+
+    function docRenderQueueBadge() {
+      const docOps = txOperations.filter(op => {
+        const meta = txOpMeta.get(op);
+        return meta && meta.docSessionId;
+      });
+      const count = document.getElementById('docQueueCount');
+      if (count) count.textContent = String(docOps.length);
+      const review = document.getElementById('docSideReview');
+      if (review) review.disabled = docOps.length === 0 || txCommitting;
+    }
+
+    function docRenderHead(session) {
+      const title = document.getElementById('docTitle');
+      if (title) title.textContent = session.title;
+      const meta = document.getElementById('docNodeMeta');
+      if (meta) meta.textContent = '#' + session.nodeId;
+      const typeBadge = document.getElementById('docTypeBadge');
+      if (typeBadge) {
+        const type = session.draftPayload && typeof session.draftPayload.type === 'string'
+          ? session.draftPayload.type : (session.node && session.node.type) || 'node';
+        typeBadge.textContent = type;
+      }
+      const dirty = document.getElementById('docDirtyLabel');
+      if (dirty) {
+        const state = docContentState(session);
+        const stagedSame = session.staged && session.staged.frozenText === session.draftText;
+        dirty.textContent = state === 'invalid' ? t('doc.status.invalid')
+          : stagedSame ? t('doc.status.staged')
+            : session.staged ? t('doc.status.stagedNew')
+              : state === 'dirty' ? t('doc.status.dirty') : t('doc.status.clean');
+        dirty.className = state === 'clean' && !session.staged ? 'dw-ok' : 'dw-dirty';
+      }
+      const stage = document.getElementById('docStageBtn');
+      if (stage) {
+        stage.disabled = !docEditable(session) || !!session.parseError || docHasLosses(session)
+          || !docIsDirty(session) || session.submit === 'submitting';
+      }
+      const exportBtn = document.getElementById('docExportBtn');
+      if (exportBtn) exportBtn.disabled = session.load === 'loading';
+      const modeBody = document.getElementById('docModeBody');
+      const modeJson = document.getElementById('docModeJson');
+      if (modeBody) {
+        modeBody.classList.toggle('active', session.editorMode === 'body');
+        modeBody.setAttribute('aria-pressed', String(session.editorMode === 'body'));
+      }
+      if (modeJson) {
+        modeJson.classList.toggle('active', session.editorMode === 'json');
+        modeJson.setAttribute('aria-pressed', String(session.editorMode === 'json'));
+      }
+      const format = document.getElementById('docFormat');
+      if (format) { format.value = session.format; format.hidden = session.editorMode === 'json'; }
+      const formatJson = document.getElementById('docFormatJson');
+      if (formatJson) { formatJson.hidden = session.editorMode !== 'json'; formatJson.disabled = !docEditable(session); }
+    }
+
+    function docRenderEditor(session) {
+      const area = document.getElementById('docEditorArea');
+      if (area) area.dataset.view = docViewMode;
+      document.querySelectorAll('[data-doc-view]').forEach((btn) => {
+        const active = btn.dataset.docView === docViewMode;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', String(active));
+      });
+      const body = docReadBody(session.draftPayload, session.pointer);
+      const jsonMode = session.editorMode === 'json';
+      const hasBody = body.state === 'string' || body.state === 'empty';
+      const value = jsonMode ? session.draftText : (hasBody ? body.value : '');
+      const missing = !jsonMode && !hasBody;
+      const editor = document.getElementById('docEditor');
+      const frame = document.getElementById('docTextFrame');
+      const missingHost = document.getElementById('docMissingBody');
+      if (frame) frame.hidden = missing;
+      if (missingHost) missingHost.hidden = !missing;
+      if (editor) {
+        if (editor.value !== value) editor.value = value;
+        editor.readOnly = !docEditable(session);
+      }
+      const sourceLabel = document.getElementById('docSourceLabel');
+      if (sourceLabel) {
+        sourceLabel.textContent = jsonMode ? 'JSON SOURCE'
+          : session.format === 'text' ? 'PLAIN TEXT' : 'MARKDOWN SOURCE';
+      }
+      const previewLabel = document.getElementById('docPreviewLabel');
+      if (previewLabel) previewLabel.textContent = jsonMode ? 'JSON PREVIEW' : 'LIVE PREVIEW';
+      const pathLabel = document.getElementById('docSourcePath');
+      if (pathLabel) {
+        pathLabel.textContent = jsonMode ? 'payload' : 'payload' + session.pointer.replace(/\//g, '.');
+      }
+      docRenderGutter(value);
+      docRenderPreview(session, jsonMode, body);
+      docRenderOutline(session, body);
+      docUpdateCursor();
+      const lossy = document.getElementById('docLossyHint');
+      if (lossy) {
+        lossy.hidden = !docHasLosses(session);
+        lossy.textContent = docHasLosses(session) ? t('doc.err.lossy') : '';
+      }
+    }
+
+    function docRenderGutter(value) {
+      const gutter = document.getElementById('docGutter');
+      if (!gutter) return;
+      const count = String(value).split('\n').length;
+      const parts = [];
+      for (let i = 1; i <= count; i += 1) parts.push(i);
+      gutter.textContent = parts.join('\n');
+      const editor = document.getElementById('docEditor');
+      if (editor) gutter.scrollTop = editor.scrollTop;
+    }
+
+    function docRenderPreview(session, jsonMode, body) {
+      const host = document.getElementById('docPreview');
+      if (!host) return;
+      host.replaceChildren();
+      const caption = document.createElement('div');
+      caption.className = 'dw-caption';
+      if (jsonMode) {
+        caption.textContent = 'PAYLOAD / #' + session.nodeId;
+        host.appendChild(caption);
+        if (session.parseError) {
+          const p = document.createElement('p');
+          p.textContent = docErrorText(session.parseError) + ' — ' + (session.parseError.raw || '');
+          host.appendChild(p);
+          return;
+        }
+        const pre = document.createElement('pre');
+        pre.textContent = session.draftText;
+        host.appendChild(pre);
+        return;
+      }
+      if (body.state === 'string' || body.state === 'empty') {
+        caption.textContent = 'NODE DOCUMENT / #' + session.nodeId;
+        host.appendChild(caption);
+        if (session.format === 'text' || body.state === 'empty') {
+          const pre = document.createElement('pre');
+          pre.textContent = body.value || '';
+          host.appendChild(pre);
+        } else {
+          docRenderMarkdown(body.value, host);
+        }
+        return;
+      }
+      caption.textContent = 'NODE DOCUMENT / #' + session.nodeId;
+      host.appendChild(caption);
+      const p = document.createElement('p');
+      p.textContent = body.state === 'invalid' ? (body.message || '')
+        : t('doc.missing.help');
+      host.appendChild(p);
+    }
+
+    function docRenderOutline(session, body) {
+      const host = document.getElementById('docOutline');
+      if (!host) return;
+      host.replaceChildren();
+      const text = (body && (body.state === 'string')) ? body.value : null;
+      const headings = (text !== null && session.format === 'markdown')
+        ? text.split('\n').map((line, index) => ({ line, index })).filter(x => /^#{1,3} /.test(x.line))
+        : [];
+      if (!headings.length) {
+        const empty = document.createElement('span');
+        empty.className = 'dw-outline-empty';
+        empty.textContent = t('doc.outline.empty');
+        host.appendChild(empty);
+        return;
+      }
+      headings.forEach((heading) => {
+        const level = heading.line.match(/^#+/)[0].length;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'lv' + level;
+        button.textContent = heading.line.replace(/^#+ /, '');
+        button.addEventListener('click', () => docGotoHeading(heading.index, text));
+        host.appendChild(button);
+      });
+    }
+
+    function docRenderInspector(session) {
+      const set = (id, text) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = text;
+      };
+      set('docInspectId', '#' + session.nodeId);
+      set('docInspectType', (session.draftPayload && typeof session.draftPayload.type === 'string')
+        ? session.draftPayload.type : 'node');
+      set('docVersion', session.version ? String(session.version) : '—');
+      set('docAccessStatus', t('doc.access.' + session.access));
+      set('docVectorStatus', session.vectorDim ? session.vectorDim + ' dim' : '—');
+      set('docMappingText', session.pointer);
+      const badge = document.getElementById('docSubmitBadge');
+      if (badge) {
+        badge.textContent = t('doc.submit.' + session.submit);
+        badge.className = 'dw-badge' + (session.submit === 'acknowledged' ? ' doc'
+          : session.submit === 'conflict' || session.submit === 'rejected' ? ' dw-dirty' : '');
+      }
+      const note = document.getElementById('docInspectNote');
+      if (note) {
+        note.textContent = t('doc.inspect.note') + (session.access === 'editable' ? ' ' + t('doc.access.note') : '');
+      }
+    }
+
+    function docRenderBanner(session) {
+      const banner = document.getElementById('docBanner');
+      const text = document.getElementById('docBannerText');
+      const action = document.getElementById('docBannerAction');
+      if (!banner || !text || !action) return;
+      let message = '';
+      let tone = '';
+      let actionLabel = '';
+      let actionKind = '';
+      if (session.parseError) {
+        message = t('doc.banner.invalid');
+        tone = 'error';
+      } else if (docHasLosses(session)) {
+        message = t('doc.banner.lossy');
+        tone = 'error';
+      } else if (session.access === 'readonly') {
+        message = t('doc.banner.readonly');
+        tone = 'warn';
+      } else if (session.access === 'heldByOther') {
+        message = t('doc.banner.heldByOther');
+        tone = 'warn';
+      } else if (session.access === 'expired') {
+        message = t('doc.banner.expired');
+        tone = 'warn';
+      } else if (session.submit === 'conflict') {
+        message = t('doc.banner.conflict');
+        tone = 'error';
+        actionLabel = t('doc.conflict.title');
+        actionKind = 'conflict';
+      } else if (session.submit === 'outcomeUnknown') {
+        message = t('doc.banner.unknown');
+        tone = 'warn';
+        actionLabel = t('doc.conflict.keepLocal');
+        actionKind = 'confirm-outcome';
+      } else if (session.load === 'error') {
+        message = t('doc.err.loadFailed', { msg: session.loadError || '' });
+        tone = 'error';
+      }
+      banner.hidden = !message;
+      banner.className = 'dw-banner' + (tone ? ' ' + tone : '');
+      text.textContent = message;
+      action.hidden = !actionLabel;
+      action.textContent = actionLabel;
+      action.dataset.docBannerAction = actionKind;
+    }
+
+    function docUpdateCursor() {
+      const editor = document.getElementById('docEditor');
+      const cursor = document.getElementById('docCursor');
+      const chars = document.getElementById('docCharCount');
+      if (!editor) return;
+      if (cursor) {
+        const before = editor.value.slice(0, editor.selectionStart);
+        const lines = before.split('\n');
+        cursor.textContent = 'Ln ' + lines.length + ', Col ' + (lines[lines.length - 1].length + 1);
+      }
+      if (chars) chars.textContent = editor.value.length.toLocaleString() + ' chars';
+    }
+
+    // ---------- 打开 / 激活 / 关闭 ----------
+    function docOpen(node, source) {
+      if (!node || node.id === undefined || node.id === null) {
+        showToast(t('doc.toast.noDoc'));
+        return null;
+      }
+      const key = docKeyOf(node);
+      const existing = docSessions.find(s => s.key === key);
+      if (existing) {
+        // 同一节点只保留一个标签：重复打开只聚焦已有标签，不新建草稿。
+        existing.node = node;
+        if (!existing.version && (node.version || node.etag)) existing.version = node.version || node.etag;
+        docActivate(existing.sessionId);
+        return existing;
+      }
+      const session = docCreateSession(node, source);
+      docSessions.push(session);
+      docActiveSessionId = session.sessionId;
+      docRestoreDraft(session);
+      // 统一右侧面板（节点详情/AI/过滤器）是覆盖在内容区之上的抽屉，开文档时必须收起，
+      // 否则它会盖住「暂存更改」等主操作按钮（实测 1280×720 与 1440 均命中）。
+      if (typeof collapseUnifiedPanel === 'function') collapseUnifiedPanel();
+      const tab = document.querySelector('[data-tab="docPane"]');
+      if (tab) tab.click();
+      docRender();
+      docPersistDraft(session);
+      docPushHistoryNow(session);
+      docRefreshFromServer(session).catch(() => {});
+      return session;
+    }
+
+    function docActivate(sessionId) {
+      if (!docById(sessionId)) return;
+      docActiveSessionId = sessionId;
+      docFindState = { query: docFindState.query, matches: [], index: -1 };
+      docRender();
+      const tab = document.querySelector('[data-tab="docPane"]');
+      if (tab) tab.click();
+      const label = document.querySelector('[data-doc-tab="' + sessionId + '"]');
+      if (label && typeof label.focus === 'function') label.focus();
+    }
+
+    function docOnTabKeydown(event, sessionId) {
+      const index = docSessions.findIndex(s => s.sessionId === sessionId);
+      if (index < 0) return;
+      let next = index;
+      if (event.key === 'ArrowLeft') next = Math.max(0, index - 1);
+      else if (event.key === 'ArrowRight') next = Math.min(docSessions.length - 1, index + 1);
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = docSessions.length - 1;
+      else return;
+      event.preventDefault();
+      docActivate(docSessions[next].sessionId);
+    }
+
+    function docQueuedOpFor(nodeId) {
+      return txOperations.find((op) => String(op.id) === String(nodeId)
+        && (op.op === 'updatePayload' || op.op === 'delete')) || null;
+    }
+    function docQueuedDocOpFor(session) {
+      return txOperations.find((op) => {
+        const meta = txOpMeta.get(op);
+        return meta && meta.docSessionId === session.sessionId;
+      }) || null;
+    }
+
+    function docRequestClose(sessionId) {
+      const session = docById(sessionId);
+      if (!session) return;
+      if (docIsDirty(session) || docQueuedOpFor(session.nodeId)) {
+        docPendingCloseId = sessionId;
+        docOpenOverlay('docCloseOverlay');
+        return;
+      }
+      docFinalizeClose(sessionId);
+    }
+
+    function docFinalizeClose(sessionId) {
+      const index = docSessions.findIndex(s => s.sessionId === sessionId);
+      if (index < 0) return;
+      docSessions.splice(index, 1);
+      if (docActiveSessionId === sessionId) {
+        const next = docSessions[index] || docSessions[index - 1] || null;
+        docActiveSessionId = next ? next.sessionId : null;
+      }
+      docRender();
+    }
+
+    function docDiscardChanges(session) {
+      if (!session) return;
+      session.draftPayload = docDeepClone(session.basePayload);
+      session.draftText = session.baseText;
+      session.parseError = null;
+      session.losses = docScanLossy(session.baseText);
+      session.staged = null;
+      session.history = [];
+      session.historyIndex = -1;
+      const queued = docQueuedDocOpFor(session);
+      if (queued) {
+        const at = txOperations.indexOf(queued);
+        if (at >= 0) txOperations.splice(at, 1);
+        syncTxBar();
+      }
+      docDraftForget(session);
+      docRender();
+    }
+
+    // ---------- 编辑器输入 / 撤销重做 ----------
+    function docApplyEditorValue(session, value) {
+      if (session.editorMode === 'json') {
+        session.draftText = value;
+        const parsed = docParsePayload(value);
+        if (parsed.ok) {
+          session.parseError = null;
+          session.draftPayload = parsed.value;
+        } else {
+          session.parseError = parsed.error;
+        }
+      } else {
+        if (!session.draftPayload) return;
+        try {
+          docWriteBody(session.draftPayload, session.pointer, value, false);
+        } catch (err) {
+          showToast(err.message);
+          return;
+        }
+        session.parseError = null;
+        session.draftText = JSON.stringify(session.draftPayload, null, 2);
+      }
+      // 无损扫描是 O(n) 全量遍历：击键路径只安排防抖扫描，暂存前必定重扫一次（见 docStage）。
+      session.title = docTitleOf(session.draftPayload, session.nodeId);
+    }
+
+    // 击键路径的三处防抖：草稿落盘、无损扫描、预览/大纲重建。
+    // 1 MB 文档下同步做这三件事会直接拖垮输入响应，而它们都不是「所见即所得」必需。
+    let docPersistTimer = 0;
+    let docPersistSession = null;
+    let docLossTimer = 0;
+    let docLossSession = null;
+    let docPreviewTimer = 0;
+    let docPreviewSession = null;
+
+    function docSchedulePersist(session) {
+      docPersistSession = session;
+      if (docPersistTimer) return;
+      docPersistTimer = setTimeout(() => {
+        docPersistTimer = 0;
+        const target = docPersistSession;
+        docPersistSession = null;
+        if (target) docPersistDraft(target);
+      }, 600);
+    }
+    function docFlushPersist() {
+      if (docPersistTimer) { clearTimeout(docPersistTimer); docPersistTimer = 0; }
+      const target = docPersistSession;
+      docPersistSession = null;
+      if (target) docPersistDraft(target);
+    }
+    function docScheduleLossScan(session) {
+      docLossSession = session;
+      if (docLossTimer) return;
+      docLossTimer = setTimeout(() => {
+        docLossTimer = 0;
+        const target = docLossSession;
+        docLossSession = null;
+        if (!target || !docById(target.sessionId)) return;
+        target.losses = docScanLossy(target.draftText);
+        docRenderHead(target);
+        docRenderBanner(target);
+        const hint = document.getElementById('docLossyHint');
+        if (hint) {
+          hint.hidden = !docHasLosses(target);
+          hint.textContent = docHasLosses(target) ? t('doc.err.lossy') : '';
+        }
+      }, 450);
+    }
+    function docSchedulePreview(session) {
+      docPreviewSession = session;
+      if (docPreviewTimer) clearTimeout(docPreviewTimer);
+      docPreviewTimer = setTimeout(() => {
+        docPreviewTimer = 0;
+        const target = docPreviewSession;
+        docPreviewSession = null;
+        if (!target || !docById(target.sessionId)) return;
+        const body = docReadBody(target.draftPayload, target.pointer);
+        docRenderPreview(target, target.editorMode === 'json', body);
+        docRenderOutline(target, body);
+      }, 220);
+    }
+    // 轻量外壳：行号 / 光标 / 空态 / 只读态，不重建 Markdown 预览与节点列表
+    function docRefreshEditorChrome(session) {
+      const body = docReadBody(session.draftPayload, session.pointer);
+      const hasBody = body.state === 'string' || body.state === 'empty';
+      const jsonMode = session.editorMode === 'json';
+      const missing = !jsonMode && !hasBody;
+      const editor = document.getElementById('docEditor');
+      const frame = document.getElementById('docTextFrame');
+      const missingHost = document.getElementById('docMissingBody');
+      if (frame) frame.hidden = missing;
+      if (missingHost) missingHost.hidden = !missing;
+      if (editor) editor.readOnly = !docEditable(session);
+      const value = editor ? editor.value : '';
+      docRenderGutter(value);
+      const chars = document.getElementById('docCharCount');
+      if (chars) chars.textContent = value.length.toLocaleString() + ' chars';
+    }
+
+    function docOnEditorInput() {
+      const session = docActive();
+      if (!session || !docEditable(session)) return;
+      const editor = document.getElementById('docEditor');
+      if (!editor) return;
+      docApplyEditorValue(session, editor.value);
+      if (!session.composing) docScheduleHistory(session);
+      docScheduleLossScan(session);
+      docSchedulePersist(session);
+      docRenderHead(session);
+      docRefreshEditorChrome(session);
+      docSchedulePreview(session);
+      const label = document.querySelector('[data-doc-tab="' + session.sessionId + '"]');
+      if (label) label.textContent = session.title + (docIsDirty(session) ? ' ●' : '');
+    }
+
+    function docSnapshot(session) {
+      const editor = document.getElementById('docEditor');
+      return {
+        mode: session.editorMode,
+        value: editor ? editor.value : session.draftText,
+        start: editor ? editor.selectionStart : 0,
+        end: editor ? editor.selectionEnd : 0,
+        scrollTop: editor ? editor.scrollTop : 0,
+      };
+    }
+    function docPushHistoryNow(session) {
+      if (!session) return;
+      const snap = docSnapshot(session);
+      const last = session.history[session.historyIndex];
+      if (last && last.mode === snap.mode && last.value === snap.value) return;
+      session.history = session.history.slice(0, session.historyIndex + 1);
+      session.history.push(snap);
+      if (session.history.length > DOC_HISTORY_MAX) session.history.shift();
+      session.historyIndex = session.history.length - 1;
+    }
+    function docScheduleHistory(session) {
+      if (docHistoryTimer) clearTimeout(docHistoryTimer);
+      docHistoryTimer = setTimeout(() => {
+        docHistoryTimer = 0;
+        docPushHistoryNow(session);
+      }, 400);
+    }
+    function docApplySnapshot(session, snap) {
+      if (!session || !snap) return;
+      if (snap.mode !== session.editorMode) {
+        if (snap.mode === 'body' && session.parseError) return;
+        session.editorMode = snap.mode;
+      }
+      docApplyEditorValue(session, snap.value);
+      const editor = document.getElementById('docEditor');
+      if (editor) {
+        editor.value = snap.value;
+        editor.setSelectionRange(snap.start, snap.end);
+        editor.scrollTop = snap.scrollTop || 0;
+      }
+      docRender();
+      docPersistDraft(session);
+    }
+    function docUndo() {
+      const session = docActive();
+      if (!session || session.historyIndex <= 0) return;
+      session.historyIndex -= 1;
+      docApplySnapshot(session, session.history[session.historyIndex]);
+    }
+    function docRedo() {
+      const session = docActive();
+      if (!session || session.historyIndex >= session.history.length - 1) return;
+      session.historyIndex += 1;
+      docApplySnapshot(session, session.history[session.historyIndex]);
+    }
+
+    function docSetEditorMode(mode) {
+      const session = docActive();
+      if (!session) return;
+      if (mode === 'body' && session.parseError) {
+        showToast(t('doc.err.invalid'));
+        return;
+      }
+      if (session.editorMode === mode) return;
+      docPushHistoryNow(session);
+      session.editorMode = mode;
+      docRender();
+      const editor = document.getElementById('docEditor');
+      if (editor) editor.focus();
+    }
+
+    function docFormatJson() {
+      const session = docActive();
+      if (!session || !docEditable(session) || session.parseError) return;
+      session.draftText = JSON.stringify(session.draftPayload, null, 2);
+      session.losses = docScanLossy(session.draftText);
+      docRender();
+      docPushHistoryNow(session);
+      docPersistDraft(session);
+      showToast(t('doc.toast.formatted'));
+    }
+
+    function docCreateBody() {
+      const session = docActive();
+      if (!session || !docEditable(session)) return;
+      const body = docReadBody(session.draftPayload, session.pointer);
+      if (body.state === 'nonString' || body.state === 'null' || body.state === 'invalid') {
+        showToast(t('doc.err.nonString'));
+        return;
+      }
+      try {
+        docWriteBody(session.draftPayload, session.pointer, '# ' + session.title + '\n\n', true);
+      } catch (err) {
+        showToast(err.message);
+        return;
+      }
+      session.draftText = JSON.stringify(session.draftPayload, null, 2);
+      session.losses = docScanLossy(session.draftText);
+      docRender();
+      docPushHistoryNow(session);
+      docPersistDraft(session);
+      showToast(t('doc.toast.bodyCreated'));
+      const editor = document.getElementById('docEditor');
+      if (editor) editor.focus();
+    }
+
+    function docGotoHeading(lineIndex, text) {
+      const session = docActive();
+      if (!session) return;
+      if (session.editorMode !== 'body') {
+        if (session.parseError) return;
+        session.editorMode = 'body';
+      }
+      const lines = String(text).split('\n');
+      const pos = lines.slice(0, lineIndex).join('\n').length + (lineIndex ? 1 : 0);
+      docRender();
+      const editor = document.getElementById('docEditor');
+      if (!editor) return;
+      editor.focus();
+      editor.setSelectionRange(pos, pos);
+      editor.scrollTop = Math.max(0, lineIndex * 22);
+      docUpdateCursor();
+    }
+
+    // ---------- 查找替换（选区驱动，不做覆盖层高亮） ----------
+    function docFindMatches(value, query) {
+      const matches = [];
+      if (!query) return matches;
+      let cursor = 0;
+      while (cursor <= value.length) {
+        const at = value.indexOf(query, cursor);
+        if (at < 0) break;
+        matches.push(at);
+        cursor = at + Math.max(1, query.length);
+      }
+      return matches;
+    }
+    function docToggleFind(force) {
+      const bar = document.getElementById('docFindBar');
+      if (!bar) return;
+      const show = typeof force === 'boolean' ? force : bar.hidden;
+      bar.hidden = !show;
+      if (show) {
+        const input = document.getElementById('docFindInput');
+        if (input) { input.focus(); input.select(); }
+        docRefreshFind();
+      } else {
+        docFindState = { query: docFindState.query, matches: [], index: -1 };
+      }
+    }
+    function docRefreshFind(step) {
+      const session = docActive();
+      const editor = document.getElementById('docEditor');
+      const input = document.getElementById('docFindInput');
+      const count = document.getElementById('docFindCount');
+      if (!session || !editor || !input) return;
+      const query = input.value;
+      const matches = docFindMatches(editor.value, query);
+      docFindState = { query, matches, index: matches.length ? (typeof step === 'number' ? step : docFindState.index) : -1 };
+      if (docFindState.index < 0 && matches.length) docFindState.index = 0;
+      if (docFindState.index >= matches.length) docFindState.index = matches.length - 1;
+      if (count) count.textContent = (matches.length ? docFindState.index + 1 : 0) + '/' + matches.length;
+      if (matches.length) {
+        const at = matches[Math.max(0, docFindState.index)];
+        editor.focus();
+        editor.setSelectionRange(at, at + query.length);
+      }
+    }
+    function docFindStep(direction) {
+      const editor = document.getElementById('docEditor');
+      const input = document.getElementById('docFindInput');
+      if (!editor || !input) return;
+      const matches = docFindMatches(editor.value, input.value);
+      if (!matches.length) { showToast(t('doc.toast.findNone')); return; }
+      const current = editor.selectionStart;
+      let index = matches.findIndex(at => at === current);
+      if (index < 0) index = direction > 0 ? 0 : matches.length - 1;
+      else index = (index + direction + matches.length) % matches.length;
+      docFindState = { query: input.value, matches, index };
+      const at = matches[index];
+      editor.focus();
+      editor.setSelectionRange(at, at + input.value.length);
+      const count = document.getElementById('docFindCount');
+      if (count) count.textContent = (index + 1) + '/' + matches.length;
+    }
+    function docReplaceOne() {
+      const session = docActive();
+      const editor = document.getElementById('docEditor');
+      const input = document.getElementById('docFindInput');
+      const replacement = document.getElementById('docReplaceInput');
+      if (!session || !docEditable(session) || !editor || !input || !replacement) return;
+      const query = input.value;
+      if (!query) return;
+      const selected = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+      if (selected !== query) { docFindStep(1); return; }
+      const at = editor.selectionStart;
+      editor.value = editor.value.slice(0, at) + replacement.value + editor.value.slice(at + query.length);
+      editor.setSelectionRange(at + replacement.value.length, at + replacement.value.length);
+      docApplyEditorValue(session, editor.value);
+      docRender();
+      docPushHistoryNow(session);
+      docPersistDraft(session);
+      docRefreshFind();
+    }
+    function docReplaceAll() {
+      const session = docActive();
+      const editor = document.getElementById('docEditor');
+      const input = document.getElementById('docFindInput');
+      const replacement = document.getElementById('docReplaceInput');
+      if (!session || !docEditable(session) || !editor || !input || !replacement) return;
+      const query = input.value;
+      if (!query) return;
+      const matches = docFindMatches(editor.value, query);
+      if (!matches.length) { showToast(t('doc.toast.findNone')); return; }
+      editor.value = editor.value.split(query).join(replacement.value);
+      docApplyEditorValue(session, editor.value);
+      docRender();
+      docPushHistoryNow(session);
+      docPersistDraft(session);
+      docRefreshFind();
+      showToast(t('doc.toast.replaced', { n: matches.length }));
+    }
+
+    // ---------- 正文来源映射 ----------
+    function docOpenMapping() {
+      const session = docActive();
+      if (!session) return;
+      const input = document.getElementById('docMappingInput');
+      const error = document.getElementById('docMappingError');
+      if (input) input.value = session.pointer;
+      if (error) error.textContent = '';
+      docOpenOverlay('docMappingOverlay');
+      if (input) input.focus();
+    }
+    function docApplyMapping() {
+      const session = docActive();
+      const input = document.getElementById('docMappingInput');
+      const error = document.getElementById('docMappingError');
+      if (!session || !input) return;
+      const value = input.value.trim();
+      try {
+        docPointerKeys(value);
+      } catch (err) {
+        if (error) error.textContent = err.message;
+        return;
+      }
+      // 变更映射只影响编辑视图，不改动 payload；但正文草稿与 JSON 草稿必须重新对齐。
+      session.pointer = value;
+      session.staged = null;
+      session.history = [];
+      session.historyIndex = -1;
+      docCloseOverlay('docMappingOverlay');
+      docRender();
+      docPushHistoryNow(session);
+      docPersistDraft(session);
+    }
+
+    // ---------- 导出 ----------
+    function docExport() {
+      const session = docActive();
+      if (!session) return;
+      const jsonMode = session.editorMode === 'json';
+      const body = docReadBody(session.draftPayload, session.pointer);
+      const value = jsonMode ? session.draftText
+        : ((body.state === 'string' || body.state === 'empty') ? body.value : '');
+      if (!jsonMode && !value) {
+        showToast(t('doc.err.nonString'));
+        return;
+      }
+      const blob = new Blob([value], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'node-' + session.nodeId + '-draft.'
+        + (jsonMode ? 'json' : session.format === 'markdown' ? 'md' : 'txt');
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      showToast(t('doc.toast.exported'));
+    }
+
+    // ---------- 弹层工具（复用既有 .import-overlay，不新增遮罩样式） ----------
+    function docOpenOverlay(id) {
+      const overlay = document.getElementById(id);
+      if (overlay) overlay.hidden = false;
+    }
+    function docCloseOverlay(id) {
+      const overlay = document.getElementById(id);
+      if (overlay) overlay.hidden = true;
+    }
+
+    // ---------- 浏览器草稿（键含 origin / pathname / nodeId / 映射 / schema） ----------
+    function docDraftsEnabled() {
+      return !window.__TRIVIUM_SELFTEST__ || window.__docTestAllowDrafts === true;
+    }
+    function docDraftIndexRead() {
+      try {
+        const parsed = JSON.parse(docStorage.get(DOC_INDEX_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed.filter(k => typeof k === 'string') : [];
+      } catch (_) { return []; }
+    }
+    function docDraftIndexWrite(list) {
+      docStorage.set(DOC_INDEX_KEY, JSON.stringify(list.slice(0, DOC_INDEX_MAX)));
+    }
+    function docDraftIndexAdd(key) {
+      const list = docDraftIndexRead().filter(k => k !== key);
+      list.unshift(key);
+      docDraftIndexWrite(list);
+    }
+    function docDraftIndexRemove(key) {
+      docDraftIndexWrite(docDraftIndexRead().filter(k => k !== key));
+    }
+    function docPersistDraft(session) {
+      if (!session || !docDraftsEnabled()) return;
+      const key = docStorageKeyOf(session.key);
+      if (!docIsDirty(session) && !session.staged) {
+        docStorage.remove(key);
+        docDraftIndexRemove(key);
+        return;
+      }
+      const payload = {
+        schema: DOC_DRAFT_SCHEMA,
+        key: session.key,
+        nodeId: session.nodeId,
+        baseText: session.baseText,
+        draftText: session.draftText,
+        pointer: session.pointer,
+        format: session.format,
+        editorMode: session.editorMode,
+        savedAt: Date.now(),
+      };
+      const ok = docStorage.set(key, JSON.stringify(payload));
+      docStorageOK = ok;
+      if (!ok) { showToast(t('doc.toast.draftQuota')); return; }
+      docDraftIndexAdd(key);
+    }
+    function docDraftForget(session) {
+      if (!session) return;
+      const key = docStorageKeyOf(session.key);
+      docStorage.remove(key);
+      docDraftIndexRemove(key);
+    }
+    function docRestoreDraft(session) {
+      if (!session || !docDraftsEnabled()) return false;
+      const key = docStorageKeyOf(session.key);
+      const raw = docStorage.get(key);
+      if (!raw) return false;
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
+      if (!parsed || parsed.schema !== DOC_DRAFT_SCHEMA || parsed.nodeId !== session.nodeId
+        || typeof parsed.draftText !== 'string') {
+        docStorage.remove(key);
+        docDraftIndexRemove(key);
+        return false;
+      }
+      session.baseText = typeof parsed.baseText === 'string' ? parsed.baseText : session.baseText;
+      session.draftText = parsed.draftText;
+      const draft = docParsePayload(parsed.draftText);
+      if (draft.ok) { session.draftPayload = draft.value; session.parseError = null; }
+      else { session.parseError = draft.error; }
+      if (typeof parsed.pointer === 'string') session.pointer = parsed.pointer;
+      session.format = parsed.format === 'text' ? 'text' : 'markdown';
+      session.editorMode = parsed.editorMode === 'json' ? 'json' : 'body';
+      session.losses = docScanLossy(session.draftText);
+      session.restored = true;
+      showToast(t('doc.toast.draftRestored'));
+      return true;
+    }
+
+    // ---------- 暂存（复用唯一写审阅队列） ----------
+    function docEnsureTxMode() {
+      const check = document.getElementById('txModeCheck');
+      if (check && !check.checked) {
+        check.checked = true;
+        check.dispatchEvent(new Event('change', { bubbles: true }));
+        showToast(t('doc.toast.txMode'));
+      }
+      return (typeof txModeOn === 'function') ? txModeOn() : true;
+    }
+    async function docEnsureVersion(session) {
+      if (session.version) return true;
+      try {
+        const remote = await docFetchNode(session.nodeId);
+        session.version = remote.version || null;
+        session.generation = remote.generation || null;
+        return !!session.version;
+      } catch (_) { return false; }
+    }
+    function docQueueStage(session, payload) {
+      const op = { op: 'updatePayload', id: Number(session.nodeId), payload };
+      stageTxOperation(op, {
+        before: docDeepClone(session.basePayload),
+        source: t('tx.source.doc'),
+        docSessionId: session.sessionId,
+        docTitle: session.title,
+        expectedVersion: session.version || null,
+        pointer: session.pointer,
+        bodyBefore: docBodyTextOf(session.basePayload, session.pointer),
+        bodyAfter: docBodyTextOf(payload, session.pointer),
+      });
+      session.staged = { frozenText: session.draftText, frozenPayload: docDeepClone(payload) };
+      session.submit = 'idle';
+      docRender();
+      docPersistDraft(session);
+    }
+    async function docStage() {
+      const session = docActive();
+      if (!session) return false;
+      if (!docEditable(session)) { showToast(t('doc.err.readonly')); return false; }
+      if (session.parseError) { showToast(t('doc.err.invalid')); return false; }
+      // 击键路径只做防抖扫描：真正落库前必须用当前文本重扫一次，避免拿陈旧结论放行
+      session.losses = docScanLossy(session.draftText);
+      if (docHasLosses(session)) { showToast(t('doc.err.lossy')); return false; }
+      if (!docIsDirty(session)) { showToast(t('doc.err.notDirty')); return false; }
+      const existing = docQueuedOpFor(session.nodeId);
+      if (existing && existing.op === 'delete') { showToast(t('doc.err.pendingDelete')); return false; }
+      // 没有节点版本就无法做 OCC：宁可拒绝，也不发一次会静默覆盖别人改动的写请求。
+      const hasVersion = await docEnsureVersion(session);
+      if (!hasVersion) { showToast(t('doc.err.noVersion')); return false; }
+      if (!docEnsureTxMode()) { showToast(t('doc.err.noTxMode')); return false; }
+      const payload = docDeepClone(session.draftPayload);
+      if (existing) {
+        const existingMeta = txOpMeta.get(existing);
+        if (existingMeta && existingMeta.docSessionId === session.sessionId) {
+          // 同一会话重复暂存：替换自己的快照，保留最初 before 与版本前置条件。
+          existing.payload = payload;
+          existingMeta.bodyAfter = docBodyTextOf(payload, session.pointer);
+          session.staged = { frozenText: session.draftText, frozenPayload: docDeepClone(payload) };
+          session.submit = 'idle';
+          syncTxBar();
+          docRender();
+          docPersistDraft(session);
+          return true;
+        }
+        docMergeTarget = { session, payload, existing };
+        docOpenOverlay('docMergeOverlay');
+        return false;
+      }
+      docQueueStage(session, payload);
+      return true;
+    }
+    function docResolveMerge(mode) {
+      const target = docMergeTarget;
+      docMergeTarget = null;
+      docCloseOverlay('docMergeOverlay');
+      if (!target) return;
+      const { session, payload, existing } = target;
+      if (mode === 'replace') {
+        existing.payload = payload;
+        const meta = txOpMeta.get(existing);
+        if (meta) meta.expectedVersion = session.version || meta.expectedVersion || null;
+      } else {
+        // 合并：以队列中的最新 payload 为基，只应用本次会话相对它自己基线的变更。
+        const merged = docDeepClone(existing.payload);
+        if (session.editorMode === 'json') {
+          const base = session.basePayload || {};
+          Object.keys(payload).forEach((key) => {
+            if (docCanonical(payload[key]) !== docCanonical(base[key])) merged[key] = docDeepClone(payload[key]);
+          });
+          Object.keys(base).forEach((key) => {
+            if (!Object.prototype.hasOwnProperty.call(payload, key)) delete merged[key];
+          });
+        } else {
+          const bodyText = docBodyTextOf(payload, session.pointer);
+          if (bodyText !== null) docWriteBody(merged, session.pointer, bodyText, true);
+        }
+        existing.payload = merged;
+        const meta = txOpMeta.get(existing);
+        if (meta) {
+          meta.expectedVersion = meta.expectedVersion || session.version || null;
+          meta.bodyAfter = docBodyTextOf(merged, meta.pointer || session.pointer);
+        }
+      }
+      session.staged = { frozenText: session.draftText, frozenPayload: docDeepClone(existing.payload) };
+      session.submit = 'idle';
+      syncTxBar();
+      docRender();
+      docPersistDraft(session);
+      showToast(t('doc.toast.stagedMerged'));
+    }
+
+    // ---------- 服务端读取与提交结果 ----------
+    async function docFetchNode(nodeId) {
+      const res = await fetch(`${API_BASE}/v1/nodes/${nodeId}`, { headers: { Accept: 'application/json' } });
+      const text = await res.text();
+      if (!res.ok) {
+        let detail = 'HTTP ' + res.status;
+        let code = null;
+        try {
+          const body = JSON.parse(text);
+          if (body && body.detail) detail = body.detail;
+          if (body && body.code) code = body.code;
+        } catch (_) { /* 非 JSON 错误体 */ }
+        const err = new Error(res.status === 404 ? t('doc.err.nodeNotFound') : detail);
+        err.status = res.status;
+        err.code = code;
+        throw err;
+      }
+      let body = null;
+      try { body = JSON.parse(text); } catch (_) {
+        const err = new Error('invalid JSON response');
+        err.status = res.status;
+        throw err;
+      }
+      return {
+        payload: (body && body.node && body.node.payload && typeof body.node.payload === 'object') ? body.node.payload : {},
+        version: body && typeof body.version === 'string' ? body.version : null,
+        generation: body && typeof body.generation === 'string' ? body.generation : null,
+        node: (body && body.node) || null,
+        losses: docScanLossy(text),
+      };
+    }
+    async function docRefreshFromServer(session) {
+      if (!session || session.load === 'loading') return;
+      session.load = 'loading';
+      const seq = ++session.requestSeq;
+      docRender();
+      try {
+        const remote = await docFetchNode(session.nodeId);
+        // 迟到响应隔离：会话已关闭或被新请求取代时，不能改当前编辑器状态。
+        if (seq !== session.requestSeq || !docById(session.sessionId)) return;
+        session.load = 'loaded';
+        session.version = remote.version || null;
+        session.generation = remote.generation || null;
+        if (remote.node && Array.isArray(remote.node.vector)) session.vectorDim = remote.node.vector.length;
+        if (docCanonical(remote.payload) !== docCanonical(session.basePayload)) {
+          if (docIsDirty(session)) {
+            session.submit = 'conflict';
+            session.remote = remote;
+          } else {
+            session.basePayload = docDeepClone(remote.payload);
+            session.baseText = JSON.stringify(session.basePayload, null, 2);
+            session.draftPayload = docDeepClone(remote.payload);
+            session.draftText = session.baseText;
+          }
+        }
+        if (remote.losses.numbers.length || remote.losses.duplicateKeys.length) session.losses = remote.losses;
+        docRender();
+        docPersistDraft(session);
+      } catch (err) {
+        if (seq !== session.requestSeq || !docById(session.sessionId)) return;
+        session.load = err.status === 404 ? 'notFound' : 'error';
+        session.loadError = err.message;
+        if (err.status === 404) session.access = 'readonly';
+        docRender();
+      }
+    }
+
+    function docCommitIdempotencyKey(submitted) {
+      const sig = submitted.map((op) => {
+        const meta = txOpMeta.get(op) || {};
+        return (meta.docSessionId || '') + ':' + op.id + ':' + (meta.draftRev || 0);
+      }).join(',');
+      if (sig !== docCommitKeySig || !docCommitKey) {
+        docCommitKeySig = sig;
+        docCommitKey = 'doc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+      }
+      return docCommitKey;
+    }
+    function docOnCommitSuccess(submitted) {
+      docCommitKey = null;
+      docCommitKeySig = '';
+      submitted.forEach((op) => {
+        const meta = txOpMeta.get(op);
+        if (!meta || !meta.docSessionId) return;
+        const session = docById(meta.docSessionId);
+        if (!session) return;
+        session.basePayload = docDeepClone(op.payload);
+        session.baseText = JSON.stringify(session.basePayload, null, 2);
+        session.staged = null;
+        session.submit = 'acknowledged';
+        session.version = null;      // 事务响应只回全局 generation，节点版本需要重新读取
+        session.needsRefresh = true;
+        docPersistDraft(session);
+      });
+      docRender();
+    }
+    async function docOnCommitFailure(submitted, err) {
+      const status = err && err.status;
+      const code = err && err.code;
+      let touched = null;
+      submitted.forEach((op) => {
+        const meta = txOpMeta.get(op);
+        if (!meta || !meta.docSessionId) return;
+        const session = docById(meta.docSessionId);
+        if (!session) return;
+        touched = touched || session;
+        if (status === 409 && code === 'WRITE_CONFLICT') session.submit = 'conflict';
+        else if (!status) session.submit = 'outcomeUnknown';
+        else session.submit = 'rejected';
+      });
+      if (!touched) return;
+      docRender();
+      if (status === 409 && code === 'WRITE_CONFLICT') await docLoadConflict(touched);
+      else if (!status) showToast(t('doc.banner.unknown'));
+    }
+    function docMarkSubmitting(submitted) {
+      submitted.forEach((op) => {
+        const meta = txOpMeta.get(op);
+        if (!meta || !meta.docSessionId) return;
+        const session = docById(meta.docSessionId);
+        if (session) session.submit = 'submitting';
+      });
+      docRender();
+    }
+
+    async function docLoadConflict(session) {
+      try {
+        const remote = await docFetchNode(session.nodeId);
+        session.remote = remote;
+        session.submit = 'conflict';
+        docRenderConflict(session, remote);
+        docConflictSessionId = session.sessionId;
+        docOpenOverlay('docConflictOverlay');
+        docRender();
+      } catch (err) {
+        showToast(t('doc.err.loadFailed', { msg: err.message }));
+      }
+    }
+    function docRenderConflict(session, remote) {
+      const host = document.getElementById('docConflictDiff');
+      if (!host) return;
+      host.replaceChildren();
+      host.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:10px;max-height:52vh;overflow:auto;border:0';
+      const make = (title, text) => {
+        const box = document.createElement('div');
+        const head = document.createElement('h3');
+        head.textContent = title;
+        const pre = document.createElement('pre');
+        pre.textContent = text;
+        box.append(head, pre);
+        return box;
+      };
+      host.append(
+        make(t('doc.conflict.remote'), JSON.stringify(remote.payload, null, 2)),
+        make(t('doc.conflict.local'), session.draftText || ''),
+      );
+      // 基线也保留可查：手工合并需要知道「我打开时看到的原始内容」，但不必占用主视觉。
+      const details = document.createElement('details');
+      details.style.gridColumn = '1 / -1';
+      const summary = document.createElement('summary');
+      summary.textContent = t('doc.conflict.base');
+      summary.style.cssText = 'cursor:pointer;font-size:11px;color:var(--text-muted)';
+      const pre = document.createElement('pre');
+      pre.textContent = JSON.stringify(session.basePayload, null, 2);
+      pre.style.cssText = 'max-height:200px;overflow:auto;font:11px/1.7 var(--font-mono);white-space:pre-wrap';
+      details.append(summary, pre);
+      host.appendChild(details);
+    }
+    function docRebaseToRemote() {
+      const session = docById(docConflictSessionId);
+      docConflictSessionId = null;
+      docCloseOverlay('docConflictOverlay');
+      if (!session || !session.remote) return;
+      session.basePayload = docDeepClone(session.remote.payload);
+      session.baseText = JSON.stringify(session.basePayload, null, 2);
+      session.version = session.remote.version || null;
+      session.access = 'editable';
+      session.submit = 'idle';
+      session.remote = null;
+      // 合并后必须重新审阅：撤回该节点的旧暂存快照，避免用旧 payload 覆盖远端字段。
+      const queued = docQueuedDocOpFor(session);
+      if (queued) {
+        const at = txOperations.indexOf(queued);
+        if (at >= 0) txOperations.splice(at, 1);
+      }
+      session.staged = null;
+      syncTxBar();
+      docRender();
+      docPersistDraft(session);
+      showToast(t('doc.toast.conflictRebase'));
+    }
+    async function docConfirmOutcome(session) {
+      if (!session) return;
+      try {
+        const remote = await docFetchNode(session.nodeId);
+        const queued = docQueuedDocOpFor(session);
+        const expected = queued ? queued.payload : (session.staged && session.staged.frozenPayload);
+        if (expected && docCanonical(remote.payload) === docCanonical(expected)) {
+          if (queued) {
+            const at = txOperations.indexOf(queued);
+            if (at >= 0) txOperations.splice(at, 1);
+          }
+          session.basePayload = docDeepClone(remote.payload);
+          session.baseText = JSON.stringify(session.basePayload, null, 2);
+          session.version = remote.version || null;
+          session.staged = null;
+          session.submit = 'acknowledged';
+          syncTxBar();
+          docRender();
+          docPersistDraft(session);
+          showToast(t('doc.toast.confirmedLate'));
+          return;
+        }
+        session.version = remote.version || session.version;
+        session.submit = 'idle';
+        docRender();
+        showToast(t('doc.err.outcomeMismatch'));
+      } catch (err) {
+        showToast(t('doc.err.loadFailed', { msg: err.message }));
+      }
+    }
+
+    // ---------- 审阅差异：正文按行展示 ----------
+    function docLineDiffSides(before, after) {
+      const left = String(before).split('\n');
+      const right = String(after).split('\n');
+      let prefix = 0;
+      let suffix = 0;
+      while (prefix < Math.min(left.length, right.length) && left[prefix] === right[prefix]) prefix += 1;
+      while (suffix < Math.min(left.length, right.length) - prefix
+        && left[left.length - 1 - suffix] === right[right.length - 1 - suffix]) suffix += 1;
+      const side = (lines, extra) => lines.map((line, index) => {
+        const span = document.createElement('span');
+        span.className = 'dw-diff-line' + (extra ? ' ' + extra : '')
+          + (index >= prefix && index < lines.length - suffix ? ' changed' : '');
+        span.textContent = line || ' ';
+        return span;
+      });
+      return { before: side(left, 'before'), after: side(right, '') };
+    }
+    function docBuildBodyDiff(before, after) {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = t('doc.review.bodyDiff');
+      summary.style.cssText = 'cursor:pointer;font-size:11px;color:var(--text-muted);margin:6px 0';
+      const grid = document.createElement('div');
+      grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px';
+      const sides = docLineDiffSides(before, after);
+      const pane = (title, nodes) => {
+        const box = document.createElement('div');
+        const head = document.createElement('div');
+        head.textContent = title;
+        head.style.cssText = 'font-size:10px;color:var(--text-muted);padding:2px 4px';
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'margin:0;max-height:220px;overflow:auto;font:11px/1.7 var(--font-mono);white-space:pre-wrap';
+        nodes.forEach(n => pre.appendChild(n));
+        box.append(head, pre);
+        return box;
+      };
+      grid.append(pane(t('doc.conflict.base'), sides.before), pane(t('doc.conflict.local'), sides.after));
+      details.append(summary, grid);
+      return details;
+    }
+    // 审阅项：文档操作额外展示正文行级差异；JSON 差异仍走既有字段级展示。
+    const docOriginalTxReviewItem = txReviewItem;
+    txReviewItem = function (op) {
+      const item = docOriginalTxReviewItem(op);
+      const meta = txOpMeta.get(op) || {};
+      if (op.op === 'updatePayload' && meta.docSessionId
+        && typeof meta.bodyBefore === 'string' && typeof meta.bodyAfter === 'string'
+        && meta.bodyBefore !== meta.bodyAfter) {
+        item.appendChild(docBuildBodyDiff(meta.bodyBefore, meta.bodyAfter));
+      }
+      return item;
+    };
+
+    // ---------- 接线 ----------
+    function setupDocWorkspace() {
+      const editor = document.getElementById('docEditor');
+      if (!editor) return;
+      editor.addEventListener('input', docOnEditorInput);
+      editor.addEventListener('scroll', () => {
+        const gutter = document.getElementById('docGutter');
+        if (gutter) gutter.scrollTop = editor.scrollTop;
+      });
+      ['keyup', 'click', 'select'].forEach((name) => editor.addEventListener(name, docUpdateCursor));
+      editor.addEventListener('compositionstart', () => {
+        const session = docActive();
+        if (session) session.composing = true;
+      });
+      editor.addEventListener('compositionend', () => {
+        const session = docActive();
+        if (!session) return;
+        session.composing = false;
+        docOnEditorInput();
+        docPushHistoryNow(session);
+      });
+      editor.addEventListener('keydown', (event) => {
+        const mod = event.ctrlKey || event.metaKey;
+        if (!mod) return;
+        const key = event.key.toLowerCase();
+        if (key === 'z') { event.preventDefault(); if (event.shiftKey) docRedo(); else docUndo(); }
+        else if (key === 'y') { event.preventDefault(); docRedo(); }
+        else if (key === 's') { event.preventDefault(); docStage(); }
+        else if (key === 'f') { event.preventDefault(); docToggleFind(true); }
+      });
+
+      const bind = (id, handler) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('click', handler);
+      };
+      bind('docModeBody', () => docSetEditorMode('body'));
+      bind('docModeJson', () => docSetEditorMode('json'));
+      bind('docStageBtn', () => docStage());
+      bind('docExportBtn', docExport);
+      bind('docFormatJson', docFormatJson);
+      bind('docCreateBody', docCreateBody);
+      bind('docMappingBtn', docOpenMapping);
+      bind('docSourcePath', docOpenMapping);
+      bind('docSideReview', () => { renderTxReview(); docOpenOverlay('txReviewOverlay'); });
+      bind('docSideToggle', () => {
+        const side = document.getElementById('docSideList');
+        if (side) side.classList.toggle('open');
+      });
+      bind('docOpenFirst', () => {
+        const side = document.getElementById('docSideList');
+        if (side) side.classList.add('open');
+        docRender();
+      });
+      bind('docFindToggle', () => docToggleFind());
+      bind('docFindClose', () => docToggleFind(false));
+      bind('docFindNext', () => docFindStep(1));
+      bind('docFindPrev', () => docFindStep(-1));
+      bind('docReplaceOne', docReplaceOne);
+      bind('docReplaceAll', docReplaceAll);
+      bind('docBannerAction', () => {
+        const session = docActive();
+        const action = document.getElementById('docBannerAction');
+        if (!session || !action) return;
+        if (action.dataset.docBannerAction === 'conflict') docLoadConflict(session);
+        else if (action.dataset.docBannerAction === 'confirm-outcome') docConfirmOutcome(session);
+      });
+
+      document.querySelectorAll('[data-doc-view]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          docViewMode = btn.dataset.docView;
+          docRender();
+        });
+      });
+      const format = document.getElementById('docFormat');
+      if (format) {
+        format.addEventListener('change', () => {
+          const session = docActive();
+          if (!session) return;
+          session.format = format.value === 'text' ? 'text' : 'markdown';
+          docRender();
+          docPersistDraft(session);
+        });
+      }
+      const search = document.getElementById('docListSearch');
+      if (search) {
+        search.addEventListener('input', () => {
+          docListFilter = search.value;
+          docRenderList();
+        });
+      }
+      const findInput = document.getElementById('docFindInput');
+      if (findInput) {
+        findInput.addEventListener('input', () => docRefreshFind());
+        findInput.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') { event.preventDefault(); docFindStep(event.shiftKey ? -1 : 1); }
+          else if (event.key === 'Escape') { event.preventDefault(); docToggleFind(false); }
+        });
+      }
+
+      // 关闭保护：三选，替代内嵌 webview 不支持的原生 confirm
+      bind('docCloseCancel', () => { docPendingCloseId = null; docCloseOverlay('docCloseOverlay'); });
+      bind('docCloseKeepDraft', () => {
+        const session = docById(docPendingCloseId);
+        if (session) { docFlushPersist(); docPersistDraft(session); }
+        docCloseOverlay('docCloseOverlay');
+        if (docPendingCloseId) docFinalizeClose(docPendingCloseId);
+        docPendingCloseId = null;
+      });
+      bind('docCloseDiscard', () => {
+        const session = docById(docPendingCloseId);
+        if (session) docDiscardChanges(session);
+        docCloseOverlay('docCloseOverlay');
+        if (docPendingCloseId) docFinalizeClose(docPendingCloseId);
+        docPendingCloseId = null;
+      });
+      bind('docMappingApply', docApplyMapping);
+      bind('docMappingCancel', () => docCloseOverlay('docMappingOverlay'));
+      bind('docMappingClose', () => docCloseOverlay('docMappingOverlay'));
+      bind('docMergeCombine', () => docResolveMerge('combine'));
+      bind('docMergeReplace', () => docResolveMerge('replace'));
+      bind('docMergeCancel', () => { docMergeTarget = null; docCloseOverlay('docMergeOverlay'); });
+      bind('docConflictClose', () => { docConflictSessionId = null; docCloseOverlay('docConflictOverlay'); });
+      bind('docConflictKeepLocal', () => { docConflictSessionId = null; docCloseOverlay('docConflictOverlay'); });
+      bind('docConflictRebase', docRebaseToRemote);
+
+      // 节点详情抽屉入口：覆盖打开函数以记住当前节点（不改原函数行为）
+      const originalOpenNodeDrawer = openNodeDrawer;
+      openNodeDrawer = function (node) {
+        docDrawerNode = node || null;
+        const btn = document.getElementById('drawerOpenDocBtn');
+        if (btn) btn.disabled = !node;
+        return originalOpenNodeDrawer(node);
+      };
+      bind('drawerOpenDocBtn', () => {
+        if (!docDrawerNode) { showToast(t('doc.toast.noDoc')); return; }
+        docOpen(docDrawerNode, 'node');
+      });
+
+      // 向量命中：捕获最近一次结果，供左侧列表按同一范围展示
+      const originalRenderVectorResults = renderVectorResults;
+      renderVectorResults = function (data, topK) {
+        docLastVectorHits = (data && Array.isArray(data.hits)) ? data.hits : [];
+        return originalRenderVectorResults(data, topK);
+      };
+
+      // 全局快捷键：仅文档工作区激活、且没有弹层时接管
+      document.addEventListener('keydown', (event) => {
+        const activeTab = document.querySelector('.tabs-bar .tab.active');
+        if (!activeTab || activeTab.dataset.tab !== 'docPane') return;
+        const overlayOpen = [...document.querySelectorAll('.import-overlay')].some(el => !el.hidden);
+        if (overlayOpen) return;
+        const mod = event.ctrlKey || event.metaKey;
+        if (mod && event.key.toLowerCase() === 's') { event.preventDefault(); docStage(); }
+        else if (mod && event.key.toLowerCase() === 'f') { event.preventDefault(); docToggleFind(true); }
+        else if (event.key === 'Escape') {
+          const bar = document.getElementById('docFindBar');
+          if (bar && !bar.hidden) { event.preventDefault(); docToggleFind(false); }
+        }
+      });
+
+      // 离开页面：覆盖所有未提交会话，不只当前标签
+      window.addEventListener('beforeunload', (event) => {
+        const dirty = docSessions.some(s => docIsDirty(s));
+        const pending = txOperations.some(op => {
+          const meta = txOpMeta.get(op);
+          return !!(meta && meta.docSessionId);
+        });
+        if (!dirty && !pending) return;
+        event.preventDefault();
+        event.returnValue = '';
+      });
+
+      docRender();
+    }
+
+    // ---------- 测试钩子（只读观测 + 显式状态注入；生产 UI 不暴露模拟状态入口） ----------
+    window.__docWorkspace = {
+      sessions: () => docSessions.map(s => ({
+        sessionId: s.sessionId, nodeId: s.nodeId, pointer: s.pointer,
+        content: docContentState(s), access: s.access, submit: s.submit,
+        dirty: docIsDirty(s), version: s.version, restored: s.restored,
+      })),
+      active: () => (docActive() ? docActive().sessionId : null),
+      open: (node) => docOpen(node, 'node'),
+      forceAccess: (state) => {
+        if (!window.__TRIVIUM_SELFTEST__) return false;
+        const session = docActive();
+        if (!session) return false;
+        session.access = state;
+        docRender();
+        return true;
+      },
+      setStorage: (impl) => {
+        if (!window.__TRIVIUM_SELFTEST__) return false;
+        docStorage = impl || docStorage;
+        window.__docTestAllowDrafts = true;
+        return true;
+      },
+      state: () => ({
+        sessions: docSessions.length,
+        queue: txOperations.length,
+        docQueue: txOperations.filter(op => {
+          const meta = txOpMeta.get(op);
+          return !!(meta && meta.docSessionId);
+        }).length,
+        commitKey: docCommitKey,
+      }),
+    };
+
+    setupDocWorkspace();
+  </script>
+  <script>
+    // ==========================================
     // 页内自检套件 (In-page Selftest) —— 仅当 URL 带 ?selftest=1 时启用。
     // 零依赖 vanilla JS，集中在本 IIFE：
     //   1) fetch mock 层：拦截全部 API 调用返回固定 fixture（离线可测、结果确定）；
@@ -19298,7 +22388,12 @@ RETURN doc, t</div>
             return jsonRes({ node: { type: 'node', id: '97', payload: { name: 'KHop3', type: 'person' }, vector: [] }, edgeVersions: [] });
           }
           const node = id === '1' ? NODE_ALICE : (id === '2' ? NODE_BOB : NODE_PAPER);
-          return jsonRes({ node, edgeVersions: id === '1' ? [{ targetId: '2', label: 'KNOWS', version: 1 }] : [] });
+          return jsonRes({
+            node,
+            version: 'selftest-node-' + id + '-v1',
+            generation: GEN,
+            edgeVersions: id === '1' ? [{ targetId: '2', label: 'KNOWS', version: 1 }] : [],
+          });
         }
         if (path.indexOf('/v1/search/vector') === 0) {
           return jsonRes({ hits: [{ id: '1', score: 0.98, payload: NODE_ALICE.payload }], generation: GEN });
@@ -19452,7 +22547,8 @@ RETURN doc, t</div>
 
       // ---------- V4.1 R2 外壳 ----------
       addAssert('V4.1 R2：主导航/侧栏三段/当前节点条', 'V4.1 R2', async () => {
-        assert(document.querySelectorAll('.tabs-bar .tab').length === 3, '主工作区应只有查询/图探索/向量三项');
+        assert(document.querySelectorAll('.tabs-bar .tab').length === 4,
+          '主工作区应为查询/图探索/向量/文档四项');
         assert(document.querySelectorAll('.side-tabs .side-tab').length === 3, '侧栏应有对象/历史/片段三段');
         // 侧栏三段互斥
         setSidePanelTab('history');
@@ -22668,6 +25764,379 @@ RETURN doc, t</div>
           window.fetch = savedFetch;
           currentDrawerNodeId = null;
           renderGraph([]);
+        }
+      });
+
+      // ---------- 文档工作区（F1~F4） ----------
+      const docReset = () => {
+        docSessions = [];
+        docActiveSessionId = null;
+        docListFilter = '';
+        txOperations = [];
+        ['docCloseOverlay', 'docMappingOverlay', 'docMergeOverlay', 'docConflictOverlay', 'txReviewOverlay']
+          .forEach((id) => { const el = document.getElementById(id); if (el) el.hidden = true; });
+        syncTxBar();
+        const queryTab = document.querySelector('[data-tab="queryPane"]');
+        if (queryTab) queryTab.click();
+      };
+      const docMockNode = (id, payload) => ({ type: 'node', id: String(id), payload, vector: [0.1, 0.2], edges: [] });
+      const docNodeResponse = (payload, version) => ({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify({
+          node: { type: 'node', id: '1', payload },
+          version: version || 'selftest-node-v1',
+          generation: 'g-doc',
+        })),
+        json: () => Promise.resolve({
+          node: { type: 'node', id: '1', payload },
+          version: version || 'selftest-node-v1',
+          generation: 'g-doc',
+        }),
+      });
+      const docEdit = (session, text) => {
+        docWriteBody(session.draftPayload, session.pointer, text, true);
+        session.draftText = JSON.stringify(session.draftPayload, null, 2);
+      };
+
+      addAssert('文档：JSON Pointer 读写与四种正文态必须分开', '文档工作区', async () => {
+        const payload = { content: '# t', nested: { body: 'x' }, emptyStr: '', nil: null, num: 3, arr: [1, 2] };
+        assert(docReadBody(payload, '/content').state === 'string', '字符串正文应为 string');
+        assert(docReadBody(payload, '/emptyStr').state === 'empty', '空串必须与缺失区分');
+        assert(docReadBody(payload, '/nil').state === 'null', 'null 必须单独成态');
+        assert(docReadBody(payload, '/num').state === 'nonString', '数字必须是非字符串态');
+        assert(docReadBody(payload, '/missing').state === 'missing', '缺失字段应为 missing');
+        assert(docReadBody(payload, '/nested/body').value === 'x', '嵌套路径应可读');
+        docWriteBody(payload, '/nested/body', 'y', false);
+        assert(payload.nested.body === 'y' && payload.arr.length === 2 && payload.num === 3,
+          '只改映射字段，其他字段必须保留');
+        let blocked = false;
+        try { docPointerKeys('/__proto__/x'); } catch (_) { blocked = true; }
+        assert(blocked, '__proto__ 路径必须拒绝');
+        blocked = false;
+        try { docPointerKeys('/constructor'); } catch (_) { blocked = true; }
+        assert(blocked, 'constructor 路径必须拒绝');
+      });
+
+      addAssert('文档：非法 JSON 保留原文、错误定位并可阻止切正文', '文档工作区', async () => {
+        const session = docCreateSession(docMockNode('9002', { content: 'base' }), 'node');
+        session.editorMode = 'json';
+        const broken = '{\n  "content": "x",\n}';
+        docApplyEditorValue(session, broken);
+        assert(session.parseError, '非法 JSON 必须记录错误');
+        assert(session.draftText === broken, '非法 JSON 必须保留原文');
+        assert(session.parseError.vars.line === 3, '错误行号应指向第 3 行，实际 ' + session.parseError.vars.line);
+        assert(docContentState(session) === 'invalid', '内容态必须是 invalid');
+        docStage();
+        assert(txOperations.length === 0, '非法 JSON 不得进入队列');
+      });
+
+      addAssert('文档：安全整数之外与重复键必须被扫描拦截', '文档工作区', async () => {
+        assert(docScanLossy('{"n": 9007199254740993}').numbers.length === 1, '超出 2^53 的整数必须被识别');
+        assert(docScanLossy('{"n": 42}').numbers.length === 0, '安全整数不得误报');
+        assert(docScanLossy('{"n": 0.5}').numbers.length === 0, '普通小数不得误报');
+        assert(docScanLossy('{"a": 1, "a": 2}').duplicateKeys.length === 1, '重复键必须被识别');
+        const session = docCreateSession(docMockNode('9003', { n: 9007199254740993 }), 'node');
+        assert(docHasLosses(session), '加载到的 payload 含不安全数值时必须标记');
+      });
+
+      addAssert('文档：同一节点只保留一个标签，不同节点各自成标签', '文档工作区', async () => {
+        docReset();
+        try {
+          const node = docMockNode('1', { content: 'a' });
+          const first = docOpen(node, 'node');
+          const again = docOpen(node, 'node');
+          assert(first && again && first.sessionId === again.sessionId, '同一节点重复打开必须复用会话');
+          docOpen(docMockNode('2', { content: 'b' }), 'node');
+          assert(docSessions.length === 2, '两个节点应有两个标签，实际 ' + docSessions.length);
+          assert(document.querySelectorAll('#docTabs [data-doc-tab]').length === 2, '标签条应有 2 个标签');
+        } finally { docReset(); }
+      });
+
+      addAssert('文档：暂存只进审阅队列，不发任何写请求', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        const sent = [];
+        window.fetch = (url, opts) => {
+          sent.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+          return Promise.resolve(docNodeResponse({ content: 'a', keep: 1 }));
+        };
+        try {
+          const session = docOpen(docMockNode('1', { content: 'a', keep: 1 }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'edited body');
+          const ok = await docStage();
+          assert(ok === true, '暂存应成功');
+          assert(txOperations.length === 1, '应有一个暂存项');
+          assert(txOperations[0].op === 'updatePayload' && txOperations[0].id === 1, '暂存项应是 updatePayload #1');
+          assert(txOperations[0].payload.content === 'edited body' && txOperations[0].payload.keep === 1,
+            '只改正文，其他字段必须保留');
+          const meta = txOpMeta.get(txOperations[0]);
+          assert(meta && meta.expectedVersion === 'selftest-node-v1', '暂存项必须记录节点版本前置条件');
+          assert(sent.filter(x => x.method === 'POST').length === 0, '暂存阶段不得发写请求');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：提交注入 expectedNodes 与幂等键，且不发全局 If-Match', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        let captured = null;
+        window.fetch = (url, opts) => {
+          if (String(url).includes('/v1/transactions')) { captured = { url, opts }; return Promise.resolve({ ok: true, json: () => Promise.resolve({ generation: 'g-doc-1' }) }); }
+          return Promise.resolve(docNodeResponse({ content: 'a' }));
+        };
+        try {
+          const session = docOpen(docMockNode('1', { content: 'a' }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'committed body');
+          assert(await docStage(), '暂存应成功');
+          assert(await commitTransaction(), '提交应成功');
+          assert(captured, '应发出一次事务请求');
+          const body = JSON.parse(captured.opts.body);
+          assert(body.expectedNodes && body.expectedNodes['1'] === 'selftest-node-v1',
+            '提交体必须带节点版本前置条件：' + JSON.stringify(body.expectedNodes));
+          assert(!Object.prototype.hasOwnProperty.call(body, 'expectedGeneration'), '不得发全局代次前置条件');
+          assert(!captured.opts.headers['If-Match'], '不得把节点版本冒充全局 If-Match');
+          assert(!!captured.opts.headers['Idempotency-Key'], '文档提交必须带幂等键');
+          assert(session.submit === 'acknowledged', '提交成功后会话应为 acknowledged');
+          assert(txOperations.length === 0, '成功后队列应清空');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：提交期间的新编辑不被旧响应清除', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        window.fetch = (url, opts) => {
+          if (String(url).includes('/v1/transactions')) {
+            return new Promise((resolve) => setTimeout(() => resolve({ ok: true, json: () => Promise.resolve({ generation: 'g-doc-2' }) }), 40));
+          }
+          return Promise.resolve(docNodeResponse({ content: 'a' }));
+        };
+        try {
+          const session = docOpen(docMockNode('1', { content: 'a' }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'snapshot body');
+          assert(await docStage(), '暂存应成功');
+          const pending = commitTransaction();
+          docEdit(session, 'snapshot body + later edit');
+          await pending;
+          assert(session.submit === 'acknowledged', '已发送快照应被确认');
+          assert(docIsDirty(session), '提交期间的新编辑必须继续保持 dirty');
+          assert(session.draftPayload.content === 'snapshot body + later edit', '新编辑内容不得被覆盖');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：409 冲突进入 conflict 态并展示远端/本地对照', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        window.fetch = (url, opts) => {
+          if (String(url).includes('/v1/transactions')) {
+            return Promise.resolve({
+              ok: false,
+              status: 409,
+              json: () => Promise.resolve({ code: 'WRITE_CONFLICT', detail: 'node etag mismatch' }),
+            });
+          }
+          return Promise.resolve(docNodeResponse({ content: 'remote body' }, 'selftest-node-v2'));
+        };
+        try {
+          const session = docOpen(docMockNode('1', { content: 'a' }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'local body');
+          assert(await docStage(), '暂存应成功');
+          assert((await commitTransaction()) === false, '冲突提交应返回失败');
+          assert(session.submit === 'conflict', '会话应进入 conflict 态，实际 ' + session.submit);
+          assert(txOperations.length === 1, '冲突必须保留队列');
+          assert(!document.getElementById('docConflictOverlay').hidden, '冲突弹层应打开');
+          const shown = document.getElementById('docConflictDiff').textContent;
+          assert(shown.includes('remote body') && shown.includes('local body'), '三方对照必须同时展示远端与本地');
+          document.getElementById('docConflictRebase').click();
+          assert(session.basePayload.content === 'remote body', '以远端为基后基线应更新');
+          assert(session.version === 'selftest-node-v2', '以远端为基后版本应更新');
+          assert(txOperations.length === 0, '重建基线后旧暂存必须撤回');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：网络失败标记结果待确认，重读一致后确认已提交', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        let mode = 'network';
+        window.fetch = (url, opts) => {
+          if (String(url).includes('/v1/transactions')) return Promise.reject(new TypeError('network down'));
+          if (mode === 'confirmed') return Promise.resolve(docNodeResponse({ content: 'late body' }));
+          return Promise.resolve(docNodeResponse({ content: 'a' }));
+        };
+        try {
+          const session = docOpen(docMockNode('1', { content: 'a' }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'late body');
+          assert(await docStage(), '暂存应成功');
+          await commitTransaction();
+          assert(session.submit === 'outcomeUnknown', '网络失败应为 outcomeUnknown，实际 ' + session.submit);
+          assert(txOperations.length === 1, '结果待确认时必须保留队列');
+          mode = 'confirmed';
+          await docConfirmOutcome(session);
+          assert(session.submit === 'acknowledged', '重读一致后应确认已提交');
+          assert(txOperations.length === 0, '确认后队列应清空');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：只读状态不能绕过按钮暂存', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        window.fetch = () => Promise.resolve(docNodeResponse({ content: 'a' }));
+        try {
+          const session = docOpen(docMockNode('1', { content: 'a' }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'readonly attempt');
+          window.__docWorkspace.forceAccess('readonly');
+          const before = txOperations.length;
+          await docStage();
+          assert(txOperations.length === before, '只读状态不得暂存');
+          const editor = document.getElementById('docEditor');
+          assert(editor.readOnly === true, '只读状态输入区必须 readonly');
+          assert(document.getElementById('docStageBtn').disabled === true, '只读状态暂存按钮必须禁用');
+          window.__docWorkspace.forceAccess('editable');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：安全预览不执行 HTML，危险协议不生成链接', '文档工作区', async () => {
+        const host = document.createElement('div');
+        const payload = '<img src=x onerror="window.__docXss=1">\n\n<script>window.__docXss=1<\/script>\n\n[click](javascript:alert(1))\n\n[ok](https://example.com)';
+        docRenderMarkdown(payload, host);
+        assert(!host.querySelector('img'), '原始 <img> 不得成为节点');
+        assert(!host.querySelector('script'), '原始 <script> 不得成为节点');
+        assert(host.querySelectorAll('a[href^="javascript"]').length === 0, 'javascript: 协议不得生成链接');
+        assert(host.querySelectorAll('a[href^="https://example.com"]').length === 1, '安全链接应保留');
+        assert(!window.__docXss, '预览不得执行注入脚本');
+      });
+
+      addAssert('文档：同一节点已暂存时必须显式三选并保留其他入口字段', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        window.fetch = () => Promise.resolve(docNodeResponse({ content: 'a', keep: 2 }));
+        try {
+          stageTxOperation(
+            { op: 'updatePayload', id: 1, payload: { content: 'from other entry', keep: 2 } },
+            { before: { content: 'a', keep: 2 }, source: 'payload edit' }
+          );
+          const session = docOpen(docMockNode('1', { content: 'a', keep: 2 }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'mine');
+          const staged = await docStage();
+          assert(staged === false, '已有同节点暂存时必须先三选');
+          assert(!document.getElementById('docMergeOverlay').hidden, '合并弹层应打开');
+          document.getElementById('docMergeCombine').click();
+          assert(txOperations.length === 1, '合并后不得新增队列项');
+          assert(txOperations[0].payload.content === 'mine', '合并应应用本次正文');
+          assert(txOperations[0].payload.keep === 2, '合并必须保留其他入口的字段');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：脏标签关闭必须三选，取消后不丢会话', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        window.fetch = () => Promise.resolve(docNodeResponse({ content: 'a' }));
+        try {
+          const session = docOpen(docMockNode('1', { content: 'a' }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'dirty body');
+          docRequestClose(session.sessionId);
+          assert(!document.getElementById('docCloseOverlay').hidden, '脏标签关闭必须弹三选');
+          document.getElementById('docCloseCancel').click();
+          assert(docById(session.sessionId), '选择继续编辑后会话必须保留');
+          assert(document.getElementById('docCloseOverlay').hidden, '取消后弹层必须关闭');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：浏览器草稿可恢复，损坏草稿被丢弃', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        const originalStorage = docStorage;
+        const store = new Map();
+        window.__docTestAllowDrafts = true;
+        docStorage = {
+          get: (k) => (store.has(k) ? store.get(k) : null),
+          set: (k, v) => { store.set(k, v); return true; },
+          remove: (k) => { store.delete(k); },
+        };
+        window.fetch = () => Promise.resolve(docNodeResponse({ content: 'a' }));
+        try {
+          const session = docOpen(docMockNode('1', { content: 'a' }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'draft body');
+          docPersistDraft(session);
+          const key = docStorageKeyOf(session.key);
+          assert(store.has(key), '脏草稿必须落盘');
+          docReset();
+          const reopened = docOpen(docMockNode('1', { content: 'a' }), 'node');
+          assert(reopened.restored === true, '重新打开必须恢复草稿');
+          assert(reopened.draftPayload.content === 'draft body', '恢复的草稿内容必须一致');
+          // 损坏草稿：schema 不符时必须丢弃，不能拿旧快照冒充
+          docReset();
+          store.set(key, JSON.stringify({ schema: 99, nodeId: '1', draftText: '{}' }));
+          const broken = docOpen(docMockNode('1', { content: 'a' }), 'node');
+          assert(broken.restored === false, '损坏草稿不得恢复');
+          assert(!store.has(key), '损坏草稿必须从存储移除');
+        } finally {
+          window.fetch = originalFetch;
+          docStorage = originalStorage;
+          window.__docTestAllowDrafts = false;
+          docReset();
+        }
+      });
+
+      addAssert('文档：迟到读取不覆盖当前会话', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        let release = null;
+        let first = true;
+        window.fetch = (url) => {
+          if (first) {
+            first = false;
+            return new Promise((resolve) => { release = () => resolve(docNodeResponse({ content: 'stale remote' }, 'v-stale')); });
+          }
+          return Promise.resolve(docNodeResponse({ content: 'fresh remote' }, 'v-fresh'));
+        };
+        try {
+          const session = docOpen(docMockNode('1', { content: 'fresh remote' }), 'node');
+          // 打开后立刻换成另一个节点的会话，模拟用户切走
+          const second = docCreateSession(docMockNode('2', { content: 'other' }), 'node');
+          docSessions.push(second);
+          docActiveSessionId = second.sessionId;
+          session.requestSeq += 1;   // 让第一个请求成为迟到响应
+          release();
+          await new Promise(r => setTimeout(r, 30));
+          assert(session.load === 'loading' || session.version === null || session.version === 'v-stale',
+            '迟到响应不得改写新会话状态');
+          assert(second.draftPayload.content === 'other', '当前会话草稿不得被旧响应覆盖');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
         }
       });
 
