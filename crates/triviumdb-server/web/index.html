@@ -4686,7 +4686,7 @@
       border-bottom: 1px solid var(--dw-line);
       font-size: 12px;
     }
-    .dw-inspect-section { padding: 14px; border-bottom: 1px solid var(--dw-line); }
+    .dw-inspect-section { padding: 14px; border-bottom: 1px solid var(--dw-line); min-width: 0; }
     .dw-inspect-section h2 {
       margin: 0 0 10px;
       font-size: 11px;
@@ -4712,7 +4712,7 @@
     .dw-identity small { display: block; margin-top: 3px; font-size: 10px; color: var(--text-muted); }
     .dw-props { display: grid; grid-template-columns: 62px 1fr; gap: 8px 6px; margin: 0; font-size: 11px; }
     .dw-props dt { color: var(--text-muted); }
-    .dw-props dd { margin: 0; word-break: break-all; }
+    .dw-props dd { margin: 0; min-width: 0; word-break: break-all; overflow-wrap: anywhere; }
     .dw-mapping {
       display: flex;
       align-items: center;
@@ -4733,7 +4733,7 @@
       font: 10px var(--font-sans);
       cursor: pointer;
     }
-    .dw-note { margin: 8px 0 0; font-size: 10px; line-height: 1.8; color: var(--text-muted); }
+    .dw-note { margin: 8px 0 0; font-size: 10px; line-height: 1.8; color: var(--text-muted); overflow-wrap: anywhere; }
     .dw-outline { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
     .dw-outline button {
       text-align: left;
@@ -4802,6 +4802,78 @@
     .dw-diff .dw-diff-line.changed { background: var(--dw-wash); border-left: 2px solid var(--primary); }
     .dw-diff .dw-diff-line.changed.before { background: rgba(228, 189, 124, 0.1); border-left-color: var(--warning); }
     .dw-narrow-only { display: none; }
+
+    /* ===== 差异视图（GitHub split 风格，纯文本） ===== */
+    .dw-diff-pane { display: none; min-width: 0; min-height: 0; flex-direction: column; }
+    .dw-editor-area[data-view="diff"] { grid-template-columns: 1fr; }
+    .dw-editor-area[data-view="diff"] .dw-source-pane,
+    .dw-editor-area[data-view="diff"] .dw-preview-pane { display: none; }
+    .dw-editor-area[data-view="diff"] .dw-diff-pane { display: flex; }
+    .dw-diffview { flex: 1; min-height: 0; overflow: auto; font: 12px/20px var(--font-mono); }
+    .dw-diff-head {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--dw-raised);
+      border-bottom: 1px solid var(--dw-line);
+    }
+    .dw-diff-head span {
+      padding: 5px 12px;
+      font-size: 10px;
+      letter-spacing: 0.6px;
+      color: var(--text-muted);
+    }
+    .dw-diff-head span + span { border-left: 1px solid var(--dw-line); }
+    .dw-diff-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) 48px minmax(0, 1fr); }
+    .dw-diff-row > .dw-ln,
+    .dw-diff-row > .dw-code { min-height: 20px; }
+    .dw-diff-row > .dw-ln {
+      padding: 0 8px;
+      text-align: right;
+      color: var(--text-muted);
+      opacity: 0.6;
+      background: var(--dw-inset);
+      user-select: none;
+      border-right: 1px solid var(--dw-line);
+    }
+    .dw-diff-row > .dw-code {
+      padding: 0 10px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--dw-doc);
+    }
+    .dw-diff-row > .dw-code.empty { background: rgba(127, 127, 127, 0.06); }
+    .dw-diff-row.add > .dw-code.right { background: rgba(63, 185, 80, 0.16); }
+    .dw-diff-row.del > .dw-code.left { background: rgba(248, 81, 73, 0.15); }
+    .dw-diff-row.mod > .dw-code.left { background: rgba(248, 81, 73, 0.15); }
+    .dw-diff-row.mod > .dw-code.right { background: rgba(63, 185, 80, 0.16); }
+    .dw-diff-row.add > .dw-ln.right { color: var(--success); opacity: 1; }
+    .dw-diff-row.del > .dw-ln.left { color: var(--danger); opacity: 1; }
+    .dw-diff-empty { padding: 22px 16px; font-size: 11px; color: var(--text-muted); }
+    .dw-diff-note { padding: 6px 12px; font-size: 10px; color: var(--warning); border-bottom: 1px solid var(--dw-line); }
+
+    /* 审阅弹层：文档差异需要更宽的容器 */
+    #txReviewOverlay .import-panel { width: min(1180px, 96vw); }
+    #txReviewOverlay .import-body { max-height: min(70vh, 720px); }
+    .dw-review-item .dw-diffview {
+      border: 1px solid var(--dw-line);
+      border-radius: 6px;
+      margin: 8px 0;
+    }
+    .dw-review-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 2px 0 6px;
+      font: 10px var(--font-mono);
+      color: var(--text-muted);
+    }
+    .dw-review-stat.add { color: var(--success); }
+    .dw-review-stat.del { color: var(--danger); }
+    .dw-doc-actions .btn.dw-armed { color: var(--danger); border-color: var(--danger); }
 
     @media (min-width: 1600px) {
       .dw-shell { grid-template-columns: 248px minmax(0, 1fr) 288px; }
@@ -5578,6 +5650,8 @@
                   </div>
                 </div>
                 <div class="dw-doc-actions">
+                  <button class="btn" type="button" id="docRevertBtn" data-i18n="doc.revert">还原</button>
+                  <button class="btn" type="button" id="docUnstageBtn" data-i18n="doc.unstage">取消暂存</button>
                   <button class="btn" type="button" id="docExportBtn" data-i18n="doc.export">导出草稿</button>
                   <button class="btn btn-primary" type="button" id="docStageBtn">暂存更改 <span class="dw-kbd-hint">Ctrl S</span></button>
                 </div>
@@ -5597,6 +5671,7 @@
                   <div class="dw-seg" role="group" aria-label="编辑器布局">
                     <button type="button" data-doc-view="edit" data-i18n="doc.view.edit">编辑</button>
                     <button type="button" data-doc-view="split" class="active" data-i18n="doc.view.split">分屏</button>
+                    <button type="button" data-doc-view="diff" data-i18n="doc.view.diff">差异</button>
                     <button type="button" data-doc-view="preview" data-i18n="doc.view.preview">预览</button>
                   </div>
                 </div>
@@ -5637,6 +5712,13 @@
                 <section class="dw-preview-pane" aria-label="内容预览">
                   <div class="dw-pane-head"><span id="docPreviewLabel">LIVE PREVIEW</span><span data-i18n="doc.preview.sync">与当前草稿同步</span></div>
                   <article class="dw-rendered" id="docPreview"></article>
+                </section>
+                <section class="dw-diff-pane" id="docDiffPane" aria-label="与基线的差异">
+                  <div class="dw-pane-head">
+                    <span id="docDiffLabel" data-i18n="doc.diff.plain">纯文本</span>
+                    <span id="docDiffStats"></span>
+                  </div>
+                  <div class="dw-diffview" id="docDiffView"></div>
                 </section>
               </div>
 
@@ -7176,6 +7258,29 @@
         'doc.err.loadFailed': '读取节点失败：{msg}',
         'doc.err.commitFailed': '提交失败：{msg}',
         'doc.err.sizeLimit': 'payload 超过请求体上限（4 MiB），请缩小文档或改用更小的字段',
+        'doc.err.pendingDelete': '该节点有待提交的删除操作，请先在审阅中处理，文档不会覆盖它',
+        'doc.err.noVersion': '未能确认节点版本，暂不能暂存：没有版本前置条件的写入会静默覆盖他人改动',
+        'doc.err.noTxMode': '写入审阅未能开启，暂存已取消',
+        'doc.err.outcomeMismatch': '服务端内容与本次提交不一致：草稿保留，可重新审阅后再提交',
+        'doc.toast.conflictRebase': '已以远端为基重建；该节点的旧暂存已撤回，请合并后重新暂存',
+        'doc.review.bodyDiff': '正文行级差异',
+        'doc.view.diff': '差异',
+        'doc.diff.base': '基线',
+        'doc.diff.current': '当前草稿',
+        'doc.diff.added': '+{n} 行',
+        'doc.diff.removed': '−{n} 行',
+        'doc.diff.empty': '与基线一致，没有差异',
+        'doc.diff.truncated': '差异过大，已按整段替换展示（未做逐行对齐）',
+        'doc.diff.plain': '纯文本',
+        'doc.unstage': '取消暂存',
+        'doc.unstage.toast': '已取消暂存，更改仍保留在草稿中',
+        'doc.unstage.blocked': '该节点的待提交项不是本文档的修改，请到审阅中处理',
+        'doc.revert': '还原',
+        'doc.revert.armed': '再点一次还原',
+        'doc.revert.toast': '已还原到上次提交的内容，并撤回该节点的暂存',
+        'doc.review.stats': '{add} 行新增 · {del} 行删除',
+        'doc.review.noDiff': '正文没有变化，下面是字段级差异',
+        'doc.review.fieldDiff': '字段级差异',
         'doc.err.prefix': '文档',
       },
       en: {
@@ -7761,6 +7866,23 @@
         'doc.err.outcomeMismatch': 'The server content differs from this submission: the draft is kept, review it and commit again',
         'doc.toast.conflictRebase': 'Rebased onto remote; the previous staging for this node was withdrawn, merge and stage again',
         'doc.review.bodyDiff': 'Body line diff',
+        'doc.view.diff': 'Diff',
+        'doc.diff.base': 'Baseline',
+        'doc.diff.current': 'Current draft',
+        'doc.diff.added': '+{n} lines',
+        'doc.diff.removed': '−{n} lines',
+        'doc.diff.empty': 'Identical to the baseline',
+        'doc.diff.truncated': 'Diff too large; shown as a whole-block replacement without line alignment',
+        'doc.diff.plain': 'Plain text',
+        'doc.unstage': 'Unstage',
+        'doc.unstage.toast': 'Unstaged; the changes stay in the draft',
+        'doc.unstage.blocked': 'The pending item for this node is not from this document; use the review queue',
+        'doc.revert': 'Revert',
+        'doc.revert.armed': 'Click again to revert',
+        'doc.revert.toast': 'Reverted to the last committed content and withdrew this node staging',
+        'doc.review.stats': '{add} added · {del} removed',
+        'doc.review.noDiff': 'The body is unchanged; field-level differences follow',
+        'doc.review.fieldDiff': 'Field-level diff',
         'doc.err.prefix': 'Document',
       }
     };
@@ -11593,6 +11715,8 @@ RETURN doc, t</div>
       lastGridCtxPoint = { x: clientX, y: clientY };
       const cell = gridActiveCell;
       gridCtxNode = cell ? nodeFromGridCell(cell.idx, cell.key) : null;
+      // 右键行号列（key='#'）时也应按整行解析节点，否则同一个节点行会少掉编辑/文档/删除三项
+      if (!gridCtxNode && cell && gridDataRows) gridCtxNode = nodeFromGridRow(gridDataRows[cell.idx]);
       menu.replaceChildren();
       const add = (act, text, hint) => {
         const btn = document.createElement('button');
@@ -11621,6 +11745,7 @@ RETURN doc, t</div>
       if (gridCtxNode) {
         sep();
         add('edit', t('grid.editPayload'));
+        add('doc', t('grid.openDocument'));
         const armed = performance.now() < gridDeleteArmedUntil;
         add('delete', armed
           ? t('grid.deleteConfirm', { id: gridCtxNode.id })
@@ -20087,6 +20212,7 @@ RETURN doc, t</div>
     let docMergeTarget = null;
     let docConflictSessionId = null;
     let docFindState = { query: '', matches: [], index: -1 };
+    let docRevertArmedUntil = 0;
     let docCommitKey = null;
     let docCommitKeySig = '';
     let docDrawerNode = null;
@@ -20641,6 +20767,18 @@ RETURN doc, t</div>
       }
       const exportBtn = document.getElementById('docExportBtn');
       if (exportBtn) exportBtn.disabled = session.load === 'loading';
+      const revert = document.getElementById('docRevertBtn');
+      if (revert) {
+        const armed = performance.now() < docRevertArmedUntil;
+        revert.textContent = armed ? t('doc.revert.armed') : t('doc.revert');
+        revert.disabled = !docIsDirty(session) && !session.staged;
+        revert.classList.toggle('dw-armed', armed);
+      }
+      const unstage = document.getElementById('docUnstageBtn');
+      if (unstage) {
+        const queued = docQueuedOpFor(session.nodeId);
+        unstage.disabled = !queued || queued.op !== 'updatePayload';
+      }
       const modeBody = document.getElementById('docModeBody');
       const modeJson = document.getElementById('docModeJson');
       if (modeBody) {
@@ -20693,6 +20831,7 @@ RETURN doc, t</div>
       docRenderGutter(value);
       docRenderPreview(session, jsonMode, body);
       docRenderOutline(session, body);
+      if (docViewMode === 'diff') docRenderDiffPane(session);
       docUpdateCursor();
       const lossy = document.getElementById('docLossyHint');
       if (lossy) {
@@ -21048,6 +21187,7 @@ RETURN doc, t</div>
         const body = docReadBody(target.draftPayload, target.pointer);
         docRenderPreview(target, target.editorMode === 'json', body);
         docRenderOutline(target, body);
+        if (docViewMode === 'diff') docRenderDiffPane(target);
       }, 220);
     }
     // 轻量外壳：行号 / 光标 / 空态 / 只读态，不重建 Markdown 预览与节点列表
@@ -21153,6 +21293,43 @@ RETURN doc, t</div>
       docRender();
       const editor = document.getElementById('docEditor');
       if (editor) editor.focus();
+    }
+
+    // 取消暂存：只撤回待提交项，草稿继续留在编辑器里（与「还原」区分）
+    function docUnstage() {
+      const session = docActive();
+      if (!session) return;
+      const queued = docQueuedOpFor(session.nodeId);
+      if (!queued || queued.op !== 'updatePayload') {
+        showToast(t('doc.unstage.blocked'));
+        return;
+      }
+      const at = txOperations.indexOf(queued);
+      if (at >= 0) txOperations.splice(at, 1);
+      session.staged = null;
+      session.submit = 'idle';
+      syncTxBar();
+      docRender();
+      docPersistDraft(session);
+      showToast(t('doc.unstage.toast'));
+    }
+
+    // 还原：丢弃本地草稿并撤回该节点的暂存，回到上次提交的内容（两步确认，不用原生 confirm）
+    function docRevert() {
+      const session = docActive();
+      if (!session) return;
+      if (performance.now() > docRevertArmedUntil) {
+        docRevertArmedUntil = performance.now() + 4000;
+        docRenderHead(session);
+        setTimeout(() => {
+          const current = docActive();
+          if (current) docRenderHead(current);
+        }, 4200);
+        return;
+      }
+      docRevertArmedUntil = 0;
+      docDiscardChanges(session);
+      showToast(t('doc.revert.toast'));
     }
 
     function docFormatJson() {
@@ -21786,58 +21963,266 @@ RETURN doc, t</div>
       }
     }
 
-    // ---------- 审阅差异：正文按行展示 ----------
-    function docLineDiffSides(before, after) {
-      const left = String(before).split('\n');
-      const right = String(after).split('\n');
-      let prefix = 0;
-      let suffix = 0;
-      while (prefix < Math.min(left.length, right.length) && left[prefix] === right[prefix]) prefix += 1;
-      while (suffix < Math.min(left.length, right.length) - prefix
-        && left[left.length - 1 - suffix] === right[right.length - 1 - suffix]) suffix += 1;
-      const side = (lines, extra) => lines.map((line, index) => {
-        const span = document.createElement('span');
-        span.className = 'dw-diff-line' + (extra ? ' ' + extra : '')
-          + (index >= prefix && index < lines.length - suffix ? ' changed' : '');
-        span.textContent = line || ' ';
-        return span;
+    // ---------- 差异引擎（GitHub split 风格，纯文本） ----------
+    const DOC_DIFF_CELL_LIMIT = 4000000;
+
+    // 行级 LCS；超大文本直接退化为「整段删除 + 整段新增」，保证不卡死并如实标注。
+    function docLcsOps(a, b) {
+      const n = a.length;
+      const m = b.length;
+      if (!n && !m) return { ops: [], truncated: false };
+      if (n * m > DOC_DIFF_CELL_LIMIT) {
+        const ops = [];
+        for (let i = 0; i < n; i += 1) ops.push({ t: 'del', ai: i });
+        for (let j = 0; j < m; j += 1) ops.push({ t: 'add', bi: j });
+        return { ops, truncated: true };
+      }
+      const width = m + 1;
+      const dp = new Uint32Array((n + 1) * width);
+      for (let i = n - 1; i >= 0; i -= 1) {
+        for (let j = m - 1; j >= 0; j -= 1) {
+          dp[i * width + j] = a[i] === b[j]
+            ? dp[(i + 1) * width + (j + 1)] + 1
+            : Math.max(dp[(i + 1) * width + j], dp[i * width + (j + 1)]);
+        }
+      }
+      const ops = [];
+      let i = 0;
+      let j = 0;
+      while (i < n && j < m) {
+        if (a[i] === b[j]) { ops.push({ t: 'ctx', ai: i, bi: j }); i += 1; j += 1; }
+        else if (dp[(i + 1) * width + j] >= dp[i * width + (j + 1)]) { ops.push({ t: 'del', ai: i }); i += 1; }
+        else { ops.push({ t: 'add', bi: j }); j += 1; }
+      }
+      while (i < n) { ops.push({ t: 'del', ai: i }); i += 1; }
+      while (j < m) { ops.push({ t: 'add', bi: j }); j += 1; }
+      return { ops, truncated: false };
+    }
+
+    // 输出左右成对的行：ctx 两边都有；mod 左边旧、右边新；del/add 只有一边。
+    function docDiffRows(before, after) {
+      const a = String(before == null ? '' : before).split('\n');
+      const b = String(after == null ? '' : after).split('\n');
+      let start = 0;
+      while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+      let endA = a.length;
+      let endB = b.length;
+      while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) { endA -= 1; endB -= 1; }
+      const rows = [];
+      for (let i = 0; i < start; i += 1) {
+        rows.push({ type: 'ctx', left: { no: i + 1, text: a[i] }, right: { no: i + 1, text: b[i] } });
+      }
+      const mid = docLcsOps(a.slice(start, endA), b.slice(start, endB));
+      let added = 0;
+      let removed = 0;
+      let k = 0;
+      while (k < mid.ops.length) {
+        const op = mid.ops[k];
+        if (op.t === 'ctx') {
+          rows.push({
+            type: 'ctx',
+            left: { no: start + op.ai + 1, text: a[start + op.ai] },
+            right: { no: start + op.bi + 1, text: b[start + op.bi] },
+          });
+          k += 1;
+          continue;
+        }
+        const dels = [];
+        const adds = [];
+        while (k < mid.ops.length && mid.ops[k].t === 'del') { dels.push(mid.ops[k].ai); k += 1; }
+        while (k < mid.ops.length && mid.ops[k].t === 'add') { adds.push(mid.ops[k].bi); k += 1; }
+        const pairs = Math.max(dels.length, adds.length);
+        for (let x = 0; x < pairs; x += 1) {
+          const ai = dels[x];
+          const bi = adds[x];
+          if (ai !== undefined && bi !== undefined) {
+            rows.push({
+              type: 'mod',
+              left: { no: start + ai + 1, text: a[start + ai] },
+              right: { no: start + bi + 1, text: b[start + bi] },
+            });
+            added += 1;
+            removed += 1;
+          } else if (ai !== undefined) {
+            rows.push({ type: 'del', left: { no: start + ai + 1, text: a[start + ai] }, right: null });
+            removed += 1;
+          } else {
+            rows.push({ type: 'add', left: null, right: { no: start + bi + 1, text: b[start + bi] } });
+            added += 1;
+          }
+        }
+      }
+      for (let i = 0; i < a.length - endA; i += 1) {
+        rows.push({
+          type: 'ctx',
+          left: { no: endA + i + 1, text: a[endA + i] },
+          right: { no: endB + i + 1, text: b[endB + i] },
+        });
+      }
+      return { rows, added, removed, truncated: mid.truncated };
+    }
+
+    function docBuildDiffView(before, after) {
+      const diff = docDiffRows(before, after);
+      const box = document.createElement('div');
+      box.className = 'dw-diffview';
+      const head = document.createElement('div');
+      head.className = 'dw-diff-head';
+      const leftTitle = document.createElement('span');
+      leftTitle.textContent = t('doc.diff.base');
+      const rightTitle = document.createElement('span');
+      rightTitle.textContent = t('doc.diff.current');
+      head.append(leftTitle, rightTitle);
+      box.appendChild(head);
+      if (diff.truncated) {
+        const note = document.createElement('div');
+        note.className = 'dw-diff-note';
+        note.textContent = t('doc.diff.truncated');
+        box.appendChild(note);
+      }
+      const changed = diff.rows.some(row => row.type !== 'ctx');
+      if (!changed) {
+        const empty = document.createElement('div');
+        empty.className = 'dw-diff-empty';
+        empty.textContent = t('doc.diff.empty');
+        box.appendChild(empty);
+        return { box, diff, changed };
+      }
+      const body = document.createElement('div');
+      diff.rows.forEach((row) => {
+        const line = document.createElement('div');
+        line.className = 'dw-diff-row ' + row.type;
+        const mkNo = (side) => {
+          const el = document.createElement('span');
+          el.className = 'dw-ln ' + side;
+          el.textContent = row[side] ? String(row[side].no) : '';
+          return el;
+        };
+        const mkCode = (side) => {
+          const el = document.createElement('span');
+          el.className = 'dw-code ' + side + (row[side] ? '' : ' empty');
+          el.textContent = row[side] ? row[side].text : '';
+          return el;
+        };
+        line.append(mkNo('left'), mkCode('left'), mkNo('right'), mkCode('right'));
+        body.appendChild(line);
       });
-      return { before: side(left, 'before'), after: side(right, '') };
+      box.appendChild(body);
+      return { box, diff, changed };
     }
-    function docBuildBodyDiff(before, after) {
-      const details = document.createElement('details');
-      const summary = document.createElement('summary');
-      summary.textContent = t('doc.review.bodyDiff');
-      summary.style.cssText = 'cursor:pointer;font-size:11px;color:var(--text-muted);margin:6px 0';
-      const grid = document.createElement('div');
-      grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px';
-      const sides = docLineDiffSides(before, after);
-      const pane = (title, nodes) => {
-        const box = document.createElement('div');
-        const head = document.createElement('div');
-        head.textContent = title;
-        head.style.cssText = 'font-size:10px;color:var(--text-muted);padding:2px 4px';
-        const pre = document.createElement('pre');
-        pre.style.cssText = 'margin:0;max-height:220px;overflow:auto;font:11px/1.7 var(--font-mono);white-space:pre-wrap';
-        nodes.forEach(n => pre.appendChild(n));
-        box.append(head, pre);
-        return box;
-      };
-      grid.append(pane(t('doc.conflict.base'), sides.before), pane(t('doc.conflict.local'), sides.after));
-      details.append(summary, grid);
-      return details;
+
+    function docDiffSource(session) {
+      if (session.editorMode === 'json') {
+        return {
+          before: JSON.stringify(session.basePayload, null, 2),
+          after: session.draftText,
+        };
+      }
+      const before = docBodyTextOf(session.basePayload, session.pointer);
+      const after = docBodyTextOf(session.draftPayload, session.pointer);
+      return { before: before == null ? '' : before, after: after == null ? '' : after };
     }
-    // 审阅项：文档操作额外展示正文行级差异；JSON 差异仍走既有字段级展示。
+
+    function docRenderDiffPane(session) {
+      const host = document.getElementById('docDiffView');
+      if (!host) return;
+      host.replaceChildren();
+      const src = docDiffSource(session);
+      const { box, diff, changed } = docBuildDiffView(src.before, src.after);
+      host.appendChild(box);
+      const stats = document.getElementById('docDiffStats');
+      if (stats) {
+        stats.textContent = changed
+          ? t('doc.diff.added', { n: diff.added }) + '  ' + t('doc.diff.removed', { n: diff.removed })
+          : t('doc.diff.empty');
+      }
+      const label = document.getElementById('docDiffLabel');
+      if (label) {
+        label.textContent = session.editorMode === 'json'
+          ? 'JSON · ' + t('doc.diff.plain') : t('doc.diff.plain');
+      }
+    }
+
+    // 审阅项：文档操作直接用 split diff 取代原始 JSON 行；其他字段差异折叠在下方。
     const docOriginalTxReviewItem = txReviewItem;
-    txReviewItem = function (op) {
-      const item = docOriginalTxReviewItem(op);
+    function docReviewItem(op) {
       const meta = txOpMeta.get(op) || {};
-      if (op.op === 'updatePayload' && meta.docSessionId
-        && typeof meta.bodyBefore === 'string' && typeof meta.bodyAfter === 'string'
-        && meta.bodyBefore !== meta.bodyAfter) {
-        item.appendChild(docBuildBodyDiff(meta.bodyBefore, meta.bodyAfter));
+      const item = document.createElement('div');
+      item.className = 'review-item dw-review-item';
+      const head = document.createElement('div');
+      head.className = 'review-item-head';
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = txOperationKind(op);
+      const title = document.createElement('strong');
+      title.textContent = txOperationSummary(op);
+      head.append(badge, title);
+      if (meta.source) {
+        const source = document.createElement('span');
+        source.className = 'badge';
+        source.textContent = meta.source;
+        head.appendChild(source);
+      }
+      const plain = document.createElement('span');
+      plain.className = 'badge';
+      plain.textContent = t('doc.diff.plain');
+      head.appendChild(plain);
+      item.appendChild(head);
+
+      const metaRow = document.createElement('div');
+      metaRow.className = 'dw-review-meta';
+      const target = document.createElement('span');
+      target.textContent = '#' + op.id + ' · ' + (meta.pointer || DOC_POINTER_DEFAULT);
+      metaRow.appendChild(target);
+      item.appendChild(metaRow);
+
+      const before = typeof meta.bodyBefore === 'string' ? meta.bodyBefore : '';
+      const after = typeof meta.bodyAfter === 'string' ? meta.bodyAfter : '';
+      const { box, diff, changed } = docBuildDiffView(before, after);
+      if (changed) {
+        const addStat = document.createElement('span');
+        addStat.className = 'dw-review-stat add';
+        addStat.textContent = t('doc.diff.added', { n: diff.added });
+        const delStat = document.createElement('span');
+        delStat.className = 'dw-review-stat del';
+        delStat.textContent = t('doc.diff.removed', { n: diff.removed });
+        metaRow.append(addStat, delStat);
+        item.appendChild(box);
+        // 长文档默认把第一处变更滚进视野：先看改了哪里，而不是从头看一遍未变的正文。
+        setTimeout(() => {
+          const first = box.querySelector('.dw-diff-row.add, .dw-diff-row.del, .dw-diff-row.mod');
+          if (first && first.isConnected) first.scrollIntoView({ block: 'center' });
+        }, 30);
+      } else {
+        const note = document.createElement('p');
+        note.className = 'nav-section-hint';
+        note.textContent = t('doc.review.noDiff');
+        item.appendChild(note);
+      }
+
+      const lines = payloadDiffLines(meta.before, op.payload);
+      if (lines.length) {
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = t('doc.review.fieldDiff');
+        summary.style.cssText = 'cursor:pointer;font-size:11px;color:var(--text-muted);margin:6px 0';
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'max-height:220px;overflow:auto';
+        lines.forEach((line) => {
+          const span = document.createElement('span');
+          span.style.display = 'block';
+          span.style.color = line.sign === '-' ? 'var(--danger)' : 'var(--success)';
+          span.textContent = line.sign + ' ' + line.text;
+          pre.appendChild(span);
+        });
+        details.append(summary, pre);
+        item.appendChild(details);
       }
       return item;
+    }
+    txReviewItem = function (op) {
+      if (op.op === 'updatePayload' && (txOpMeta.get(op) || {}).docSessionId) return docReviewItem(op);
+      return docOriginalTxReviewItem(op);
     };
 
     // ---------- 接线 ----------
@@ -21878,6 +22263,8 @@ RETURN doc, t</div>
       bind('docModeBody', () => docSetEditorMode('body'));
       bind('docModeJson', () => docSetEditorMode('json'));
       bind('docStageBtn', () => docStage());
+      bind('docUnstageBtn', docUnstage);
+      bind('docRevertBtn', docRevert);
       bind('docExportBtn', docExport);
       bind('docFormatJson', docFormatJson);
       bind('docCreateBody', docCreateBody);
@@ -21911,6 +22298,11 @@ RETURN doc, t</div>
         btn.addEventListener('click', () => {
           docViewMode = btn.dataset.docView;
           docRender();
+          if (docViewMode === 'diff') {
+            const host = document.getElementById('docDiffView');
+            const first = host && host.querySelector('.dw-diff-row.add, .dw-diff-row.del, .dw-diff-row.mod');
+            if (first && first.isConnected) first.scrollIntoView({ block: 'center' });
+          }
         });
       });
       const format = document.getElementById('docFormat');
@@ -26106,6 +26498,108 @@ RETURN doc, t</div>
           window.fetch = originalFetch;
           docStorage = originalStorage;
           window.__docTestAllowDrafts = false;
+          docReset();
+        }
+      });
+
+      addAssert('文档：行级差异按 GitHub split 分类（新增/删除/修改）', '文档工作区', async () => {
+        const diff = docDiffRows('a\nb\nc', 'a\nB\nc\nd');
+        const types = diff.rows.map(r => r.type).join(',');
+        assert(types === 'ctx,mod,ctx,add', '差异行类型应为 ctx,mod,ctx,add，实际 ' + types);
+        assert(diff.added === 2 && diff.removed === 1, '统计应为 +2/-1，实际 +' + diff.added + '/-' + diff.removed);
+        assert(diff.rows[1].left.text === 'b' && diff.rows[1].right.text === 'B',
+          '修改行左应为旧值、右应为新值');
+        const same = docDiffRows('x\ny', 'x\ny');
+        assert(same.rows.every(r => r.type === 'ctx'), '无变化时不应产生差异行');
+        const truncated = docDiffRows(
+          Array(3000).fill('a').join('\n'),
+          Array(3000).fill('b').join('\n'),
+        );
+        assert(truncated.truncated === true, '超大差异必须退化为整段替换并如实标记');
+      });
+
+      addAssert('文档：取消暂存只撤回队列，草稿保留', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        window.fetch = () => Promise.resolve(docNodeResponse({ content: 'a' }));
+        try {
+          const session = docOpen(docMockNode('1', { content: 'a' }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'draft kept');
+          assert(await docStage(), '暂存应成功');
+          assert(txOperations.length === 1, '队列应为 1');
+          docUnstage();
+          assert(txOperations.length === 0, '取消暂存应移除队列项');
+          assert(session.draftPayload.content === 'draft kept', '取消暂存不得丢弃草稿');
+          assert(docIsDirty(session), '取消暂存后仍应是未暂存更改');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：还原需两步确认并回到基线、撤回暂存', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        window.fetch = () => Promise.resolve(docNodeResponse({ content: 'base' }));
+        try {
+          const session = docOpen(docMockNode('1', { content: 'base' }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'changed');
+          assert(await docStage(), '暂存应成功');
+          docRevert();
+          assert(session.draftPayload.content === 'changed', '第一次点击只进入待确认，不得直接还原');
+          docRevert();
+          assert(session.draftPayload.content === 'base', '第二次点击应还原到基线');
+          assert(txOperations.length === 0, '还原应撤回该节点的暂存');
+          assert(!docIsDirty(session), '还原后不应再有未暂存更改');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：审阅项使用左右差异而非原始 JSON 行', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        window.fetch = () => Promise.resolve(docNodeResponse({ content: 'a\nb' }));
+        try {
+          const session = docOpen(docMockNode('1', { content: 'a\nb' }), 'node');
+          await waitFor(() => session.version, 2000, '文档版本读取');
+          docEdit(session, 'a\nB');
+          assert(await docStage(), '暂存应成功');
+          const host = document.createElement('div');
+          host.appendChild(docReviewItem(txOperations[0]));
+          assert(host.querySelector('.dw-review-item'), '应使用文档审阅项');
+          assert(host.querySelector('.dw-diffview'), '审阅项必须包含 split diff');
+          assert(host.querySelectorAll('.dw-diff-row.mod').length === 1, '应有 1 行修改对照');
+          assert(host.querySelector('.dw-review-stat.add') && host.querySelector('.dw-review-stat.del'),
+            '应有新增/删除行数统计');
+        } finally {
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      addAssert('文档：结果右键菜单必须提供「打开文档」', '文档工作区', async () => {
+        docReset();
+        try {
+          renderGrid([{ _: docMockNode('1', { content: 'a' }) }]);
+          const cell = [...document.querySelectorAll('#gridBody tr[data-row-index="0"] td[data-col-key]')]
+            .find(td => td.dataset.colKey !== '#');
+          assert(cell, '应有可右键的数据单元格');
+          const rect = cell.getBoundingClientRect();
+          cell.dispatchEvent(new MouseEvent('contextmenu', {
+            bubbles: true, cancelable: true, clientX: rect.left + 4, clientY: rect.top + 4,
+          }));
+          const menu = document.getElementById('gridCtxMenu');
+          assert(menu && !menu.hidden, '右键菜单应打开');
+          const acts = [...menu.querySelectorAll('button[data-ctx-act]')].map(b => b.dataset.ctxAct);
+          assert(acts.includes('doc'), '右键菜单必须包含 doc 项，实际 ' + acts.join(','));
+        } finally {
+          const menu = document.getElementById('gridCtxMenu');
+          if (menu) menu.hidden = true;
+          renderGrid([]);
           docReset();
         }
       });
