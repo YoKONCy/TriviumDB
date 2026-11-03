@@ -194,30 +194,9 @@ const shot = async (page, name) => {
   await page.screenshot({ path: path.join(OUT, `${String(shotIndex).padStart(2, '0')}-${name}.png`) });
 };
 
-async function waitForShell(page) {
-  await page.waitForFunction(() => window.__TRIVIUM_APP_READY === true, null, { timeout: 20000 });
-  // WebKit 的首个绘制帧可能晚于 load 数秒；GSAP 首帧前的可见样式不能证明入场动画完成。
-  await page.evaluate(() => {
-    window.__V41_SHELL_FRAMES_READY = false;
-    requestAnimationFrame(() => requestAnimationFrame(() => { window.__V41_SHELL_FRAMES_READY = true; }));
-  });
-  await page.waitForFunction(() => {
-    if (!window.__V41_SHELL_FRAMES_READY) return false;
-    const selectors = ['header.app-header', 'main.workspace'];
-    if (innerWidth > 900) selectors.push('aside.sidebar');
-    return selectors.every(selector => {
-      const style = getComputedStyle(document.querySelector(selector));
-      const matrix = new DOMMatrixReadOnly(style.transform);
-      return style.visibility === 'visible' && Number(style.opacity) > 0.999
-        && Math.abs(matrix.m41) < 0.1 && Math.abs(matrix.m42) < 0.1;
-    });
-  }, null, { timeout: 20000 });
-}
-
 async function newPage({ width = 1440, height = 900, theme = 'dark', lang = 'zh', reducedMotion = 'no-preference' } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, reducedMotion });
   const page = await context.newPage();
-  await page.bringToFront();
   const errors = [];
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => {
@@ -230,7 +209,9 @@ async function newPage({ width = 1440, height = 900, theme = 'dark', lang = 'zh'
     } catch (_) { /* ignore */ }
   }, { theme, lang });
   await page.goto(`${BASE}/ui`, { waitUntil: 'load' });
-  await waitForShell(page);
+  await page.waitForFunction(() => window.__TRIVIUM_APP_READY === true, null, { timeout: 20000 });
+  // 首屏 GSAP timeline 约 0.9s（autoAlpha 期间元素 visibility:hidden）：等动画结束再做 hit-test
+  await page.waitForTimeout(1000);
   return { context, page, errors };
 }
 
@@ -332,7 +313,8 @@ try {
     expect(Math.abs(before - 232) < 1, `侧栏默认宽度应为 232，实际 ${before}`);
     expect(Math.abs(dragged - 302) < 4, `拖拽 +70 后应约 302，实际 ${dragged}`);
     await page.reload({ waitUntil: 'load' });
-    await waitForShell(page);
+    await page.waitForFunction(() => window.__TRIVIUM_APP_READY === true);
+    await page.waitForTimeout(1100);   // GSAP 首屏 autoAlpha 结束前 focus 会落在 hidden 元素上
     expect(Math.abs((await widthOf()) - dragged) < 2, '刷新后应恢复拖拽宽度');
 
     await page.focus('#sidebarResize');
