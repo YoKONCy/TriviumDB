@@ -968,6 +968,109 @@ try {
     }
   }
 
+  // ---------- S12. 跨入口合并的节点版本保护（真实服务端） ----------
+  for (const [offset, mode] of ['combine', 'replace'].entries()) {
+    const id = 84001 + offset;
+    const baseline = { content: 'base', keep: 1 };
+    const seed = await request('POST', '/v1/transactions', {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operations: [{ op: 'insert', id, vector: Array(8).fill(0.1), payload: baseline }] }),
+    });
+    expect(seed.status === 200, `S12 ${mode}: 必须创建真实节点`);
+    const { context, page, errors } = await newPage();
+    try {
+      await page.evaluate(({ id, baseline }) => {
+        stageTxOperation({ op: 'updatePayload', id, payload: { content: 'grid', keep: 2 } },
+          { source: 'payload edit', before: baseline });
+        docOpen({ type: 'node', id: String(id), payload: baseline, vector: [] }, 'node');
+      }, { id, baseline });
+      await page.waitForFunction(() => !!docActive()?.version);
+      await page.locator('#docEditor').fill('document');
+      expect(!(await page.evaluate(() => docStage())), `S12 ${mode}: 合并前必须显式选择`);
+      await page.click(mode === 'combine' ? '#docMergeCombine' : '#docMergeReplace');
+      const external = { content: 'external', keep: 7, externalOnly: true };
+      const changed = await request('POST', '/v1/transactions', {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operations: [{ op: 'updatePayload', id, payload: external }] }),
+      });
+      expect(changed.status === 200, `S12 ${mode}: 外部写入必须完成`);
+      expect(!(await page.evaluate(() => commitTransaction())), `S12 ${mode}: 旧版本合并必须冲突`);
+      const read = await request('GET', `/v1/nodes/${id}`);
+      expect(read.status === 200 && read.json.node.payload.content === 'external'
+        && read.json.node.payload.keep === 7 && read.json.node.payload.externalOnly === true,
+      `S12 ${mode}: 合并提交不得覆盖任何远端字段`);
+      expect(await page.evaluate(() => docActive().submit === 'conflict' && txOperations.length === 1),
+        `S12 ${mode}: 冲突应保留待审阅队列`);
+      expect(errors.filter(entry => !/status of 409/.test(entry)).length === 0,
+        `S12 ${mode}: 仅允许本用例预期的 409 资源错误：${errors.join('; ')}`);
+    } finally { await context.close(); }
+  }
+
+  // ---------- S13. 响应丢失后的整批幂等确认（写入真实发生，不模拟数据库） ----------
+  {
+    const id = 84003;
+    const baseline = { content: 'base', keep: 1 };
+    const seed = await request('POST', '/v1/transactions', {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operations: [{ op: 'insert', id, vector: Array(8).fill(0.1), payload: baseline }] }),
+    });
+    expect(seed.status === 200, 'S13: 必须创建真实节点');
+    const { context, page, errors } = await newPage();
+    const attempts = [];
+    try {
+      await page.route('**/v1/transactions', async route => {
+        const response = await route.fetch();
+        const entry = {
+          body: route.request().postData(),
+          key: route.request().headers()['idempotency-key'],
+          status: response.status(),
+          response: await response.json(),
+        };
+        attempts.push(entry);
+        // 服务端完整提交后仅丢弃第一份响应；后续请求仍由真实服务端执行幂等检查。
+        if (attempts.length === 1) await route.abort('failed');
+        else await route.fulfill({ response });
+      });
+      await page.evaluate(({ id, baseline }) => docOpen({ type: 'node', id: String(id), payload: baseline, vector: [] }, 'node'), { id, baseline });
+      await page.waitForFunction(() => !!docActive()?.version);
+      await page.locator('#docEditor').fill('submitted');
+      await page.locator('#docEditor').press('Control+s');
+      await page.waitForFunction(() => !docActive().staging && txOperations.length > 0);
+      expect(await page.evaluate(() => txOperations.length === 1), 'S13: 一次 Ctrl+S 只能暂存一次');
+      await page.evaluate(() => stageTxOperation({ op: 'insert', vector: Array(8).fill(0.2),
+        payload: { type: 'pr85_replay_insert', content: 'created once' } }, { source: 'node import' }));
+      expect(!(await page.evaluate(() => commitTransaction())), 'S13: 响应丢失不得报告提交成功');
+      expect(attempts[0].status === 200 && attempts[0].response.createdIds.length === 1,
+        'S13: 必须证实服务端已提交并分配一个节点 ID');
+      await page.locator('#docEditor').fill('next draft');
+      expect(!(await page.evaluate(() => docStage())), 'S13: 未知批次不得被新草稿替换');
+      expect(await page.evaluate(() => docConfirmOutcome(docActive())), 'S13: 原事务确认应成功');
+      expect(attempts.length === 2 && attempts[0].body === attempts[1].body && attempts[0].key === attempts[1].key,
+        'S13: 必须保留原请求字节及幂等键');
+      expect(attempts[1].response.replayed === true
+        && JSON.stringify(attempts[1].response.createdIds) === JSON.stringify(attempts[0].response.createdIds),
+      'S13: 服务端必须重放同一批次的原始节点 ID');
+      const inserted = await request('GET', `/v1/nodes/${attempts[0].response.createdIds[0]}`);
+      expect(inserted.status === 200 && inserted.json.node.payload.type === 'pr85_replay_insert'
+        && inserted.json.node.payload.content === 'created once', 'S13: 插入节点的实际内容必须正确');
+      await runQuery(page, 'FIND {type: "pr85_replay_insert"} RETURN *');
+      expect(await page.evaluate(() => gridDataRows.length === 1), 'S13: 幂等确认不得重复插入节点');
+      expect(await page.evaluate(() => txOperations.length === 0 && docIsDirty(docActive())
+        && docActive().basePayload.content === 'submitted' && docActive().draftPayload.content === 'next draft'),
+      'S13: 整批确认后新草稿仍未提交');
+      expect(await page.evaluate(async () => await docStage() && await commitTransaction()),
+        'S13: 确认后新草稿应能作为独立批次提交');
+      expect(attempts.length === 3 && attempts[2].key !== attempts[1].key
+        && JSON.parse(attempts[2].body).operations.length === 1, 'S13: 新草稿使用新键且不重复导入');
+      const read = await request('GET', `/v1/nodes/${id}`);
+      expect(read.status === 200 && read.json.node.payload.content === 'next draft'
+        && read.json.node.payload.keep === 1, 'S13: 新批次必须真实落库并保留其他字段');
+      // 只允许本场景主动丢弃响应造成的 ERR_FAILED，其余异常仍失败。
+      expect(errors.filter(entry => !/^console: Failed to load resource: net::ERR_FAILED$/.test(entry)).length === 0,
+        `S13: 非预期浏览器异常：${errors.join('; ')}`);
+    } finally { await context.close(); }
+  }
+
   await browser.close();
   writeFileSync(path.join(OUT, 'report.json'), JSON.stringify({ checks, failures, base: BASE, browser: BROWSER }, null, 2));
   log(`${checks.length} checks, ${failures.length} failure(s), artifacts ${OUT}`);

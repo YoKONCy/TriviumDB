@@ -2,7 +2,7 @@
 
 Server 与 WebUI 处于 nightly 快速迭代阶段，布局、主题、交互和 HTTP 接口随开发调整。开发者按需要选择服务端自测、浏览器交互检查和截图记录。嵌入式 Core、Rust/Python/Node SDK 与 CLI 使用各自的正式验收流程。
 
-WebUI 位于 `crates/triviumdb-server/web/index.html`，由 Server 通过 `include_str!` 内嵌，页面修改后重新构建 Server。当前文档对应 0.9.0 + V4.1 R2 工作区验收。
+WebUI 位于 `crates/triviumdb-server/web/index.html`，由 Server 通过 `include_str!` 内嵌，页面修改后重新构建 Server。当前文档对应以 0.9.0 为基线的 V4.1 R2 工作区及节点文档扩展验收。
 
 ## 按需运行
 
@@ -72,6 +72,12 @@ Remove-Item Env:WEBUI_BROWSER
 ```
 
 单独运行报告的 `scope` 为 `write-boundaries`，不能将其检查数量当作完整 V4 或视觉验收。
+
+## 节点文档的提交与恢复回归
+
+节点文档的页内回归使用受控 HTTP 响应验证提交快照、跨入口合并/替换、编辑基线与 ETag 的绑定、未知事务的整批确认、幂等键生命周期和 Ctrl+S 去重。S12/S13 位于 `scripts/webui-v41-r2-checks.mjs`：S12 在真实 Server 上制造合并后的外部写入冲突；S13 先通过真实 Server 提交文档更新与自动分配 ID 的插入，再丢弃响应，以相同请求和幂等键确认，检查重放 ID、完整内容以及查询只返回一个插入节点。这里只控制响应交付，事务执行与幂等处理没有 mock。
+
+未知事务的确认操作保留整个原批次。内容相等不能替代事务身份；未知结果的重试若遇到冲突，应继续保留未知状态。页面刷新/关闭会丢失内存中的原请求，恢复的正文草稿不能作为整笔提交的完成证明。相关限制见[未发布变更](changes/unreleased.md)。
 
 ## 可选的截图比对
 

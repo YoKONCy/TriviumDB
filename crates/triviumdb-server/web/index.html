@@ -7227,7 +7227,9 @@
         'doc.banner.heldByOther': '此文档被其他编辑者占用（模拟状态，服务端未提供租约）。',
         'doc.banner.expired': '编辑资格已失效（模拟状态）：草稿保留，提交已停止。',
         'doc.banner.conflict': '服务端版本已变化：请对比远端与本地后手工合并。',
-        'doc.banner.unknown': '提交结果待确认：先重新读取服务端，避免重复提交。',
+        'doc.banner.unknown': '提交结果待确认：保留整笔原事务，以相同幂等键重试确认；新草稿尚未提交。',
+        'doc.confirmOutcome': '确认原事务',
+        'doc.err.pendingCommit': '原事务仍在提交或结果待确认，请先确认原事务；草稿可以继续编辑。',
         'doc.banner.noTxMode': '已开启写入审阅：文档暂存与提交走同一队列。',
         'doc.toast.staged': '已暂存到审阅队列（未写入数据库）',
         'doc.toast.stagedMerged': '已合并进该节点已有的待提交更改',
@@ -7829,7 +7831,9 @@
         'doc.banner.heldByOther': 'Another editor holds this document (simulated state; the server provides no lease).',
         'doc.banner.expired': 'Edit access expired (simulated state): the draft is kept and committing is stopped.',
         'doc.banner.conflict': 'The server version changed: compare remote and local, then merge manually.',
-        'doc.banner.unknown': 'Commit outcome unknown: re-read the server before retrying to avoid duplicate writes.',
+        'doc.banner.unknown': 'Commit outcome unknown: retry the complete original transaction with its original idempotency key. New draft edits are not submitted.',
+        'doc.confirmOutcome': 'Confirm original transaction',
+        'doc.err.pendingCommit': 'The original transaction is submitting or awaiting confirmation. Confirm it first; draft editing remains available.',
         'doc.banner.noTxMode': 'Write review enabled: document staging and commits use the same queue.',
         'doc.toast.staged': 'Staged in the review queue (nothing written yet)',
         'doc.toast.stagedMerged': 'Merged into the pending change for this node',
@@ -8554,7 +8558,7 @@
       if (count) count.textContent = t('tx.pendingCount', { n });
       if (summary) summary.textContent = txOperationsSummaryText();
       if (commit) commit.disabled = n === 0 || txCommitting;
-      if (rollback) rollback.disabled = n === 0 || txCommitting;
+      if (rollback) rollback.disabled = n === 0 || txCommitting || !!txPendingAttempt;
       const review = document.getElementById('txReviewBtn');
       if (review) review.disabled = n === 0 || txCommitting;
     }
@@ -8672,7 +8676,7 @@
       const commit = document.getElementById('txReviewCommitBtn');
       const discard = document.getElementById('txReviewDiscardBtn');
       if (commit) commit.disabled = !txOperations.length || txCommitting;
-      if (discard) discard.disabled = !txOperations.length || txCommitting;
+      if (discard) discard.disabled = !txOperations.length || txCommitting || !!txPendingAttempt;
     }
 
     // 结果操作菜单：导出 JSON / 导出 CSV / 列显隐（低频操作集中，主按钮仍在工具条）
@@ -12560,6 +12564,39 @@ RETURN doc, t</div>
     // ==========================================
     let txOperations = [];
     let txCommitting = false;
+    // 结果不确定时保留整笔请求；队列对象和编辑草稿都不是已发送内容的权威副本。
+    let txPendingAttempt = null;
+
+    function txOperationProtected(operation) {
+      return !!txPendingAttempt && txPendingAttempt.entries.some(entry => entry.source === operation);
+    }
+
+    function txNodeProtected(nodeId) {
+      return !!txPendingAttempt && txPendingAttempt.entries.some(entry =>
+        String(entry.operation.id) === String(nodeId));
+    }
+
+    function txCreateAttempt() {
+      const expectedNodes = {};
+      const entries = txOperations.map(source => {
+        const operation = JSON.parse(JSON.stringify(source));
+        const meta = JSON.parse(JSON.stringify(txOpMeta.get(source) || {}));
+        txOpMeta.set(operation, meta);
+        if (meta.docSessionId && meta.expectedVersion) expectedNodes[String(operation.id)] = meta.expectedVersion;
+        return { source, operation };
+      });
+      const request = { operations: entries.map(entry => entry.operation) };
+      const hasDocuments = entries.some(entry => (txOpMeta.get(entry.operation) || {}).docSessionId);
+      if (Object.keys(expectedNodes).length) request.expectedNodes = expectedNodes;
+      return {
+        entries,
+        body: JSON.stringify(request),
+        hasDocuments,
+        key: hasDocuments ? 'doc-' + Array.from(crypto.getRandomValues(new Uint32Array(4)),
+          value => value.toString(16).padStart(8, '0')).join('') : null,
+        unknown: false,
+      };
+    }
 
     // meta.before 只在审阅弹层展示；提交体仍是原始 TransactionOperation。
     function stageTxOperation(operation, meta) {
@@ -12572,28 +12609,14 @@ RETURN doc, t</div>
 
     async function commitTransaction() {
       if (!txModeOn() || !txOperations.length || txCommitting) return false;
+      const attempt = txPendingAttempt || txCreateAttempt();
       txCommitting = true;
-      // 请求体一经发送便不会包含后续暂存项；响应只能确认本次快照中的操作。
-      const submitted = txOperations.slice();
+      txPendingAttempt = attempt;
+      const submitted = attempt.entries.map(entry => entry.operation);
       const count = submitted.length;
-      // 文档操作带节点版本：只注入 expectedNodes（节点级 OCC）。
-      // 绝不能把节点 ETag 填到全局 If-Match / expectedGeneration —— 那会要求整库代次一致。
-      const expectedNodes = {};
-      let docOpCount = 0;
-      submitted.forEach((op) => {
-        const meta = txOpMeta.get(op);
-        if (!meta || !meta.docSessionId || !meta.expectedVersion) return;
-        if (op.op !== 'updatePayload' && op.op !== 'delete') return;
-        expectedNodes[String(op.id)] = meta.expectedVersion;
-        docOpCount += 1;
-      });
-      const requestBody = { operations: submitted };
-      if (docOpCount) requestBody.expectedNodes = expectedNodes;
       const requestHeaders = { 'Content-Type': 'application/json' };
-      // 幂等键只在同一批文档操作重试时保持不变；换键会把「响应丢了」变成重复写入。
-      if (docOpCount && typeof docCommitIdempotencyKey === 'function') {
-        requestHeaders['Idempotency-Key'] = docCommitIdempotencyKey(submitted);
-      }
+      if (attempt.key) requestHeaders['Idempotency-Key'] = attempt.key;
+      if (attempt.hasDocuments) docMarkSubmitting(submitted);
       const bar = document.getElementById('txBar');
       const countEl = document.getElementById('txCount');
       if (countEl) countEl.textContent = t('tx.committing');
@@ -12608,9 +12631,10 @@ RETURN doc, t</div>
         const res = await fetch(`${API_BASE}/v1/transactions`, {
           method: 'POST',
           headers: requestHeaders,
-          body: JSON.stringify(requestBody),
+          body: attempt.body,
         });
-        const body = await res.json().catch(() => ({}));
+        // 成功响应损坏也不能假装已确认；保留原请求供同键重试。
+        const body = await res.json();
         if (!res.ok) {
           const failure = new Error(body.detail || `HTTP ${res.status}`);
           failure.status = res.status;
@@ -12618,9 +12642,11 @@ RETURN doc, t</div>
           failure.problem = body;
           throw failure;
         }
-        txOperations.splice(0, count);
+        const completed = new Set(attempt.entries.map(entry => entry.source));
+        txOperations = txOperations.filter(operation => !completed.has(operation));
+        txPendingAttempt = null;
         showToast(t('tx.committed', { n: count, gen: body.generation || '-' }));
-        if (docOpCount && typeof docOnCommitSuccess === 'function') {
+        if (attempt.hasDocuments) {
           docOnCommitSuccess(submitted);
           if (body.replayed) showToast(t('doc.toast.replayed'));
         }
@@ -12629,8 +12655,11 @@ RETURN doc, t</div>
         if (!txOperations.length) rerunActiveQueryTab();
         return true;
       } catch (err) {
-        // 失败保留全部暂存操作；不自动重试，避免重复写入
-        if (docOpCount && typeof docOnCommitFailure === 'function') await docOnCommitFailure(submitted, err);
+        // 曾经结果不确定的批次，即使重试遇到冲突也不能拆开重发：服务端缓存可能已失效。
+        const unknown = attempt.hasDocuments && (attempt.unknown || !err.status || err.status >= 500);
+        attempt.unknown = unknown;
+        if (!unknown) txPendingAttempt = null;
+        if (attempt.hasDocuments) await docOnCommitFailure(submitted, err, unknown);
         showToast(t('tx.failed', { msg: err.message }));
         return false;
       } finally {
@@ -12644,8 +12673,11 @@ RETURN doc, t</div>
 
     function rollbackTransaction() {
       if (txCommitting) return;
+      if (txPendingAttempt) { showToast(t('doc.err.pendingCommit')); return; }
       const count = txOperations.length;
       txOperations = [];
+      docSessions.forEach(session => { session.staged = null; docPersistDraft(session); });
+      docRender();
       syncTxBar();
       showToast(t('tx.rolledBack', { n: count }));
       rerunActiveQueryTab();   // 撤销本地乐观修改：重跑当前标签的查询
@@ -20200,7 +20232,6 @@ RETURN doc, t</div>
     const DOC_INDEX_KEY = 'tdb_doc_index_v1';
     const DOC_INDEX_MAX = 60;
     const DOC_HISTORY_MAX = 200;
-    const DOC_COMMIT_TIMEOUT_MS = 20000;
 
     let docSessions = [];          // 已打开文档（按打开顺序）
     let docActiveSessionId = null;
@@ -20213,8 +20244,6 @@ RETURN doc, t</div>
     let docConflictSessionId = null;
     let docFindState = { query: '', matches: [], index: -1 };
     let docRevertArmedUntil = 0;
-    let docCommitKey = null;
-    let docCommitKeySig = '';
     let docDrawerNode = null;
     let docLastVectorHits = [];
     let docHistoryTimer = 0;
@@ -20255,7 +20284,11 @@ RETURN doc, t</div>
       return JSON.parse(JSON.stringify(value));
     }
     function docCanonical(value) {
-      try { return JSON.stringify(value); } catch (_) { return ''; }
+      // 服务端可能重排对象键；基线比较忽略键序，但保留数组顺序、数值和字段差异。
+      try {
+        return JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
+          ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+      } catch (_) { return ''; }
     }
 
     // ---------- JSON 解析与错误定位 ----------
@@ -20461,6 +20494,7 @@ RETURN doc, t</div>
         historyIndex: -1,
         composing: false,
         requestSeq: 0,
+        staging: false,
         needsRefresh: false,
         remote: null,
       };
@@ -20776,7 +20810,7 @@ RETURN doc, t</div>
       const stage = document.getElementById('docStageBtn');
       if (stage) {
         stage.disabled = !docEditable(session) || !!session.parseError || docHasLosses(session)
-          || !docIsDirty(session) || session.submit === 'submitting';
+          || !docIsDirty(session) || session.staging || session.submit === 'conflict' || txNodeProtected(session.nodeId);
       }
       const exportBtn = document.getElementById('docExportBtn');
       if (exportBtn) exportBtn.disabled = session.load === 'loading';
@@ -20784,13 +20818,13 @@ RETURN doc, t</div>
       if (revert) {
         const armed = performance.now() < docRevertArmedUntil;
         revert.textContent = armed ? t('doc.revert.armed') : t('doc.revert');
-        revert.disabled = !docIsDirty(session) && !session.staged;
+        revert.disabled = (!docIsDirty(session) && !session.staged) || txNodeProtected(session.nodeId);
         revert.classList.toggle('dw-armed', armed);
       }
       const unstage = document.getElementById('docUnstageBtn');
       if (unstage) {
         const queued = docQueuedOpFor(session.nodeId);
-        unstage.disabled = !queued || queued.op !== 'updatePayload';
+        unstage.disabled = !queued || queued.op !== 'updatePayload' || txOperationProtected(queued);
       }
       const modeBody = document.getElementById('docModeBody');
       const modeJson = document.getElementById('docModeJson');
@@ -20986,7 +21020,7 @@ RETURN doc, t</div>
       } else if (session.submit === 'outcomeUnknown') {
         message = t('doc.banner.unknown');
         tone = 'warn';
-        actionLabel = t('doc.conflict.keepLocal');
+        actionLabel = t('doc.confirmOutcome');
         actionKind = 'confirm-outcome';
       } else if (session.load === 'error') {
         message = t('doc.err.loadFailed', { msg: session.loadError || '' });
@@ -21103,6 +21137,7 @@ RETURN doc, t</div>
 
     function docDiscardChanges(session) {
       if (!session) return;
+      if (txNodeProtected(session.nodeId)) { showToast(t('doc.err.pendingCommit')); return false; }
       session.draftPayload = docDeepClone(session.basePayload);
       session.draftText = session.baseText;
       session.parseError = null;
@@ -21118,6 +21153,7 @@ RETURN doc, t</div>
       }
       docDraftForget(session);
       docRender();
+      return true;
     }
 
     // ---------- 编辑器输入 / 撤销重做 ----------
@@ -21313,6 +21349,7 @@ RETURN doc, t</div>
       const session = docActive();
       if (!session) return;
       const queued = docQueuedOpFor(session.nodeId);
+      if (txOperationProtected(queued)) { showToast(t('doc.err.pendingCommit')); return; }
       if (!queued || queued.op !== 'updatePayload') {
         showToast(t('doc.unstage.blocked'));
         return;
@@ -21331,6 +21368,7 @@ RETURN doc, t</div>
     function docRevert() {
       const session = docActive();
       if (!session) return;
+      if (txNodeProtected(session.nodeId)) { showToast(t('doc.err.pendingCommit')); return; }
       if (performance.now() > docRevertArmedUntil) {
         docRevertArmedUntil = performance.now() + 4000;
         docRenderHead(session);
@@ -21598,6 +21636,7 @@ RETURN doc, t</div>
         key: session.key,
         nodeId: session.nodeId,
         baseText: session.baseText,
+        baseVersion: session.version,
         draftText: session.draftText,
         pointer: session.pointer,
         format: session.format,
@@ -21635,6 +21674,7 @@ RETURN doc, t</div>
         if (base.ok) {
           session.baseText = parsed.baseText;
           session.basePayload = base.value;
+          session.version = typeof parsed.baseVersion === 'string' ? parsed.baseVersion : null;
         }
       }
       session.draftText = parsed.draftText;
@@ -21661,16 +21701,24 @@ RETURN doc, t</div>
       return (typeof txModeOn === 'function') ? txModeOn() : true;
     }
     async function docEnsureVersion(session) {
+      if (session.submit === 'conflict') return false;
       if (session.version) return true;
       try {
         const remote = await docFetchNode(session.nodeId);
+        if (!docById(session.sessionId)) return false;
+        if (docCanonical(remote.payload) !== docCanonical(session.basePayload)) {
+          session.remote = remote;
+          session.submit = 'conflict';
+          docRender();
+          return false;
+        }
         session.version = remote.version || null;
         session.generation = remote.generation || null;
         return !!session.version;
       } catch (_) { return false; }
     }
     function docQueueStage(session, payload) {
-      const op = { op: 'updatePayload', id: Number(session.nodeId), payload };
+      const op = { op: 'updatePayload', id: parseWriteNodeId(session.nodeId), payload };
       stageTxOperation(op, {
         before: docDeepClone(session.basePayload),
         source: t('tx.source.doc'),
@@ -21689,38 +21737,53 @@ RETURN doc, t</div>
     async function docStage() {
       const session = docActive();
       if (!session) return false;
+      if (session.staging) return false;
+      if (txNodeProtected(session.nodeId)) { showToast(t('doc.err.pendingCommit')); return false; }
+      if (session.submit === 'conflict') { showToast(t('doc.banner.conflict')); return false; }
+      try { parseWriteNodeId(session.nodeId); } catch (error) { showToast(error.message); return false; }
       if (!docEditable(session)) { showToast(t('doc.err.readonly')); return false; }
       if (session.parseError) { showToast(t('doc.err.invalid')); return false; }
       // 击键路径只做防抖扫描：真正落库前必须用当前文本重扫一次，避免拿陈旧结论放行
       session.losses = docScanLossy(session.draftText);
       if (docHasLosses(session)) { showToast(t('doc.err.lossy')); return false; }
       if (!docIsDirty(session)) { showToast(t('doc.err.notDirty')); return false; }
-      const existing = docQueuedOpFor(session.nodeId);
-      if (existing && existing.op === 'delete') { showToast(t('doc.err.pendingDelete')); return false; }
-      // 没有节点版本就无法做 OCC：宁可拒绝，也不发一次会静默覆盖别人改动的写请求。
-      const hasVersion = await docEnsureVersion(session);
-      if (!hasVersion) { showToast(t('doc.err.noVersion')); return false; }
-      if (!docEnsureTxMode()) { showToast(t('doc.err.noTxMode')); return false; }
-      const payload = docDeepClone(session.draftPayload);
-      if (existing) {
-        const existingMeta = txOpMeta.get(existing);
-        if (existingMeta && existingMeta.docSessionId === session.sessionId) {
-          // 同一会话重复暂存：替换自己的快照，保留最初 before 与版本前置条件。
-          existing.payload = payload;
-          existingMeta.bodyAfter = docBodyTextOf(payload, session.pointer);
-          session.staged = { frozenText: session.draftText, frozenPayload: docDeepClone(payload) };
-          session.submit = 'idle';
-          syncTxBar();
-          docRender();
-          docPersistDraft(session);
-          return true;
+      session.staging = true;
+      try {
+        // 没有节点版本就无法做 OCC：宁可拒绝，也不发一次会静默覆盖别人改动的写请求。
+        const hasVersion = await docEnsureVersion(session);
+        if (!hasVersion) { showToast(t('doc.err.noVersion')); return false; }
+        // 等待读取期间可能关闭、改写或开始提交；返回后重新检查当前草稿与队列。
+        if (!docById(session.sessionId) || !docEditable(session) || txNodeProtected(session.nodeId)
+            || session.submit === 'conflict' || session.parseError || !docIsDirty(session)) return false;
+        session.losses = docScanLossy(session.draftText);
+        if (docHasLosses(session)) { showToast(t('doc.err.lossy')); return false; }
+        const existing = docQueuedOpFor(session.nodeId);
+        if (existing && existing.op === 'delete') { showToast(t('doc.err.pendingDelete')); return false; }
+        if (!docEnsureTxMode()) { showToast(t('doc.err.noTxMode')); return false; }
+        const payload = docDeepClone(session.draftPayload);
+        if (existing) {
+          const existingMeta = txOpMeta.get(existing);
+          if (existingMeta && existingMeta.docSessionId === session.sessionId) {
+            // 同一会话重复暂存：替换自己的快照，保留最初 before 与版本前置条件。
+            existing.payload = payload;
+            existingMeta.bodyAfter = docBodyTextOf(payload, session.pointer);
+            session.staged = { frozenText: session.draftText, frozenPayload: docDeepClone(payload) };
+            session.submit = 'idle';
+            syncTxBar();
+            docRender();
+            docPersistDraft(session);
+            return true;
+          }
+          docMergeTarget = { session, payload, existing };
+          docOpenOverlay('docMergeOverlay');
+          return false;
         }
-        docMergeTarget = { session, payload, existing };
-        docOpenOverlay('docMergeOverlay');
-        return false;
+        docQueueStage(session, payload);
+        return true;
+      } finally {
+        session.staging = false;
+        if (docActive() === session) docRenderHead(session);
       }
-      docQueueStage(session, payload);
-      return true;
     }
     function docResolveMerge(mode) {
       const target = docMergeTarget;
@@ -21728,6 +21791,8 @@ RETURN doc, t</div>
       docCloseOverlay('docMergeOverlay');
       if (!target) return;
       const { session, payload, existing } = target;
+      if (!docById(session.sessionId) || !txOperations.includes(existing)) return;
+      if (txOperationProtected(existing)) { showToast(t('doc.err.pendingCommit')); return; }
       if (mode === 'replace') {
         existing.payload = payload;
         const meta = txOpMeta.get(existing);
@@ -21754,6 +21819,21 @@ RETURN doc, t</div>
           meta.bodyAfter = docBodyTextOf(merged, meta.pointer || session.pointer);
         }
       }
+      // 合并或替换都必须把该队列项完整纳入文档提交契约，不能只补一个版本字段。
+      const previousMeta = txOpMeta.get(existing) || {};
+      txOpMeta.set(existing, {
+        ...previousMeta,
+        before: previousMeta.before || docDeepClone(session.basePayload),
+        source: t('tx.source.doc'),
+        docSessionId: session.sessionId,
+        docTitle: session.title,
+        expectedVersion: previousMeta.expectedVersion || session.version,
+        pointer: session.pointer,
+        bodyBefore: docBodyTextOf(previousMeta.before || session.basePayload, session.pointer),
+        bodyAfter: docBodyTextOf(existing.payload, session.pointer),
+      });
+      session.draftPayload = docDeepClone(existing.payload);
+      session.draftText = JSON.stringify(session.draftPayload, null, 2);
       session.staged = { frozenText: session.draftText, frozenPayload: docDeepClone(existing.payload) };
       session.submit = 'idle';
       syncTxBar();
@@ -21806,13 +21886,16 @@ RETURN doc, t</div>
         // 迟到响应隔离：会话已关闭或被新请求取代时，不能改当前编辑器状态。
         if (seq !== session.requestSeq || !docById(session.sessionId)) return;
         session.load = 'loaded';
-        session.version = remote.version || null;
-        session.generation = remote.generation || null;
+        // 提交开始后到达的旧读取不能改变该批次或当前基线。
+        if (txNodeProtected(session.nodeId)) return;
         if (remote.node && Array.isArray(remote.node.vector)) session.vectorDim = remote.node.vector.length;
         if (docCanonical(remote.payload) !== docCanonical(session.basePayload)) {
           if (docIsDirty(session)) {
             session.submit = 'conflict';
             session.remote = remote;
+            docRender();
+            docPersistDraft(session);
+            return;
           } else {
             session.basePayload = docDeepClone(remote.payload);
             session.baseText = JSON.stringify(session.basePayload, null, 2);
@@ -21821,6 +21904,8 @@ RETURN doc, t</div>
             session.title = docTitleOf(session.draftPayload, session.nodeId);
           }
         }
+        session.version = remote.version || null;
+        session.generation = remote.generation || null;
         if (remote.losses.numbers.length || remote.losses.duplicateKeys.length) session.losses = remote.losses;
         docRender();
         docPersistDraft(session);
@@ -21833,25 +21918,14 @@ RETURN doc, t</div>
       }
     }
 
-    function docCommitIdempotencyKey(submitted) {
-      const sig = submitted.map((op) => {
-        const meta = txOpMeta.get(op) || {};
-        return (meta.docSessionId || '') + ':' + op.id + ':' + (meta.draftRev || 0);
-      }).join(',');
-      if (sig !== docCommitKeySig || !docCommitKey) {
-        docCommitKeySig = sig;
-        docCommitKey = 'doc-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
-      }
-      return docCommitKey;
-    }
     function docOnCommitSuccess(submitted) {
-      docCommitKey = null;
-      docCommitKeySig = '';
       submitted.forEach((op) => {
         const meta = txOpMeta.get(op);
         if (!meta || !meta.docSessionId) return;
         const session = docById(meta.docSessionId);
         if (!session) return;
+        session.requestSeq += 1;
+        session.load = 'loaded';
         session.basePayload = docDeepClone(op.payload);
         session.baseText = JSON.stringify(session.basePayload, null, 2);
         session.staged = null;
@@ -21862,7 +21936,7 @@ RETURN doc, t</div>
       });
       docRender();
     }
-    async function docOnCommitFailure(submitted, err) {
+    async function docOnCommitFailure(submitted, err, unknown) {
       const status = err && err.status;
       const code = err && err.code;
       let touched = null;
@@ -21872,14 +21946,14 @@ RETURN doc, t</div>
         const session = docById(meta.docSessionId);
         if (!session) return;
         touched = touched || session;
-        if (status === 409 && code === 'WRITE_CONFLICT') session.submit = 'conflict';
-        else if (!status) session.submit = 'outcomeUnknown';
+        if (unknown) session.submit = 'outcomeUnknown';
+        else if (status === 409 && code === 'WRITE_CONFLICT') session.submit = 'conflict';
         else session.submit = 'rejected';
       });
       if (!touched) return;
       docRender();
-      if (status === 409 && code === 'WRITE_CONFLICT') await docLoadConflict(touched);
-      else if (!status) showToast(t('doc.banner.unknown'));
+      if (unknown) showToast(t('doc.banner.unknown'));
+      else if (status === 409 && code === 'WRITE_CONFLICT') await docLoadConflict(touched);
     }
     function docMarkSubmitting(submitted) {
       submitted.forEach((op) => {
@@ -21892,8 +21966,10 @@ RETURN doc, t</div>
     }
 
     async function docLoadConflict(session) {
+      if (txNodeProtected(session.nodeId)) return;
       try {
         const remote = await docFetchNode(session.nodeId);
+        if (!docById(session.sessionId) || txNodeProtected(session.nodeId)) return;
         session.remote = remote;
         session.submit = 'conflict';
         docRenderConflict(session, remote);
@@ -21939,6 +22015,7 @@ RETURN doc, t</div>
       docConflictSessionId = null;
       docCloseOverlay('docConflictOverlay');
       if (!session || !session.remote) return;
+      if (txNodeProtected(session.nodeId)) { showToast(t('doc.err.pendingCommit')); return; }
       session.basePayload = docDeepClone(session.remote.payload);
       session.baseText = JSON.stringify(session.basePayload, null, 2);
       session.version = session.remote.version || null;
@@ -21958,34 +22035,9 @@ RETURN doc, t</div>
       showToast(t('doc.toast.conflictRebase'));
     }
     async function docConfirmOutcome(session) {
-      if (!session) return;
-      try {
-        const remote = await docFetchNode(session.nodeId);
-        const queued = docQueuedDocOpFor(session);
-        const expected = queued ? queued.payload : (session.staged && session.staged.frozenPayload);
-        if (expected && docCanonical(remote.payload) === docCanonical(expected)) {
-          if (queued) {
-            const at = txOperations.indexOf(queued);
-            if (at >= 0) txOperations.splice(at, 1);
-          }
-          session.basePayload = docDeepClone(remote.payload);
-          session.baseText = JSON.stringify(session.basePayload, null, 2);
-          session.version = remote.version || null;
-          session.staged = null;
-          session.submit = 'acknowledged';
-          syncTxBar();
-          docRender();
-          docPersistDraft(session);
-          showToast(t('doc.toast.confirmedLate'));
-          return;
-        }
-        session.version = remote.version || session.version;
-        session.submit = 'idle';
-        docRender();
-        showToast(t('doc.err.outcomeMismatch'));
-      } catch (err) {
-        showToast(t('doc.err.loadFailed', { msg: err.message }));
-      }
+      if (!session || !txPendingAttempt || !txNodeProtected(session.nodeId)) return false;
+      // 单个节点内容相等不能证明整笔事务的身份；原样重试，由服务端幂等结果确认所有操作。
+      return commitTransaction();
     }
 
     // ---------- 差异引擎（GitHub split 风格，纯文本） ----------
@@ -22277,7 +22329,7 @@ RETURN doc, t</div>
         const key = event.key.toLowerCase();
         if (key === 'z') { event.preventDefault(); if (event.shiftKey) docRedo(); else docUndo(); }
         else if (key === 'y') { event.preventDefault(); docRedo(); }
-        else if (key === 's') { event.preventDefault(); docStage(); }
+        else if (key === 's') { event.preventDefault(); event.stopPropagation(); docStage(); }
         else if (key === 'f') { event.preventDefault(); docToggleFind(true); }
       });
 
@@ -22367,7 +22419,7 @@ RETURN doc, t</div>
       });
       bind('docCloseDiscard', () => {
         const session = docById(docPendingCloseId);
-        if (session) docDiscardChanges(session);
+        if (session && docDiscardChanges(session) === false) return;
         docCloseOverlay('docCloseOverlay');
         if (docPendingCloseId) docFinalizeClose(docPendingCloseId);
         docPendingCloseId = null;
@@ -22404,6 +22456,7 @@ RETURN doc, t</div>
 
       // 全局快捷键：仅文档工作区激活、且没有弹层时接管
       document.addEventListener('keydown', (event) => {
+        if (event.defaultPrevented) return;
         const activeTab = document.querySelector('.tabs-bar .tab.active');
         if (!activeTab || activeTab.dataset.tab !== 'docPane') return;
         const overlayOpen = [...document.querySelectorAll('.import-overlay')].some(el => !el.hidden);
@@ -22462,7 +22515,7 @@ RETURN doc, t</div>
           const meta = txOpMeta.get(op);
           return !!(meta && meta.docSessionId);
         }).length,
-        commitKey: docCommitKey,
+        commitKey: txPendingAttempt && txPendingAttempt.key,
       }),
     };
 
@@ -26186,6 +26239,11 @@ RETURN doc, t</div>
 
       // ---------- 文档工作区（F1~F4） ----------
       const docReset = () => {
+        txPendingAttempt = null;
+        txCommitting = false;
+        [docPersistTimer, docLossTimer, docPreviewTimer, docHistoryTimer].forEach(clearTimeout);
+        docPersistTimer = docLossTimer = docPreviewTimer = docHistoryTimer = 0;
+        docMergeTarget = null;
         docSessions = [];
         docActiveSessionId = null;
         docListFilter = '';
@@ -26386,12 +26444,14 @@ RETURN doc, t</div>
         }
       });
 
-      addAssert('文档：网络失败标记结果待确认，重读一致后确认已提交', '文档工作区', async () => {
+      addAssert('文档：网络失败标记结果待确认，同键重试原事务确认已提交', '文档工作区', async () => {
         docReset();
         const originalFetch = window.fetch;
         let mode = 'network';
         window.fetch = (url, opts) => {
-          if (String(url).includes('/v1/transactions')) return Promise.reject(new TypeError('network down'));
+          if (String(url).includes('/v1/transactions')) return mode === 'confirmed'
+            ? Promise.resolve({ ok: true, json: async () => ({ generation: 'g-confirmed', replayed: true }) })
+            : Promise.reject(new TypeError('network down'));
           if (mode === 'confirmed') return Promise.resolve(docNodeResponse({ content: 'late body' }));
           return Promise.resolve(docNodeResponse({ content: 'a' }));
         };
@@ -26405,12 +26465,247 @@ RETURN doc, t</div>
           assert(txOperations.length === 1, '结果待确认时必须保留队列');
           mode = 'confirmed';
           await docConfirmOutcome(session);
-          assert(session.submit === 'acknowledged', '重读一致后应确认已提交');
+          assert(session.submit === 'acknowledged', '重试确认后应标记已提交');
           assert(txOperations.length === 0, '确认后队列应清空');
         } finally {
           window.fetch = originalFetch;
           docReset();
         }
+      });
+
+      addAssert('文档：提交屏障保护原快照并保留期间的新草稿和新队列项', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        let finish;
+        let sent;
+        window.fetch = (url, opts) => {
+          if (String(url).includes('/v1/transactions')) {
+            sent = JSON.parse(opts.body);
+            return new Promise(resolve => { finish = resolve; });
+          }
+          return Promise.resolve(docNodeResponse({ content: 'base', keep: 1 }));
+        };
+        let pending;
+        try {
+          const session = docOpen(docMockNode('1', { content: 'base', keep: 1 }), 'node');
+          await waitFor(() => session.version, 2000, '读取基线版本');
+          docEdit(session, 'sent');
+          assert(await docStage(), '首次暂存应成功');
+          pending = commitTransaction();
+          assert(finish && sent.operations.length === 1, '必须真实到达请求屏障');
+          docEdit(session, 'later draft');
+          assert(!(await docStage()), '发送中的同节点操作不得被重新暂存替换');
+          docUnstage();
+          docDiscardChanges(session);
+          assert(txOperations.length === 1, '发送中的操作不得撤回或放弃');
+          stageTxOperation({ op: 'updatePayload', id: 2, payload: { content: 'next batch' } }, { source: 'payload edit' });
+          finish({ ok: true, json: async () => ({ generation: 'g-frozen' }) });
+          assert(await pending, '原批次应成功');
+          assert(JSON.stringify(sent.operations) === JSON.stringify([
+            { op: 'updatePayload', id: 1, payload: { content: 'sent', keep: 1 } },
+          ]), '实际请求必须仅包含原始完整快照');
+          assert(session.basePayload.content === 'sent' && session.draftPayload.content === 'later draft'
+            && docIsDirty(session), '只确认已发送内容，新草稿必须继续标脏');
+          assert(JSON.stringify(txOperations) === JSON.stringify([
+            { op: 'updatePayload', id: 2, payload: { content: 'next batch' } },
+          ]), '旧响应不能移除新的完整队列项');
+        } finally {
+          if (finish) finish({ ok: true, json: async () => ({ generation: 'g-frozen' }) });
+          if (pending) await pending;
+          window.fetch = originalFetch;
+          docReset();
+        }
+      });
+
+      for (const mergeMode of ['combine', 'replace']) {
+        addAssert('文档：跨入口' + mergeMode + '保留完整版本与提交确认契约', '文档工作区', async () => {
+          docReset();
+          const originalFetch = window.fetch;
+          let captured;
+          window.fetch = (url, opts) => {
+            if (String(url).includes('/v1/transactions')) {
+              captured = { body: JSON.parse(opts.body), headers: opts.headers };
+              return Promise.resolve({ ok: true, json: async () => ({ generation: 'g-merged' }) });
+            }
+            return Promise.resolve(docNodeResponse({ content: 'base', keep: 1 }));
+          };
+          try {
+            stageTxOperation({ op: 'updatePayload', id: 1, payload: { content: 'grid', keep: 2 } },
+              { before: { content: 'base', keep: 1 }, source: 'payload edit' });
+            const session = docOpen(docMockNode('1', { content: 'base', keep: 1 }), 'node');
+            await waitFor(() => session.version, 2000, '读取合并基线');
+            docEdit(session, 'document');
+            assert(!(await docStage()) && !document.getElementById('docMergeOverlay').hidden, '合并必须先由用户选择');
+            docResolveMerge(mergeMode);
+            assert(await commitTransaction(), '合并后的提交应成功');
+            assert(captured.body.expectedNodes['1'] === 'selftest-node-v1'
+              && !!captured.headers['Idempotency-Key'], '合并后仍须使用节点版本与幂等键');
+            const expected = { content: 'document', keep: mergeMode === 'combine' ? 2 : 1 };
+            assert(JSON.stringify(captured.body.operations) === JSON.stringify([
+              { op: 'updatePayload', id: 1, payload: expected },
+            ]), '完整合并结果必须符合所选策略');
+            assert(session.submit === 'acknowledged' && !session.staged && !docIsDirty(session), '实际合并草稿必须被完整确认');
+          } finally { window.fetch = originalFetch; docReset(); }
+        });
+      }
+
+      addAssert('文档：成功后的外部修改不能用新版本给旧基线补签', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        let remote = { content: 'base', keep: 1 };
+        let version = 'base-v1';
+        let posts = 0;
+        window.fetch = (url) => {
+          if (String(url).includes('/v1/transactions')) {
+            posts += 1;
+            return Promise.resolve({ ok: true, json: async () => ({ generation: 'g-first' }) });
+          }
+          return Promise.resolve(docNodeResponse(remote, version));
+        };
+        try {
+          const session = docOpen(docMockNode('1', remote), 'node');
+          await waitFor(() => session.version, 2000, '读取初始版本');
+          docEdit(session, 'first');
+          assert(await docStage() && await commitTransaction(), '必须先完成第一次提交');
+          remote = { content: 'external', keep: 1, externalOnly: 42 };
+          version = 'external-v3';
+          docEdit(session, 'second');
+          assert(!(await docStage()), '远端与编辑基线不一致时必须拒绝暂存');
+          assert(posts === 1 && txOperations.length === 0, '不得发送覆盖外部字段的第二笔写入');
+          assert(session.submit === 'conflict' && session.version === null
+            && session.remote.payload.externalOnly === 42 && session.draftPayload.content === 'second',
+          '保留旧基线身份、本地草稿及完整远端内容供显式合并');
+        } finally { window.fetch = originalFetch; docReset(); }
+      });
+
+      addAssert('文档：重新读取基线时对象键顺序不构成内容冲突', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        const baseline = { keep: { z: 1, a: [2, 3] }, content: 'base' };
+        const reordered = { content: 'base', keep: { a: [2, 3], z: 1 } };
+        window.fetch = () => Promise.resolve(docNodeResponse(reordered));
+        try {
+          const session = docCreateSession(docMockNode('1', baseline), 'node');
+          docSessions.push(session); docActiveSessionId = session.sessionId;
+          docEdit(session, 'local');
+          assert(await docStage(), '只有键顺序改变时应能按真实版本暂存');
+          assert(txOperations.length === 1 && txOperations[0].payload.content === 'local'
+            && JSON.stringify(txOperations[0].payload.keep.a) === '[2,3]', '正文与完整嵌套内容必须保留');
+          assert(docCanonical(baseline) !== docCanonical({ ...reordered, keep: { a: [3, 2], z: 1 } }),
+            '数组顺序的变化仍须识别为内容变化');
+        } finally { window.fetch = originalFetch; docReset(); }
+      });
+
+      addAssert('文档：脏会话刷新发现冲突时不得覆盖基线版本', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        let remote = { content: 'base' };
+        let version = 'base-v1';
+        window.fetch = () => Promise.resolve(docNodeResponse(remote, version));
+        try {
+          const session = docOpen(docMockNode('1', remote), 'node');
+          await waitFor(() => session.version, 2000, '读取原版本');
+          docEdit(session, 'local');
+          remote = { content: 'external', another: true }; version = 'external-v2';
+          await docRefreshFromServer(session);
+          assert(session.version === 'base-v1' && session.submit === 'conflict', '冲突不能把远端版本绑定到旧基线');
+          assert(!(await docStage()) && txOperations.length === 0, '未显式合并不能继续暂存');
+        } finally { window.fetch = originalFetch; docReset(); }
+      });
+
+      addAssert('文档：未知结果保持混合事务完整，确认后新草稿使用新键', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        const requests = [];
+        let remote = { content: 'base' };
+        window.fetch = (url, opts) => {
+          if (String(url).includes('/v1/transactions')) {
+            requests.push({ body: opts.body, key: opts.headers['Idempotency-Key'] });
+            if (requests.length === 1) return Promise.reject(new TypeError('受控响应丢失'));
+            return Promise.resolve({ ok: true, json: async () => ({ generation: 'g-replayed', replayed: requests.length === 2 }) });
+          }
+          return Promise.resolve(docNodeResponse(remote, 'read-v2'));
+        };
+        try {
+          const session = docOpen(docMockNode('1', remote), 'node');
+          await waitFor(() => session.version, 2000, '读取混合事务基线');
+          docEdit(session, 'submitted');
+          assert(await docStage(), '文档暂存应成功');
+          stageTxOperation({ op: 'insert', vector: [0.1, 0.2], payload: { name: 'imported' } }, { source: 'node import' });
+          assert(!(await commitTransaction()) && session.submit === 'outcomeUnknown', '响应丢失必须保留未知状态');
+          docEdit(session, 'new draft');
+          assert(!(await docStage()), '未知结果期间不能用新草稿替换旧批次');
+          rollbackTransaction(); docUnstage();
+          assert(txOperations.length === 2, '未知事务不能拆分或丢弃');
+          assert(await docConfirmOutcome(session), '整批幂等确认应成功');
+          assert(requests.length === 2 && requests[0].body === requests[1].body
+            && requests[0].key === requests[1].key, '确认必须逐字重发原请求及原幂等键');
+          const expectedOperations = [
+            { op: 'updatePayload', id: 1, payload: { content: 'submitted' } },
+            { op: 'insert', vector: [0.1, 0.2], payload: { name: 'imported' } },
+          ];
+          assert(JSON.stringify(JSON.parse(requests[1].body).operations) === JSON.stringify(expectedOperations), '确认请求必须包含完整导入操作');
+          assert(txOperations.length === 0 && session.basePayload.content === 'submitted'
+            && session.draftPayload.content === 'new draft' && docIsDirty(session), '整批确认后保留尚未提交的新草稿');
+          remote = { content: 'submitted' };
+          assert(await docStage() && await commitTransaction(), '确认后新草稿可以成为下一批');
+          assert(requests[2].key !== requests[1].key
+            && JSON.stringify(JSON.parse(requests[2].body).operations) === JSON.stringify([
+              { op: 'updatePayload', id: 1, payload: { content: 'new draft' } },
+            ]), '新内容必须使用新幂等键且不能重复导入');
+        } finally { window.fetch = originalFetch; docReset(); }
+      });
+
+      addAssert('文档：未知事务重试冲突时仍保持整批保护', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        let posts = 0;
+        window.fetch = (url) => {
+          if (String(url).includes('/v1/transactions')) {
+            posts += 1;
+            return posts === 1 ? Promise.reject(new TypeError('受控响应丢失')) : Promise.resolve({
+              ok: false, status: 409, json: async () => ({ code: 'WRITE_CONFLICT', detail: '受控缓存失效后冲突' }),
+            });
+          }
+          return Promise.resolve(docNodeResponse({ content: 'base' }));
+        };
+        try {
+          const session = docOpen(docMockNode('1', { content: 'base' }), 'node');
+          await waitFor(() => session.version, 2000, '读取原版本');
+          docEdit(session, 'submitted'); await docStage(); await commitTransaction();
+          assert(!(await docConfirmOutcome(session)), '冲突不能证明原未知事务未提交');
+          assert(session.submit === 'outcomeUnknown' && txOperations.length === 1
+            && txNodeProtected(session.nodeId), '不得拆开或换键重发未知事务');
+        } finally { window.fetch = originalFetch; docReset(); }
+      });
+
+      addAssert('文档：一次 Ctrl+S 只暂存一次，取消后队列为空', '文档工作区', async () => {
+        docReset();
+        const originalFetch = window.fetch;
+        window.fetch = () => Promise.resolve(docNodeResponse({ content: 'base' }));
+        try {
+          const session = docOpen(docMockNode('1', { content: 'base' }), 'node');
+          await waitFor(() => session.version, 2000, '读取快捷键基线');
+          docEdit(session, 'keyboard'); docRender();
+          document.getElementById('docEditor').dispatchEvent(new KeyboardEvent('keydown', {
+            key: 's', ctrlKey: true, bubbles: true, cancelable: true,
+          }));
+          await waitFor(() => !session.staging, 2000, '快捷键暂存完成');
+          assert(txOperations.length === 1 && txOperations[0].payload.content === 'keyboard', '一个键盘事件只能生成一个完整暂存项');
+          docUnstage();
+          assert(txOperations.length === 0 && !session.staged && docIsDirty(session), '取消应完整撤回且保留草稿');
+        } finally { window.fetch = originalFetch; docReset(); }
+      });
+
+      addAssert('文档：不安全节点 ID 在暂存前拒绝', '文档工作区', async () => {
+        docReset();
+        try {
+          const session = docCreateSession(docMockNode('9007199254740993', { content: 'base' }), 'node');
+          session.version = 'large-id-version';
+          docSessions.push(session); docActiveSessionId = session.sessionId;
+          docEdit(session, 'must not write');
+          assert(!(await docStage()) && txOperations.length === 0, '不能舍入节点 ID 后写入相邻记录');
+        } finally { docReset(); }
       });
 
       addAssert('文档：只读状态不能绕过按钮暂存', '文档工作区', async () => {
