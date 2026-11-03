@@ -20342,17 +20342,30 @@ RETURN doc, t</div>
     // ---------- 无损扫描：安全整数之外的数值 / 重复键 ----------
     // 服务端 serde_json 未启用 arbitrary_precision，浏览器 JSON.parse 也在 2^53 之后丢精度；
     // 因此这里只能「检测并阻止」，不能宣称往返无损。
+    // 归一化成「有效数字 + 十进制指数」，用于判断字面量与 double 的最短表示是否等价。
+    // 例：1.0 ≡ 1 ≡ 1e0；0.10000000149011612（f32 回读）保持原样，不误报。
+    function docNormalizeNumberText(input) {
+      let text = String(input).trim().toLowerCase();
+      let sign = '';
+      if (text.startsWith('-')) { sign = '-'; text = text.slice(1); } else if (text.startsWith('+')) text = text.slice(1);
+      const parts = text.split('e');
+      const mantissa = parts[0];
+      let exponent = parts.length > 1 ? Number(parts[1]) : 0;
+      const dot = mantissa.indexOf('.');
+      let digits = dot < 0 ? mantissa : mantissa.slice(0, dot) + mantissa.slice(dot + 1);
+      if (dot >= 0) exponent -= mantissa.length - dot - 1;
+      digits = digits.replace(/^0+/, '');
+      if (!digits) return '0e0';
+      while (digits.endsWith('0')) { digits = digits.slice(0, -1); exponent += 1; }
+      return sign + digits + 'e' + exponent;
+    }
     function docNumberUnsafe(literal) {
-      if (/^-?\d+$/.test(literal)) {
-        const value = Number(literal);
-        if (!Number.isSafeInteger(value)) return true;
-        return String(value) !== literal;
-      }
       const value = Number(literal);
       if (!Number.isFinite(value)) return true;
-      const digits = literal.replace(/^[-+]/, '').replace(/[eE].*$/, '').replace('.', '')
-        .replace(/^0+/, '').replace(/0+$/, '');
-      return digits.length > 15;
+      // 整数只有超出 ±(2^53−1) 才真的无法无损表示。
+      if (/^-?\d+$/.test(literal) && !Number.isSafeInteger(value)) return true;
+      // 其余情况：字面量与 double 的最短往返表示必须等价（1.0 与 1 视为等价）。
+      return docNormalizeNumberText(literal) !== docNormalizeNumberText(String(value));
     }
     function docScanLossy(text) {
       const numbers = [];
@@ -21615,7 +21628,15 @@ RETURN doc, t</div>
         docDraftIndexRemove(key);
         return false;
       }
-      session.baseText = typeof parsed.baseText === 'string' ? parsed.baseText : session.baseText;
+      // 草稿自带「它当时的基线」：恢复时必须连 baseline 一起恢复，
+      // 否则远端对比会拿新会话的 payload 当基线，误报版本冲突。
+      if (typeof parsed.baseText === 'string') {
+        const base = docParsePayload(parsed.baseText);
+        if (base.ok) {
+          session.baseText = parsed.baseText;
+          session.basePayload = base.value;
+        }
+      }
       session.draftText = parsed.draftText;
       const draft = docParsePayload(parsed.draftText);
       if (draft.ok) { session.draftPayload = draft.value; session.parseError = null; }
@@ -21764,12 +21785,15 @@ RETURN doc, t</div>
         err.status = res.status;
         throw err;
       }
+      const payload = (body && body.node && body.node.payload && typeof body.node.payload === 'object') ? body.node.payload : {};
       return {
-        payload: (body && body.node && body.node.payload && typeof body.node.payload === 'object') ? body.node.payload : {},
+        payload,
         version: body && typeof body.version === 'string' ? body.version : null,
         generation: body && typeof body.generation === 'string' ? body.generation : null,
         node: (body && body.node) || null,
-        losses: docScanLossy(text),
+        // 只扫描 payload：向量、generation、版本串不属于文档写入面，扫描整份响应会把
+        // f32 回读值（0.10000000149011612）误判成不可无损处理。
+        losses: docScanLossy(JSON.stringify(payload)),
       };
     }
     async function docRefreshFromServer(session) {
@@ -21794,6 +21818,7 @@ RETURN doc, t</div>
             session.baseText = JSON.stringify(session.basePayload, null, 2);
             session.draftPayload = docDeepClone(remote.payload);
             session.draftText = session.baseText;
+            session.title = docTitleOf(session.draftPayload, session.nodeId);
           }
         }
         if (remote.losses.numbers.length || remote.losses.duplicateKeys.length) session.losses = remote.losses;
@@ -26500,6 +26525,16 @@ RETURN doc, t</div>
           window.__docTestAllowDrafts = false;
           docReset();
         }
+      });
+
+      addAssert('文档：f32 回读值不得被误判为不可无损', '文档工作区', async () => {
+        assert(docScanLossy('{"v": 0.10000000149011612}').numbers.length === 0,
+          'f32 回读的高精度小数应视为可无损');
+        assert(docScanLossy('{"v": 1.0}').numbers.length === 0, '1.0 与 1 等价，不应误报');
+        assert(docScanLossy('{"v": 0.1234567890123456789}').numbers.length === 1,
+          '超出 double 精度的字面量必须拦截');
+        assert(docScanLossy('{"v": 9007199254740993}').numbers.length === 1,
+          '超出安全整数的整数必须拦截');
       });
 
       addAssert('文档：行级差异按 GitHub split 分类（新增/删除/修改）', '文档工作区', async () => {
