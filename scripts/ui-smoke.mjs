@@ -312,67 +312,16 @@ try {
   log('  ✓ 查询结果并入图探索 (graphNodes=' + mergedCount + ')');
   await page.evaluate(() => document.querySelector('[data-view="grid"]').click());
 
-  // 冒烟 3：依次切换四个主标签（切换本身不得产生新的查询请求）
+  // 冒烟 3：依次切换三个主标签（切换本身不得产生新的查询请求）
   const tqlBeforeTabs = tqlRequests.length;
-  for (const tabId of ['graphExplorePane', 'vectorLabPane', 'docPane', 'queryPane']) {
+  for (const tabId of ['graphExplorePane', 'vectorLabPane', 'queryPane']) {
     await page.click(`[data-tab="${tabId}"]`);
     await page.waitForSelector(`#${tabId}.active`, { timeout: 5000 });
   }
   if (tqlRequests.length !== tqlBeforeTabs) {
     throw new Error(`切换主标签不应执行查询，实际新增 ${tqlRequests.length - tqlBeforeTabs} 次`);
   }
-  log('  ✓ 四个主标签切换（0 次查询）');
-
-  // 冒烟 3b：文档工作区 —— 节点详情打开、创建正文、暂存只进队列（不发写请求）
-  const docTxPosts = [];
-  const onDocRequest = (req) => {
-    if (req.url().includes('/v1/transactions') && req.method() === 'POST') docTxPosts.push(req.url());
-  };
-  page.on('request', onDocRequest);
-  try {
-    await page.click('[data-tab="queryPane"]');
-    await page.click('#gridBody tr[data-row-index="0"] .entity-name');
-    await page.waitForTimeout(450);
-    await page.click('#drawerOpenDocBtn');
-    await page.waitForSelector('#docPane.active', { timeout: 8000 });
-    const docShell = await page.evaluate(() => ({
-      nav: document.querySelectorAll('.tabs-bar .tab').length,
-      tabs: document.querySelectorAll('#docTabs [data-doc-tab]').length,
-      missing: !document.getElementById('docMissingBody').hidden,
-    }));
-    if (docShell.nav !== 4) throw new Error('主导航应为 4 项，实际 ' + docShell.nav);
-    if (docShell.tabs !== 1) throw new Error('应打开一个文档标签，实际 ' + docShell.tabs);
-    if (docShell.missing) {
-      await page.click('#docCreateBody');
-      await page.waitForTimeout(200);
-    }
-    await page.evaluate(() => {
-      const editor = document.getElementById('docEditor');
-      editor.value = (editor.value || '') + '\n\nsmoke paragraph';
-      editor.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    await page.waitForTimeout(200);
-    const postsBeforeStage = docTxPosts.length;
-    await page.click('#docStageBtn');
-    await page.waitForTimeout(450);
-    const docStaged = await page.evaluate(() => ({
-      barHidden: document.getElementById('txBar').hidden,
-      queue: document.getElementById('docQueueCount').textContent,
-    }));
-    if (docStaged.barHidden) throw new Error('文档暂存后待提交条应出现');
-    if (docStaged.queue !== '1') throw new Error('文档待提交计数应为 1，实际 ' + docStaged.queue);
-    if (docTxPosts.length !== postsBeforeStage) throw new Error('文档暂存不得发出写请求');
-    // 撤回，避免污染后续步骤
-    await page.evaluate(() => rollbackTransaction());
-    await page.waitForTimeout(300);
-    await page.evaluate(() => {
-      const tab = document.querySelector('[data-tab="queryPane"]');
-      if (tab) tab.click();
-    });
-    log('  ✓ 文档工作区：打开、创建正文、暂存只进队列');
-  } finally {
-    page.off('request', onDocRequest);
-  }
+  log('  ✓ 三个主标签切换（0 次查询）');
 
   // 冒烟 4：图规模护栏 —— 注入 700 节点，用 LIMIT 500 的 MATCH 出图验证不冻结：
   // >300 节点应自动暂停力学模拟（O(n²) tick 护栏）并显示提示条

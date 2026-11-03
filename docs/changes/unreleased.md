@@ -12,7 +12,7 @@
 
 使用限制：此能力属于 nightly WebUI，数据库锁由宿主管理。草稿按 origin、页面路径与节点 ID 区分，无法可靠识别同一地址切换的不同数据库；切换前应导出并处理旧草稿。未知事务的原请求保留在当前页面会话，刷新或关闭后需核对完整事务的实际结果，不能以恢复的正文草稿作为提交证明；服务端幂等缓存也不是跨重启永久日志。
 
-回归覆盖提交响应屏障、合并/替换、基线冲突、未知事务和键生命周期、快捷键去重，以及真实 Server 上的版本冲突与响应丢失后的混合事务重放。平台执行结果以对应提交验收为准。
+验收采用代码审查、语法检查及 Server 非 UI 契约，不包含 UI/UX、样式、布局、动画或耗时阈值测试。平台执行结果以对应提交验收为准。
 
 ## Unreleased
 
@@ -28,4 +28,4 @@ Subsequent changes build on stable `0.9.0`. Published changes are recorded in th
 
 Limitations: this is a nightly WebUI capability; the host manages database locks. Drafts are scoped by origin, page path, and node ID and cannot reliably distinguish different databases served at the same address. Export and resolve old drafts before switching databases there. An unknown transaction's original request exists in the current page session; after refreshing or closing it, verify the entire transaction's actual outcome. A restored body draft is not proof of commit, and the server idempotency cache is not a permanent log across restarts.
 
-Regression coverage includes controlled response barriers, merge/replace, baseline conflicts, unknown outcomes and key lifetimes, keyboard deduplication, and real-server checks for version conflicts and mixed-transaction replay after a lost response. Platform execution results are tied to the validated commit.
+Acceptance uses code review, syntax checks, and non-UI server contracts. UI/UX, styling, layout, animation, and elapsed-time threshold tests are excluded. Platform execution results are tied to the validated commit.

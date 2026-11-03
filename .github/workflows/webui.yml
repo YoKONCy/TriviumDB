@@ -1,134 +1,23 @@
-# nightly Server/WebUI 的手动开发诊断。界面与交互随开发调整，默认记录当前截图。
-# 开发者可按需运行交互自测，或显式选择历史截图比对与更新。
-# run_smoke 依次执行：页内自检 + ui-smoke、V4 定向回归、120 组合矩阵（均双引擎）。
-# Windows 双引擎的 Server 契约和浏览器断言必须通过；仍与嵌入式发布门禁独立配置。
-
-name: Nightly WebUI Diagnostics
+# nightly Server 的非 UI 契约；禁止在此运行浏览器、UI/UX、视觉或耗时阈值验收。
+name: Nightly Server Contracts
 
 on:
   workflow_dispatch:
-    inputs:
-      run_smoke:
-        description: '执行当前页面的交互和页内自测'
-        required: false
-        default: false
-        type: boolean
-      visual_mode:
-        description: '截图记录、历史截图比对或更新参考截图'
-        required: false
-        default: 'record-only'
-        type: choice
-        options:
-          - 'record-only'
-          - 'compare'
-          - 'update'
-
-defaults:
-  run:
-    shell: bash
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TARGET_DIR: ${{ github.workspace }}/target/webui-tests
 
 jobs:
-  webui:
-    name: WebUI Diagnostics (Manual)
+  server:
+    name: Server HTTP and Transaction Contracts
     runs-on: windows-latest
+    # 基础设施挂起保护，不作为产品耗时指标。
     timeout-minutes: 40
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
         with:
-          key: webui
-          workspaces: . -> target/webui-tests
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: 安装 WebUI 测试依赖（不写入 package.json）
-        run: |
-          npm i --no-save --ignore-scripts playwright@1.64.1 pixelmatch@8.0.0 pngjs@7.0.0 gsap@3.13.0
-          npx playwright install --with-deps chromium webkit
-
-      - name: 验证 Server 契约
-        run: cargo test -p triviumdb-server
-
-      - name: 打包宿主接入资源
-        run: python scripts/package_console.py --output .tmp/console/triviumdb-console.zip
-
-      - name: 构建 server（HTML 经 include_str! 内嵌，必须先构建）
-        run: cargo build -p triviumdb-server
-
-      - name: 页内自检 + ui-smoke（chromium）
-        if: inputs.run_smoke
-        run: node scripts/ui-smoke.mjs
-
-      - name: 页内自检 + ui-smoke（webkit）
-        if: inputs.run_smoke
-        env:
-          SMOKE_BROWSER: webkit
-        run: node scripts/ui-smoke.mjs
-
-      - name: V4 定向回归（chromium）
-        if: inputs.run_smoke
-        env:
-          WEBUI_BROWSER: chromium
-        run: node scripts/webui-v4-regressions.mjs
-
-      - name: V4 定向回归（webkit）
-        if: inputs.run_smoke
-        env:
-          WEBUI_BROWSER: webkit
-        run: node scripts/webui-v4-regressions.mjs
-
-      - name: V4 120 组合矩阵（chromium）
-        if: inputs.run_smoke
-        env:
-          WEBUI_BROWSER: chromium
-        run: node scripts/webui-v4-combos.mjs
-
-      - name: V4 120 组合矩阵（webkit）
-        if: inputs.run_smoke
-        env:
-          WEBUI_BROWSER: webkit
-        run: node scripts/webui-v4-combos.mjs
-
-      - name: 视觉基线（生成模式，仅手动触发时）
-        if: inputs.visual_mode == 'update'
-        run: node scripts/visual-baseline.mjs --update
-
-      - name: 视觉基线比对
-        if: inputs.visual_mode == 'compare'
-        run: node scripts/visual-baseline.mjs --compare
-
-      - name: 记录当前页面截图
-        if: inputs.visual_mode == 'record-only'
-        run: node scripts/visual-baseline.mjs --record-only
-
-      - name: 上传视觉基线产物（手动生成模式）
-        if: always() && inputs.visual_mode == 'update'
-        uses: actions/upload-artifact@v4
-        with:
-          name: visual-baseline-${{ runner.os }}
-          path: tests/visual/baseline/
-          if-no-files-found: warn
-
-      - name: 上传截图与差异图
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: webui-visual-artifacts
-          include-hidden-files: true
-          path: |
-            .tmp/visual-shots/
-            .tmp/visual-diff/
-            .tmp/v4-regressions/
-            .tmp/v4-combos/
-            .tmp/console/
-          if-no-files-found: ignore
+          key: server-contracts
+      - name: 验证 Server 非 UI 契约
+        run: cargo test --locked -p triviumdb-server

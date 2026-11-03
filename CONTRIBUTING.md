@@ -70,7 +70,7 @@ git diff --check
 
 在本地提交前请先运行上述命令。
 
-Server 与 WebUI 处于 nightly 快速迭代阶段，接口、交互和视觉方案随开发调整。Server 通过 `cargo test -p triviumdb-server` 和独立 workflow 验证当前实现；WebUI 的浏览器及截图工具按需手动运行，见 [nightly WebUI 开发诊断](docs/webui-testing.md)。
+Server 与 WebUI 处于 nightly 快速迭代阶段，接口、交互和视觉方案随开发调整。Server 通过 `cargo test -p triviumdb-server` 和独立 workflow 验证非 UI 契约。禁止新增或执行 UI/UX、样式、布局、视觉基线、动画及耗时阈值测试，不将这些项目设为本地、CI、合并或发布门禁，也不以冒烟、行为或诊断名义执行。前端变更执行代码审查、语法检查及非 UI 数据契约验证，见 [WebUI 验收边界](docs/webui-testing.md)。
 
 测试方面的重点要求：
 
@@ -286,7 +286,7 @@ git diff --check
 
 Please run these commands locally before committing.
 
-Server and WebUI are under rapid nightly development; their interfaces, interactions, and visual design evolve with implementation. Validate Server with `cargo test -p triviumdb-server` and its separate workflow. Run browser and screenshot diagnostics manually as needed; see [nightly WebUI development diagnostics](docs/webui-testing.md).
+Server and WebUI are under rapid nightly development; their interfaces, interactions, and visual design evolve with implementation. Validate non-UI Server contracts with `cargo test -p triviumdb-server` and its separate workflow. Do not add or run UI/UX, styling, layout, visual-baseline, animation, or elapsed-time threshold tests, or use them as local, CI, merge, or release gates. Renaming them smoke, behavior, diagnostic, or optional manual checks does not exempt them. Frontend changes use code review, syntax checks, and non-UI data contracts; see [WebUI acceptance boundaries](docs/webui-testing.md).
 
 Key testing requirements:
 
