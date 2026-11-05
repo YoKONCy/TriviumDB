@@ -67,7 +67,7 @@ fn with递归检查每个表达式变量() {
     ] {
         let query = format!("MATCH (n) AS n WITH n, {expr} AS total RETURN total");
         assert!(
-            matches!(db.tql(&query), Err(TriviumError::QueryParse(_))),
+            matches!(db.tql(&query), Err(TriviumError::QuerySyntax { .. })),
             "{query}"
         );
     }
@@ -175,7 +175,7 @@ fn 连续with使用进入阶段时的值并区分节点与标量别名() {
         "MATCH (n) AS n WITH n.x AS scalar WITH n RETURN n",
     ] {
         assert!(
-            matches!(db.tql(query), Err(TriviumError::QueryParse(_))),
+            matches!(db.tql(query), Err(TriviumError::QuerySyntax { .. })),
             "{query}"
         );
     }
@@ -272,7 +272,7 @@ fn 三端共享别名样例覆盖索引与存储模式() {
         for query in cases["invalid"].as_array().unwrap() {
             assert!(matches!(
                 db.tql(query.as_str().unwrap()),
-                Err(TriviumError::QueryParse(_))
+                Err(TriviumError::QuerySyntax { .. })
             ));
         }
         db.close().unwrap();

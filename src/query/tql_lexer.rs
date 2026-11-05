@@ -137,6 +137,8 @@ pub struct TqlLexer {
     /// 与 chars 平行：chars[i] 在原始输入字符串中的字节起始偏移
     char_byte_offsets: Vec<usize>,
     input_too_large: bool,
+    /// 当前 token 的起点；消费失败后仍指向被拒绝的词法单元。
+    token_byte_start: usize,
 }
 
 impl TqlLexer {
@@ -147,6 +149,7 @@ impl TqlLexer {
                 pos: 0,
                 char_byte_offsets: vec![0],
                 input_too_large: true,
+                token_byte_start: 0,
             };
         }
         let chars: Vec<char> = input.chars().collect();
@@ -162,6 +165,7 @@ impl TqlLexer {
             pos: 0,
             char_byte_offsets,
             input_too_large: false,
+            token_byte_start: 0,
         }
     }
 
@@ -212,12 +216,12 @@ impl TqlLexer {
     }
 
     /// 同时返回 token 流与每个 token 在输入中的字节起始位置。
-    /// 错误也带位置（指向当前字符的字节偏移）。
+    /// 错误指向失败词法单元的起点。
     pub fn tokenize_with_positions(&mut self) -> Result<Vec<PosToken>, ParseErrorAt> {
         let mut positions = Vec::new();
         let tokens = self
             .tokenize_inner(Some(&mut positions))
-            .map_err(|msg| ParseErrorAt::new(msg, self.current_byte_pos()))?;
+            .map_err(|msg| ParseErrorAt::new(msg, self.token_byte_start))?;
         debug_assert_eq!(tokens.len(), positions.len());
         Ok(tokens
             .into_iter()
@@ -238,12 +242,14 @@ impl TqlLexer {
         let mut tokens = Vec::new();
 
         loop {
+            self.token_byte_start = self.current_byte_pos();
             if tokens.len() >= MAX_TQL_TOKENS {
                 return Err(format!(
                     "TQL token 数量超过 {MAX_TQL_TOKENS} (TQL token limit exceeded)"
                 ));
             }
             self.skip_whitespace();
+            self.token_byte_start = self.current_byte_pos();
 
             match self.peek() {
                 None => {

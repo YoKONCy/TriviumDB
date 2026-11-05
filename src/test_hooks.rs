@@ -50,6 +50,7 @@ pub enum ConcurrencyPoint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoPoint {
+    DirectWriteApply,
     TransactionApply,
     SnapshotCopy,
     SnapshotSync,

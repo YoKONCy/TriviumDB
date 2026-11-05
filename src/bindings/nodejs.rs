@@ -199,18 +199,63 @@ pub mod nodejs {
     }
 
     fn to_napi_error(env: Env, error: crate::error::TriviumError) -> napi::Error {
-        let code = error.code();
-        let details = node_tql_scalar_json(error.details());
+        let info = error.info();
+        let details = crate::sdk::json_error_details(info.details);
         let result = env
-            .create_error(napi::Error::from_reason(format!("{code}: {error}")))
+            .create_error(napi::Error::from_reason(info.message))
             .and_then(|mut object| {
-                object.set_named_property("code", code)?;
+                object.set_named_property("schema_version", info.schema_version)?;
+                object.set_named_property("code", info.code)?;
                 object.set_named_property("details", details.clone())?;
+                if let Some(stage) = info.stage {
+                    object.set_named_property("stage", stage.as_str())?;
+                }
+                if let Some(target) = info.target {
+                    let target = serde_json::to_value(target)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    object.set_named_property("target", target)?;
+                }
+                if let Some(write) = info.write {
+                    let write = serde_json::to_value(write)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    object.set_named_property("write", write)?;
+                }
                 if let Some(fields) = details.as_object() {
                     for (name, value) in fields {
+                        if matches!(
+                            name.as_str(),
+                            "schema_version"
+                                | "code"
+                                | "message"
+                                | "details"
+                                | "stage"
+                                | "target"
+                                | "write"
+                        ) {
+                            continue;
+                        }
                         object.set_named_property(name, value.clone())?;
                     }
                 }
+                Ok(napi::Error::from(object.into_unknown()))
+            });
+        match result {
+            Ok(error) | Err(error) => error,
+        }
+    }
+
+    fn with_napi_write_info(
+        env: Env,
+        error: napi::Error,
+        write: crate::error::WriteErrorInfo,
+    ) -> napi::Error {
+        let result = napi::JsError::from(error)
+            .into_unknown(env)
+            .coerce_to_object()
+            .and_then(|mut object| {
+                let write = serde_json::to_value(write)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                object.set_named_property("write", write)?;
                 Ok(napi::Error::from(object.into_unknown()))
             });
         match result {
@@ -1056,8 +1101,15 @@ pub mod nodejs {
             if count == 0 {
                 return Ok(());
             }
-            let next = dispatch!(self,db=>db.next_id_for_binding())
-                .map_err(|error| to_napi_error(env, error))?;
+            let next = dispatch!(self,db=>db.next_id_for_binding()).map_err(|error| {
+                to_napi_error(
+                    env,
+                    error.with_write_info(crate::error::WriteErrorInfo {
+                        transaction_consumed: None,
+                        ..crate::error::WriteErrorInfo::TRANSACTION_ADMISSION
+                    }),
+                )
+            })?;
             let last = next.checked_add(count as u64 - 1).ok_or_else(|| {
                 napi::Error::from_reason("节点 ID 分配溢出 (Node ID allocation overflow)")
             })?;
@@ -1619,26 +1671,57 @@ pub mod nodejs {
             env: Env,
             operations: Vec<NodeJson>,
         ) -> napi::Result<Vec<f64>> {
+            dispatch!(self, db => db.check_transaction_admission()).map_err(|error| {
+                to_napi_error(
+                    env,
+                    error.with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION),
+                )
+            })?;
             let operations = operations
                 .into_iter()
                 .map(|value| value.0)
                 .collect::<Vec<_>>();
-            self.check_transaction_ids(env, &operations)?;
+            let validation = |error| {
+                with_napi_write_info(
+                    env,
+                    error,
+                    crate::error::WriteErrorInfo {
+                        phase: crate::error::WritePhase::Validation,
+                        ..crate::error::WriteErrorInfo::TRANSACTION_ADMISSION
+                    },
+                )
+            };
+            self.check_transaction_ids(env, &operations)
+                .map_err(validation)?;
             let ids = match &mut self.inner {
-                DbBackend::F32(db) => db.commit_tx(build_transaction(env, &operations, |value| {
-                    Ok(value as f32)
-                })?),
-                DbBackend::F16(db) => db.commit_tx(build_transaction(env, &operations, |value| {
-                    Ok(half::f16::from_f64(value))
-                })?),
-                DbBackend::U64(db) => db.commit_tx(build_transaction(env, &operations, |value| {
-                    parse_u64_component(env, value)
-                })?),
+                DbBackend::F32(db) => db.commit_tx(
+                    build_transaction(env, &operations, |value| Ok(value as f32))
+                        .map_err(validation)?,
+                ),
+                DbBackend::F16(db) => db.commit_tx(
+                    build_transaction(env, &operations, |value| Ok(half::f16::from_f64(value)))
+                        .map_err(validation)?,
+                ),
+                DbBackend::U64(db) => db.commit_tx(
+                    build_transaction(env, &operations, |value| parse_u64_component(env, value))
+                        .map_err(validation)?,
+                ),
             }
             .map_err(|error| to_napi_error(env, error))?;
             ids.into_iter()
                 .map(|value| node_id_to_js(env, value))
                 .collect::<napi::Result<_>>()
+                .map_err(|error| {
+                    with_napi_write_info(
+                        env,
+                        error,
+                        crate::error::WriteErrorInfo {
+                            phase: crate::error::WritePhase::Response,
+                            outcome: crate::error::WriteOutcome::Committed,
+                            transaction_consumed: Some(true),
+                        },
+                    )
+                })
         }
 
         #[napi]
@@ -2739,7 +2822,7 @@ pub mod nodejs {
             for (name, value) in object {
                 values.insert(
                     name.clone(),
-                    crate::query::tql_prepared::TqlParamValue::from_json(value)
+                    crate::query::tql_prepared::TqlParamValue::from_named_json(name, value)
                         .map_err(|error| to_napi_error(env, error))?,
                 );
             }

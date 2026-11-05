@@ -168,6 +168,28 @@ struct AppState {
 }
 
 pub async fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
+    build_app_with_shutdown(config)
+        .await
+        .map(|(router, _)| router)
+}
+
+/// 可等待的数据库关闭句柄；保留 Router 或此句柄不影响关闭后的文件资源释放。
+#[derive(Clone)]
+pub struct ServerShutdown {
+    engine: EngineHandle,
+}
+
+impl ServerShutdown {
+    /// 等待写队列和后台任务排空，再执行 Core 关闭。取消等待不会取消真实关闭任务。
+    pub async fn shutdown(&self) -> Result<(), ApiError> {
+        self.engine.shutdown().await
+    }
+}
+
+/// 创建 HTTP Router 及显式关闭句柄，供宿主在停服时等待持久化和文件租约释放。
+pub async fn build_app_with_shutdown(
+    config: ServerConfig,
+) -> Result<(Router, ServerShutdown), ApiError> {
     if config.max_body_bytes == 0 || config.request_timeout.is_zero() {
         return Err(ApiError::invalid_request(
             "请求体上限和超时必须大于 0 (Request body limit and timeout must be greater than zero)",
@@ -184,16 +206,23 @@ pub async fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         prepared_cache_capacity: config.prepared_cache_capacity,
     })
     .await?;
+    let shutdown = ServerShutdown {
+        engine: engine.clone(),
+    };
     let state = Arc::new(AppState {
         engine,
         request_timeout: config.request_timeout,
         request_metrics: Arc::new(RequestMetrics::default()),
     });
 
-    Ok(Router::new()
+    let router = Router::new()
         .route("/", get(webui_index))
         .route("/ui", get(webui_index))
         .route("/ui/", get(webui_index))
+        .route("/console-client.js", get(webui_client))
+        .route("/ui/console-client.js", get(webui_client))
+        .route("/console-embed.js", get(webui_embed))
+        .route("/ui/console-embed.js", get(webui_embed))
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/health/details", get(health_details))
@@ -241,14 +270,39 @@ pub async fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
                 },
             )),
         )
-        .with_state(state))
+        .with_state(state);
+    Ok((router, shutdown))
 }
 
 const WEBUI_HTML: &str = include_str!("../web/index.html");
 
-/// 导出现有控制台资源；传输接入与容器挂载由宿主及前端适配器负责。
+/// 导出控制台页面；宿主同时提供同目录的客户端脚本。
 pub fn console_html() -> &'static str {
     WEBUI_HTML
+}
+
+/// Console RPC 客户端资源，与 HTML 同版交付。
+pub fn console_client_script() -> &'static str {
+    include_str!("../web/console-client.js")
+}
+
+/// 宿主页面使用的同源 iframe 挂载入口。
+pub fn console_embed_script() -> &'static str {
+    include_str!("../web/console-embed.js")
+}
+
+async fn webui_client() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        console_client_script(),
+    )
+}
+
+async fn webui_embed() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        console_embed_script(),
+    )
 }
 
 /// 内嵌页面内容指纹（构建期固定、进程内一次性计算）。

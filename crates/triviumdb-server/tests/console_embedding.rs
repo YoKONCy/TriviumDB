@@ -37,6 +37,174 @@ fn setup(path: &str) -> Arc<Mutex<Database<f32>>> {
 }
 
 #[tokio::test]
+async fn 嵌入http保留查询阶段及源码位置并隔离拒绝写入() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("diagnostics.tdb");
+    let database = setup(file.to_str().unwrap());
+    let host = ConsoleHost::attach(
+        &database,
+        ConsoleOptions {
+            read_only: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let app = build_console_app(host, ConsoleHttpOptions::default()).unwrap();
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../tests/contracts/query_diagnostics.json"
+    ))
+    .unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let (status, body) = post(app.clone(), wire(case["name"].as_str().unwrap(), json!({
+            "operation":if case["mutation"] == true {"mutate"} else {"query"},"query":case["query"]
+        }))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {body}");
+        let error = &body["error"];
+        assert_eq!(error["schema_version"], 1);
+        assert_eq!(error["code"], "TDB_QUERY_PARSE");
+        assert_eq!(error["stage"], case["stage"], "{case}");
+        assert_eq!(error["target"]["query_span"], case["span"], "{case}");
+        if case["mutation"] == true {
+            assert_eq!(
+                error["write"],
+                json!({"phase":"validation","outcome":"not_committed"})
+            );
+        }
+        if case["span"].is_null() {
+            assert!(error.get("target").is_none());
+        }
+        assert!(error["details"]["reason"].is_string());
+    }
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../tests/contracts/prepared_diagnostics.json"
+    ))
+    .unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let (status, body) = post(
+            app.clone(),
+            wire(
+                case["name"].as_str().unwrap(),
+                json!({
+                    "operation":"query","query":case["query"],"parameters":case["parameters"]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}");
+        let error = &body["error"];
+        assert_eq!(error["code"], case["code"]);
+        assert_eq!(error["stage"], "bind");
+        assert_eq!(error["target"], json!({"parameter":case["parameter"]}));
+        if let Some(details) = case.get("details") {
+            assert_eq!(&error["details"], details);
+        } else {
+            assert_eq!(error["details"].as_object().unwrap().len(), 1);
+            assert!(!error["details"]["reason"].as_str().unwrap().is_empty());
+        }
+    }
+    let (status, body) = post(app.clone(), wire("write-outcome", json!({
+        "operation":"transaction","operations":[{"op":"insert","vector":[1],"payload":{"state":"rejected"}}]
+    }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "TDB_DIMENSION_MISMATCH");
+    assert_eq!(body["error"]["details"], json!({"expected":2,"got":1}));
+    assert_eq!(
+        body["error"]["write"],
+        json!({"phase":"validation","outcome":"not_committed","transaction_consumed":true})
+    );
+    database.lock().unwrap().close().unwrap();
+    let mut reopened = Database::<f32>::open(file.to_str().unwrap(), 2).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), vec![1]);
+    let node = reopened.get(1).unwrap().unwrap();
+    assert_eq!(node.vector, vec![1., 0.]);
+    assert_eq!(node.payload, json!({"host":true}));
+    assert!(node.edges.is_empty());
+    reopened.close().unwrap();
+}
+
+#[tokio::test]
+async fn 嵌入http编辑冲突及原事务确认沿用core契约() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("editing.tdb");
+    let database = setup(file.to_str().unwrap());
+    let host = ConsoleHost::attach(
+        &database,
+        ConsoleOptions {
+            read_only: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let app = build_console_app(host, ConsoleHttpOptions::default()).unwrap();
+    let (status, read) = post(
+        app.clone(),
+        wire(
+            "读取",
+            json!({"operation":"getNodes","ids":["1"],"withRevision":true}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    database
+        .lock()
+        .unwrap()
+        .update_payload(1, json!({"owner":"host"}))
+        .unwrap();
+    let mut command = json!({"operation":"guardedTransaction","expectedRevision":read["data"]["revision"],"idempotencyKey":"http-edit","operations":[
+        {"op":"insert","vector":[0,1],"payload":{"owner":"new"}},
+        {"op":"updatePayload","id":"1","payload":{"owner":"console"}}
+    ]});
+    let (status, rejected) = post(app.clone(), wire("冲突", command.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(rejected["error"]["code"], "TDB_WRITE_CONFLICT");
+    assert_eq!(database.lock().unwrap().node_count().unwrap(), 1);
+    let (status, read) = post(
+        app.clone(),
+        wire(
+            "重新读取",
+            json!({"operation":"getNodes","ids":["1"],"withRevision":true}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    command["expectedRevision"] = read["data"]["revision"].clone();
+    let (status, committed) = post(app.clone(), wire("提交", command.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(committed["data"]["createdIds"], json!(["2"]));
+    assert_eq!(committed["data"]["replayed"], false);
+    let (status, replayed) = post(app.clone(), wire("重试", command.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        replayed["data"],
+        json!({"createdIds":["2"],"replayed":true,"revision":committed["data"]["revision"]})
+    );
+    command["operation"] = json!("transactionStatus");
+    let (status, receipt) = post(app.clone(), wire("确认", command.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        receipt["data"],
+        json!({"outcome":"committed","revision":committed["data"]["revision"],"createdIds":["2"]})
+    );
+    command["operations"][0]["payload"] = json!({"owner":"different"});
+    let (status, conflict) = post(app.clone(), wire("错配确认", command)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["error"]["code"], "TDB_IDEMPOTENCY_CONFLICT");
+    database.lock().unwrap().close().unwrap();
+    let mut reopened = Database::<f32>::open(file.to_str().unwrap(), 2).unwrap();
+    assert_eq!(reopened.node_count().unwrap(), 2);
+    assert_eq!(
+        reopened.get_payload(1).unwrap().unwrap(),
+        json!({"owner":"console"})
+    );
+    assert_eq!(
+        reopened.get_payload(2).unwrap().unwrap(),
+        json!({"owner":"new"})
+    );
+    assert_eq!(reopened.get(2).unwrap().unwrap().vector, vec![0., 1.]);
+    reopened.close().unwrap();
+}
+
+#[tokio::test]
 async fn http复用已打开实例且路由存活不延长文件锁() {
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("宿主.tdb");
@@ -136,7 +304,11 @@ async fn 客户端退出后许可保留到真实任务退出() {
     assert!(running.await.unwrap_err().is_cancelled());
     let (status, error) = post(app.clone(), wire("背压", json!({"operation":"info"}))).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(error["error"]["details"]["io_kind"], "WouldBlock");
+    assert_eq!(error["error"]["code"], "TDB_BUSY");
+    assert_eq!(
+        error["error"]["details"],
+        json!({"resource":"console_in_flight"})
+    );
     release.wait();
     // 仅对受控读取退出后的背压重试；必须观察真实成功及完整记录，不以时间推断退出。
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -154,7 +326,11 @@ async fn 客户端退出后许可保留到真实任务退出() {
             break result;
         }
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(result["error"]["details"]["io_kind"], "WouldBlock");
+        assert_eq!(result["error"]["code"], "TDB_BUSY");
+        assert_eq!(
+            result["error"]["details"],
+            json!({"resource":"console_in_flight"})
+        );
         tokio::task::yield_now().await;
     };
     assert_eq!(
@@ -212,7 +388,11 @@ async fn 请求体读取前取得并发许可且退出后归还() {
     ready.await.unwrap();
     let (status, error) = post(app.clone(), wire("并发", json!({"operation":"info"}))).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(error["error"]["details"]["io_kind"], "WouldBlock");
+    assert_eq!(error["error"]["code"], "TDB_BUSY");
+    assert_eq!(
+        error["error"]["details"],
+        json!({"resource":"console_in_flight"})
+    );
     waiting.abort();
     assert!(waiting.await.unwrap_err().is_cancelled());
     let (status, result) = post(

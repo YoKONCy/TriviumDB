@@ -363,6 +363,9 @@ export type ErrorInteger = number | string;
 
 /** 内核错误字段；错误码与字段名在 Rust、Python、Node 三端保持一致。 */
 export interface ErrorDetailsByCode {
+  TDB_BUSY: { resource: string };
+  TDB_REENTRANT_ACCESS: { operation: string };
+  TDB_HOST_LOCK_POISONED: { resource: string };
   TDB_IO: { io_kind: string; os_code: number | null };
   TDB_SERIALIZATION: { reason: string };
   TDB_DTYPE_MISMATCH: { stored: DType; requested: DType };
@@ -397,8 +400,12 @@ export interface ErrorDetailsByCode {
   TDB_SNAPSHOT_PUBLICATION_UNCERTAIN: { path: string; reason: string };
   TDB_SHUTDOWN_FAILED: { reason: string };
   TDB_DATABASE_CLOSED: Record<string, never>;
+  TDB_TRANSACTION_FINISHED: Record<string, never>;
   TDB_CONSOLE_SESSION_CLOSED: Record<string, never>;
   TDB_CONSOLE_RESPONSE_TOO_LARGE: { max_bytes: ErrorInteger; committed: boolean };
+  TDB_WRITE_CONFLICT: { expected: string; actual: string };
+  TDB_IDEMPOTENCY_CONFLICT: Record<string, never>;
+  TDB_WRITE_OUTCOME_UNKNOWN: Record<string, never>;
   TDB_UNSUPPORTED_WAL_VERSION: { found: number; supported: number };
   TDB_UNSUPPORTED_DATABASE_VERSION: { found: number; minimum_supported: number; current: number };
   TDB_API_MIGRATION_REQUIRED: { removed_api: string; replacement: string };
@@ -407,9 +414,31 @@ export interface ErrorDetailsByCode {
   TDB_ERROR: { reason: string };
 }
 
+/** 原始 TQL 中的 UTF-8 字节锚点；行列从 1 开始，列按 Unicode 标量计数。 */
+export interface QueryErrorSpan {
+  start_byte: number;
+  end_byte: number;
+  line: number;
+  column: number;
+}
+
 export type TriviumDBError = {
-  [Code in keyof ErrorDetailsByCode]: Error & { code: Code; details: ErrorDetailsByCode[Code] }
+  [Code in keyof ErrorDetailsByCode]: Error & {
+    schema_version: 1;
+    code: Code;
+    details: ErrorDetailsByCode[Code];
+    stage?: 'lex' | 'parse' | 'bind';
+    target?: { query_span: QueryErrorSpan; parameter?: never } | { parameter: string; query_span?: never };
+    write?: WriteErrorInfo;
+  }
 }[keyof ErrorDetailsByCode];
+
+/** 写入失败的阶段与结果，事务消费描述当前请求对内核操作缓冲的所有权转移。 */
+export interface WriteErrorInfo {
+  phase: 'admission' | 'validation' | 'wal' | 'apply' | 'group_sync' | 'response';
+  outcome: 'not_committed' | 'unknown' | 'committed';
+  transaction_consumed?: boolean;
+}
 
 /** QueueFull 错误上的附加字段；内存单位为字节，任务和线程单位为个数。 */
 export interface ResourceBudgetDetails {
@@ -420,8 +449,10 @@ export interface ResourceBudgetDetails {
 }
 
 export interface ResourceBudgetError extends Error, ResourceBudgetDetails {
+  schema_version: 1;
   code: 'QueueFull';
   details: ResourceBudgetDetails;
+  write?: WriteErrorInfo;
 }
 
 export interface ResourceFailure {

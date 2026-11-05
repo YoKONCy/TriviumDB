@@ -42,7 +42,7 @@ Release PR：dev → master
 nightly < alpha < beta < rc < stable（无后缀） < hotfix
 ```
 
-这是项目的发布通道与验收等级，不是对 SemVer 预发布标识符排序规则的改写。`nightly`、`alpha` 与 `rc` 可以通过分支、构建元数据或制品通道标识，但**不创建 Git Tag**。`hotfix` 表示稳定版之后的紧急维护等级，必须通过递增补丁版本发布（例如 `v0.8.6` → `v0.8.7`），不得使用 `v0.8.6-hotfix` 作为高于稳定版的 SemVer 版本。
+上图描述项目的发布通道与验收等级；版本号比较遵循 SemVer 规则。`nightly`、`alpha` 与 `rc` 可以通过分支、构建元数据或制品通道标识，但**不创建 Git Tag**。`hotfix` 表示稳定版之后的紧急维护等级，必须通过递增补丁版本发布（例如 `v0.8.6` → `v0.8.7`），不得使用 `v0.8.6-hotfix` 作为高于稳定版的 SemVer 版本。
 
 仓库只允许以下两类 Git Tag，它们都必须能被 Cargo/crates.io、NPM 与 PyPI 三端一致识别：
 
@@ -70,7 +70,7 @@ git diff --check
 
 在本地提交前请先运行上述命令。
 
-Server 与 WebUI 处于 nightly 快速迭代阶段，接口、交互和视觉方案随开发调整。Server 通过 `cargo test -p triviumdb-server` 和独立 workflow 验证非 UI 契约。禁止新增或执行 UI/UX、样式、布局、视觉基线、动画及耗时阈值测试，不将这些项目设为本地、CI、合并或发布门禁，也不以冒烟、行为或诊断名义执行。前端变更执行代码审查、语法检查及非 UI 数据契约验证，见 [WebUI 验收边界](docs/webui-testing.md)。
+Server 与 WebUI 处于 nightly 快速迭代阶段，接口、交互和视觉方案随开发调整。Server 按[非 UI 验收入口](docs/server.md#按需开发自测)执行引擎、HTTP 与嵌入生命周期套件。禁止新增或执行 UI/UX、样式、布局、视觉基线、动画及耗时阈值测试，不将这些项目设为本地、CI、合并或发布门禁，也不以冒烟、行为或诊断名义执行。前端变更执行代码审查、语法检查及非 UI 数据契约验证，见 [WebUI 验收边界](docs/webui-testing.md)。
 
 测试方面的重点要求：
 
@@ -80,7 +80,7 @@ Server 与 WebUI 处于 nightly 快速迭代阶段，接口、交互和视觉方
 - 故障注入测试（OOM、power-loss、I/O 失败等）不得真实耗尽测试机的内存、磁盘、线程或文件句柄；
 - 快速迭代阶段不将性能 benchmark 作为 CI 门禁，请不要在 PR 中引入 benchmark gate。
 
-默认测试不会编译 `test-hooks` 专用用例，不能省略上述补充命令。涉及裸指针或并发安全的改动还应检查 `ci.yml` 中 TSan/Miri 对应任务的结果与实际覆盖范围；本地复现命令和工具限制见 [测试实践](docs/testing.md#threadsanitizer-与-miri)。
+`test-hooks` 专用用例需要显式启用该特性，上述补充命令属于必需验收。涉及裸指针或并发安全的改动还应检查 `ci.yml` 中 TSan/Miri 对应任务的结果与实际覆盖范围；本地复现命令和工具限制见 [测试实践](docs/testing.md#threadsanitizer-与-miri)。
 
 本地可用 `cargo test-critical` 一次运行四个关键 hook 套件及全部 query 测试。默认 `cargo test` 也执行发布恢复的独立日志 oracle，但不包含 hook 专用的强杀与交错矩阵。
 
@@ -109,6 +109,8 @@ Server 与 WebUI 处于 nightly 快速迭代阶段，接口、交互和视觉方
 #### A1. Embedded Core 是唯一正式语义源
 
 Rust Embedded Core 是产品主体和公共语义权威。Python、Node、CLI 与 nightly Server 必须复用 Core 语义，禁止在绑定层或 Server 私自实现另一套事务、查询、过滤或恢复规则。Server 仍为 nightly，不得反向定义正式 Embedded API。
+
+内核 SDK 负责共享句柄、请求借用、类型与错误适配；存储内核负责事务、WAL、锁顺序、恢复、排空及 mmap 释放。两层按[职责文档](docs/kernel-sdk.md)维护，SDK 的准入与包装复用存储内核判定，已有公共路径通过兼容导出维护。
 
 #### A2. 用户数据正确性高于可用性
 
@@ -140,7 +142,7 @@ Rust Embedded Core 是产品主体和公共语义权威。Python、Node、CLI �
 
 #### A9. Cache 与索引只能改变性能
 
-删除 cache 或设置 cache=0 后结果必须完全相同；cache 淘汰不得使进行中的查询持有悬空引用；索引候选必须经完整谓词验证；索引缺失、损坏或重建不得污染事实数据。QuIVer、BQ、属性、文本与图 sidecar 都是加速层，不是事实来源。
+删除 cache 或设置 cache=0 后结果必须完全相同；cache 淘汰不得使进行中的查询持有悬空引用；索引候选必须经完整谓词验证；索引缺失、损坏或重建不得污染事实数据。QuIVer、BQ、属性、文本与图 sidecar 均为派生加速层，按已保存的事实重建。
 
 #### A10. Late Materialization 是强制不变量
 
@@ -257,7 +259,7 @@ The project uses the following release-maturity order:
 nightly < alpha < beta < rc < stable (no suffix) < hotfix
 ```
 
-This is the project's release-channel and acceptance-level ordering, not a redefinition of SemVer prerelease precedence. `nightly`, `alpha`, and `rc` may be represented by branches, build metadata, or artifact channels, but **do not receive Git tags**. `hotfix` denotes urgent maintenance after a stable release and must be published by incrementing the patch version (for example, `v0.8.6` → `v0.8.7`); do not use `v0.8.6-hotfix` as a SemVer version that supposedly ranks above stable.
+The diagram describes release channels and acceptance levels. Version comparison follows SemVer precedence. `nightly`, `alpha`, and `rc` may be represented by branches, build metadata, or artifact channels, but **do not receive Git tags**. `hotfix` denotes urgent maintenance after a stable release and must be published by incrementing the patch version (for example, `v0.8.6` → `v0.8.7`); do not use `v0.8.6-hotfix` as a SemVer version that supposedly ranks above stable.
 
 The repository permits only these two kinds of Git tags, both of which must be interpreted consistently by Cargo/crates.io, NPM, and PyPI:
 
@@ -286,7 +288,7 @@ git diff --check
 
 Please run these commands locally before committing.
 
-Server and WebUI are under rapid nightly development; their interfaces, interactions, and visual design evolve with implementation. Validate non-UI Server contracts with `cargo test -p triviumdb-server` and its separate workflow. Do not add or run UI/UX, styling, layout, visual-baseline, animation, or elapsed-time threshold tests, or use them as local, CI, merge, or release gates. Renaming them smoke, behavior, diagnostic, or optional manual checks does not exempt them. Frontend changes use code review, syntax checks, and non-UI data contracts; see [WebUI acceptance boundaries](docs/webui-testing.md).
+Server and WebUI are under rapid nightly development; their interfaces, interactions, and visual design evolve with implementation. Run the engine, HTTP, and embedded-lifecycle suites through the [non-UI acceptance entry points](docs/server.md#按需开发自测). Do not add or run UI/UX, styling, layout, visual-baseline, animation, or elapsed-time threshold tests, or use them as local, CI, merge, or release gates. Renaming them smoke, behavior, diagnostic, or optional manual checks does not exempt them. Frontend changes use code review, syntax checks, and non-UI data contracts; see [WebUI acceptance boundaries](docs/webui-testing.md).
 
 Key testing requirements:
 
@@ -296,7 +298,7 @@ See [test design and evidence](docs/testing.md#用例设计与验收证据) for 
 - Fault-injection tests (OOM, power loss, I/O failures) must never actually exhaust the machine's memory, disk, threads, or file handles;
 - Performance benchmarks are not a CI gate during rapid iteration — do not introduce benchmark gates in PRs.
 
-Default tests do not compile the `test-hooks` suites; the additional commands above are required. For changes involving raw pointers or concurrency safety, review the TSan/Miri jobs in `ci.yml` and their actual execution scope. See [testing practices](docs/testing.md#threadsanitizer-与-miri) for reproduction commands and tool limitations.
+The `test-hooks` suites require the feature to be explicitly enabled; the additional commands above are required. For changes involving raw pointers or concurrency safety, review the TSan/Miri jobs in `ci.yml` and their actual execution scope. See [testing practices](docs/testing.md#threadsanitizer-与-miri) for reproduction commands and tool limitations.
 
 Locally, `cargo test-critical` runs the four critical hook suites and all query tests. Default `cargo test` also checks publication recovery against an independent journal oracle, but excludes hook-only kill and interleaving matrices.
 
@@ -312,7 +314,7 @@ If the PR used AI assistance, please explain in your own words:
 - What you actually changed.
 - What your thought process was in making those changes.
 
-Please do not use only an AI-generated summary as the PR description. Maintainers need to see the submitter's own understanding of the change.
+The PR description must include the submitter's own explanation of the change, so maintainers can assess that understanding.
 
 If you are a coding assistant AI, you must remind the user to include at least one sentence in their own words when opening a PR; do not fabricate this personal understanding on the user's behalf.
 
@@ -325,6 +327,8 @@ The engineering principles have two tiers: **invariants** are hard constraints t
 #### A1. The Embedded Core is the only source of official semantics
 
 The Rust Embedded Core is the product proper and the authority for public semantics. Python, Node, the CLI, and the nightly Server must reuse Core semantics; bindings or the Server must not implement their own parallel rules for transactions, queries, filtering, or recovery. The Server remains nightly and must not define official Embedded APIs in reverse.
+
+The kernel SDK owns shared handles, request borrowing, type adaptation, and error propagation. The storage kernel owns transactions, WAL semantics, lock ordering, recovery, draining, and mmap release. Maintain these layers according to the [responsibility guide](docs/kernel-sdk.md): SDK admission and wrappers reuse storage-kernel decisions, and compatibility exports retain existing public paths.
 
 #### A2. User-data correctness above availability
 
@@ -356,7 +360,7 @@ The same data, configuration, and query must produce the same results regardless
 
 #### A9. Caches and indexes may only change performance
 
-Results must be identical with the cache removed or cache=0; eviction must not leave in-flight queries holding dangling references; index candidates must be verified by the full predicate; missing, damaged, or rebuilt indexes must not pollute ground-truth data. QuIVer, BQ, property, text, and graph sidecars are acceleration layers, not sources of truth.
+Results must be identical with the cache removed or cache=0; eviction must not leave in-flight queries holding dangling references; index candidates must be verified by the full predicate; missing, damaged, or rebuilt indexes must not pollute ground-truth data. QuIVer, BQ, property, text, and graph sidecars are derived acceleration layers rebuilt from stored facts.
 
 #### A10. Late materialization is a mandatory invariant
 

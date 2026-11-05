@@ -6,6 +6,32 @@ use serde_json::{Value, json};
 pub(crate) fn cases() -> Vec<(E, &'static str, Value)> {
     vec![
         (
+            E::TransactionFinished,
+            "TDB_TRANSACTION_FINISHED",
+            json!({}),
+        ),
+        (
+            E::DatabaseBusy {
+                resource: "shared_database",
+            },
+            "TDB_BUSY",
+            json!({"resource":"shared_database"}),
+        ),
+        (
+            E::ReentrantAccess {
+                operation: "shared_write",
+            },
+            "TDB_REENTRANT_ACCESS",
+            json!({"operation":"shared_write"}),
+        ),
+        (
+            E::HostLockPoisoned {
+                resource: "host_database",
+            },
+            "TDB_HOST_LOCK_POISONED",
+            json!({"resource":"host_database"}),
+        ),
+        (
             E::DtypeMismatch {
                 stored: "f32",
                 requested: "f16",
@@ -220,6 +246,24 @@ pub(crate) fn cases() -> Vec<(E, &'static str, Value)> {
         ),
         (E::DatabaseClosed, "TDB_DATABASE_CLOSED", json!({})),
         (
+            E::WriteConflict {
+                expected: "old".into(),
+                actual: "new".into(),
+            },
+            "TDB_WRITE_CONFLICT",
+            json!({"expected":"old","actual":"new"}),
+        ),
+        (
+            E::IdempotencyConflict,
+            "TDB_IDEMPOTENCY_CONFLICT",
+            json!({}),
+        ),
+        (
+            E::WriteOutcomeUnknown,
+            "TDB_WRITE_OUTCOME_UNKNOWN",
+            json!({}),
+        ),
+        (
             E::ConsoleSessionClosed,
             "TDB_CONSOLE_SESSION_CLOSED",
             json!({}),
@@ -287,6 +331,56 @@ fn 错误描述符保持预期类别与完整精度() {
     for (error, code, details) in cases() {
         assert_eq!(error.code(), code);
         assert_eq!(error.details(), details, "{code}");
+        let info = error.info();
+        assert_eq!(info.schema_version, 1);
+        assert_eq!(info.code, code);
+        assert_eq!(info.details, details);
         assert!(codes.insert(code), "不同错误类别不应共享错误码");
     }
+}
+
+#[test]
+fn 参数定位保留原始错误链和无损字段() {
+    let error = E::NodeNotFound(u64::MAX).at_query_parameter("x");
+    assert!(matches!(error.underlying(), E::NodeNotFound(u64::MAX)));
+    let cause = std::error::Error::source(&error).unwrap();
+    let cause = cause.downcast_ref::<Box<E>>().unwrap();
+    assert!(matches!(cause.as_ref(), E::NodeNotFound(u64::MAX)));
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["code"], "TDB_NODE_NOT_FOUND");
+    assert_eq!(info["details"], json!({"id":u64::MAX}));
+    assert_eq!(info["stage"], "bind");
+    assert_eq!(info["target"], json!({"parameter":"x"}));
+}
+
+#[test]
+fn 写入上下文保留原始错误且外层准入不覆盖执行事实() {
+    use super::{WriteErrorInfo, WriteOutcome, WritePhase};
+    let write = WriteErrorInfo {
+        phase: WritePhase::Wal,
+        outcome: WriteOutcome::Unknown,
+        transaction_consumed: Some(true),
+    };
+    let error = E::Io(std::io::Error::from_raw_os_error(2))
+        .with_write_info(write)
+        .with_write_info(WriteErrorInfo::TRANSACTION_ADMISSION);
+    assert!(matches!(error.underlying(), E::Io(_)));
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["code"], "TDB_IO");
+    assert_eq!(info["details"], json!({"io_kind":"NotFound","os_code":2}));
+    assert_eq!(
+        info["write"],
+        json!({"phase":"wal","outcome":"unknown","transaction_consumed":true})
+    );
+    let error = E::MissingQueryParameter {
+        parameter: "x".into(),
+    }
+    .with_write_info(WriteErrorInfo::TRANSACTION_ADMISSION);
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["stage"], "bind");
+    assert_eq!(info["target"], json!({"parameter":"x"}));
+    assert_eq!(
+        info["write"],
+        json!({"phase":"admission","outcome":"not_committed","transaction_consumed":false})
+    );
 }

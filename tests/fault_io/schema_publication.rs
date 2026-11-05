@@ -54,8 +54,10 @@ fn 约束发布失败隔离实例并按真实提交点恢复() {
                     assert!(matches!(error, TriviumError::Io(_)), "{mode:?}/{point:?}");
                     let wal_before = std::fs::read(format!("{path}.wal")).unwrap();
                     assert!(matches!(
-                        db.insert_with_id(3, &[1., 1.], json!({"tenant":"a","email":"same"})),
-                        Err(TriviumError::WalClosed)
+                        db.insert_with_id(3, &[1., 1.], json!({"tenant":"a","email":"same"}))
+                            .unwrap_err()
+                            .underlying(),
+                        TriviumError::WalClosed
                     ));
                     assert!(matches!(db.get(1), Err(TriviumError::WalClosed)));
                     assert!(matches!(
@@ -98,8 +100,8 @@ fn 约束发布失败隔离实例并按真实提交点恢复() {
                     );
                     if has_constraint {
                         assert!(matches!(
-                            duplicate,
-                            Err(TriviumError::UniqueConstraintViolation { .. })
+                            duplicate.unwrap_err().underlying(),
+                            TriviumError::UniqueConstraintViolation { .. }
                         ));
                     } else {
                         duplicate.unwrap();

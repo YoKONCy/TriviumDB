@@ -278,6 +278,9 @@ jobs:
       - name: 验证 Node.js 公共 API 契约
         run: npm run test:public-api
 
+      - name: 验证 Console 非 UI 传输与事务契约
+        run: npm run test:console-transport
+
       - name: 验证 npm 产物的 TypeScript 消费与原生运行契约
         run: npm run test:package
 

@@ -95,7 +95,7 @@ pub mod python {
 
     fn to_py_error(error: crate::error::TriviumError) -> PyErr {
         use crate::error::TriviumError;
-        let exception = match &error {
+        let exception = match error.underlying() {
             TriviumError::SnapshotPublicationUncertain { .. } => {
                 SnapshotPublicationError::new_err(error.to_string())
             }
@@ -125,12 +125,37 @@ pub mod python {
         };
         Python::with_gil(|py| -> PyResult<()> {
             let value = exception.value(py);
-            value.setattr("code", error.code())?;
-            let details = error.details();
+            let info = error.info();
+            value.setattr("schema_version", info.schema_version)?;
+            value.setattr("code", info.code)?;
+            value.setattr("message", info.message)?;
+            value.setattr(
+                "stage",
+                info.stage.map(crate::error::QueryErrorStage::as_str),
+            )?;
+            let target = serde_json::to_value(info.target)
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            value.setattr("target", json_to_pyobject(py, &target)?)?;
+            let write = serde_json::to_value(info.write)
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+            value.setattr("write", json_to_pyobject(py, &write)?)?;
+            let details = info.details;
             value.setattr("details", json_to_pyobject(py, &details)?)?;
             // 保留资源预算等已有的直接属性，字段的权威值来自内核。
             if let Some(fields) = details.as_object() {
                 for (name, field) in fields {
+                    if matches!(
+                        name.as_str(),
+                        "schema_version"
+                            | "code"
+                            | "message"
+                            | "details"
+                            | "stage"
+                            | "target"
+                            | "write"
+                    ) {
+                        continue;
+                    }
                     value.setattr(name.as_str(), json_to_pyobject(py, field)?)?;
                 }
             }
@@ -143,6 +168,19 @@ pub mod python {
         F32(GenericDatabase<f32>),
         F16(GenericDatabase<half::f16>),
         U64(GenericDatabase<u64>),
+    }
+
+    fn transaction_admission_error(error: PyErr) -> PyErr {
+        Python::with_gil(|py| -> PyResult<()> {
+            let write = serde_json::to_value(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION)
+                .map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
+            })?;
+            error
+                .value(py)
+                .setattr("write", json_to_pyobject(py, &write)?)
+        })
+        .map_or_else(|conversion| conversion, |()| error)
     }
 
     fn tql_row_to_json<T: crate::VectorType>(
@@ -210,8 +248,37 @@ pub mod python {
     #[pyclass(name = "TriviumDB")]
     pub struct PyTriviumDB {
         inner: DbBackend,
-        #[pyo3(get)]
         dtype: String,
+    }
+
+    // 在 PyO3 借用前登记请求：同线程重入与其他线程的借用争用分别返回稳定类别。
+    // 请求作用域只保留对象身份；Bound 和 PyRef 保证对象在作用域内存活。
+    fn database_read<'py>(
+        database: &Bound<'py, PyTriviumDB>,
+    ) -> PyResult<(crate::sdk::RequestScope, PyRef<'py, PyTriviumDB>)> {
+        let request =
+            crate::sdk::RequestScope::enter(database.as_ptr() as usize, "python_callback")
+                .map_err(to_py_error)?;
+        let borrowed = database.try_borrow().map_err(|_| {
+            to_py_error(crate::TriviumError::DatabaseBusy {
+                resource: "python_database",
+            })
+        })?;
+        Ok((request, borrowed))
+    }
+
+    fn database_write<'py>(
+        database: &Bound<'py, PyTriviumDB>,
+    ) -> PyResult<(crate::sdk::RequestScope, PyRefMut<'py, PyTriviumDB>)> {
+        let request =
+            crate::sdk::RequestScope::enter(database.as_ptr() as usize, "python_callback")
+                .map_err(to_py_error)?;
+        let borrowed = database.try_borrow_mut().map_err(|_| {
+            to_py_error(crate::TriviumError::DatabaseBusy {
+                resource: "python_database",
+            })
+        })?;
+        Ok((request, borrowed))
     }
 
     macro_rules! dispatch {
@@ -592,6 +659,12 @@ pub mod python {
 
     #[pymethods]
     impl PyTriviumDB {
+        #[getter]
+        fn dtype(slf: &Bound<'_, Self>) -> PyResult<String> {
+            let (_request, borrowed) = database_read(slf)?;
+            Ok(borrowed.dtype.clone())
+        }
+
         #[new]
         #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0, payload_cache_mb=64, payload_cache_entry_mb=8, access_mode="read_write", missing_index_policy="fallback", max_query_rows=None, row_overflow="throw", runtime=None))]
         fn new(
@@ -670,9 +743,11 @@ pub mod python {
         }
 
         /// 运行时切换 WAL 同步模式: "full" / "normal" / "off"
-        fn set_sync_mode(&mut self, mode: &str) -> PyResult<()> {
+        fn set_sync_mode(slf: &Bound<'_, Self>, mode: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let sm = parse_sync_mode(mode)?;
-            dispatch!(self, mut db => db.set_sync_mode(sm)).map_err(to_py_error)
+            dispatch!(this, mut db => db.set_sync_mode(sm)).map_err(to_py_error)
         }
 
         // ════════ Hook 管理 ════════
@@ -688,16 +763,21 @@ pub mod python {
         /// db.load_ffi_hook("./libmy_plugin.so")
         /// results = db.search(query_vec)  # 自动经过 C++ Hook
         /// ```
-        fn load_ffi_hook(&mut self, lib_path: &str) -> PyResult<()> {
+        fn load_ffi_hook(slf: &Bound<'_, Self>, lib_path: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let ffi_hook = crate::hook::FfiHook::load(lib_path).map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("加载 FFI Hook 失败: {}", e))
             })?;
-            dispatch!(self, mut db => db.set_hook(ffi_hook)).map_err(to_py_error)
+            dispatch!(this, mut db => db.set_hook(ffi_hook)).map_err(to_py_error)
         }
 
         /// 清除当前已注册的 Hook，恢复为默认的零开销 NoopHook
-        fn clear_hook(&mut self) {
-            dispatch!(self, mut db => db.clear_hook());
+        fn clear_hook(slf: &Bound<'_, Self>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.clear_hook());
+            Ok(())
         }
 
         /// 注册一个 Python 原生 Hook 对象
@@ -716,9 +796,14 @@ pub mod python {
         ///
         /// db.set_hook(MyHook())
         /// ```
-        fn set_hook(&mut self, hook: PyObject) -> PyResult<()> {
-            let wrapper = PySearchHookWrapper { py_hook: hook };
-            dispatch!(self, mut db => db.set_hook(wrapper)).map_err(to_py_error)
+        fn set_hook(slf: &Bound<'_, Self>, hook: PyObject) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            let wrapper = PySearchHookWrapper {
+                py_hook: hook,
+                database_identity: slf.as_ptr() as usize,
+            };
+            dispatch!(this, mut db => db.set_hook(wrapper)).map_err(to_py_error)
         }
 
         fn __traverse__(
@@ -754,7 +839,7 @@ pub mod python {
         /// ```
         #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None))]
         fn search_with_context(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             query_vector: Bound<'_, PyAny>,
             top_k: usize,
@@ -764,6 +849,8 @@ pub mod python {
             min_score: f32,
             payload_filter: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<(Vec<PySearchHit>, PyHookContext)> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let rust_filter = match payload_filter {
                 Some(dict) => Some(dict_to_filter(py, dict)?),
                 None => None,
@@ -778,7 +865,7 @@ pub mod python {
                 ..Default::default()
             };
 
-            let (results, hook_ctx) = match &self.inner {
+            let (results, hook_ctx) = match &this.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
                     py.allow_threads(|| db.search_hybrid_with_context(None, Some(&vec), &config))
@@ -836,13 +923,15 @@ pub mod python {
         }
 
         fn insert(
-            &mut self,
+            slf: &Bound<'_, Self>,
             _py: Python<'_>,
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<u64> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let json = pyobject_to_json(payload)?;
-            match &mut self.inner {
+            match &mut this.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = vector.extract()?;
                     db.insert(&vec, json).map_err(to_py_error)
@@ -860,14 +949,16 @@ pub mod python {
         }
 
         fn insert_with_id(
-            &mut self,
+            slf: &Bound<'_, Self>,
             _py: Python<'_>,
             id: u64,
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let json = pyobject_to_json(payload)?;
-            match &mut self.inner {
+            match &mut this.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = vector.extract()?;
                     db.insert_with_id(id, &vec, json)
@@ -886,13 +977,15 @@ pub mod python {
         }
 
         fn upsert_with_id(
-            &mut self,
+            slf: &Bound<'_, Self>,
             id: u64,
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let json = pyobject_to_json(payload)?;
-            match &mut self.inner {
+            match &mut this.inner {
                 DbBackend::F32(db) => db.upsert_with_id(id, &vector.extract::<Vec<f32>>()?, json),
                 DbBackend::F16(db) => {
                     let vector = vector
@@ -908,19 +1001,29 @@ pub mod python {
         }
 
         #[pyo3(signature = (src, dst, label="related", weight=1.0))]
-        fn link(&mut self, src: u64, dst: u64, label: &str, weight: f32) -> PyResult<()> {
-            dispatch!(self, mut db => db.link(src, dst, label, weight)).map_err(to_py_error)
+        fn link(
+            slf: &Bound<'_, Self>,
+            src: u64,
+            dst: u64,
+            label: &str,
+            weight: f32,
+        ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.link(src, dst, label, weight)).map_err(to_py_error)
         }
 
         fn get_edge(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             src: u64,
             dst: u64,
             label: &str,
         ) -> PyResult<Option<PyEdge>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             Ok({
-                dispatch!(self, db => db.get_edge(src, dst, label).map_err(to_py_error)?)
+                dispatch!(this, db => db.get_edge(src, dst, label).map_err(to_py_error)?)
                     .map(|edge| -> PyResult<PyEdge> {
                         Ok(PyEdge {
                             target_id: edge.target_id,
@@ -935,31 +1038,35 @@ pub mod python {
 
         #[pyo3(signature = (src, dst, label, weight=1.0, metadata=None))]
         fn upsert_edge(
-            &mut self,
+            slf: &Bound<'_, Self>,
             src: u64,
             dst: u64,
             label: &str,
             weight: f32,
             metadata: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let metadata = metadata
                 .map(pyobject_to_json)
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
-            dispatch!(self, mut db => db.upsert_edge(src, dst, label, weight, metadata))
+            dispatch!(this, mut db => db.upsert_edge(src, dst, label, weight, metadata))
                 .map_err(to_py_error)
         }
 
         #[pyo3(signature = (src, dst, label, weight=None, metadata=None))]
         fn update_edge(
-            &mut self,
+            slf: &Bound<'_, Self>,
             src: u64,
             dst: u64,
             label: &str,
             weight: Option<f32>,
             metadata: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<()> {
-            dispatch!(self, mut db => db.update_edge(
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.update_edge(
                 src,
                 dst,
                 label,
@@ -971,7 +1078,7 @@ pub mod python {
 
         #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction="out"))]
         fn search(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             query_vector: Bound<'_, PyAny>,
             top_k: usize,
@@ -984,6 +1091,8 @@ pub mod python {
             min_edge_weight: f32,
             edge_direction: &str,
         ) -> PyResult<Vec<PySearchHit>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let rust_filter = match payload_filter {
                 Some(dict) => Some(dict_to_filter(py, dict)?),
                 None => None,
@@ -1003,7 +1112,7 @@ pub mod python {
                 ..Default::default()
             };
 
-            let results = match &self.inner {
+            let results = match &this.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
                     py.allow_threads(|| db.search_hybrid(None, Some(&vec), &config))
@@ -1034,7 +1143,7 @@ pub mod python {
 
         #[pyo3(signature = (query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction="out"))]
         fn search_grouped(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             query_vector: Bound<'_, PyAny>,
             top_k: usize,
@@ -1047,6 +1156,8 @@ pub mod python {
             min_edge_weight: f32,
             edge_direction: &str,
         ) -> PyResult<PyGroupedSearchResult> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let rust_filter = payload_filter
                 .map(|dict| dict_to_filter(py, dict))
                 .transpose()?;
@@ -1062,7 +1173,7 @@ pub mod python {
                 edge_direction: parse_edge_direction(edge_direction)?,
                 ..Default::default()
             };
-            let result = match &self.inner {
+            let result = match &this.inner {
                 DbBackend::F32(db) => {
                     let vector: Vec<f32> = query_vector.extract()?;
                     py.allow_threads(|| db.search_hybrid_grouped(None, Some(&vector), &config))
@@ -1103,7 +1214,7 @@ pub mod python {
 
         #[pyo3(signature = (query_vectors, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, parallelism=0))]
         fn search_batch(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             query_vectors: Bound<'_, PyAny>,
             top_k: usize,
@@ -1113,6 +1224,8 @@ pub mod python {
             min_score: f32,
             parallelism: usize,
         ) -> PyResult<Vec<Vec<PySearchHit>>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let config = crate::database::SearchConfig {
                 top_k,
                 recall_k,
@@ -1123,7 +1236,7 @@ pub mod python {
                 ..Default::default()
             };
             let batch_config = crate::database::BatchSearchConfig { parallelism };
-            let results = match &self.inner {
+            let results = match &this.inner {
                 DbBackend::F32(db) => {
                     let queries: Vec<Vec<f32>> = query_vectors.extract()?;
                     py.allow_threads(|| db.search_batch(&queries, &config, &batch_config))
@@ -1185,7 +1298,7 @@ pub mod python {
             edge_direction="out"
         ))]
         fn search_advanced(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             query_vector: Bound<'_, PyAny>,
             top_k: usize,
@@ -1211,6 +1324,8 @@ pub mod python {
             min_edge_weight: f32,
             edge_direction: &str,
         ) -> PyResult<Vec<PySearchHit>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             // 解析 payload_filter（类 MongoDB 语法的 dict -> Rust Filter）
             let rust_filter = match payload_filter {
                 Some(dict) => Some(dict_to_filter(py, dict)?),
@@ -1244,7 +1359,7 @@ pub mod python {
 
             let q_text = custom_query_text.as_deref();
 
-            let results = match &self.inner {
+            let results = match &this.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
                     py.allow_threads(|| db.search_hybrid(q_text, Some(&vec), &config))
@@ -1275,7 +1390,7 @@ pub mod python {
 
         #[pyo3(signature = (query_vector, query_text, top_k=5, expand_depth=2, min_score=0.1, hybrid_alpha=0.7, payload_filter=None))]
         fn search_hybrid(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             query_vector: Bound<'_, PyAny>,
             query_text: &str,
@@ -1285,6 +1400,8 @@ pub mod python {
             hybrid_alpha: f32,
             payload_filter: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Vec<PySearchHit>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let rust_filter = match payload_filter {
                 Some(dict) => Some(dict_to_filter(py, dict)?),
                 None => None,
@@ -1303,7 +1420,7 @@ pub mod python {
                 ..Default::default()
             };
             let query_text = query_text.to_owned();
-            let results = match &self.inner {
+            let results = match &this.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = query_vector.extract()?;
                     py.allow_threads(|| db.search_hybrid(Some(&query_text), Some(&vec), &config))
@@ -1331,44 +1448,54 @@ pub mod python {
                 .collect::<PyResult<Vec<_>>>()
         }
 
-        fn delete_many_atomic(&mut self, ids: Vec<u64>) -> PyResult<usize> {
-            dispatch!(self, mut db => db.delete_many_atomic(&ids)).map_err(to_py_error)
+        fn delete_many_atomic(slf: &Bound<'_, Self>, ids: Vec<u64>) -> PyResult<usize> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.delete_many_atomic(&ids)).map_err(to_py_error)
         }
 
         fn compare_and_set_payload_field(
-            &mut self,
+            slf: &Bound<'_, Self>,
             id: u64,
             field: &str,
             expected: &Bound<'_, PyAny>,
             replacement: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let expected = pyobject_to_json(expected)?;
             let replacement = pyobject_to_json(replacement)?;
-            dispatch!(self, mut db => db.compare_and_set_payload_field(id, field, &expected, replacement))
+            dispatch!(this, mut db => db.compare_and_set_payload_field(id, field, &expected, replacement))
                 .map_err(to_py_error)
         }
 
-        fn delete(&mut self, id: u64) -> PyResult<()> {
-            dispatch!(self, mut db => db.delete(id)).map_err(to_py_error)
+        fn delete(slf: &Bound<'_, Self>, id: u64) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.delete(id)).map_err(to_py_error)
         }
 
         #[pyo3(signature = (src, dst, label=None))]
-        fn unlink(&mut self, src: u64, dst: u64, label: Option<&str>) -> PyResult<()> {
+        fn unlink(slf: &Bound<'_, Self>, src: u64, dst: u64, label: Option<&str>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             match label {
-                Some(label) => dispatch!(self, mut db => db.unlink_label(src, dst, label)),
-                None => dispatch!(self, mut db => db.unlink(src, dst)),
+                Some(label) => dispatch!(this, mut db => db.unlink_label(src, dst, label)),
+                None => dispatch!(this, mut db => db.unlink(src, dst)),
             }
             .map_err(to_py_error)
         }
 
         fn update_payload(
-            &mut self,
+            slf: &Bound<'_, Self>,
             _py: Python<'_>,
             id: u64,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let json = pyobject_to_json(payload)?;
-            dispatch!(self, mut db => db.update_payload(id, json)).map_err(to_py_error)
+            dispatch!(this, mut db => db.update_payload(id, json)).map_err(to_py_error)
         }
 
         /// 部分更新节点 Payload（$set / $inc / $unset）
@@ -1383,16 +1510,20 @@ pub mod python {
         /// db.patch_payload(id, {"name": "Bob"})  # 简写，等价于 $set
         /// ```
         fn patch_payload(
-            &mut self,
+            slf: &Bound<'_, Self>,
             _py: Python<'_>,
             id: u64,
             patch: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let json = pyobject_to_json(patch)?;
-            dispatch!(self, mut db => db.patch_payload(id, json)).map_err(to_py_error)
+            dispatch!(this, mut db => db.patch_payload(id, json)).map_err(to_py_error)
         }
-        fn update_vector(&mut self, vector: Bound<'_, PyAny>, id: u64) -> PyResult<()> {
-            match &mut self.inner {
+        fn update_vector(slf: &Bound<'_, Self>, vector: Bound<'_, PyAny>, id: u64) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            match &mut this.inner {
                 DbBackend::F32(db) => {
                     let vec: Vec<f32> = vector.extract()?;
                     db.update_vector(id, &vec).map_err(to_py_error)
@@ -1409,20 +1540,31 @@ pub mod python {
             }
         }
 
-        fn index_text(&mut self, id: u64, text: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.index_text(id, text)).map_err(to_py_error)
+        fn index_text(slf: &Bound<'_, Self>, id: u64, text: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.index_text(id, text)).map_err(to_py_error)
         }
 
-        fn index_keyword(&mut self, id: u64, keyword: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.index_keyword(id, keyword)).map_err(to_py_error)
+        fn index_keyword(slf: &Bound<'_, Self>, id: u64, keyword: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.index_keyword(id, keyword)).map_err(to_py_error)
         }
 
-        fn build_text_index(&mut self) -> PyResult<()> {
-            dispatch!(self, mut db => db.build_text_index()).map_err(to_py_error)
+        fn build_text_index(slf: &Bound<'_, Self>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.build_text_index()).map_err(to_py_error)
         }
 
         /// 从完整正文与关键词集合重建文本索引，通过 flush 或 close 持久化。
-        fn rebuild_text_index(&mut self, documents: Vec<Bound<'_, PyDict>>) -> PyResult<()> {
+        fn rebuild_text_index(
+            slf: &Bound<'_, Self>,
+            documents: Vec<Bound<'_, PyDict>>,
+        ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let documents = documents
                 .iter()
                 .map(|document| {
@@ -1449,7 +1591,7 @@ pub mod python {
                     })
                 })
                 .collect::<PyResult<Vec<_>>>()?;
-            dispatch!(self, mut db => db.rebuild_text_index(&documents)).map_err(to_py_error)
+            dispatch!(this, mut db => db.rebuild_text_index(&documents)).map_err(to_py_error)
         }
 
         // ════════ 属性二级索引 ════════
@@ -1463,10 +1605,12 @@ pub mod python {
         /// ```
         #[pyo3(signature = (equalities, max_results=10000))]
         fn indexed_lookup(
-            &self,
+            slf: &Bound<'_, Self>,
             equalities: &Bound<'_, PyAny>,
             max_results: usize,
         ) -> PyResult<Vec<u64>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let value = pyobject_to_json(equalities)?;
             let object = value.as_object().ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(
@@ -1477,85 +1621,120 @@ pub mod python {
                 .iter()
                 .map(|(field, value)| (field.clone(), value.clone()))
                 .collect::<Vec<_>>();
-            dispatch!(self, db => db.indexed_lookup(&equalities, max_results)).map_err(to_py_error)
+            dispatch!(this, db => db.indexed_lookup(&equalities, max_results)).map_err(to_py_error)
         }
 
-        fn create_ngram_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.create_ngram_index(field)).map_err(to_py_error)
+        fn create_ngram_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.create_ngram_index(field)).map_err(to_py_error)
         }
 
-        fn drop_ngram_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.drop_ngram_index(field)).map_err(to_py_error)
+        fn drop_ngram_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.drop_ngram_index(field)).map_err(to_py_error)
         }
 
         #[pyo3(signature = (field, needle, max_results=10000))]
         fn substring_lookup(
-            &self,
+            slf: &Bound<'_, Self>,
             field: &str,
             needle: &str,
             max_results: usize,
         ) -> PyResult<Vec<u64>> {
-            dispatch!(self, db => db.substring_lookup(field, needle, max_results))
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            dispatch!(this, db => db.substring_lookup(field, needle, max_results))
                 .map_err(to_py_error)
         }
 
-        fn create_unique_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.create_unique_index(field)).map_err(to_py_error)
+        fn create_unique_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.create_unique_index(field)).map_err(to_py_error)
         }
 
-        fn create_unique_composite_index(&mut self, fields: Vec<String>) -> PyResult<()> {
-            dispatch!(self, mut db => db.create_unique_composite_index(&fields))
+        fn create_unique_composite_index(
+            slf: &Bound<'_, Self>,
+            fields: Vec<String>,
+        ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.create_unique_composite_index(&fields))
                 .map_err(to_py_error)
         }
 
-        fn list_unique_indexes(&self) -> PyResult<Vec<Vec<String>>> {
-            Ok(dispatch!(self, db => db.list_unique_indexes().map_err(to_py_error)?))
+        fn list_unique_indexes(slf: &Bound<'_, Self>) -> PyResult<Vec<Vec<String>>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            Ok(dispatch!(this, db => db.list_unique_indexes().map_err(to_py_error)?))
         }
 
-        fn create_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.create_index(field)).map_err(to_py_error)
+        fn create_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.create_index(field)).map_err(to_py_error)
         }
 
-        fn create_ordered_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.create_ordered_index(field)).map_err(to_py_error)
+        fn create_ordered_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.create_ordered_index(field)).map_err(to_py_error)
         }
 
-        fn create_composite_index(&mut self, fields: Vec<String>) -> PyResult<()> {
-            dispatch!(self, mut db => db.create_composite_index(&fields)).map_err(to_py_error)
+        fn create_composite_index(slf: &Bound<'_, Self>, fields: Vec<String>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.create_composite_index(&fields)).map_err(to_py_error)
         }
 
-        fn create_bitmap_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.create_bitmap_index(field)).map_err(to_py_error)
+        fn create_bitmap_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.create_bitmap_index(field)).map_err(to_py_error)
         }
 
         /// 删除属性索引（查询仍可用，退化为全扫描）
-        fn drop_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.drop_index(field)).map_err(to_py_error)
+        fn drop_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.drop_index(field)).map_err(to_py_error)
         }
 
-        fn drop_ordered_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.drop_ordered_index(field)).map_err(to_py_error)
+        fn drop_ordered_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.drop_ordered_index(field)).map_err(to_py_error)
         }
 
-        fn drop_composite_index(&mut self, fields: Vec<String>) -> PyResult<()> {
-            dispatch!(self, mut db => db.drop_composite_index(&fields)).map_err(to_py_error)
+        fn drop_composite_index(slf: &Bound<'_, Self>, fields: Vec<String>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.drop_composite_index(&fields)).map_err(to_py_error)
         }
 
-        fn drop_bitmap_index(&mut self, field: &str) -> PyResult<()> {
-            dispatch!(self, mut db => db.drop_bitmap_index(field)).map_err(to_py_error)
+        fn drop_bitmap_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.drop_bitmap_index(field)).map_err(to_py_error)
         }
 
-        fn index_info(&self, py: Python<'_>) -> PyResult<PyObject> {
+        fn index_info(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let value =
-                dispatch!(self, db => serde_json::to_value(db.index_info().map_err(to_py_error)?))
+                dispatch!(this, db => serde_json::to_value(db.index_info().map_err(to_py_error)?))
                     .map_err(|error| {
                         pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
                     })?;
             json_to_pyobject(py, &value)
         }
 
-        fn storage_info(&self, py: Python<'_>) -> PyResult<PyObject> {
-            let value = dispatch!(self, db => serde_json::to_value(db.storage_info()))
+        fn storage_info(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            let value = dispatch!(this, db => serde_json::to_value(db.storage_info()))
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             json_to_pyobject(py, &value)
         }
@@ -1563,18 +1742,26 @@ pub mod python {
         // ════════ 轻量级单字段查询 ════════
 
         /// 获取节点的 payload（不含向量，比 get() 更轻量）
-        fn get_payload(&self, py: Python<'_>, id: u64) -> PyResult<Option<PyObject>> {
+        fn get_payload(
+            slf: &Bound<'_, Self>,
+            py: Python<'_>,
+            id: u64,
+        ) -> PyResult<Option<PyObject>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             Ok({
-                dispatch!(self, db => db.get_payload(id).map_err(to_py_error)?)
+                dispatch!(this, db => db.get_payload(id).map_err(to_py_error)?)
                     .map(|p| json_to_pyobject(py, &p))
                     .transpose()?
             })
         }
 
         /// 获取节点的出边列表
-        fn get_edges(&self, py: Python<'_>, id: u64) -> PyResult<Vec<PyEdge>> {
+        fn get_edges(slf: &Bound<'_, Self>, py: Python<'_>, id: u64) -> PyResult<Vec<PyEdge>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             Ok({
-                dispatch!(self, db => db.get_edges(id).map_err(to_py_error)?)
+                dispatch!(this, db => db.get_edges(id).map_err(to_py_error)?)
                     .into_iter()
                     .map(|e| {
                         Ok(PyEdge {
@@ -1590,13 +1777,15 @@ pub mod python {
 
         #[pyo3(signature = (id, label=None))]
         fn get_incoming_edges(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             id: u64,
             label: Option<&str>,
         ) -> PyResult<Vec<PyIncomingEdge>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             Ok({
-                dispatch!(self, db => db.get_incoming_edges(id, label).map_err(to_py_error)?)
+                dispatch!(this, db => db.get_incoming_edges(id, label).map_err(to_py_error)?)
                     .into_iter()
                     .map(|edge| {
                         Ok(PyIncomingEdge {
@@ -1611,8 +1800,10 @@ pub mod python {
             })
         }
 
-        fn get(&self, py: Python<'_>, id: u64) -> PyResult<Option<PyNodeView>> {
-            match &self.inner {
+        fn get(slf: &Bound<'_, Self>, py: Python<'_>, id: u64) -> PyResult<Option<PyNodeView>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            match &this.inner {
                 DbBackend::F32(db) => {
                     if let Some(n) = db.get(id).map_err(to_py_error)? {
                         return Ok(Some(PyNodeView {
@@ -1686,19 +1877,21 @@ pub mod python {
 
         #[pyo3(signature = (id, depth=1, labels=None))]
         fn neighbors(
-            &self,
+            slf: &Bound<'_, Self>,
             id: u64,
             depth: usize,
             labels: Option<Vec<String>>,
         ) -> PyResult<Vec<u64>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             Ok({
-                dispatch!(self, db => db.neighbors_with_labels(id, depth, labels.as_deref()).map_err(to_py_error)?)
+                dispatch!(this, db => db.neighbors_with_labels(id, depth, labels.as_deref()).map_err(to_py_error)?)
             })
         }
 
         #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000, max_results=10_000, max_edges=50_000))]
         fn reachable(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             id: u64,
             min_depth: usize,
@@ -1709,6 +1902,8 @@ pub mod python {
             max_results: usize,
             max_edges: usize,
         ) -> PyResult<Vec<PyReachabilityResult>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let direction = match direction {
                 "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
                 "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
@@ -1730,7 +1925,7 @@ pub mod python {
                 max_frontier_size: 10_000,
                 exhaustion_policy: crate::graph::budget::BudgetExhaustionPolicy::Partial,
             };
-            dispatch!(self, db => db.reachable(id, &config))
+            dispatch!(this, db => db.reachable(id, &config))
                 .map(|results| {
                     results
                         .into_iter()
@@ -1742,7 +1937,7 @@ pub mod python {
 
         #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000, max_results=10_000, max_edges=50_000))]
         fn reachable_detailed(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             id: u64,
             min_depth: usize,
@@ -1753,6 +1948,8 @@ pub mod python {
             max_results: usize,
             max_edges: usize,
         ) -> PyResult<PyObject> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let direction = match direction {
                 "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
                 "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
@@ -1775,7 +1972,7 @@ pub mod python {
                 exhaustion_policy: crate::graph::budget::BudgetExhaustionPolicy::Partial,
             };
             let output =
-                dispatch!(self, db => db.reachable_detailed(id, &config)).map_err(to_py_error)?;
+                dispatch!(this, db => db.reachable_detailed(id, &config)).map_err(to_py_error)?;
             let value = serde_json::to_value(output)
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             json_to_pyobject(py, &value)
@@ -1783,7 +1980,7 @@ pub mod python {
 
         #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000, max_results=10_000, max_edges=50_000))]
         fn query_subgraph(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             id: u64,
             min_depth: usize,
@@ -1794,6 +1991,8 @@ pub mod python {
             max_results: usize,
             max_edges: usize,
         ) -> PyResult<PyObject> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let direction = match direction {
                 "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
                 "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
@@ -1816,7 +2015,7 @@ pub mod python {
                 exhaustion_policy: crate::graph::budget::BudgetExhaustionPolicy::Partial,
             };
             let output =
-                dispatch!(self, db => db.query_subgraph(id, &config)).map_err(to_py_error)?;
+                dispatch!(this, db => db.query_subgraph(id, &config)).map_err(to_py_error)?;
             let value = serde_json::to_value(output)
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             json_to_pyobject(py, &value)
@@ -1824,14 +2023,16 @@ pub mod python {
 
         #[pyo3(signature = (query_vector, anchor_ids, top_k, max_anchor_nodes=100_000))]
         fn search_graph_first(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             query_vector: Bound<'_, PyAny>,
             anchor_ids: Vec<u64>,
             top_k: usize,
             max_anchor_nodes: usize,
         ) -> PyResult<Vec<PySearchHit>> {
-            let hits = match &self.inner {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            let hits = match &this.inner {
                 DbBackend::F32(db) => {
                     let query: Vec<f32> = query_vector.extract()?;
                     db.search_graph_first(&query, &anchor_ids, top_k, max_anchor_nodes)
@@ -1861,12 +2062,14 @@ pub mod python {
 
         #[pyo3(signature = (query_vector, top_k))]
         fn search_exact(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             query_vector: Bound<'_, PyAny>,
             top_k: usize,
         ) -> PyResult<Vec<PySearchHit>> {
-            let hits = match &self.inner {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            let hits = match &this.inner {
                 DbBackend::F32(db) => {
                     let query: Vec<f32> = query_vector.extract()?;
                     db.search_exact(&query, top_k)
@@ -1894,54 +2097,73 @@ pub mod python {
                 .collect::<PyResult<Vec<_>>>()
         }
 
-        fn graph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        fn graph_stats(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let value =
-                serde_json::to_value(dispatch!(self, db => db.graph_stats().map_err(to_py_error)?))
+                serde_json::to_value(dispatch!(this, db => db.graph_stats().map_err(to_py_error)?))
                     .map_err(|error| {
                         pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
                     })?;
             json_to_pyobject(py, &value)
         }
 
-        fn validate_graph(&self, py: Python<'_>) -> PyResult<PyObject> {
+        fn validate_graph(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let value = serde_json::to_value(
-                dispatch!(self, db => db.validate_graph().map_err(to_py_error)?),
+                dispatch!(this, db => db.validate_graph().map_err(to_py_error)?),
             )
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             json_to_pyobject(py, &value)
         }
 
-        fn repair_graph_indexes(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        fn repair_graph_indexes(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let report =
-                dispatch!(self, mut db => db.repair_graph_indexes()).map_err(to_py_error)?;
+                dispatch!(this, mut db => db.repair_graph_indexes()).map_err(to_py_error)?;
             let value = serde_json::to_value(report)
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             json_to_pyobject(py, &value)
         }
 
-        fn node_count(&self) -> PyResult<usize> {
-            Ok(dispatch!(self, db => db.node_count().map_err(to_py_error)?))
+        fn node_count(slf: &Bound<'_, Self>) -> PyResult<usize> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            Ok(dispatch!(this, db => db.node_count().map_err(to_py_error)?))
         }
 
-        fn flush(&mut self) -> PyResult<()> {
-            dispatch!(self, mut db => db.flush()).map_err(to_py_error)
+        fn flush(slf: &Bound<'_, Self>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.flush()).map_err(to_py_error)
         }
 
-        fn publish_generation_manifest(&mut self, generation_id: &str) -> PyResult<PyObject> {
-            let manifest = dispatch!(self, mut db => db.publish_generation_manifest(generation_id))
+        fn publish_generation_manifest(
+            slf: &Bound<'_, Self>,
+            generation_id: &str,
+        ) -> PyResult<PyObject> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            let manifest = dispatch!(this, mut db => db.publish_generation_manifest(generation_id))
                 .map_err(to_py_error)?;
             let value = serde_json::to_value(manifest)
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             Python::with_gil(|py| json_to_pyobject(py, &value))
         }
 
-        fn dim(&self) -> usize {
-            dispatch!(self, db => db.dim())
+        fn dim(slf: &Bound<'_, Self>) -> PyResult<usize> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            Ok(dispatch!(this, db => db.dim()))
         }
 
         /// 获取所有活跃节点的 ID 列表
-        fn all_node_ids(&self) -> PyResult<Vec<u64>> {
-            Ok(dispatch!(self, db => db.all_node_ids().map_err(to_py_error)?))
+        fn all_node_ids(slf: &Bound<'_, Self>) -> PyResult<Vec<u64>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            Ok(dispatch!(this, db => db.all_node_ids().map_err(to_py_error)?))
         }
 
         /// 维度迁移：将当前数据库的所有节点和边迁移到一个新维度的数据库。
@@ -1958,8 +2180,10 @@ pub mod python {
         ///     new_vec = new_model.encode(payloads[nid]["text"]).tolist()
         ///     new_db.update_vector(new_vec, nid)
         /// ```
-        fn migrate(&self, new_path: &str, new_dim: usize) -> PyResult<Vec<u64>> {
-            match &self.inner {
+        fn migrate(slf: &Bound<'_, Self>, new_path: &str, new_dim: usize) -> PyResult<Vec<u64>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            match &this.inner {
                 DbBackend::F32(db) => {
                     let (_new_db, ids) = db.migrate_to(new_path, new_dim).map_err(to_py_error)?;
                     Ok(ids)
@@ -1976,77 +2200,104 @@ pub mod python {
         }
 
         #[pyo3(signature = (interval_secs=7200))]
-        fn enable_auto_compaction(&mut self, interval_secs: u64) -> PyResult<()> {
-            dispatch!(self, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(interval_secs)))
+        fn enable_auto_compaction(slf: &Bound<'_, Self>, interval_secs: u64) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(interval_secs)))
                 .map_err(to_py_error)
         }
 
-        fn set_auto_build_quiver(&mut self, enabled: bool) -> PyResult<()> {
-            dispatch!(self, mut db => db.set_auto_build_quiver(enabled)).map_err(to_py_error)
+        fn set_auto_build_quiver(slf: &Bound<'_, Self>, enabled: bool) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.set_auto_build_quiver(enabled)).map_err(to_py_error)
         }
 
-        fn clear_search_state(&self) -> PyResult<()> {
-            dispatch!(self, db => db.clear_search_state()).map_err(to_py_error)
+        fn clear_search_state(slf: &Bound<'_, Self>) -> PyResult<()> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            dispatch!(this, db => db.clear_search_state()).map_err(to_py_error)
         }
 
-        fn disable_auto_compaction(&mut self) {
-            dispatch!(self, mut db => db.disable_auto_compaction());
+        fn disable_auto_compaction(slf: &Bound<'_, Self>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.disable_auto_compaction());
+            Ok(())
         }
 
-        fn compact(&mut self) -> PyResult<()> {
-            dispatch!(self, mut db => db.compact()).map_err(to_py_error)
+        fn compact(slf: &Bound<'_, Self>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, mut db => db.compact()).map_err(to_py_error)
         }
 
         /// 为后续插入主动预留额外节点容量。
-        fn reserve_nodes(&mut self, additional: usize) -> PyResult<()> {
-            dispatch!(self, db => db.reserve_nodes(additional)).map_err(to_py_error)
+        fn reserve_nodes(slf: &Bound<'_, Self>, additional: usize) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            dispatch!(this, db => db.reserve_nodes(additional)).map_err(to_py_error)
         }
 
         /// 设置内核内存预算（MiB），0 表示不限制。
         #[pyo3(signature = (mb=0))]
-        fn set_memory_limit(&mut self, mb: usize) -> PyResult<()> {
+        fn set_memory_limit(slf: &Bound<'_, Self>, mb: usize) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let bytes = mb.checked_mul(1024 * 1024).ok_or_else(|| {
                 pyo3::exceptions::PyOverflowError::new_err("内存上限换算字节时溢出")
             })?;
-            dispatch!(self, mut db => db.set_memory_limit(bytes)).map_err(to_py_error)
+            dispatch!(this, mut db => db.set_memory_limit(bytes)).map_err(to_py_error)
         }
 
         /// 读取多个数据库共享的配额、工作线程和任务统计。
-        fn resource_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
-            let stats = dispatch!(self, db => db.resource_stats());
+        fn resource_stats(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            let stats = dispatch!(this, db => db.resource_stats());
             let value = serde_json::to_value(stats)
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             json_to_pyobject(py, &value)
         }
 
-        fn instance_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
-            let stats = dispatch!(self, db => db.instance_stats());
+        fn instance_stats(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            let stats = dispatch!(this, db => db.instance_stats());
             let value = serde_json::to_value(stats)
                 .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
             json_to_pyobject(py, &value)
         }
 
-        fn estimated_memory(&self) -> usize {
-            dispatch!(self, db => db.estimated_memory())
+        fn estimated_memory(slf: &Bound<'_, Self>) -> PyResult<usize> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            Ok(dispatch!(this, db => db.estimated_memory()))
         }
 
-        fn __len__(&self) -> PyResult<usize> {
-            self.node_count()
+        fn __len__(slf: &Bound<'_, Self>) -> PyResult<usize> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            dispatch!(this, db => db.node_count()).map_err(to_py_error)
         }
 
-        fn __contains__(&self, id: u64) -> PyResult<bool> {
-            Ok(dispatch!(self, db => db.contains(id).map_err(to_py_error)?))
+        fn __contains__(slf: &Bound<'_, Self>, id: u64) -> PyResult<bool> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            Ok(dispatch!(this, db => db.contains(id).map_err(to_py_error)?))
         }
 
-        fn __repr__(&self) -> String {
-            format!(
+        fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            Ok(format!(
                 "TriviumDB(dtype={}, nodes={}, dim={})",
-                self.dtype,
-                self.node_count()
+                this.dtype,
+                dispatch!(this, db => db.node_count())
                     .map(|count| count.to_string())
                     .unwrap_or_else(|_| "已关闭".into()),
-                self.dim()
-            )
+                dispatch!(this, db => db.dim())
+            ))
         }
 
         fn __enter__(slf: Py<Self>) -> Py<Self> {
@@ -2055,28 +2306,30 @@ pub mod python {
 
         #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
         fn __exit__(
-            &mut self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             _exc_type: Option<&Bound<'_, PyAny>>,
             _exc_val: Option<&Bound<'_, PyAny>>,
             _exc_tb: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<bool> {
-            self.close(py)?;
+            Self::close(slf, py)?;
             Ok(false)
         }
 
         fn batch_insert(
-            &mut self,
+            slf: &Bound<'_, Self>,
             _py: Python<'_>,
             vectors: Bound<'_, PyList>,
             payloads: &Bound<'_, PyList>,
         ) -> PyResult<Vec<u64>> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             if vectors.len() != payloads.len() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "vectors and payloads must have the same length",
                 ));
             }
-            match &mut self.inner {
+            match &mut this.inner {
                 DbBackend::F32(db) => {
                     let mut tx = crate::database::TxBuilder::new();
                     for (i, payload_obj) in payloads.iter().enumerate() {
@@ -2110,19 +2363,21 @@ pub mod python {
         }
 
         fn batch_insert_with_ids(
-            &mut self,
+            slf: &Bound<'_, Self>,
             _py: Python<'_>,
             ids: Vec<u64>,
             vectors: Bound<'_, PyList>,
             payloads: &Bound<'_, PyList>,
         ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             if vectors.len() != payloads.len() || ids.len() != vectors.len() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "ids, vectors and payloads must have the same length",
                 ));
             }
 
-            match &mut self.inner {
+            match &mut this.inner {
                 DbBackend::F32(db) => {
                     let mut tx = crate::database::TxBuilder::new();
                     for (i, payload_obj) in payloads.iter().enumerate() {
@@ -2166,7 +2421,9 @@ pub mod python {
         /// # 文档过滤
         /// rows = db.tql('FIND {type: "event", heat: {$gte: 0.7}} RETURN *')
         /// ```
-        fn tql(&self, py: Python<'_>, query: &str) -> PyResult<Vec<PyQueryRow>> {
+        fn tql(slf: &Bound<'_, Self>, py: Python<'_>, query: &str) -> PyResult<Vec<PyQueryRow>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             fn convert_rows<T: crate::VectorType>(
                 py: Python<'_>,
                 rows: crate::query::tql_executor::TqlValueResult<T>,
@@ -2238,7 +2495,7 @@ pub mod python {
                 Ok(out)
             }
 
-            match &self.inner {
+            match &this.inner {
                 DbBackend::F32(db) => {
                     let rows = db.tql_values(query).map_err(to_py_error)?;
                     convert_rows(py, rows)
@@ -2254,29 +2511,32 @@ pub mod python {
             }
         }
 
-        fn prepare_tql(&self, query: &str) -> PyResult<PyPreparedTql> {
-            dispatch!(self, db => db.prepare_tql(query))
+        fn prepare_tql(slf: &Bound<'_, Self>, query: &str) -> PyResult<PyPreparedTql> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            dispatch!(this, db => db.prepare_tql(query))
                 .map(|inner| PyPreparedTql { inner })
                 .map_err(to_py_error)
         }
 
         fn execute_prepared_tql(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             prepared: &PyPreparedTql,
             parameters: &Bound<'_, PyDict>,
         ) -> PyResult<Vec<PyQueryRow>> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
             let mut values = std::collections::HashMap::new();
             for (key, value) in parameters.iter() {
                 let name: String = key.extract()?;
                 let json = pyobject_to_json(&value)?;
-                values.insert(
-                    name,
-                    crate::query::tql_prepared::TqlParamValue::from_json(&json)
-                        .map_err(to_py_error)?,
-                );
+                let value =
+                    crate::query::tql_prepared::TqlParamValue::from_named_json(&name, &json)
+                        .map_err(to_py_error)?;
+                values.insert(name, value);
             }
-            let rows = match &self.inner {
+            let rows = match &this.inner {
                 DbBackend::F32(db) => db
                     .execute_prepared_tql(&prepared.inner, &values)
                     .map(|rows| rows.into_iter().map(tql_row_to_json).collect::<Vec<_>>()),
@@ -2298,14 +2558,16 @@ pub mod python {
 
         /// 原样传输 JSON 字符串，避免宿主 JavaScript 对 u64 的中间降精度。
         fn console_request(
-            &mut self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             session: &PyConsoleSession,
             request_json: &str,
         ) -> PyResult<String> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let session = session.inner.clone();
             py.allow_threads(
-                || dispatch!(self, mut db => db.console_request(&session, request_json)),
+                || dispatch!(this, mut db => db.console_request(&session, request_json)),
             )
             .map_err(to_py_error)
         }
@@ -2323,8 +2585,10 @@ pub mod python {
         /// db.tql_mut('MATCH (a {name: "Alice"}) SET a.age == 31')
         /// db.tql_mut('MATCH (a {name: "Alice"}) DELETE a')
         /// ```
-        fn tql_mut(&mut self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
-            let result = dispatch!(self, mut db => db.tql_mut(query)).map_err(to_py_error)?;
+        fn tql_mut(slf: &Bound<'_, Self>, py: Python<'_>, query: &str) -> PyResult<PyObject> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            let result = dispatch!(this, mut db => db.tql_mut(query)).map_err(to_py_error)?;
             let dict = PyDict::new(py);
             let _ = dict.set_item("affected", result.affected);
             let created: Vec<u64> = result.created_ids;
@@ -2350,13 +2614,15 @@ pub mod python {
         /// ```
         #[pyo3(signature = (min_community_size=3, max_iterations=15, compute_centroids=true))]
         fn leiden_cluster(
-            &self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             min_community_size: usize,
             max_iterations: usize,
             compute_centroids: bool,
         ) -> PyResult<PyObject> {
-            let result = dispatch!(self, db => db.leiden_cluster(
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            let result = dispatch!(this, db => db.leiden_cluster(
                 min_community_size,
                 Some(max_iterations),
                 Some(compute_centroids),
@@ -2412,7 +2678,9 @@ pub mod python {
         ///     # 异常 → 自动 rollback
         /// ```
         fn transaction(slf: Py<Self>, py: Python<'_>) -> PyResult<PyTransaction> {
-            let dtype = slf.borrow(py).dtype.clone();
+            let (_request, borrowed) = database_read(slf.bind(py))?;
+            dispatch!(borrowed, db => db.check_request_admission()).map_err(to_py_error)?;
+            let dtype = borrowed.dtype.clone();
             let builder = match dtype.as_str() {
                 "f32" => TxBuilderBackend::F32(crate::database::TxBuilder::new()),
                 "f16" => TxBuilderBackend::F16(crate::database::TxBuilder::new()),
@@ -2424,40 +2692,48 @@ pub mod python {
                     )));
                 }
             };
+            drop(borrowed);
             Ok(PyTransaction {
                 db: slf,
                 builder: Some(builder),
-                finished: false,
             })
         }
 
-        fn request_shutdown(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-            let status = dispatch!(self, mut db => db.request_shutdown()).map_err(to_py_error)?;
+        fn request_shutdown(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            let status = dispatch!(this, mut db => db.request_shutdown()).map_err(to_py_error)?;
             let value = serde_json::to_value(status)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             json_to_pyobject(py, &value)
         }
 
-        fn shutdown_status(&self, py: Python<'_>) -> PyResult<PyObject> {
-            let value = serde_json::to_value(dispatch!(self, db => db.shutdown_status()))
+        fn shutdown_status(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
+            let (_request, borrowed) = database_read(slf)?;
+            let this = &*borrowed;
+            let value = serde_json::to_value(dispatch!(this, db => db.shutdown_status()))
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             json_to_pyobject(py, &value)
         }
 
-        fn close_timeout(&mut self, py: Python<'_>, timeout_ms: u64) -> PyResult<bool> {
-            py.allow_threads(|| dispatch!(self, mut db => db.close_timeout(std::time::Duration::from_millis(timeout_ms))))
+        fn close_timeout(slf: &Bound<'_, Self>, py: Python<'_>, timeout_ms: u64) -> PyResult<bool> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            py.allow_threads(|| dispatch!(this, mut db => db.close_timeout(std::time::Duration::from_millis(timeout_ms))))
                 .map_err(to_py_error)
         }
 
         fn create_snapshot(
-            &mut self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             destination: &str,
             generation_id: &str,
         ) -> PyResult<PyObject> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
             let manifest = py
                 .allow_threads(
-                    || dispatch!(self, mut db => db.create_snapshot(destination, generation_id)),
+                    || dispatch!(this, mut db => db.create_snapshot(destination, generation_id)),
                 )
                 .map_err(to_py_error)?;
             let value = serde_json::to_value(manifest)
@@ -2466,8 +2742,10 @@ pub mod python {
         }
 
         /// 显式关闭数据库（落盘后释放资源）
-        fn close(&mut self, py: Python<'_>) -> PyResult<()> {
-            match py.allow_threads(|| dispatch!(self, mut db => db.close())) {
+        fn close(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf)?;
+            let this = &mut *borrowed;
+            match py.allow_threads(|| dispatch!(this, mut db => db.close())) {
                 Ok(()) | Err(crate::error::TriviumError::DatabaseClosed) => Ok(()),
                 Err(error) => Err(to_py_error(error)),
             }
@@ -2493,32 +2771,101 @@ pub mod python {
     struct PyTransaction {
         db: Py<PyTriviumDB>,
         builder: Option<TxBuilderBackend>,
-        finished: bool,
     }
 
-    /// 检查事务是否已结束的辅助宏
-    macro_rules! check_finished {
-        ($self:expr) => {
-            if $self.finished {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "事务已结束（已提交或已回滚），不能继续添加操作",
-                ));
+    // 参数转换可执行 Python 回调；先登记事务身份，再取得可失败的借用。
+    fn transaction_read<'py>(
+        transaction: &Bound<'py, PyTransaction>,
+    ) -> PyResult<(crate::sdk::RequestScope, PyRef<'py, PyTransaction>)> {
+        let request = crate::sdk::RequestScope::enter(
+            transaction.as_ptr() as usize,
+            "python_transaction_callback",
+        )
+        .map_err(to_py_error)?;
+        let borrowed = transaction.try_borrow().map_err(|_| {
+            to_py_error(crate::TriviumError::DatabaseBusy {
+                resource: "python_transaction",
+            })
+        })?;
+        Ok((request, borrowed))
+    }
+
+    fn transaction_write<'py>(
+        transaction: &Bound<'py, PyTransaction>,
+    ) -> PyResult<(crate::sdk::RequestScope, PyRefMut<'py, PyTransaction>)> {
+        let request = crate::sdk::RequestScope::enter(
+            transaction.as_ptr() as usize,
+            "python_transaction_callback",
+        )
+        .map_err(to_py_error)?;
+        let borrowed = transaction.try_borrow_mut().map_err(|_| {
+            to_py_error(crate::TriviumError::DatabaseBusy {
+                resource: "python_transaction",
+            })
+        })?;
+        Ok((request, borrowed))
+    }
+
+    impl PyTransaction {
+        fn active_builder(&mut self) -> PyResult<&mut TxBuilderBackend> {
+            self.builder
+                .as_mut()
+                .ok_or_else(|| to_py_error(crate::TriviumError::TransactionFinished))
+        }
+
+        fn pending_count_inner(&self) -> usize {
+            match self.builder.as_ref() {
+                Some(TxBuilderBackend::F32(b)) => b.pending_count(),
+                Some(TxBuilderBackend::F16(b)) => b.pending_count(),
+                Some(TxBuilderBackend::U64(b)) => b.pending_count(),
+                None => 0,
             }
-        };
+        }
+
+        fn commit_inner(&mut self, py: Python<'_>) -> PyResult<Vec<u64>> {
+            self.active_builder().map_err(transaction_admission_error)?;
+            // 先取得借用并完成内核准入，拒绝时保留整笔待提交操作。
+            let (_request, mut db_ref) =
+                database_write(self.db.bind(py)).map_err(transaction_admission_error)?;
+            dispatch!(db_ref, db => db.check_transaction_admission()).map_err(|error| {
+                to_py_error(
+                    error.with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION),
+                )
+            })?;
+            let builder = self
+                .builder
+                .take()
+                .ok_or_else(|| to_py_error(crate::TriviumError::TransactionFinished))?;
+            match (&mut db_ref.inner, builder) {
+                (DbBackend::F32(db), TxBuilderBackend::F32(b)) => {
+                    db.commit_tx(b).map_err(to_py_error)
+                }
+                (DbBackend::F16(db), TxBuilderBackend::F16(b)) => {
+                    db.commit_tx(b).map_err(to_py_error)
+                }
+                (DbBackend::U64(db), TxBuilderBackend::U64(b)) => {
+                    db.commit_tx(b).map_err(to_py_error)
+                }
+                _ => Err(to_py_error(crate::TriviumError::InvalidInput(
+                    "事务与数据库类型不匹配 (Transaction and database dtypes do not match)".into(),
+                ))),
+            }
+        }
     }
 
     #[pymethods]
     impl PyTransaction {
         /// 缓冲一个插入操作
         fn insert(
-            &mut self,
+            slf: &Bound<'_, Self>,
             _py: Python<'_>,
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            check_finished!(self);
+            let (_request, mut this) = transaction_write(slf)?;
+            let builder = this.active_builder()?;
             let json = pyobject_to_json(payload)?;
-            match self.builder.as_mut().expect("TxBuilder missing") {
+            match builder {
                 TxBuilderBackend::F32(b) => {
                     let v: Vec<f32> = vector.extract()?;
                     b.insert(&v, json);
@@ -2538,15 +2885,16 @@ pub mod python {
 
         /// 缓冲一个带自定义 ID 的插入操作
         fn insert_with_id(
-            &mut self,
+            slf: &Bound<'_, Self>,
             _py: Python<'_>,
             id: u64,
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            check_finished!(self);
+            let (_request, mut this) = transaction_write(slf)?;
+            let builder = this.active_builder()?;
             let json = pyobject_to_json(payload)?;
-            match self.builder.as_mut().expect("TxBuilder missing") {
+            match builder {
                 TxBuilderBackend::F32(b) => {
                     let v: Vec<f32> = vector.extract()?;
                     b.insert_with_id(id, &v, json);
@@ -2566,9 +2914,15 @@ pub mod python {
 
         /// 缓冲一个连边操作
         #[pyo3(signature = (src, dst, label="related", weight=1.0))]
-        fn link(&mut self, src: u64, dst: u64, label: &str, weight: f32) -> PyResult<()> {
-            check_finished!(self);
-            match self.builder.as_mut().expect("TxBuilder missing") {
+        fn link(
+            slf: &Bound<'_, Self>,
+            src: u64,
+            dst: u64,
+            label: &str,
+            weight: f32,
+        ) -> PyResult<()> {
+            let (_request, mut this) = transaction_write(slf)?;
+            match this.active_builder()? {
                 TxBuilderBackend::F32(b) => b.link(src, dst, label, weight),
                 TxBuilderBackend::F16(b) => b.link(src, dst, label, weight),
                 TxBuilderBackend::U64(b) => b.link(src, dst, label, weight),
@@ -2577,9 +2931,9 @@ pub mod python {
         }
 
         /// 缓冲一个删除操作
-        fn delete(&mut self, id: u64) -> PyResult<()> {
-            check_finished!(self);
-            match self.builder.as_mut().expect("TxBuilder missing") {
+        fn delete(slf: &Bound<'_, Self>, id: u64) -> PyResult<()> {
+            let (_request, mut this) = transaction_write(slf)?;
+            match this.active_builder()? {
                 TxBuilderBackend::F32(b) => b.delete(id),
                 TxBuilderBackend::F16(b) => b.delete(id),
                 TxBuilderBackend::U64(b) => b.delete(id),
@@ -2589,9 +2943,9 @@ pub mod python {
 
         /// 缓冲一个断边操作
         #[pyo3(signature = (src, dst, label=None))]
-        fn unlink(&mut self, src: u64, dst: u64, label: Option<&str>) -> PyResult<()> {
-            check_finished!(self);
-            match (self.builder.as_mut().expect("TxBuilder missing"), label) {
+        fn unlink(slf: &Bound<'_, Self>, src: u64, dst: u64, label: Option<&str>) -> PyResult<()> {
+            let (_request, mut this) = transaction_write(slf)?;
+            match (this.active_builder()?, label) {
                 (TxBuilderBackend::F32(b), Some(label)) => b.unlink_label(src, dst, label),
                 (TxBuilderBackend::F16(b), Some(label)) => b.unlink_label(src, dst, label),
                 (TxBuilderBackend::U64(b), Some(label)) => b.unlink_label(src, dst, label),
@@ -2604,14 +2958,15 @@ pub mod python {
 
         /// 缓冲一个更新 payload 操作
         fn update_payload(
-            &mut self,
+            slf: &Bound<'_, Self>,
             _py: Python<'_>,
             id: u64,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            check_finished!(self);
+            let (_request, mut this) = transaction_write(slf)?;
+            let builder = this.active_builder()?;
             let json = pyobject_to_json(payload)?;
-            match self.builder.as_mut().expect("TxBuilder missing") {
+            match builder {
                 TxBuilderBackend::F32(b) => b.update_payload(id, json),
                 TxBuilderBackend::F16(b) => b.update_payload(id, json),
                 TxBuilderBackend::U64(b) => b.update_payload(id, json),
@@ -2620,9 +2975,9 @@ pub mod python {
         }
 
         /// 缓冲一个更新向量操作
-        fn update_vector(&mut self, id: u64, vector: Bound<'_, PyAny>) -> PyResult<()> {
-            check_finished!(self);
-            match self.builder.as_mut().expect("TxBuilder missing") {
+        fn update_vector(slf: &Bound<'_, Self>, id: u64, vector: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut this) = transaction_write(slf)?;
+            match this.active_builder()? {
                 TxBuilderBackend::F32(b) => {
                     let v: Vec<f32> = vector.extract()?;
                     b.update_vector(id, &v);
@@ -2641,83 +2996,70 @@ pub mod python {
         }
 
         /// 当前事务中缓冲的操作数
-        fn pending_count(&self) -> usize {
-            match self.builder.as_ref() {
-                Some(TxBuilderBackend::F32(b)) => b.pending_count(),
-                Some(TxBuilderBackend::F16(b)) => b.pending_count(),
-                Some(TxBuilderBackend::U64(b)) => b.pending_count(),
-                None => 0,
-            }
+        fn pending_count(slf: &Bound<'_, Self>) -> PyResult<usize> {
+            let (_request, this) = transaction_read(slf)?;
+            Ok(this.pending_count_inner())
         }
 
         /// 原子提交事务：Dry-Run 预检 + WAL-first 写入
-        fn commit(&mut self, py: Python<'_>) -> PyResult<Vec<u64>> {
-            if self.finished {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "事务已结束（已提交或已回滚），不能重复提交",
-                ));
-            }
-            self.finished = true;
-            let builder = self.builder.take().expect("TxBuilder missing");
-            let mut db_ref = self.db.borrow_mut(py);
-
-            match (&mut db_ref.inner, builder) {
-                (DbBackend::F32(db), TxBuilderBackend::F32(b)) => {
-                    db.commit_tx(b).map_err(to_py_error)
-                }
-                (DbBackend::F16(db), TxBuilderBackend::F16(b)) => {
-                    db.commit_tx(b).map_err(to_py_error)
-                }
-                (DbBackend::U64(db), TxBuilderBackend::U64(b)) => {
-                    db.commit_tx(b).map_err(to_py_error)
-                }
-                _ => Err(pyo3::exceptions::PyRuntimeError::new_err("dtype 不匹配")),
-            }
+        fn commit(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<Vec<u64>> {
+            let (_request, mut this) =
+                transaction_write(slf).map_err(transaction_admission_error)?;
+            this.commit_inner(py)
         }
 
         /// 回滚事务（丢弃所有缓冲操作）
-        fn rollback(&mut self) -> PyResult<()> {
-            if self.finished {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "事务已结束（已提交或已回滚），不能重复回滚",
-                ));
-            }
-            self.finished = true;
-            self.builder.take();
+        fn rollback(slf: &Bound<'_, Self>) -> PyResult<()> {
+            let (_request, mut this) = transaction_write(slf)?;
+            this.builder
+                .take()
+                .ok_or_else(|| to_py_error(crate::TriviumError::TransactionFinished))?;
             Ok(())
         }
 
         // 上下文管理器支持
-        fn __enter__(slf: Py<Self>) -> Py<Self> {
-            slf
+        fn __enter__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+            let (_request, mut this) = transaction_write(slf)?;
+            this.active_builder()?;
+            Ok(slf.clone().unbind())
         }
 
         #[pyo3(signature = (exc_type=None, _exc_val=None, _exc_tb=None))]
         fn __exit__(
-            &mut self,
+            slf: &Bound<'_, Self>,
             py: Python<'_>,
             exc_type: Option<&Bound<'_, PyAny>>,
             _exc_val: Option<&Bound<'_, PyAny>>,
             _exc_tb: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<bool> {
-            if self.finished {
+            let (_request, mut this) =
+                transaction_write(slf).map_err(transaction_admission_error)?;
+            if this.builder.is_none() {
                 return Ok(false);
             }
             if exc_type.is_some() {
-                self.finished = true;
-                self.builder.take();
+                this.builder.take();
             } else {
-                self.commit(py)?;
+                this.commit_inner(py)?;
             }
             Ok(false)
         }
 
-        fn __repr__(&self) -> String {
-            format!(
+        fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+            let (_request, this) = transaction_read(slf)?;
+            Ok(format!(
                 "Transaction(pending={}, finished={})",
-                self.pending_count(),
-                self.finished
-            )
+                this.pending_count_inner(),
+                this.builder.is_none()
+            ))
+        }
+
+        fn __traverse__(
+            &self,
+            visit: pyo3::PyVisit<'_>,
+        ) -> std::result::Result<(), pyo3::PyTraverseError> {
+            // 向 GC 暴露 Transaction → Database，数据库的 __clear__ 负责断开 Hook 环。
+            visit.call(&self.db)
         }
     }
 
@@ -2734,6 +3076,8 @@ pub mod python {
     /// - on_post_search(self, hits, ctx) -> None
     struct PySearchHookWrapper {
         py_hook: PyObject,
+        // 身份只用于准入匹配；正在调用的方法持有 PyRef，保证原实例存活。
+        database_identity: usize,
     }
 
     // SAFETY: PyObject 本身是 Send+Sync（它只是一个引用计数指针），
@@ -2742,6 +3086,23 @@ pub mod python {
     unsafe impl Sync for PySearchHookWrapper {}
 
     impl PySearchHookWrapper {
+        fn with_callback<R: Default>(
+            &self,
+            ctx: &mut crate::hook::HookContext,
+            call: impl FnOnce(Python<'_>, &mut crate::hook::HookContext) -> R,
+        ) -> R {
+            let _request =
+                match crate::sdk::RequestScope::callback(self.database_identity, "python_callback")
+                {
+                    Ok(request) => request,
+                    Err(error) => {
+                        ctx.error = Some(error.to_string());
+                        return R::default();
+                    }
+                };
+            Python::with_gil(|py| call(py, ctx))
+        }
+
         fn record_python_error(ctx: &mut crate::hook::HookContext, stage: &str, error: PyErr) {
             ctx.error = Some(format!("Python Hook {stage} 执行失败: {error}"));
         }
@@ -2814,7 +3175,7 @@ pub mod python {
             _config: &mut crate::database::SearchConfig,
             ctx: &mut crate::hook::HookContext,
         ) {
-            pyo3::Python::with_gil(|py| {
+            self.with_callback(ctx, |py, ctx| {
                 let hook = self.py_hook.bind(py);
                 if let Ok(method) = hook.getattr("on_pre_search")
                     && let Ok(py_vec) = pyo3::types::PyList::new(py, query_vector.iter())
@@ -2848,7 +3209,7 @@ pub mod python {
             _config: &crate::database::SearchConfig,
             ctx: &mut crate::hook::HookContext,
         ) -> Option<Vec<crate::node::SearchHit>> {
-            pyo3::Python::with_gil(|py| {
+            self.with_callback(ctx, |py, ctx| {
                 let hook = self.py_hook.bind(py);
                 let Ok(method) = hook.getattr("on_custom_recall") else {
                     return None;
@@ -2880,7 +3241,7 @@ pub mod python {
             seeds: &mut Vec<crate::node::SearchHit>,
             ctx: &mut crate::hook::HookContext,
         ) {
-            pyo3::Python::with_gil(|py| {
+            self.with_callback(ctx, |py, ctx| {
                 let hook = self.py_hook.bind(py);
                 let Ok(method) = hook.getattr("on_pre_graph_expand") else {
                     return;
@@ -2916,7 +3277,7 @@ pub mod python {
             hits: &mut Vec<crate::node::SearchHit>,
             ctx: &mut crate::hook::HookContext,
         ) {
-            pyo3::Python::with_gil(|py| {
+            self.with_callback(ctx, |py, ctx| {
                 let hook = self.py_hook.bind(py);
                 if let Ok(method) = hook.getattr("on_post_recall") {
                     let py_hits = match Self::hits_to_py(py, hits) {
@@ -2953,7 +3314,7 @@ pub mod python {
             hits: &mut Vec<crate::node::SearchHit>,
             ctx: &mut crate::hook::HookContext,
         ) -> Option<Vec<crate::node::SearchHit>> {
-            pyo3::Python::with_gil(|py| {
+            self.with_callback(ctx, |py, ctx| {
                 let hook = self.py_hook.bind(py);
                 if let Ok(method) = hook.getattr("on_rerank") {
                     let py_hits = match Self::hits_to_py(py, hits) {
@@ -2990,7 +3351,7 @@ pub mod python {
             hits: &mut Vec<crate::node::SearchHit>,
             ctx: &mut crate::hook::HookContext,
         ) {
-            pyo3::Python::with_gil(|py| {
+            self.with_callback(ctx, |py, ctx| {
                 let hook = self.py_hook.bind(py);
                 if let Ok(method) = hook.getattr("on_post_search") {
                     let py_hits = match Self::hits_to_py(py, hits) {
@@ -3141,8 +3502,25 @@ pub mod python {
                 use pyo3::prelude::*;
                 let json = py.import("json").unwrap();
                 for (error, code, expected) in crate::error::tests::cases() {
+                    let message = error.to_string();
                     let exception = super::to_py_error(error);
                     let value = exception.value(py);
+                    assert_eq!(
+                        value
+                            .getattr("schema_version")
+                            .unwrap()
+                            .extract::<u32>()
+                            .unwrap(),
+                        1
+                    );
+                    assert_eq!(
+                        value
+                            .getattr("message")
+                            .unwrap()
+                            .extract::<String>()
+                            .unwrap(),
+                        message
+                    );
                     assert_eq!(
                         value.getattr("code").unwrap().extract::<String>().unwrap(),
                         code

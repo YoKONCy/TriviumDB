@@ -557,6 +557,7 @@ pub struct MemTable<T: VectorType> {
     generation: u64,
     /// 最近一次完整检查点之后是否发生了需要持久化的变更。
     checkpoint_dirty: bool,
+    pub(crate) editing: crate::database::editing::EditState,
     recovery_required: Arc<AtomicBool>,
     load_memory_limit: usize,
     vector_generation: u64,
@@ -672,6 +673,7 @@ impl<T: VectorType> MemTable<T> {
             next_id: 1, // 从 1 开始，保留 0 作为特殊标记
             generation: 0,
             checkpoint_dirty: true,
+            editing: Default::default(),
             recovery_required: Arc::new(AtomicBool::new(false)),
             load_memory_limit: 0,
             vector_generation: 0,
@@ -728,6 +730,7 @@ impl<T: VectorType> MemTable<T> {
             next_id,
             generation: 0,
             checkpoint_dirty: true,
+            editing: Default::default(),
             recovery_required: Arc::new(AtomicBool::new(false)),
             load_memory_limit: 0,
             vector_generation: 0,
@@ -822,6 +825,7 @@ impl<T: VectorType> MemTable<T> {
     #[inline]
     fn mark_changed(&mut self, vectors_changed: bool) {
         self.checkpoint_dirty = true;
+        self.editing.changed();
         self.generation = self.generation.wrapping_add(1);
         if vectors_changed {
             self.bq_signatures.take();
@@ -1459,6 +1463,7 @@ impl<T: VectorType> MemTable<T> {
             if changed {
                 self.checkpoint_dirty = true;
                 self.generation = self.generation.wrapping_add(1);
+                self.editing.changed();
             }
             return Ok(());
         }
@@ -3478,6 +3483,7 @@ impl<T: VectorType> MemTable<T> {
             + self.pending_text_bytes;
         let property_index_bytes = self.property_indexes.estimated_memory_bytes();
         vec_bytes
+            + self.editing.memory_bytes()
             + self.bq_cache_bytes()
             + payload_bytes
             + edge_bytes

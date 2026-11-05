@@ -5,8 +5,139 @@
 
 use thiserror::Error;
 
+/// 各 SDK 与传输适配器共享的错误字段；消息用于诊断，code 与 details 用于程序判断。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ErrorInfo {
+    pub schema_version: u32,
+    pub code: &'static str,
+    pub message: String,
+    pub details: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<QueryErrorStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<ErrorTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write: Option<WriteErrorInfo>,
+}
+
+pub const ERROR_SCHEMA_VERSION: u32 = 1;
+
+/// 写请求失败时由实际执行点提供的结果事实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct WriteErrorInfo {
+    pub phase: WritePhase,
+    pub outcome: WriteOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_consumed: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WritePhase {
+    Admission,
+    Validation,
+    Wal,
+    Apply,
+    GroupSync,
+    Response,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteOutcome {
+    NotCommitted,
+    Unknown,
+    Committed,
+}
+
+impl WriteErrorInfo {
+    pub const TRANSACTION_ADMISSION: Self = Self {
+        phase: WritePhase::Admission,
+        outcome: WriteOutcome::NotCommitted,
+        transaction_consumed: Some(false),
+    };
+}
+
+/// TQL 解析与参数绑定能够确认的失败阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryErrorStage {
+    Lex,
+    Parse,
+    Bind,
+}
+
+impl QueryErrorStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lex => "lex",
+            Self::Parse => "parse",
+            Self::Bind => "bind",
+        }
+    }
+}
+
+/// 原始查询的 UTF-8 字节范围；当前解析诊断使用零长度锚点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct QuerySpan {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl QuerySpan {
+    /// 只接受真实字符边界；列按 Unicode 标量计数，CRLF 合并，Tab 计一列。
+    pub fn at(input: &str, byte: usize) -> Option<Self> {
+        let prefix = input.get(..byte)?;
+        let (mut line, mut column, mut previous_cr) = (1, 1, false);
+        for ch in prefix.chars() {
+            match ch {
+                '\r' => {
+                    line += 1;
+                    column = 1;
+                }
+                '\n' if previous_cr => {}
+                '\n' => {
+                    line += 1;
+                    column = 1;
+                }
+                _ => column += 1,
+            }
+            previous_cr = ch == '\r';
+        }
+        Some(Self {
+            start_byte: byte,
+            end_byte: byte,
+            line,
+            column,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+pub enum ErrorTarget {
+    Query { query_span: QuerySpan },
+    Parameter { parameter: String },
+}
+
 #[derive(Error, Debug)]
 pub enum TriviumError {
+    /// 写入阶段上下文保留原始错误类别及 cause。
+    #[error("{source}")]
+    WriteFailure {
+        #[source]
+        source: Box<TriviumError>,
+        write: WriteErrorInfo,
+    },
+    /// 为参数转换或绑定错误保留参数身份及原始错误。
+    #[error("{source}")]
+    QueryParameter {
+        parameter: String,
+        #[source]
+        source: Box<TriviumError>,
+    },
     #[error("I/O 错误 (I/O error): {0}")]
     Io(#[from] std::io::Error),
 
@@ -55,6 +186,18 @@ pub enum TriviumError {
     #[error("数据库已锁定 (Database locked): {0}")]
     DatabaseLocked(String),
 
+    /// 请求尚未进入实例，调用方可在持有者释放后重新提交。
+    #[error("数据库请求繁忙 (Database request is busy): {resource}")]
+    DatabaseBusy { resource: &'static str },
+
+    /// 在当前线程持锁期间重复进入同一实例，拒绝请求以避免自锁。
+    #[error("数据库重入被拒绝 (Database reentrant access rejected): {operation}")]
+    ReentrantAccess { operation: &'static str },
+
+    /// 宿主锁内发生异常展开，交由宿主结束该实例并检查恢复结果。
+    #[error("数据库宿主锁已中毒 (Database host lock is poisoned): {resource}")]
+    HostLockPoisoned { resource: &'static str },
+
     #[error("只读数据库不允许执行操作 (Read-only database operation denied): {operation}")]
     ReadOnlyViolation { operation: &'static str },
 
@@ -74,6 +217,14 @@ pub enum TriviumError {
     /// 查询语法解析错误
     #[error("查询解析错误 (Query parse error): {0}")]
     QueryParse(String),
+
+    /// 词法与语法入口保留结构化阶段；只有可靠定位时携带源码锚点。
+    #[error("查询解析错误 (Query parse error): {reason}")]
+    QuerySyntax {
+        reason: String,
+        stage: QueryErrorStage,
+        span: Option<QuerySpan>,
+    },
 
     /// 查询执行错误
     #[error("查询执行错误 (Query execution error): {0}")]
@@ -170,6 +321,10 @@ pub enum TriviumError {
     #[error("数据库已关闭 (Database closed)")]
     DatabaseClosed,
 
+    /// SDK 事务构造器已消费或回滚，结束状态不允许再次提交或添加操作。
+    #[error("事务已结束，请创建新事务 (Transaction finished; create a new transaction)")]
+    TransactionFinished,
+
     #[error("控制台会话已卸载 (Console session is detached)")]
     ConsoleSessionClosed,
 
@@ -177,6 +332,17 @@ pub enum TriviumError {
         "控制台响应超出大小上限 (Console response exceeds size limit): max_bytes={max_bytes}, committed={committed}"
     )]
     ConsoleResponseTooLarge { max_bytes: usize, committed: bool },
+
+    #[error("编辑版本冲突，请重新读取并合并 (Edit revision conflict; reload and merge)")]
+    WriteConflict { expected: String, actual: String },
+
+    #[error("幂等键已用于其他事务内容 (Idempotency key was used for a different transaction)")]
+    IdempotencyConflict,
+
+    #[error(
+        "事务结果无法确认，请核对事实且勿换键盲目重试 (Transaction outcome unknown; reconcile facts and do not blindly retry with a new key)"
+    )]
+    WriteOutcomeUnknown,
 
     /// WAL 格式版本高于当前内核支持范围。
     #[error("不支持的 WAL 版本 (Unsupported WAL version): 发现 {found}，当前支持 {supported}")]
@@ -219,9 +385,76 @@ pub enum TriviumError {
 }
 
 impl TriviumError {
+    /// 外层准入只补充尚未由执行点提供的上下文。
+    pub(crate) fn with_write_info(self, write: WriteErrorInfo) -> Self {
+        match self {
+            Self::WriteFailure { .. } => self,
+            _ => Self::WriteFailure {
+                source: Box::new(self),
+                write,
+            },
+        }
+    }
+
+    /// 为已知参数附加定位，原错误码、详情和错误链继续保留。
+    pub fn at_query_parameter(self, parameter: &str) -> Self {
+        Self::QueryParameter {
+            parameter: parameter.into(),
+            source: Box::new(self),
+        }
+    }
+
+    /// 语言异常分类与 Rust 模式匹配使用原始错误变体。
+    pub fn underlying(&self) -> &Self {
+        match self {
+            Self::QueryParameter { source, .. } | Self::WriteFailure { source, .. } => {
+                source.underlying()
+            }
+            _ => self,
+        }
+    }
+
+    pub fn info(&self) -> ErrorInfo {
+        if let Self::WriteFailure { source, write } = self {
+            let mut info = source.info();
+            info.write = Some(*write);
+            return info;
+        }
+        let (stage, target) = match self {
+            Self::QuerySyntax { stage, span, .. } => (
+                Some(*stage),
+                span.map(|query_span| ErrorTarget::Query { query_span }),
+            ),
+            Self::MissingQueryParameter { parameter }
+            | Self::UnexpectedQueryParameter { parameter }
+            | Self::QueryParameter { parameter, .. } => (
+                Some(QueryErrorStage::Bind),
+                Some(ErrorTarget::Parameter {
+                    parameter: parameter.clone(),
+                }),
+            ),
+            _ => (None, None),
+        };
+        ErrorInfo {
+            schema_version: ERROR_SCHEMA_VERSION,
+            code: self.code(),
+            message: self.to_string(),
+            details: self.details(),
+            stage,
+            target,
+            write: match self {
+                Self::QueryParameter { source, .. } => source.info().write,
+                _ => None,
+            },
+        }
+    }
+
     /// 三端共享的稳定错误码；消息可翻译，控制流依赖错误码与字段。
     pub fn code(&self) -> &'static str {
         match self {
+            Self::QueryParameter { source, .. } | Self::WriteFailure { source, .. } => {
+                source.code()
+            }
             Self::Io(_) => "TDB_IO",
             Self::Serialization(_) => "TDB_SERIALIZATION",
             Self::DimensionMismatch { .. } => "TDB_DIMENSION_MISMATCH",
@@ -233,12 +466,15 @@ impl TriviumError {
             Self::ConditionalUpdateNotMatched { .. } => "TDB_CONDITIONAL_UPDATE_NOT_MATCHED",
             Self::NodeAlreadyExists(_) => "TDB_NODE_ALREADY_EXISTS",
             Self::DatabaseLocked(_) => "TDB_DATABASE_LOCKED",
+            Self::DatabaseBusy { .. } => "TDB_BUSY",
+            Self::ReentrantAccess { .. } => "TDB_REENTRANT_ACCESS",
+            Self::HostLockPoisoned { .. } => "TDB_HOST_LOCK_POISONED",
             Self::ReadOnlyViolation { .. } => "TDB_READ_ONLY",
             Self::RecoveryRequired { .. } => "TDB_RECOVERY_REQUIRED",
             Self::ImmutableArtifactInvalid { .. } => "TDB_IMMUTABLE_ARTIFACT",
             Self::GenerationBusy { .. } => "TDB_GENERATION_BUSY",
             Self::CorruptedFile(_) => "TDB_CORRUPTED_FILE",
-            Self::QueryParse(_) => "TDB_QUERY_PARSE",
+            Self::QueryParse(_) | Self::QuerySyntax { .. } => "TDB_QUERY_PARSE",
             Self::QueryExecution(_) => "TDB_QUERY_EXECUTION",
             Self::MissingQueryParameter { .. } => "TDB_MISSING_QUERY_PARAMETER",
             Self::UnexpectedQueryParameter { .. } => "TDB_UNEXPECTED_QUERY_PARAMETER",
@@ -256,8 +492,12 @@ impl TriviumError {
             Self::SnapshotPublicationUncertain { .. } => "TDB_SNAPSHOT_PUBLICATION_UNCERTAIN",
             Self::ShutdownFailed { .. } => "TDB_SHUTDOWN_FAILED",
             Self::DatabaseClosed => "TDB_DATABASE_CLOSED",
+            Self::TransactionFinished => "TDB_TRANSACTION_FINISHED",
             Self::ConsoleSessionClosed => "TDB_CONSOLE_SESSION_CLOSED",
             Self::ConsoleResponseTooLarge { .. } => "TDB_CONSOLE_RESPONSE_TOO_LARGE",
+            Self::WriteConflict { .. } => "TDB_WRITE_CONFLICT",
+            Self::IdempotencyConflict => "TDB_IDEMPOTENCY_CONFLICT",
+            Self::WriteOutcomeUnknown => "TDB_WRITE_OUTCOME_UNKNOWN",
             Self::UnsupportedWalVersion { .. } => "TDB_UNSUPPORTED_WAL_VERSION",
             Self::UnsupportedDatabaseVersion { .. } => "TDB_UNSUPPORTED_DATABASE_VERSION",
             Self::ApiMigrationRequired { .. } => "TDB_API_MIGRATION_REQUIRED",
@@ -271,10 +511,21 @@ impl TriviumError {
     pub fn details(&self) -> serde_json::Value {
         use serde_json::json;
         match self {
+            Self::QueryParameter { source, .. } | Self::WriteFailure { source, .. } => {
+                source.details()
+            }
+            Self::DatabaseBusy { resource } | Self::HostLockPoisoned { resource } => {
+                json!({"resource": resource})
+            }
+            Self::ReentrantAccess { operation } => json!({"operation": operation}),
             Self::Io(error) => {
                 json!({"io_kind": format!("{:?}", error.kind()), "os_code": error.raw_os_error()})
             }
             Self::Serialization(error) => json!({"reason": error.to_string()}),
+            Self::WriteConflict { expected, actual } => {
+                json!({"expected":expected,"actual":actual})
+            }
+            Self::IdempotencyConflict | Self::WriteOutcomeUnknown => json!({}),
             Self::DimensionMismatch { expected, got } => json!({"expected": expected, "got": got}),
             Self::DtypeMismatch { stored, requested } => {
                 json!({"stored": stored, "requested": requested})
@@ -362,7 +613,8 @@ impl TriviumError {
                 removed_api,
                 replacement,
             } => json!({"removed_api": removed_api, "replacement": replacement}),
-            Self::InvalidVector { reason }
+            Self::QuerySyntax { reason, .. }
+            | Self::InvalidVector { reason }
             | Self::ImmutableArtifactInvalid { reason }
             | Self::CapacityAllocationFailed { reason }
             | Self::ShutdownFailed { reason } => json!({"reason": reason}),
@@ -377,6 +629,7 @@ impl TriviumError {
             Self::QueryCancelled
             | Self::WalClosed
             | Self::DatabaseClosed
+            | Self::TransactionFinished
             | Self::ConsoleSessionClosed => json!({}),
         }
     }

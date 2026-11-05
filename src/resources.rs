@@ -67,7 +67,7 @@ pub struct ResourceBudgetDetails {
 
 impl ResourceBudgetDetails {
     pub(crate) fn from_error(error: &TriviumError) -> Option<Self> {
-        match error {
+        match error.underlying() {
             TriviumError::ResourceBudgetExceeded {
                 resource,
                 requested,
@@ -94,7 +94,7 @@ pub struct ResourceFailure {
 
 impl ResourceFailure {
     pub(crate) fn from_error(error: &TriviumError) -> Self {
-        let kind = match error {
+        let kind = match error.underlying() {
             TriviumError::ResourceBudgetExceeded { .. } => "resource_budget",
             TriviumError::Io(_) => "io",
             TriviumError::CapacityAllocationFailed { .. } => "capacity",
@@ -785,6 +785,33 @@ impl ResourcePool {
 mod tests {
     use super::*;
     use rayon::prelude::*;
+
+    #[test]
+    fn 写入上下文保留资源故障类别与预算字段() {
+        let budget = TriviumError::ResourceBudgetExceeded {
+            resource: "memory_bytes",
+            requested: 512,
+            used: 768,
+            limit: 1024,
+        }
+        .with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION);
+        let failure = ResourceFailure::from_error(&budget);
+        assert_eq!(failure.kind, "resource_budget");
+        assert_eq!(
+            failure.budget,
+            Some(ResourceBudgetDetails {
+                resource: "memory_bytes",
+                requested: 512,
+                used: 768,
+                limit: 1024,
+            })
+        );
+        let io = TriviumError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION);
+        let failure = ResourceFailure::from_error(&io);
+        assert_eq!(failure.kind, "io");
+        assert_eq!(failure.budget, None);
+    }
 
     #[test]
     fn 工作区扩缩容拒绝与释放准确维护两类账本() {

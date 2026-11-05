@@ -1,27 +1,65 @@
 # TQL (Trivium Query Language) 完整参考
 
-> **版本**: 0.9.0；版本记录见 [0.9.0 变更说明](changes/0.9.0.md)。
-> **定位**: 统一查询 DSL — 融合文档过滤、图模式匹配、向量检索于一体  
-> **前置依赖**: 零外部依赖，纯 Rust 实现
+> 本文介绍 `0.9.0` 的 TQL 语法与执行语义，涵盖文档过滤、图模式匹配、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.0.md)。
 
 ---
 
 ## 目录
 
+- [结构化查询诊断](#结构化查询诊断)
 - [概述](#概述)
 - [快速入门](#快速入门)
 - [FIND — 文档过滤查询](#find--文档过滤查询)
 - [MATCH — 图模式匹配](#match--图模式匹配)
 - [SEARCH — 向量检索](#search--向量检索)
-- [TEXT — BM25 / AC 文本召回](#文本召回入口)
+- [MATCH + RANK — GraphFirst 约束检索](#match--rank--graphfirst-约束检索)
 - [WHERE — 统一谓词系统](#where--统一谓词系统)
 - [RETURN / ORDER BY / LIMIT / OFFSET](#return--order-by--limit--offset)
 - [WITH 可组合管线](#with-可组合管线)
 - [表达式、聚合与空值](#表达式聚合与空值)
+- [向量更新](#向量更新)
 - [Prepared TQL](#prepared-tql)
 - [路径与集合代数](#路径与集合代数)
+- [历史 API 迁移](#历史-api-迁移)
 - [形式语法与内部架构](#形式语法与内部架构)
 - [当前边界](#当前边界)
+
+---
+
+## 结构化查询诊断
+
+当前开发版本的数据库查询、Prepared TQL 准备和写语句解析共享 `TDB_QUERY_PARSE`。错误保留 `schema_version`、`message` 与 `details.reason`，并增加 `stage`：`lex` 表示词法阶段，`parse` 表示语法及解析期语义检查。
+
+能够确定位置时，`target.query_span` 提供以下字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `start_byte`、`end_byte` | 原始查询 UTF-8 字节的零起点、左闭右开范围；当前诊断使用两者相等的零长度锚点 |
+| `line` | 从 1 开始的行号；CRLF 计一个换行，单独 CR 或 LF 也换行 |
+| `column` | 从 1 开始的列号；按 Unicode 标量值计数，Tab 计一列，组合字符分别计数 |
+
+例如 `MATCH (123) RETURN n` 的诊断包含：
+
+```json
+{
+  "schema_version": 1,
+  "code": "TDB_QUERY_PARSE",
+  "stage": "parse",
+  "target": {
+    "query_span": { "start_byte": 7, "end_byte": 7, "line": 1, "column": 8 }
+  }
+}
+```
+
+词法锚点指向失败词法单元的起点，包括非法字符、不完整运算符和未闭合字符串。语法锚点覆盖明确的 token 预期、括号校验、尾部输入及输入结束。别名冲突等缺少精确位置的检查仅提供阶段；JSON 和 Node 省略对应 `target`，Python 使用 `None`。超过输入字节上限时也省略源码位置。
+
+Prepared 参数绑定使用 `stage=bind` 和 `target.parameter`。缺参、多参、命名 JSON 参数转换，以及向量槽位中的非数值和 Rust 非有限参数均携带参数原名。缺参和多参保留原有专用错误码，容器值沿用 `TDB_INVALID_INPUT`，向量槽位类型错误沿用 `TDB_QUERY_EXECUTION`。参数名按映射键传递，点、斜杠、方括号与 Unicode 字符保持原样。字段与各入口的覆盖边界见[公共错误契约](error-contracts.md)。
+
+Rust 的数据库解析入口返回 `TriviumError::QuerySyntax { reason, stage, span }`；原 `QueryParse(String)` 继续保留，稳定错误码一致。独立解析可使用 `parse_tql_diagnostic` 和 `parse_tql_statement_diagnostic`。旧字符串及 `ParseErrorAt` 入口继续提供原返回类型；需要区分准确位置与缺失位置的调用者使用结构化入口。
+
+Python／Node 异常、CLI JSON、嵌入 Console HTTP 与独立 Server 直接传递内核诊断。独立 Server 使用 HTTP 400 和 `legacyCode: "QUERY_PARSE_ERROR"`。查询范围使用原始 UTF-8 字节，JavaScript 按 UTF-16 索引处理字符串时需先换算。
+
+> **接入提醒**：诊断锚点用于定位当前检查的失败位置。完整 AST 源码范围、Prepared 参数绑定位置及执行期位置按后续契约补充；写入结果继续依据事务与回执判断。
 
 ---
 
@@ -32,7 +70,7 @@ TQL 是 TriviumDB 的统一查询语言，提供面向三模数据的 **自由 D
 每个阶段具有明确的输入/输出类型、作用域、确定性规则和预算切片，完整查询由 Parser、Cascades 与 Pipeline 统一验证和优化。`0.9.0-beta.1` 中的 TQL 工作区和计算池接入数据库所属的 `ResourceRuntime`，配置与诊断见[共享资源运行时](resource-runtime.md)。
 
 | 入口 | 对应能力 |
-|------|---------|
+| ------ | --------- |
 | `FIND` | MongoDB 风格文档过滤与属性索引规划 |
 | `MATCH` / `OPTIONAL MATCH` | 图模式、可变长路径与 GraphFirst |
 | `SEARCH` | 向量源、确定性扩展与跨模管线 |
@@ -105,7 +143,7 @@ RANK doc BY VECTOR [0.1, -0.2, 0.8, ...] TOP 10
 RETURN doc, ref
 ```
 
-> 💡 TQL 支持行注释：以 `--` 开头的内容到行尾会被忽略。
+> **提醒**：TQL 支持行注释：以 `--` 开头的内容到行尾会被忽略。
 
 ---
 
@@ -170,12 +208,12 @@ ORDER BY _.heat DESC
 LIMIT 10 OFFSET 20
 ```
 
-> 💡 `FIND` 场景下节点绑定到隐式变量 `_`，在 `ORDER BY` 中通过 `_.field` 引用字段。
+> **提醒**：`FIND` 场景下节点绑定到隐式变量 `_`，在 `ORDER BY` 中通过 `_.field` 引用字段。
 
 ### 支持的全部操作符
 
 | 操作符 | 含义 | 值类型 | TQL 示例 |
-|--------|------|--------|----------|
+| -------- | ------ | -------- | ---------- |
 | `$eq` | 等于 | 任意 | `{name: {$eq: "Alice"}}` 或 `{name: "Alice"}` |
 | `$ne` | 不等于 | 任意 | `{status: {$ne: "deleted"}}` |
 | `$gt` | 大于 | 数字 | `{age: {$gt: 18}}` |
@@ -224,7 +262,7 @@ MATCH (a {}) RETURN a
 MATCH (a {id: 42}) RETURN a
 ```
 
-> 💡 当内联属性包含 `{id: N}` 时，执行器会启用 **O(1) 主键哈希短路**，跳过全表扫描直接定位节点。
+> **提醒**：当内联属性包含 `{id: N}` 时，执行器会启用 **O(1) 主键哈希短路**，跳过全表扫描直接定位节点。
 
 MATCH 内联 `id` 条件和节点的 `.id` 属性引用结构 ID，支持完整 `u64` 整数及 `$in`、范围等条件；负数按实际数值比较。`FIND` 与 `MATCHES` 的文档条件读取 Payload 字段。Payload 自身的 `id` 属性索引服务于文档过滤，结构 ID 排序使用节点 ID。
 
@@ -305,7 +343,7 @@ RETURN b
 ### 变量绑定规则
 
 | 规则 | 说明 |
-|------|------|
+| ------ | ------ |
 | 单跳具名边支持匿名端点 | `MATCH ()-[e:rel]->() RETURN e` |
 | 其他含边路径的节点使用具名变量 | `MATCH (a)-[]->(b) RETURN a, b` |
 | 纯单节点查询允许匿名 | `MATCH (n) RETURN n` ✅ |
@@ -319,7 +357,7 @@ OPTIONAL MATCH 首先筛选符合起点条件的节点；每个起点沿满足�
 ### 执行器安全机制
 
 | 机制 | 配置 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | 预算熔断 | 100,000 步 | 单次查询最多评估 10 万步，防止内存爆炸 |
 | 行数上限 | LIMIT 或默认 5,000 | 结果行数达标后立即停止所有 DFS 分支 |
 | 环路检测 | 可变长路径 | `HashSet<u64>` 跟踪已访问节点 |
@@ -402,7 +440,7 @@ WHERE _.score > 0.8
 RETURN *
 ```
 
-> 💡 不带 `EXPAND` 且 `WHERE` 是已索引的等值或 AND 等值文档过滤时，Planner 会先取得属性索引候选，再在过滤集合内精确向量排序并返回 Top-K。这样 `TOP 10 WHERE {type: "event"}` 表示 event 集合中的 Top 10。
+> **提醒**：不带 `EXPAND` 且 `WHERE` 是已索引的等值或 AND 等值文档过滤时，Planner 会先取得属性索引候选，再在过滤集合内精确向量排序并返回 Top-K。这样 `TOP 10 WHERE {type: "event"}` 表示 event 集合中的 Top 10。
 >
 > 无可用属性索引、范围/OR/通用表达式或带 `EXPAND` 的查询保留候选后过滤路径；可能少于 TOP 指定数量，但始终执行最终精确谓词校验。
 
@@ -450,7 +488,7 @@ WHERE a.score >= 0.8 AND a.score < 1.0
 **支持的比较运算符**：
 
 | 运算符 | 含义 |
-|--------|------|
+| -------- | ------ |
 | `==` | 等于 |
 | `!=` | 不等于 |
 | `>` | 大于 |
@@ -492,7 +530,7 @@ WHERE a.age > 25 AND b MATCHES {tags: {$all: ["rust"]}}
 ### 类型安全
 
 | 场景 | 行为 |
-|------|------|
+| ------ | ------ |
 | 字段不存在 | 比较结果为 `false`，不报错 |
 | 类型不匹配（如 `age > "text"`）| 比较结果为 `false`，不报错 |
 | `Int` vs `Float` 跨类型比较 | 自动提升为 `f64` 比较 |
@@ -596,7 +634,7 @@ ORDER BY score DESC
 `TEXT` 支持：
 
 | 类型 | 语义 |
-|---|---|
+| --- | --- |
 | `BM25` | 使用 TextIndex 的 BM25 相关度召回 |
 | `AC` | 使用 Aho-Corasick 关键词命中召回 |
 | `HYBRID` | 将 BM25 与 AC 分数相加，`AC_WEIGHT` 控制 AC 权重 |
@@ -613,7 +651,7 @@ WITH diverse
 RETURN diverse, diversity_score(diverse) AS diversity
 ```
 
-DPP 从输入的 `similarity`、`text_score` 或 `graph_score` 中选择质量分数。候选池最多 512 个节点，`TOP` 不得超过输入候选数；向量读取和临时矩阵均计入预算。`diversity_score()` 表示确定性选择次序的边际排名分数，不替代原质量分数。
+DPP 从输入的 `similarity`、`text_score` 或 `graph_score` 中选择质量分数。候选池最多 512 个节点，`TOP` 不得超过输入候选数；向量读取和临时矩阵均计入预算。`diversity_score()` 表示确定性选择次序的边际排名分数，原质量分数保留在对应字段中。
 
 ### 参数化 SA-PPR
 
@@ -625,7 +663,7 @@ WITH expanded
 RETURN expanded, graph_score(expanded) AS score
 ```
 
-`DEPTH`、`ALPHA`、`MAX_EDGES`、`MIN_WEIGHT` 和可选的 `LABELS` 显式控制有限深度扩散。该算子仍是 Depth-Bounded SA-PPR，不等同于迭代至收敛的标准 PageRank。
+`DEPTH`、`ALPHA`、`MAX_EDGES`、`MIN_WEIGHT` 和可选的 `LABELS` 显式控制有限深度扩散。该算子采用 Depth-Bounded SA-PPR 语义；需要迭代收敛结果时使用 PageRank。
 
 ### FISTA 残差召回
 
@@ -651,9 +689,11 @@ RETURN clustered, topic(clustered) AS topic_id, topic_score(clustered) AS confid
 
 `TOPICS` 对候选向量执行确定性 NMF，并把 W 矩阵的主导主题映射回节点。候选最多 512、`K` 最大 32 且不得超过候选数、迭代最多 256；V/W/H 矩阵在分配前接受内存预算检查。当前输出逐节点主题编号与权重，不输出可跨阶段传递的 H 矩阵 artifact。
 
+---
+
 ## 表达式、聚合与空值
 
-表达式支持 `+ - * /`、括号优先级、参数、属性、一等分数、`COALESCE`、`IS NULL/IS NOT NULL`、`path()` 与 `path_length()`。认知管线新增 `text_score()`、`diversity_score()`、`residual_score()`、`topic()` 与 `topic_score()`；未携带对应分数的行返回 Null。除零、非数值算术和非有限结果返回 Null，不 panic。
+表达式支持 `+ - * /`、括号优先级、参数、属性、一等分数、`COALESCE`、`IS NULL/IS NOT NULL`、`path()` 与 `path_length()`。认知管线新增 `text_score()`、`diversity_score()`、`residual_score()`、`topic()` 与 `topic_score()`；未携带对应分数的行返回 Null。除零、非数值算术和非有限结果返回 Null。
 
 整数的字面量、属性、节点 ID 与 Prepared 参数覆盖 `i64::MIN..=u64::MAX`；Rust 一等值使用 `Int(i64)`、`UInt(u64)`、`Float(f64)`。`WHERE`、排序与 `MIN/MAX` 共用精确数值比较，整数和浮点混合比较保持整数精度。浮点相等比较使用实际数值相等；`+0.0` 与 `-0.0` 相等。
 
@@ -671,6 +711,8 @@ TQL 数值等值谓词采用相同的索引候选和精确复核语义：整数 
 
 写入操作沿匹配行生成事务。`MATCH … CREATE` 的零匹配产生零次创建，每条匹配拥有独立的新节点变量作用域；同一行内的边引用对应的新节点。多字段 SET 按文本顺序累计到同一节点，重复字段采用最后一次赋值，合并后提交一次 Payload 替换。整条 mutation 通过内核事务完成预检、预算准入与原子提交。
 
+---
+
 ## 向量更新
 
 TQL mutation 可在 `MATCH` 目标集合上原子更新向量：
@@ -683,6 +725,8 @@ SET VECTOR(n) == [1e-5, 0.2, -0.3]
 目标匹配集不受查询返回行上限静默截断。向量维度必须与数据库一致，且所有分量必须为有限值；任一目标或向量校验失败时，事务整体不提交。该语法当前使用数字字面量；需要参数化或批量向量写入时使用事务 API。
 
 SET VECTOR 从字面量保留数值类型，并按目标 dtype 转换。`u64` 保留 `0..=18446744073709551615` 的整数位模式，负数、小数与超范围值在写 WAL 前拒绝；f32/f16 在转换后检查有限范围。Rust mutation AST 的 `SetVector.vector` 使用 `Vec<serde_json::Number>`，自定义 `VectorType` 可覆盖 `from_json_number()` 定义数值转换。
+
+---
 
 ## Prepared TQL
 
@@ -700,6 +744,8 @@ Node 使用 `prepareTql/executePreparedTql`，Rust 使用 `prepare_tql/execute_p
 
 直接执行包含未绑定参数的查询返回明确错误。Rust 手工构造 Prepared AST 时，向量参数槽位必须有效且唯一；绑定过程检查槽位边界并保持原始整数精度。
 
+---
+
 ## 路径与集合代数
 
 ```sql
@@ -712,16 +758,18 @@ RETURN path(route) AS nodes, path_length(route) AS hops
 
 Path 当前是一等 NodeId 序列；`path_length` 返回边数。`WEIGHTED_PATHS` 使用非负有限边权执行确定性 Dijkstra，`weighted_distance()` 返回总成本；`YEN_PATHS ... K n` 返回最多 n 条最短简单路径，`path_rank()` 从 1 开始标记顺序。等成本路径按完整 NodeId 序列决胜。
 
-`NODE_SIMILARITY input TOP n CUTOFF x [LABEL label] AS pairs` 在输入诱导无向图上计算邻居集合 Jaccard，相似节点对通过 `pair_left()`、`pair_right()` 与 `node_similarity()` 投影。PairSet 以 `(left,right)` 为独立行身份，不会因共享左节点而被 NodeSet 去重；节点对数量、邻居交集工作量、结果数和临时字节均受硬预算约束。
+`NODE_SIMILARITY input TOP n CUTOFF x [LABEL label] AS pairs` 在输入诱导无向图上计算邻居集合 Jaccard，相似节点对通过 `pair_left()`、`pair_right()` 与 `node_similarity()` 投影。PairSet 以 `(left,right)` 为行身份，两个节点共同参与去重；节点对数量、邻居交集工作量、结果数和临时字节均受硬预算约束。
 
 集合阶段公开 `UNION/INTERSECT/EXCEPT`，普通 NodeSet 仍按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。所有路径与集合算法均受节点数、字节和遍历预算约束。
+
+---
 
 ## 历史 API 迁移
 
 ### db.query() → db.tql()
 
 | 旧 `db.query()` 写法 | TQL 等价写法 | 新增能力 |
-|---|---|---|
+| --- | --- | --- |
 | `MATCH (n {name: "alice"}) RETURN n` | 完全相同 | — |
 | `MATCH (n {id: 42}) RETURN n` | 完全相同 | O(1) 短路 |
 | `MATCH (a)-[:knows]->(b) RETURN b` | 完全相同 | — |
@@ -736,7 +784,7 @@ Path 当前是一等 NodeId 序列；`path_length` 返回边数。`WEIGHTED_PATH
 ### db.filter_where() → db.tql()
 
 | 旧 `Filter` 枚举 | TQL FIND 写法 |
-|---|---|
+| --- | --- |
 | `Filter::Eq("name", json!("Alice"))` | `FIND {name: "Alice"}` |
 | `Filter::Gt("age", 18.0)` | `FIND {age: {$gt: 18}}` |
 | `Filter::In("role", vec![...])` | `FIND {role: {$in: [...]}}` |
@@ -805,7 +853,7 @@ OrderExpr    := Expr (ASC | DESC)?
 TQL 由七个协作模块组成，延续项目既有的模块化拆分：
 
 | 模块 | 文件 | 行数 | 职责 |
-|------|------|------|------|
+| ------ | ------ | ------ | ------ |
 | **AST** | `query/tql_ast.rs` | 查询、管线、表达式、聚合、Path |
 | **Lexer** | `query/tql_lexer.rs` | Token、参数、位置诊断 |
 | **Parser** | `query/tql_parser.rs` | 递归下降、作用域与语义验证 |
@@ -827,7 +875,7 @@ TQL 文本
   → TqlValueResult（Node、Edge、标量、Path、List、Object、Null）
 ```
 
-`FIND` 可选择主键、Hash/Ordered/Composite/Bitmap、索引交集或 Fast Tags + 精确校验；`SEARCH` 可选择可用的向量访问路径与 exact fallback；`MATCH`、图算法和路径阶段复用 `.gidx`/内存图目录。Cascades 是确定性、有界、统计感知且成本驱动的优化器，不宣称穷举意义上的数学全局最优。
+`FIND` 可选择主键、Hash/Ordered/Composite/Bitmap、索引交集或 Fast Tags + 精确校验；`SEARCH` 可选择可用的向量访问路径与 exact fallback；`MATCH`、图算法和路径阶段复用 `.gidx`/内存图目录。Cascades 在有界计划空间内依据统计信息和成本模型确定执行方案。
 
 ---
 
@@ -835,14 +883,14 @@ TQL 文本
 
 ### 解析递归预算
 
-标量表达式递归与现有嵌套解析共用 128 层预算；括号、函数参数、一元运算与子查询组合不能绕过这一限制。超限返回解析错误，防止恶意输入耗尽线程栈；该上限不代表查询执行的行数或图遍历深度预算。
+标量表达式递归与现有嵌套解析共用 128 层预算；括号、函数参数、一元运算与子查询组合不能绕过这一限制。超限返回解析错误，防止恶意输入耗尽线程栈；查询执行行数和图遍历深度使用独立预算。
 
 ### TQL 与认知检索 API 的关系
 
 TQL 和 `search_advanced()` 共用底层数据、QuIVer、图与预算设施，但提供不同语义：
 
 | 维度 | `search_advanced()` | TQL Pipeline |
-|---|---|---|
+| --- | --- | --- |
 | 主要目标 | 固定工业 RAG 检索管线 | 任意三模算子组合 |
 | 向量访问 | QuIVer / exact fallback | Cascades 选择向量源与重排 |
 | 图能力 | SA-PPR 扩散，组件可开关、顺序固定 | EXPAND、路径、PageRank/WCC/Leiden、参数化 SA-PPR 等自由编排 |
@@ -855,7 +903,7 @@ TQL 和 `search_advanced()` 共用底层数据、QuIVer、图与预算设施，�
 ### 当前限制
 
 | 限制 | 说明 | 计划 |
-|------|------|------|
+| ------ | ------ | ------ |
 | MATCH 模式方向 | MATCH 边模式仍以显式有向模式为主；SEARCH EXPAND 已支持 OUTGOING/INCOMING/BOTH | 后续扩展 |
 | 认知算子 Prepared 参数 | `TEXT` 参数、`RESIDUAL` 向量和认知算子参数当前使用字面量；Prepared 逐维参数目前只覆盖 `SEARCH VECTOR` | 后续扩展 |
 | NMF 集合 artifact | `TOPICS` 投影逐节点主题与权重，不在阶段间传递 H 矩阵 | 按真实需求评估 |

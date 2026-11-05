@@ -20,7 +20,7 @@ Run locally:
 """
 
 from typing_extensions import assert_type
-from typing import Any
+from typing import Any, Literal
 
 import triviumdb
 from triviumdb import Edge, EdgeDirection, NodeView, SearchHit, Transaction, TriviumDB
@@ -56,6 +56,15 @@ assert_type(db.get_edges(1), list[Edge])
 assert_type(db.node_count(), int)
 assert_type(db.rebuild_text_index([{"id": 1, "text": "完整正文", "keywords": ["别名"]}]), None)
 assert_type(db.instance_stats(), dict[str, Any])
+assert_type(db.compare_and_set_payload_field(1, "state", "old", "new"), None)
+assert_type(db.delete_many_atomic([1, 2]), int)
+assert_type(db.indexed_lookup({"state": "new"}), list[int])
+assert_type(db.substring_lookup("text", "正文"), list[int])
+assert_type(db.create_ngram_index("text"), None)
+assert_type(db.drop_ngram_index("text"), None)
+assert_type(db.create_unique_index("key"), None)
+assert_type(db.create_unique_composite_index(["scope", "key"]), None)
+assert_type(db.list_unique_indexes(), list[list[str]])
 
 # 资源异常保留内核预算字段。
 def check_resource_error(error: triviumdb.ResourceBudgetError) -> None:
@@ -67,10 +76,21 @@ def check_resource_error(error: triviumdb.ResourceBudgetError) -> None:
     assert_type(error.limit, int)
 
 def check_core_error(error: triviumdb.TriviumDBError) -> None:
+    assert_type(error.schema_version, int)
+    assert_type(error.message, str)
     assert_type(error.code, str)
     assert_type(error.details, dict[str, Any])
+    assert_type(error.stage, Literal['lex', 'parse', 'bind'] | None)
+    assert_type(error.target, dict[str, str | dict[str, int]] | None)
+    assert_type(error.write, dict[str, str | bool] | None)
+    if error.target is not None:
+        location = error.target['query_span']
+        if isinstance(location, dict):
+            assert_type(location['start_byte'], int)
 
 def check_input_error(error: triviumdb.InvalidInputError) -> None:
+    assert_type(error.schema_version, int)
+    assert_type(error.message, str)
     assert_type(error.code, str)
     assert_type(error.details, dict[str, Any])
 
@@ -102,5 +122,7 @@ assert_type(
 db.insert("not-a-vector", {})  # type: ignore[arg-type]
 db.node_count("extra-arg")  # type: ignore[call-arg]
 db.nonexistent_method()  # type: ignore[attr-defined]
+db.substring_lookup("text", 123)  # type: ignore[arg-type]
+db.indexed_lookup([("key", "value")])  # type: ignore[arg-type]
 takes_str: str = db.node_count()  # type: ignore[assignment]
 db.search_advanced([0.1] * 8, edge_direction="sideways")  # type: ignore[arg-type]

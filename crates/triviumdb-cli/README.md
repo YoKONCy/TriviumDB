@@ -16,6 +16,8 @@ cargo build -p triviumdb-cli --release
 
 ## 命令参考
 
+`--format json` 模式下，内核错误写入 stderr，字段为 `schema_version: 1`、`code`、`message`、`details`，进程退出码为 1。stdout 保留给结果数据；TQL 解析失败同样通过此结构返回。文本模式在诊断中显示稳定错误码。
+
 ```bash
 # 查看数据库元信息
 tdb info mydata.tdb
@@ -55,7 +57,7 @@ tdb ui mydata.tdb
 - **`--dtype <f32|f16|u64>`**：控制数据库向量元素类型。
 - **`--dim <N>`**：创建新库或无法嗅探文件头时指定向量维度。
 
-> ⚠️ **强烈建议 `--dim` 不超过 3072。** 更高维度仍可使用精确 BruteForce 检索，但不会启用 QuIVer ANN 加速；显式构建 QuIVer 会被安全拒绝。
+> **维度提醒**：QuIVer ANN 支持最多 3072 维。更高维度使用精确 BruteForce 检索，显式构建 QuIVer 返回错误。
 
 ## JSONL 导入/导出格式
 
@@ -150,4 +152,4 @@ graph_marker  = "auto"  # auto | braille | dot | block | half_block
 - **导入会写入数据库**，建议对重要数据先备份。
 - **创建新库时必须提供 `--dim`**，否则无法确定向量维度。
 
-更多细节请参阅源码及根目录 [README](../README.md)。
+更多细节请参阅源码及根目录 [README](../../README.md)。

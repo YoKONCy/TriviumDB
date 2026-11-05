@@ -2,6 +2,7 @@
 //! 按领域聚合的集成测试入口。
 
 mod boundary;
+mod console_editing;
 mod console_host;
 mod database_advanced;
 mod endian_limit;
@@ -17,6 +18,7 @@ mod retrieval_validation;
 mod runtime_types;
 mod search;
 mod search_boundaries;
+mod shared_sdk;
 mod system_boundaries;
 mod tql_aliases;
 mod tql_boundaries;
@@ -27,6 +29,7 @@ mod typed_facade;
 mod vector_types;
 mod workflow;
 mod write_boundaries;
+mod write_outcomes;
 
 #[path = "../support/mod.rs"]
 mod support;

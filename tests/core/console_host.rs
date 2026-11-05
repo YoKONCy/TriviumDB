@@ -240,9 +240,12 @@ fn 卸载互不干扰且持有旧会话也能释放文件锁() {
         Err(TriviumError::DatabaseLocked(_))
     ));
     let guard = database.lock().unwrap();
-    assert!(
-        matches!(host.request(&request(json!({"operation":"info"}))),Err(TriviumError::Io(error)) if error.kind()==std::io::ErrorKind::WouldBlock)
-    );
+    assert!(matches!(
+        host.request(&request(json!({"operation":"info"}))),
+        Err(TriviumError::DatabaseBusy {
+            resource: "host_database"
+        })
+    ));
     host.session().detach();
     assert!(matches!(
         host.request(&request(json!({"operation":"info"}))),

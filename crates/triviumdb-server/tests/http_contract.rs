@@ -9,6 +9,214 @@ use tower::ServiceExt;
 use triviumdb::database::{Config, StorageMode};
 use triviumdb_server::{ServerConfig, build_app};
 
+#[tokio::test]
+async fn tql错误阶段及源码位置遵守共享契约() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("diagnostics.tdb");
+    let config = Config {
+        dim: 2,
+        auto_build_quiver: false,
+        ..Default::default()
+    };
+    let mut seed =
+        triviumdb::Database::<f32>::open_with_config(path.to_str().unwrap(), config).unwrap();
+    seed.insert_with_id(7, &[1., 0.], serde_json::json!({"saved":"完整事实"}))
+        .unwrap();
+    seed.close().unwrap();
+    let (app, shutdown) = triviumdb_server::build_app_with_shutdown(ServerConfig {
+        database_path: path.clone(),
+        database: config,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../tests/contracts/query_diagnostics.json"
+    ))
+    .unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let response = request(
+            app.clone(),
+            "POST",
+            "/v1/tql",
+            Some(serde_json::json!({
+                "query":case["query"],"mutation":case["mutation"] == true
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{case}");
+        let error = json(response).await;
+        assert_eq!(error["schema_version"], 1);
+        assert_eq!(error["code"], "TDB_QUERY_PARSE");
+        assert_eq!(error["legacyCode"], "QUERY_PARSE_ERROR");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["stage"], case["stage"], "{case}");
+        assert_eq!(error["target"]["query_span"], case["span"], "{case}");
+        if case["mutation"] == true {
+            assert_eq!(
+                error["write"],
+                serde_json::json!({"phase":"validation","outcome":"not_committed"})
+            );
+        }
+        if case["span"].is_null() {
+            assert!(error.get("target").is_none());
+        }
+        assert!(error["details"]["reason"].is_string());
+    }
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../tests/contracts/prepared_diagnostics.json"
+    ))
+    .unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let prepared = request(
+            app.clone(),
+            "POST",
+            "/v1/prepared",
+            Some(serde_json::json!({"query":case["query"]})),
+            &[],
+        )
+        .await;
+        assert_eq!(prepared.status(), StatusCode::OK, "{case}");
+        let prepared = json(prepared).await;
+        let id = prepared["preparedId"].as_str().unwrap();
+        let response = request(
+            app.clone(),
+            "POST",
+            &format!("/v1/prepared/{id}/execute"),
+            Some(serde_json::json!({"parameters":case["parameters"]})),
+            &[],
+        )
+        .await;
+        let expected_status = if case["code"] == "TDB_QUERY_EXECUTION" {
+            StatusCode::UNPROCESSABLE_ENTITY
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        assert_eq!(response.status(), expected_status, "{case}");
+        let error = json(response).await;
+        assert_eq!(error["code"], case["code"]);
+        assert_eq!(error["stage"], "bind");
+        assert_eq!(
+            error["target"],
+            serde_json::json!({"parameter":case["parameter"]})
+        );
+        assert_eq!(error["retryable"], false);
+        if let Some(details) = case.get("details") {
+            assert_eq!(&error["details"], details);
+        } else {
+            assert_eq!(error["details"].as_object().unwrap().len(), 1);
+            assert!(!error["details"]["reason"].as_str().unwrap().is_empty());
+        }
+    }
+    let response = request(
+        app.clone(),
+        "POST",
+        "/v1/transactions",
+        Some(serde_json::json!({
+            "operations":[{"op":"insert","vector":[1],"payload":{"state":"rejected"}}]
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error = json(response).await;
+    assert_eq!(error["code"], "TDB_DIMENSION_MISMATCH");
+    assert_eq!(error["details"], serde_json::json!({"expected":2,"got":1}));
+    assert_eq!(
+        error["write"],
+        serde_json::json!({"phase":"validation","outcome":"not_committed","transaction_consumed":true})
+    );
+    assert_eq!(error["retryable"], false);
+    shutdown.shutdown().await.unwrap();
+    let mut reopened =
+        triviumdb::Database::<f32>::open_with_config(path.to_str().unwrap(), config).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), vec![7]);
+    let node = reopened.get(7).unwrap().unwrap();
+    assert_eq!(node.vector, vec![1., 0.]);
+    assert_eq!(node.payload, serde_json::json!({"saved":"完整事实"}));
+    assert!(node.edges.is_empty());
+    reopened.close().unwrap();
+}
+
+#[tokio::test]
+async fn 关闭句柄完成后保留router仍释放数据库文件并拒绝新查询() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("shutdown.tdb");
+    let (router, shutdown) = triviumdb_server::build_app_with_shutdown(ServerConfig {
+        database_path: path.clone(),
+        database: Config {
+            dim: 2,
+            auto_build_quiver: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let response = request(
+        router.clone(),
+        "POST",
+        "/v1/tql",
+        Some(serde_json::json!({
+            "query":"CREATE ({name: \"saved\"})",
+            "mutation":true
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await["affected"], 1);
+    shutdown.shutdown().await.unwrap();
+    let response = request(
+        router.clone(),
+        "POST",
+        "/v1/tql",
+        Some(serde_json::json!({
+            "query":"MATCH (n) RETURN n"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let error = json(response).await;
+    assert_eq!(error["schema_version"], 1);
+    assert_eq!(error["code"], "TDB_DATABASE_CLOSED");
+    assert_eq!(error["details"], serde_json::json!({}));
+    assert_eq!(error["legacyCode"], "SERVICE_UNAVAILABLE");
+    assert_eq!(error["retryable"], false);
+    // 关闭后写入与读取使用同一类别，已确认的数据继续保留。
+    let response = request(
+        router.clone(),
+        "POST",
+        "/v1/tql",
+        Some(serde_json::json!({"query":"CREATE ({name: \"rejected\"})", "mutation":true})),
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json(response).await["code"], "TDB_DATABASE_CLOSED");
+    #[cfg(windows)]
+    for entry in std::fs::read_dir(directory.path()).unwrap() {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(entry.unwrap().path())
+            .unwrap();
+    }
+    let mut reopened = triviumdb::Database::<f32>::open(&path.to_string_lossy(), 2).unwrap();
+    let ids = reopened.all_node_ids().unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(
+        reopened.get_payload(ids[0]).unwrap().unwrap(),
+        serde_json::json!({"name":"saved"})
+    );
+    reopened.close().unwrap();
+    drop((router, shutdown));
+}
+
 async fn app(name: &str) -> (axum::Router, tempfile::TempDir) {
     app_with(name, 16, 4, Duration::from_secs(5)).await
 }
@@ -281,7 +489,10 @@ async fn unique_cas_与批量删除_http_契约() {
     )
     .await;
     assert_eq!(stale.status(), StatusCode::CONFLICT);
-    assert_eq!(json(stale).await["code"], "CONDITIONAL_UPDATE_NOT_MATCHED");
+    let stale_error = json(stale).await;
+    assert_eq!(stale_error["code"], "TDB_CONDITIONAL_UPDATE_NOT_MATCHED");
+    assert_eq!(stale_error["details"], serde_json::json!({"id":1}));
+    assert_eq!(stale_error["legacyCode"], "CONDITIONAL_UPDATE_NOT_MATCHED");
 
     let deleted = request(
         app,
@@ -359,7 +570,11 @@ async fn tql查询写入解析错误和预算错误映射稳定http契约() {
     )
     .await;
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json(invalid).await["code"], "QUERY_PARSE_ERROR");
+    let error = json(invalid).await;
+    assert_eq!(error["code"], "TDB_QUERY_PARSE");
+    assert_eq!(error["legacyCode"], "QUERY_PARSE_ERROR");
+    assert_eq!(error["schema_version"], 1);
+    assert!(error["details"]["reason"].is_string());
 }
 
 #[tokio::test]

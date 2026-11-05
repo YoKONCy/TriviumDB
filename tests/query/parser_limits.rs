@@ -160,7 +160,10 @@ fn invalid_mutation_tail_preserves_all_facts_and_wal() {
         "MATCH (n) SET VECTOR(n) == [9] RETURN n",
     ] {
         assert!(
-            matches!(db.tql_mut(query), Err(TriviumError::QueryParse(_))),
+            matches!(
+                db.tql_mut(query).unwrap_err().underlying(),
+                TriviumError::QuerySyntax { .. }
+            ),
             "{query}"
         );
         assert_eq!(

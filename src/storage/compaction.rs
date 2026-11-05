@@ -385,6 +385,20 @@ impl CompactionThread {
         self.job.stop();
         self.scheduler.notify();
     }
+
+    /// 关闭尝试回滚时复用原登记及诊断，不重新分配线程或丢失周期配置。
+    pub(crate) fn resume(&mut self) {
+        let mut state = lock(&self.job.state);
+        state.cancelled = false;
+        let now = Instant::now();
+        state.next = now.checked_add(self.job.interval).unwrap_or(now);
+        if !state.registered {
+            self.job.runtime.register_maintenance();
+            state.registered = true;
+        }
+        drop(state);
+        self.scheduler.notify();
+    }
 }
 
 impl Drop for CompactionThread {

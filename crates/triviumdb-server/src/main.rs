@@ -2,7 +2,7 @@ use clap::{Parser, ValueEnum};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 use tracing_subscriber::EnvFilter;
 use triviumdb::database::{Config, StorageMode};
-use triviumdb_server::{ServerConfig, build_app};
+use triviumdb_server::{ServerConfig, build_app_with_shutdown};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LogFormat {
@@ -77,7 +77,7 @@ struct Arguments {
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("服务启动失败 (Server startup failed): {error:?}");
+        eprintln!("服务运行失败 (Server failed): {error:?}");
         std::process::exit(1);
     }
 }
@@ -112,7 +112,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         log_format = ?arguments.log_format,
         "TriviumDB Server 生效配置 (Effective configuration)"
     );
-    let app = build_app(ServerConfig {
+    let listener = tokio::net::TcpListener::bind(arguments.listen).await?;
+    let (app, shutdown) = build_app_with_shutdown(ServerConfig {
         database_path: arguments.database,
         database: Config {
             dim: arguments.dim,
@@ -131,11 +132,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_body_bytes: arguments.max_body_bytes,
     })
     .await?;
-    let listener = tokio::net::TcpListener::bind(arguments.listen).await?;
     tracing::info!(address = %arguments.listen, "TriviumDB Server 已启动 (TriviumDB Server started)");
-    axum::serve(listener, app)
+    let serving = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+    // HTTP 结束（包括监听错误）后仍须等待真实工作和持久化完成。
+    let closed = shutdown.shutdown().await;
+    serving?;
+    closed?;
     Ok(())
 }
 

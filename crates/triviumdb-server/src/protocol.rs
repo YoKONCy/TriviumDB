@@ -232,11 +232,23 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiErrorBody {
+    #[serde(rename = "schema_version")]
+    pub schema_version: u32,
     pub r#type: String,
     pub title: &'static str,
     pub status: u16,
     pub code: &'static str,
     pub detail: String,
+    pub message: String,
+    pub details: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<triviumdb::error::QueryErrorStage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<triviumdb::error::ErrorTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write: Option<triviumdb::error::WriteErrorInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_code: Option<&'static str>,
     pub retryable: bool,
 }
 
@@ -252,10 +264,23 @@ pub struct ApiError {
     code: &'static str,
     title: &'static str,
     detail: String,
+    details: serde_json::Value,
+    stage: Option<triviumdb::error::QueryErrorStage>,
+    target: Option<Box<triviumdb::error::ErrorTarget>>,
+    write: Option<triviumdb::error::WriteErrorInfo>,
+    legacy_code: Option<&'static str>,
     retryable: bool,
 }
 
 impl ApiError {
+    pub(crate) fn with_write_info(mut self, write: triviumdb::error::WriteErrorInfo) -> Self {
+        if self.write.is_none() {
+            self.write = Some(write);
+        }
+        self.retryable = false;
+        self
+    }
+
     pub fn new(
         status: StatusCode,
         code: &'static str,
@@ -268,6 +293,11 @@ impl ApiError {
             code,
             title,
             detail: detail.into(),
+            details: serde_json::json!({}),
+            stage: None,
+            target: None,
+            write: None,
+            legacy_code: None,
             retryable,
         }
     }
@@ -275,7 +305,7 @@ impl ApiError {
     pub(crate) fn metric(&self) -> Option<ErrorMetric> {
         match self.code {
             "REQUEST_TIMEOUT" => Some(ErrorMetric::Timeout),
-            "WRITE_CONFLICT" => Some(ErrorMetric::OccConflict),
+            "WRITE_CONFLICT" | "TDB_WRITE_CONFLICT" => Some(ErrorMetric::OccConflict),
             _ => None,
         }
     }
@@ -353,93 +383,167 @@ impl ApiError {
 
 impl From<TriviumError> for ApiError {
     fn from(error: TriviumError) -> Self {
-        match error {
-            TriviumError::QueryParse(detail) => Self::new(
-                StatusCode::BAD_REQUEST,
-                "QUERY_PARSE_ERROR",
-                "查询解析失败 (Query parse error)",
-                detail,
-                false,
-            ),
-            TriviumError::QueryExecution(detail) => Self::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "QUERY_EXECUTION_ERROR",
-                "查询执行失败 (Query execution error)",
-                detail,
-                false,
-            ),
-            TriviumError::QueryCancelled => Self::timeout(),
-            TriviumError::MissingQueryParameter { .. }
-            | TriviumError::UnexpectedQueryParameter { .. } => {
-                Self::invalid_request(error.to_string())
-            }
-            TriviumError::QueryRowBudgetExceeded { budget } => Self::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "QUERY_ROW_BUDGET_EXCEEDED",
-                "查询行预算耗尽 (Query row budget exceeded)",
-                format!("最多允许处理 {budget} 行 (At most {budget} rows may be processed)"),
-                false,
-            ),
-            TriviumError::TraversalBudgetExceeded { .. }
-            | TriviumError::CapacityReservationRejected { .. }
-            | TriviumError::CapacityAllocationFailed { .. } => Self::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "RESOURCE_BUDGET_EXCEEDED",
-                "资源预算耗尽 (Resource budget exceeded)",
-                error.to_string(),
-                false,
-            ),
-            TriviumError::NodeNotFound(id) => Self::new(
-                StatusCode::NOT_FOUND,
-                "NODE_NOT_FOUND",
-                "节点不存在 (Node not found)",
-                format!("节点 {id} 不存在 (Node {id} does not exist)"),
-                false,
-            ),
-            TriviumError::NodeAlreadyExists(id) => Self::new(
-                StatusCode::CONFLICT,
-                "NODE_ALREADY_EXISTS",
-                "节点已存在 (Node already exists)",
-                format!("节点 {id} 已存在 (Node {id} already exists)"),
-                false,
-            ),
-            TriviumError::UniqueConstraintViolation { .. } => Self::new(
-                StatusCode::CONFLICT,
-                "UNIQUE_CONSTRAINT_VIOLATION",
-                "唯一约束冲突 (Unique constraint violation)",
-                error.to_string(),
-                false,
-            ),
-            TriviumError::ConditionalUpdateNotMatched { .. } => Self::new(
-                StatusCode::CONFLICT,
-                "CONDITIONAL_UPDATE_NOT_MATCHED",
-                "条件更新未匹配 (Conditional update did not match)",
-                error.to_string(),
-                false,
-            ),
-            TriviumError::ReadOnlyViolation { .. } => Self::new(
-                StatusCode::FORBIDDEN,
-                "READ_ONLY_VIOLATION",
-                "只读操作被拒绝 (Read-only operation denied)",
-                error.to_string(),
-                false,
-            ),
-            TriviumError::InvalidInput(detail) | TriviumError::InvalidVector { reason: detail } => {
-                Self::invalid_request(detail)
-            }
-            TriviumError::DimensionMismatch { .. } | TriviumError::PayloadTooLarge { .. } => {
-                Self::invalid_request(error.to_string())
-            }
-            TriviumError::DatabaseLocked(_) => Self::new(
-                StatusCode::LOCKED,
-                "DATABASE_LOCKED",
-                "数据库已锁定 (Database locked)",
-                error.to_string(),
-                true,
-            ),
-            TriviumError::DatabaseClosed => Self::unavailable(error.to_string()),
-            _ => Self::internal(error.to_string()),
+        let info = error.info();
+        let mut mapped =
+            match error {
+                TriviumError::QueryParameter { source, .. }
+                | TriviumError::WriteFailure { source, .. } => Self::from(*source),
+                TriviumError::QueryParse(detail)
+                | TriviumError::QuerySyntax { reason: detail, .. } => Self::new(
+                    StatusCode::BAD_REQUEST,
+                    "QUERY_PARSE_ERROR",
+                    "查询解析失败 (Query parse error)",
+                    detail,
+                    false,
+                ),
+                TriviumError::QueryExecution(detail) => Self::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "QUERY_EXECUTION_ERROR",
+                    "查询执行失败 (Query execution error)",
+                    detail,
+                    false,
+                ),
+                TriviumError::QueryCancelled => Self::new(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "REQUEST_TIMEOUT",
+                    "查询已取消 (Query cancelled)",
+                    error.to_string(),
+                    false,
+                ),
+                TriviumError::TransactionFinished => Self::new(
+                    StatusCode::CONFLICT,
+                    "TDB_TRANSACTION_FINISHED",
+                    "事务已结束 (Transaction finished)",
+                    error.to_string(),
+                    false,
+                ),
+                TriviumError::MissingQueryParameter { .. }
+                | TriviumError::UnexpectedQueryParameter { .. } => {
+                    Self::invalid_request(error.to_string())
+                }
+                TriviumError::QueryRowBudgetExceeded { budget } => Self::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "QUERY_ROW_BUDGET_EXCEEDED",
+                    "查询行预算耗尽 (Query row budget exceeded)",
+                    format!("最多允许处理 {budget} 行 (At most {budget} rows may be processed)"),
+                    false,
+                ),
+                TriviumError::TraversalBudgetExceeded { .. }
+                | TriviumError::CapacityReservationRejected { .. }
+                | TriviumError::CapacityAllocationFailed { .. } => Self::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "RESOURCE_BUDGET_EXCEEDED",
+                    "资源预算耗尽 (Resource budget exceeded)",
+                    error.to_string(),
+                    false,
+                ),
+                TriviumError::NodeNotFound(id) => Self::new(
+                    StatusCode::NOT_FOUND,
+                    "NODE_NOT_FOUND",
+                    "节点不存在 (Node not found)",
+                    format!("节点 {id} 不存在 (Node {id} does not exist)"),
+                    false,
+                ),
+                TriviumError::NodeAlreadyExists(id) => Self::new(
+                    StatusCode::CONFLICT,
+                    "NODE_ALREADY_EXISTS",
+                    "节点已存在 (Node already exists)",
+                    format!("节点 {id} 已存在 (Node {id} already exists)"),
+                    false,
+                ),
+                TriviumError::UniqueConstraintViolation { .. } => Self::new(
+                    StatusCode::CONFLICT,
+                    "UNIQUE_CONSTRAINT_VIOLATION",
+                    "唯一约束冲突 (Unique constraint violation)",
+                    error.to_string(),
+                    false,
+                ),
+                TriviumError::ConditionalUpdateNotMatched { .. } => Self::new(
+                    StatusCode::CONFLICT,
+                    "CONDITIONAL_UPDATE_NOT_MATCHED",
+                    "条件更新未匹配 (Conditional update did not match)",
+                    error.to_string(),
+                    false,
+                ),
+                TriviumError::ReadOnlyViolation { .. } => Self::new(
+                    StatusCode::FORBIDDEN,
+                    "READ_ONLY_VIOLATION",
+                    "只读操作被拒绝 (Read-only operation denied)",
+                    error.to_string(),
+                    false,
+                ),
+                TriviumError::InvalidInput(detail)
+                | TriviumError::InvalidVector { reason: detail } => Self::invalid_request(detail),
+                TriviumError::DimensionMismatch { .. } | TriviumError::PayloadTooLarge { .. } => {
+                    Self::invalid_request(error.to_string())
+                }
+                TriviumError::DatabaseLocked(_) => Self::new(
+                    StatusCode::LOCKED,
+                    "DATABASE_LOCKED",
+                    "数据库已锁定 (Database locked)",
+                    error.to_string(),
+                    true,
+                ),
+                TriviumError::DatabaseClosed => Self::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "SERVICE_UNAVAILABLE",
+                    "数据库已关闭 (Database closed)",
+                    error.to_string(),
+                    false,
+                ),
+                TriviumError::DatabaseBusy { .. } => Self::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "TDB_BUSY",
+                    "数据库请求繁忙 (Database request busy)",
+                    error.to_string(),
+                    true,
+                ),
+                TriviumError::ReentrantAccess { .. } => Self::new(
+                    StatusCode::CONFLICT,
+                    "TDB_REENTRANT_ACCESS",
+                    "数据库重入被拒绝 (Database reentrant access rejected)",
+                    error.to_string(),
+                    false,
+                ),
+                TriviumError::WriteConflict { .. }
+                | TriviumError::IdempotencyConflict
+                | TriviumError::WriteOutcomeUnknown => Self::new(
+                    StatusCode::CONFLICT,
+                    info.code,
+                    "事务请求冲突 (Transaction request conflict)",
+                    error.to_string(),
+                    false,
+                ),
+                TriviumError::PayloadQueryBudgetExceeded { .. } => Self::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    info.code,
+                    "查询预算耗尽 (Query budget exceeded)",
+                    error.to_string(),
+                    false,
+                ),
+                TriviumError::ResourceBudgetExceeded { .. } => Self::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    info.code,
+                    "资源准入被拒绝 (Resource admission rejected)",
+                    error.to_string(),
+                    false,
+                ),
+                _ => Self::internal(error.to_string()),
+            };
+        if mapped.code != info.code {
+            mapped.legacy_code = Some(mapped.code);
         }
+        mapped.code = info.code;
+        mapped.detail = info.message;
+        mapped.details = triviumdb::sdk::json_error_details(info.details);
+        mapped.stage = info.stage;
+        mapped.target = info.target.map(Box::new);
+        mapped.write = info.write;
+        if mapped.write.is_some() {
+            // 重新准入及重放由调用方结合结果和事务状态决定。
+            mapped.retryable = false;
+        }
+        mapped
     }
 }
 
@@ -455,6 +559,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let metric = self.metric();
         let body = ApiErrorBody {
+            schema_version: triviumdb::error::ERROR_SCHEMA_VERSION,
             r#type: format!(
                 "https://triviumdb.dev/errors/{}",
                 self.code.to_ascii_lowercase().replace('_', "-")
@@ -462,7 +567,13 @@ impl IntoResponse for ApiError {
             title: self.title,
             status: self.status.as_u16(),
             code: self.code,
+            message: self.detail.clone(),
             detail: self.detail,
+            details: self.details,
+            stage: self.stage,
+            target: self.target.map(|target| *target),
+            write: self.write,
+            legacy_code: self.legacy_code,
             retryable: self.retryable,
         };
         let mut response = (self.status, Json(body)).into_response();
@@ -580,18 +691,97 @@ mod structured_error_tests {
 
     #[test]
     fn prepared参数错误作为无效请求返回() {
-        for error in [
-            TriviumError::MissingQueryParameter {
-                parameter: "required".into(),
-            },
-            TriviumError::UnexpectedQueryParameter {
-                parameter: "extra".into(),
-            },
+        for (error, code, parameter) in [
+            (
+                TriviumError::MissingQueryParameter {
+                    parameter: "required".into(),
+                },
+                "TDB_MISSING_QUERY_PARAMETER",
+                "required",
+            ),
+            (
+                TriviumError::UnexpectedQueryParameter {
+                    parameter: "extra".into(),
+                },
+                "TDB_UNEXPECTED_QUERY_PARAMETER",
+                "extra",
+            ),
         ] {
             let response = ApiError::from(error);
             assert_eq!(response.status, StatusCode::BAD_REQUEST);
-            assert_eq!(response.code, "INVALID_REQUEST");
+            assert_eq!(response.code, code);
+            assert_eq!(
+                response.details,
+                serde_json::json!({"parameter": parameter})
+            );
+            assert_eq!(response.legacy_code, Some("INVALID_REQUEST"));
             assert!(!response.retryable);
+        }
+    }
+
+    #[tokio::test]
+    async fn 内核锁错误及完整整数通过http保持结构化() {
+        for (error, code, status, details, retryable) in [
+            (
+                TriviumError::TransactionFinished,
+                "TDB_TRANSACTION_FINISHED",
+                StatusCode::CONFLICT,
+                serde_json::json!({}),
+                false,
+            ),
+            (
+                TriviumError::DatabaseBusy {
+                    resource: "shared_database",
+                },
+                "TDB_BUSY",
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({"resource":"shared_database"}),
+                true,
+            ),
+            (
+                TriviumError::ReentrantAccess {
+                    operation: "shared_write",
+                },
+                "TDB_REENTRANT_ACCESS",
+                StatusCode::CONFLICT,
+                serde_json::json!({"operation":"shared_write"}),
+                false,
+            ),
+            (
+                TriviumError::HostLockPoisoned {
+                    resource: "shared_database",
+                },
+                "TDB_HOST_LOCK_POISONED",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"resource":"shared_database"}),
+                false,
+            ),
+            (
+                TriviumError::NodeNotFound(u64::MAX),
+                "TDB_NODE_NOT_FOUND",
+                StatusCode::NOT_FOUND,
+                serde_json::json!({"id":"18446744073709551615"}),
+                false,
+            ),
+            (
+                TriviumError::QueryCancelled,
+                "TDB_QUERY_CANCELLED",
+                StatusCode::REQUEST_TIMEOUT,
+                serde_json::json!({}),
+                false,
+            ),
+        ] {
+            let response = ApiError::from(error).into_response();
+            assert_eq!(response.status(), status);
+            let bytes = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["schema_version"], 1);
+            assert_eq!(body["code"], code);
+            assert_eq!(body["details"], details);
+            assert_eq!(body["retryable"], retryable);
+            assert_eq!(body["message"], body["detail"]);
         }
     }
 }

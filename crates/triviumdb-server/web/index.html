@@ -3574,8 +3574,7 @@
        4) 当前节点条：跨三个工作区共享上下文
        5) 待提交条：界面写操作的暂存入口（常驻计数）
        6) 结果身份卡：节点值以「类型点 + 名称 + id + 摘要 + 维度」呈现
-       所有新选择器都带 r2-/entity-/context- 前缀或直接增强既有类，
-       不改动 V2-MAPPING §4 的测试锚点。
+       所有新选择器都带 r2-/entity-/context- 前缀或直接增强既有类。
        ========================================================== */
     :root {
       --sidebar-width: 232px;
@@ -4907,7 +4906,29 @@
       .dw-find input { width: 100px; }
     }
   </style>
+  <script src="./console-client.js"></script>
   <script>
+    // 嵌入宿主使用稳定数据库标识隔离草稿与偏好；独立 Server 保留已有键。
+    const consoleEmbedded = new URLSearchParams(location.search).get('embedded') === '1';
+    const consoleStorageId = new URLSearchParams(location.search).get('storageKey') || '';
+    const consoleStoragePrefix = consoleEmbedded ? 'tdb:' + encodeURIComponent(consoleStorageId) + ':' : '';
+    function consoleStorage(name) {
+      return {
+        getItem(key) { try { return window[name].getItem(consoleStoragePrefix + key); } catch (_) { return null; } },
+        setItem(key, value) { window[name].setItem(consoleStoragePrefix + key, value); },
+        removeItem(key) { window[name].removeItem(consoleStoragePrefix + key); },
+      };
+    }
+    const localStorage = consoleStorage('localStorage');
+    const sessionStorage = consoleStorage('sessionStorage');
+    let consoleClient = null;
+    let consoleMounted = false;
+    let consoleDisposed = false;
+    function apiFetch(input, init) {
+      if (consoleDisposed) return Promise.reject(new Error('控制台已卸载 (Console detached)'));
+      if (consoleEmbedded && !consoleClient) return Promise.reject(new Error('控制台尚未挂载 (Console not mounted)'));
+      return consoleClient ? consoleClient.fetch(input, init) : fetch(input, init);
+    }
     // 首屏前置：侧栏 rail 与界面语言在样式生效前恢复，避免展开态闪一下再收起
     try {
       if (localStorage.getItem('tdb_sidebar_rail') === '1') document.documentElement.dataset.rail = '1';
@@ -6095,7 +6116,7 @@
         <button class="btn btn-quiet" id="docConflictClose" type="button" aria-label="关闭" title="关闭">✕</button>
       </div>
       <div class="import-body">
-        <p class="import-hint" id="docConflictHint" data-i18n="doc.conflict.hint">提交被节点 ETag 拒绝（未写入任何内容）。先对比远端与本地草稿，手工合并后重新审阅；首期不提供自动合并与强制覆盖。</p>
+        <p class="import-hint" id="docConflictHint" data-i18n="doc.conflict.hint">版本校验发现冲突，整批操作已拒绝。请对比远端与本地草稿，手工合并后重新审阅。</p>
         <div class="dw-diff" id="docConflictDiff"></div>
       </div>
       <div class="import-footer">
@@ -7198,7 +7219,7 @@
         'doc.merge.replace': '替换整份 payload',
         'doc.merge.combine': '合并并暂存',
         'doc.conflict.title': '版本冲突：服务端内容已变化',
-        'doc.conflict.hint': '提交被节点 ETag 拒绝（未写入任何内容）。先对比远端与本地草稿，手工合并后重新审阅；首期不提供自动合并与强制覆盖。',
+        'doc.conflict.hint': '版本校验发现冲突，整批操作已拒绝。请对比远端与本地草稿，手工合并后重新审阅。',
         'doc.conflict.keepLocal': '保留本地草稿',
         'doc.conflict.rebase': '以远端为基继续合并',
         'doc.conflict.remote': '远端（服务端刚读到）',
@@ -7227,7 +7248,7 @@
         'doc.banner.heldByOther': '此文档被其他编辑者占用（模拟状态，服务端未提供租约）。',
         'doc.banner.expired': '编辑资格已失效（模拟状态）：草稿保留，提交已停止。',
         'doc.banner.conflict': '服务端版本已变化：请对比远端与本地后手工合并。',
-        'doc.banner.unknown': '提交结果待确认：保留整笔原事务，以相同幂等键重试确认；新草稿尚未提交。',
+        'doc.banner.unknown': '提交结果待确认：请确认保留的完整原事务。当前继续编辑的内容保留为新草稿。',
         'doc.confirmOutcome': '确认原事务',
         'doc.err.pendingCommit': '原事务仍在提交或结果待确认，请先确认原事务；草稿可以继续编辑。',
         'doc.banner.noTxMode': '已开启写入审阅：文档暂存与提交走同一队列。',
@@ -7802,7 +7823,7 @@
         'doc.merge.replace': 'Replace the whole payload',
         'doc.merge.combine': 'Merge and stage',
         'doc.conflict.title': 'Version conflict: the server content changed',
-        'doc.conflict.hint': 'The commit was rejected by the node ETag and nothing was written. Compare the remote payload with your draft, merge manually, then review again. No auto-merge or force overwrite in this phase.',
+        'doc.conflict.hint': 'Revision validation detected a conflict and rejected the entire batch. Compare the remote payload with your draft, merge manually, and review again.',
         'doc.conflict.keepLocal': 'Keep local draft',
         'doc.conflict.rebase': 'Rebase onto remote and merge',
         'doc.conflict.remote': 'Remote (just read)',
@@ -7831,7 +7852,7 @@
         'doc.banner.heldByOther': 'Another editor holds this document (simulated state; the server provides no lease).',
         'doc.banner.expired': 'Edit access expired (simulated state): the draft is kept and committing is stopped.',
         'doc.banner.conflict': 'The server version changed: compare remote and local, then merge manually.',
-        'doc.banner.unknown': 'Commit outcome unknown: retry the complete original transaction with its original idempotency key. New draft edits are not submitted.',
+        'doc.banner.unknown': 'Commit outcome unknown: confirm the retained original transaction. Further edits are kept as a new draft.',
         'doc.confirmOutcome': 'Confirm original transaction',
         'doc.err.pendingCommit': 'The original transaction is submitting or awaiting confirmation. Confirm it first; draft editing remains available.',
         'doc.banner.noTxMode': 'Write review enabled: document staging and commits use the same queue.',
@@ -8557,7 +8578,10 @@
       bar.hidden = n === 0;
       if (count) count.textContent = t('tx.pendingCount', { n });
       if (summary) summary.textContent = txOperationsSummaryText();
-      if (commit) commit.disabled = n === 0 || txCommitting;
+      if (commit) {
+        commit.disabled = n === 0 || txCommitting;
+        commit.textContent = t(consoleClient && txPendingAttempt?.unknown ? 'doc.confirmOutcome' : 'tx.commit');
+      }
       if (rollback) rollback.disabled = n === 0 || txCommitting || !!txPendingAttempt;
       const review = document.getElementById('txReviewBtn');
       if (review) review.disabled = n === 0 || txCommitting;
@@ -8675,7 +8699,10 @@
       }
       const commit = document.getElementById('txReviewCommitBtn');
       const discard = document.getElementById('txReviewDiscardBtn');
-      if (commit) commit.disabled = !txOperations.length || txCommitting;
+      if (commit) {
+        commit.disabled = !txOperations.length || txCommitting;
+        commit.textContent = t(consoleClient && txPendingAttempt?.unknown ? 'doc.confirmOutcome' : 'tx.commit');
+      }
       if (discard) discard.disabled = !txOperations.length || txCommitting || !!txPendingAttempt;
     }
 
@@ -9406,7 +9433,7 @@ RETURN doc, t</div>
         `url("data:image/svg+xml,${encodeURIComponent(graphSvg)}")`);
     }
 
-    document.addEventListener('DOMContentLoaded', () => {
+    function initializeConsolePage() {
       setupTheme();
       initStarfield();
       setupSidebarRail();
@@ -9451,6 +9478,9 @@ RETURN doc, t</div>
       // 应用初始化完成信号：供 scripts/ui-smoke.mjs 等自动化脚本等待，
       // 避免在 DOMContentLoaded 监听器挂载前点击按钮导致竞态
       window.__TRIVIUM_APP_READY = true;
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      if (!consoleEmbedded) initializeConsolePage();
     });
 
     // 主题切换（localStorage 优先；无保存值时跟随系统 prefers-color-scheme）
@@ -9479,7 +9509,7 @@ RETURN doc, t</div>
       });
       // 多标签页主题同步：其它标签页切主题时本页跟随（storage 事件只在异地标签触发）
       window.addEventListener('storage', (e) => {
-        if (e.key !== 'tdb_theme' || !e.newValue) return;
+        if (e.key !== consoleStoragePrefix + 'tdb_theme' || !e.newValue) return;
         if (e.newValue !== document.documentElement.getAttribute('data-theme')) {
           applyThemeAttributes(e.newValue);
         }
@@ -9691,7 +9721,7 @@ RETURN doc, t</div>
         .find((n) => Array.isArray(n.vector) && n.vector.length > 0);
       if (node) return node.vector.length;
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/1`);
+        const res = await apiFetch(`${API_BASE}/v1/nodes/1`);
         if (res.ok) {
           const data = await res.json();
           const len = data && data.node && Array.isArray(data.node.vector) ? data.node.vector.length : 0;
@@ -9972,14 +10002,14 @@ RETURN doc, t</div>
       const connBadge = document.getElementById('connStatus');
       const connText = document.getElementById('connText');
       try {
-        const res = await fetch(`${API_BASE}/health/ready`);
+        const res = await apiFetch(`${API_BASE}/health/ready`);
         if (res.ok) {
           const data = await res.json();
           connBadge.className = 'status-badge live';
           connText.textContent = t('status.online');
           const versionEl = document.getElementById('statusVersion');
           // 只信服务端上报的版本；缺失时退化为不带版本号，不写死一个会过期的默认值
-          if (versionEl) versionEl.textContent = data.version ? `TriviumDB Server v${data.version}` : 'TriviumDB Server';
+          if (versionEl) versionEl.textContent = (consoleClient ? 'TriviumDB Embedded' : 'TriviumDB Server') + (data.version ? ` v${data.version}` : '');
         } else {
           connBadge.className = 'status-badge dead';
           connText.textContent = t('status.degraded');
@@ -9989,9 +10019,15 @@ RETURN doc, t</div>
         connText.textContent = t('status.offline');
       }
 
+      // Embedded Core 未提供 Server 队列指标。
+      if (consoleClient) {
+        document.getElementById('statusQueue').textContent = 'Embedded';
+        document.getElementById('statusReads').textContent = '—';
+        return;
+      }
       // 抓取详细指标
       try {
-        const resDetails = await fetch(`${API_BASE}/health/details`);
+        const resDetails = await apiFetch(`${API_BASE}/health/details`);
         if (resDetails.ok) {
           const details = await resDetails.json();
           document.getElementById('statusQueue').textContent = t('status.queueValue', {
@@ -10469,7 +10505,7 @@ RETURN doc, t</div>
       __lastTqlRequest = { accept: requestHeaders['Accept'] || '', mutation: isMutation };
 
       try {
-        const response = await fetch(`${API_BASE}/v1/tql`, {
+        const response = await apiFetch(`${API_BASE}/v1/tql`, {
           method: 'POST',
           headers: requestHeaders,
           body: JSON.stringify({ query, mutation: isMutation, profile: isProfile }),
@@ -11891,6 +11927,7 @@ RETURN doc, t</div>
 
     function openPayloadEditor(node, rowIndex) {
       if (!node) { showToast(t('grid.editOnlyNode')); return; }
+      if (consoleClient) { docOpen(node, 'grid'); return; }
       payloadEditorState = { id: String(node.id), node, rowIndex };
       const overlay = document.getElementById('payloadEditor');
       if (!overlay) return;
@@ -11918,6 +11955,7 @@ RETURN doc, t</div>
 
     // HTTP 写入协议使用 JSON 数字；转换前拒绝不安全 ID，防止降精度后操作相邻记录。
     function parseWriteNodeId(value) {
+      if (consoleClient) return TriviumConsoleClient.nodeId(value);
       const text = typeof value === 'string' ? value.trim() : value;
       if ((typeof text !== 'string' && typeof text !== 'number')
           || (typeof text === 'string' && !/^\d+$/.test(text))) {
@@ -11970,7 +12008,7 @@ RETURN doc, t</div>
         return;
       }
       try {
-        const res = await fetch(`${API_BASE}/v1/transactions`, {
+        const res = await apiFetch(`${API_BASE}/v1/transactions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -12006,11 +12044,16 @@ RETURN doc, t</div>
       let writeIds;
       try { writeIds = ids.map(parseWriteNodeId); }
       catch (err) { showToast(err.message); return; }
+      let revision = null;
+      try {
+        const observed = (gridRawRows || []).map(findNodeInRow).filter(node => node && ids.includes(String(node.id)));
+        revision = await embeddedStageRevision(writeIds, observed);
+      } catch (error) { showToast(error.message); return; }
       if (txModeOn()) {
         writeIds.forEach((id) => {
           const node = (gridRawRows || []).map((row) => findNodeInRow(row)).find((n) => n && String(n.id) === String(id));
           const op = { op: 'delete', id };
-          if (node) txOpMeta.set(op, { before: node.payload, source: t('tx.source.batchDelete') });
+          txOpMeta.set(op, { before: node?.payload, source: t('tx.source.batchDelete'), expectedVersion: revision });
           txOperations.push(op);
         });
         syncTxBar();
@@ -12020,7 +12063,7 @@ RETURN doc, t</div>
         return;
       }
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/delete-many`, {
+        const res = await apiFetch(`${API_BASE}/v1/nodes/delete-many`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ids: writeIds }),
@@ -12068,17 +12111,19 @@ RETURN doc, t</div>
       let writeId;
       try { writeId = parseWriteNodeId(id); }
       catch (err) { showToast(err.message); return; }
+      let revision = null;
+      try { revision = await embeddedStageRevision([writeId], [node]); } catch (error) { showToast(error.message); return; }
       if (txModeOn()) {
         stageTxOperation(
           { op: 'delete', id: writeId },
-          { before: node.payload, source: t('tx.source.delete') }
+          { before: node.payload, source: t('tx.source.delete'), expectedVersion: revision }
         );
         // 本地乐观移除；stageTxOperation 已提示「已暂存（提交后生效）」
         applyLocalNodeRemoval(new Set([id]));
         return;
       }
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/delete-many`, {
+        const res = await apiFetch(`${API_BASE}/v1/nodes/delete-many`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ids: [writeId] }),
@@ -12576,6 +12621,21 @@ RETURN doc, t</div>
         String(entry.operation.id) === String(nodeId));
     }
 
+    async function embeddedStageRevision(ids, observed = []) {
+      if (!consoleClient) return null;
+      if (consoleClient.info.readOnly) throw new Error('宿主会话为只读 (Host session is read-only)');
+      if (!consoleClient.info.features.includes('transactions')) throw new Error('宿主未启用事务能力 (Host transactions are disabled)');
+      const snapshot = await consoleClient.call({ operation: 'getNodes', ids: ids.map(TriviumConsoleClient.nodeId), withRevision: true });
+      for (const before of observed) {
+        const current = snapshot.nodes.find(node => node.id === String(before.id));
+        if (!current || docCanonical(current.payload) !== docCanonical(before.payload)
+            || (Array.isArray(before.vector) && docCanonical(current.vector) !== docCanonical(before.vector))) {
+          throw new Error('节点已变化，请重新读取后审阅删除 (Node changed; read again before reviewing deletion)');
+        }
+      }
+      return snapshot.revision;
+    }
+
     function txCreateAttempt() {
       const expectedNodes = {};
       const entries = txOperations.map(source => {
@@ -12585,6 +12645,15 @@ RETURN doc, t</div>
         if (meta.docSessionId && meta.expectedVersion) expectedNodes[String(operation.id)] = meta.expectedVersion;
         return { source, operation };
       });
+      if (consoleClient) {
+        const key = 'console-' + Array.from(crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, '0')).join('');
+        const revisions = entries.map(entry => (txOpMeta.get(entry.operation) || {}).expectedVersion);
+        if (!revisions[0] || revisions.some(revision => revision !== revisions[0])) {
+          throw new Error('暂存项基线已变化，请重新读取并审阅整批操作 (Staged baselines differ; read and review the complete batch again)');
+        }
+        return { entries, body: TriviumConsoleClient.freezeTransaction(entries.map(entry => entry.operation), revisions[0], key),
+          hasDocuments: entries.some(entry => (txOpMeta.get(entry.operation) || {}).docSessionId), key, unknown: false };
+      }
       const request = { operations: entries.map(entry => entry.operation) };
       const hasDocuments = entries.some(entry => (txOpMeta.get(entry.operation) || {}).docSessionId);
       if (Object.keys(expectedNodes).length) request.expectedNodes = expectedNodes;
@@ -12609,7 +12678,8 @@ RETURN doc, t</div>
 
     async function commitTransaction() {
       if (!txModeOn() || !txOperations.length || txCommitting) return false;
-      const attempt = txPendingAttempt || txCreateAttempt();
+      let attempt;
+      try { attempt = txPendingAttempt || txCreateAttempt(); } catch (error) { showToast(error.message); return false; }
       txCommitting = true;
       txPendingAttempt = attempt;
       const submitted = attempt.entries.map(entry => entry.operation);
@@ -12628,26 +12698,27 @@ RETURN doc, t</div>
       });
       syncTxBar();
       try {
-        const res = await fetch(`${API_BASE}/v1/transactions`, {
-          method: 'POST',
-          headers: requestHeaders,
-          body: attempt.body,
-        });
-        // 成功响应损坏也不能假装已确认；保留原请求供同键重试。
-        const body = await res.json();
-        if (!res.ok) {
-          const failure = new Error(body.detail || `HTTP ${res.status}`);
-          failure.status = res.status;
-          failure.code = body.code || null;
-          failure.problem = body;
-          throw failure;
+        let body;
+        if (consoleClient) {
+          // 结果不确定时只查询原事务回执，避免用新草稿替换原事务身份。
+          body = await consoleClient.submit(attempt.body, attempt.unknown);
+        } else {
+          const res = await apiFetch(`${API_BASE}/v1/transactions`, {
+            method: 'POST', headers: requestHeaders, body: attempt.body,
+          });
+          body = await res.json();
+          if (!res.ok) {
+            const failure = new Error(body.detail || `HTTP ${res.status}`);
+            failure.status = res.status; failure.code = body.code || null; failure.problem = body;
+            throw failure;
+          }
         }
         const completed = new Set(attempt.entries.map(entry => entry.source));
         txOperations = txOperations.filter(operation => !completed.has(operation));
         txPendingAttempt = null;
-        showToast(t('tx.committed', { n: count, gen: body.generation || '-' }));
+        showToast(t('tx.committed', { n: count, gen: body.revision || body.generation || '-' }));
         if (attempt.hasDocuments) {
-          docOnCommitSuccess(submitted);
+          docOnCommitSuccess(submitted, body.revision);
           if (body.replayed) showToast(t('doc.toast.replayed'));
         }
         loadObjectTree();
@@ -12656,10 +12727,14 @@ RETURN doc, t</div>
         return true;
       } catch (err) {
         // 曾经结果不确定的批次，即使重试遇到冲突也不能拆开重发：服务端缓存可能已失效。
-        const unknown = attempt.hasDocuments && (attempt.unknown || !err.status || err.status >= 500);
+        const unknown = (consoleClient || attempt.hasDocuments) && (attempt.unknown || !err.status || err.status >= 500
+          || err.code === 'TDB_WRITE_OUTCOME_UNKNOWN' || err.details?.committed === true);
         attempt.unknown = unknown;
         if (!unknown) txPendingAttempt = null;
         if (attempt.hasDocuments) await docOnCommitFailure(submitted, err, unknown);
+        if (consoleClient && !unknown && err.code === 'TDB_WRITE_CONFLICT') {
+          showToast('数据已变化，请重新读取并审阅整批操作 (Data changed; read and review the complete batch again)');
+        }
         showToast(t('tx.failed', { msg: err.message }));
         return false;
       } finally {
@@ -12768,9 +12843,9 @@ RETURN doc, t</div>
       try {
         const jsonOr = (promise) => promise.then((res) => (res.ok ? res.json() : null)).catch(() => null);
         const [indexRes, quiverRes, sampleRes] = await Promise.all([
-          jsonOr(fetch(`${API_BASE}/v1/indexes`)),
-          jsonOr(fetch(`${API_BASE}/v1/indexes/quiver`)),
-          jsonOr(fetch(`${API_BASE}/v1/tql`, {
+          jsonOr(apiFetch(`${API_BASE}/v1/indexes`)),
+          jsonOr(apiFetch(`${API_BASE}/v1/indexes/quiver`)),
+          jsonOr(apiFetch(`${API_BASE}/v1/tql`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -12952,7 +13027,7 @@ RETURN doc, t</div>
     async function dropObjectIndex(value) {
       let info = null;
       try { info = JSON.parse(value); } catch (_) { return; }
-      const res = await fetch(`${API_BASE}/v1/indexes/delete`, {
+      const res = await apiFetch(`${API_BASE}/v1/indexes/delete`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind: info.kind, fields: info.fields }),
@@ -12970,7 +13045,7 @@ RETURN doc, t</div>
       const btn = document.querySelector('#objectTree [data-ot-kind="quiver"] .ot-run');
       if (btn) { btn.disabled = true; btn.textContent = t('ot.building'); }
       try {
-        const res = await fetch(`${API_BASE}/v1/indexes/quiver`, { method: 'POST' });
+        const res = await apiFetch(`${API_BASE}/v1/indexes/quiver`, { method: 'POST' });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
         showToast(t('ot.built'));
@@ -13456,6 +13531,10 @@ RETURN doc, t</div>
       runBtn.disabled = true;
       status.className = 'import-status';
       status.textContent = t('import.running');
+      let revision = null;
+      try { revision = await embeddedStageRevision(['0']); } catch (error) {
+        status.textContent = error.message; runBtn.disabled = false; return;
+      }
       // 事务模式：把解析结果转成 TransactionOperation 暂存，提交时原子生效
       if (txModeOn()) {
         const ops = importState.tab === 'nodes'
@@ -13473,7 +13552,7 @@ RETURN doc, t</div>
             weight: record.weight,
           }));
         ops.forEach((op) => {
-          txOpMeta.set(op, { source: t('tx.source.import') });
+          txOpMeta.set(op, { source: t('tx.source.import'), expectedVersion: revision });
           txOperations.push(op);
         });
         syncTxBar();
@@ -13487,7 +13566,7 @@ RETURN doc, t</div>
       try {
         const url = importState.tab === 'nodes' ? `${API_BASE}/v1/import/nodes` : `${API_BASE}/v1/import/edges`;
         const body = parsed.records.map((record) => JSON.stringify(record)).join('\n');
-        const res = await fetch(url, {
+        const res = await apiFetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-ndjson' },
           body,
@@ -13745,7 +13824,7 @@ RETURN doc, t</div>
       let full = node;
       if (!Array.isArray(full.vector) || !full.vector.length) {
         try {
-          const res = await fetch(`${API_BASE}/v1/nodes/${node.id}`);
+          const res = await apiFetch(`${API_BASE}/v1/nodes/${node.id}`);
           if (res.ok) {
             const body = await res.json();
             if (body && body.node) full = body.node;
@@ -13804,7 +13883,7 @@ RETURN doc, t</div>
       hint.className = 'vl-hint';
       hint.textContent = t('vector.loading');
       try {
-        const res = await fetch(`${API_BASE}/v1/tql`, {
+        const res = await apiFetch(`${API_BASE}/v1/tql`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query, mutation: false, profile: false })
@@ -13976,7 +14055,7 @@ RETURN doc, t</div>
       btn.textContent = t('vector.searching');
       const started = performance.now();
       try {
-        const res = await fetch(`${API_BASE}/v1/search/vector?top_k=${topK}&min_score=${String(minScore)}`, {
+        const res = await apiFetch(`${API_BASE}/v1/search/vector?top_k=${topK}&min_score=${String(minScore)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/vnd.triviumdb.vector+f32' },
           body: vectorToBody(vector)
@@ -14276,8 +14355,9 @@ RETURN doc, t</div>
     const NEIGHBORS_LIMIT = 2000;
     async function expandNeighborhoodIntoGraph(nodeId, depth) {
       const url = `${API_BASE}/v1/nodes/${nodeId}/neighbors`
-        + `?depth=${encodeURIComponent(depth)}&limit=${NEIGHBORS_LIMIT}&direction=both`;
-      const res = await fetch(url);
+        + `?depth=${encodeURIComponent(depth)}&limit=${NEIGHBORS_LIMIT}&direction=${consoleClient ? 'out' : 'both'}`;
+      if (consoleClient) showToast('嵌入式邻域按出边扩展 (Embedded neighborhoods follow outgoing edges)');
+      const res = await apiFetch(url);
       if (!res.ok) {
         const err = await res.json().catch(() => ({ title: t('err.request'), detail: res.statusText }));
         throw new Error(t('gt.err.fail', { title: err.title || t('err.request'), detail: err.detail || '' }));
@@ -16367,7 +16447,7 @@ RETURN doc, t</div>
       btn.disabled = true;
       btn.textContent = t('graph.nebulaLoading');
       try {
-        const res = await fetch(`${API_BASE}/v1/tql`, {
+        const res = await apiFetch(`${API_BASE}/v1/tql`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: NEBULA_QUERY, mutation: false })
@@ -17933,7 +18013,7 @@ RETURN doc, t</div>
 
     async function runCockpitVectorSearch(parsed) {
       const params = new URLSearchParams({ top_k: String(parsed.topK) });
-      const res = await fetch(`${API_BASE}/v1/search/vector?${params}`, {
+      const res = await apiFetch(`${API_BASE}/v1/search/vector?${params}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/vnd.triviumdb.vector+f32' },
         body: new Float32Array(parsed.vector),
@@ -18037,7 +18117,7 @@ RETURN doc, t</div>
       runBtn.textContent = t('gt.running');
       setGraphTqlError(null);
       try {
-        const res = await fetch(`${API_BASE}/v1/tql`, {
+        const res = await apiFetch(`${API_BASE}/v1/tql`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query, mutation: false })
@@ -18306,7 +18386,7 @@ RETURN doc, t</div>
       }
       const offset = append ? __drawerEdgesState.offset : 0;
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/${nodeId}/edges`
+        const res = await apiFetch(`${API_BASE}/v1/nodes/${nodeId}/edges`
           + `?direction=both&offset=${offset}&limit=${DRAWER_EDGES_PAGE}`);
         if (seq !== __drawerFetchSeq) return;
         if (!res.ok) {
@@ -18505,10 +18585,10 @@ RETURN doc, t</div>
       const pc = document.getElementById('drawerProjection');
       if (pc) pc.getContext('2d').clearRect(0, 0, pc.width, pc.height);
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/batch-get`, {
+        const res = await apiFetch(`${API_BASE}/v1/nodes/batch-get`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: '{"ids":[' + ids.join(',') + ']}'
+          body: consoleClient ? JSON.stringify({ ids: ids.map(String) }) : '{"ids":[' + ids.join(',') + ']}'
         });
         if (seq !== __projectionSeq) return;
         if (!res.ok) throw new Error('batch-get http ' + res.status);
@@ -18563,7 +18643,7 @@ RETURN doc, t</div>
       const container = document.getElementById('drawerNodeEdges');
       container.textContent = t('detail.loading');
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/${nodeId}`);
+        const res = await apiFetch(`${API_BASE}/v1/nodes/${nodeId}`);
         if (seq !== __drawerFetchSeq) return;
         if (!res.ok) {
           const err = await res.json().catch(() => ({ title: t('err.request'), detail: res.statusText }));
@@ -18654,7 +18734,7 @@ RETURN doc, t</div>
       const seq = ++__pathTraceSeq;
       hint.textContent = t('detail.path.querying');
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/${from}/paths/to/${targetId}?maxHops=${encodeURIComponent(maxHops)}`);
+        const res = await apiFetch(`${API_BASE}/v1/nodes/${from}/paths/to/${targetId}?maxHops=${encodeURIComponent(maxHops)}`);
         if (seq !== __pathTraceSeq) return;
         if (!res.ok) {
           const err = await res.json().catch(() => ({ title: t('err.request'), detail: res.statusText }));
@@ -18679,11 +18759,11 @@ RETURN doc, t</div>
         }
         const rows = [];
         if (ids.length) {
-          const bres = await fetch(`${API_BASE}/v1/nodes/batch-get`, {
+          const bres = await apiFetch(`${API_BASE}/v1/nodes/batch-get`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             // 严格验证后的十进制数字可直接组成 JSON 数值，服务端按 u64 精确解析。
-            body: '{"ids":[' + ids.join(',') + ']}'
+            body: consoleClient ? JSON.stringify({ ids: ids.map(String) }) : '{"ids":[' + ids.join(',') + ']}'
           });
           if (seq !== __pathTraceSeq) return;
           if (!bres.ok) throw new Error(t('detail.path.backfillFail'));
@@ -18867,7 +18947,7 @@ RETURN doc, t</div>
       let succeeded = 0;
       for (const query of statements) {
         try {
-          const res = await fetch(`${API_BASE}/v1/tql`, {
+          const res = await apiFetch(`${API_BASE}/v1/tql`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ query, mutation: true })
@@ -20261,11 +20341,11 @@ RETURN doc, t</div>
     }
     function docDbIdentity() {
       const origin = (typeof location !== 'undefined' && location.origin) ? location.origin : 'app';
+      if (consoleEmbedded) return { connectionId: origin, databaseId: consoleStorageId };
       const path = (typeof location !== 'undefined' && location.pathname) ? (location.pathname || '/') : '/';
       return { connectionId: origin, databaseId: path };
     }
-    // 后端没有 databaseId（/health/ready 只回 status/version），草稿键暂以 origin+pathname 近似；
-    // 该缺陷已记录在规划文档的「作者确认项」中。
+    // Embedded 使用宿主的稳定数据库标识；独立 Server 保留 origin 与页面路径作用域。
     function docKeyOf(node) {
       const id = docDbIdentity();
       return id.connectionId + '|' + id.databaseId + '|' + String(node && node.id);
@@ -20481,7 +20561,7 @@ RETURN doc, t</div>
         draftText: text,
         staged: null,
         load: 'loaded',
-        access: 'editable',
+        access: consoleClient && (consoleClient.info.readOnly || !consoleClient.info.features.includes('transactions')) ? 'readonly' : 'editable',
         submit: 'idle',
         version: (node && (node.version || node.etag)) || null,
         generation: (node && node.generation) || null,
@@ -21844,7 +21924,7 @@ RETURN doc, t</div>
 
     // ---------- 服务端读取与提交结果 ----------
     async function docFetchNode(nodeId) {
-      const res = await fetch(`${API_BASE}/v1/nodes/${nodeId}`, { headers: { Accept: 'application/json' } });
+      const res = await apiFetch(`${API_BASE}/v1/nodes/${nodeId}`, { headers: { Accept: 'application/json' } });
       const text = await res.text();
       if (!res.ok) {
         let detail = 'HTTP ' + res.status;
@@ -21918,7 +21998,7 @@ RETURN doc, t</div>
       }
     }
 
-    function docOnCommitSuccess(submitted) {
+    function docOnCommitSuccess(submitted, revision) {
       submitted.forEach((op) => {
         const meta = txOpMeta.get(op);
         if (!meta || !meta.docSessionId) return;
@@ -21930,7 +22010,7 @@ RETURN doc, t</div>
         session.baseText = JSON.stringify(session.basePayload, null, 2);
         session.staged = null;
         session.submit = 'acknowledged';
-        session.version = null;      // 事务响应只回全局 generation，节点版本需要重新读取
+        session.version = revision || null; // Console 回执提供提交后的完整版本令牌
         session.needsRefresh = true;
         docPersistDraft(session);
       });
@@ -21947,13 +22027,13 @@ RETURN doc, t</div>
         if (!session) return;
         touched = touched || session;
         if (unknown) session.submit = 'outcomeUnknown';
-        else if (status === 409 && code === 'WRITE_CONFLICT') session.submit = 'conflict';
+        else if (status === 409 && ['WRITE_CONFLICT', 'TDB_WRITE_CONFLICT'].includes(code)) session.submit = 'conflict';
         else session.submit = 'rejected';
       });
       if (!touched) return;
       docRender();
       if (unknown) showToast(t('doc.banner.unknown'));
-      else if (status === 409 && code === 'WRITE_CONFLICT') await docLoadConflict(touched);
+      else if (status === 409 && ['WRITE_CONFLICT', 'TDB_WRITE_CONFLICT'].includes(code)) await docLoadConflict(touched);
     }
     function docMarkSubmitting(submitted) {
       submitted.forEach((op) => {
@@ -22019,7 +22099,7 @@ RETURN doc, t</div>
       session.basePayload = docDeepClone(session.remote.payload);
       session.baseText = JSON.stringify(session.basePayload, null, 2);
       session.version = session.remote.version || null;
-      session.access = 'editable';
+      session.access = consoleClient && (consoleClient.info.readOnly || !consoleClient.info.features.includes('transactions')) ? 'readonly' : 'editable';
       session.submit = 'idle';
       session.remote = null;
       // 合并后必须重新审阅：撤回该节点的旧暂存快照，避免用旧 payload 覆盖远端字段。
@@ -22036,7 +22116,7 @@ RETURN doc, t</div>
     }
     async function docConfirmOutcome(session) {
       if (!session || !txPendingAttempt || !txNodeProtected(session.nodeId)) return false;
-      // 单个节点内容相等不能证明整笔事务的身份；原样重试，由服务端幂等结果确认所有操作。
+      // Console 读取完整原事务的回执；Server 通过原幂等请求确认整批结果。
       return commitTransaction();
     }
 
@@ -22519,7 +22599,50 @@ RETURN doc, t</div>
       }),
     };
 
-    setupDocWorkspace();
+    if (!consoleEmbedded) setupDocWorkspace();
+
+    window.TriviumConsole = Object.freeze({
+      async mount(options) {
+        if (!consoleEmbedded || consoleMounted || consoleDisposed || !consoleStorageId) {
+          throw new Error('控制台挂载状态或存储标识无效 (Invalid mount state or storage identity)');
+        }
+        if (!options || typeof options.detach !== 'function') throw new Error('需要宿主 detach 回调 (Host detach callback required)');
+        consoleMounted = true;
+        consoleClient = TriviumConsoleClient.create(options);
+        try {
+          const info = await consoleClient.call({ operation: 'info' });
+          if (consoleDisposed) throw new Error('控制台已卸载 (Console detached)');
+          initializeConsolePage();
+          setupDocWorkspace();
+          // 嵌入式界面写入统一进入审阅，普通 TQL 写入继续使用明确的写入开关。
+          const tx = document.getElementById('txModeCheck');
+          tx.checked = true; tx.disabled = true;
+          const profile = document.getElementById('profileCheck');
+          profile.checked = false; profile.disabled = true;
+          const writable = !info.readOnly;
+          document.getElementById('mutationCheck').disabled = !writable;
+          return info;
+        } catch (error) {
+          consoleDisposed = true;
+          await consoleClient.dispose();
+          throw error;
+        }
+      },
+      pendingTransaction() { return txPendingAttempt ? JSON.parse(txPendingAttempt.body) : null; },
+      async dispose({ discard = false } = {}) {
+        if (!discard && (txOperations.length || docSessions.some(docIsDirty))) {
+          throw new Error('请先处理或导出草稿与原事务 (Resolve or export drafts and original transaction first)');
+        }
+        consoleDisposed = true;
+        clearInterval(healthTimer);
+        __queryAbort?.abort();
+        docSessions.forEach(docPersistDraft);
+        await consoleClient?.dispose();
+      },
+    });
+    window.addEventListener('pagehide', () => {
+      if (consoleEmbedded) window.TriviumConsole.dispose({ discard: true }).catch(() => {});
+    });
   </script>
   <script>
     // ==========================================

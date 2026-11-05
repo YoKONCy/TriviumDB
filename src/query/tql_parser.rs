@@ -6,6 +6,7 @@
 
 use super::tql_ast::*;
 use super::tql_lexer::{ParseErrorAt, TqlToken};
+use crate::error::{QueryErrorStage, QuerySpan, TriviumError};
 use crate::filter::Filter;
 
 pub const MAX_TQL_NESTING: usize = 128;
@@ -18,6 +19,8 @@ pub struct TqlParser {
     input_checked: bool,
     /// 与 tokens 平行的字节起始位置（用于错误诊断）
     positions: Option<Vec<usize>>,
+    /// 仅在能够确定失败 token 的检查处登记，语义校验保持空值。
+    error_position: Option<usize>,
 }
 
 impl TqlParser {
@@ -28,6 +31,7 @@ impl TqlParser {
             depth: 0,
             input_checked: false,
             positions: None,
+            error_position: None,
         }
     }
 
@@ -39,6 +43,7 @@ impl TqlParser {
             depth: 0,
             input_checked: false,
             positions: Some(positions),
+            error_position: None,
         }
     }
 
@@ -66,8 +71,23 @@ impl TqlParser {
         if &tok == expected {
             Ok(())
         } else {
-            Err(format!("Expected {:?}, got {:?}", expected, tok))
+            Err(self.error_previous(format!("Expected {:?}, got {:?}", expected, tok)))
         }
+    }
+
+    fn error_here(&mut self, message: impl Into<String>) -> String {
+        self.error_position = self.current_byte_pos();
+        message.into()
+    }
+
+    fn error_previous(&mut self, message: impl Into<String>) -> String {
+        self.error_position = self.positions.as_ref().and_then(|positions| {
+            positions
+                .get(self.pos.saturating_sub(1))
+                .or_else(|| positions.last())
+                .copied()
+        });
+        message.into()
     }
 
     fn at(&self, expected: &TqlToken) -> bool {
@@ -88,7 +108,7 @@ impl TqlParser {
         let mut delimiters = Vec::new();
         let mut literal_depth = 0usize;
         let mut operators = 0usize;
-        for token in &self.tokens {
+        for (index, token) in self.tokens.iter().enumerate() {
             let opening = match token {
                 TqlToken::LParen => Some(0),
                 TqlToken::LBracket => Some(1),
@@ -97,6 +117,8 @@ impl TqlParser {
             };
             if let Some(kind) = opening {
                 if delimiters.len() == MAX_TQL_NESTING {
+                    self.error_position =
+                        self.positions.as_ref().and_then(|p| p.get(index)).copied();
                     return Err(format!(
                         "TQL 嵌套超过 {MAX_TQL_NESTING} 层 (TQL nesting limit exceeded)"
                     ));
@@ -113,6 +135,8 @@ impl TqlParser {
             };
             if let Some(kind) = closing {
                 if delimiters.pop() != Some(kind) {
+                    self.error_position =
+                        self.positions.as_ref().and_then(|p| p.get(index)).copied();
                     return Err("TQL 括号不匹配 (Unmatched TQL delimiter)".into());
                 }
                 literal_depth -= usize::from(kind != 0);
@@ -133,6 +157,8 @@ impl TqlParser {
             {
                 operators += 1;
                 if operators > MAX_TQL_OPERATORS {
+                    self.error_position =
+                        self.positions.as_ref().and_then(|p| p.get(index)).copied();
                     return Err(format!(
                         "TQL 运算复杂度超过 {MAX_TQL_OPERATORS} (TQL operator limit exceeded)"
                     ));
@@ -140,26 +166,28 @@ impl TqlParser {
             }
         }
         if !delimiters.is_empty() {
+            self.error_position = self.positions.as_ref().and_then(|p| p.last()).copied();
             return Err("TQL 括号未闭合 (Unclosed TQL delimiter)".into());
         }
         self.input_checked = true;
         Ok(())
     }
 
-    fn expect_end(&self) -> Result<(), String> {
+    fn expect_end(&mut self) -> Result<(), String> {
         if self.pos == self.tokens.len()
             || (self.at(&TqlToken::Eof) && self.pos + 1 == self.tokens.len())
         {
             Ok(())
         } else {
-            Err(format!(
+            Err(self.error_here(format!(
                 "TQL 语句尾部存在多余输入 (Unexpected trailing TQL input): {:?}",
                 self.peek()
-            ))
+            )))
         }
     }
 
     pub fn parse_query(&mut self) -> Result<TqlQuery, String> {
+        self.error_position = None;
         self.validate_input()?;
         // 0. EXPLAIN 前缀（可选）
         let explain = if self.at(&TqlToken::Explain) {
@@ -185,10 +213,10 @@ impl TqlParser {
                 self.parse_text_entry()?
             }
             other => {
-                return Err(format!(
+                return Err(self.error_here(format!(
                     "Expected MATCH, OPTIONAL MATCH, FIND, SEARCH, or TEXT, got {:?}",
                     other
-                ));
+                )));
             }
         };
 
@@ -996,7 +1024,7 @@ impl TqlParser {
     fn expect_ident_keyword(&mut self, expected: &str) -> Result<(), String> {
         match self.advance() {
             TqlToken::Ident(value) if value.eq_ignore_ascii_case(expected) => Ok(()),
-            other => Err(format!("Expected {expected}, got {other:?}")),
+            other => Err(self.error_previous(format!("Expected {expected}, got {other:?}"))),
         }
     }
 
@@ -1679,7 +1707,7 @@ impl TqlParser {
                 let lit = self.parse_tql_literal()?;
                 Ok(TqlExpr::Literal(lit))
             }
-            other => Err(format!("Expected expression, got {:?}", other)),
+            other => Err(self.error_here(format!("Expected expression, got {:?}", other))),
         }
     }
 
@@ -1691,7 +1719,9 @@ impl TqlParser {
             TqlToken::Gte => Ok(TqlCompOp::Gte),
             TqlToken::Lt => Ok(TqlCompOp::Lt),
             TqlToken::Lte => Ok(TqlCompOp::Lte),
-            other => Err(format!("Expected comparison operator, got {:?}", other)),
+            other => {
+                Err(self.error_previous(format!("Expected comparison operator, got {:?}", other)))
+            }
         }
     }
 
@@ -1703,7 +1733,7 @@ impl TqlParser {
             TqlToken::StringLit(s) => Ok(TqlLiteral::Str(s)),
             TqlToken::BoolLit(b) => Ok(TqlLiteral::Bool(b)),
             TqlToken::Null => Ok(TqlLiteral::Null),
-            other => Err(format!("Expected literal, got {:?}", other)),
+            other => Err(self.error_previous(format!("Expected literal, got {:?}", other))),
         }
     }
 
@@ -1711,7 +1741,7 @@ impl TqlParser {
         match self.advance() {
             TqlToken::Ident(s) => Ok(s),
             TqlToken::Rank => Ok("rank".into()),
-            other => Err(format!("Expected identifier, got {:?}", other)),
+            other => Err(self.error_previous(format!("Expected identifier, got {:?}", other))),
         }
     }
 
@@ -1721,7 +1751,9 @@ impl TqlParser {
                 .map_err(|_| "数量超出平台范围 (Quantity exceeds platform range)".into()),
             TqlToken::UIntLit(n) => usize::try_from(n)
                 .map_err(|_| "数量超出平台范围 (Quantity exceeds platform range)".into()),
-            other => Err(format!("Expected positive integer, got {:?}", other)),
+            other => {
+                Err(self.error_previous(format!("Expected positive integer, got {:?}", other)))
+            }
         }
     }
 
@@ -1730,7 +1762,7 @@ impl TqlParser {
             TqlToken::Ident(s) => Ok(s),
             TqlToken::StringLit(s) => Ok(s),
             TqlToken::Rank => Ok("rank".into()),
-            other => Err(format!("Expected field name, got {:?}", other)),
+            other => Err(self.error_previous(format!("Expected field name, got {:?}", other))),
         }
     }
 
@@ -1783,7 +1815,7 @@ impl TqlParser {
                 self.depth -= 1;
                 result
             }
-            other => Err(format!("Expected JSON value, got {:?}", other)),
+            other => Err(self.error_here(format!("Expected JSON value, got {:?}", other))),
         }
     }
 
@@ -1792,7 +1824,7 @@ impl TqlParser {
             TqlToken::IntLit(n) => Ok(n as f64),
             TqlToken::UIntLit(n) => Ok(n as f64),
             TqlToken::FloatLit(f) => Ok(f),
-            other => Err(format!("Expected number, got {:?}", other)),
+            other => Err(self.error_previous(format!("Expected number, got {:?}", other))),
         }
     }
 
@@ -1815,6 +1847,7 @@ impl TqlParser {
 
     /// 顶层语句解析：判断是读查询还是写操作
     pub fn parse_statement(&mut self) -> Result<TqlStatement, String> {
+        self.error_position = None;
         self.validate_input()?;
         let statement = match self.peek() {
             // 写操作入口
@@ -2451,25 +2484,48 @@ pub fn parse_tql_statement(input: &str) -> Result<TqlStatement, String> {
 
 /// 带位置诊断的 TQL 解析（仅读查询）。错误中包含字节偏移，便于上层 CLI/IDE 高亮。
 pub fn parse_tql_with_pos(input: &str) -> Result<TqlQuery, ParseErrorAt> {
-    let mut lexer = super::tql_lexer::TqlLexer::new(input);
-    let tokens_with_pos = lexer.tokenize_with_positions()?;
-    let mut tokens = Vec::with_capacity(tokens_with_pos.len());
-    let mut positions = Vec::with_capacity(tokens_with_pos.len());
-    for pt in tokens_with_pos {
-        tokens.push(pt.token);
-        positions.push(pt.byte_start);
-    }
-    let mut parser = TqlParser::new_with_positions(tokens, positions);
-    parser.parse_query().map_err(|msg| {
-        let pos = parser.current_byte_pos().unwrap_or(input.len());
-        ParseErrorAt::new(msg, pos)
-    })
+    parse_tql_diagnostic(input).map_err(|error| legacy_position(error, input.len()))
 }
 
 /// 带位置诊断的 TQL 解析（读 / 写均可）。错误中包含字节偏移。
 pub fn parse_tql_statement_with_pos(input: &str) -> Result<TqlStatement, ParseErrorAt> {
+    parse_tql_statement_diagnostic(input).map_err(|error| legacy_position(error, input.len()))
+}
+
+fn legacy_position(error: TriviumError, fallback: usize) -> ParseErrorAt {
+    match error {
+        TriviumError::QuerySyntax { reason, span, .. } => {
+            ParseErrorAt::new(reason, span.map_or(fallback, |span| span.start_byte))
+        }
+        error => ParseErrorAt::new(error.to_string(), fallback),
+    }
+}
+
+/// 结构化诊断入口；数据库与各适配层共享同一词法、语法及位置事实。
+pub fn parse_tql_diagnostic(input: &str) -> crate::Result<TqlQuery> {
+    parse_diagnostic(input, TqlParser::parse_query)
+}
+
+/// 写入解析在返回 AST 前完成，语法拒绝尚未执行任何操作。
+pub fn parse_tql_statement_diagnostic(input: &str) -> crate::Result<TqlStatement> {
+    parse_diagnostic(input, TqlParser::parse_statement)
+}
+
+fn parse_diagnostic<R>(
+    input: &str,
+    parse: fn(&mut TqlParser) -> Result<R, String>,
+) -> crate::Result<R> {
     let mut lexer = super::tql_lexer::TqlLexer::new(input);
-    let tokens_with_pos = lexer.tokenize_with_positions()?;
+    let tokens_with_pos =
+        lexer
+            .tokenize_with_positions()
+            .map_err(|error| TriviumError::QuerySyntax {
+                reason: error.msg,
+                stage: QueryErrorStage::Lex,
+                span: (input.len() <= super::tql_lexer::MAX_TQL_INPUT_BYTES)
+                    .then(|| QuerySpan::at(input, error.byte_pos))
+                    .flatten(),
+            })?;
     let mut tokens = Vec::with_capacity(tokens_with_pos.len());
     let mut positions = Vec::with_capacity(tokens_with_pos.len());
     for pt in tokens_with_pos {
@@ -2477,8 +2533,11 @@ pub fn parse_tql_statement_with_pos(input: &str) -> Result<TqlStatement, ParseEr
         positions.push(pt.byte_start);
     }
     let mut parser = TqlParser::new_with_positions(tokens, positions);
-    parser.parse_statement().map_err(|msg| {
-        let pos = parser.current_byte_pos().unwrap_or(input.len());
-        ParseErrorAt::new(msg, pos)
+    parse(&mut parser).map_err(|reason| TriviumError::QuerySyntax {
+        reason,
+        stage: QueryErrorStage::Parse,
+        span: parser
+            .error_position
+            .and_then(|byte| QuerySpan::at(input, byte)),
     })
 }

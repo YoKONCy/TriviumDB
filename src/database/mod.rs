@@ -2,7 +2,7 @@
 //!
 //! 按职责划分为以下模块：
 //! - `config.rs`: 配置类型（StorageMode, Config, SearchConfig）
-//! - `facade.rs`: Reader / Writer 公共门面
+//! - `sdk::facade`: Reader / Writer 公共门面（保留原导入路径）
 //! - `lifecycle.rs`: 可观测关闭、排空与超时等待
 //! - `pipeline.rs`: 混合检索管线（L0-L9 + 6 个 Hook 调用点）
 //! - `transaction.rs`: 轻量级事务（Dry-Run + WAL-first 语义）+ WAL 回放
@@ -10,7 +10,8 @@
 
 pub mod config;
 pub mod console;
-pub mod facade;
+pub(crate) mod editing;
+pub use crate::sdk::facade;
 mod lifecycle;
 mod migration;
 pub use lifecycle::{InstanceMemoryStats, InstanceStats, ShutdownPhase, ShutdownStatus};
@@ -26,7 +27,7 @@ pub use facade::{DatabaseReader, DatabaseWriter};
 pub use transaction::{Transaction, TxBuilder};
 
 use crate::VectorType;
-use crate::error::{Result, TriviumError};
+use crate::error::{Result, TriviumError, WriteErrorInfo, WriteOutcome, WritePhase};
 use crate::hook::{HookContext, NoopHook, SearchHook};
 
 use crate::node::{NodeId, SearchHit};
@@ -51,6 +52,14 @@ fn clear_hook_slot(slot: &HookSlot) {
     };
     // 用户 Hook 的析构可重入诊断接口，析构时不持有 Hook 槽锁。
     drop(previous);
+}
+
+/// 持久化完成后的 Hook 清理失败不能跳过文件租约释放，也不能再次执行检查点。
+fn clear_hook_for_close(slot: &HookSlot) -> Result<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| clear_hook_slot(slot)))
+        .map_err(|_| TriviumError::ShutdownFailed {
+            reason: "数据已持久化并关闭，但 Hook 析构发生异常 (Data persisted and closed, but hook destruction panicked)".into(),
+        })
 }
 
 /// 安全获取 Mutex 锁：如果锁中毒（某个线程 panic 持有锁），
@@ -204,35 +213,73 @@ fn reject_hard_link_alias(path: &str, metadata: &std::fs::Metadata) -> Result<()
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn reject_hard_link_alias(path: &str, _metadata: &std::fs::Metadata) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let file = std::fs::File::open(path)?;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY：file 持有有效文件句柄直至调用结束；information 是大小、对齐均符合
+    // Windows ABI 的独占可写结构体。同步调用不保存指针、不转移句柄所有权。
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if information.nNumberOfLinks > 1 {
+        return Err(TriviumError::InvalidInput(format!(
+            "数据库主文件不能是硬链接 (Database file must not have hard links): {path}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn reject_hard_link_alias(_path: &str, _metadata: &std::fs::Metadata) -> Result<()> {
     Ok(())
 }
 
 thread_local! {
-    static HOOK_READ_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static HOOK_INSTANCES: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub(crate) struct HookReadScope;
 
 impl HookReadScope {
-    pub(crate) fn enter() -> Self {
-        HOOK_READ_DEPTH.with(|depth| depth.set(depth.get() + 1));
-        Self
+    pub(crate) fn enter<T: VectorType>(memtable: &Arc<RwLock<MemTable<T>>>) -> Result<Self> {
+        HOOK_INSTANCES.with(|instances| {
+            let mut instances = instances.borrow_mut();
+            instances
+                .try_reserve(1)
+                .map_err(|error| TriviumError::CapacityAllocationFailed {
+                    reason: format!("Hook 作用域分配失败 (Hook scope allocation failed): {error}"),
+                })?;
+            instances.push(Arc::as_ptr(memtable) as usize);
+            Ok(Self)
+        })
     }
 }
 
 impl Drop for HookReadScope {
     fn drop(&mut self) {
-        HOOK_READ_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        HOOK_INSTANCES.with(|instances| {
+            instances.borrow_mut().pop();
+        });
     }
 }
 
-pub(crate) fn reject_hook_reentrant_write() -> Result<()> {
-    if HOOK_READ_DEPTH.with(|depth| depth.get() > 0) {
-        return Err(TriviumError::InvalidInput(
-            "Hook 在检索读锁内禁止重入同一线程的数据库写操作".into(),
-        ));
+pub(crate) fn reject_hook_reentrant_access<T: VectorType>(
+    memtable: &Arc<RwLock<MemTable<T>>>,
+) -> Result<()> {
+    if HOOK_INSTANCES.with(|instances| {
+        instances
+            .borrow()
+            .contains(&(Arc::as_ptr(memtable) as usize))
+    }) {
+        return Err(TriviumError::ReentrantAccess {
+            operation: "hook_callback",
+        });
     }
     Ok(())
 }
@@ -279,11 +326,14 @@ pub struct PreparedQuiverBuild<T: VectorType> {
     _operation_guard: OperationGuard,
     _workspace: crate::resources::WorkspaceReservation,
     resource_runtime: crate::resources::ResourceRuntime,
+    /// 必须晚于存储、操作与工作区析构，防止原 Database 丢弃后提前释放文件锁。
+    _file_lock: Arc<Mutex<Option<std::fs::File>>>,
 }
 
 impl<T: VectorType> PreparedQuiverBuild<T> {
     /// 在不持有调用方 Database guard 的情况下构建，并仅在向量代际未变化时发布。
     pub fn execute(self) -> Result<bool> {
+        reject_hook_reentrant_access(&self.memtable)?;
         let source_generation = self.snapshot.generation;
         let pool = self
             .resource_runtime
@@ -306,18 +356,19 @@ pub struct QuiverBuildHandle<T: VectorType> {
     quiver_builds: Arc<(Mutex<std::collections::HashSet<u64>>, Condvar)>,
     lifecycle: Arc<(Mutex<LifecycleState>, Condvar)>,
     access_mode: AccessMode,
+    /// 与真实存储共同持有租约；显式关闭通过共享槽统一释放。
+    _file_lock: Arc<Mutex<Option<std::fs::File>>>,
 }
 
 impl<T: VectorType> QuiverBuildHandle<T> {
     /// 若当前配置和数据状态满足自动构建条件，捕获后台 QuIVer 构建任务。
     pub fn prepare_auto_build(&self) -> Result<Option<PreparedQuiverBuild<T>>> {
+        reject_hook_reentrant_access(&self.memtable)?;
         if self.access_mode != AccessMode::ReadWrite {
             return Err(TriviumError::ReadOnlyViolation {
                 operation: "prepare_auto_quiver_build",
             });
         }
-        let mut resource_task = self.resource_runtime.enter_task()?;
-        resource_task.detach();
         let operation_guard = {
             let mut state = lock_or_recover(&self.lifecycle.0);
             if state.recovery_required.load(Ordering::Acquire) {
@@ -326,6 +377,8 @@ impl<T: VectorType> QuiverBuildHandle<T> {
             if state.lifecycle != DatabaseLifecycle::Open {
                 return Err(TriviumError::DatabaseClosed);
             }
+            let mut resource_task = self.resource_runtime.enter_task()?;
+            resource_task.detach();
             state.active_operations = state
                 .active_operations
                 .checked_add(1)
@@ -371,6 +424,7 @@ impl<T: VectorType> QuiverBuildHandle<T> {
             _operation_guard: operation_guard,
             _workspace: workspace,
             resource_runtime: self.resource_runtime.clone(),
+            _file_lock: self._file_lock.clone(),
         }))
     }
 }
@@ -506,6 +560,8 @@ pub(crate) struct SearchHandle<T: VectorType> {
     hook: HookSlot,
     quiver_builds: Arc<(Mutex<std::collections::HashSet<u64>>, Condvar)>,
     lifecycle: Arc<(Mutex<LifecycleState>, Condvar)>,
+    /// 最后释放租约，覆盖排队任务和已进入的查询。
+    _file_lock: Arc<Mutex<Option<std::fs::File>>>,
 }
 
 impl<T: VectorType> Clone for SearchHandle<T> {
@@ -517,6 +573,7 @@ impl<T: VectorType> Clone for SearchHandle<T> {
             hook: Arc::clone(&self.hook),
             quiver_builds: Arc::clone(&self.quiver_builds),
             lifecycle: Arc::clone(&self.lifecycle),
+            _file_lock: Arc::clone(&self._file_lock),
         }
     }
 }
@@ -527,6 +584,7 @@ impl<T: VectorType> SearchHandle<T> {
     }
 
     fn enter_operation(&self) -> Result<OperationGuard> {
+        reject_hook_reentrant_access(&self.memtable)?;
         let mut state = lock_or_recover(&self.lifecycle.0);
         if state.recovery_required.load(Ordering::Acquire) {
             return Err(TriviumError::WalClosed);
@@ -639,6 +697,26 @@ impl<T: VectorType> SearchHandle<T> {
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T> {
+    /// SDK 在调用宿主闭包之前检查准入；具体操作仍由内核登记活动资源。
+    pub(crate) fn check_request_admission(&self) -> Result<()> {
+        reject_hook_reentrant_access(&self.memtable)?;
+        let state = lock_or_recover(&self.lifecycle.0);
+        if state.recovery_required.load(Ordering::Acquire) {
+            return Err(TriviumError::WalClosed);
+        }
+        if state.lifecycle != DatabaseLifecycle::Open {
+            return Err(TriviumError::DatabaseClosed);
+        }
+        Ok(())
+    }
+
+    /// 事务消费前核对生命周期、写权限和 WAL 写入能力。
+    pub(crate) fn check_transaction_admission(&self) -> Result<()> {
+        self.check_request_admission()?;
+        self.require_write_access("transaction commit")?;
+        lock_or_recover(&self.wal).ensure_writable()
+    }
+
     fn enter_operation(&self) -> Result<OperationGuard> {
         self.enter_operation_kind(false)
     }
@@ -648,6 +726,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     fn enter_operation_kind(&self, maintenance: bool) -> Result<OperationGuard> {
+        reject_hook_reentrant_access(&self.memtable)?;
         let mut state = lock_or_recover(&self.lifecycle.0);
         if state.recovery_required.load(Ordering::Acquire) {
             return Err(TriviumError::WalClosed);
@@ -1026,9 +1105,18 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 闭包内仍通过普通事务 API 提交；每个事务保留独立 Begin/Commit 边界。
     /// 返回值中的布尔量表示本组是否执行了一次物理 fsync。
     pub fn group_commit<R>(&mut self, operation: impl FnOnce(&mut Self) -> R) -> Result<(R, bool)> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("group_commit")?;
-        lock_or_recover(&self.wal).begin_group_commit()?;
+        let admission = |error: TriviumError| {
+            error.with_write_info(crate::error::WriteErrorInfo {
+                transaction_consumed: None,
+                ..crate::error::WriteErrorInfo::TRANSACTION_ADMISSION
+            })
+        };
+        let _operation = self.enter_operation().map_err(admission)?;
+        self.require_write_access("group_commit")
+            .map_err(admission)?;
+        lock_or_recover(&self.wal)
+            .begin_group_commit()
+            .map_err(admission)?;
         lock_or_recover(&self.lifecycle.0).group_commit_owner = Some(std::thread::current().id());
         let mut group = GroupCommitGuard {
             wal: self.wal.clone(),
@@ -1036,7 +1124,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             active: true,
         };
         let result = operation(self);
-        let synced = group.finish()?;
+        let synced = group.finish().map_err(|error| {
+            error.with_write_info(crate::error::WriteErrorInfo {
+                phase: crate::error::WritePhase::GroupSync,
+                outcome: crate::error::WriteOutcome::Unknown,
+                transaction_consumed: None,
+            })
+        })?;
         Ok((result, synced))
     }
 
@@ -1115,6 +1209,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             quiver_builds: Arc::clone(&self.quiver_builds),
             lifecycle: Arc::clone(&self.lifecycle),
             access_mode: self.access_mode,
+            _file_lock: Arc::clone(&self._lock_file),
         }
     }
 
@@ -1214,7 +1309,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn enable_quiver_corrected_sm(&self, coefficients: &[(NodeId, f32)]) -> Result<()> {
         let _operation = self.enter_operation()?;
         self.require_write_access("enable_quiver_corrected_sm")?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         let mut guard = write_or_recover(&self.memtable);
         let mt = &mut *guard;
         self.resource_runtime
@@ -1247,7 +1342,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn enable_quiver_sm_l2(&self) -> Result<()> {
         let _operation = self.enter_operation()?;
         self.require_write_access("enable_quiver_sm_l2")?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         let mut guard = write_or_recover(&self.memtable);
         let mt = &mut *guard;
         self.resource_runtime
@@ -1282,7 +1377,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn enable_quiver_sm_native_l2(&self) -> Result<()> {
         let _operation = self.enter_operation()?;
         self.require_write_access("enable_quiver_sm_native_l2")?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         let mut guard = write_or_recover(&self.memtable);
         let mt = &mut *guard;
         self.resource_runtime
@@ -1338,7 +1433,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn reserve_nodes(&self, additional: usize) -> Result<()> {
         let _operation = self.enter_operation()?;
         self.require_write_access("reserve_nodes")?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         if additional == 0 {
             return Err(TriviumError::InvalidInput(
                 "reserve_nodes 的 additional 必须大于 0".into(),
@@ -1472,7 +1567,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn compact(&mut self) -> Result<()> {
         let _operation = self.enter_maintenance_operation()?;
         self.require_write_access("compact")?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         {
             let mut mt = write_or_recover(&self.memtable);
             tracing::info!("手动压实开始: {}", self.db_path);
@@ -1499,53 +1594,89 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     //  写操作
     // ════════════════════════════════════════════════════════
 
-    pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) -> Result<NodeId> {
-        self.require_write_access("insert")?;
-        let _operation = self.enter_operation()?;
-        reject_hook_reentrant_write()?;
-        self.admit_payload(&payload)?;
-        let payload_str = payload.to_string();
-        if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(crate::error::TriviumError::PayloadTooLarge {
-                size_bytes: payload_str.len(),
-                max_bytes: 8 * 1024 * 1024,
-            });
-        }
-        self.ensure_incremental_memory_budget(
-            vector
-                .len()
-                .saturating_mul(std::mem::size_of::<T>())
-                .saturating_add(payload_str.len())
-                .saturating_add(256),
-        )?;
+    /// 记录当前写入口能够确认的阶段，保留内层事务已经提供的结果。
+    fn write_operation<R>(operation: impl FnOnce(&mut WriteErrorInfo) -> Result<R>) -> Result<R> {
+        let mut write = WriteErrorInfo {
+            transaction_consumed: None,
+            ..WriteErrorInfo::TRANSACTION_ADMISSION
+        };
+        operation(&mut write).map_err(|error| error.with_write_info(write))
+    }
 
-        let id = {
-            let mut mt = write_or_recover(&self.memtable);
-            mt.validate_insert(vector)?;
-            let id = mt.next_id_value();
-            mt.validate_insert_with_id(id, vector)?;
-            mt.ensure_additional_memory(
-                self.memory_limit,
-                mt.estimate_reserve_bytes(1)?
-                    .saturating_add(payload_str.len().saturating_mul(2))
-                    .saturating_add(crate::storage::payload_store::estimate_json_memory(
-                        &payload,
-                    ))
-                    .saturating_add(vector.len().saturating_mul(std::mem::size_of::<T>()))
+    /// WAL 与应用阶段共享恢复保护，WAL 互斥锁在进入应用前归还。
+    fn apply_wal_entry<R>(
+        &self,
+        mt: &mut MemTable<T>,
+        entry: WalEntry<T>,
+        write: &mut WriteErrorInfo,
+        apply: impl FnOnce(&mut MemTable<T>) -> Result<R>,
+    ) -> Result<R> {
+        write.phase = WritePhase::Wal;
+        write.outcome = WriteOutcome::Unknown;
+        lock_or_recover(&self.wal).append(&entry)?;
+        write.phase = WritePhase::Apply;
+        let guard = transaction::ApplicationGuard::direct(mt, &self.wal, &self.lifecycle.0);
+        let result = apply(guard.mt)?;
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::io_result(crate::test_hooks::IoPoint::DirectWriteApply)?;
+        guard.finish();
+        Ok(result)
+    }
+
+    pub fn insert(&mut self, vector: &[T], payload: serde_json::Value) -> Result<NodeId> {
+        Self::write_operation(|write| {
+            self.require_write_access("insert")?;
+            let _operation = self.enter_operation()?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            self.admit_payload(&payload)?;
+            let payload_str = payload.to_string();
+            if payload_str.len() > 8 * 1024 * 1024 {
+                return Err(crate::error::TriviumError::PayloadTooLarge {
+                    size_bytes: payload_str.len(),
+                    max_bytes: 8 * 1024 * 1024,
+                });
+            }
+            self.ensure_incremental_memory_budget(
+                vector
+                    .len()
+                    .saturating_mul(std::mem::size_of::<T>())
+                    .saturating_add(payload_str.len())
                     .saturating_add(256),
             )?;
-            mt.validate_unique_changes([(id, Some(&payload))])?;
-            let mut w = lock_or_recover(&self.wal);
-            w.append(&WalEntry::Insert {
-                id,
-                vector: vector.to_vec(),
-                payload: payload_str,
-            })?;
-            mt.insert_with_id(id, vector, payload)?;
-            id
-        };
-        self.check_memory_pressure();
-        Ok(id)
+
+            let id = {
+                let mut mt = write_or_recover(&self.memtable);
+                mt.validate_insert(vector)?;
+                let id = mt.next_id_value();
+                mt.validate_insert_with_id(id, vector)?;
+                mt.ensure_additional_memory(
+                    self.memory_limit,
+                    mt.estimate_reserve_bytes(1)?
+                        .saturating_add(payload_str.len().saturating_mul(2))
+                        .saturating_add(crate::storage::payload_store::estimate_json_memory(
+                            &payload,
+                        ))
+                        .saturating_add(vector.len().saturating_mul(std::mem::size_of::<T>()))
+                        .saturating_add(256),
+                )?;
+                mt.validate_unique_changes([(id, Some(&payload))])?;
+                self.apply_wal_entry(
+                    &mut mt,
+                    WalEntry::Insert {
+                        id,
+                        vector: vector.to_vec(),
+                        payload: payload_str,
+                    },
+                    write,
+                    |mt| mt.insert_with_id(id, vector, payload),
+                )?;
+                id
+            };
+            self.check_memory_pressure();
+            Ok(id)
+        })
     }
 
     pub fn insert_with_id(
@@ -1554,49 +1685,56 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         vector: &[T],
         payload: serde_json::Value,
     ) -> Result<()> {
-        self.require_write_access("insert_with_id")?;
-        let _operation = self.enter_operation()?;
-        self.admit_payload(&payload)?;
-        let payload_str = payload.to_string();
-        reject_hook_reentrant_write()?;
-        if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(crate::error::TriviumError::PayloadTooLarge {
-                size_bytes: payload_str.len(),
-                max_bytes: 8 * 1024 * 1024,
-            });
-        }
-        self.ensure_incremental_memory_budget(
-            vector
-                .len()
-                .saturating_mul(std::mem::size_of::<T>())
-                .saturating_add(payload_str.len())
-                .saturating_add(256),
-        )?;
-
-        {
-            let mut mt = write_or_recover(&self.memtable);
-            mt.validate_insert_with_id(id, vector)?;
-            mt.ensure_additional_memory(
-                self.memory_limit,
-                mt.estimate_reserve_bytes(1)?
-                    .saturating_add(payload_str.len().saturating_mul(2))
-                    .saturating_add(crate::storage::payload_store::estimate_json_memory(
-                        &payload,
-                    ))
-                    .saturating_add(vector.len().saturating_mul(std::mem::size_of::<T>()))
+        Self::write_operation(|write| {
+            self.require_write_access("insert_with_id")?;
+            let _operation = self.enter_operation()?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            self.admit_payload(&payload)?;
+            let payload_str = payload.to_string();
+            reject_hook_reentrant_access(&self.memtable)?;
+            if payload_str.len() > 8 * 1024 * 1024 {
+                return Err(crate::error::TriviumError::PayloadTooLarge {
+                    size_bytes: payload_str.len(),
+                    max_bytes: 8 * 1024 * 1024,
+                });
+            }
+            self.ensure_incremental_memory_budget(
+                vector
+                    .len()
+                    .saturating_mul(std::mem::size_of::<T>())
+                    .saturating_add(payload_str.len())
                     .saturating_add(256),
             )?;
-            mt.validate_unique_changes([(id, Some(&payload))])?;
-            let mut w = lock_or_recover(&self.wal);
-            w.append(&WalEntry::Insert {
-                id,
-                vector: vector.to_vec(),
-                payload: payload_str,
-            })?;
-            mt.insert_with_id(id, vector, payload)?;
-        }
-        self.check_memory_pressure();
-        Ok(())
+
+            {
+                let mut mt = write_or_recover(&self.memtable);
+                mt.validate_insert_with_id(id, vector)?;
+                mt.ensure_additional_memory(
+                    self.memory_limit,
+                    mt.estimate_reserve_bytes(1)?
+                        .saturating_add(payload_str.len().saturating_mul(2))
+                        .saturating_add(crate::storage::payload_store::estimate_json_memory(
+                            &payload,
+                        ))
+                        .saturating_add(vector.len().saturating_mul(std::mem::size_of::<T>()))
+                        .saturating_add(256),
+                )?;
+                mt.validate_unique_changes([(id, Some(&payload))])?;
+                self.apply_wal_entry(
+                    &mut mt,
+                    WalEntry::Insert {
+                        id,
+                        vector: vector.to_vec(),
+                        payload: payload_str,
+                    },
+                    write,
+                    |mt| mt.insert_with_id(id, vector, payload),
+                )?;
+            }
+            self.check_memory_pressure();
+            Ok(())
+        })
     }
 
     /// 使用自定义 ID 原子插入或覆盖节点的向量与 Payload。
@@ -1606,43 +1744,55 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         vector: &[T],
         payload: serde_json::Value,
     ) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("upsert_with_id")?;
-        let mut tx = transaction::TxBuilder::new();
-        if self.contains(id)? {
-            tx.update_vector(id, vector);
-            tx.update_payload(id, payload);
-        } else {
-            tx.insert_with_id(id, vector, payload);
-        }
-        self.commit_tx(tx).map(|_| ())
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("upsert_with_id")?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            let mut tx = transaction::TxBuilder::new();
+            if self.contains(id)? {
+                tx.update_vector(id, vector);
+                tx.update_payload(id, payload);
+            } else {
+                tx.insert_with_id(id, vector, payload);
+            }
+            self.commit_tx(tx).map(|_| ())
+        })
     }
 
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) -> Result<()> {
-        self.require_write_access("link")?;
-        let _operation = self.enter_operation()?;
-        reject_hook_reentrant_write()?;
-        {
-            let mut mt = write_or_recover(&self.memtable);
-            mt.validate_link(src, dst)?;
-            let growth = mt.estimate_edge_write_bytes(src, dst, label, &serde_json::Value::Null)?;
-            mt.ensure_additional_memory(self.memory_limit, growth)?;
-            if !weight.is_finite() {
-                return Err(TriviumError::InvalidInput(
-                    "边权重必须是有限浮点数 (Edge weight must be finite)".into(),
-                ));
+        Self::write_operation(|write| {
+            self.require_write_access("link")?;
+            let _operation = self.enter_operation()?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            {
+                let mut mt = write_or_recover(&self.memtable);
+                mt.validate_link(src, dst)?;
+                let growth =
+                    mt.estimate_edge_write_bytes(src, dst, label, &serde_json::Value::Null)?;
+                mt.ensure_additional_memory(self.memory_limit, growth)?;
+                if !weight.is_finite() {
+                    return Err(TriviumError::InvalidInput(
+                        "边权重必须是有限浮点数 (Edge weight must be finite)".into(),
+                    ));
+                }
+                self.apply_wal_entry(
+                    &mut mt,
+                    WalEntry::Link::<T> {
+                        src,
+                        dst,
+                        label: label.to_string(),
+                        weight,
+                        metadata: "null".to_string(),
+                    },
+                    write,
+                    |mt| mt.link(src, dst, label.to_string(), weight),
+                )?;
             }
-            let mut w = lock_or_recover(&self.wal);
-            w.append(&WalEntry::Link::<T> {
-                src,
-                dst,
-                label: label.to_string(),
-                weight,
-                metadata: "null".to_string(),
-            })?;
-            mt.link(src, dst, label.to_string(), weight)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn get_edge(
@@ -1717,11 +1867,15 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         weight: f32,
         metadata: serde_json::Value,
     ) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("upsert_edge")?;
-        let mut tx = transaction::TxBuilder::new();
-        tx.upsert_edge(src, dst, label, weight, metadata);
-        self.commit_tx(tx).map(|_| ())
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("upsert_edge")?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            let mut tx = transaction::TxBuilder::new();
+            tx.upsert_edge(src, dst, label, weight, metadata);
+            self.commit_tx(tx).map(|_| ())
+        })
     }
 
     pub fn update_edge(
@@ -1732,17 +1886,22 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         weight: Option<f32>,
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        let edge = self
-            .get_edge(src, dst, label)?
-            .ok_or_else(|| TriviumError::InvalidInput("指定边不存在".into()))?;
-        self.upsert_edge(
-            src,
-            dst,
-            label,
-            weight.unwrap_or(edge.weight),
-            metadata.unwrap_or(edge.metadata),
-        )
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("update_edge")?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            let edge = self
+                .get_edge(src, dst, label)?
+                .ok_or_else(|| TriviumError::InvalidInput("指定边不存在".into()))?;
+            self.upsert_edge(
+                src,
+                dst,
+                label,
+                weight.unwrap_or(edge.weight),
+                metadata.unwrap_or(edge.metadata),
+            )
+        })
     }
 
     /// 当字段当前值等于 `expected` 时原子替换为 `replacement`。
@@ -1753,181 +1912,217 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         expected: &serde_json::Value,
         replacement: serde_json::Value,
     ) -> Result<()> {
-        self.require_write_access("compare_and_set_payload_field")?;
-        if field.is_empty() {
-            return Err(TriviumError::InvalidInput(
-                "条件更新字段不能为空 (Conditional update field cannot be empty)".into(),
-            ));
-        }
-        self.admit_payload(&replacement)?;
-        let _operation = self.enter_operation()?;
-        reject_hook_reentrant_write()?;
-        let mut mt = write_or_recover(&self.memtable);
-        mt.validate_update_payload(id)?;
-        let mut payload = mt
-            .get_payload(id)
-            .map(|payload| (*payload).clone())
-            .ok_or(TriviumError::NodeNotFound(id))?;
-        if payload.get(field) != Some(expected) {
-            return Err(TriviumError::ConditionalUpdateNotMatched { id });
-        }
-        let object = payload.as_object_mut().ok_or_else(|| {
-            TriviumError::InvalidInput(
+        Self::write_operation(|write| {
+            self.require_write_access("compare_and_set_payload_field")?;
+            let _operation = self.enter_operation()?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            if field.is_empty() {
+                return Err(TriviumError::InvalidInput(
+                    "条件更新字段不能为空 (Conditional update field cannot be empty)".into(),
+                ));
+            }
+            self.admit_payload(&replacement)?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            let mut mt = write_or_recover(&self.memtable);
+            mt.validate_update_payload(id)?;
+            let mut payload = mt
+                .get_payload(id)
+                .map(|payload| (*payload).clone())
+                .ok_or(TriviumError::NodeNotFound(id))?;
+            if payload.get(field) != Some(expected) {
+                return Err(TriviumError::ConditionalUpdateNotMatched { id });
+            }
+            let object = payload.as_object_mut().ok_or_else(|| {
+                TriviumError::InvalidInput(
                 "条件更新要求 Payload 为 JSON 对象 (Conditional update requires an object payload)"
                     .into(),
             )
-        })?;
-        object.insert(field.to_owned(), replacement);
-        let encoded = crate::storage::payload_store::json_encoded_len(&payload)?;
-        let additional = encoded.saturating_mul(2).saturating_add(
-            crate::storage::payload_store::estimate_json_memory(&payload),
-        );
-        let current_bytes = mt.estimated_memory_bytes();
-        if self.memory_limit > 0 && current_bytes.saturating_add(additional) > self.memory_limit {
-            return Err(TriviumError::CapacityReservationRejected {
-                requested_nodes: 1,
-                estimated_bytes: additional,
-                current_bytes,
-                memory_limit: self.memory_limit,
-            });
-        }
-        let payload_str = payload.to_string();
-        if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(TriviumError::PayloadTooLarge {
-                size_bytes: payload_str.len(),
-                max_bytes: 8 * 1024 * 1024,
-            });
-        }
-        mt.validate_unique_changes([(id, Some(&payload))])?;
-        lock_or_recover(&self.wal).append(&WalEntry::UpdatePayload::<T> {
-            id,
-            payload: payload_str,
-        })?;
-        mt.update_payload(id, payload)
+            })?;
+            object.insert(field.to_owned(), replacement);
+            let encoded = crate::storage::payload_store::json_encoded_len(&payload)?;
+            let additional = encoded.saturating_mul(2).saturating_add(
+                crate::storage::payload_store::estimate_json_memory(&payload),
+            );
+            let current_bytes = mt.estimated_memory_bytes();
+            if self.memory_limit > 0 && current_bytes.saturating_add(additional) > self.memory_limit
+            {
+                return Err(TriviumError::CapacityReservationRejected {
+                    requested_nodes: 1,
+                    estimated_bytes: additional,
+                    current_bytes,
+                    memory_limit: self.memory_limit,
+                });
+            }
+            let payload_str = payload.to_string();
+            if payload_str.len() > 8 * 1024 * 1024 {
+                return Err(TriviumError::PayloadTooLarge {
+                    size_bytes: payload_str.len(),
+                    max_bytes: 8 * 1024 * 1024,
+                });
+            }
+            mt.validate_unique_changes([(id, Some(&payload))])?;
+            self.apply_wal_entry(
+                &mut mt,
+                WalEntry::UpdatePayload::<T> {
+                    id,
+                    payload: payload_str,
+                },
+                write,
+                |mt| mt.update_payload(id, payload),
+            )
+        })
     }
 
     /// 原子删除去重后的节点集合；任一节点不存在时不执行任何删除。
     pub fn delete_many_atomic(&mut self, ids: &[NodeId]) -> Result<usize> {
-        let _operation = self.enter_operation()?;
-        const MAX_DELETE_NODES: usize = 100_000;
-        const MAX_DELETE_INCIDENT_EDGES: usize = 1_000_000;
-        const MAX_DELETE_WAL_BYTES: usize = 8 * 1024 * 1024;
-        let ids = ids
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>();
-        if ids.len() > MAX_DELETE_NODES {
-            return Err(TriviumError::InvalidInput(format!(
-                "批量删除超过节点预算 {MAX_DELETE_NODES} (Delete set exceeds node budget)"
-            )));
-        }
-        let estimated_wal_bytes = ids.len().saturating_mul(32);
-        if estimated_wal_bytes > MAX_DELETE_WAL_BYTES {
-            return Err(TriviumError::InvalidInput(format!(
-                "批量删除超过 WAL 字节预算 {MAX_DELETE_WAL_BYTES} (Delete set exceeds WAL byte budget)"
-            )));
-        }
-        let incident_edges = {
-            let mt = read_or_recover(&self.memtable);
-            let mut total = 0usize;
-            for id in &ids {
-                if !mt.contains(*id) {
-                    return Err(TriviumError::NodeNotFound(*id));
-                }
-                total = total.saturating_add(mt.incident_edge_count(*id));
-                if total > MAX_DELETE_INCIDENT_EDGES {
-                    return Err(TriviumError::InvalidInput(format!(
-                        "批量删除超过关联边预算 {MAX_DELETE_INCIDENT_EDGES} (Delete set exceeds incident edge budget)"
-                    )));
-                }
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("delete_many_atomic")?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            const MAX_DELETE_NODES: usize = 100_000;
+            const MAX_DELETE_INCIDENT_EDGES: usize = 1_000_000;
+            const MAX_DELETE_WAL_BYTES: usize = 8 * 1024 * 1024;
+            let ids = ids
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
+            if ids.len() > MAX_DELETE_NODES {
+                return Err(TriviumError::InvalidInput(format!(
+                    "批量删除超过节点预算 {MAX_DELETE_NODES} (Delete set exceeds node budget)"
+                )));
             }
-            total
-        };
-        self.ensure_incremental_memory_budget(
-            estimated_wal_bytes
-                .saturating_add(ids.len().saturating_mul(24))
-                .saturating_add(incident_edges.saturating_mul(16)),
-        )?;
-        let count = ids.len();
-        let mut tx = transaction::TxBuilder::new();
-        for id in ids {
-            tx.delete(id);
-        }
-        self.commit_tx(tx)?;
-        Ok(count)
+            let estimated_wal_bytes = ids.len().saturating_mul(32);
+            if estimated_wal_bytes > MAX_DELETE_WAL_BYTES {
+                return Err(TriviumError::InvalidInput(format!(
+                    "批量删除超过 WAL 字节预算 {MAX_DELETE_WAL_BYTES} (Delete set exceeds WAL byte budget)"
+                )));
+            }
+            let incident_edges = {
+                let mt = read_or_recover(&self.memtable);
+                let mut total = 0usize;
+                for id in &ids {
+                    if !mt.contains(*id) {
+                        return Err(TriviumError::NodeNotFound(*id));
+                    }
+                    total = total.saturating_add(mt.incident_edge_count(*id));
+                    if total > MAX_DELETE_INCIDENT_EDGES {
+                        return Err(TriviumError::InvalidInput(format!(
+                            "批量删除超过关联边预算 {MAX_DELETE_INCIDENT_EDGES} (Delete set exceeds incident edge budget)"
+                        )));
+                    }
+                }
+                total
+            };
+            self.ensure_incremental_memory_budget(
+                estimated_wal_bytes
+                    .saturating_add(ids.len().saturating_mul(24))
+                    .saturating_add(incident_edges.saturating_mul(16)),
+            )?;
+            let count = ids.len();
+            let mut tx = transaction::TxBuilder::new();
+            for id in ids {
+                tx.delete(id);
+            }
+            self.commit_tx(tx)?;
+            Ok(count)
+        })
     }
 
     pub fn delete(&mut self, id: NodeId) -> Result<()> {
-        self.require_write_access("delete")?;
-        let _operation = self.enter_operation()?;
-        reject_hook_reentrant_write()?;
-        {
-            let mut mt = write_or_recover(&self.memtable);
-            mt.validate_delete(id)?;
-            mt.reserve_text_deletes(1)?;
-            let mut w = lock_or_recover(&self.wal);
-            w.append(&WalEntry::Delete::<T> { id })?;
-            mt.delete(id)?;
-        }
+        Self::write_operation(|write| {
+            self.require_write_access("delete")?;
+            let _operation = self.enter_operation()?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            {
+                let mut mt = write_or_recover(&self.memtable);
+                mt.validate_delete(id)?;
+                mt.reserve_text_deletes(1)?;
+                self.apply_wal_entry(&mut mt, WalEntry::Delete::<T> { id }, write, |mt| {
+                    mt.delete(id)
+                })?;
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn unlink(&mut self, src: NodeId, dst: NodeId) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("unlink")?;
-        reject_hook_reentrant_write()?;
-        {
-            let mut mt = write_or_recover(&self.memtable);
-            mt.validate_unlink(src)?;
-            let mut w = lock_or_recover(&self.wal);
-            w.append(&WalEntry::Unlink::<T> { src, dst })?;
-            mt.unlink(src, dst)?;
-        }
-        Ok(())
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("unlink")?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            {
+                let mut mt = write_or_recover(&self.memtable);
+                mt.validate_unlink(src)?;
+                self.apply_wal_entry(&mut mt, WalEntry::Unlink::<T> { src, dst }, write, |mt| {
+                    mt.unlink(src, dst)
+                })?;
+            }
+            Ok(())
+        })
     }
 
     pub fn unlink_label(&mut self, src: NodeId, dst: NodeId, label: &str) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("unlink_label")?;
-        reject_hook_reentrant_write()?;
-        let mut mt = write_or_recover(&self.memtable);
-        mt.validate_unlink(src)?;
-        let mut w = lock_or_recover(&self.wal);
-        w.append(&WalEntry::UnlinkLabel::<T> {
-            src,
-            dst,
-            label: label.to_string(),
-        })?;
-        mt.unlink_label(src, dst, label)
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("unlink_label")?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            let mut mt = write_or_recover(&self.memtable);
+            mt.validate_unlink(src)?;
+            self.apply_wal_entry(
+                &mut mt,
+                WalEntry::UnlinkLabel::<T> {
+                    src,
+                    dst,
+                    label: label.to_string(),
+                },
+                write,
+                |mt| mt.unlink_label(src, dst, label),
+            )
+        })
     }
 
     pub fn update_payload(&mut self, id: NodeId, payload: serde_json::Value) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("update_payload")?;
-        reject_hook_reentrant_write()?;
-        self.admit_payload(&payload)?;
-        let payload_str = payload.to_string();
-        if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(crate::error::TriviumError::PayloadTooLarge {
-                size_bytes: payload_str.len(),
-                max_bytes: 8 * 1024 * 1024,
-            });
-        }
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("update_payload")?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            self.admit_payload(&payload)?;
+            let payload_str = payload.to_string();
+            if payload_str.len() > 8 * 1024 * 1024 {
+                return Err(crate::error::TriviumError::PayloadTooLarge {
+                    size_bytes: payload_str.len(),
+                    max_bytes: 8 * 1024 * 1024,
+                });
+            }
 
-        self.ensure_incremental_memory_budget(payload_str.len().saturating_add(128))?;
-        {
-            let mut mt = write_or_recover(&self.memtable);
-            mt.validate_update_payload(id)?;
-            mt.validate_unique_changes([(id, Some(&payload))])?;
-            let mut w = lock_or_recover(&self.wal);
-            w.append(&WalEntry::UpdatePayload::<T> {
-                id,
-                payload: payload_str,
-            })?;
-            mt.update_payload(id, payload)?;
-        }
-        Ok(())
+            self.ensure_incremental_memory_budget(payload_str.len().saturating_add(128))?;
+            {
+                let mut mt = write_or_recover(&self.memtable);
+                mt.validate_update_payload(id)?;
+                mt.validate_unique_changes([(id, Some(&payload))])?;
+                self.apply_wal_entry(
+                    &mut mt,
+                    WalEntry::UpdatePayload::<T> {
+                        id,
+                        payload: payload_str,
+                    },
+                    write,
+                    |mt| mt.update_payload(id, payload),
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// 部分更新节点的 Payload（$set / $inc / $unset）
@@ -1946,65 +2141,81 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// db.patch_payload(id, serde_json::json!({"name": "Bob"}))?;
     /// ```
     pub fn patch_payload(&mut self, id: NodeId, patch: serde_json::Value) -> Result<()> {
-        self.require_write_access("patch_payload")?;
-        let _operation = self.enter_operation()?;
-        reject_hook_reentrant_write()?;
-        self.admit_payload(&patch)?;
-        let final_payload = {
-            let mt = read_or_recover(&self.memtable);
-            mt.preview_patch_payload(id, &patch)?
-        };
+        Self::write_operation(|write| {
+            self.require_write_access("patch_payload")?;
+            let _operation = self.enter_operation()?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            self.admit_payload(&patch)?;
+            let final_payload = {
+                let mt = read_or_recover(&self.memtable);
+                mt.preview_patch_payload(id, &patch)?
+            };
 
-        self.admit_payload(&final_payload)?;
+            self.admit_payload(&final_payload)?;
 
-        let payload_str = final_payload.to_string();
-        if payload_str.len() > 8 * 1024 * 1024 {
-            return Err(crate::error::TriviumError::PayloadTooLarge {
-                size_bytes: payload_str.len(),
-                max_bytes: 8 * 1024 * 1024,
-            });
-        }
-        {
-            let mut mt = write_or_recover(&self.memtable);
-            mt.validate_update_payload(id)?;
-            mt.validate_unique_changes([(id, Some(&final_payload))])?;
-            let mut w = lock_or_recover(&self.wal);
-            w.append(&WalEntry::UpdatePayload::<T> {
-                id,
-                payload: payload_str,
-            })?;
-            mt.update_payload(id, final_payload)?;
-        }
-        Ok(())
+            let payload_str = final_payload.to_string();
+            if payload_str.len() > 8 * 1024 * 1024 {
+                return Err(crate::error::TriviumError::PayloadTooLarge {
+                    size_bytes: payload_str.len(),
+                    max_bytes: 8 * 1024 * 1024,
+                });
+            }
+            {
+                let mut mt = write_or_recover(&self.memtable);
+                mt.validate_update_payload(id)?;
+                mt.validate_unique_changes([(id, Some(&final_payload))])?;
+                self.apply_wal_entry(
+                    &mut mt,
+                    WalEntry::UpdatePayload::<T> {
+                        id,
+                        payload: payload_str,
+                    },
+                    write,
+                    |mt| mt.update_payload(id, final_payload),
+                )?;
+            }
+            Ok(())
+        })
     }
 
     pub fn update_vector(&self, id: NodeId, vector: &[T]) -> Result<()> {
-        self.require_write_access("update_vector")?;
-        let _operation = self.enter_operation()?;
-        reject_hook_reentrant_write()?;
-        self.ensure_incremental_memory_budget(
-            vector
-                .len()
-                .saturating_mul(std::mem::size_of::<T>())
-                .saturating_add(128),
-        )?;
-        #[cfg(feature = "test-hooks")]
-        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeUpdateVectorWriteLock);
-        {
-            let mut mt = write_or_recover(&self.memtable);
+        Self::write_operation(|write| {
+            self.require_write_access("update_vector")?;
+            let _operation = self.enter_operation()?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            self.ensure_incremental_memory_budget(
+                vector
+                    .len()
+                    .saturating_mul(std::mem::size_of::<T>())
+                    .saturating_add(128),
+            )?;
             #[cfg(feature = "test-hooks")]
             crate::test_hooks::hit(
-                crate::test_hooks::ConcurrencyPoint::UpdateVectorWriteLockAcquired,
+                crate::test_hooks::ConcurrencyPoint::BeforeUpdateVectorWriteLock,
             );
-            mt.validate_update_vector(id, vector)?;
-            let mut w = lock_or_recover(&self.wal);
-            w.append(&WalEntry::UpdateVector::<T> {
-                id,
-                vector: vector.to_vec(),
-            })?;
-            mt.update_vector(id, vector)?;
-        }
-        Ok(())
+            {
+                let mut mt = write_or_recover(&self.memtable);
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::hit(
+                    crate::test_hooks::ConcurrencyPoint::UpdateVectorWriteLockAcquired,
+                );
+                mt.validate_update_vector(id, vector)?;
+                self.apply_wal_entry(
+                    &mut mt,
+                    WalEntry::UpdateVector::<T> {
+                        id,
+                        vector: vector.to_vec(),
+                    },
+                    write,
+                    |mt| mt.update_vector(id, vector),
+                )?;
+            }
+            Ok(())
+        })
     }
 
     // ════════════════════════════════════════════════════════
@@ -2075,7 +2286,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn index_keyword(&mut self, id: NodeId, keyword: &str) -> Result<()> {
         self.require_write_access("index_keyword")?;
         let _operation = self.enter_operation()?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         if keyword.is_empty() {
             return Err(TriviumError::InvalidInput("关键词不能为空".into()));
         }
@@ -2089,7 +2300,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn index_text(&mut self, id: NodeId, text: &str) -> Result<()> {
         self.require_write_access("index_text")?;
         let _operation = self.enter_operation()?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         let mut mt = write_or_recover(&self.memtable);
         mt.validate_update_payload(id)?;
         mt.prepare_text_index()?;
@@ -2100,7 +2311,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn build_text_index(&mut self) -> Result<()> {
         self.require_write_access("build_text_index")?;
         let _operation = self.enter_operation()?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         let mut mt = write_or_recover(&self.memtable);
         mt.prepare_text_index()?;
         mt.try_build_text_index()
@@ -2113,7 +2324,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ) -> Result<()> {
         self.require_write_access("rebuild_text_index")?;
         let _operation = self.enter_maintenance_operation()?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         write_or_recover(&self.memtable).rebuild_text_index(documents)
     }
 
@@ -2189,6 +2400,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             hook: Arc::clone(&self.hook),
             quiver_builds: Arc::clone(&self.quiver_builds),
             lifecycle: Arc::clone(&self.lifecycle),
+            _file_lock: Arc::clone(&self._lock_file),
         }
     }
 
@@ -2824,7 +3036,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         &self,
         change: impl FnOnce(&mut MemTable<T>) -> Result<bool>,
     ) -> Result<()> {
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         let mut mt = write_or_recover(&self.memtable);
         mt.ensure_readable()?;
         let mut wal = lock_or_recover(&self.wal);
@@ -2937,7 +3149,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 执行 TQL，并返回可同时承载节点与标量列的一等值结果。
     pub fn tql(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
-        let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
+        let query = crate::query::tql_parser::parse_tql_diagnostic(input)?;
         let mt = read_or_recover(&self.memtable);
         crate::query::tql_executor::execute_tql_values_with_limits(
             &query,
@@ -2952,7 +3164,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         control: crate::query::tql_executor::QueryControl,
     ) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
-        let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
+        let query = crate::query::tql_parser::parse_tql_diagnostic(input)?;
         let mt = read_or_recover(&self.memtable);
         let mut limits = self.tql_limits.clone();
         limits.query_control = Some(control);
@@ -2962,7 +3174,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 执行仅返回节点绑定的 TQL。
     pub fn tql_nodes(&self, input: &str) -> Result<crate::query::tql_executor::TqlResult<T>> {
         let _operation = self.enter_operation()?;
-        let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
+        let query = crate::query::tql_parser::parse_tql_diagnostic(input)?;
         let mt = read_or_recover(&self.memtable);
         crate::query::tql_executor::execute_tql_with_limits(&query, &mt, self.tql_limits.clone())
     }
@@ -2970,7 +3182,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 执行 TQL，并返回可同时承载节点与标量列的一等值结果。
     pub fn query(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
-        let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
+        let query = crate::query::tql_parser::parse_tql_diagnostic(input)?;
         let mt = read_or_recover(&self.memtable);
         crate::query::tql_executor::execute_tql_values_with_limits(
             &query,
@@ -2988,7 +3200,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 解析并准备可重复绑定执行的只读 TQL。
     pub fn prepare_tql(&self, input: &str) -> Result<crate::query::tql_prepared::PreparedTql> {
         let _operation = self.enter_operation()?;
-        let query = crate::query::tql_parser::parse_tql(input).map_err(TriviumError::QueryParse)?;
+        let query = crate::query::tql_parser::parse_tql_diagnostic(input)?;
         Ok(crate::query::tql_prepared::PreparedTql::from_query(query))
     }
 
@@ -3075,139 +3287,144 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         control: Option<crate::query::tql_executor::QueryControl>,
         admit: impl FnOnce(usize, usize) -> Result<()>,
     ) -> Result<crate::query::tql_executor::TqlMutResult> {
-        self.require_write_access("tql_mut")?;
-        let _operation = self.enter_operation()?;
-        use crate::query::tql_ast::TqlStatement;
-        use crate::query::tql_executor::{MutationOp, TqlMutResult};
+        Self::write_operation(|write| {
+            self.require_write_access("tql_mut")?;
+            let _operation = self.enter_operation()?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            use crate::query::tql_ast::TqlStatement;
+            use crate::query::tql_executor::{MutationOp, TqlMutResult};
 
-        let stmt = crate::query::tql_parser::parse_tql_statement(input)
-            .map_err(TriviumError::QueryParse)?;
+            let stmt = crate::query::tql_parser::parse_tql_statement_diagnostic(input)?;
 
-        match stmt {
-            TqlStatement::Query(_) => Err(TriviumError::ApiMigrationRequired {
-                removed_api: "tql_mut(read query)",
-                replacement: "tql() 或 tql_values()",
-            }),
-            TqlStatement::Mutation(mutation) => {
-                let (ops, mut next_id) = {
-                    let mt = read_or_recover(&self.memtable);
-                    let mut limits = self.tql_limits.clone();
-                    if let Some(control) = control {
-                        limits.query_control = Some(control);
-                    }
-                    let ops = if let Some(limit) = plan_limit {
-                        crate::query::tql_executor::execute_tql_mutation_with_operation_budget(
-                            &mutation, &mt, limits, limit,
-                        )?
-                    } else {
-                        crate::query::tql_executor::execute_tql_mutation_with_limits(
-                            &mutation, &mt, limits,
-                        )?
-                    };
-                    (ops, mt.next_id_value())
-                };
-
-                let mut affected = 0usize;
-                let mut var_id_map: std::collections::HashMap<String, u64> =
-                    std::collections::HashMap::new();
-                for op in &ops {
-                    if let MutationOp::InsertNode { var, .. } = op {
-                        if next_id > max_id {
-                            return Err(TriviumError::InvalidInput("节点 ID 超出当前接口范围 (Node ID exceeds this API's supported range)".into()));
+            match stmt {
+                TqlStatement::Query(_) => Err(TriviumError::ApiMigrationRequired {
+                    removed_api: "tql_mut(read query)",
+                    replacement: "tql() 或 tql_values()",
+                }),
+                TqlStatement::Mutation(mutation) => {
+                    let (ops, mut next_id) = {
+                        let mt = read_or_recover(&self.memtable);
+                        let mut limits = self.tql_limits.clone();
+                        if let Some(control) = control {
+                            limits.query_control = Some(control);
                         }
-                        var_id_map.insert(var.clone(), next_id);
-                        next_id = next_id.checked_add(1).ok_or_else(|| {
-                            TriviumError::InvalidInput("节点 ID 已耗尽 (Node IDs exhausted)".into())
-                        })?;
-                    }
-                }
+                        let ops = if let Some(limit) = plan_limit {
+                            crate::query::tql_executor::execute_tql_mutation_with_operation_budget(
+                                &mutation, &mt, limits, limit,
+                            )?
+                        } else {
+                            crate::query::tql_executor::execute_tql_mutation_with_limits(
+                                &mutation, &mt, limits,
+                            )?
+                        };
+                        (ops, mt.next_id_value())
+                    };
 
-                let mut tx_ops = Vec::with_capacity(ops.len());
-                for op in ops {
-                    match op {
-                        MutationOp::InsertNode {
-                            var,
-                            vector,
-                            payload,
-                        } => {
-                            let id = var_id_map[&var];
-                            tx_ops.push(transaction::TxOp::InsertWithId {
-                                id,
+                    let mut affected = 0usize;
+                    let mut var_id_map: std::collections::HashMap<String, u64> =
+                        std::collections::HashMap::new();
+                    for op in &ops {
+                        if let MutationOp::InsertNode { var, .. } = op {
+                            if next_id > max_id {
+                                return Err(TriviumError::InvalidInput("节点 ID 超出当前接口范围 (Node ID exceeds this API's supported range)".into()));
+                            }
+                            var_id_map.insert(var.clone(), next_id);
+                            next_id = next_id.checked_add(1).ok_or_else(|| {
+                                TriviumError::InvalidInput(
+                                    "节点 ID 已耗尽 (Node IDs exhausted)".into(),
+                                )
+                            })?;
+                        }
+                    }
+
+                    let mut tx_ops = Vec::with_capacity(ops.len());
+                    for op in ops {
+                        match op {
+                            MutationOp::InsertNode {
+                                var,
                                 vector,
                                 payload,
-                            });
-                            affected += 1;
-                        }
-                        MutationOp::LinkEdge {
-                            src_id,
-                            dst_id,
-                            src_var,
-                            dst_var,
-                            label,
-                            weight,
-                        } => {
-                            let src = if src_id == 0 {
-                                var_id_map.get(&src_var).copied().ok_or_else(|| {
-                                    TriviumError::QueryExecution(format!(
-                                        "CREATE 边引用了未定义变量 {src_var}"
-                                    ))
-                                })?
-                            } else {
-                                src_id
-                            };
-                            let dst = if dst_id == 0 {
-                                var_id_map.get(&dst_var).copied().ok_or_else(|| {
-                                    TriviumError::QueryExecution(format!(
-                                        "CREATE 边引用了未定义变量 {dst_var}"
-                                    ))
-                                })?
-                            } else {
-                                dst_id
-                            };
-                            tx_ops.push(transaction::TxOp::Link {
-                                src,
-                                dst,
+                            } => {
+                                let id = var_id_map[&var];
+                                tx_ops.push(transaction::TxOp::InsertWithId {
+                                    id,
+                                    vector,
+                                    payload,
+                                });
+                                affected += 1;
+                            }
+                            MutationOp::LinkEdge {
+                                src_id,
+                                dst_id,
+                                src_var,
+                                dst_var,
                                 label,
                                 weight,
-                                metadata: serde_json::Value::Null,
-                            });
-                            affected += 1;
-                        }
-                        MutationOp::UpdateVector { id, vector } => {
-                            tx_ops.push(transaction::TxOp::UpdateVector { id, vector });
-                            affected += 1;
-                        }
-                        MutationOp::UpdatePayload { id, payload } => {
-                            tx_ops.push(transaction::TxOp::UpdatePayload { id, payload });
-                            affected += 1;
-                        }
-                        MutationOp::DeleteNode { id, .. } => {
-                            // 事务删除统一清理关联边；整批节点共享同一预检与 WAL 提交边界。
-                            tx_ops.push(transaction::TxOp::Delete { id });
-                            affected += 1;
+                            } => {
+                                let src = if src_id == 0 {
+                                    var_id_map.get(&src_var).copied().ok_or_else(|| {
+                                        TriviumError::QueryExecution(format!(
+                                            "CREATE 边引用了未定义变量 {src_var}"
+                                        ))
+                                    })?
+                                } else {
+                                    src_id
+                                };
+                                let dst = if dst_id == 0 {
+                                    var_id_map.get(&dst_var).copied().ok_or_else(|| {
+                                        TriviumError::QueryExecution(format!(
+                                            "CREATE 边引用了未定义变量 {dst_var}"
+                                        ))
+                                    })?
+                                } else {
+                                    dst_id
+                                };
+                                tx_ops.push(transaction::TxOp::Link {
+                                    src,
+                                    dst,
+                                    label,
+                                    weight,
+                                    metadata: serde_json::Value::Null,
+                                });
+                                affected += 1;
+                            }
+                            MutationOp::UpdateVector { id, vector } => {
+                                tx_ops.push(transaction::TxOp::UpdateVector { id, vector });
+                                affected += 1;
+                            }
+                            MutationOp::UpdatePayload { id, payload } => {
+                                tx_ops.push(transaction::TxOp::UpdatePayload { id, payload });
+                                affected += 1;
+                            }
+                            MutationOp::DeleteNode { id, .. } => {
+                                // 事务删除统一清理关联边；整批节点共享同一预检与 WAL 提交边界。
+                                tx_ops.push(transaction::TxOp::Delete { id });
+                                affected += 1;
+                            }
                         }
                     }
-                }
 
-                let created_count = tx_ops
-                    .iter()
-                    .filter(|op| {
-                        matches!(
-                            op,
-                            transaction::TxOp::Insert { .. }
-                                | transaction::TxOp::InsertWithId { .. }
-                        )
+                    let created_count = tx_ops
+                        .iter()
+                        .filter(|op| {
+                            matches!(
+                                op,
+                                transaction::TxOp::Insert { .. }
+                                    | transaction::TxOp::InsertWithId { .. }
+                            )
+                        })
+                        .count();
+                    admit(affected, created_count)?;
+                    let created_ids = self.commit_ops(tx_ops)?;
+
+                    Ok(TqlMutResult {
+                        affected,
+                        created_ids,
                     })
-                    .count();
-                admit(affected, created_count)?;
-                let created_ids = self.commit_ops(tx_ops)?;
-
-                Ok(TqlMutResult {
-                    affected,
-                    created_ids,
-                })
+                }
             }
-        }
+        })
     }
 
     // ════════════════════════════════════════════════════════
@@ -3248,7 +3465,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         generation_id: &str,
     ) -> Result<crate::storage::snapshot::GenerationManifest> {
         self.require_write_access("create_snapshot")?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         let _operation = self.enter_maintenance_operation()?;
         let mut mt = write_or_recover(&self.memtable);
         file_format::checkpoint(
@@ -3271,7 +3488,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     fn flush_inner(&self) -> Result<()> {
         self.require_write_access("flush")?;
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         let mut mt = write_or_recover(&self.memtable);
         file_format::checkpoint(
             &mut mt,
@@ -3286,7 +3503,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn close(&mut self) -> Result<()> {
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         self.reject_group_shutdown()?;
         {
             let mut state = lock_or_recover(&self.lifecycle.0);
@@ -3296,7 +3513,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 return self.wait_for_shutdown(None).map(|_| ());
             }
             if state.lifecycle == DatabaseLifecycle::Closed {
-                return Err(TriviumError::DatabaseClosed);
+                return Err(state
+                    .shutdown_error
+                    .take()
+                    .unwrap_or(TriviumError::DatabaseClosed));
             }
             state.lifecycle = DatabaseLifecycle::Closing;
             state.shutdown_phase = ShutdownPhase::Draining;
@@ -3304,7 +3524,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             state.shutdown_last_failure = None;
         }
 
-        self.compaction.take();
+        if let Some(background) = &mut self.compaction {
+            background.stop();
+        }
 
         {
             let mut state = lock_or_recover(&self.lifecycle.0);
@@ -3320,6 +3542,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let _resource_task = match self.resource_runtime.enter_maintenance_task() {
             Ok(task) => task,
             Err(error) => {
+                if let Some(background) = &mut self.compaction {
+                    background.resume();
+                }
                 let mut state = lock_or_recover(&self.lifecycle.0);
                 state.lifecycle = DatabaseLifecycle::Open;
                 state.shutdown_phase = ShutdownPhase::Open;
@@ -3340,6 +3565,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             Ok(())
         };
         if let Err(error) = persisted {
+            if let Some(background) = &mut self.compaction {
+                background.resume();
+            }
             let mut state = lock_or_recover(&self.lifecycle.0);
             state.lifecycle = DatabaseLifecycle::Open;
             state.shutdown_phase = ShutdownPhase::Open;
@@ -3350,14 +3578,20 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             return Err(error);
         }
 
+        self.compaction.take();
         write_or_recover(&self.memtable).release_resource_storage();
-        clear_hook_slot(&self.hook);
+        let result = clear_hook_for_close(&self.hook);
         self.release_lock();
         let mut state = lock_or_recover(&self.lifecycle.0);
         state.lifecycle = DatabaseLifecycle::Closed;
         state.shutdown_phase = ShutdownPhase::Closed;
+        if let Err(error) = &result {
+            state.shutdown_last_error = Some(error.to_string());
+            state.shutdown_last_failure =
+                Some(crate::resources::ResourceFailure::from_error(error));
+        }
         self.lifecycle.1.notify_all();
-        Ok(())
+        result
     }
 
     /// 仅在 close 成功完成持久化后释放文件锁。
@@ -3417,6 +3651,15 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 /// 安全析构：确保 WAL BufWriter 的缓冲数据在 Database 被 drop 时显式落盘。
 impl<T: VectorType> Drop for Database<T> {
     fn drop(&mut self) {
+        // 析构后禁止独立句柄发起新工作；已经准入的操作继续持有自己的存储与文件租约。
+        // 不在此等待调用方持有、尚未执行的 PreparedQuiverBuild，避免同线程自锁。
+        {
+            let mut state = lock_or_recover(&self.lifecycle.0);
+            if state.lifecycle == DatabaseLifecycle::Open {
+                state.lifecycle = DatabaseLifecycle::Closing;
+                state.shutdown_phase = ShutdownPhase::Draining;
+            }
+        }
         // 1. 停止自动压缩线程
         self.compaction.take();
 
@@ -3443,6 +3686,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Database::open(&dir.join("test.tdb").to_string_lossy(), 3).unwrap()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn 单条应用失败隔离已准入句柄并保留可恢复事实() {
+        use crate::test_hooks::{IoPoint, fail_io_at};
+        let mut db = open_db(&format!("direct_quarantine_{}", std::process::id()));
+        db.insert_with_id(1, &[1., 0., 0.], json!({"state":"seed"}))
+            .unwrap();
+        db.flush().unwrap();
+        let handle = db.search_handle();
+        let admitted = handle.enter_operation().unwrap();
+        let failure = fail_io_at(IoPoint::DirectWriteApply);
+        let error = db.update_payload(1, json!({"state":"saved"})).unwrap_err();
+        drop(failure);
+        assert_eq!(error.code(), "TDB_IO");
+        assert!(matches!(
+            admitted.check_recovery(),
+            Err(TriviumError::WalClosed)
+        ));
+        assert!(matches!(
+            handle.enter_operation(),
+            Err(TriviumError::WalClosed)
+        ));
+        assert_eq!(
+            handle
+                .search_batch(
+                    &[vec![1., 0., 0.]],
+                    &Default::default(),
+                    &Default::default()
+                )
+                .unwrap_err()
+                .code(),
+            "TDB_WAL_CLOSED"
+        );
+        let path = db.db_path.clone();
+        drop(db);
+        drop(admitted);
+        drop(handle);
+        let mut recovered = Database::<f32>::open(&path, 3).unwrap();
+        assert_eq!(recovered.all_node_ids().unwrap(), vec![1]);
+        let node = recovered.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, vec![1., 0., 0.]);
+        assert_eq!(node.payload, json!({"state":"saved"}));
+        assert!(node.edges.is_empty());
+        recovered.close().unwrap();
+        drop(recovered);
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
     }
 
     #[cfg(feature = "test-hooks")]
@@ -3538,13 +3829,18 @@ mod tests {
 
         let insert_after_close = db.insert(&[0.0, 1.0, 0.0], json!({}));
         assert!(
-            matches!(insert_after_close, Err(TriviumError::DatabaseClosed)),
+            matches!(
+                insert_after_close.as_ref().unwrap_err().underlying(),
+                TriviumError::DatabaseClosed
+            ),
             "关闭后插入结果异常: {insert_after_close:?}"
         );
         assert!(matches!(db.flush(), Err(TriviumError::DatabaseClosed)));
         assert!(matches!(
-            db.update_vector(id, &[0.0, 0.0, 1.0]),
-            Err(TriviumError::DatabaseClosed)
+            db.update_vector(id, &[0.0, 0.0, 1.0])
+                .unwrap_err()
+                .underlying(),
+            TriviumError::DatabaseClosed
         ));
         assert!(matches!(
             db.search(&[1.0, 0.0, 0.0], 1, 0, 0.0),
@@ -3584,8 +3880,10 @@ mod tests {
             Err(TriviumError::DatabaseLocked(_))
         ));
         assert!(matches!(
-            db.insert(&[0.0, 1.0, 0.0], json!({})),
-            Err(TriviumError::WalClosed)
+            db.insert(&[0.0, 1.0, 0.0], json!({}))
+                .unwrap_err()
+                .underlying(),
+            TriviumError::WalClosed
         ));
     }
 
@@ -3602,41 +3900,56 @@ mod tests {
         db.close_wal_writer_for_test();
 
         assert!(matches!(
-            db.insert(&[0.0, 0.0, 1.0], json!({})),
-            Err(TriviumError::WalClosed)
+            db.insert(&[0.0, 0.0, 1.0], json!({}))
+                .unwrap_err()
+                .underlying(),
+            TriviumError::WalClosed
         ));
         assert_eq!(db.node_count().unwrap(), 2);
         assert!(matches!(
-            db.insert_with_id(42, &[0.0, 0.0, 1.0], json!({})),
-            Err(TriviumError::WalClosed)
+            db.insert_with_id(42, &[0.0, 0.0, 1.0], json!({}))
+                .unwrap_err()
+                .underlying(),
+            TriviumError::WalClosed
         ));
         assert!(!db.contains(42).unwrap());
         assert!(matches!(
-            db.link(second, first, "back", 1.0),
-            Err(TriviumError::WalClosed)
+            db.link(second, first, "back", 1.0)
+                .unwrap_err()
+                .underlying(),
+            TriviumError::WalClosed
         ));
         assert!(db.get_edges(second).unwrap().is_empty());
         assert!(matches!(
-            db.unlink(first, second),
-            Err(TriviumError::WalClosed)
+            db.unlink(first, second).unwrap_err().underlying(),
+            TriviumError::WalClosed
         ));
         assert_eq!(db.get_edges(first).unwrap().len(), 1);
         assert!(matches!(
-            db.update_payload(first, json!({"name": "changed"})),
-            Err(TriviumError::WalClosed)
+            db.update_payload(first, json!({"name": "changed"}))
+                .unwrap_err()
+                .underlying(),
+            TriviumError::WalClosed
         ));
         assert_eq!(db.get_payload(first).unwrap().unwrap()["name"], "first");
         assert!(matches!(
-            db.patch_payload(first, json!({"$set": {"name": "patched"}})),
-            Err(TriviumError::WalClosed)
+            db.patch_payload(first, json!({"$set": {"name": "patched"}}))
+                .unwrap_err()
+                .underlying(),
+            TriviumError::WalClosed
         ));
         assert_eq!(db.get_payload(first).unwrap().unwrap()["name"], "first");
         assert!(matches!(
-            db.update_vector(first, &[9.0, 9.0, 9.0]),
-            Err(TriviumError::WalClosed)
+            db.update_vector(first, &[9.0, 9.0, 9.0])
+                .unwrap_err()
+                .underlying(),
+            TriviumError::WalClosed
         ));
         assert_eq!(db.get(first).unwrap().unwrap().vector, vec![1.0, 0.0, 0.0]);
-        assert!(matches!(db.delete(first), Err(TriviumError::WalClosed)));
+        assert!(matches!(
+            db.delete(first).unwrap_err().underlying(),
+            TriviumError::WalClosed
+        ));
         assert!(db.contains(first).unwrap());
     }
 }

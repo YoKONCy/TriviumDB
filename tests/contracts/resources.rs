@@ -149,8 +149,8 @@ fn run<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(case: &Va
     check_instance(&first, &case["instances"]["closed"]);
     check(runtime.stats(), &case["expected"]["closed_one"]);
     assert!(matches!(
-        first.insert(&vector, json!({})),
-        Err(TriviumError::DatabaseClosed)
+        first.insert(&vector, json!({})).unwrap_err().underlying(),
+        TriviumError::DatabaseClosed
     ));
     let mut replacement = Database::<T>::open_with_runtime(
         &path("replacement"),

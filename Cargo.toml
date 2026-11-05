@@ -47,6 +47,7 @@ crc32fast = "1.5.0"
 roaring = "0.11"
 fs2 = "0.4.3"
 same-file = "1.0"
+uuid = { version = "1", features = ["v4"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 aho-corasick = "1.1.4"
@@ -56,6 +57,9 @@ usearch = { version = "2.25.1", default-features = false, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [build-dependencies]
 napi-build = "2"

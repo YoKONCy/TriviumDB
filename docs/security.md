@@ -10,11 +10,17 @@
 - [数据完整性保障](#数据完整性保障)
 - [内存安全与 unsafe 边界](#内存安全与-unsafe-边界)
 - [资源配额与输入验证](#资源配额与输入验证)
-- [跨平台 I/O 加固](#跨平台-io-加固windows-兼容性)
+- [跨平台 I/O 加固（Windows 兼容性）](#跨平台-io-加固windows-兼容性)
+- [API 迁移与统一错误](#api-迁移与统一错误)
+- [生产错误处理与故障注入验证](#生产错误处理与故障注入验证)
+- [FFI Hook 插件安全](#ffi-hook-插件安全)
+- [附录：unsafe 使用汇总](#附录unsafe-使用汇总)
 
 ---
 
 ## 并发安全模型
+
+宿主通过[内核 SDK](kernel-sdk.md)管理共享请求，存储内核负责下述文件租约、事务与生命周期。`SharedDatabase` 的竞争与重入分别返回 `TDB_BUSY`、`TDB_REENTRANT_ACCESS`；普通请求拒绝保持其他持有者的数据与租约。Hook 重入检查按实例识别，受准入管理的同库调用在获取数据锁前返回错误。
 
 ### 1. 进程级互斥锁（文件锁）
 
@@ -34,13 +40,14 @@ lock_file.try_lock_exclusive().map_err(|_| {
 数据库先将现有主文件或其父目录规范化为绝对路径，再从该规范身份派生 `<db_path>.lock`。Writer 通过 `try_lock_exclusive` 获取排他锁，ReadOnly 通过 `try_lock_shared` 获取共享锁，Immutable 验证代际后直接打开。文件锁由共享所有权句柄持有；显式关闭成功时释放，进行中的异步关闭继续持有它直到工作完成。
 
 **保证**：
-- 同一数据库文件**不可能**被两个进程同时写入
-- 相对路径、绝对路径、`..` 和符号链接别名不能生成独立锁身份
-- Unix 检测到主数据库硬链接时拒绝打开，避免同一 inode 搭配不同 sidecar/WAL/锁前缀
-- 锁文件在进程异常退出后由 OS 自动释放（不同于 PID 文件，不会产生死锁残留）
+
+- 同一数据库文件由一个 Writer 持有排他锁，其他 Writer 打开时返回锁冲突
+- 相对路径、绝对路径、`..` 和符号链接别名统一为规范锁身份
+- Unix 和 Windows 检测到主数据库硬链接时拒绝打开，避免同一文件搭配不同 sidecar/WAL/锁前缀；Windows 通过文件句柄读取链接数，查询失败按原始 I/O 错误拒绝
+- 进程退出后，OS 释放该进程持有的文件锁
 - 在 Linux/macOS（`flock`）和 Windows（`LockFileEx`）上均有效
 
-不得删除仍可能被进程持有的 `.lock` 文件。Unix advisory lock 绑定 inode，删除活跃锁文件后重建同名文件可能绕过原锁。
+> **文件锁提醒**：保留仍可能被进程持有的 `.lock` 文件。Unix advisory lock 绑定 inode，删除后重建同名文件可能绕过原锁。
 
 ---
 
@@ -48,7 +55,7 @@ lock_file.try_lock_exclusive().map_err(|_| {
 
 `MemTable` 使用 `RwLock`：普通无状态查询共享读锁，写入、flush 和 compaction 获取写锁；`Wal` 使用独立 `Mutex`。两类锁均通过恢复封装处理 poison，避免单线程 panic 直接拖垮进程。
 
-完整查询 pipeline 持同一个 MemTable read guard，候选生成、Payload 过滤、QuIVer 精排和结果组装观察同一逻辑版本。开启 fatigue 的有状态查询额外经过 `stateful_search` 串行锁。Hook 在读锁作用域内同线程重入写 API 时返回结构化错误。
+完整查询 pipeline 持同一个 MemTable read guard，候选生成、Payload 过滤、QuIVer 精排和结果组装观察同一逻辑版本。开启 fatigue 的有状态查询额外经过 `stateful_search` 串行锁。Hook 在读锁作用域内同线程重入本库受准入管理的 API 时返回 `TDB_REENTRANT_ACCESS`。
 
 锁顺序不变量：
 
@@ -71,13 +78,18 @@ QuIVer 构建：不得持有 MemTable guard 等待 singleflight Condvar
 写操作保持固定顺序 `MemTable write → WAL Mutex`。事务在持有 MemTable 写锁时完成 Dry-Run、容量预算和整批预留，随后获取 WAL 锁一次性追加事务，最后执行已验证的内存应用。Compaction 同样遵循该顺序，并在主数据保存成功后才清理 WAL。
 
 **保证**：
+
 - 所有多锁路径遵守同一方向，禁止反向获取；
 - 容量、维度、ID、Payload 等错误发生在 WAL 之前；
 - WAL 成功后内存应用只执行已经 Dry-Run 验证的操作。
 
-数据库关闭使用 `Open → Closing → Closed` 状态机和活动操作 RAII 计数。进入 `Closing` 后新操作返回 `DatabaseClosed`。同步 `close()` 等待已有操作结束并完成持久化；失败时恢复 `Open` 并保留文件锁，成功时释放锁与配额。
+数据库关闭使用 `Open → Closing → Closed` 状态机和活动操作 RAII 计数。进入 `Closing` 后新操作返回 `DatabaseClosed`。同步 `close()` 等待已有操作结束并完成持久化；准入或持久化失败时恢复 `Open`、原周期维护登记并保留文件锁，成功时释放锁与配额。持久化后 Hook 析构异常仍完成资源释放并报告结构化错误，具体见[关闭协议](lifecycle-snapshots.md#关闭协议)。普通析构会停止新操作准入，独立查询句柄及已准备的构建任务继续持有存储对应的文件租约，直至自身释放。
 
 受控关闭通过 `request_shutdown()` 登记排空与保存任务，`close_timeout()` 在期限内等待，`shutdown_status()` 提供阶段和结构化故障。等待超时后，任务继续持有数据、配额和文件锁。异步保存失败进入 `failed` 状态，调用方取得原始错误后可发起重试。详见[关闭协议](lifecycle-snapshots.md#关闭协议)。
+
+当前开发版本的嵌入式 Console 提供显式版本保护事务：节点快照与全库版本共用读锁，前置条件与 WAL 提交共用事务写锁。宿主普通写入也推进版本，版本令牌在当前实例内有效。回执以原版本和完整操作匹配。详细契约见[编辑协议](embedded-console.md#编辑快照冲突与原事务确认)。
+
+> **接入提醒**：权限由宿主单独控制；编辑保护需显式调用 guardedTransaction。回执淘汰或重开后返回未知结果时，应核对整笔事务的实际数据。
 
 ---
 
@@ -145,7 +157,7 @@ if len > 256 * 1024 * 1024 {
 }
 ```
 
-防止损坏的 `len` 字段触发天量内存分配（OOM 或 DoS）。
+长度上限用于在分配缓冲区之前拒绝异常帧。
 
 ---
 
@@ -156,7 +168,7 @@ if len > 256 * 1024 * 1024 {
 崩溃恢复时对事务做两阶段过滤：只有见到匹配 `TxCommit` 的事务才会回放，否则整体丢弃：
 
 | 状态 | 行为 |
-|---|---|
+| --- | --- |
 | TxBegin + 匹配 TxCommit | 全量回放 |
 | TxBegin，无 TxCommit（掉电） | **整体丢弃，并物理截断 WAL 尾部（Partial Truncation）** |
 | 有当前版本头的独立操作 | 作为当前非事务 CRUD 记录直接回放，推进安全游标 |
@@ -217,7 +229,7 @@ ReadWrite/ReadOnly 类型不匹配返回 `DtypeMismatch`，并保留 `stored`、
 
 ```rust
 pub enum SyncMode {
-    Full,    // 每条后 fsync — 防 OS 崩溃，金融级
+    Full,    // 每条写入后执行 fsync
     Normal,  // 每条后 flush 到 OS 缓冲 — 防进程崩溃（默认）
     Off,     // 不主动 flush — 仅测试
 }
@@ -287,7 +299,7 @@ if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
 cosine_similarity_scalar(a, b) // 安全标量回退
 ```
 
-不支持 AVX2 的 CPU 自动回退到纯 Rust 路径，**不会执行非法指令**。
+CPU 支持 AVX2 时使用对应实现，其余情况使用标量 Rust 路径。
 
 ---
 
@@ -322,15 +334,15 @@ pub trait VectorType: bytemuck::Zeroable + bytemuck::Pod + ...
 3. 超预算、溢出或 `try_reserve` 失败时返回结构化错误；
 4. 只有预留和全部 Dry-Run 验证成功后才写 WAL。
 
-逻辑原子性保证节点、ID、generation 和 WAL 在失败后保持原值。预留过程中已经取得的空 capacity 可能保留供后续操作使用。内核按实例内存估算和已接入工作区执行预算检查；进程容量评估另行记录 Python/NumPy、V8、其他线程、mmap 驻留与页缓存开销。
+预检失败时，节点、ID、generation 和 WAL 保持原值。预留过程中已经取得的空 capacity 可能保留供后续操作使用。内核按实例内存估算和已接入工作区执行预算检查；进程容量评估另行记录 Python/NumPy、V8、其他线程、mmap 驻留与页缓存开销。
 
 共享 `ResourceRuntime` 在数据库打开时登记声明配额，并在操作前预留前台或维护工作区。维护保护额度属于总预算。调整配额失败保留原值，成功关闭归还本实例登记。预算错误包含 `resource/requested/used/limit`，Python 异常与 Node 同步/异步错误提供对应字段。配置与统计见[共享资源运行时](resource-runtime.md)。
 
-QuIVer 构建有独立峰值预算，流式准备 BQ2 与默认 SM 状态，避免 FP16 全库临时展开为 FP32。默认查询的紧凑状态与显式模式安装的临时峰值应分别核算，详见 [QuIVer 内存与重载说明](quiver.md#增量维护重载与内存)。纯 `flush()` 和 compaction 不会隐式触发 ANN 构建。
+QuIVer 构建有独立峰值预算，流式准备 BQ2 与默认 SM 状态，避免 FP16 全库临时展开为 FP32。默认查询的紧凑状态与显式模式安装的临时峰值应分别核算，详见 [QuIVer 内存与重载说明](quiver.md#增量维护重载与内存)。`flush()` 和 compaction 负责持久化，ANN 构建由查询准备或显式入口触发。
 
 构图连通性保护的父节点数组、预分配遍历栈和访问位图在分配前纳入峰值预算；父节点数组也计入索引热内存。重载不补拓扑：旧图通过重建应用新规则，断连图按已有缺失索引策略处理。
 
-查询统一受四类预算约束：QueryMemoryBudget（候选/union/精排向量/页读取字节）、TraversalBudget（visited/edges/frontier/depth）、PipelineBudget（NodeSet 节点与字节）和 QueryParallelismBudget（线程与并行阈值）。分配前检查、按阶段切片；Error 模式 fail-closed，只有显式 Partial 策略才允许带 truncated 标记返回。GraphFirst、路径、集合、图算法和聚合不得偷偷退化为无界全库执行。
+查询统一受四类预算约束：QueryMemoryBudget（候选/union/精排向量/页读取字节）、TraversalBudget（visited/edges/frontier/depth）、PipelineBudget（NodeSet 节点与字节）和 QueryParallelismBudget（线程与并行阈值）。分配前检查、按阶段切片；Error 模式 fail-closed，只有显式 Partial 策略才允许带 truncated 标记返回。GraphFirst、路径、集合、图算法和聚合同样遵守各阶段预算。
 
 ---
 
@@ -352,7 +364,7 @@ if vector.len() != self.dim {
 }
 ```
 
-所有写入向量路径（`insert`、`insert_with_id`、`update_vector`、事务 Dry-Run）均强校验维度，返回类型化错误而非 panic。
+所有写入向量路径（`insert`、`insert_with_id`、`update_vector`、事务 Dry-Run）均强校验维度，维度不符时返回类型化错误。
 
 ---
 
@@ -371,7 +383,7 @@ for item in qv {
 }
 ```
 
-NaN 进入余弦计算会传染整个结果。在检索管线 L0 层直接拦截，防止毒素向量污染后续所有计算。
+检索管线在输入校验阶段拒绝 NaN 和 Infinity，后续余弦计算接收经过验证的有限数值。
 
 ---
 
@@ -390,13 +402,13 @@ config.dpp_quality_weight = config.dpp_quality_weight.clamp(0.0, 10.0);
 
 ---
 
-### 22. 事务 Dry-Run 预检与极巨载荷拦截（零损伤回滚）
+### 22. 事务 Dry-Run 预检与载荷限制
 
 **实现位置**：[事务提交预检](../src/database/transaction.rs)与[直写 API](../src/database/mod.rs)
 
-所有业务验证（节点是否存在、ID 是否冲突、维度是否匹配、是否包含 NaN/Inf）在**纯内存虚拟状态**上完成，不触碰 MemTable 或 WAL。
+业务预检在临时状态上验证节点存在性、ID、维度和有限数值；实际事实与 WAL 在预检期间保持原样。
 
-**防OOM极巨载荷拦截 (Payload Limiting)**：为防止恶意构造或意外产生的数以百兆计的超大 Payload 文本占用物理内存和撑爆日志，`Database::insert`、`update_payload` 和 `Transaction::commit` 会强制性对 JSON 载荷施加 **8MB 大小限制** (`MAX_PAYLOAD_SIZE`)。超越此数值的数据写入将被直接判定失败，保护操作系统的内存水位和文件视窗。
+**Payload 大小限制**：`Database::insert`、`update_payload` 和 `Transaction::commit` 对 JSON 载荷执行 **8 MiB** 上限检查（`MAX_PAYLOAD_SIZE`）。超过上限时在写入前返回错误。
 
 预检按缓冲操作顺序更新每个 ID 的存在状态，覆盖删除、重建、修改和再次删除。JSON 在 WAL 前检查可恢复性；预检失败时节点、索引、ID 分配状态和 WAL 保持原样。容量预留完成后先提交 WAL，再应用已校验的原始值并同步索引；WAL I/O 失败向调用方传播原始错误，该批内存操作尚未应用。
 
@@ -407,7 +419,7 @@ config.dpp_quality_weight = config.dpp_quality_weight.clamp(0.0, 10.0);
 **实现位置**：`storage/memtable.rs:update_vector()`
 
 ```rust
-// 必须检查 payload 存在性，而非 ids_to_indices
+// 通过 payload 存在性判断节点存活状态
 // delete() 移除 payload 但 ids_to_indices 中的槽位仍存在（指向已置零位置）
 if !self.payloads.contains_key(&id) {
     return Err(TriviumError::NodeNotFound(id));
@@ -418,17 +430,19 @@ if !self.payloads.contains_key(&id) {
 
 ---
 
-### 24. QuIVer 索引与 FreeList 墓碑复用（零 Ghost Node）
+### 24. QuIVer 索引与 FreeList 墓碑复用
 
 **实现位置**：[节点删除](../src/database/mod.rs)、[MemTable](../src/storage/memtable.rs)、[QuIVer](../src/index/quiver.rs)
 
-传统图索引（如 HNSW）在节点被逻辑删除后，会在索引图中留下幽灵引用，导致检索结果污染和性能退化。TriviumDB 通过 **FreeList 墓碑隐式复用机制** + **QuIVer 增量图维护** 彻底消除了该问题：
+TriviumDB 通过 FreeList 复用已删除节点的槽位，并同步维护 QuIVer 的节点存活状态：
 
-- **原位物理擦除**：无需进行极其耗时的全局紧凑，已删除的 `index` 将被推入快速复用队列。下一个插入的节点直接占据其所在的物理行。
-- **并行特征网同步清零**：删除节点时，对应的 `fast_tags` 位特征槽立即置零，杜绝废弃指纹被误读；
+- **槽位复用**：删除后的槽位进入 FreeList，后续插入可以复用对应物理行。
+- **快速标签清理**：删除节点时同步清零对应 `fast_tags` 槽位；
 - **QuIVer 增量同步**：QuIVer 图索引支持 Tombstone 软删除，删除比例达 25% 时自动触发重建，保证图结构质量。
 
-**保证**：删除操作对检索质量零副作用，无空间碎片，无需用户手动触发重建，不仅杜绝了 Ghost Node 幽灵节点，更实现了无限频次改写下的 `O(1)` 平均生命周期开销！
+查询按存活状态筛选结果，槽位复用减少重复插入和删除造成的存储增长。
+
+> **维护提醒**：持续更新后的索引质量和资源开销应结合业务数据评估；重建策略见 [QuIVer 说明](quiver.md#增量维护重载与内存)。
 
 ---
 
@@ -463,7 +477,7 @@ self.mmap = None;           // 先解除内核映射锁
 robust_rename(&tmp, dst)?;  // 再执行原子替换
 ```
 
-Windows 强制锁定语义：映射存活时 rename 目标文件必定 `ERROR_ACCESS_DENIED`。先 Drop mmap，COW 私有脏页安全丢弃（数据已写入 .tmp）。
+Windows 上仍被映射的目标文件可能阻止替换。流程先将数据写入临时文件，再释放旧 mmap 并执行 rename。
 
 ---
 
@@ -471,15 +485,15 @@ Windows 强制锁定语义：映射存活时 rename 目标文件必定 `ERROR_AC
 
 **实现位置**：`storage/file_format.rs` 和 `storage/vec_pool.rs`
 
-Windows 杀毒软件在文件关闭瞬间抢占扫描，通常几毫秒后自动释放。实现指数退避重试（1→2→4→…→50ms，最多 10 次）仅针对 `ERROR_ACCESS_DENIED(5)` 和 `ERROR_SHARING_VIOLATION(32)`，其他错误立即快速失败。非 Windows 平台编译为直接调用 `std::fs::rename`，零开销。
+Windows 上文件扫描等活动可能短暂占用文件。实现指数退避重试（1→2→4→…→50ms，最多 10 次）仅针对 `ERROR_ACCESS_DENIED(5)` 和 `ERROR_SHARING_VIOLATION(32)`，其他错误立即快速失败。非 Windows 平台直接调用 `std::fs::rename`。
 
 ---
 
-### 28. WAL 清空使用 truncate 而非 remove+create
+### 28. WAL 截断清理
 
 **实现位置**：`storage/wal.rs`
 
-`truncate(true)` 保留 inode，不触发杀软的"新文件扫描"；截断后立即写回固定 6 字节 WAL 版本头，避免 WAL clear 期间再次产生文件锁冲突。
+`truncate(true)` 在原文件上清理 WAL，保留文件身份；截断后写回固定 6 字节版本头。
 
 ---
 
@@ -492,7 +506,7 @@ Windows 杀毒软件在文件关闭瞬间抢占扫描，通常几毫秒后自动
 #[cfg(target_os = "linux")]
 libc::madvise(ptr, len, libc::MADV_DONTNEED);
 ```
-对于数十 GB 的向量基库，单纯依靠 OS 自我调节 LRU 会引发主机端周期性严重卡顿（Threshing）。引擎使用安全封装的非阻塞 FFI 建议系统，配合 Windows 的 `VirtualUnlock` 提供安全回收，以极低的成本维持了 60 帧 0 卡顿的主机交互体验。
+页面回收用于减少已持久化冷向量的驻留工作集。实际驻留量取决于操作系统、存储和访问模式；加载成本与运行期资源用量应分别记录。
 
 ---
 
@@ -508,16 +522,20 @@ libc::madvise(ptr, len, libc::MADV_DONTNEED);
 
 Python/Node 绑定应通过中央转换器保留核心错误类别；控制流依赖枚举或稳定 code，不匹配中英文错误字符串。QuIVer profiler/连通性信息统一走 `tracing`，不直接写 stderr。
 
-## 生产路径零 panic 与故障注入验证
+---
 
-生产可达的 `panic!` / `unreachable!` 已全部消除：解析器枚举转换返回 parse error、执行器聚合分支返回 execution error、mmap 对齐在打开阶段返回结构化错误，内部不变量使用显式校验而非 `unwrap/expect`。静态门禁防止生产代码重新引入 `panic!/unreachable!`。
+## 生产错误处理与故障注入验证
 
-故障注入均使用小型 fixture 与隔离子进程，不会耗尽测试机的物理内存或磁盘：
+生产路径通过结构化错误处理异常：解析器枚举转换返回 parse error、执行器聚合分支返回 execution error、mmap 对齐在打开阶段返回结构化错误，内部不变量通过显式校验处理。静态门禁防止生产代码重新引入 `panic!/unreachable!`。
 
-- **发布阶段强杀矩阵**：启用 `test-hooks` 后，首次 flush、追加与 2048×65 更新/删除/compaction 在备份、向量、主文件、marker 和恢复途中由父进程强杀；必须重开并逐项验证全部已同步事务，再 flush/reopen 验证持久化，不能以拒绝打开通过验收。这是进程中断模拟，不等同于真实物理断电；
+故障注入使用小型 fixture、受控 failpoint 和隔离子进程：
+
+- **发布阶段强杀矩阵**：启用 `test-hooks` 后，首次 flush、追加与 2048×65 更新/删除/compaction 在备份、向量、主文件、marker 和恢复途中由父进程强杀；必须重开并逐项验证全部已同步事务，再 flush/reopen 验证持久化；覆盖范围为进程中断恢复；
 - **确定性 I/O failpoint**：在 Create/Write/Sync/Rename 等定点注入失败，验证临时文件清理与错误传播；
 - **allocator failure**：仅在目标 failpoint 后拒绝分配，验证 `try_reserve` 路径的结构化错误与零部分提交；
 - **格式规格测试**：独立于生产解析器的字段规格 + 结构化 mutation（字段边界/截断/位翻转/CRC 修复），并验证 ReadOnly 对任何损坏输入字节级零写。
+
+---
 
 ## FFI Hook 插件安全
 
@@ -525,12 +543,12 @@ Python/Node 绑定应通过中央转换器保留核心错误类别；控制流�
 
 **实现位置**：`hook.rs:FfiHook::load()`
 
-`FfiHook` 允许在运行时加载 C/C++ 动态库（`.so` / `.dll` / `.dylib`）作为检索管线的自定义扩展。这是一个**有意设计的安全边界开放点**，需要用户明确理解其风险。
+`FfiHook` 允许在运行时加载 C/C++ 动态库（`.so` / `.dll` / `.dylib`）作为检索管线的自定义扩展。插件代码使用宿主进程的地址空间和权限。
 
 **威胁模型**：
 
 | 风险 | 等级 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | 任意代码执行 | 🔴 高 | 动态库内的代码在进程内执行，拥有与宿主进程完全相同的权限 |
 | 堆破坏 / 段错误 | 🔴 高 | C/C++ 插件的内存错误可导致宿主进程崩溃 |
 | 数据窃取 | 🟡 中 | 插件可读取进程内存中的任何数据（向量、payload 等） |
@@ -538,7 +556,7 @@ Python/Node 绑定应通过中央转换器保留核心错误类别；控制流�
 
 **缓解措施**：
 
-1. **符号可选加载 + ABI 版本门禁**：`FfiHook` 使用 `libloading::Library::get()` 按名称查找符号。未找到的符号静默降级为 NoopHook，**不会因缺少符号而崩溃**。导出 `trivium_hook_invoke_v2` 六阶段入口的插件必须同时导出返回 ABI 版本的 `trivium_hook_abi_version`，与内核期望的 `FFI_HOOK_ABI_VERSION = 2` 不一致时明确拒绝加载，避免跨 ABI 误读内存。
+1. **符号可选加载 + ABI 版本门禁**：`FfiHook` 使用 `libloading::Library::get()` 按名称查找符号。可选符号缺失时使用对应的 NoopHook 行为。导出 `trivium_hook_invoke_v2` 六阶段入口的插件必须同时导出返回 ABI 版本的 `trivium_hook_abi_version`，与内核期望的 `FFI_HOOK_ABI_VERSION = 2` 不一致时明确拒绝加载，避免跨 ABI 误读内存。
 
 2. **调用隔离**：所有 FFI 回调在 Rust 侧包装，返回值经过有效性检查后才被消费。C 侧返回的 `null` 指针会被安全处理。
 
@@ -554,7 +572,7 @@ db.load_ffi_hook("./libmy_verified_plugin.so")
 db.clear_hook()
 ```
 
-> ⚠️ **安全警告**：`load_ffi_hook()` 加载的动态库将在进程内执行**任意原生代码**。请确保：
+> **安全提醒**：`load_ffi_hook()` 加载的动态库将在进程内执行**任意原生代码**。请确保：
 > 1. 动态库来自可信来源或经过安全审计
 > 2. 在生产环境中不要加载用户提交的未经验证的动态库
 > 3. 建议在沙箱/容器环境中隔离使用 FFI Hook
@@ -568,11 +586,12 @@ db.clear_hook()
 `SearchHook` trait 要求实现 `Send + Sync`，这是编译器层面的强制约束。任何自定义 Hook 实现如果包含非线程安全的内部状态，编译器将直接拒绝编译。
 
 **保证**：
+
 - `NoopHook`：零状态，天然线程安全
-- `CompositeHook`：通过 `Vec<Arc<dyn SearchHook>>` 持有子 Hook，Arc 自动保证线程安全
+- `CompositeHook`：通过 `Vec<Arc<dyn SearchHook>>` 共享子 Hook，子 Hook 同样满足 `SearchHook` 的线程安全约束
 - `FfiHook`：`libloading::Library` 是 `Send + Sync` 的，函数指针无状态
 
-> 💡 如果你的 Rust 自定义 Hook 需要内部可变状态，请使用 `Mutex<T>` 或 `RwLock<T>` 包装。
+> **提醒**：如果你的 Rust 自定义 Hook 需要内部可变状态，请使用 `Mutex<T>` 或 `RwLock<T>` 包装。
 
 ---
 
@@ -580,9 +599,10 @@ db.clear_hook()
 
 **实现位置**：`hook.rs:HookContext`
 
-每次 `search_hybrid_with_context()` 调用创建一个独立的 `HookContext` 实例，不在多次查询之间共享。Hook 注入的 `custom_data` 和计时统计在查询结束后随 `HookContext` 一并返回给调用方，**不残留在引擎内部状态中**。
+每次 `search_hybrid_with_context()` 调用创建独立的 `HookContext`。Hook 注入的 `custom_data` 和计时统计在查询结束后随上下文返回调用方。
 
 **保证**：
+
 - 不同查询之间的 Hook 状态完全隔离
 - Hook 无法通过 `HookContext` 修改引擎的持久化状态
 - `abort` 标志仅影响当前查询的管线执行，不影响后续查询
@@ -592,7 +612,7 @@ db.clear_hook()
 ## 附录：unsafe 使用汇总
 
 | 位置 | unsafe 操作 | 安全契约 |
-|---|---|---|
+| --- | --- | --- |
 | `storage/vec_pool.rs` | mmap、裸切片与页面建议 | 文件/映射生命周期、长度与对齐、映射访问边界 |
 | `storage/file_format.rs`、`graph_blocks.rs`、`payload_store.rs`、`index/property.rs` | 只读映射或字节转换 | 格式几何与完整性校验、对齐、引用寿命和发布顺序 |
 | `index/bq.rs` | 标量裸指针、SIMD 与预取 | 有效行偏移、完整 chunk/尾块边界、指令集与分配长度 |
@@ -603,5 +623,3 @@ db.clear_hook()
 | `observability.rs` | Windows 外部系统调用 | API 参数、缓冲区布局与返回值检查 |
 
 上表列出各模块的审核范围与安全契约。手工 `Send/Sync` 按内部访问、所有权和同步条件逐项审核。`unsafe_audit` 执行专项回归，ASan、TSan、Miri 按各自范围运行；验收记录关联具体提交、平台和实际执行路径。
-
-

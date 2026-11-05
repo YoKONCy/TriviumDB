@@ -151,7 +151,7 @@ fn 符号链接别名在权限允许时不能绕过writer锁() {
     std::fs::remove_dir_all(root).ok();
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn 硬链接主文件被安全拒绝以防独立sidecar锁身份() {
     let root = tmp_root("hard_link");
@@ -173,4 +173,89 @@ fn 硬链接主文件被安全拒绝以防独立sidecar锁身份() {
         Err(TriviumError::InvalidInput(_))
     ));
     std::fs::remove_dir_all(root).ok();
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn 活跃writer的硬链接别名在创建sidecar前拒绝且完整文件组不变() {
+    use std::collections::BTreeMap;
+    use triviumdb::database::{AccessMode, Config, StorageMode};
+    for mode in [StorageMode::Mmap, StorageMode::Rom] {
+        let root = tmp_root(&format!("active-hard-link-{mode:?}"));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("data.tdb");
+        let alias = root.join("alias.tdb");
+        let mut db = Database::<f32>::open_with_config(
+            path.to_str().unwrap(),
+            Config {
+                dim: 2,
+                storage_mode: mode,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.insert_with_id(1, &[1., 0.], json!({"state":"checkpoint"}))
+            .unwrap();
+        db.flush().unwrap();
+        db.set_sync_mode(triviumdb::storage::wal::SyncMode::Full)
+            .unwrap();
+        db.insert_with_id(2, &[0., 1.], json!({"state":"wal"}))
+            .unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+        let snapshot = || {
+            std::fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let bytes = if entry
+                        .path()
+                        .extension()
+                        .is_some_and(|value| value == "lock")
+                    {
+                        // Windows 租约锁定字节范围；协调文件仍必须保持空内容。
+                        assert_eq!(entry.metadata().unwrap().len(), 0);
+                        Vec::new()
+                    } else {
+                        std::fs::read(entry.path()).unwrap()
+                    };
+                    (entry.file_name(), bytes)
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = snapshot();
+        for access_mode in [
+            AccessMode::ReadWrite,
+            AccessMode::ReadOnly,
+            AccessMode::Immutable,
+        ] {
+            assert!(matches!(
+                Database::<f32>::open_with_config(
+                    alias.to_str().unwrap(),
+                    Config {
+                        dim: 2,
+                        access_mode,
+                        ..Default::default()
+                    }
+                ),
+                Err(TriviumError::InvalidInput(_))
+            ));
+            assert_eq!(snapshot(), before);
+        }
+        std::fs::remove_file(alias).unwrap();
+        db.close().unwrap();
+        let mut reopened = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+        assert_eq!(reopened.node_count().unwrap(), 2);
+        assert_eq!(reopened.get(1).unwrap().unwrap().vector, vec![1., 0.]);
+        assert_eq!(
+            reopened.get_payload(1).unwrap().unwrap(),
+            json!({"state":"checkpoint"})
+        );
+        assert_eq!(reopened.get(2).unwrap().unwrap().vector, vec![0., 1.]);
+        assert_eq!(
+            reopened.get_payload(2).unwrap().unwrap(),
+            json!({"state":"wal"})
+        );
+        reopened.close().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

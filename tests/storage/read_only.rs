@@ -126,13 +126,31 @@ fn 只读句柄拒绝写入事务索引和持久化操作() {
     let path = tmp_db("guards");
     let id = create_clean_database(&path);
     let mut db = Database::<f32>::open_read_only(&path, 2).unwrap();
+    for (operation, error) in [
+        (
+            "update_edge",
+            db.update_edge(999, 998, "missing", Some(1.), None)
+                .unwrap_err(),
+        ),
+        (
+            "delete_many_atomic",
+            db.delete_many_atomic(&[999]).unwrap_err(),
+        ),
+    ] {
+        assert_eq!(error.code(), "TDB_READ_ONLY");
+        assert_eq!(error.details(), json!({"operation":operation}));
+        assert_eq!(
+            serde_json::to_value(error.info()).unwrap()["write"],
+            json!({"phase":"admission","outcome":"not_committed"})
+        );
+    }
     assert!(matches!(
-        db.insert(&[0.0, 1.0], json!({})),
-        Err(TriviumError::ReadOnlyViolation { .. })
+        db.insert(&[0.0, 1.0], json!({})).unwrap_err().underlying(),
+        TriviumError::ReadOnlyViolation { .. }
     ));
     assert!(matches!(
-        db.update_vector(id, &[0.0, 1.0]),
-        Err(TriviumError::ReadOnlyViolation { .. })
+        db.update_vector(id, &[0.0, 1.0]).unwrap_err().underlying(),
+        TriviumError::ReadOnlyViolation { .. }
     ));
     assert!(matches!(
         db.flush(),
@@ -157,8 +175,8 @@ fn 只读句柄拒绝写入事务索引和持久化操作() {
     let mut tx = db.begin_tx();
     tx.insert(&[0.0, 1.0], json!({}));
     assert!(matches!(
-        tx.commit(),
-        Err(TriviumError::ReadOnlyViolation { .. })
+        tx.commit().unwrap_err().underlying(),
+        TriviumError::ReadOnlyViolation { .. }
     ));
     assert_eq!(db.node_count().unwrap(), 1);
     assert_eq!(db.search(&[1.0, 0.0], 1, 0, 0.0).unwrap()[0].id, id);

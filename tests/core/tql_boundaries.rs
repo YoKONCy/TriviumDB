@@ -246,7 +246,7 @@ fn 默认列名区分字面量且重复列显式拒绝() {
         "MATCH (n) AS n WITH n RETURN n, n",
     ] {
         assert!(
-            matches!(db.tql(query), Err(TriviumError::QueryParse(_))),
+            matches!(db.tql(query), Err(TriviumError::QuerySyntax { .. })),
             "{query}"
         );
     }
@@ -589,7 +589,7 @@ fn prepared默认列名稳定且非法槽位和未绑定参数明确拒绝() {
         "MATCH (a) RETURN missing IS NULL",
     ] {
         assert!(
-            matches!(db.tql(query), Err(TriviumError::QueryParse(_))),
+            matches!(db.tql(query), Err(TriviumError::QuerySyntax { .. })),
             "{query}"
         );
     }

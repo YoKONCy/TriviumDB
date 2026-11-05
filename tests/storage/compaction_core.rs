@@ -464,7 +464,14 @@ fn COV_07_memory_limit_rejects_without_auto_flush() {
             serde_json::json!({"data": "x".repeat(50)}),
         ) {
             Ok(_) => inserted += 1,
-            Err(triviumdb::TriviumError::CapacityReservationRejected { .. }) => break,
+            Err(error)
+                if matches!(
+                    error.underlying(),
+                    triviumdb::TriviumError::CapacityReservationRejected { .. }
+                ) =>
+            {
+                break;
+            }
             Err(error) => panic!("内存门禁返回意外错误: {error}"),
         }
     }

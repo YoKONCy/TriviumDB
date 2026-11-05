@@ -16,6 +16,11 @@ pub enum TqlParamValue {
 }
 
 impl TqlParamValue {
+    /// 已知参数名的公共适配入口，转换失败携带原始参数键。
+    pub fn from_named_json(name: &str, value: &serde_json::Value) -> Result<Self, TriviumError> {
+        Self::from_json(value).map_err(|error| error.at_query_parameter(name))
+    }
+
     pub fn from_json(value: &serde_json::Value) -> Result<Self, TriviumError> {
         match value {
             serde_json::Value::Null => Ok(Self::Null),
@@ -210,7 +215,7 @@ fn bind_query(
                 _ => {
                     return Err(TriviumError::QueryExecution(format!(
                         "SEARCH VECTOR 参数 ${name} 必须是有限数值 (SEARCH VECTOR parameter ${name} must be a finite number)"
-                    )));
+                    )).at_query_parameter(name));
                 }
             };
         }
@@ -288,7 +293,7 @@ fn bind_expr(
                 TqlParamValue::Float(_) => {
                     return Err(TriviumError::QueryExecution(format!(
                         "Prepared TQL 参数 ${name} 必须是有限浮点数 (Prepared TQL parameter ${name} must be finite)"
-                    )));
+                    )).at_query_parameter(name));
                 }
                 TqlParamValue::String(value) => TqlLiteral::Str(value.clone()),
                 TqlParamValue::Bool(value) => TqlLiteral::Bool(*value),

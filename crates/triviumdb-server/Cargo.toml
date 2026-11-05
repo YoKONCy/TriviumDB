@@ -8,6 +8,9 @@ license = "Apache-2.0"
 repository = "https://github.com/YoKONCy/TriviumDB"
 publish = false
 
+[features]
+test-hooks = ["triviumdb/test-hooks"]
+
 [dependencies]
 axum = { version = "0.8", features = ["json"] }
 async-stream = "0.3"

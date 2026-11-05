@@ -796,8 +796,8 @@ fn 延期加载与删除预留遵守预算且失败不追加WAL() {
     let mut tx = db.begin_tx();
     tx.delete(1);
     assert!(matches!(
-        tx.commit(),
-        Err(triviumdb::TriviumError::CapacityReservationRejected { .. })
+        tx.commit().unwrap_err().underlying(),
+        triviumdb::TriviumError::CapacityReservationRejected { .. }
     ));
     assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before_wal);
     assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), before_text);

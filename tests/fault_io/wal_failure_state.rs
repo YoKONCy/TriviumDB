@@ -18,6 +18,60 @@ fn config(mode: StorageMode) -> Config {
 }
 
 #[test]
+fn WAL隔离后共享事务准入拒绝保留待提交操作() {
+    let root = support::TestDir::new("wal_admission_outcome");
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let path = root.file(&format!("{mode:?}.tdb"));
+        let shared =
+            triviumdb::SharedDatabase::<f32>::open_with_config(&path, config(mode)).unwrap();
+        shared
+            .try_write(|core| core.insert_with_id(1, &[1., 0.], json!({"state":"saved"})))
+            .unwrap();
+        let mut transaction = TxBuilder::new();
+        transaction.insert_with_id(2, &[0., 1.], json!({"state":"uncertain"}));
+        let failure = fail_io_at(IoPoint::WalSync);
+        let error = shared.commit_tx(&mut transaction).unwrap_err();
+        drop(failure);
+        assert_eq!(error.code(), "TDB_IO");
+        assert_eq!(
+            serde_json::to_value(error.info()).unwrap()["write"],
+            json!({"phase":"wal","outcome":"unknown","transaction_consumed":true})
+        );
+        assert_eq!(transaction.pending_count(), 0);
+        transaction.insert_with_id(3, &[1., 1.], json!({"state":"retry"}));
+        let before = std::fs::read(format!("{path}.wal")).unwrap();
+        let error = shared.commit_tx(&mut transaction).unwrap_err();
+        assert_eq!(error.code(), "TDB_WAL_CLOSED");
+        assert_eq!(
+            serde_json::to_value(error.info()).unwrap()["write"],
+            json!({"phase":"admission","outcome":"not_committed","transaction_consumed":false})
+        );
+        assert_eq!(transaction.pending_count(), 1);
+        assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
+        drop(shared);
+        let mut reopened = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+        // 故障点位于完整 flush 之后，当前进程内重开必须恢复已经写入的完整事务帧。
+        assert_eq!(reopened.all_node_ids().unwrap(), vec![1, 2]);
+        for (id, vector, state) in [(1, vec![1., 0.], "saved"), (2, vec![0., 1.], "uncertain")] {
+            let node = reopened.get(id).unwrap().unwrap();
+            assert_eq!(node.vector, vector);
+            assert_eq!(node.payload, json!({"state":state}));
+            assert!(node.edges.is_empty());
+        }
+        assert_eq!(reopened.commit_tx(transaction).unwrap(), vec![3]);
+        reopened.close().unwrap();
+        let mut reopened = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+        assert_eq!(reopened.all_node_ids().unwrap(), vec![1, 2, 3]);
+        assert_eq!(
+            reopened.get_payload(3).unwrap(),
+            Some(json!({"state":"retry"}))
+        );
+        assert_eq!(reopened.get(3).unwrap().unwrap().vector, vec![1., 1.]);
+        reopened.close().unwrap();
+    }
+}
+
+#[test]
 fn 事务应用失败拒绝部分状态并从完整wal恢复() {
     let root = support::TestDir::new("transaction_apply_failure");
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
@@ -31,7 +85,14 @@ fn 事务应用失败拒绝部分状态并从完整wal恢复() {
         tx.update_payload(1, json!({"state":"updated"}));
         tx.insert_with_id(2, &[0., 1.], json!({"state":"inserted"}));
         let guard = fail_io_at(IoPoint::TransactionApply);
-        assert!(matches!(db.commit_tx(tx), Err(TriviumError::Io(_))));
+        let error = db.commit_tx(tx).unwrap_err();
+        assert!(matches!(error.underlying(), TriviumError::Io(_)));
+        assert_eq!(
+            serde_json::to_value(error.info()).unwrap()["write"],
+            json!({
+                "phase":"apply","outcome":"unknown","transaction_consumed":true
+            })
+        );
         drop(guard);
         let before = std::fs::read(format!("{path}.wal")).unwrap();
         assert!(matches!(db.get_payload(1), Err(TriviumError::WalClosed)));
@@ -45,8 +106,8 @@ fn 事务应用失败拒绝部分状态并从完整wal恢复() {
             Err(TriviumError::WalClosed)
         ));
         assert!(matches!(
-            db.insert(&[1., 1.], json!({})),
-            Err(TriviumError::WalClosed)
+            db.insert(&[1., 1.], json!({})).unwrap_err().underlying(),
+            TriviumError::WalClosed
         ));
         assert!(matches!(db.flush(), Err(TriviumError::WalClosed)));
         assert!(matches!(db.close(), Err(TriviumError::WalClosed)));
@@ -115,20 +176,43 @@ fn wal失败隔离子进程入口() {
         db.insert(&[0., 1.], json!({"state":"uncertain"}))
             .map(|_| ())
     };
-    assert!(matches!(failed, Err(TriviumError::Io(_))), "{failed:?}");
+    let error = failed.unwrap_err();
+    assert!(
+        matches!(error.underlying(), TriviumError::Io(_)),
+        "{error:?}"
+    );
+    if operation == "tx" {
+        assert_eq!(
+            serde_json::to_value(error.info()).unwrap()["write"],
+            json!({
+                "phase":"wal","outcome":"unknown","transaction_consumed":true
+            })
+        );
+    }
     drop(guard);
     let before = std::fs::read(format!("{path}.wal")).unwrap();
     assert!(matches!(
-        db.insert(&[1., 1.], json!({"state":"rejected"})),
-        Err(TriviumError::WalClosed)
+        db.insert(&[1., 1.], json!({"state":"rejected"}))
+            .unwrap_err()
+            .underlying(),
+        TriviumError::WalClosed
     ));
     assert!(matches!(
-        db.update_payload(10, json!({"state":"rejected"})),
-        Err(TriviumError::WalClosed)
+        db.update_payload(10, json!({"state":"rejected"}))
+            .unwrap_err()
+            .underlying(),
+        TriviumError::WalClosed
     ));
     let mut tx = TxBuilder::new();
     tx.delete(10);
-    assert!(matches!(db.commit_tx(tx), Err(TriviumError::WalClosed)));
+    let error = db.commit_tx(tx).unwrap_err();
+    assert!(matches!(error.underlying(), TriviumError::WalClosed));
+    assert_eq!(
+        serde_json::to_value(error.info()).unwrap()["write"],
+        json!({
+            "phase":"admission","outcome":"not_committed","transaction_consumed":true
+        })
+    );
     assert!(matches!(db.flush(), Err(TriviumError::WalClosed)));
     assert!(matches!(db.close(), Err(TriviumError::WalClosed)));
     assert_eq!(

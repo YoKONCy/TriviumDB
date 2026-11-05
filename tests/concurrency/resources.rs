@@ -93,11 +93,11 @@ fn 活动任务跨库拒绝且回调保持调用线程() {
     assert_eq!(callback_thread, caller_thread);
     assert_eq!(result.unwrap()[0].id, 7);
     assert!(matches!(
-        rejected,
-        Err(TriviumError::ResourceBudgetExceeded {
+        rejected.unwrap_err().underlying(),
+        TriviumError::ResourceBudgetExceeded {
             resource: "active_tasks",
             ..
-        })
+        }
     ));
     independent_result.unwrap();
     assert_eq!(second.node_count().unwrap(), 0);
@@ -118,6 +118,9 @@ fn 工作区拒绝关闭时保留配额文件锁与可重试数据() {
     let mut first = open(&first_path, &shared, 16 * MB);
     let mut second = open(&path("quota-holder"), &shared, 12 * MB);
     first
+        .enable_auto_compaction(Duration::from_secs(3600))
+        .unwrap();
+    first
         .insert_with_id(
             11,
             &[1.0, 0.0, 0.0],
@@ -133,10 +136,16 @@ fn 工作区拒绝关闭时保留配额文件锁与可重试数据() {
     ));
     assert_eq!(shared.stats().reserved_database_bytes, 28 * MB);
     assert_eq!(shared.stats().reserved_workspace_bytes, 0);
+    assert_eq!(shared.stats().maintenance_jobs, 1);
+    assert_eq!(
+        first.instance_stats().compaction.unwrap().phase,
+        triviumdb::MaintenancePhase::Scheduled
+    );
     assert!(first.contains(11).unwrap());
     assert!(Database::<f32>::open(&first_path, 3).is_err());
     second.set_memory_limit(4 * MB).unwrap();
     first.close().unwrap();
+    assert_eq!(shared.stats().maintenance_jobs, 0);
     let mut reopened = Database::<f32>::open(&first_path, 3).unwrap();
     assert!(reopened.contains(11).unwrap());
     reopened.close().unwrap();

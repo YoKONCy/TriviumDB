@@ -15,6 +15,8 @@ from query_numeric_indexes import run_query_numeric_indexes
 from tql_semantics import run_tql_semantics
 from tql_boundaries import run_tql_boundaries
 from error_contracts import run_error_contract
+from request_admission import run_request_admission_contract
+from transaction_admission import run_transaction_admission_contract
 from console_contracts import run_console_contract
 from kernel_boundaries import run_kernel_boundaries
 
@@ -406,6 +408,8 @@ def main() -> None:
         run_resource_contract(root)
         run_shared_contract(root)
         run_error_contract(root)
+        run_request_admission_contract(root)
+        run_transaction_admission_contract(root)
         run_console_contract(root)
         run_kernel_boundaries(root)
         run_transaction_contract(root)

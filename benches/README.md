@@ -38,7 +38,7 @@
 | `bench_graph_parallel` | BFS、PageRank、WCC、Betweenness、标签传播线程扩展 | 100K；1/2/4/8/16 线程 |
 | `bench_deep_traversal` | 单源大前沿 BFS 与 TEPS | 1M × 出度 4/8/16 × 深度 3/5/8 |
 
-这三个套件都校验不同线程数的稳定结果哈希。哈希不一致属于正确性失败，而不是性能噪声。
+这三个套件校验不同线程数的稳定结果哈希，哈希不一致按正确性失败处理。
 
 ## D. QuIVer 质量与规模
 
@@ -56,11 +56,11 @@
 | `bench_sensitivity` | 参数敏感性 |
 | `bench_quiver_ablation` | QuIVer 组件消融 |
 
-外部数据集套件不会静默下载数据。运行前应按源码顶部说明准备输入路径，并记录数据集版本和校验和。
+> **数据准备**：运行外部数据集套件前，按源码顶部说明下载数据并配置输入路径，同时记录数据集版本和校验和。
 
 ## E. 研究与硬件消融
 
-以下套件不是日常回归基准，必须显式启用 `ablation` feature：
+以下研究套件通过 `ablation` feature 显式启用：
 
 ```powershell
 cargo bench --features ablation --bench bench_encoding_ablation

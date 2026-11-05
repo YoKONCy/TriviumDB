@@ -1,14 +1,60 @@
 import {
   TriviumDB, ResourceRuntime, ConsoleSession, type TriviumDBOptions, type TransactionOperation,
   type JsSearchHit, type PreparedTql, type ShutdownStatus, type StorageInfo,
-  type TriviumDBError, type ErrorInteger, type DType,
+  type TriviumDBError, type ResourceBudgetError, type ErrorInteger, type DType,
 } from 'triviumdb';
 
 function check(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
+export function inspectBudgetWriteError(error: ResourceBudgetError): void {
+  const consumed: boolean | undefined = error.write?.transaction_consumed;
+  void consumed;
+}
+
 export function inspectCoreError(error: TriviumDBError): void {
+  const stage: 'lex' | 'parse' | 'bind' | undefined = error.stage;
+  const start: number | undefined = error.target?.query_span?.start_byte;
+  const parameter: string | undefined = error.target?.parameter;
+  const outcome: 'not_committed' | 'unknown' | 'committed' | undefined = error.write?.outcome;
+  const consumed: boolean | undefined = error.write?.transaction_consumed;
+  // @ts-expect-error 写入结果使用约定类别。
+  const invalidOutcome: 'success' | undefined = error.write?.outcome;
+  // @ts-expect-error 源码偏移为数值。
+  const invalidSpan: string | undefined = error.target?.query_span?.start_byte;
+  void [stage, start, parameter, invalidSpan, outcome, consumed, invalidOutcome];
+  const schemaVersion: 1 = error.schema_version;
+  void schemaVersion;
+  if (error.code === 'TDB_TRANSACTION_FINISHED') {
+    const details: Record<string, never> = error.details;
+    void details;
+    // @ts-expect-error 结束状态只提供空详情，不携带节点字段。
+    const node: { id: number } = error.details;
+    void node;
+  }
+  if (error.code === 'TDB_BUSY') {
+    const resource: string = error.details.resource;
+    void resource;
+    // @ts-expect-error 锁忙详情通过 resource 定位，不提供 I/O 类别。
+    error.details.io_kind;
+  }
+  if (error.code === 'TDB_REENTRANT_ACCESS') {
+    const operation: string = error.details.operation;
+    void operation;
+  }
+  if (error.code === 'TDB_WRITE_CONFLICT') {
+    const expected: string = error.details.expected;
+    const actual: string = error.details.actual;
+    void [expected, actual];
+    // @ts-expect-error 编辑版本是字符串令牌。
+    const invalid: number = error.details.actual;
+    void invalid;
+  }
+  if (error.code === 'TDB_IDEMPOTENCY_CONFLICT' || error.code === 'TDB_WRITE_OUTCOME_UNKNOWN') {
+    const details: Record<string, never> = error.details;
+    void details;
+  }
   if (error.code === 'TDB_DTYPE_MISMATCH') {
     const stored: DType = error.details.stored;
     const requested: DType = error.details.requested;

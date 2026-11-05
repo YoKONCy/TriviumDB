@@ -22,7 +22,9 @@ class ConsoleBundleTests(unittest.TestCase):
             subprocess.run(command, check=True, capture_output=True)
             self.assertEqual(output.read_bytes(), first)
             with zipfile.ZipFile(output) as archive:
-                self.assertEqual(set(archive.namelist()), {"index.html", "console-contract.json", "manifest.json", "docs/embedded-console.md", "LICENSE"})
+                self.assertEqual(set(archive.namelist()), {"index.html", "console-client.js", "console-embed.js", "console-contract.json", "manifest.json", "docs/embedded-console.md", "LICENSE"})
+                for script in ("console-client.js", "console-embed.js"):
+                    self.assertEqual(archive.read(script), (ROOT / "crates/triviumdb-server/web" / script).read_bytes())
                 html = archive.read("index.html")
                 self.assertEqual(html, (ROOT / "crates/triviumdb-server/web/index.html").read_bytes())
                 self.assertEqual(archive.read("console-contract.json"), (ROOT / "src/database/console_contract.json").read_bytes())
@@ -32,8 +34,12 @@ class ConsoleBundleTests(unittest.TestCase):
                 self.assertEqual(manifest["component"], "triviumdb-console")
                 self.assertEqual(manifest["packageVersion"], json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"])
                 self.assertEqual(manifest["htmlSha256"], hashlib.sha256(html).hexdigest())
+                self.assertEqual(manifest["assetSha256"], {name: hashlib.sha256(archive.read(name)).hexdigest()
+                                 for name in ("index.html", "console-client.js", "console-embed.js")})
                 self.assertEqual(manifest["protocolVersion"], 1)
-                self.assertTrue(manifest["requiresFrontendTransportAdapter"])
+                self.assertFalse(manifest["requiresFrontendTransportAdapter"])
+                self.assertEqual(manifest["mountEntry"], "console-embed.js")
+                self.assertEqual(manifest["clientEntry"], "console-client.js")
                 self.assertIn("https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js", manifest["externalAssetUrls"])
 
 

@@ -16,7 +16,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, OwnedRwLockReadGuard, Semaphore, mpsc, oneshot, watch};
 use triviumdb::{
     Database,
     database::Config,
@@ -216,6 +216,30 @@ struct EngineInner {
     metrics: EngineMetricState,
     max_write_batch_size: usize,
     max_write_batch_delay: Duration,
+    stopping: watch::Sender<bool>,
+    writer_done: watch::Sender<bool>,
+    operations: Arc<tokio::sync::RwLock<()>>,
+    shutdown_attempt: Mutex<Option<ShutdownReceiver>>,
+    #[cfg(all(test, feature = "test-hooks"))]
+    batch_io_failure: Mutex<Option<triviumdb::test_hooks::IoPoint>>,
+    #[cfg(all(test, feature = "test-hooks"))]
+    batch_panic_after_write: AtomicBool,
+}
+
+type ShutdownReceiver = watch::Receiver<Option<Result<(), ApiError>>>;
+
+impl EngineInner {
+    fn enter_operation(&self) -> Result<OwnedRwLockReadGuard<()>, ApiError> {
+        let lease = self
+            .operations
+            .clone()
+            .try_read_owned()
+            .map_err(|_| ApiError::from(triviumdb::TriviumError::DatabaseClosed))?;
+        if *self.stopping.borrow() {
+            return Err(ApiError::from(triviumdb::TriviumError::DatabaseClosed));
+        }
+        Ok(lease)
+    }
 }
 
 struct EngineMetricState {
@@ -379,6 +403,10 @@ impl EngineHandle {
         }));
         let (writes, receiver) = mpsc::channel(config.write_queue_capacity);
         let inner = Arc::new(EngineInner {
+            #[cfg(all(test, feature = "test-hooks"))]
+            batch_io_failure: Mutex::new(None),
+            #[cfg(all(test, feature = "test-hooks"))]
+            batch_panic_after_write: AtomicBool::new(false),
             database,
             read_slots,
             max_concurrent_reads: u32::try_from(config.max_concurrent_reads).map_err(|_| {
@@ -406,10 +434,65 @@ impl EngineHandle {
             },
             max_write_batch_size: config.max_write_batch_size,
             max_write_batch_delay: config.max_write_batch_delay,
+            stopping: watch::channel(false).0,
+            writer_done: watch::channel(false).0,
+            operations: Arc::new(tokio::sync::RwLock::new(())),
+            shutdown_attempt: Mutex::new(None),
         });
         start_writer_supervisor(inner.clone(), receiver);
         start_quiver_warmup(inner.clone());
         Ok(Self { inner, writes })
+    }
+
+    /// 停止准入、排空写队列与真实 blocking 工作，最后等待 Core 完成持久化和释放。
+    /// 等待者取消不会撤销已启动的关闭；失败后可再次调用以重试 Core 关闭。
+    pub async fn shutdown(&self) -> Result<(), ApiError> {
+        let mut receiver = {
+            let mut current = lock_or_recover(&self.inner.shutdown_attempt);
+            let retry = current
+                .as_ref()
+                .is_none_or(|attempt| matches!(&*attempt.borrow(), Some(Err(_))));
+            if retry {
+                self.inner.stopping.send_replace(true);
+                let (completed, receiver) = watch::channel(None);
+                let inner = self.inner.clone();
+                let mut writer_done = inner.writer_done.subscribe();
+                tokio::spawn(async move {
+                    while !*writer_done.borrow_and_update() {
+                        if writer_done.changed().await.is_err() {
+                            completed.send_replace(Some(Err(engine_stopped())));
+                            return;
+                        }
+                    }
+                    // 准入租约移入 blocking 闭包：HTTP 超时或 Future 取消不能提前归还。
+                    let drained = inner.operations.clone().write_owned().await;
+                    let result = tokio::task::spawn_blocking(move || {
+                        let _drained = drained;
+                        let result = write_or_recover(&inner.database).close();
+                        match result {
+                            Ok(()) | Err(triviumdb::TriviumError::DatabaseClosed) => Ok(()),
+                            Err(error) => Err(ApiError::from(error)),
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        Err(ApiError::internal(format!(
+                            "数据库关闭任务异常 (Database shutdown task failed): {error}"
+                        )))
+                    });
+                    completed.send_replace(Some(result));
+                });
+                *current = Some(receiver);
+            }
+            // 上面的初始化分支保证存在；仍用结构化错误处理意外状态。
+            current.as_ref().cloned().ok_or_else(engine_stopped)?
+        };
+        loop {
+            if let Some(result) = receiver.borrow_and_update().clone() {
+                return result;
+            }
+            receiver.changed().await.map_err(|_| engine_stopped())?;
+        }
     }
 
     pub async fn query(
@@ -430,6 +513,7 @@ impl EngineHandle {
     }
 
     pub fn prepare(&self, query: &str) -> Result<(String, Vec<String>), ApiError> {
+        let _operation = self.inner.enter_operation()?;
         let prepared = {
             let database = read_or_recover(&self.inner.database);
             database.prepare_tql(query).map_err(ApiError::from)?
@@ -464,10 +548,9 @@ impl EngineHandle {
         let parameters = parameters
             .into_iter()
             .map(|(name, value)| {
-                Ok((
-                    name,
-                    TqlParamValue::from_json(&value).map_err(ApiError::from)?,
-                ))
+                let value =
+                    TqlParamValue::from_named_json(&name, &value).map_err(ApiError::from)?;
+                Ok((name, value))
             })
             .collect::<Result<HashMap<_, _>, ApiError>>()?;
         let versions = self.inner.versions.clone();
@@ -501,6 +584,7 @@ impl EngineHandle {
     }
 
     pub fn index_fields(&self) -> Result<Vec<String>, ApiError> {
+        let _operation = self.inner.enter_operation()?;
         let database = read_or_recover(&self.inner.database);
         Ok(database
             .index_info()
@@ -545,15 +629,10 @@ impl EngineHandle {
         let versions = self.inner.versions.clone();
         let control = QueryControl::with_deadline(deadline);
         self.run_read(deadline, control.clone(), move |database| {
-            let node = database.get(id).map_err(ApiError::from)?.ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::NOT_FOUND,
-                    "NODE_NOT_FOUND",
-                    "节点不存在 (Node not found)",
-                    format!("节点 {id} 不存在 (Node {id} does not exist)"),
-                    false,
-                )
-            })?;
+            let node = database
+                .get(id)
+                .map_err(ApiError::from)?
+                .ok_or_else(|| ApiError::from(triviumdb::TriviumError::NodeNotFound(id)))?;
             let versions = lock_or_recover(&versions);
             let node_version = versions.node_versions.get(&id).copied().unwrap_or(0);
             let edge_versions = node
@@ -755,12 +834,14 @@ impl EngineHandle {
     pub fn index_info(
         &self,
     ) -> Result<Vec<triviumdb::index::property::PropertyIndexStats>, ApiError> {
+        let _operation = self.inner.enter_operation()?;
         read_or_recover(&self.inner.database)
             .index_info()
             .map_err(ApiError::from)
     }
 
     pub async fn build_quiver(&self, deadline: Instant) -> Result<bool, ApiError> {
+        let operation = self.inner.enter_operation()?;
         let handle = read_or_recover(&self.inner.database).quiver_build_handle();
         self.inner
             .metrics
@@ -772,6 +853,7 @@ impl EngineHandle {
             .fetch_add(1, Ordering::AcqRel);
         let inner = self.inner.clone();
         let task = tokio::task::spawn_blocking(move || {
+            let _operation = operation;
             let _blocking_guard =
                 AtomicGaugeGuard::enter_existing(&inner.metrics.active_blocking_tasks);
             let build = match handle.prepare_auto_build() {
@@ -907,7 +989,9 @@ impl EngineHandle {
     pub fn readiness(&self) -> ReadinessSnapshot {
         let mut metrics = self.inner.metrics.snapshot();
         metrics.waiting_writers = self.inner.waiting_writers.load(Ordering::Acquire);
-        let (ready, reason) = if metrics.writer_failed {
+        let (ready, reason) = if *self.inner.stopping.borrow() {
+            (false, "shutting_down")
+        } else if metrics.writer_failed {
             (false, "writer_failed")
         } else if !metrics.writer_alive || self.writes.is_closed() {
             (false, "writer_unavailable")
@@ -939,6 +1023,7 @@ impl EngineHandle {
         R: Send + 'static,
         F: FnOnce(&Database<f32>) -> Result<R, ApiError> + Send + 'static,
     {
+        let operation_lease = self.inner.enter_operation()?;
         if self.inner.metrics.writer_failed.load(Ordering::Acquire) {
             return Err(engine_stopped());
         }
@@ -990,6 +1075,7 @@ impl EngineHandle {
         metrics.active_reads.fetch_add(1, Ordering::AcqRel);
         let inner = self.inner.clone();
         let task = tokio::task::spawn_blocking(move || {
+            let _operation_lease = operation_lease;
             let _blocking_guard =
                 AtomicGaugeGuard::enter_existing(&inner.metrics.active_blocking_tasks);
             let _read_guard = AtomicGaugeGuard::enter_existing(&inner.metrics.active_reads);
@@ -1029,7 +1115,14 @@ impl EngineHandle {
         fingerprint: Vec<u8>,
         deadline: Instant,
     ) -> Result<StoredWriteResult, ApiError> {
-        validate_idempotency_key(idempotency_key.as_deref())?;
+        let _operation = self
+            .inner
+            .enter_operation()
+            .map_err(write_admission_error)?;
+        validate_idempotency_key(idempotency_key.as_deref()).map_err(write_admission_error)?;
+        if Instant::now() >= deadline {
+            return Err(write_admission_error(ApiError::timeout()));
+        }
         let (response, receiver) = oneshot::channel();
         self.inner
             .metrics
@@ -1061,20 +1154,20 @@ impl EngineHandle {
                     .metrics
                     .rejected_total
                     .fetch_add(1, Ordering::Relaxed);
-                return Err(ApiError::queue_full());
+                return Err(write_admission_error(ApiError::queue_full()));
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.inner
                     .metrics
                     .queue_depth
                     .fetch_sub(1, Ordering::AcqRel);
-                return Err(engine_stopped());
+                return Err(write_admission_error(engine_stopped()));
             }
         }
         tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), receiver)
             .await
-            .map_err(|_| ApiError::timeout())?
-            .map_err(|_| engine_stopped())?
+            .map_err(|_| write_response_error(ApiError::timeout()))?
+            .map_err(|_| write_response_error(engine_stopped()))?
     }
 }
 
@@ -1088,10 +1181,14 @@ fn start_writer_supervisor(inner: Arc<EngineInner>, receiver: mpsc::Receiver<Wri
         inner.metrics.writer_alive.store(false, Ordering::Release);
         inner.read_slots.close();
         inner.writer_released.notify_waiters();
+        inner.writer_done.send_replace(true);
     });
 }
 
 fn start_quiver_warmup(inner: Arc<EngineInner>) {
+    let Ok(operation) = inner.enter_operation() else {
+        return;
+    };
     let handle = read_or_recover(&inner.database).quiver_build_handle();
     inner
         .metrics
@@ -1102,6 +1199,7 @@ fn start_quiver_warmup(inner: Arc<EngineInner>) {
         .active_blocking_tasks
         .fetch_add(1, Ordering::AcqRel);
     tokio::task::spawn_blocking(move || {
+        let _operation = operation;
         let _blocking_guard =
             AtomicGaugeGuard::enter_existing(&inner.metrics.active_blocking_tasks);
         let build = match handle.prepare_auto_build() {
@@ -1160,7 +1258,25 @@ fn start_quiver_warmup(inner: Arc<EngineInner>) {
 }
 
 async fn run_writer(inner: Arc<EngineInner>, mut receiver: mpsc::Receiver<WriteCommand>) {
-    while let Some(command) = receiver.recv().await {
+    let mut stopping = inner.stopping.subscribe();
+    loop {
+        let draining = *stopping.borrow_and_update();
+        let command = if draining {
+            receiver.close();
+            receiver.recv().await
+        } else {
+            tokio::select! {
+                biased;
+                _ = stopping.changed() => {
+                    receiver.close();
+                    receiver.recv().await
+                }
+                command = receiver.recv() => command,
+            }
+        };
+        let Some(command) = command else {
+            break;
+        };
         inner.metrics.queue_depth.fetch_sub(1, Ordering::AcqRel);
         let mut batch = vec![command];
         collect_write_batch(&inner, &mut receiver, &mut batch).await;
@@ -1169,7 +1285,9 @@ async fn run_writer(inner: Arc<EngineInner>, mut receiver: mpsc::Receiver<WriteC
             receiver.close();
             while let Some(command) = receiver.recv().await {
                 inner.metrics.queue_depth.fetch_sub(1, Ordering::AcqRel);
-                let _ = command.response.send(Err(engine_stopped()));
+                let _ = command
+                    .response
+                    .send(Err(write_admission_error(engine_stopped())));
             }
             break;
         }
@@ -1186,15 +1304,25 @@ async fn collect_write_batch(
     if batch.len() >= inner.max_write_batch_size {
         return;
     }
+    let mut stopping = inner.stopping.subscribe();
+    if *stopping.borrow_and_update() {
+        receiver.close();
+    }
     if receiver.is_empty() && !inner.max_write_batch_delay.is_zero() {
-        let _ = tokio::time::timeout(inner.max_write_batch_delay, receiver.recv())
-            .await
-            .ok()
-            .flatten()
-            .map(|command| {
-                inner.metrics.queue_depth.fetch_sub(1, Ordering::AcqRel);
-                batch.push(command);
-            });
+        let command = tokio::select! {
+            biased;
+            _ = stopping.changed() => {
+                receiver.close();
+                receiver.recv().await
+            }
+            command = tokio::time::timeout(inner.max_write_batch_delay, receiver.recv()) => {
+                command.ok().flatten()
+            }
+        };
+        if let Some(command) = command {
+            inner.metrics.queue_depth.fetch_sub(1, Ordering::AcqRel);
+            batch.push(command);
+        }
     }
     while batch.len() < inner.max_write_batch_size {
         match receiver.try_recv() {
@@ -1207,16 +1335,20 @@ async fn collect_write_batch(
     }
 }
 
-async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteCommand>) {
+fn retain_pending_writes(batch: &mut Vec<WriteCommand>) {
     batch.retain_mut(|command| {
         if Instant::now() >= command.deadline {
             let response = std::mem::replace(&mut command.response, oneshot::channel().0);
-            let _ = response.send(Err(ApiError::timeout()));
+            let _ = response.send(Err(write_admission_error(ApiError::timeout())));
             false
         } else {
             !command.response.is_closed()
         }
     });
+}
+
+async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteCommand>) {
+    retain_pending_writes(&mut batch);
     if batch.is_empty() {
         return;
     }
@@ -1244,7 +1376,9 @@ async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteComma
                 let mut remaining = Vec::with_capacity(batch.len());
                 for command in batch {
                     if command.deadline <= now {
-                        let _ = command.response.send(Err(ApiError::timeout()));
+                        let _ = command
+                            .response
+                            .send(Err(write_admission_error(ApiError::timeout())));
                     } else if !command.response.is_closed() {
                         remaining.push(command);
                     }
@@ -1260,12 +1394,12 @@ async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteComma
     inner.writer_released.notify_waiters();
     let Some(permits) = permits else {
         if !batch.is_empty() {
-            reject_batch(batch, engine_stopped());
+            reject_batch(batch, write_admission_error(engine_stopped()));
         }
         return;
     };
 
-    batch.retain(|command| !command.response.is_closed() && Instant::now() < command.deadline);
+    retain_pending_writes(&mut batch);
     if batch.is_empty() {
         return;
     }
@@ -1293,10 +1427,14 @@ async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteComma
         let _permits = permits;
         let mut database = write_or_recover(&database);
         let mut versions = lock_or_recover(&versions);
-        let (outcomes, synced) = database
+        #[cfg(all(test, feature = "test-hooks"))]
+        let _failure = lock_or_recover(&task_inner.batch_io_failure)
+            .take()
+            .map(triviumdb::test_hooks::fail_io_at);
+        let mut outcomes = Vec::with_capacity(batch.len());
+        let sync_result = database
             .group_commit(|database| {
-                let mut outcomes = Vec::with_capacity(batch.len());
-                for command in batch {
+                for command in batch.drain(..) {
                     let execution_started = Instant::now();
                     if let Some(telemetry) = &command.telemetry {
                         telemetry.record_queue_wait(
@@ -1322,16 +1460,32 @@ async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteComma
                         execution_started,
                         outcome,
                     ));
+                    #[cfg(all(test, feature = "test-hooks"))]
+                    if task_inner
+                        .batch_panic_after_write
+                        .swap(false, Ordering::AcqRel)
+                    {
+                        panic!("受控 Server 后台任务异常");
+                    }
                 }
-                outcomes
             })
-            .map_err(ApiError::from)?;
-        Ok::<_, ApiError>((outcomes, synced))
+            .map(|(_, synced)| synced)
+            .map_err(ApiError::from);
+        (outcomes, sync_result, batch)
     })
     .await;
 
     match result {
-        Ok(Ok((outcomes, synced))) => {
+        Ok((outcomes, sync_result, unexecuted)) => {
+            let (synced, failure) = match sync_result {
+                Ok(synced) => (synced, None),
+                Err(error) => {
+                    inner.metrics.writer_failed.store(true, Ordering::Release);
+                    tracing::error!(%error, "Group Commit 失败，Writer Actor 已停止 (Group commit failed; writer actor stopped)");
+                    reject_batch(unexecuted, error.clone());
+                    (false, Some(error))
+                }
+            };
             if synced {
                 inner.metrics.wal_sync_total.fetch_add(1, Ordering::Relaxed);
             }
@@ -1339,12 +1493,13 @@ async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteComma
                 if let Some(telemetry) = telemetry {
                     telemetry.record_execution(execution_started.elapsed());
                 }
+                // 保留已经明确的操作错误；仅成功但尚未完成组同步的请求改为未知结果。
+                let outcome = match (outcome, &failure) {
+                    (Ok(_), Some(error)) => Err(error.clone()),
+                    (outcome, _) => outcome,
+                };
                 let _ = response.send(outcome);
             }
-        }
-        Ok(Err(error)) => {
-            inner.metrics.writer_failed.store(true, Ordering::Release);
-            tracing::error!(%error, "Group Commit 同步失败，Writer Actor 已停止 (Group commit sync failed; writer actor stopped)");
         }
         Err(error) => {
             inner.metrics.writer_failed.store(true, Ordering::Release);
@@ -1357,6 +1512,21 @@ fn reject_batch(batch: Vec<WriteCommand>, error: ApiError) {
     for command in batch {
         let _ = command.response.send(Err(error.clone()));
     }
+}
+
+fn write_admission_error(error: ApiError) -> ApiError {
+    error.with_write_info(triviumdb::error::WriteErrorInfo {
+        transaction_consumed: None,
+        ..triviumdb::error::WriteErrorInfo::TRANSACTION_ADMISSION
+    })
+}
+
+fn write_response_error(error: ApiError) -> ApiError {
+    error.with_write_info(triviumdb::error::WriteErrorInfo {
+        phase: triviumdb::error::WritePhase::Response,
+        outcome: triviumdb::error::WriteOutcome::Unknown,
+        transaction_consumed: None,
+    })
 }
 
 fn execute_write(
@@ -1794,10 +1964,434 @@ fn engine_stopped() -> ApiError {
 mod tests {
     use super::*;
 
+    async fn error_body(error: ApiError) -> serde_json::Value {
+        use axum::response::IntoResponse;
+        use http_body_util::BodyExt;
+        let body = error
+            .into_response()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[tokio::test]
+    async fn 后台写任务异常向请求返回未知结果且关闭后完整重开() {
+        let (engine, directory) = test_engine("write-task-failure", 4, 1).await;
+        engine
+            .inner
+            .batch_panic_after_write
+            .store(true, Ordering::Release);
+        let error = engine
+            .mutate(
+                "CREATE ({state: \"committed\"})".into(),
+                None,
+                None,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+            .unwrap_err();
+        let body = error_body(error).await;
+        assert_eq!(body["code"], "SERVICE_UNAVAILABLE");
+        assert_eq!(
+            body["write"],
+            serde_json::json!({"phase":"response","outcome":"unknown"})
+        );
+        assert_eq!(body["retryable"], false);
+        engine.shutdown().await.unwrap();
+        let mut reopened = Database::<f32>::open(
+            &directory
+                .path()
+                .join("write-task-failure.tdb")
+                .to_string_lossy(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(reopened.all_node_ids().unwrap(), vec![1]);
+        let node = reopened.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, vec![0., 0.]);
+        assert_eq!(node.payload, serde_json::json!({"state":"committed"}));
+        assert!(node.edges.is_empty());
+        reopened
+            .insert_with_id(2, &[1., 0.], serde_json::json!({"state":"after-reopen"}))
+            .unwrap();
+        reopened.close().unwrap();
+        let mut reopened = Database::<f32>::open(
+            &directory
+                .path()
+                .join("write-task-failure.tdb")
+                .to_string_lossy(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(reopened.all_node_ids().unwrap(), vec![1, 2]);
+        assert_eq!(
+            reopened.get_payload(1).unwrap(),
+            Some(serde_json::json!({"state":"committed"}))
+        );
+        let node = reopened.get(2).unwrap().unwrap();
+        assert_eq!(node.vector, vec![1., 0.]);
+        assert_eq!(node.payload, serde_json::json!({"state":"after-reopen"}));
+        assert!(node.edges.is_empty());
+        reopened.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn 内核分组准入拒绝交回原请求并保留已保存事实() {
+        let (engine, directory) = test_engine("group-admission", 4, 1).await;
+        {
+            let mut database = write_or_recover(&engine.inner.database);
+            database
+                .insert_with_id(1, &[1., 0.], serde_json::json!({"state":"saved"}))
+                .unwrap();
+            database.close().unwrap();
+        }
+        let error = engine
+            .mutate(
+                "CREATE ({state: \"rejected\"})".into(),
+                None,
+                None,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+            .unwrap_err();
+        let body = error_body(error).await;
+        assert_eq!(body["code"], "TDB_DATABASE_CLOSED");
+        assert_eq!(
+            body["write"],
+            serde_json::json!({"phase":"admission","outcome":"not_committed"})
+        );
+        assert_eq!(body["retryable"], false);
+        engine.shutdown().await.unwrap();
+        let mut reopened = Database::<f32>::open(
+            &directory
+                .path()
+                .join("group-admission.tdb")
+                .to_string_lossy(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(reopened.all_node_ids().unwrap(), vec![1]);
+        let node = reopened.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, vec![1., 0.]);
+        assert_eq!(node.payload, serde_json::json!({"state":"saved"}));
+        assert!(node.edges.is_empty());
+        reopened.close().unwrap();
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[tokio::test]
+    async fn 分组同步失败逐请求交回未知结果并保留独立校验错误() {
+        let (engine, directory) = test_engine("group-outcome", 4, 1).await;
+        write_or_recover(&engine.inner.database)
+            .insert_with_id(1, &[1., 0.], serde_json::json!({"state":"saved"}))
+            .unwrap();
+        *lock_or_recover(&engine.inner.batch_io_failure) =
+            Some(triviumdb::test_hooks::IoPoint::WalFlush);
+        let mut batch = Vec::new();
+        let mut receivers = Vec::new();
+        for query in ["CREATE ({state: \"uncertain\"})", "CREATE ("] {
+            let (response, receiver) = oneshot::channel();
+            receivers.push(receiver);
+            batch.push(WriteCommand {
+                deadline: Instant::now() + Duration::from_secs(30),
+                enqueued_at: Instant::now(),
+                telemetry: None,
+                idempotency_key: None,
+                fingerprint: Vec::new(),
+                operation: WriteOperation::Tql {
+                    query: query.into(),
+                    expected_generation: None,
+                },
+                response,
+            });
+        }
+        process_write_batch(&engine.inner, batch).await;
+        let mut receivers = receivers.into_iter();
+        let error = receivers
+            .next()
+            .unwrap()
+            .await
+            .unwrap()
+            .err()
+            .expect("同步失败必须交回原请求");
+        let body = error_body(error).await;
+        assert_eq!(body["code"], "TDB_IO");
+        assert_eq!(
+            body["write"],
+            serde_json::json!({"phase":"group_sync","outcome":"unknown"})
+        );
+        assert_eq!(body["retryable"], false);
+        let error = receivers
+            .next()
+            .unwrap()
+            .await
+            .unwrap()
+            .err()
+            .expect("校验拒绝必须保留原错误");
+        let body = error_body(error).await;
+        assert_eq!(body["code"], "TDB_QUERY_PARSE");
+        assert_eq!(body["stage"], "parse");
+        assert_eq!(
+            body["write"],
+            serde_json::json!({"phase":"validation","outcome":"not_committed"})
+        );
+        assert!(engine.inner.metrics.writer_failed.load(Ordering::Acquire));
+        let shutdown = error_body(engine.shutdown().await.unwrap_err()).await;
+        assert_eq!(shutdown["code"], "TDB_WAL_CLOSED");
+        drop(engine);
+        let mut reopened = Database::<f32>::open(
+            &directory.path().join("group-outcome.tdb").to_string_lossy(),
+            2,
+        )
+        .unwrap();
+        let facts = reopened
+            .all_node_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| {
+                let node = reopened.get(id).unwrap().unwrap();
+                assert!(node.edges.is_empty());
+                serde_json::json!({"id":id,"vector":node.vector,"payload":node.payload})
+            })
+            .collect::<Vec<_>>();
+        let saved = serde_json::json!({"id":1,"vector":[1.,0.],"payload":{"state":"saved"}});
+        let uncertain =
+            serde_json::json!({"id":2,"vector":[0.,0.],"payload":{"state":"uncertain"}});
+        assert!(
+            facts == vec![saved.clone()] || facts == vec![saved, uncertain],
+            "{facts:?}"
+        );
+        reopened.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn 关闭信号中断合批等待且保留已接收写入() {
+        // 长周期仅用于确保等待由关闭信号解除；不对实际耗时作断言。
+        let (engine, directory) =
+            test_engine_with_batch_delay("shutdown-batch", 4, 1, Duration::from_secs(3600)).await;
+        let path = directory.path().join("shutdown-batch.tdb");
+        let (sender, mut receiver) = mpsc::channel(1);
+        let (response, result) = oneshot::channel();
+        let mut batch = vec![WriteCommand {
+            deadline: Instant::now() + Duration::from_secs(30),
+            enqueued_at: Instant::now(),
+            telemetry: None,
+            idempotency_key: None,
+            fingerprint: Vec::new(),
+            operation: WriteOperation::Tql {
+                query: "CREATE ({name: \"batched\"})".into(),
+                expected_generation: None,
+            },
+            response,
+        }];
+        {
+            let collecting = collect_write_batch(&engine.inner, &mut receiver, &mut batch);
+            tokio::pin!(collecting);
+            assert!(futures_util::poll!(&mut collecting).is_pending());
+            engine.inner.stopping.send_replace(true);
+            assert!(futures_util::poll!(&mut collecting).is_ready());
+        }
+        assert!(sender.is_closed());
+        assert_eq!(batch.len(), 1);
+        // 同一轮 poll 内执行真实写入；独立 Writer 尚未消费关闭通知。
+        process_write_batch(&engine.inner, batch).await;
+        assert!(matches!(
+            result.await.unwrap().unwrap(),
+            StoredWriteResult::Mutation(_)
+        ));
+        engine.shutdown().await.unwrap();
+        let mut reopened = Database::<f32>::open(&path.to_string_lossy(), 2).unwrap();
+        let ids = reopened.all_node_ids().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            reopened.get_payload(ids[0]).unwrap().unwrap(),
+            serde_json::json!({"name":"batched"})
+        );
+        reopened.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn 关闭排空已排队写入且取消读请求不提前释放真实任务租约() {
+        let (engine, directory) = test_engine("shutdown-drain", 4, 1).await;
+        let path = directory.path().join("shutdown-drain.tdb");
+        let (entered, arrived) = oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let reading = tokio::spawn({
+            let engine = engine.clone();
+            async move {
+                engine
+                    .run_read(
+                        Instant::now() + Duration::from_secs(30),
+                        QueryControl::default(),
+                        move |db| {
+                            entered.send(()).unwrap();
+                            wait.recv_timeout(Duration::from_secs(30)).unwrap();
+                            db.node_count().map_err(ApiError::from)
+                        },
+                    )
+                    .await
+            }
+        });
+        arrived.await.unwrap();
+        let write = engine.mutate(
+            "CREATE ({name: \"drained\"})".into(),
+            None,
+            None,
+            Instant::now() + Duration::from_secs(30),
+        );
+        tokio::pin!(write);
+        assert!(futures_util::poll!(&mut write).is_pending());
+        let closing = engine.shutdown();
+        tokio::pin!(closing);
+        assert!(futures_util::poll!(&mut closing).is_pending());
+        reading.abort();
+        assert!(reading.await.unwrap_err().is_cancelled());
+        assert_eq!(engine.readiness().reason, "shutting_down");
+        assert!(engine.prepare("MATCH (n) RETURN n").is_err());
+        assert!(
+            engine
+                .mutate(
+                    "CREATE ({name: \"late\"})".into(),
+                    None,
+                    None,
+                    Instant::now() + Duration::from_secs(30)
+                )
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            Database::<f32>::open(&path.to_string_lossy(), 2),
+            Err(triviumdb::TriviumError::DatabaseLocked(_))
+        ));
+        assert!(futures_util::poll!(&mut closing).is_pending());
+        release.send(()).unwrap();
+        write.await.unwrap();
+        closing.await.unwrap();
+        assert_eq!(engine.metrics().active_blocking_tasks, 0);
+        assert_eq!(engine.metrics().queue_depth, 0);
+        assert!(!engine.metrics().writer_alive);
+        let mut reopened = Database::<f32>::open(&path.to_string_lossy(), 2).unwrap();
+        let ids = reopened.all_node_ids().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            reopened.get_payload(ids[0]).unwrap().unwrap(),
+            serde_json::json!({"name":"drained"})
+        );
+        engine.shutdown().await.unwrap();
+        assert!(matches!(
+            Database::<f32>::open(&path.to_string_lossy(), 2),
+            Err(triviumdb::TriviumError::DatabaseLocked(_))
+        ));
+        reopened.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn 取消关闭等待者后后台关闭仍能完成且可再次等待() {
+        let (engine, directory) = test_engine("shutdown-cancel", 4, 1).await;
+        let path = directory.path().join("shutdown-cancel.tdb");
+        let (entered, arrived) = oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let reading = tokio::spawn({
+            let engine = engine.clone();
+            async move {
+                engine
+                    .run_read(
+                        Instant::now() + Duration::from_secs(30),
+                        QueryControl::default(),
+                        move |db| {
+                            entered.send(()).unwrap();
+                            wait.recv_timeout(Duration::from_secs(30)).unwrap();
+                            db.node_count().map_err(ApiError::from)
+                        },
+                    )
+                    .await
+            }
+        });
+        arrived.await.unwrap();
+        let mut stopping = engine.inner.stopping.subscribe();
+        let closing = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.shutdown().await }
+        });
+        stopping.wait_for(|value| *value).await.unwrap();
+        closing.abort();
+        assert!(closing.await.unwrap_err().is_cancelled());
+        let mut completion = lock_or_recover(&engine.inner.shutdown_attempt)
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(completion.borrow().is_none());
+        assert!(matches!(
+            Database::<f32>::open(&path.to_string_lossy(), 2),
+            Err(triviumdb::TriviumError::DatabaseLocked(_))
+        ));
+        release.send(()).unwrap();
+        assert_eq!(reading.await.unwrap().unwrap(), 0);
+        // 只观察原任务完成，不通过新关闭调用来推动它。
+        completion
+            .wait_for(Option::is_some)
+            .await
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        engine.shutdown().await.unwrap();
+        let mut reopened = Database::<f32>::open(&path.to_string_lossy(), 2).unwrap();
+        assert_eq!(reopened.node_count().unwrap(), 0);
+        reopened.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn 关闭持久化失败保持租约并允许排障后重试() {
+        let (engine, directory) = test_engine("shutdown-retry", 4, 1).await;
+        let path = directory.path().join("shutdown-retry.tdb");
+        engine
+            .mutate(
+                "CREATE ({name: \"persisted\"})".into(),
+                None,
+                None,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        let obstructed = directory.path().join("shutdown-retry.tdb.tmp");
+        std::fs::create_dir(&obstructed).unwrap();
+        assert!(engine.shutdown().await.is_err());
+        assert!(matches!(
+            Database::<f32>::open(&path.to_string_lossy(), 2),
+            Err(triviumdb::TriviumError::DatabaseLocked(_))
+        ));
+        assert!(engine.index_fields().is_err());
+        std::fs::remove_dir(&obstructed).unwrap();
+        engine.shutdown().await.unwrap();
+        let mut reopened = Database::<f32>::open(&path.to_string_lossy(), 2).unwrap();
+        let ids = reopened.all_node_ids().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            reopened.get_payload(ids[0]).unwrap().unwrap(),
+            serde_json::json!({"name":"persisted"})
+        );
+        reopened.close().unwrap();
+    }
+
     async fn test_engine(
         name: &str,
         queue: usize,
         reads: usize,
+    ) -> (EngineHandle, tempfile::TempDir) {
+        test_engine_with_batch_delay(name, queue, reads, Duration::from_millis(1)).await
+    }
+
+    async fn test_engine_with_batch_delay(
+        name: &str,
+        queue: usize,
+        reads: usize,
+        batch_delay: Duration,
     ) -> (EngineHandle, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
         let engine = EngineHandle::start(EngineConfig {
@@ -1811,7 +2405,7 @@ mod tests {
             max_concurrent_reads: reads,
             idempotency_capacity: 8,
             max_write_batch_size: 8,
-            max_write_batch_delay: Duration::from_millis(1),
+            max_write_batch_delay: batch_delay,
             prepared_cache_capacity: 8,
         })
         .await
@@ -2102,7 +2696,13 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("写队列已满"));
+        let body = error_body(error).await;
+        assert_eq!(body["code"], "WRITE_QUEUE_FULL");
+        assert_eq!(
+            body["write"],
+            serde_json::json!({"phase":"admission","outcome":"not_committed"})
+        );
+        assert_eq!(body["retryable"], false);
         drop(held);
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
@@ -2120,11 +2720,13 @@ mod tests {
             )
             .await
             .unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("超时") || message.contains("不可用"),
-            "实际错误: {message}"
+        let body = error_body(error).await;
+        assert_eq!(body["code"], "REQUEST_TIMEOUT");
+        assert_eq!(
+            body["write"],
+            serde_json::json!({"phase":"admission","outcome":"not_committed"})
         );
+        assert_eq!(body["retryable"], false);
         let (rows, _) = engine
             .query(
                 "MATCH (n) RETURN count(*) AS total".into(),

@@ -503,8 +503,8 @@ fn blocked_vector_worker() {
         Err(TriviumError::WalClosed)
     ));
     assert!(matches!(
-        db.insert(&[1.0, 0.0], json!({})),
-        Err(TriviumError::WalClosed)
+        db.insert(&[1.0, 0.0], json!({})).unwrap_err().underlying(),
+        TriviumError::WalClosed
     ));
     assert!(matches!(
         db.search_batch(&[vec![0.0, 1.0]], &Default::default(), &Default::default()),

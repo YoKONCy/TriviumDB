@@ -63,6 +63,7 @@ ATTRS = {
 
 # Param type by name. A param whose default is None is auto-wrapped in Optional.
 PARAM_TYPES = {
+    "needle": "str", "equalities": "dict[str, Any]",
     "options_json": "str", "request_json": "str", "request_id": "str", "session": "ConsoleSession",
     "vector": "Vector", "query_vector": "Vector",
     "vectors": "Sequence[Vector]", "query_vectors": "Sequence[Vector]",
@@ -114,6 +115,8 @@ QUALIFIED_PARAM_TYPES = {
 RETURNS = {}
 for _ret, _quals in {
     "None": "init_logger ConsoleSession.detach "
+            "TriviumDB.compare_and_set_payload_field TriviumDB.create_ngram_index TriviumDB.drop_ngram_index "
+            "TriviumDB.create_unique_index TriviumDB.create_unique_composite_index "
             "TriviumDB.set_sync_mode TriviumDB.load_ffi_hook TriviumDB.clear_hook "
             "TriviumDB.set_hook TriviumDB.insert_with_id TriviumDB.upsert_with_id "
             "TriviumDB.batch_insert_with_ids "
@@ -130,8 +133,10 @@ for _ret, _quals in {
             "Transaction.delete Transaction.unlink Transaction.update_payload "
             "Transaction.update_vector Transaction.rollback",
     "int": "TriviumDB.insert TriviumDB.node_count TriviumDB.dim TriviumDB.estimated_memory "
+           "TriviumDB.delete_many_atomic "
            "TriviumDB.__len__ Transaction.pending_count",
     "list[int]": "TriviumDB.all_node_ids TriviumDB.batch_insert TriviumDB.migrate "
+                 "TriviumDB.indexed_lookup TriviumDB.substring_lookup "
                  "TriviumDB.neighbors Transaction.commit",
     "list[SearchHit]": "TriviumDB.search TriviumDB.search_advanced TriviumDB.search_hybrid "
                        "TriviumDB.search_graph_first TriviumDB.search_exact",
@@ -142,6 +147,7 @@ for _ret, _quals in {
     "list[ReachabilityResult]": "TriviumDB.reachable",
     "list[QueryRow]": "TriviumDB.tql TriviumDB.execute_prepared_tql",
     "list[str]": "PreparedTql.parameter_names",
+    "list[list[str]]": "TriviumDB.list_unique_indexes",
     "PreparedTql": "TriviumDB.prepare_tql",
     "dict[str, Any]": "verify_snapshot restore_snapshot TriviumDB.create_snapshot TriviumDB.request_shutdown TriviumDB.shutdown_status ResourceRuntime.stats TriviumDB.resource_stats TriviumDB.instance_stats TriviumDB.tql_mut TriviumDB.leiden_cluster TriviumDB.graph_stats "
                       "TriviumDB.index_info TriviumDB.storage_info "
@@ -253,7 +259,8 @@ def build_stub(mod) -> str:
                                   for n in EXCEPTIONS + CLASS_ORDER + FUNCTIONS) + "]",
         "# Exceptions",
         *(f"class {e}({getattr(mod, e).__bases__[0].__name__}):"
-          + ("\n    code: str\n    details: dict[str, Any]"
+          + ("\n    schema_version: int\n    code: str\n    message: str\n    details: dict[str, Any]"
+             "\n    stage: Literal['lex', 'parse', 'bind'] | None\n    target: dict[str, str | dict[str, int]] | None\n    write: dict[str, str | bool] | None"
              if e in {"TriviumDBError", "InvalidInputError", "CapacityError", "SnapshotDestinationError"} else "")
           + ("\n    resource: str\n    requested: int\n    used: int\n    limit: int" if e == "ResourceBudgetError"
              else "" if e in {"TriviumDBError", "InvalidInputError", "CapacityError", "SnapshotDestinationError"} else " ...")

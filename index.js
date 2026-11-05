@@ -58,36 +58,38 @@ if (binding.TriviumDB) {
     })
   }
 
-  // Console 调用借用整个原生实例；两个方向的 Hook 重入都必须在 N-API 前拒绝。
-  // 普通调用只记录同步借用深度，保持既有入口之间的行为。
-  const activeConsoleCalls = new WeakSet()
+  // 同步回调期间重复进入同一实例会形成原生借用或锁等待环，在 N-API 前拒绝。
   const activeNativeCalls = new WeakMap()
   const prototype = binding.TriviumDB.prototype
-  const invoke = (database, original, arguments_, consoleCall = false) => {
+  const invoke = (database, original, arguments_, method) => {
     const depth = activeNativeCalls.get(database) || 0
-    if (activeConsoleCalls.has(database) || (consoleCall && depth > 0)) {
-      const error = new Error('控制台与宿主数据库访问冲突 (Console and host database access conflict)')
-      error.code = 'TDB_IO'
-      error.details = { io_kind: 'WouldBlock', os_code: null }
+    if (depth > 0) {
+      const error = new Error('数据库回调重入被拒绝 (Database callback reentry rejected)')
+      error.schema_version = 1
+      error.code = 'TDB_REENTRANT_ACCESS'
+      error.details = { operation: 'node_callback' }
+      error.operation = error.details.operation
+      if (method === 'commitTransaction') {
+        error.write = { phase: 'admission', outcome: 'not_committed', transaction_consumed: false }
+      }
       throw error
     }
     activeNativeCalls.set(database, depth + 1)
-    if (consoleCall) activeConsoleCalls.add(database)
     try {
       return original.apply(database, arguments_)
     } finally {
       if (depth === 0) activeNativeCalls.delete(database)
       else activeNativeCalls.set(database, depth)
-      if (consoleCall) activeConsoleCalls.delete(database)
     }
   }
   for (const name of Reflect.ownKeys(prototype)) {
-    if (name === 'constructor') continue
+    // 资源释放别名转调已受保护的 close，避免把 SDK 自身转发识别为回调重入。
+    if (name === 'constructor' || name === 'dispose' || name === Symbol.dispose) continue
     const descriptor = Object.getOwnPropertyDescriptor(prototype, name)
     if (typeof descriptor.value === 'function') {
       const original = descriptor.value
       descriptor.value = function (...arguments_) {
-        return invoke(this, original, arguments_, name === 'consoleRequest')
+        return invoke(this, original, arguments_, name)
       }
     }
     if (descriptor.get) {

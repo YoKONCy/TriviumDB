@@ -116,12 +116,16 @@ fn 历史静默_api全部明确拒绝() {
     let id = db.insert(&[1.0, 0.0], json!({"value": 1})).unwrap();
 
     assert!(matches!(
-        db.patch_payload(id, json!({"value": 2})),
-        Err(triviumdb::TriviumError::ApiMigrationRequired { .. })
+        db.patch_payload(id, json!({"value": 2}))
+            .unwrap_err()
+            .underlying(),
+        triviumdb::TriviumError::ApiMigrationRequired { .. }
     ));
     assert!(matches!(
-        db.tql_mut("FIND {value: 1} RETURN *"),
-        Err(triviumdb::TriviumError::ApiMigrationRequired { .. })
+        db.tql_mut("FIND {value: 1} RETURN *")
+            .unwrap_err()
+            .underlying(),
+        triviumdb::TriviumError::ApiMigrationRequired { .. }
     ));
     cleanup(&path);
 }

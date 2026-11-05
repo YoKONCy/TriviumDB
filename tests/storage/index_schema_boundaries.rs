@@ -156,8 +156,11 @@ fn 历史复合字段边界不明确时查询扫描事实且唯一约束从主�
                     .unwrap();
             if unique {
                 assert!(matches!(
-                    writer.insert_with_id(2, &[0., 1.], case["payload"].clone()),
-                    Err(TriviumError::UniqueConstraintViolation { .. })
+                    writer
+                        .insert_with_id(2, &[0., 1.], case["payload"].clone())
+                        .unwrap_err()
+                        .underlying(),
+                    TriviumError::UniqueConstraintViolation { .. }
                 ));
             } else {
                 writer.create_composite_index(&fields).unwrap();

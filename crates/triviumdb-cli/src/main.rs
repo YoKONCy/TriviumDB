@@ -136,10 +136,24 @@ fn main() {
     let cli = Cli::parse();
     apply_color(cli.color);
     let cfg = config::Config::load();
+    let error_format = resolve_format(cli.format, &cfg);
 
     let result = run(cli, cfg);
     if let Err(e) = result {
-        eprintln!("{} {}", "错误 / Error:".red().bold(), e);
+        if let Some(error) = e.downcast_ref::<triviumdb::TriviumError>() {
+            if error_format == OutputFormat::Json {
+                eprintln!("{}", serde_json::json!(error.info()));
+            } else {
+                eprintln!(
+                    "{} [{}] {}",
+                    "错误 / Error:".red().bold(),
+                    error.code(),
+                    error
+                );
+            }
+        } else {
+            eprintln!("{} {}", "错误 / Error:".red().bold(), e);
+        }
         std::process::exit(1);
     }
 }

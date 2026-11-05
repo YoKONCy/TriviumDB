@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import triviumdb
+from write_outcomes import run_write_outcomes
 
 
 def run_error_contract(root):
@@ -48,6 +49,8 @@ def run_error_contract(root):
             try:
                 actions[operation]()
             except triviumdb.TriviumDBError as error:
+                assert error.schema_version == 1, operation
+                assert error.message == str(error), operation
                 assert error.code == case["code"], (operation, error.code)
                 details = dict(error.details)
                 for field in case.get("string_fields", []):
@@ -56,9 +59,102 @@ def run_error_contract(root):
                 for field in case.get("integer_fields", []):
                     assert type(details.pop(field)) is int, (operation, field)
                 assert details == case["details"], (operation, details)
+                assert error.write == case.get("write"), operation
                 for field, value in error.details.items():
                     assert getattr(error, field) == value, (operation, field)
             else:
                 raise AssertionError(f"操作应返回结构化错误：{operation}")
         finally:
             db.close()
+    run_query_diagnostics(root)
+    run_prepared_diagnostics(root)
+    run_write_outcomes(root)
+
+
+def run_prepared_diagnostics(root):
+    cases = json.loads((Path(__file__).parents[1] / "contracts/prepared_diagnostics.json").read_text(encoding="utf-8"))["cases"]
+    for dtype in ("f32", "f16", "u64"):
+        file = str(Path(root) / f"prepared-diagnostics-{dtype}.tdb")
+        db = triviumdb.TriviumDB(file, dim=2, dtype=dtype, auto_build_quiver=False)
+        try:
+            db.insert_with_id(7, [1, 0], {"saved": "完整事实"})
+            session = triviumdb.ConsoleSession()
+            before = Path(file + ".wal").read_bytes()
+            for case in cases:
+                prepared = db.prepare_tql(case["query"])
+                request = json.dumps({"version": 1, "requestId": case["name"], "command": {
+                    "operation": "query", "query": case["query"], "parameters": case["parameters"],
+                }})
+                for action in (
+                    lambda: db.execute_prepared_tql(prepared, case["parameters"]),
+                    lambda: db.console_request(session, request),
+                ):
+                    try:
+                        action()
+                    except (triviumdb.TriviumDBError, triviumdb.InvalidInputError) as error:
+                        assert error.code == case["code"], case
+                        assert error.schema_version == 1
+                        assert error.stage == "bind"
+                        assert error.target == {"parameter": case["parameter"]}
+                        if "details" in case:
+                            assert error.details == case["details"]
+                        else:
+                            assert list(error.details) == ["reason"]
+                            assert isinstance(error.details["reason"], str) and error.details["reason"]
+                        if case["code"] == "TDB_INVALID_INPUT":
+                            assert isinstance(error, triviumdb.InvalidInputError)
+                    else:
+                        raise AssertionError(f"必须拒绝参数：{case['name']}")
+            prepared = db.prepare_tql("MATCH (n) RETURN $x AS value")
+            assert [row.row for row in db.execute_prepared_tql(prepared, {"x": 42})] == [{"value": 42}]
+            assert Path(file + ".wal").read_bytes() == before
+        finally:
+            db.close()
+        reopened = triviumdb.TriviumDB(file, dim=2, dtype=dtype, auto_build_quiver=False)
+        try:
+            assert reopened.all_node_ids() == [7]
+            node = reopened.get(7)
+            assert node.vector == [1, 0] and node.payload == {"saved": "完整事实"} and node.edges == []
+        finally:
+            reopened.close()
+
+
+def run_query_diagnostics(root):
+    cases = json.loads((Path(__file__).parents[1] / "contracts/query_diagnostics.json").read_text(encoding="utf-8"))["cases"]
+    for dtype in ("f32", "f16", "u64"):
+        file = str(Path(root) / f"diagnostics-{dtype}.tdb")
+        db = triviumdb.TriviumDB(file, dim=2, dtype=dtype, auto_build_quiver=False)
+        try:
+            db.insert_with_id(7, [1, 0], {"saved": "完整事实"})
+            session = triviumdb.ConsoleSession('{"readOnly":false}')
+            for case in cases:
+                query = case["query"]
+                actions = [lambda: db.tql_mut(query)] if case.get("mutation") else [
+                    lambda: db.tql(query), lambda: db.prepare_tql(query),
+                ]
+                request = json.dumps({"version": 1, "requestId": case["name"], "command": {
+                    "operation": "mutate" if case.get("mutation") else "query", "query": query,
+                }})
+                actions.append(lambda: db.console_request(session, request))
+                for action in actions:
+                    try:
+                        action()
+                    except triviumdb.TriviumDBError as error:
+                        assert error.schema_version == 1
+                        assert error.code == "TDB_QUERY_PARSE", case
+                        assert error.stage == case["stage"], case
+                        assert error.write == ({"phase": "validation", "outcome": "not_committed"} if case.get("mutation") else None), case
+                        assert error.target == ({"query_span": case["span"]} if case["span"] else None), case
+                        assert list(error.details) == ["reason"]
+                        assert isinstance(error.details["reason"], str) and error.details["reason"]
+                    else:
+                        raise AssertionError(f"必须拒绝查询：{case['name']}")
+        finally:
+            db.close()
+        reopened = triviumdb.TriviumDB(file, dim=2, dtype=dtype, auto_build_quiver=False)
+        try:
+            assert reopened.all_node_ids() == [7]
+            node = reopened.get(7)
+            assert node.vector == [1, 0] and node.payload == {"saved": "完整事实"} and node.edges == []
+        finally:
+            reopened.close()

@@ -86,9 +86,9 @@ async fn request<T: VectorType + Serialize + DeserializeOwned>(
         Err(_) => {
             return failure(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "TDB_IO",
+                "TDB_BUSY",
                 "控制台请求繁忙 (Console request capacity is busy)",
-                json!({"io_kind":"WouldBlock","os_code":null}),
+                json!({"resource":"console_in_flight"}),
             );
         }
     };
@@ -163,11 +163,18 @@ async fn request<T: VectorType + Serialize + DeserializeOwned>(
             ([("content-type", "application/json; charset=utf-8")], body).into_response()
         }
         Ok(Err(error)) => {
-            let status = match &error {
+            let status = match error.underlying() {
+                TriviumError::DatabaseBusy { .. } => StatusCode::SERVICE_UNAVAILABLE,
+                TriviumError::ReentrantAccess { .. } => StatusCode::CONFLICT,
+                TriviumError::HostLockPoisoned { .. } => StatusCode::INTERNAL_SERVER_ERROR,
                 TriviumError::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     StatusCode::SERVICE_UNAVAILABLE
                 }
                 TriviumError::ReadOnlyViolation { .. } => StatusCode::FORBIDDEN,
+                TriviumError::WriteConflict { .. }
+                | TriviumError::IdempotencyConflict
+                | TriviumError::TransactionFinished
+                | TriviumError::WriteOutcomeUnknown => StatusCode::CONFLICT,
                 TriviumError::DatabaseClosed | TriviumError::ConsoleSessionClosed => {
                     StatusCode::GONE
                 }
@@ -181,7 +188,9 @@ async fn request<T: VectorType + Serialize + DeserializeOwned>(
                 TriviumError::Io(_) | TriviumError::WalClosed => StatusCode::INTERNAL_SERVER_ERROR,
                 _ => StatusCode::BAD_REQUEST,
             };
-            failure(status, error.code(), &error.to_string(), error.details())
+            let mut info = error.info();
+            info.details = triviumdb::sdk::json_error_details(info.details);
+            (status, Json(json!({"version":1,"error":info}))).into_response()
         }
         Err(error) => failure(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -195,31 +204,7 @@ async fn request<T: VectorType + Serialize + DeserializeOwned>(
 fn failure(status: StatusCode, code: &str, message: &str, details: serde_json::Value) -> Response {
     (
         status,
-        Json(json!({"version":1,"error":{"code":code,"message":message,"details":lossless_details(details)}})),
+        Json(json!({"version":1,"error":{"schema_version":triviumdb::error::ERROR_SCHEMA_VERSION,"code":code,"message":message,"details":triviumdb::sdk::json_error_details(details)}})),
     )
         .into_response()
-}
-
-fn lossless_details(value: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-    match value {
-        Value::Number(number)
-            if number
-                .as_u64()
-                .is_some_and(|value| value > 9_007_199_254_740_991)
-                || number
-                    .as_i64()
-                    .is_some_and(|value| value.unsigned_abs() > 9_007_199_254_740_991) =>
-        {
-            Value::String(number.to_string())
-        }
-        Value::Array(values) => Value::Array(values.into_iter().map(lossless_details).collect()),
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, lossless_details(value)))
-                .collect(),
-        ),
-        other => other,
-    }
 }

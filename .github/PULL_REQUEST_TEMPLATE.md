@@ -1,6 +1,6 @@
 ## 变更说明
 
-<!-- 请用自己的话说明问题、实际修改和设计思路。不要只粘贴 AI 生成的摘要。 -->
+<!-- 请用自己的话说明问题、实际修改和设计思路，至少包含一句本人对变更的解释。 -->
 
 ### 解决的问题
 
@@ -34,7 +34,7 @@
 
 ## Change Description
 
-<!-- Explain the problem, actual changes, and reasoning in your own words. Do not submit only an AI-generated summary. -->
+<!-- Explain the problem, actual changes, and reasoning in your own words, including at least one sentence of your own explanation. -->
 
 ### Problem solved
 
