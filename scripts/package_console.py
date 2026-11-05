@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 import tempfile
 import zipfile
 
@@ -52,6 +53,7 @@ def package(output: Path) -> None:
 
 
 def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()

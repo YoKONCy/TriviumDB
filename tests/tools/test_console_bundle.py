@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -15,9 +16,11 @@ ROOT = Path(__file__).resolve().parents[2]
 class ConsoleBundleTests(unittest.TestCase):
     def test_bundle_contains_exact_frontend_and_host_contract(self):
         with tempfile.TemporaryDirectory() as root:
-            output = Path(root) / "console.zip"
+            output = Path(root) / "控制台资源.zip"
             command = [sys.executable, str(ROOT / "scripts/package_console.py"), "--output", str(output)]
-            subprocess.run(command, check=True, capture_output=True)
+            result = subprocess.run(command, check=True, capture_output=True,
+                                    env={**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"})
+            self.assertIn(str(output), result.stdout.decode("utf-8"))
             first = output.read_bytes()
             subprocess.run(command, check=True, capture_output=True)
             self.assertEqual(output.read_bytes(), first)

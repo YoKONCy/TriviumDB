@@ -71,6 +71,7 @@
 - 文档编辑、删除和导入使用审阅队列，捕获版本并冻结完整事务；同批次基线不一致时要求重新读取和审阅。提交结果不明时只查询原事务回执，继续保留完整请求与后续草稿。Console 路径以十进制字符串传递完整 u64 节点 ID。
 - 宿主使用稳定 `storageKey` 隔离各数据库的草稿、历史和偏好。卸载在未处理草稿或队列存在时返回错误；显式退出可先导出原事务。客户端停止准入、发送取消与 detach，并等待已准入桥接调用退出，数据库持久化及文件锁由宿主管理。
 - 资源包加入客户端、挂载入口及各资源 SHA-256。Rust Server crate 导出对应脚本，文档提供 HTTP/IPC 接入和卸载示例。
+- 资源打包命令使用 UTF-8 标准输出，支持 Windows Runner 的重定向日志和中文输出路径，完成提示按中英文双语输出。
 
 > **使用范围**：组件资源与宿主页面同源。Console 邻域沿出边扩展，路径入口提供一条最短路径，查询使用 JSON 响应。向量工作区支持 f32/f16，u64 向量通过 TQL 使用；GSAP、Sigma 等增强能力仍按需加载 CDN。关闭窗口时宿主负责补充卸载，回执继续遵守实例内保留范围。
 
@@ -173,6 +174,7 @@ Subsequent changes build on stable `0.9.0`. Published changes are recorded in th
 - Document edits, deletion, and imports enter write review with captured revisions and frozen transaction identities. Mixed baselines require fresh reads and review. Unknown submissions only query the original receipt and retain the complete request plus later draft edits. Console node IDs use lossless decimal strings across the full u64 range.
 - A stable host-provided `storageKey` isolates database drafts, history, and preferences. Disposal rejects unresolved drafts or queued work; hosts can export the original transaction before explicit exit. The client stops admission, requests cancellation and detach, and waits for admitted bridge calls. Hosts retain ownership of database persistence and file locks.
 - Bundles include the client, mount entry, and SHA-256 hashes for each resource. The Rust Server crate exports both scripts; integration documentation includes HTTP/IPC mounting and disposal examples.
+- The packaging command uses UTF-8 standard output for redirected Windows Runner logs and output paths containing Chinese characters. Its completion message includes both Chinese and English.
 
 > **Scope**: component resources share the host page origin. Console neighborhoods follow outgoing edges, path requests return one shortest path, and queries return JSON. The vector workspace supports f32/f16; use TQL for u64 vectors. Enhancements including GSAP and Sigma still load from CDN on demand. Hosts complete session teardown when windows close; receipts retain their instance-local lifetime.
 
