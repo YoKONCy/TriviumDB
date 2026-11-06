@@ -102,14 +102,17 @@ fn 事务应用失败拒绝部分状态并从完整wal恢复() {
             Err(TriviumError::WalClosed)
         ));
         assert!(matches!(
-            retained.prepare_auto_build(),
-            Err(TriviumError::WalClosed)
+            retained.prepare_auto_build().err().unwrap().underlying(),
+            TriviumError::WalClosed
         ));
         assert!(matches!(
             db.insert(&[1., 1.], json!({})).unwrap_err().underlying(),
             TriviumError::WalClosed
         ));
-        assert!(matches!(db.flush(), Err(TriviumError::WalClosed)));
+        assert!(matches!(
+            db.flush().unwrap_err().underlying(),
+            TriviumError::WalClosed
+        ));
         assert!(matches!(db.close(), Err(TriviumError::WalClosed)));
         assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
         drop(retained);
@@ -213,7 +216,10 @@ fn wal失败隔离子进程入口() {
             "phase":"admission","outcome":"not_committed","transaction_consumed":true
         })
     );
-    assert!(matches!(db.flush(), Err(TriviumError::WalClosed)));
+    assert!(matches!(
+        db.flush().unwrap_err().underlying(),
+        TriviumError::WalClosed
+    ));
     assert!(matches!(db.close(), Err(TriviumError::WalClosed)));
     assert_eq!(
         db.get_payload(10).unwrap(),

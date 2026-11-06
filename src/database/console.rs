@@ -1,6 +1,7 @@
 //! 嵌入式控制台宿主协议；只借用现有实例，不打开路径、不接管文件锁。
 
 use super::{AccessMode, Database, LifecycleState, TxBuilder, lock_or_recover};
+use crate::error::{WriteErrorInfo, WritePhase};
 use crate::query::tql_executor::{QueryControl, TqlValue};
 use crate::{Result, TriviumError, VectorType};
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
@@ -199,6 +200,19 @@ struct RequestGuard {
     state: Weak<Mutex<SessionState>>,
     request_id: String,
     control: QueryControl,
+}
+
+impl RequestGuard {
+    fn check_before_commit(&self) -> Result<()> {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::ConsoleBeforeCommit);
+        self.control.check().map_err(|error| {
+            error.with_write_info(WriteErrorInfo {
+                phase: WritePhase::Validation,
+                ..WriteErrorInfo::MAINTENANCE_ADMISSION
+            })
+        })
+    }
 }
 
 impl Drop for RequestGuard {
@@ -450,7 +464,13 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
         if write {
             self.require_write_access("console_request")?;
         }
-        active.control.check()?;
+        active.control.check().map_err(|error| {
+            if write {
+                error.with_write_info(WriteErrorInfo::MAINTENANCE_ADMISSION)
+            } else {
+                error
+            }
+        })?;
         let limit = options.max_response_bytes;
         let runtime = self.resource_runtime.clone();
         let respond = |data: &Value, committed| {
@@ -800,7 +820,7 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 for operation in operations {
                     append_operation(&mut builder, operation)?;
                 }
-                active.control.check()?;
+                active.check_before_commit()?;
                 self.commit_ops_guarded(builder.into_ops(), Some(receipt))?;
                 let mt = super::read_or_recover(&self.memtable);
                 let receipt = mt
@@ -872,7 +892,7 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 for operation in operations {
                     append_operation(&mut builder, operation)?;
                 }
-                active.control.check()?;
+                active.check_before_commit()?;
                 let ids = self.commit_tx(builder)?;
                 prepared.complete(&json!({"createdIds":strings(ids)}))
             }
@@ -884,7 +904,7 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 for record in records {
                     append_operation(&mut builder, Operation::Insert { record })?;
                 }
-                active.control.check()?;
+                active.check_before_commit()?;
                 let ids = self.commit_tx(builder)?;
                 prepared.complete(&json!({"createdIds":strings(ids)}))
             }
@@ -901,7 +921,7 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 for record in records {
                     append_operation(&mut builder, Operation::Link { record })?;
                 }
-                active.control.check()?;
+                active.check_before_commit()?;
                 self.commit_tx(builder)?;
                 prepared.into_response()
             }

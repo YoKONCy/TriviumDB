@@ -162,9 +162,18 @@ function runConsoleContract(root, api = { TriviumDB, ConsoleSession }) {
       return query
     } })
     assert.throws(() => db.consoleRequest(session, wire({ operation: 'search', vector: [1, 0], topK: 1 })),
-      error => error.code === 'TDB_QUERY_CANCELLED')
+      error => {
+        assert.equal(error.schema_version, 1)
+        assert.equal(error.code, 'TDB_QUERY_CANCELLED')
+        assert.deepEqual(error.details, {})
+        assert.equal(error.write, undefined)
+        return true
+      })
     assert.equal(cancelCallbacks, 1)
     assert.equal(session.cancel('验收请求'), false)
+    db.clearHook()
+    const resumed = JSON.parse(db.consoleRequest(session, wire({ operation: 'getNodes', ids: ['1'] })))
+    assert.deepEqual(resumed.data, { nodes: [{ id: '1', vector: [1, 0], payload: { owner: 'host' }, edges: [] }], missingIds: [] })
     assert.deepEqual(db.getPayload(1), { owner: 'host' })
   } finally { db.close() }
 }

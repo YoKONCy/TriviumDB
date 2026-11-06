@@ -143,7 +143,7 @@ async fn request<T: VectorType + Serialize + DeserializeOwned>(
         Err(_) => {
             return failure(
                 StatusCode::REQUEST_TIMEOUT,
-                "TDB_QUERY_CANCELLED",
+                TriviumError::QueryDeadlineExceeded.code(),
                 "读取请求体超时 (Request body read timed out)",
                 json!({}),
             );
@@ -185,6 +185,7 @@ async fn request<T: VectorType + Serialize + DeserializeOwned>(
                 } => StatusCode::PAYLOAD_TOO_LARGE,
                 TriviumError::ResourceBudgetExceeded { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 TriviumError::QueryCancelled => StatusCode::REQUEST_TIMEOUT,
+                TriviumError::QueryDeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
                 TriviumError::Io(_) | TriviumError::WalClosed => StatusCode::INTERNAL_SERVER_ERROR,
                 _ => StatusCode::BAD_REQUEST,
             };

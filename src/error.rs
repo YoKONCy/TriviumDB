@@ -38,6 +38,7 @@ pub enum WritePhase {
     Validation,
     Wal,
     Apply,
+    Publish,
     GroupSync,
     Response,
 }
@@ -56,6 +57,33 @@ impl WriteErrorInfo {
         outcome: WriteOutcome::NotCommitted,
         transaction_consumed: Some(false),
     };
+
+    pub(crate) const MAINTENANCE_ADMISSION: Self = Self {
+        transaction_consumed: None,
+        ..Self::TRANSACTION_ADMISSION
+    };
+
+    #[cfg(any(feature = "python", feature = "nodejs"))]
+    pub(crate) const MAINTENANCE_VALIDATION: Self = Self {
+        phase: WritePhase::Validation,
+        ..Self::MAINTENANCE_ADMISSION
+    };
+
+    pub(crate) fn capture<R>(operation: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
+        let mut write = Self::MAINTENANCE_ADMISSION;
+        operation(&mut write).map_err(|error| error.with_write_info(write))
+    }
+
+    /// 独立目标操作保留源库错误链，最外层结果描述目标发布。
+    pub(crate) fn capture_destination<R>(
+        operation: impl FnOnce(&mut Self) -> Result<R>,
+    ) -> Result<R> {
+        let mut write = Self::MAINTENANCE_ADMISSION;
+        operation(&mut write).map_err(|source| TriviumError::WriteFailure {
+            source: Box::new(source),
+            write,
+        })
+    }
 }
 
 /// TQL 解析与参数绑定能够确认的失败阶段。
@@ -120,10 +148,18 @@ impl QuerySpan {
 pub enum ErrorTarget {
     Query { query_span: QuerySpan },
     Parameter { parameter: String },
+    Field { field: String },
 }
 
 #[derive(Error, Debug)]
 pub enum TriviumError {
+    /// 普通 API 字段定位保留原始错误类别、详情与 cause。
+    #[error("{source}")]
+    ApiField {
+        field: String,
+        #[source]
+        source: Box<TriviumError>,
+    },
     /// 写入阶段上下文保留原始错误类别及 cause。
     #[error("{source}")]
     WriteFailure {
@@ -238,9 +274,13 @@ pub enum TriviumError {
     )]
     UnexpectedQueryParameter { parameter: String },
 
-    /// 查询因客户端取消或请求 deadline 到期而协作式终止。
+    /// 查询在协作检查点观察到主动取消。
     #[error("查询已取消 (Query cancelled)")]
     QueryCancelled,
+
+    /// 查询在协作检查点观察到请求期限已到。
+    #[error("查询执行期限已到 (Query deadline exceeded)")]
+    QueryDeadlineExceeded,
 
     /// 查询需要物化的行数超过安全预算；禁止以静默截断伪装成完整结果。
     #[error(
@@ -387,12 +427,30 @@ pub enum TriviumError {
 impl TriviumError {
     /// 外层准入只补充尚未由执行点提供的上下文。
     pub(crate) fn with_write_info(self, write: WriteErrorInfo) -> Self {
-        match self {
-            Self::WriteFailure { .. } => self,
-            _ => Self::WriteFailure {
+        if self.write_info().is_some() {
+            self
+        } else {
+            Self::WriteFailure {
                 source: Box::new(self),
                 write,
-            },
+            }
+        }
+    }
+
+    fn write_info(&self) -> Option<WriteErrorInfo> {
+        match self {
+            Self::WriteFailure { write, .. } => Some(*write),
+            Self::QueryParameter { source, .. } | Self::ApiField { source, .. } => {
+                source.write_info()
+            }
+            _ => None,
+        }
+    }
+
+    pub fn at_field(self, field: &str) -> Self {
+        Self::ApiField {
+            field: field.into(),
+            source: Box::new(self),
         }
     }
 
@@ -407,14 +465,21 @@ impl TriviumError {
     /// 语言异常分类与 Rust 模式匹配使用原始错误变体。
     pub fn underlying(&self) -> &Self {
         match self {
-            Self::QueryParameter { source, .. } | Self::WriteFailure { source, .. } => {
-                source.underlying()
-            }
+            Self::QueryParameter { source, .. }
+            | Self::WriteFailure { source, .. }
+            | Self::ApiField { source, .. } => source.underlying(),
             _ => self,
         }
     }
 
     pub fn info(&self) -> ErrorInfo {
+        if let Self::ApiField { field, source } = self {
+            let mut info = source.info();
+            info.target = Some(ErrorTarget::Field {
+                field: field.clone(),
+            });
+            return info;
+        }
         if let Self::WriteFailure { source, write } = self {
             let mut info = source.info();
             info.write = Some(*write);
@@ -442,19 +507,16 @@ impl TriviumError {
             details: self.details(),
             stage,
             target,
-            write: match self {
-                Self::QueryParameter { source, .. } => source.info().write,
-                _ => None,
-            },
+            write: self.write_info(),
         }
     }
 
     /// 三端共享的稳定错误码；消息可翻译，控制流依赖错误码与字段。
     pub fn code(&self) -> &'static str {
         match self {
-            Self::QueryParameter { source, .. } | Self::WriteFailure { source, .. } => {
-                source.code()
-            }
+            Self::QueryParameter { source, .. }
+            | Self::WriteFailure { source, .. }
+            | Self::ApiField { source, .. } => source.code(),
             Self::Io(_) => "TDB_IO",
             Self::Serialization(_) => "TDB_SERIALIZATION",
             Self::DimensionMismatch { .. } => "TDB_DIMENSION_MISMATCH",
@@ -479,6 +541,7 @@ impl TriviumError {
             Self::MissingQueryParameter { .. } => "TDB_MISSING_QUERY_PARAMETER",
             Self::UnexpectedQueryParameter { .. } => "TDB_UNEXPECTED_QUERY_PARAMETER",
             Self::QueryCancelled => "TDB_QUERY_CANCELLED",
+            Self::QueryDeadlineExceeded => "TDB_QUERY_DEADLINE_EXCEEDED",
             Self::QueryRowBudgetExceeded { .. } => "TDB_QUERY_BUDGET",
             Self::PayloadQueryBudgetExceeded { .. } => "TDB_PAYLOAD_BUDGET_EXCEEDED",
             Self::TraversalBudgetExceeded { .. } => "TDB_TRAVERSAL_BUDGET_EXCEEDED",
@@ -511,9 +574,9 @@ impl TriviumError {
     pub fn details(&self) -> serde_json::Value {
         use serde_json::json;
         match self {
-            Self::QueryParameter { source, .. } | Self::WriteFailure { source, .. } => {
-                source.details()
-            }
+            Self::QueryParameter { source, .. }
+            | Self::WriteFailure { source, .. }
+            | Self::ApiField { source, .. } => source.details(),
             Self::DatabaseBusy { resource } | Self::HostLockPoisoned { resource } => {
                 json!({"resource": resource})
             }
@@ -627,6 +690,7 @@ impl TriviumError {
             | Self::InvalidInput(reason)
             | Self::Generic(reason) => json!({"reason": reason}),
             Self::QueryCancelled
+            | Self::QueryDeadlineExceeded
             | Self::WalClosed
             | Self::DatabaseClosed
             | Self::TransactionFinished

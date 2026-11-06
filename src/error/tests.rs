@@ -160,6 +160,11 @@ pub(crate) fn cases() -> Vec<(E, &'static str, Value)> {
         ),
         (E::QueryCancelled, "TDB_QUERY_CANCELLED", json!({})),
         (
+            E::QueryDeadlineExceeded,
+            "TDB_QUERY_DEADLINE_EXCEEDED",
+            json!({}),
+        ),
+        (
             E::QueryRowBudgetExceeded { budget: 2 },
             "TDB_QUERY_BUDGET",
             json!({"budget":2}),
@@ -366,6 +371,20 @@ fn 写入上下文保留原始错误且外层准入不覆盖执行事实() {
         .with_write_info(WriteErrorInfo::TRANSACTION_ADMISSION);
     assert!(matches!(error.underlying(), E::Io(_)));
     let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["code"], "TDB_IO");
+    assert_eq!(info["details"], json!({"io_kind":"NotFound","os_code":2}));
+    assert_eq!(
+        info["write"],
+        json!({"phase":"wal","outcome":"unknown","transaction_consumed":true})
+    );
+    let error = error
+        .at_query_parameter("input")
+        .at_field("mb")
+        .with_write_info(WriteErrorInfo::TRANSACTION_ADMISSION);
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert!(matches!(error.underlying(), E::Io(_)));
+    assert_eq!(info["target"], json!({"field":"mb"}));
+    assert_eq!(info["stage"], "bind");
     assert_eq!(info["code"], "TDB_IO");
     assert_eq!(info["details"], json!({"io_kind":"NotFound","os_code":2}));
     assert_eq!(

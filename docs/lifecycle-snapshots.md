@@ -45,7 +45,7 @@ Rust 多个宿主组件可通过 `SharedDatabase<T>` 共享实例；接口与层
 
 异步关闭阶段依次为 `open → draining → flushing → closed`。持久化失败时为 `failed`，下一次等待返回保存的原始错误；消费错误后，可再次调用 `close_timeout` 重试。`last_error` 提供诊断文本，宿主通过结构化 `last_failure` 和调用返回的错误分类处理故障。
 
-`shutdown_status()` 还返回结构化 `last_failure`（分类、消息及可选预算字段），以及当前关闭登记的 `maintenance` 状态。宿主可以区分排空等待、维护准入延期与已执行失败，详见[后台维护诊断](resource-runtime.md#后台维护诊断)。`active_operations` 统计本实例已进入的操作调用，包括内部嵌套调用。共享运行时另行统计根任务数。一次新的关闭尝试清除上次故障诊断。
+`shutdown_status()` 还返回结构化 `last_failure`，包含分类、规范错误码、消息、详情、可选写入结果及预算字段，以及当前关闭登记的 `maintenance` 状态。宿主可以区分排空等待、维护准入延期与已执行失败，详见[后台维护诊断](resource-runtime.md#后台维护诊断)。`active_operations` 统计本实例已进入的操作调用，包括内部嵌套调用。共享运行时另行统计根任务数。一次新的关闭尝试清除上次故障诊断。
 
 等待超时返回 `false`，关闭任务继续持有内存、配额和文件锁。已有操作与 Hook 完成后，共享调度器继续执行关闭；已排空的关闭任务优先于周期压实。后续调用可继续等待或读取状态。返回 `true` 时，可写实例已完成持久化，数据库配额已归还、文件锁已释放；Reader 完成自身资源释放，并保持数据库制品原样。
 
@@ -156,6 +156,10 @@ Rust 校验和恢复还有接收 `&ResourceRuntime` 的 `_with_runtime` 入口�
 > **恢复提醒**：发布前的普通错误清理本次暂存目录；强杀后可能留下隐藏暂存目录。正式快照由目标路径及有效 manifest 识别，目标父目录可能保留用于并发发布互斥的隐藏锁文件。
 
 重命名完成后，若父目录同步失败，Rust 返回 `SnapshotPublicationUncertain`，Python 抛出 `SnapshotPublicationError`，Node 错误码为 `TDB_SNAPSHOT_PUBLICATION_UNCERTAIN`。此时保留已发布的完整目标，宿主通过校验目标决定后续操作。已有目标分别返回 Rust `SnapshotDestinationExists`、Python `FileExistsError`、Node `TDB_SNAPSHOT_EXISTS`。
+
+创建、恢复和 manifest 错误的最外层 `write` 描述目标的发布结果。目标校验、复制和源检查点失败在目标发布前提供 `validation/not_committed`；目录重命名后的同步失败提供 `publish/unknown`。`generation_id` 在源检查点之前校验。Rust 通过 `underlying()` 匹配原始错误变体，原始 cause 继续保留。
+
+维度迁移在独占暂存库中构建节点和边，并在公开目标之前预留最终实例配额。提交前失败且回滚清理完成时提供 `publish/not_committed`；提交标记重命名后同步失败为 `publish/unknown`；完成提交及目录同步后的清理失败为 `publish/committed`。根据结果校验目标，释放旧句柄后再重新打开。
 
 校验检查文件集合、长度、CRC 及主文件头的维度和节点数。打开数据库时继续执行内部格式校验。发布后的快照目录按不可变制品管理；创建和校验期间，宿主保持源文件与发布目录的内容稳定。
 

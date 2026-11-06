@@ -322,6 +322,7 @@ pub struct PreparedQuiverBuild<T: VectorType> {
     snapshot: crate::storage::memtable::QuiverBuildSnapshot,
     config: crate::index::quiver::QuIVerConfig,
     memtable: Arc<RwLock<MemTable<T>>>,
+    wal: Arc<Mutex<Wal>>,
     _build_guard: QuiverBuildGuard,
     _operation_guard: OperationGuard,
     _workspace: crate::resources::WorkspaceReservation,
@@ -333,17 +334,29 @@ pub struct PreparedQuiverBuild<T: VectorType> {
 impl<T: VectorType> PreparedQuiverBuild<T> {
     /// 在不持有调用方 Database guard 的情况下构建，并仅在向量代际未变化时发布。
     pub fn execute(self) -> Result<bool> {
-        reject_hook_reentrant_access(&self.memtable)?;
-        let source_generation = self.snapshot.generation;
-        let pool = self
-            .resource_runtime
-            .pool(self.resource_runtime.parallelism())?;
-        let index = pool.install_task(Some(self._operation_guard.resource_task.id()), || {
-            MemTable::<T>::build_quiver_snapshot(self.snapshot, &self.config)
-        });
-        #[cfg(feature = "test-hooks")]
-        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverPublish);
-        Ok(write_or_recover(&self.memtable).publish_quiver_if_current(source_generation, index))
+        WriteErrorInfo::capture(|write| {
+            reject_hook_reentrant_access(&self.memtable)?;
+            {
+                let mt = read_or_recover(&self.memtable);
+                mt.ensure_readable()?;
+                lock_or_recover(&self.wal).ensure_writable()?;
+            }
+            write.phase = WritePhase::Validation;
+            let source_generation = self.snapshot.generation;
+            let pool = self
+                .resource_runtime
+                .pool(self.resource_runtime.parallelism())?;
+            let index = pool.install_task(Some(self._operation_guard.resource_task.id()), || {
+                MemTable::<T>::build_quiver_snapshot(self.snapshot, &self.config)
+            });
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverPublish);
+            let mut mt = write_or_recover(&self.memtable);
+            mt.ensure_readable()?;
+            let wal = lock_or_recover(&self.wal);
+            wal.ensure_writable()?;
+            Ok(mt.publish_quiver_if_current(source_generation, index))
+        })
     }
 }
 
@@ -351,7 +364,7 @@ impl<T: VectorType> PreparedQuiverBuild<T> {
 #[derive(Clone)]
 pub struct QuiverBuildHandle<T: VectorType> {
     memtable: Arc<RwLock<MemTable<T>>>,
-    memory_limit: usize,
+    wal: Arc<Mutex<Wal>>,
     resource_runtime: crate::resources::ResourceRuntime,
     quiver_builds: Arc<(Mutex<std::collections::HashSet<u64>>, Condvar)>,
     lifecycle: Arc<(Mutex<LifecycleState>, Condvar)>,
@@ -363,69 +376,77 @@ pub struct QuiverBuildHandle<T: VectorType> {
 impl<T: VectorType> QuiverBuildHandle<T> {
     /// 若当前配置和数据状态满足自动构建条件，捕获后台 QuIVer 构建任务。
     pub fn prepare_auto_build(&self) -> Result<Option<PreparedQuiverBuild<T>>> {
-        reject_hook_reentrant_access(&self.memtable)?;
-        if self.access_mode != AccessMode::ReadWrite {
-            return Err(TriviumError::ReadOnlyViolation {
-                operation: "prepare_auto_quiver_build",
-            });
-        }
-        let operation_guard = {
-            let mut state = lock_or_recover(&self.lifecycle.0);
-            if state.recovery_required.load(Ordering::Acquire) {
-                return Err(TriviumError::WalClosed);
+        WriteErrorInfo::capture(|write| {
+            reject_hook_reentrant_access(&self.memtable)?;
+            if self.access_mode != AccessMode::ReadWrite {
+                return Err(TriviumError::ReadOnlyViolation {
+                    operation: "prepare_auto_quiver_build",
+                });
             }
-            if state.lifecycle != DatabaseLifecycle::Open {
-                return Err(TriviumError::DatabaseClosed);
-            }
-            let mut resource_task = self.resource_runtime.enter_task()?;
-            resource_task.detach();
-            state.active_operations = state
-                .active_operations
-                .checked_add(1)
-                .ok_or_else(|| TriviumError::InvalidInput("数据库活动操作计数溢出".into()))?;
-            OperationGuard {
-                resource_task,
-                lifecycle: Arc::clone(&self.lifecycle),
-            }
-        };
-        let config = crate::index::quiver::QuIVerConfig::default();
-        let (snapshot, workspace) = {
-            let mt = read_or_recover(&self.memtable);
-            if !mt.auto_quiver_build_needed() {
+            let operation_guard = {
+                let mut state = lock_or_recover(&self.lifecycle.0);
+                if state.recovery_required.load(Ordering::Acquire) {
+                    return Err(TriviumError::WalClosed);
+                }
+                if state.lifecycle != DatabaseLifecycle::Open {
+                    return Err(TriviumError::DatabaseClosed);
+                }
+                let mut resource_task = self.resource_runtime.enter_task()?;
+                resource_task.detach();
+                state.active_operations = state
+                    .active_operations
+                    .checked_add(1)
+                    .ok_or_else(|| TriviumError::InvalidInput("数据库活动操作计数溢出".into()))?;
+                OperationGuard {
+                    resource_task,
+                    lifecycle: Arc::clone(&self.lifecycle),
+                }
+            };
+            let config = crate::index::quiver::QuIVerConfig::default();
+            let (snapshot, workspace) = {
+                let mt = read_or_recover(&self.memtable);
+                mt.ensure_readable()?;
+                lock_or_recover(&self.wal).ensure_writable()?;
+                write.phase = WritePhase::Validation;
+                if !mt.auto_quiver_build_needed() {
+                    return Ok(None);
+                }
+                let projected = mt
+                    .estimated_memory_bytes()
+                    .saturating_add(mt.quiver_build_peak_bytes(&config));
+                let memory_limit = mt.reserved_database_bytes();
+                if memory_limit > 0 && projected > memory_limit {
+                    return Err(TriviumError::InvalidInput(format!(
+                        "QuIVer 自动构建预计峰值 {}MB 超过内存上限 {}MB",
+                        projected / (1024 * 1024),
+                        memory_limit / (1024 * 1024)
+                    )));
+                }
+                let workspace = self
+                    .resource_runtime
+                    .reserve_workspace(mt.quiver_build_peak_bytes(&config))?;
+                (mt.quiver_build_snapshot(), workspace)
+            };
+            let Some(snapshot) = snapshot else {
                 return Ok(None);
-            }
-            let projected = mt
-                .estimated_memory_bytes()
-                .saturating_add(mt.quiver_build_peak_bytes(&config));
-            if self.memory_limit > 0 && projected > self.memory_limit {
-                return Err(TriviumError::InvalidInput(format!(
-                    "QuIVer 自动构建预计峰值 {}MB 超过内存上限 {}MB",
-                    projected / (1024 * 1024),
-                    self.memory_limit / (1024 * 1024)
-                )));
-            }
-            let workspace = self
-                .resource_runtime
-                .reserve_workspace(mt.quiver_build_peak_bytes(&config))?;
-            (mt.quiver_build_snapshot(), workspace)
-        };
-        let Some(snapshot) = snapshot else {
-            return Ok(None);
-        };
-        let Some(build_guard) = try_start_quiver_build(&self.quiver_builds, snapshot.generation)
-        else {
-            return Ok(None);
-        };
-        Ok(Some(PreparedQuiverBuild {
-            snapshot,
-            config,
-            memtable: Arc::clone(&self.memtable),
-            _build_guard: build_guard,
-            _operation_guard: operation_guard,
-            _workspace: workspace,
-            resource_runtime: self.resource_runtime.clone(),
-            _file_lock: self._file_lock.clone(),
-        }))
+            };
+            let Some(build_guard) =
+                try_start_quiver_build(&self.quiver_builds, snapshot.generation)
+            else {
+                return Ok(None);
+            };
+            Ok(Some(PreparedQuiverBuild {
+                snapshot,
+                config,
+                memtable: Arc::clone(&self.memtable),
+                wal: Arc::clone(&self.wal),
+                _build_guard: build_guard,
+                _operation_guard: operation_guard,
+                _workspace: workspace,
+                resource_runtime: self.resource_runtime.clone(),
+                _file_lock: self._file_lock.clone(),
+            }))
+        })
     }
 }
 
@@ -1080,11 +1101,15 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     /// 运行时切换 WAL 同步模式
     pub fn set_sync_mode(&mut self, mode: SyncMode) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("set_sync_mode")?;
-        let mut w = lock_or_recover(&self.wal);
-        w.set_sync_mode(mode);
-        Ok(())
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("set_sync_mode")?;
+            let mut w = lock_or_recover(&self.wal);
+            w.ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            w.set_sync_mode(mode);
+            Ok(())
+        })
     }
 
     /// 数据读取与查询共享准入和生命周期检查。
@@ -1204,7 +1229,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn quiver_build_handle(&self) -> QuiverBuildHandle<T> {
         QuiverBuildHandle {
             memtable: Arc::clone(&self.memtable),
-            memory_limit: self.memory_limit,
+            wal: Arc::clone(&self.wal),
             resource_runtime: self.resource_runtime.clone(),
             quiver_builds: Arc::clone(&self.quiver_builds),
             lifecycle: Arc::clone(&self.lifecycle),
@@ -1215,8 +1240,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     /// 若当前配置和数据状态满足自动构建条件，捕获后台 QuIVer 构建任务。
     pub fn prepare_auto_quiver_build(&self) -> Result<Option<PreparedQuiverBuild<T>>> {
-        let _operation = self.enter_operation()?;
-        self.quiver_build_handle().prepare_auto_build()
+        Self::write_operation(|_| {
+            let _operation = self.enter_operation()?;
+            self.quiver_build_handle().prepare_auto_build()
+        })
     }
 
     /// 构建 QuIVer BQ-native Vamana 图索引
@@ -1238,99 +1265,115 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         &self,
         config: Option<crate::index::quiver::QuIVerConfig>,
     ) -> Result<()> {
-        let _operation = self.enter_operation()?;
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
 
-        self.require_write_access("build_quiver_index")?;
-        if crate::vector::is_binary_vector::<T>() {
-            return Err(TriviumError::InvalidInput("u64 使用汉明精确检索，QuIVer 构建支持浮点向量 (u64 uses exact Hamming retrieval; QuIVer construction supports floating-point vectors)".into()));
-        }
-        let cfg = config.unwrap_or_default();
-        let (_workspace, snapshot) = {
-            let mt = read_or_recover(&self.memtable);
-            if mt.dim() > crate::index::bq::MAX_BQ_DIM {
-                return Err(TriviumError::InvalidInput(format!(
-                    "QuIVer 最高支持 {} 维，当前数据库为 {} 维",
-                    crate::index::bq::MAX_BQ_DIM,
-                    mt.dim()
-                )));
+            self.require_write_access("build_quiver_index")?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            if crate::vector::is_binary_vector::<T>() {
+                return Err(TriviumError::InvalidInput("u64 使用汉明精确检索，QuIVer 构建支持浮点向量 (u64 uses exact Hamming retrieval; QuIVer construction supports floating-point vectors)".into()));
             }
-            let projected = mt
-                .estimated_memory_bytes()
-                .saturating_add(mt.quiver_build_peak_bytes(&cfg));
-            if self.memory_limit > 0 && projected > self.memory_limit {
-                return Err(TriviumError::InvalidInput(format!(
-                    "QuIVer 构建预计峰值 {}MB 超过内存上限 {}MB",
-                    projected / (1024 * 1024),
-                    self.memory_limit / (1024 * 1024)
-                )));
-            }
-            let workspace = self
-                .resource_runtime
-                .reserve_workspace(mt.quiver_build_peak_bytes(&cfg))?;
-            (workspace, mt.quiver_build_snapshot())
-        };
-        if let Some(snapshot) = snapshot {
-            let source_generation = snapshot.generation;
-            #[cfg(feature = "test-hooks")]
-            crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverBuildClaim);
-            let Some(_build_guard) = try_start_quiver_build(&self.quiver_builds, source_generation)
-            else {
-                #[cfg(feature = "test-hooks")]
-                crate::test_hooks::hit(
-                    crate::test_hooks::ConcurrencyPoint::QuiverBuildFollowerWaiting,
-                );
-                let (building, changed) = &*self.quiver_builds;
-                let mut active = lock_or_recover(building);
-                while active.contains(&source_generation) {
-                    active = changed
-                        .wait(active)
-                        .unwrap_or_else(|poison| poison.into_inner());
+            let cfg = config.unwrap_or_default();
+            let (_workspace, snapshot) = {
+                let mt = read_or_recover(&self.memtable);
+                mt.ensure_readable()?;
+                lock_or_recover(&self.wal).ensure_writable()?;
+                if mt.dim() > crate::index::bq::MAX_BQ_DIM {
+                    return Err(TriviumError::InvalidInput(format!(
+                        "QuIVer 最高支持 {} 维，当前数据库为 {} 维",
+                        crate::index::bq::MAX_BQ_DIM,
+                        mt.dim()
+                    )));
                 }
-                return Ok(());
+                let projected = mt
+                    .estimated_memory_bytes()
+                    .saturating_add(mt.quiver_build_peak_bytes(&cfg));
+                if self.memory_limit > 0 && projected > self.memory_limit {
+                    return Err(TriviumError::InvalidInput(format!(
+                        "QuIVer 构建预计峰值 {}MB 超过内存上限 {}MB",
+                        projected / (1024 * 1024),
+                        self.memory_limit / (1024 * 1024)
+                    )));
+                }
+                let workspace = self
+                    .resource_runtime
+                    .reserve_workspace(mt.quiver_build_peak_bytes(&cfg))?;
+                (workspace, mt.quiver_build_snapshot())
             };
-            let index = self
-                .resource_runtime
-                .pool(self.resource_runtime.parallelism())?
-                .install(|| MemTable::<T>::build_quiver_snapshot(snapshot, &cfg));
-            #[cfg(feature = "test-hooks")]
-            crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverPublish);
-            if !write_or_recover(&self.memtable).publish_quiver_if_current(source_generation, index)
-            {
-                return Err(TriviumError::InvalidInput(
-                    "QuIVer 构建期间向量数据已变化，请重试".into(),
-                ));
+            if let Some(snapshot) = snapshot {
+                let source_generation = snapshot.generation;
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverBuildClaim);
+                let Some(_build_guard) =
+                    try_start_quiver_build(&self.quiver_builds, source_generation)
+                else {
+                    #[cfg(feature = "test-hooks")]
+                    crate::test_hooks::hit(
+                        crate::test_hooks::ConcurrencyPoint::QuiverBuildFollowerWaiting,
+                    );
+                    let (building, changed) = &*self.quiver_builds;
+                    let mut active = lock_or_recover(building);
+                    while active.contains(&source_generation) {
+                        active = changed
+                            .wait(active)
+                            .unwrap_or_else(|poison| poison.into_inner());
+                    }
+                    return Ok(());
+                };
+                let index = self
+                    .resource_runtime
+                    .pool(self.resource_runtime.parallelism())?
+                    .install(|| MemTable::<T>::build_quiver_snapshot(snapshot, &cfg));
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverPublish);
+                let mut mt = write_or_recover(&self.memtable);
+                mt.ensure_readable()?;
+                let wal = lock_or_recover(&self.wal);
+                wal.ensure_writable()?;
+                if !mt.publish_quiver_if_current(source_generation, index) {
+                    return Err(TriviumError::InvalidInput(
+                        "QuIVer 构建期间向量数据已变化，请重试".into(),
+                    ));
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// 在当前快速QuIVer图上安装按节点ID绑定的校正系数，不重新构图。
     /// 校正为运行期派生状态；增删、重建和重载后需重新安装，不改变旧BQ存储格式。
     pub fn enable_quiver_corrected_sm(&self, coefficients: &[(NodeId, f32)]) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("enable_quiver_corrected_sm")?;
-        reject_hook_reentrant_access(&self.memtable)?;
-        let mut guard = write_or_recover(&self.memtable);
-        let mt = &mut *guard;
-        self.resource_runtime
-            .pool(self.resource_runtime.parallelism())?
-            .install(|| {
-                let extra = mt
-                    .quiver()
-                    .map_or(0, |index| index.sm_install_peak_extra_bytes());
-                if self.memory_limit > 0
-                    && mt.estimated_memory_bytes().saturating_add(extra) > self.memory_limit
-                {
-                    return Err(TriviumError::InvalidInput(
-                        "QuIVer校正安装预计峰值超过内核内存预算".into(),
-                    ));
-                }
-                let _workspace = self.resource_runtime.reserve_workspace(extra)?;
-                mt.enable_quiver_corrected_sm(coefficients)
-                    .map_err(|error| {
-                        TriviumError::InvalidInput(format!("安装QuIVer校正失败：{error}"))
-                    })
-            })
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("enable_quiver_corrected_sm")?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            let mut guard = write_or_recover(&self.memtable);
+            let mt = &mut *guard;
+            mt.ensure_readable()?;
+            let wal = lock_or_recover(&self.wal);
+            wal.ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            self.resource_runtime
+                .pool(self.resource_runtime.parallelism())?
+                .install(|| {
+                    let extra = mt
+                        .quiver()
+                        .map_or(0, |index| index.sm_install_peak_extra_bytes());
+                    if self.memory_limit > 0
+                        && mt.estimated_memory_bytes().saturating_add(extra) > self.memory_limit
+                    {
+                        return Err(TriviumError::InvalidInput(
+                            "QuIVer校正安装预计峰值超过内核内存预算".into(),
+                        ));
+                    }
+                    let _workspace = self.resource_runtime.reserve_workspace(extra)?;
+                    mt.enable_quiver_corrected_sm(coefficients)
+                        .map_err(|error| {
+                            TriviumError::InvalidInput(format!("安装QuIVer校正失败：{error}"))
+                        })
+                })
+        })
     }
 
     /// 返回校正是否仍与当前QuIVer图匹配。
@@ -1340,33 +1383,39 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     /// 恢复默认无训练SM-L2；新构图、增量写入及数据库重载均自动维护默认状态。
     pub fn enable_quiver_sm_l2(&self) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("enable_quiver_sm_l2")?;
-        reject_hook_reentrant_access(&self.memtable)?;
-        let mut guard = write_or_recover(&self.memtable);
-        let mt = &mut *guard;
-        self.resource_runtime
-            .pool(self.resource_runtime.parallelism())?
-            .install(|| {
-                let extra = mt.quiver().map_or(0, |index| {
-                    if index.default_sm_ready() {
-                        0
-                    } else {
-                        index.sm_install_peak_extra_bytes()
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("enable_quiver_sm_l2")?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            let mut guard = write_or_recover(&self.memtable);
+            let mt = &mut *guard;
+            mt.ensure_readable()?;
+            let wal = lock_or_recover(&self.wal);
+            wal.ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            self.resource_runtime
+                .pool(self.resource_runtime.parallelism())?
+                .install(|| {
+                    let extra = mt.quiver().map_or(0, |index| {
+                        if index.default_sm_ready() {
+                            0
+                        } else {
+                            index.sm_install_peak_extra_bytes()
+                        }
+                    });
+                    if self.memory_limit > 0
+                        && mt.estimated_memory_bytes().saturating_add(extra) > self.memory_limit
+                    {
+                        return Err(TriviumError::InvalidInput(
+                            "QuIVer重建L2安装预计峰值超过内核内存预算".into(),
+                        ));
                     }
-                });
-                if self.memory_limit > 0
-                    && mt.estimated_memory_bytes().saturating_add(extra) > self.memory_limit
-                {
-                    return Err(TriviumError::InvalidInput(
-                        "QuIVer重建L2安装预计峰值超过内核内存预算".into(),
-                    ));
-                }
-                let _workspace = self.resource_runtime.reserve_workspace(extra)?;
-                mt.enable_quiver_sm_l2().map_err(|error| {
-                    TriviumError::InvalidInput(format!("安装QuIVer重建L2失败：{error}"))
+                    let _workspace = self.resource_runtime.reserve_workspace(extra)?;
+                    mt.enable_quiver_sm_l2().map_err(|error| {
+                        TriviumError::InvalidInput(format!("安装QuIVer重建L2失败：{error}"))
+                    })
                 })
-            })
+        })
     }
 
     pub fn quiver_sm_l2_enabled(&self) -> bool {
@@ -1375,29 +1424,35 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     /// 显式选择原生欧氏查询，返回负平方距离；运行期模式在修改或重载后需重新安装。
     pub fn enable_quiver_sm_native_l2(&self) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("enable_quiver_sm_native_l2")?;
-        reject_hook_reentrant_access(&self.memtable)?;
-        let mut guard = write_or_recover(&self.memtable);
-        let mt = &mut *guard;
-        self.resource_runtime
-            .pool(self.resource_runtime.parallelism())?
-            .install(|| {
-                let extra = mt
-                    .quiver()
-                    .map_or(0, |index| index.sm_install_peak_extra_bytes());
-                if self.memory_limit > 0
-                    && mt.estimated_memory_bytes().saturating_add(extra) > self.memory_limit
-                {
-                    return Err(TriviumError::InvalidInput(
-                        "QuIVer原生欧氏安装预计峰值超过内核内存预算".into(),
-                    ));
-                }
-                let _workspace = self.resource_runtime.reserve_workspace(extra)?;
-                mt.enable_quiver_sm_native_l2().map_err(|error| {
-                    TriviumError::InvalidInput(format!("安装QuIVer原生欧氏失败：{error}"))
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("enable_quiver_sm_native_l2")?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            let mut guard = write_or_recover(&self.memtable);
+            let mt = &mut *guard;
+            mt.ensure_readable()?;
+            let wal = lock_or_recover(&self.wal);
+            wal.ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            self.resource_runtime
+                .pool(self.resource_runtime.parallelism())?
+                .install(|| {
+                    let extra = mt
+                        .quiver()
+                        .map_or(0, |index| index.sm_install_peak_extra_bytes());
+                    if self.memory_limit > 0
+                        && mt.estimated_memory_bytes().saturating_add(extra) > self.memory_limit
+                    {
+                        return Err(TriviumError::InvalidInput(
+                            "QuIVer原生欧氏安装预计峰值超过内核内存预算".into(),
+                        ));
+                    }
+                    let _workspace = self.resource_runtime.reserve_workspace(extra)?;
+                    mt.enable_quiver_sm_native_l2().map_err(|error| {
+                        TriviumError::InvalidInput(format!("安装QuIVer原生欧氏失败：{error}"))
+                    })
                 })
-            })
+        })
     }
 
     pub fn quiver_sm_native_l2_enabled(&self) -> bool {
@@ -1413,13 +1468,18 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 达到上限时拒绝新增内存负载；不会用频繁全量 flush 换取表面 RSS 降低。
     /// 设为 0 表示无限制（默认）。
     pub fn set_memory_limit(&mut self, bytes: usize) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        let mut mt = write_or_recover(&self.memtable);
-        mt.resize_resource_reservation(bytes)?;
-        self.memory_limit = bytes;
-        self.tql_limits.memory_limit = bytes;
-        mt.set_text_memory_limit(bytes);
-        Ok(())
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            let mut mt = write_or_recover(&self.memtable);
+            mt.ensure_readable()?;
+            write.phase = WritePhase::Validation;
+            mt.resize_resource_reservation(bytes)
+                .map_err(|error| error.at_field("bytes"))?;
+            self.memory_limit = bytes;
+            self.tql_limits.memory_limit = bytes;
+            mt.set_text_memory_limit(bytes);
+            Ok(())
+        })
     }
 
     /// 返回共享运行时的配额、线程和任务统计。
@@ -1431,28 +1491,38 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ///
     /// 预留受内核内存预算约束；失败不会修改 WAL、节点、ID 或 generation。
     pub fn reserve_nodes(&self, additional: usize) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("reserve_nodes")?;
-        reject_hook_reentrant_access(&self.memtable)?;
-        if additional == 0 {
-            return Err(TriviumError::InvalidInput(
-                "reserve_nodes 的 additional 必须大于 0".into(),
-            ));
-        }
-        let mut mt = write_or_recover(&self.memtable);
-        let estimated_bytes = mt.estimate_reserve_bytes(additional)?;
-        let current_bytes = mt.estimated_memory_bytes();
-        if self.memory_limit > 0
-            && current_bytes.saturating_add(estimated_bytes) > self.memory_limit
-        {
-            return Err(TriviumError::CapacityReservationRejected {
-                requested_nodes: additional,
-                estimated_bytes,
-                current_bytes,
-                memory_limit: self.memory_limit,
-            });
-        }
-        mt.try_reserve_for_insert(additional)
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("reserve_nodes")?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            let mut mt = write_or_recover(&self.memtable);
+            mt.ensure_readable()?;
+            let wal = lock_or_recover(&self.wal);
+            wal.ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            if additional == 0 {
+                return Err(TriviumError::InvalidInput(
+                "reserve_nodes 的 additional 必须大于 0 (reserve_nodes additional must be positive)".into(),
+            ).at_field("additional"));
+            }
+            let estimated_bytes = mt
+                .estimate_reserve_bytes(additional)
+                .map_err(|error| error.at_field("additional"))?;
+            let current_bytes = mt.estimated_memory_bytes();
+            if self.memory_limit > 0
+                && current_bytes.saturating_add(estimated_bytes) > self.memory_limit
+            {
+                return Err(TriviumError::CapacityReservationRejected {
+                    requested_nodes: additional,
+                    estimated_bytes,
+                    current_bytes,
+                    memory_limit: self.memory_limit,
+                }
+                .at_field("additional"));
+            }
+            mt.try_reserve_for_insert(additional)
+                .map_err(|error| error.at_field("additional"))
+        })
     }
 
     /// 查询当前 MemTable 估算内存占用（字节）
@@ -1532,31 +1602,41 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn set_auto_build_quiver(&mut self, enabled: bool) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("set_auto_build_quiver")?;
-        write_or_recover(&self.memtable).set_auto_build_quiver(enabled);
-        Ok(())
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("set_auto_build_quiver")?;
+            let mut mt = write_or_recover(&self.memtable);
+            mt.ensure_readable()?;
+            let wal = lock_or_recover(&self.wal);
+            wal.ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            mt.set_auto_build_quiver(enabled);
+            Ok(())
+        })
     }
 
     /// 启动后台自动 Compaction 线程
     pub fn enable_auto_compaction(&mut self, interval: Duration) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("enable_auto_compaction")?;
-        if interval.is_zero() {
-            return Err(TriviumError::InvalidInput(
-                "自动压缩间隔必须大于 0 秒".into(),
-            ));
-        }
-        self.compaction.take();
-        let ct = CompactionThread::spawn(
-            interval,
-            Arc::clone(&self.memtable),
-            Arc::clone(&self.wal),
-            self.db_path.clone(),
-            self.storage_mode,
-        )?;
-        self.compaction = Some(ct);
-        Ok(())
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access("enable_auto_compaction")?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            if interval.is_zero() {
+                return Err(TriviumError::InvalidInput(
+                    "自动压缩间隔必须大于 0 秒".into(),
+                ));
+            }
+            let ct = CompactionThread::spawn(
+                interval,
+                Arc::clone(&self.memtable),
+                Arc::clone(&self.wal),
+                self.db_path.clone(),
+                self.storage_mode,
+            )?;
+            self.compaction = Some(ct);
+            Ok(())
+        })
     }
 
     pub fn disable_auto_compaction(&mut self) {
@@ -1565,29 +1645,39 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     /// 主动触发全量重写与压实（Manual Compaction）
     pub fn compact(&mut self) -> Result<()> {
-        let _operation = self.enter_maintenance_operation()?;
-        self.require_write_access("compact")?;
-        reject_hook_reentrant_access(&self.memtable)?;
-        {
-            let mut mt = write_or_recover(&self.memtable);
-            tracing::info!("手动压实开始: {}", self.db_path);
-            let mut w = lock_or_recover(&self.wal);
-            w.ensure_writable()?;
-            #[cfg(feature = "test-hooks")]
-            crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeCompactionSave);
-            file_format::save(&mut mt, &self.db_path, self.storage_mode)?;
-            #[cfg(feature = "test-hooks")]
-            crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeWalClear);
-            w.clear()?;
-            mt.mark_checkpoint_clean();
-            mt.advise_cold_vectors_dontneed();
-        }
+        Self::write_operation(|write| {
+            let _operation = self.enter_maintenance_operation()?;
+            self.require_write_access("compact")?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            {
+                let mut mt = write_or_recover(&self.memtable);
+                tracing::info!(path = %self.db_path, "手动压实开始 (Manual compaction started)");
+                let mut w = lock_or_recover(&self.wal);
+                w.ensure_writable()?;
+                write.phase = WritePhase::Validation;
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeCompactionSave);
+                file_format::save_with_write_info(
+                    &mut mt,
+                    &self.db_path,
+                    self.storage_mode,
+                    write,
+                )?;
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeWalClear);
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::io_result(crate::test_hooks::IoPoint::CheckpointWalClear)?;
+                w.clear()?;
+                mt.mark_checkpoint_clean();
+                mt.advise_cold_vectors_dontneed();
+            }
 
-        tracing::info!(
-            "手动压实完成 (Manual compaction completed): {}",
-            self.db_path
-        );
-        Ok(())
+            tracing::info!(
+                "手动压实完成 (Manual compaction completed): {}",
+                self.db_path
+            );
+            Ok(())
+        })
     }
 
     // ════════════════════════════════════════════════════════
@@ -1596,11 +1686,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     /// 记录当前写入口能够确认的阶段，保留内层事务已经提供的结果。
     fn write_operation<R>(operation: impl FnOnce(&mut WriteErrorInfo) -> Result<R>) -> Result<R> {
-        let mut write = WriteErrorInfo {
-            transaction_consumed: None,
-            ..WriteErrorInfo::TRANSACTION_ADMISSION
-        };
-        operation(&mut write).map_err(|error| error.with_write_info(write))
+        WriteErrorInfo::capture(operation)
     }
 
     /// WAL 与应用阶段共享恢复保护，WAL 互斥锁在进入应用前归还。
@@ -1852,11 +1938,31 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn repair_graph_indexes(&mut self) -> Result<crate::storage::memtable::GraphRepairReport> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("repair_graph_indexes")?;
-        let report = write_or_recover(&self.memtable).repair_graph_indexes();
-        self.flush()?;
-        Ok(report)
+        Self::write_operation(|write| {
+            let _operation = self.enter_maintenance_operation()?;
+            self.require_write_access("repair_graph_indexes")?;
+            let mut mt = write_or_recover(&self.memtable);
+            mt.ensure_readable()?;
+            let mut wal = lock_or_recover(&self.wal);
+            wal.ensure_writable()?;
+            write.phase = WritePhase::Apply;
+            write.outcome = WriteOutcome::Unknown;
+            let report = mt.repair_graph_indexes();
+            if let Err(error) = file_format::checkpoint_with_write_info(
+                &mut mt,
+                &mut wal,
+                &self.db_path,
+                self.storage_mode,
+                false,
+                write,
+            ) {
+                mt.require_recovery();
+                wal.release_writer();
+                return Err(error);
+            }
+            mt.advise_cold_vectors_dontneed();
+            Ok(report)
+        })
     }
 
     pub fn upsert_edge(
@@ -2284,37 +2390,50 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     // ════════════════════════════════════════════════════════
 
     pub fn index_keyword(&mut self, id: NodeId, keyword: &str) -> Result<()> {
-        self.require_write_access("index_keyword")?;
-        let _operation = self.enter_operation()?;
-        reject_hook_reentrant_access(&self.memtable)?;
-        if keyword.is_empty() {
-            return Err(TriviumError::InvalidInput("关键词不能为空".into()));
-        }
-        let mut mt = write_or_recover(&self.memtable);
-        mt.validate_update_payload(id)?;
-        mt.prepare_text_index()?;
-        mt.index_keyword(id, keyword);
-        Ok(())
+        Self::write_operation(|write| {
+            self.require_write_access("index_keyword")?;
+            let _operation = self.enter_operation()?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            if keyword.is_empty() {
+                return Err(TriviumError::InvalidInput(
+                    "关键词不能为空 (Keyword cannot be empty)".into(),
+                ));
+            }
+            let mut mt = write_or_recover(&self.memtable);
+            mt.validate_update_payload(id)?;
+            mt.prepare_text_index()?;
+            let _workspace = mt.reserve_text_update(keyword)?;
+            mt.index_keyword(id, keyword);
+            Ok(())
+        })
     }
 
     pub fn index_text(&mut self, id: NodeId, text: &str) -> Result<()> {
-        self.require_write_access("index_text")?;
-        let _operation = self.enter_operation()?;
-        reject_hook_reentrant_access(&self.memtable)?;
-        let mut mt = write_or_recover(&self.memtable);
-        mt.validate_update_payload(id)?;
-        mt.prepare_text_index()?;
-        mt.index_text(id, text);
-        Ok(())
+        Self::write_operation(|write| {
+            self.require_write_access("index_text")?;
+            let _operation = self.enter_operation()?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            let mut mt = write_or_recover(&self.memtable);
+            mt.validate_update_payload(id)?;
+            mt.prepare_text_index()?;
+            let _workspace = mt.reserve_text_update(text)?;
+            mt.index_text(id, text);
+            Ok(())
+        })
     }
 
     pub fn build_text_index(&mut self) -> Result<()> {
-        self.require_write_access("build_text_index")?;
-        let _operation = self.enter_operation()?;
-        reject_hook_reentrant_access(&self.memtable)?;
-        let mut mt = write_or_recover(&self.memtable);
-        mt.prepare_text_index()?;
-        mt.try_build_text_index()
+        Self::write_operation(|write| {
+            self.require_write_access("build_text_index")?;
+            let _operation = self.enter_operation()?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            let mut mt = write_or_recover(&self.memtable);
+            mt.prepare_text_index()?;
+            mt.try_build_text_index()
+        })
     }
 
     /// 根据提供的完整正文与关键词集合重建文本索引，成功后通过 flush 或 close 持久化。
@@ -2322,10 +2441,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         &mut self,
         documents: &[crate::index::text::TextIndexDocument],
     ) -> Result<()> {
-        self.require_write_access("rebuild_text_index")?;
-        let _operation = self.enter_maintenance_operation()?;
-        reject_hook_reentrant_access(&self.memtable)?;
-        write_or_recover(&self.memtable).rebuild_text_index(documents)
+        Self::write_operation(|write| {
+            self.require_write_access("rebuild_text_index")?;
+            let _operation = self.enter_maintenance_operation()?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            write_or_recover(&self.memtable).rebuild_text_index(documents)
+        })
     }
 
     pub fn get_payload(&self, id: NodeId) -> Result<Option<serde_json::Value>> {
@@ -2828,26 +2950,27 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn create_ngram_index(&mut self, field: &str) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("create_ngram_index")?;
-        if field.is_empty() {
-            return Err(TriviumError::InvalidInput(
-                "N-gram 索引字段不能为空 (N-gram index field cannot be empty)".into(),
-            ));
-        }
-        write_or_recover(&self.memtable).build_property_index(
-            crate::index::property::PropertyIndexKind::Ngram,
-            &[field.to_owned()],
-            false,
-            self.memory_limit,
-        )
+        self.change_property_index("create_ngram_index", |mt| {
+            if field.is_empty() {
+                return Err(TriviumError::InvalidInput(
+                    "N-gram 索引字段不能为空 (N-gram index field cannot be empty)".into(),
+                ));
+            }
+            mt.build_property_index(
+                crate::index::property::PropertyIndexKind::Ngram,
+                &[field.to_owned()],
+                false,
+                self.memory_limit,
+            )?;
+            Ok(false)
+        })
     }
 
     pub fn drop_ngram_index(&mut self, field: &str) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("drop_ngram_index")?;
-        write_or_recover(&self.memtable).drop_ngram_property_index(field);
-        Ok(())
+        self.change_property_index("drop_ngram_index", |mt| {
+            mt.drop_ngram_property_index(field);
+            Ok(false)
+        })
     }
 
     pub fn substring_lookup(
@@ -2892,14 +3015,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn create_unique_index(&mut self, field: &str) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("create_unique_index")?;
-        if field.is_empty() {
-            return Err(TriviumError::InvalidInput(
-                "唯一索引字段不能为空 (Unique index field cannot be empty)".into(),
-            ));
-        }
-        self.change_property_schema(|mt| {
+        self.change_property_index("create_unique_index", |mt| {
+            if field.is_empty() {
+                return Err(TriviumError::InvalidInput(
+                    "唯一索引字段不能为空 (Unique index field cannot be empty)".into(),
+                ));
+            }
             mt.build_property_index(
                 crate::index::property::PropertyIndexKind::Hash,
                 &[field.to_owned()],
@@ -2911,9 +3032,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn create_unique_composite_index(&mut self, fields: &[String]) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("create_unique_composite_index")?;
-        self.change_property_schema(|mt| {
+        self.change_property_index("create_unique_composite_index", |mt| {
             mt.build_property_index(
                 crate::index::property::PropertyIndexKind::Composite,
                 fields,
@@ -2935,51 +3054,49 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// db.create_index("type");   // FIND {type: "event"} 同样受益
     /// ```
     pub fn create_index(&mut self, field: &str) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("create_index")?;
-        let mut mt = write_or_recover(&self.memtable);
-        mt.build_property_index(
-            crate::index::property::PropertyIndexKind::Hash,
-            &[field.to_owned()],
-            false,
-            self.memory_limit,
-        )?;
-        Ok(())
+        self.change_property_index("create_index", |mt| {
+            mt.build_property_index(
+                crate::index::property::PropertyIndexKind::Hash,
+                &[field.to_owned()],
+                false,
+                self.memory_limit,
+            )?;
+            Ok(false)
+        })
     }
 
     pub fn create_composite_index(&mut self, fields: &[String]) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("create_composite_index")?;
-        if fields.len() < 2 {
-            return Err(TriviumError::InvalidInput(
-                "复合索引至少需要两个字段 (Composite index requires at least two fields)".into(),
-            ));
-        }
-        write_or_recover(&self.memtable).build_property_index(
-            crate::index::property::PropertyIndexKind::Composite,
-            fields,
-            false,
-            self.memory_limit,
-        )?;
-        Ok(())
+        self.change_property_index("create_composite_index", |mt| {
+            if fields.len() < 2 {
+                return Err(TriviumError::InvalidInput(
+                    "复合索引至少需要两个字段 (Composite index requires at least two fields)"
+                        .into(),
+                ));
+            }
+            mt.build_property_index(
+                crate::index::property::PropertyIndexKind::Composite,
+                fields,
+                false,
+                self.memory_limit,
+            )?;
+            Ok(false)
+        })
     }
 
     pub fn create_bitmap_index(&mut self, field: &str) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("create_bitmap_index")?;
-        write_or_recover(&self.memtable).build_property_index(
-            crate::index::property::PropertyIndexKind::Bitmap,
-            &[field.to_owned()],
-            false,
-            self.memory_limit,
-        )?;
-        Ok(())
+        self.change_property_index("create_bitmap_index", |mt| {
+            mt.build_property_index(
+                crate::index::property::PropertyIndexKind::Bitmap,
+                &[field.to_owned()],
+                false,
+                self.memory_limit,
+            )?;
+            Ok(false)
+        })
     }
 
     pub fn drop_composite_index(&mut self, fields: &[String]) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("drop_composite_index")?;
-        self.change_property_schema(|mt| {
+        self.change_property_index("drop_composite_index", |mt| {
             let was_unique = mt
                 .unique_index_definitions()
                 .iter()
@@ -2990,38 +3107,34 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     pub fn drop_bitmap_index(&mut self, field: &str) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("drop_bitmap_index")?;
-        write_or_recover(&self.memtable).drop_bitmap_property_index(field);
-        Ok(())
+        self.change_property_index("drop_bitmap_index", |mt| {
+            mt.drop_bitmap_property_index(field);
+            Ok(false)
+        })
     }
 
     pub fn create_ordered_index(&mut self, field: &str) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("create_ordered_index")?;
-        let mut mt = write_or_recover(&self.memtable);
-        mt.build_property_index(
-            crate::index::property::PropertyIndexKind::Ordered,
-            &[field.to_owned()],
-            false,
-            self.memory_limit,
-        )?;
-        Ok(())
+        self.change_property_index("create_ordered_index", |mt| {
+            mt.build_property_index(
+                crate::index::property::PropertyIndexKind::Ordered,
+                &[field.to_owned()],
+                false,
+                self.memory_limit,
+            )?;
+            Ok(false)
+        })
     }
 
     pub fn drop_ordered_index(&mut self, field: &str) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("drop_ordered_index")?;
-        let mut mt = write_or_recover(&self.memtable);
-        mt.drop_ordered_property_index(field);
-        Ok(())
+        self.change_property_index("drop_ordered_index", |mt| {
+            mt.drop_ordered_property_index(field);
+            Ok(false)
+        })
     }
 
     /// 删除属性索引
     pub fn drop_index(&mut self, field: &str) -> Result<()> {
-        let _operation = self.enter_operation()?;
-        self.require_write_access("drop_index")?;
-        self.change_property_schema(|mt| {
+        self.change_property_index("drop_index", |mt| {
             let was_unique = mt
                 .unique_index_definitions()
                 .iter()
@@ -3031,28 +3144,40 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         })
     }
 
-    /// 约束变更与检查点共用写锁；发布结果不明确时隔离实例，由重开按提交点恢复。
-    fn change_property_schema(
+    /// 属性索引共享准入；约束变更在同一写锁下发布，失败后由重开恢复。
+    fn change_property_index(
         &self,
+        operation: &'static str,
         change: impl FnOnce(&mut MemTable<T>) -> Result<bool>,
     ) -> Result<()> {
-        reject_hook_reentrant_access(&self.memtable)?;
-        let mut mt = write_or_recover(&self.memtable);
-        mt.ensure_readable()?;
-        let mut wal = lock_or_recover(&self.wal);
-        wal.ensure_writable()?;
-        if !change(&mut mt)? {
-            return Ok(());
-        }
-        if let Err(error) =
-            file_format::checkpoint(&mut mt, &mut wal, &self.db_path, self.storage_mode, false)
-        {
-            // 既覆盖提交前失败，也覆盖提交后 WAL 清理失败，禁止继续使用未确认的约束状态。
-            mt.require_recovery();
-            wal.release_writer();
-            return Err(error);
-        }
-        Ok(())
+        Self::write_operation(|write| {
+            let _operation = self.enter_operation()?;
+            self.require_write_access(operation)?;
+            let mut mt = write_or_recover(&self.memtable);
+            mt.ensure_readable()?;
+            let mut wal = lock_or_recover(&self.wal);
+            wal.ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            if !change(&mut mt)? {
+                return Ok(());
+            }
+            write.phase = WritePhase::Apply;
+            write.outcome = WriteOutcome::Unknown;
+            if let Err(error) = file_format::checkpoint_with_write_info(
+                &mut mt,
+                &mut wal,
+                &self.db_path,
+                self.storage_mode,
+                false,
+                write,
+            ) {
+                // 已安装的约束需要按文件组提交点确认，发布失败统一隔离当前实例。
+                mt.require_recovery();
+                wal.release_writer();
+                return Err(error);
+            }
+            Ok(())
+        })
     }
 
     /// 返回已注册属性索引字段，按字段名稳定排序。
@@ -3437,25 +3562,33 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ///   1. 原子写入 .tdb（写 .tmp → fsync → rename）
     ///   2. 确认 .tdb 写入成功后，才清除 WAL
     pub fn flush(&mut self) -> Result<()> {
-        self.require_write_access("flush")?;
-        let _operation = self.enter_maintenance_operation()?;
-        self.flush_inner()
+        Self::write_operation(|write| {
+            self.require_write_access("flush")?;
+            let _operation = self.enter_maintenance_operation()?;
+            self.flush_inner(write)
+        })
     }
 
     pub fn publish_generation_manifest(
         &mut self,
         generation_id: &str,
     ) -> Result<crate::storage::snapshot::GenerationManifest> {
-        let _operation = self.enter_maintenance_operation()?;
-        self.require_write_access("publish_generation_manifest")?;
-        self.flush()?;
-        crate::storage::snapshot::write_manifest(
-            &self.db_path,
-            generation_id,
-            std::any::type_name::<T>(),
-            self.dim(),
-            self.node_count()?,
-        )
+        WriteErrorInfo::capture_destination(|write| {
+            let _operation = self.enter_maintenance_operation()?;
+            self.require_write_access("publish_generation_manifest")?;
+            lock_or_recover(&self.wal).ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            crate::storage::snapshot::validate_generation_id(generation_id)?;
+            self.flush()?;
+            crate::storage::snapshot::write_manifest_with_write_info(
+                &self.db_path,
+                generation_id,
+                std::any::type_name::<T>(),
+                self.dim(),
+                self.node_count()?,
+                write,
+            )
+        })
     }
 
     /// 保存当前一致状态到独立的新快照目录；持有写锁直到复制和发布完成。
@@ -3464,39 +3597,46 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         destination: &str,
         generation_id: &str,
     ) -> Result<crate::storage::snapshot::GenerationManifest> {
-        self.require_write_access("create_snapshot")?;
-        reject_hook_reentrant_access(&self.memtable)?;
-        let _operation = self.enter_maintenance_operation()?;
-        let mut mt = write_or_recover(&self.memtable);
-        file_format::checkpoint(
-            &mut mt,
-            &mut lock_or_recover(&self.wal),
-            &self.db_path,
-            self.storage_mode,
-            false,
-        )?;
-        crate::storage::snapshot::copy_database_snapshot(
-            &self.db_path,
-            destination,
-            generation_id,
-            std::any::type_name::<T>(),
-            mt.dim(),
-            mt.node_count(),
-            &self.resource_runtime,
-        )
+        WriteErrorInfo::capture_destination(|write| {
+            self.require_write_access("create_snapshot")?;
+            reject_hook_reentrant_access(&self.memtable)?;
+            let _operation = self.enter_maintenance_operation()?;
+            let mut mt = write_or_recover(&self.memtable);
+            mt.ensure_readable()?;
+            let mut wal = lock_or_recover(&self.wal);
+            wal.ensure_writable()?;
+            write.phase = WritePhase::Validation;
+            crate::storage::snapshot::validate_generation_id(generation_id)?;
+            file_format::checkpoint(&mut mt, &mut wal, &self.db_path, self.storage_mode, false)?;
+            crate::storage::snapshot::copy_database_snapshot(
+                &self.db_path,
+                destination,
+                generation_id,
+                std::any::type_name::<T>(),
+                mt.dim(),
+                mt.node_count(),
+                &self.resource_runtime,
+                write,
+            )
+        })
     }
 
-    fn flush_inner(&self) -> Result<()> {
+    fn flush_inner(&self, write: &mut WriteErrorInfo) -> Result<()> {
         self.require_write_access("flush")?;
         reject_hook_reentrant_access(&self.memtable)?;
         let mut mt = write_or_recover(&self.memtable);
-        file_format::checkpoint(
+        let mut wal = lock_or_recover(&self.wal);
+        wal.ensure_writable()?;
+        write.phase = WritePhase::Validation;
+        file_format::checkpoint_with_write_info(
             &mut mt,
-            &mut lock_or_recover(&self.wal),
+            &mut wal,
             &self.db_path,
             self.storage_mode,
             false,
+            write,
         )?;
+        drop(wal);
         drop(mt);
         read_or_recover(&self.memtable).advise_cold_vectors_dontneed();
         Ok(())
@@ -3623,8 +3763,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     where
         T: serde::Serialize + serde::de::DeserializeOwned,
     {
-        let _operation = self.enter_operation()?;
-        migration::migrate(self, new_path, new_dim)
+        WriteErrorInfo::capture_destination(|write| {
+            let _operation = self.enter_operation()?;
+            write.phase = WritePhase::Validation;
+            migration::migrate(self, new_path, new_dim, write)
+        })
     }
 
     // ════════════════════════════════════════════════════════
@@ -3749,8 +3892,8 @@ mod tests {
         {
             let _failure = fail_io_at(IoPoint::PropertySidecarWrite);
             assert!(matches!(
-                db.create_unique_index("email"),
-                Err(TriviumError::Io(_))
+                db.create_unique_index("email").unwrap_err().underlying(),
+                TriviumError::Io(_)
             ));
         }
         assert!(matches!(
@@ -3794,7 +3937,10 @@ mod tests {
             .open(format!("{path}.vec"))
             .unwrap();
         db.update_vector(1, &[0.0, 1.0, 0.0]).unwrap();
-        assert!(matches!(db.flush(), Err(TriviumError::Io(_))));
+        assert!(matches!(
+            db.flush().unwrap_err().underlying(),
+            TriviumError::Io(_)
+        ));
         assert!(matches!(
             admitted.check_recovery(),
             Err(TriviumError::WalClosed)
@@ -3835,7 +3981,10 @@ mod tests {
             ),
             "关闭后插入结果异常: {insert_after_close:?}"
         );
-        assert!(matches!(db.flush(), Err(TriviumError::DatabaseClosed)));
+        assert!(matches!(
+            db.flush().unwrap_err().underlying(),
+            TriviumError::DatabaseClosed
+        ));
         assert!(matches!(
             db.update_vector(id, &[0.0, 0.0, 1.0])
                 .unwrap_err()

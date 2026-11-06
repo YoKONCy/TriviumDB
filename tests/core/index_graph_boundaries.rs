@@ -105,8 +105,8 @@ fn 删除唯一索引同时删除约束并允许重复值持久化() {
         db.insert_with_id(2, &[0., 1.], json!({"email":"same"}))
             .unwrap();
         assert!(matches!(
-            db.create_unique_index("email"),
-            Err(TriviumError::UniqueConstraintViolation { .. })
+            db.create_unique_index("email").unwrap_err().underlying(),
+            TriviumError::UniqueConstraintViolation { .. }
         ));
         assert!(db.list_unique_indexes().unwrap().is_empty());
         db.close().unwrap();

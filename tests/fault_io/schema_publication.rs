@@ -51,7 +51,10 @@ fn 约束发布失败隔离实例并按真实提交点恢复() {
                         let _failure = fail_io_at(point);
                         change(&mut db, composite, create).unwrap_err()
                     };
-                    assert!(matches!(error, TriviumError::Io(_)), "{mode:?}/{point:?}");
+                    assert!(
+                        matches!(error.underlying(), TriviumError::Io(_)),
+                        "{mode:?}/{point:?}"
+                    );
                     let wal_before = std::fs::read(format!("{path}.wal")).unwrap();
                     assert!(matches!(
                         db.insert_with_id(3, &[1., 1.], json!({"tenant":"a","email":"same"}))
@@ -68,7 +71,10 @@ fn 约束发布失败隔离实例并按真实提交点恢复() {
                         db.list_unique_indexes(),
                         Err(TriviumError::WalClosed)
                     ));
-                    assert!(matches!(db.flush(), Err(TriviumError::WalClosed)));
+                    assert!(matches!(
+                        db.flush().unwrap_err().underlying(),
+                        TriviumError::WalClosed
+                    ));
                     assert!(matches!(db.close(), Err(TriviumError::WalClosed)));
                     assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), wal_before);
                     drop(db);
@@ -131,8 +137,8 @@ fn 约束构建预检拒绝不隔离可用实例() {
     }
     let before = std::fs::read(format!("{path}.wal")).unwrap();
     assert!(matches!(
-        db.create_unique_index("email"),
-        Err(TriviumError::UniqueConstraintViolation { .. })
+        db.create_unique_index("email").unwrap_err().underlying(),
+        TriviumError::UniqueConstraintViolation { .. }
     ));
     assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
     assert!(db.list_unique_indexes().unwrap().is_empty());

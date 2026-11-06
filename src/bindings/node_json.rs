@@ -7,6 +7,12 @@ use serde_json::Value;
 #[derive(Clone, Debug)]
 pub struct NodeJson(pub Value);
 
+impl NodeJson {
+    pub(super) fn from_js(env: Env, value: JsUnknown) -> napi::Result<Self> {
+        read_json(env, value, 0).map(Self)
+    }
+}
+
 impl From<Value> for NodeJson {
     fn from(value: Value) -> Self {
         Self(value)
@@ -37,7 +43,7 @@ impl FromNapiValue for NodeJson {
                 JsUnknown::from_raw_unchecked(env, value),
             )
         };
-        read_json(env, value, 0).map(Self)
+        Self::from_js(env, value)
     }
 }
 impl ToNapiValue for NodeJson {

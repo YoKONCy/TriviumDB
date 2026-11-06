@@ -2721,7 +2721,8 @@ mod tests {
             .await
             .unwrap_err();
         let body = error_body(error).await;
-        assert_eq!(body["code"], "REQUEST_TIMEOUT");
+        assert_eq!(body["code"], "TDB_QUERY_DEADLINE_EXCEEDED");
+        assert_eq!(body["legacyCode"], "REQUEST_TIMEOUT");
         assert_eq!(
             body["write"],
             serde_json::json!({"phase":"admission","outcome":"not_committed"})

@@ -21,6 +21,8 @@ Run locally:
 
 from typing_extensions import assert_type
 from typing import Any, Literal
+from collections import UserDict
+from types import MappingProxyType
 
 import triviumdb
 from triviumdb import Edge, EdgeDirection, NodeView, SearchHit, Transaction, TriviumDB
@@ -49,6 +51,19 @@ hits = db.search([0.1] * 8, top_k=5)
 assert_type(hits, list[SearchHit])
 assert_type(hits[0].id, int)
 assert_type(hits[0].score, float)
+db.search([0.1] * 8, top_k="1")  # type: ignore[arg-type]
+db.search_grouped([0.1] * 8, expand_depth="1")  # type: ignore[arg-type]
+db.search_batch([[0.1] * 8], parallelism="1")  # type: ignore[arg-type]
+db.tql(1)  # type: ignore[arg-type]
+db.prepare_tql(1)  # type: ignore[arg-type]
+db.tql_mut(1)  # type: ignore[arg-type]
+db.search_exact([0.1] * 8, "1")  # type: ignore[arg-type]
+db.search_graph_first([0.1] * 8, [1], 1, max_anchor_nodes="1")  # type: ignore[arg-type]
+db.search_with_context([0.1] * 8, recall_k="1")  # type: ignore[arg-type]
+db.search_advanced([0.1] * 8, max_edges_per_node="1")  # type: ignore[arg-type]
+db.search_hybrid([0.1] * 8, 1)  # type: ignore[arg-type]
+assert_type(db.search([0.1] * 8, payload_filter=MappingProxyType({"name": "Alice"})), list[SearchHit])
+assert_type(db.search_grouped([0.1] * 8, payload_filter=UserDict({"name": "Alice"})), triviumdb.GroupedSearchResult)
 
 # ── reads ──
 assert_type(db.get(1), NodeView | None)
@@ -56,6 +71,11 @@ assert_type(db.get_edges(1), list[Edge])
 assert_type(db.node_count(), int)
 assert_type(db.rebuild_text_index([{"id": 1, "text": "完整正文", "keywords": ["别名"]}]), None)
 assert_type(db.instance_stats(), dict[str, Any])
+db.set_sync_mode(1)  # type: ignore[arg-type]
+db.publish_generation_manifest(1)  # type: ignore[arg-type]
+prepared = db.prepare_tql("MATCH (n) RETURN $x AS value")
+assert_type(db.execute_prepared_tql(prepared, MappingProxyType({"x": 42})), list[triviumdb.QueryRow])
+assert_type(db.execute_prepared_tql(prepared, UserDict({"x": 42})), list[triviumdb.QueryRow])
 assert_type(db.compare_and_set_payload_field(1, "state", "old", "new"), None)
 assert_type(db.delete_many_atomic([1, 2]), int)
 assert_type(db.indexed_lookup({"state": "new"}), list[int])
@@ -84,9 +104,12 @@ def check_core_error(error: triviumdb.TriviumDBError) -> None:
     assert_type(error.target, dict[str, str | dict[str, int]] | None)
     assert_type(error.write, dict[str, str | bool] | None)
     if error.target is not None:
-        location = error.target['query_span']
+        location = error.target.get('query_span')
         if isinstance(location, dict):
             assert_type(location['start_byte'], int)
+        field = error.target.get('field')
+        if isinstance(field, str):
+            assert_type(field, str)
 
 def check_input_error(error: triviumdb.InvalidInputError) -> None:
     assert_type(error.schema_version, int)

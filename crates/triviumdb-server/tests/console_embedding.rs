@@ -37,6 +37,132 @@ fn setup(path: &str) -> Arc<Mutex<Database<f32>>> {
 }
 
 #[tokio::test]
+async fn 请求体期限使用独立错误码并归还并发许可() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("body-deadline.tdb");
+    let database = setup(path.to_str().unwrap());
+    let before = std::fs::read(format!("{}.wal", path.to_str().unwrap())).unwrap();
+    let host = ConsoleHost::attach(
+        &database,
+        ConsoleOptions {
+            query_timeout_ms: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let app = build_console_app(host, ConsoleHttpOptions { max_in_flight: 1 }).unwrap();
+    // 永不完成的外部请求体只验证期限契约，第二次请求必须再次取得唯一许可。
+    for _ in 0..2 {
+        let body = Body::from_stream(futures_util::stream::pending::<
+            Result<bytes::Bytes, std::io::Error>,
+        >());
+        let response = app
+            .clone()
+            .oneshot(Request::post("/v1/console").body(body).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["error"]["schema_version"], 1);
+        assert_eq!(result["error"]["code"], "TDB_QUERY_DEADLINE_EXCEEDED");
+        assert_eq!(result["error"]["details"], json!({}));
+        assert!(result["error"].get("write").is_none());
+    }
+    assert_eq!(
+        std::fs::read(format!("{}.wal", path.to_str().unwrap())).unwrap(),
+        before
+    );
+    let live = build_console_app(
+        ConsoleHost::attach(&database, ConsoleOptions::default()).unwrap(),
+        ConsoleHttpOptions::default(),
+    )
+    .unwrap();
+    let (status, result) = post(
+        live,
+        wire("有效读取", json!({"operation":"getNodes","ids":["1"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        result["data"],
+        json!({"nodes":[{"id":"1","vector":[1.,0.],
+        "payload":{"host":true},"edges":[]}],"missingIds":[]})
+    );
+    database.lock().unwrap().close().unwrap();
+}
+
+#[tokio::test]
+async fn 索引发布失败保留提交阶段并在持有旧router时恢复完整事实() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("index-publication.tdb");
+    let path = file.to_str().unwrap();
+    let database = setup(path);
+    {
+        let mut core = database.lock().unwrap();
+        core.create_index("host").unwrap();
+        core.flush().unwrap();
+    }
+    let host = ConsoleHost::attach(
+        &database,
+        ConsoleOptions {
+            read_only: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let app = build_console_app(host, ConsoleHttpOptions::default()).unwrap();
+    // 排他临时目录阻断属性索引发布，故障限定于本用例自己的文件组。
+    let obstacle = root.path().join("index-publication.tdb.pidx.tmp");
+    std::fs::create_dir(&obstacle).unwrap();
+    let (status, body) = post(
+        app.clone(),
+        wire(
+            "publish-index",
+            json!({
+                "operation":"manageIndex","kind":"unique","fields":["host"],"create":true
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"]["schema_version"], 1);
+    assert_eq!(body["error"]["code"], "TDB_IO");
+    assert!(
+        body["error"]["details"]["io_kind"]
+            .as_str()
+            .is_some_and(|kind| !kind.is_empty())
+    );
+    assert_eq!(
+        body["error"]["write"],
+        json!({"phase":"publish","outcome":"unknown"})
+    );
+    assert_eq!(
+        database.lock().unwrap().node_count().unwrap_err().code(),
+        "TDB_WAL_CLOSED"
+    );
+    std::fs::remove_dir(&obstacle).unwrap();
+    drop(database);
+    let mut recovered = Database::<f32>::open(path, 2).unwrap();
+    for _ in 0..2 {
+        assert_eq!(recovered.all_node_ids().unwrap(), vec![1]);
+        let node = recovered.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, vec![1., 0.]);
+        assert_eq!(node.payload, json!({"host":true}));
+        assert!(node.edges.is_empty());
+        let indexes = recovered.index_info().unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].fields, vec!["host".to_owned()]);
+        assert!(!indexes[0].unique);
+        recovered.flush().unwrap();
+        recovered.close().unwrap();
+        recovered = Database::<f32>::open(path, 2).unwrap();
+    }
+    recovered.close().unwrap();
+    drop(app);
+}
+
+#[tokio::test]
 async fn 嵌入http保留查询阶段及源码位置并隔离拒绝写入() {
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("diagnostics.tdb");

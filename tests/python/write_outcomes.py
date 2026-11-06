@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import triviumdb
+from index_maintenance import run_index_maintenance
 
 
 def expect_write(action, code, details, write):
@@ -18,6 +19,7 @@ def expect_write(action, code, details, write):
 
 
 def run_write_outcomes(root):
+    run_index_maintenance(root)
     contract = json.loads((Path(__file__).parents[1] / "contracts/write_outcomes.json").read_text(encoding="utf-8"))
     for dtype in ("f32", "f16", "u64"):
         file = str(Path(root) / f"write-outcomes-{dtype}.tdb")

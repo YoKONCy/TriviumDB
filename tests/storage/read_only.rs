@@ -153,24 +153,26 @@ fn 只读句柄拒绝写入事务索引和持久化操作() {
         TriviumError::ReadOnlyViolation { .. }
     ));
     assert!(matches!(
-        db.flush(),
-        Err(TriviumError::ReadOnlyViolation { .. })
+        db.flush().unwrap_err().underlying(),
+        TriviumError::ReadOnlyViolation { .. }
     ));
     assert!(matches!(
-        db.compact(),
-        Err(TriviumError::ReadOnlyViolation { .. })
+        db.compact().unwrap_err().underlying(),
+        TriviumError::ReadOnlyViolation { .. }
     ));
     assert!(matches!(
-        db.create_index("kind"),
-        Err(TriviumError::ReadOnlyViolation { .. })
+        db.create_index("kind").unwrap_err().underlying(),
+        TriviumError::ReadOnlyViolation { .. }
     ));
     assert!(matches!(
-        db.set_sync_mode(triviumdb::storage::wal::SyncMode::Full),
-        Err(TriviumError::ReadOnlyViolation { .. })
+        db.set_sync_mode(triviumdb::storage::wal::SyncMode::Full)
+            .unwrap_err()
+            .underlying(),
+        TriviumError::ReadOnlyViolation { .. }
     ));
     assert!(matches!(
-        db.set_auto_build_quiver(true),
-        Err(TriviumError::ReadOnlyViolation { .. })
+        db.set_auto_build_quiver(true).unwrap_err().underlying(),
+        TriviumError::ReadOnlyViolation { .. }
     ));
     let mut tx = db.begin_tx();
     tx.insert(&[0.0, 1.0], json!({}));

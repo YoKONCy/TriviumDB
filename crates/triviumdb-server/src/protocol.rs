@@ -304,7 +304,7 @@ impl ApiError {
 
     pub(crate) fn metric(&self) -> Option<ErrorMetric> {
         match self.code {
-            "REQUEST_TIMEOUT" => Some(ErrorMetric::Timeout),
+            "REQUEST_TIMEOUT" | "TDB_QUERY_DEADLINE_EXCEEDED" => Some(ErrorMetric::Timeout),
             "WRITE_CONFLICT" | "TDB_WRITE_CONFLICT" => Some(ErrorMetric::OccConflict),
             _ => None,
         }
@@ -331,13 +331,7 @@ impl ApiError {
     }
 
     pub fn timeout() -> Self {
-        Self::new(
-            StatusCode::GATEWAY_TIMEOUT,
-            "REQUEST_TIMEOUT",
-            "请求超时 (Request timeout)",
-            "请求超过服务端执行时限 (The request exceeded the server execution deadline)",
-            true,
-        )
+        Self::from(TriviumError::QueryDeadlineExceeded)
     }
 
     pub fn unavailable(detail: impl Into<String>) -> Self {
@@ -387,6 +381,7 @@ impl From<TriviumError> for ApiError {
         let mut mapped =
             match error {
                 TriviumError::QueryParameter { source, .. }
+                | TriviumError::ApiField { source, .. }
                 | TriviumError::WriteFailure { source, .. } => Self::from(*source),
                 TriviumError::QueryParse(detail)
                 | TriviumError::QuerySyntax { reason: detail, .. } => Self::new(
@@ -409,6 +404,13 @@ impl From<TriviumError> for ApiError {
                     "查询已取消 (Query cancelled)",
                     error.to_string(),
                     false,
+                ),
+                TriviumError::QueryDeadlineExceeded => Self::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "REQUEST_TIMEOUT",
+                    "查询执行期限已到 (Query deadline exceeded)",
+                    error.to_string(),
+                    true,
                 ),
                 TriviumError::TransactionFinished => Self::new(
                     StatusCode::CONFLICT,
@@ -689,6 +691,35 @@ fn encode_value(value: TqlValue<f32>) -> Result<serde_json::Value, ApiError> {
 mod structured_error_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn 普通字段上下文保留规范类别与请求结果() {
+        let error = TriviumError::WriteFailure {
+            source: Box::new(
+                TriviumError::InvalidInput("容量必须为正 (Capacity must be positive)".into())
+                    .at_field("additional"),
+            ),
+            write: triviumdb::error::WriteErrorInfo {
+                phase: triviumdb::error::WritePhase::Validation,
+                outcome: triviumdb::error::WriteOutcome::NotCommitted,
+                transaction_consumed: None,
+            },
+        };
+        let response = ApiError::from(error).into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["schema_version"], 1);
+        assert_eq!(body["code"], "TDB_INVALID_INPUT");
+        assert_eq!(body["target"], serde_json::json!({"field":"additional"}));
+        assert_eq!(
+            body["write"],
+            serde_json::json!({"phase":"validation","outcome":"not_committed"})
+        );
+        assert_eq!(body["retryable"], false);
+    }
+
     #[test]
     fn prepared参数错误作为无效请求返回() {
         for (error, code, parameter) in [
@@ -769,6 +800,13 @@ mod structured_error_tests {
                 StatusCode::REQUEST_TIMEOUT,
                 serde_json::json!({}),
                 false,
+            ),
+            (
+                TriviumError::QueryDeadlineExceeded,
+                "TDB_QUERY_DEADLINE_EXCEEDED",
+                StatusCode::GATEWAY_TIMEOUT,
+                serde_json::json!({}),
+                true,
             ),
         ] {
             let response = ApiError::from(error).into_response();

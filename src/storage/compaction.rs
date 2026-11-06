@@ -3,7 +3,7 @@
 //! 全进程复用一个仅负责计时的线程，实际任务在数据库所属的资源运行时中执行。
 //! 注册项仅弱引用数据库；停止会撤销登记并等待已经派发的任务结束，不提前清除 WAL。
 
-use crate::error::{Result, TriviumError};
+use crate::error::{Result, TriviumError, WriteErrorInfo, WritePhase};
 use crate::resources::ResourceRuntime;
 use crate::storage::{file_format, memtable::MemTable, wal::Wal};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock, Weak};
@@ -111,7 +111,8 @@ impl Job {
         let admitted = self
             .runtime
             .enter_maintenance_task()
-            .and_then(|task| self.runtime.maintenance_pool().map(|pool| (task, pool)));
+            .and_then(|task| self.runtime.maintenance_pool().map(|pool| (task, pool)))
+            .map_err(|error| error.with_write_info(WriteErrorInfo::MAINTENANCE_ADMISSION));
         match admitted {
             Ok((task, pool)) => {
                 let job = Arc::clone(self);
@@ -164,7 +165,7 @@ impl Job {
                             }
                         }
                         if let Err(error) = result {
-                            tracing::error!(%error, "维护任务失败，保留未完成状态以便重试");
+                            tracing::error!(error_code = error.code(), %error, "维护任务失败，保留状态供恢复或重试 (Maintenance task failed, state retained for recovery or retry)");
                         }
                     },
                     move || {
@@ -333,33 +334,43 @@ impl CompactionThread {
             repeat: true,
             completed: None,
             operation: Box::new(move || {
-                let (Some(memtable), Some(wal)) = (memtable.upgrade(), wal.upgrade()) else {
-                    return Ok(false);
-                };
-                let mut mt = match memtable.try_write() {
-                    Ok(guard) => guard,
-                    Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-                    Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
-                };
-                #[cfg(feature = "test-hooks")]
-                crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeCompactionSave);
-                let mut wal = lock(&wal);
-                wal.ensure_writable()?;
-                if !mt.needs_checkpoint() {
-                    return Ok(true);
-                }
-                if let Err(error) = file_format::save(&mut mt, &db_path, storage_mode) {
-                    if mt.ensure_readable().is_err() {
-                        wal.release_writer();
+                WriteErrorInfo::capture(|write| {
+                    let (Some(memtable), Some(wal)) = (memtable.upgrade(), wal.upgrade()) else {
+                        return Ok(false);
+                    };
+                    let mut mt = match memtable.try_write() {
+                        Ok(guard) => guard,
+                        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                        Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+                    };
+                    #[cfg(feature = "test-hooks")]
+                    crate::test_hooks::hit(
+                        crate::test_hooks::ConcurrencyPoint::BeforeCompactionSave,
+                    );
+                    let mut wal = lock(&wal);
+                    wal.ensure_writable()?;
+                    mt.ensure_readable()?;
+                    write.phase = WritePhase::Validation;
+                    if !mt.needs_checkpoint() {
+                        return Ok(true);
                     }
-                    return Err(error);
-                }
-                #[cfg(feature = "test-hooks")]
-                crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeWalClear);
-                wal.clear()?;
-                mt.mark_checkpoint_clean();
-                mt.advise_cold_vectors_dontneed();
-                Ok(true)
+                    if let Err(error) =
+                        file_format::save_with_write_info(&mut mt, &db_path, storage_mode, write)
+                    {
+                        if mt.ensure_readable().is_err() {
+                            wal.release_writer();
+                        }
+                        return Err(error);
+                    }
+                    #[cfg(feature = "test-hooks")]
+                    crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeWalClear);
+                    #[cfg(feature = "test-hooks")]
+                    crate::test_hooks::io_result(crate::test_hooks::IoPoint::CheckpointWalClear)?;
+                    wal.clear()?;
+                    mt.mark_checkpoint_clean();
+                    mt.advise_cold_vectors_dontneed();
+                    Ok(true)
+                })
             }),
         });
         runtime.register_maintenance();
@@ -461,6 +472,90 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
+    fn 真实压实失败诊断保留发布结果且旧登记允许释放文件() {
+        use crate::database::{Config, Database, StorageMode};
+        use serde_json::json;
+        for mode in [StorageMode::Rom, StorageMode::Mmap] {
+            let root = std::env::temp_dir().join(format!(
+                "tdb-compaction-publication-{}-{mode:?}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let path = root.join("db.tdb");
+            let runtime = ResourceRuntime::new(crate::resources::ResourceLimits {
+                max_threads: 1,
+                ..Default::default()
+            })
+            .unwrap();
+            let mut db = Database::<f32>::open_with_runtime(
+                path.to_str().unwrap(),
+                Config {
+                    dim: 2,
+                    storage_mode: mode,
+                    auto_build_quiver: false,
+                    ..Default::default()
+                },
+                runtime,
+            )
+            .unwrap();
+            db.insert_with_id(1, &[1., 0.], json!({"state":"seed"}))
+                .unwrap();
+            db.create_index("state").unwrap();
+            db.flush().unwrap();
+            db.enable_auto_compaction(Duration::from_secs(3600))
+                .unwrap();
+            let error = db.enable_auto_compaction(Duration::MAX).unwrap_err();
+            assert_eq!(error.code(), "TDB_INVALID_INPUT");
+            assert_eq!(
+                serde_json::to_value(error.info()).unwrap()["write"],
+                json!({"phase":"validation","outcome":"not_committed"})
+            );
+            db.update_payload(1, json!({"state":"saved"})).unwrap();
+            let obstacle = root.join("db.tdb.pidx.tmp");
+            std::fs::create_dir(&obstacle).unwrap();
+            let background = db.compaction.take().unwrap();
+            // 直接派发真实登记，再等待任务完成通知，使验证与计时间隔独立。
+            lock(&background.job.state).next = Instant::now();
+            background.job.dispatch(Instant::now());
+            let mut state = lock(&background.job.state);
+            while state.running {
+                state = background.job.idle.wait(state).unwrap();
+            }
+            drop(state);
+            let status = background.status();
+            assert_eq!(status.failed_runs, 1, "{mode:?}/{status:?}");
+            let failure = status.last_failure.unwrap();
+            assert_eq!(failure.kind, "io");
+            assert_eq!(failure.code, "TDB_IO");
+            assert!(
+                failure.details["io_kind"]
+                    .as_str()
+                    .is_some_and(|kind| !kind.is_empty())
+            );
+            assert_eq!(
+                serde_json::to_value(failure.write).unwrap(),
+                json!({"phase":"publish","outcome":"unknown"})
+            );
+            std::fs::remove_dir(obstacle).unwrap();
+            drop(db);
+            let moved = root.with_extension("moved");
+            std::fs::rename(&root, &moved).unwrap();
+            for _ in 0..2 {
+                let mut recovered =
+                    Database::<f32>::open(moved.join("db.tdb").to_str().unwrap(), 2).unwrap();
+                assert_eq!(recovered.all_node_ids().unwrap(), [1]);
+                let node = recovered.get(1).unwrap().unwrap();
+                assert_eq!(node.vector, [1., 0.]);
+                assert_eq!(node.payload, json!({"state":"saved"}));
+                assert!(node.edges.is_empty());
+                recovered.close().unwrap();
+            }
+            drop(background);
+            std::fs::remove_dir_all(moved).unwrap();
+        }
+    }
+
+    #[test]
     fn 维护诊断区分排空延期资源拒绝锁忙失败和恢复() {
         let runtime = ResourceRuntime::new(crate::resources::ResourceLimits {
             max_threads: 1,
@@ -513,6 +608,11 @@ mod tests {
         );
         let failure = status.last_failure.unwrap();
         assert_eq!(failure.kind, "resource_budget");
+        assert_eq!(failure.code, "QueueFull");
+        assert_eq!(
+            serde_json::to_value(failure.write).unwrap(),
+            serde_json::json!({"phase":"admission","outcome":"not_committed"})
+        );
         assert_eq!(failure.budget.unwrap().resource, "maintenance_tasks");
         drop(occupied);
         for outcome in [1, 2, 0] {

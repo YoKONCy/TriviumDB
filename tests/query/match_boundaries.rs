@@ -228,7 +228,7 @@ fn small_stack_worker() {
             };
             assert!(matches!(
                 execute_tql_with_limits(&query, &mt, limits),
-                Err(TriviumError::QueryCancelled | TriviumError::QueryExecution(_))
+                Err(TriviumError::QueryDeadlineExceeded | TriviumError::QueryExecution(_))
             ));
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(2),
@@ -282,9 +282,14 @@ fn 路径已经开始展开后取消和期限耗尽仍会终止执行() {
             control.cancel();
         }
         gate.release();
-        assert!(matches!(
-            worker.join().unwrap(),
-            Err(TriviumError::QueryCancelled)
-        ));
+        let error = worker.join().unwrap().unwrap_err();
+        assert_eq!(
+            error.code(),
+            if deadline {
+                "TDB_QUERY_DEADLINE_EXCEEDED"
+            } else {
+                "TDB_QUERY_CANCELLED"
+            }
+        );
     }
 }

@@ -64,11 +64,13 @@ impl QueryControl {
     }
 
     pub fn check(&self) -> Result<(), TriviumError> {
-        if self.cancelled.load(Ordering::Acquire)
-            || self
-                .deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
+        // 同一检查点同时观察到取消与期限到期时，期限原因优先。
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
         {
+            Err(TriviumError::QueryDeadlineExceeded)
+        } else if self.cancelled.load(Ordering::Acquire) {
             Err(TriviumError::QueryCancelled)
         } else {
             Ok(())

@@ -1,7 +1,7 @@
 import {
   TriviumDB, ResourceRuntime, ConsoleSession, type TriviumDBOptions, type TransactionOperation,
   type JsSearchHit, type PreparedTql, type ShutdownStatus, type StorageInfo,
-  type TriviumDBError, type ResourceBudgetError, type ErrorInteger, type DType,
+  type TriviumDBError, type ResourceBudgetError, type ErrorInteger, type DType, type WriteErrorInfo, type ResourceFailure,
 } from 'triviumdb';
 
 function check(condition: boolean, message: string): asserts condition {
@@ -9,14 +9,36 @@ function check(condition: boolean, message: string): asserts condition {
 }
 
 export function inspectBudgetWriteError(error: ResourceBudgetError): void {
+  const publication: WriteErrorInfo = { phase: 'publish', outcome: 'committed' };
+  void publication;
   const consumed: boolean | undefined = error.write?.transaction_consumed;
   void consumed;
 }
 
+export function inspectMaintenanceFailure(failure: ResourceFailure): void {
+  const code: TriviumDBError['code'] = failure.code;
+  const write: WriteErrorInfo | undefined = failure.write;
+  void code;
+  void write;
+  // @ts-expect-error 规范错误码只能来自公共目录。
+  const invalid: ResourceFailure = { ...failure, code: 'MAINTENANCE_FAILED' };
+  void invalid;
+}
+
 export function inspectCoreError(error: TriviumDBError): void {
+  if (error.code === 'TDB_QUERY_DEADLINE_EXCEEDED') {
+    const details: Record<string, never> = error.details;
+    // @ts-expect-error 期限错误使用空详情，预算字段由预算错误提供。
+    const invalid: TriviumDBError = { ...error, details: { budget: 1 } };
+    void [details, invalid];
+  }
   const stage: 'lex' | 'parse' | 'bind' | undefined = error.stage;
   const start: number | undefined = error.target?.query_span?.start_byte;
   const parameter: string | undefined = error.target?.parameter;
+  const field: string | undefined = error.target?.field;
+  // @ts-expect-error 普通 API 字段名为字符串。
+  const numericField: number | undefined = error.target?.field;
+  void [field, numericField];
   const outcome: 'not_committed' | 'unknown' | 'committed' | undefined = error.write?.outcome;
   const consumed: boolean | undefined = error.write?.transaction_consumed;
   // @ts-expect-error 写入结果使用约定类别。
@@ -158,6 +180,42 @@ export function rejectedInputs(db: TriviumDB): void {
   db.updateVector(11, ['1', '0']);
   // @ts-expect-error 关键词为字符串数组。
   db.rebuildTextIndex([{ id: 11, text: 'token', keywords: [42] }]);
+  // @ts-expect-error 预留数量必须为数值。
+  db.reserveNodes('1');
+  // @ts-expect-error 内存配额必须为数值。
+  db.setMemoryLimit(true);
+  // @ts-expect-error 后台构建开关必须为布尔值。
+  db.setAutoBuildQuiver(1);
+  // @ts-expect-error 整理间隔必须为数值。
+  db.enableAutoCompaction('1');
+  // @ts-expect-error 检索数量必须为数值。
+  db.search([1, 0], '1');
+  // @ts-expect-error 展开深度必须为数值。
+  db.searchGrouped([1, 0], 1, '1');
+  // @ts-expect-error 批查询并行度必须为数值。
+  db.searchBatch([[1, 0]], 1, '1');
+  // @ts-expect-error 精确检索数量必须为数值。
+  db.searchExact([1, 0], '1');
+  // @ts-expect-error 锚点上限必须为数值。
+  db.searchGraphFirst([1, 0], [1], 1, '1');
+  // @ts-expect-error 上下文检索配置中的数量必须为数值。
+  db.searchWithContext([1, 0], { recallK: '1' });
+  // @ts-expect-error 高级配置中的边数量必须为数值。
+  db.searchAdvanced([1, 0], { maxEdgesPerNode: '1' });
+  // @ts-expect-error 混合检索文本必须为字符串。
+  db.searchHybrid([1, 0], 1);
+  // @ts-expect-error 查询文本必须为字符串。
+  db.tql(1);
+  // @ts-expect-error Prepared 查询文本必须为字符串。
+  db.prepareTql(1);
+  // @ts-expect-error 写查询文本必须为字符串。
+  db.tqlMut(1);
+  // @ts-expect-error 同步模式采用公开字符串枚举。
+  db.setSyncMode(1);
+  // @ts-expect-error generation 标识必须为字符串。
+  db.publishGenerationManifest(1);
+  // @ts-expect-error Prepared 参数值仅包含公开标量。
+  db.executePreparedTql(db.prepareTql('MATCH (n) RETURN $x AS value'), { x: undefined });
   // @ts-expect-error Prepared 参数值为公开的标量集合。
   db.executePreparedTql(db.prepareTql('FIND {kind: "primary"} RETURN $label AS label'), { label: {} });
   // @ts-expect-error 事务操作必须提供对应的向量。

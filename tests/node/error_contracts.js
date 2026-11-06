@@ -100,10 +100,11 @@ async function runErrorContract(root) {
   } finally {
     integers.close()
   }
-  runQueryDiagnostics(root)
+  await runQueryDiagnostics(root)
 }
 
-function runQueryDiagnostics(root, api = require('../../index.js')) {
+async function runQueryDiagnostics(root, api = require('../../index.js')) {
+  await require('./query_arguments').runQueryArguments(root, api)
   require('./write_outcomes').runWriteOutcomes(root, api)
   runPreparedDiagnostics(root, api)
   const { TriviumDB, ConsoleSession } = api
@@ -152,6 +153,17 @@ function runQueryDiagnostics(root, api = require('../../index.js')) {
 
 function runPreparedDiagnostics(root, { TriviumDB, ConsoleSession }) {
   const { cases } = require('../contracts/prepared_diagnostics.json')
+  const invalid = (target, stage) => error => {
+    assert.equal(error.schema_version, 1)
+    assert.equal(error.code, 'TDB_INVALID_INPUT')
+    assert.deepEqual(error.target, target)
+    assert.equal(error.stage, stage)
+    assert.equal(error.write, undefined)
+    assert.deepEqual(Object.keys(error.details), ['reason'])
+    assert.equal(typeof error.details.reason, 'string')
+    assert.ok(error.details.reason.length > 0)
+    return true
+  }
   for (const dtype of ['f32', 'f16', 'u64']) {
     const file = path.join(root, `prepared-diagnostics-${dtype}.tdb`)
     const db = new TriviumDB(file, { dim: 2, dtype, autoBuildQuiver: false })
@@ -180,7 +192,55 @@ function runPreparedDiagnostics(root, { TriviumDB, ConsoleSession }) {
           })
         }
       }
-      assert.deepEqual(db.executePreparedTql(db.prepareTql('MATCH (n) RETURN $x AS value'), { x: 42 }), [{ value: 42 }])
+      const prepared = db.prepareTql('MATCH (n) RETURN $x AS value')
+      assert.deepEqual(db.executePreparedTql(prepared, { x: 42 }), [{ value: 42 }])
+      for (const parameters of [null, undefined, [], 42, 'x', true, 1n, Symbol('container'), () => 42]) {
+        assert.throws(() => db.executePreparedTql(prepared, parameters), invalid({ field: 'parameters' }))
+      }
+      for (const value of [NaN, Infinity, -Infinity, undefined, 1n, Symbol('value'), () => 42]) {
+        assert.throws(() => db.executePreparedTql(prepared, { x: value }), invalid({ parameter: 'x' }, 'bind'))
+      }
+      for (const value of [null, true, false, '中文\u0000参数', 0, -2147483648, 4294967295, 4294967296, 1.25, Number.MAX_SAFE_INTEGER]) {
+        assert.deepEqual(db.executePreparedTql(prepared, { x: value }), [{ value }])
+      }
+      let nestedReads = 0
+      const nested = { get rejected() { nestedReads++; throw new Error('复合参数应在标量边界拒绝') } }
+      nested.self = nested
+      assert.throws(() => db.executePreparedTql(prepared, { x: nested }), invalid({ parameter: 'x' }, 'bind'))
+      assert.equal(nestedReads, 0)
+      const literalName = 'extra\u0000中文.key'
+      assert.throws(() => db.executePreparedTql(prepared, { [literalName]: undefined }),
+        invalid({ parameter: literalName }, 'bind'))
+      let callbacks = 0
+      const callbackParameters = { get x() {
+        assert.throws(() => db.reserveNodes(1), error => {
+          assert.equal(error.code, 'TDB_REENTRANT_ACCESS')
+          assert.deepEqual(error.write, { phase: 'admission', outcome: 'not_committed' })
+          return true
+        })
+        callbacks++
+        return 42
+      } }
+      assert.deepEqual(db.executePreparedTql(prepared, callbackParameters), [{ value: 42 }])
+      assert.equal(callbacks, 1)
+      assert.deepEqual(db.executePreparedTql(prepared, Object.create({ x: 42 })), [{ value: 42 }])
+      assert.deepEqual(db.executePreparedTql(prepared, Object.assign(Object.create(null), { x: 42 })), [{ value: 42 }])
+      const cause = new Error('宿主映射原因')
+      const sentinel = new TypeError('宿主参数 getter 失败', { cause })
+      assert.throws(() => db.executePreparedTql(prepared, { get x() { throw sentinel } }), error => {
+        assert.equal(error, sentinel)
+        assert.equal(error.cause, cause)
+        assert.equal(error.code, undefined)
+        return true
+      })
+      const proxy = new Proxy({}, { ownKeys() { throw sentinel } })
+      assert.throws(() => db.executePreparedTql(prepared, proxy), error => {
+        assert.equal(error, sentinel)
+        assert.equal(error.cause, cause)
+        assert.equal(error.code, undefined)
+        return true
+      })
+      assert.deepEqual(db.executePreparedTql(prepared, { x: 42 }), [{ value: 42 }])
       assert.deepEqual(fs.readFileSync(`${file}.wal`), before)
     } finally {
       db.close()

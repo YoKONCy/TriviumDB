@@ -48,6 +48,8 @@
 
 当前开发版的 TQL 解析错误保留 `TDB_QUERY_PARSE` 和 `details.reason`，补充 `stage` 与可选 `target.query_span`。位置来自原始查询的 UTF-8 字节，行列按 Unicode 标量计算；字段、跨语言表示及 Rust 变体见 [TQL 结构化诊断](tql-reference.md#结构化查询诊断)。
 
+已覆盖的普通 API 输入使用 `target.field` 定位，并保留原始错误码、详情和完成阶段。容量预留使用 `additional`，同步模式使用 `mode`，内存额度的 Rust 字节接口使用 `bytes`，Python／Node 的 MiB 接口使用 `mb`。Rust 通过 `at_field()` 附加位置、`underlying()` 匹配原始变体。已知 Node 管理数字转换和 MiB 换算拒绝提供 `validation/not_committed`，Python 的单位换算溢出保留 `OverflowError` 继承。详见[公共错误契约](error-contracts.md)。
+
 ### Python
 
 ```python
@@ -137,6 +139,8 @@ db.publish_generation_manifest("generation-42")?;
 ```
 
 Python 使用 `db.publish_generation_manifest("generation-42")`，Node.js 使用 `db.publishGenerationManifest("generation-42")`。该操作会先执行安全 `flush()`，随后为当前 `.tdb`、`.vec`、`.pld.<generation>`、`.flush_ok` 及已存在的 TextIndex/QuIVer sidecar 记录文件大小和 CRC32，并最后原子发布 `<path>.manifest.json`。
+
+同步模式和 generation 标识采用字符串参数。已覆盖的绑定类型拒绝提供 `TDB_INVALID_INPUT`、`target.field` 与 `validation/not_committed`，Python 保留原异常类型。generation 字段按语言入口使用 `generation_id` 或 `generationId`。manifest 回调重入提供 `admission/not_committed`，发布中的错误继续依据 Core 完成点判断。
 
 发布完成后可在不需要 `.lock` 和 `.wal` 的部署目录中使用：
 
@@ -761,6 +765,12 @@ for hit in &results {
 | `score` | `f32` | 相似度得分（余弦相似度或扩散热度） |
 | `payload` | `dict` | 节点的 JSON 元数据 |
 
+Python 普通／分组检索的整数数量及展开参数、批量检索的数量及并行度在请求借用后转换，已覆盖类型拒绝提供 `TDB_INVALID_INPUT` 与 `target.field`，保留原类型异常。Node 的对应数值拒绝提供公开参数名，读取错误省略写入结果。各入口的具体字段范围见[公共错误契约](error-contracts.md)。
+
+精确、图优先、上下文、高级及混合检索的已覆盖整数数量字段采用同一错误契约。Python 图优先检索在请求范围内提取锚点序列，转换回调的同库写入明确拒绝。混合检索文本类型错误定位 `query_text` 或 `queryText`。Node 上下文／高级配置的数字字段以省略或 `undefined` 使用默认值，`null` 按既有类型边界拒绝。可选方法数字实参继续支持 `null` 默认值。
+
+Python 的 `search`、`search_grouped`、`search_with_context`、`search_advanced` 和 `search_hybrid` 接受外层 `Mapping` 过滤器，包括 `MappingProxyType` 和 `UserDict`。Mapping 协议在请求范围内执行，转换中的宿主异常保留原对象与 cause。已覆盖 Filter 表示及语义错误定位 `payload_filter`，Node 对应语义错误定位 `payloadFilter`。
+
 ### search_batch — 批量并行 ANN 检索
 
 同一个数据库实例一次接收多条向量查询，由 Rust 共享线程池并行执行。所有查询在执行前完成整批校验；任一向量维度错误或包含 NaN/Infinity 时整批失败，不返回部分结果。外层结果顺序严格对应输入顺序。
@@ -1244,7 +1254,13 @@ const rows = db.executePreparedTql(prepared, { bonus: 4 })
 
 Prepared 参数只接受 null/bool/string/number；缺参、额外参数、数组/对象和非有限数值明确失败。
 
-当前开发版本的命名参数转换及绑定错误提供 `stage=bind` 和 `target.parameter`。缺参、多参与类型错误保留各自错误码和详情，Python 保留原异常继承关系。Rust 使用 `TriviumError::underlying()` 取得带定位错误的原始变体。参数集合的外层语言提取继续遵守各端契约，覆盖边界见[公共错误契约](error-contracts.md)。
+Python 的参数容器接受字符串键 `Mapping`，包括 `dict`、`MappingProxyType` 和 `UserDict`。Node 接受 JSON 对象。已覆盖的容器或键类型拒绝提供 `TDB_INVALID_INPUT` 和 `target.field=parameters`，阶段省略。
+
+`tql`、`prepare_tql` 和 `tql_mut` 的查询文本类型拒绝定位 `query`，发生在解析之前，阶段省略。Python 保留原类型及编码异常。写入口类型拒绝提供 `validation/not_committed`，回调重入提供 `admission/not_committed`，读取入口省略写入结果。
+
+Node Prepared 对 NaN、无穷、undefined、BigInt、Symbol、函数及复合值提供具名绑定错误。数组和对象参数在标量边界拒绝。属性枚举与 getter 抛出的宿主异常保留原对象与 cause；有效标量沿用原有数值和字符串转换规则。
+
+当前开发版本的命名参数转换及绑定错误提供 `stage=bind` 和 `target.parameter`。缺参、多参与类型错误保留各自错误码和详情，Python 保留原异常继承关系。映射协议产生的宿主异常保留原对象与 cause。Rust 使用 `TriviumError::underlying()` 取得带定位错误的原始变体。覆盖边界见[公共错误契约](error-contracts.md)。
 
 SEARCH 向量的字面量与数值参数按数据库 dtype 转换，u64 分量保持整数位模式。RANK 和 RESIDUAL 的向量字面量采用相同转换。Rust 的 `QueryEntry::Search.vector`、`RankClause.vector` 和 `ResidualStage.vector` 使用 `Vec<serde_json::Number>`；`pipeline::lower_search_entry()` 返回 `Result`，调用方传播数值转换错误。
 
@@ -1406,6 +1422,8 @@ db.dropIndex('name')
 
 完整类别与字段由 [Rust 错误模型](../src/error.rs)及 [Node 类型声明](../triviumdb.d.ts)列出。Python 的 `TriviumDBError` 继承 `RuntimeError`；已有只读、恢复、代际和资源异常继承它。`InvalidInputError`、`CapacityError`、`SnapshotDestinationError` 分别继承 `ValueError`、`MemoryError`、`FileExistsError`，并提供同样的错误码与详情。SDK 参数提取阶段沿用各语言的参数类型异常。
 
+Rust `QueryControl` 在协作检查点分别返回主动取消的 `TDB_QUERY_CANCELLED` 和期限到达的 `TDB_QUERY_DEADLINE_EXCEEDED`，详情为空对象。同一检查点两者同时成立时，期限优先。Console 的已知提交前终止附带对应的未提交阶段，Server 期限使用规范码及兼容字段 `legacyCode=REQUEST_TIMEOUT`。具体 HTTP 状态、重试条件与资源完成点见[取消与期限](error-contracts.md#取消与期限)。
+
 Node 错误详情中的安全整数使用 Number，超出 `Number.MAX_SAFE_INTEGER` 的整数使用十进制字符串；Python 与 Rust 保留原始整数精度。已有资源错误的 `resource/requested/used/limit` 直接属性继续提供，字段内容与 `details` 相同。
 
 ```python
@@ -1534,6 +1552,10 @@ print(db.instance_stats())
 
 设置本实例内存预算。写入增量、容量预留和已接入的大工作区在执行前检查预算。共享运行时先核对配额调整，成功后同步更新实例配置，失败时保留原配额。Rust `set_memory_limit(bytes)` 返回 `Result<()>`。
 
+ReadOnly／Immutable 实例可调整自身运行时额度。已有 QuIVer 构建句柄在后续捕获任务时使用当前额度，释放额度后可重新尝试捕获。额度拒绝保留现有数据与配置，已知输入错误提供字段定位及写入结果。
+
+Python 的 `set_memory_limit()` 默认值为 0，`enable_auto_compaction()` 默认间隔为 7200 秒。容量、额度和压实间隔沿用 Python 整数协议，自动构建开关沿用布尔提取规则。已覆盖的内置类型拒绝保留 `TypeError`／`OverflowError`，并提供字段定位和 `validation/not_committed`。Node 的对应接口严格接收数值或布尔值；运行时省略压实间隔或传入 `null` 时沿用 7200 秒默认值。
+
 **Python：**
 ```python
 db.set_memory_limit(mb=256)  # 设置为 256 MiB
@@ -1585,6 +1607,8 @@ db.build_text_index()
 `load_text_index=True` 会在打开时加载持久化的全文索引。默认 `False` 省略加载，后续纯向量写入、`flush()` 和 `close()` 保留已有文本文件；显式文本登记或预热会先加载原索引并合并修改。延期加载与清理受内核内存预算约束，超限会先返回错误。
 
 文本登记通过 `flush()` 或可写句柄的 `close()` 持久化，尚不属于 `Transaction` 的 WAL 操作。应用需保留权威正文与别名来源，以便重新登记。
+
+正文和关键词在分词、转换及索引增长前检查保守峰值，并向共享运行时预留临时工作区。预算拒绝保留原正文、关键词与 WAL。维护入口核对 WAL 可写性，已关闭的 writer 返回 `TDB_WAL_CLOSED`；权限和生命周期拒绝提供 `admission/not_committed`，输入及构建拒绝提供 `validation/not_committed`。
 
 历史 `.text`（TIDX v2）快照缺少 `.text.meta` 时，完整格式校验通过后可恢复正文与关键词，并在保存时补齐长度和 CRC。已有元数据中的文本长度和 CRC 用于校验内容；主文件长度随存储布局和节点变化更新。加载异常时保留原文本文件，错误消息区分长度、CRC、元数据格式与快照格式。
 
@@ -1671,6 +1695,8 @@ Mmap 只读打开在采用 `.gidx` 前校验所有边块、派生目录与主文
 
 **返回值：** 所有已迁移节点的 ID 列表（`list[int]`）
 
+迁移在公开目标前预留最终实例配额。错误中的最外层 `write` 描述目标发布结果，提交前回滚清理完成为 `publish/not_committed`，标记重命名后的同步失败为 `publish/unknown`，耐久提交后的清理失败为 `publish/committed`。原始类别和错误链继续保留，Rust 使用 `underlying()` 匹配原始变体。完整边界见[公共错误契约](error-contracts.md)。
+
 **Python：**
 ```python
 # 第一步：迁移结构（保留 payload + 边，向量置零）
@@ -1739,6 +1765,8 @@ Python 通过 `db.transaction()` 暴露缓冲提交语义，Node.js 通过 `comm
 当前开发版本的事务提交错误增加可选 `write`，包含 `phase`、`outcome` 与适用的 `transaction_consumed`。SDK 准入拒绝保留操作并返回 `not_committed`，Core 预检拒绝消费操作并返回 `not_committed`，WAL 或应用失败返回 `unknown`。分组提交以组尾同步结果确认，内核已知的已提交响应失败返回 `committed`。各入口覆盖范围及处理依据见[写入结果契约](error-contracts.md#写入结果字段)。
 
 节点及边的直接 CRUD、Payload 补丁与 CAS 同样提供 `write`。直接入口省略 `transaction_consumed`，准入与校验拒绝分别使用 `admission` 和 `validation`。TQL 写入在解析、计划和预算准入失败时提供 `validation/not_committed`，进入事务提交后保留内层阶段。Rust 调用方使用 `underlying()` 匹配带上下文的原始错误变体。
+
+文本、属性索引和 Rust 显式 QuIVer 构建的已覆盖维护错误沿用该结构。`flush`／`compact` 及唯一约束发布使用 `phase=publish`，提交标记完成后的清理失败提供 `outcome=committed`，此前的发布失败提供 `unknown`。唯一约束发布失败后释放相关句柄并重新打开核对定义与事实。创建唯一索引时，重复值的节点身份按活跃 NodeId 升序确定。
 
 ---
 

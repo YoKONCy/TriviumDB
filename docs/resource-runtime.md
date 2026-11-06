@@ -46,6 +46,8 @@
 
 维护在工作前检查峰值预算。宿主按数据库规模和同时执行的维护任务配置总额与保护额度。额度不足时返回预算错误并保留重试状态；后台维护记录延期或失败原因。详见[关闭、快照与恢复](lifecycle-snapshots.md)。
 
+显式正文与关键词登记在构建前检查实例预算并预留共享工作区，估算包含分词、字符串转换与索引增长。拒绝保留原文本事实，临时预留在返回时归还。文件组发布错误通过 `write.phase=publish` 报告结果，提交标记完成后的 WAL 清理失败保留 `committed`，具体入口见[公共错误契约](error-contracts.md)。
+
 ### 查询工作区
 
 资源不足立即返回错误，宿主可以限流、退避重试或释放闲置实例。检索参数、结果完整性和排序遵循调用方选择的查询语义。
@@ -89,6 +91,8 @@ fn main() -> triviumdb::Result<()> {
 > **配额提醒**：需要统一控制多个数据库的总预算时，应为它们传入同一个 ResourceRuntime。
 
 Rust `set_memory_limit(bytes)` 返回 `Result<()>`，成功时同步更新本实例配置与共享配额。运行时资源拒绝返回 `TriviumError::ResourceBudgetExceeded { resource, requested, used, limit }`，可直接按字段分类。
+
+调整失败保留原配置与共享登记，提供 `validation/not_committed` 和字段定位。Rust 使用 `target.field=bytes`，Python／Node 的 MiB 接口使用 `mb`。ReadOnly／Immutable 实例可以调整自身的运行时额度。先前创建的 QuIVer 构建句柄在后续捕获任务时读取最新额度，额度释放后可重新尝试捕获。
 
 ---
 
@@ -168,6 +172,8 @@ Node.js 配额参数单位为 MiB，运行时资源拒绝的 `error.code` 为 `Q
 - `database_busy`：周期压实尝试获取写锁时数据库繁忙，本次跳过。
 
 延期不计作已执行失败。执行阶段发生 I/O 或工作区预算错误则计入 `failed_runs`。`last_failure.kind` 为稳定分类，`budget` 在资源拒绝时包含四个预算字段；`message` 仅供诊断。一次成功执行会清除最近延期原因和故障，但保留累计次数。统计从本次登记开始，重新启用压实会建立新的登记。
+
+`last_failure` 同时提供规范 `code`、原始 `details` 和已知执行点的可选 `write`。周期压实复用存储发布阶段，调度准入拒绝为 `admission/not_committed`。修改自动压实配置在新登记创建成功后替换旧登记，配置拒绝保留此前有效登记。QuIVer 独立构建任务在执行前和发布前检查 WAL 及恢复状态，失败后归还任务与工作区。
 
 ---
 

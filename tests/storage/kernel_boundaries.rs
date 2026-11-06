@@ -244,7 +244,10 @@ fn empty_vector_file_delete_failure_can_retry_without_false_publication() {
         .share_mode(3)
         .open(format!("{path}.vec"))
         .unwrap();
-    assert!(matches!(db.flush(), Err(TriviumError::Io(_))));
+    assert!(matches!(
+        db.flush().unwrap_err().underlying(),
+        TriviumError::Io(_)
+    ));
     assert!(!Path::new(&format!("{path}.flush_ok")).exists());
     drop(blocker);
     db.flush().unwrap();
@@ -496,7 +499,10 @@ fn blocked_vector_worker() {
         .open(format!("{path}.vec"))
         .unwrap();
     db.update_vector(1, &[0.0, 1.0]).unwrap();
-    assert!(matches!(db.flush(), Err(TriviumError::Io(_))));
+    assert!(matches!(
+        db.flush().unwrap_err().underlying(),
+        TriviumError::Io(_)
+    ));
     assert!(matches!(db.get(1), Err(TriviumError::WalClosed)));
     assert!(matches!(
         db.search_exact(&[0.0, 1.0], 1),
@@ -511,7 +517,10 @@ fn blocked_vector_worker() {
         Err(TriviumError::WalClosed)
     ));
     drop(blocker);
-    assert!(matches!(db.flush(), Err(TriviumError::WalClosed)));
+    assert!(matches!(
+        db.flush().unwrap_err().underlying(),
+        TriviumError::WalClosed
+    ));
     drop(db);
     let mut reopened = Database::<f32>::open_with_config(&path, config(StorageMode::Mmap)).unwrap();
     assert_eq!(reopened.get(1).unwrap().unwrap().vector, vec![0.0, 1.0]);

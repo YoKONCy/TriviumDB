@@ -388,13 +388,13 @@ fn 容量规划_ReserveNodes零值与溢出均防呆拒绝() {
     cleanup(&path);
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert!(matches!(
-        db.reserve_nodes(0),
-        Err(TriviumError::InvalidInput(_))
+        db.reserve_nodes(0).unwrap_err().underlying(),
+        TriviumError::InvalidInput(_)
     ));
     assert!(matches!(
-        db.reserve_nodes(usize::MAX),
-        Err(TriviumError::CapacityAllocationFailed { .. })
-            | Err(TriviumError::CapacityReservationRejected { .. })
+        db.reserve_nodes(usize::MAX).unwrap_err().underlying(),
+        TriviumError::CapacityAllocationFailed { .. }
+            | TriviumError::CapacityReservationRejected { .. }
     ));
     assert_eq!(db.node_count().unwrap(), 0);
     drop(db);

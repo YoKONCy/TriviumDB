@@ -267,7 +267,10 @@ fn cooperative_cancellation在全表扫描前和扫描中fail_closed() {
     let error = db
         .tql_with_control("FIND {missing: true} RETURN *", expired)
         .unwrap_err();
-    assert!(matches!(error, triviumdb::TriviumError::QueryCancelled));
+    assert!(matches!(
+        error,
+        triviumdb::TriviumError::QueryDeadlineExceeded
+    ));
     cleanup(&path);
 }
 

@@ -1,7 +1,9 @@
 """按共享独立样例核对实际 Python API 的错误类别与完整字段。"""
 
 import json
+from collections import UserDict
 from pathlib import Path
+from types import MappingProxyType
 import triviumdb
 from write_outcomes import run_write_outcomes
 
@@ -107,6 +109,55 @@ def run_prepared_diagnostics(root):
                         raise AssertionError(f"必须拒绝参数：{case['name']}")
             prepared = db.prepare_tql("MATCH (n) RETURN $x AS value")
             assert [row.row for row in db.execute_prepared_tql(prepared, {"x": 42})] == [{"value": 42}]
+            for parameters in (MappingProxyType({"x": 42}), UserDict({"x": 42})):
+                assert [row.row for row in db.execute_prepared_tql(prepared, parameters)] == [{"value": 42}]
+            for parameters in (None, [], [("x", 42)], 42, "x", {7: 42}):
+                try:
+                    db.execute_prepared_tql(prepared, parameters)
+                except TypeError as error:
+                    assert error.schema_version == 1
+                    assert error.code == "TDB_INVALID_INPUT"
+                    assert error.target == {"field": "parameters"}
+                    assert error.stage is None and error.write is None
+                else:
+                    raise AssertionError("参数容器或键必须符合映射契约")
+            for value, exception in ((float("nan"), ValueError), (float("inf"), ValueError),
+                                     (1 << 100, OverflowError), (object(), TypeError)):
+                try:
+                    db.execute_prepared_tql(prepared, {"x": value})
+                except exception as error:
+                    assert error.code == "TDB_INVALID_INPUT"
+                    assert error.target == {"parameter": "x"}
+                    assert error.stage == "bind" and error.write is None
+                else:
+                    raise AssertionError("参数值必须经过具名绑定诊断")
+            cause = RuntimeError("宿主映射原因")
+            sentinel = TypeError("宿主映射失败")
+            sentinel.__cause__ = cause
+            class BrokenMapping(UserDict):
+                def items(self):
+                    raise sentinel
+            try:
+                db.execute_prepared_tql(prepared, BrokenMapping(x=42))
+            except TypeError as error:
+                assert error is sentinel and error.__cause__ is cause
+                assert not hasattr(error, "code")
+            else:
+                raise AssertionError("必须保留宿主映射异常")
+            callbacks = []
+            class CallbackMapping(UserDict):
+                def items(self):
+                    try:
+                        db.all_node_ids()
+                    except triviumdb.TriviumDBError as error:
+                        assert error.code == "TDB_REENTRANT_ACCESS"
+                        assert error.write is None
+                    else:
+                        raise AssertionError("映射转换中的重入必须被拒绝")
+                    callbacks.append(True)
+                    return super().items()
+            assert [row.row for row in db.execute_prepared_tql(prepared, CallbackMapping(x=42))] == [{"value": 42}]
+            assert callbacks == [True]
             assert Path(file + ".wal").read_bytes() == before
         finally:
             db.close()
@@ -120,6 +171,8 @@ def run_prepared_diagnostics(root):
 
 
 def run_query_diagnostics(root):
+    from query_arguments import run_query_arguments
+    run_query_arguments(root)
     cases = json.loads((Path(__file__).parents[1] / "contracts/query_diagnostics.json").read_text(encoding="utf-8"))["cases"]
     for dtype in ("f32", "f16", "u64"):
         file = str(Path(root) / f"diagnostics-{dtype}.tdb")

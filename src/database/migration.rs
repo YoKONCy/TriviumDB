@@ -164,6 +164,7 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
     source: &Database<T>,
     path: &str,
     dim: usize,
+    write: &mut crate::error::WriteErrorInfo,
 ) -> Result<(Database<T>, Vec<u64>)> {
     if dim == 0 || dim > 65_536 {
         return Err(TriviumError::InvalidInput(
@@ -226,15 +227,20 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
         stage.close()?;
     }
     drop(mt);
-    ensure_empty(&destination.target)?;
-    crate::storage::file_format::publish_new_database::<T>(&stage_path, &destination.target)?;
-    // 文件已经排他移动，清理剩余暂存目录期间目标租约仍由当前调用持有。
-    std::fs::remove_dir_all(&destination.directory)?;
-    // 目标租约直接交给新实例，发布与打开之间保持排他性。
+    // 暂存库释放后先预留最终实例配额，再公开目标，避免发布后被其他实例抢走额度。
     let _task = source.resource_runtime.enter_task()?;
     let reservation = source
         .resource_runtime
         .reserve_database(config.memory_limit)?;
+    ensure_empty(&destination.target)?;
+    crate::storage::file_format::publish_new_database::<T>(
+        &stage_path,
+        &destination.target,
+        write,
+    )?;
+    // 文件已经排他移动，清理剩余暂存目录期间目标租约仍由当前调用持有。
+    std::fs::remove_dir_all(&destination.directory)?;
+    // 目标租约直接交给新实例，发布与打开之间保持排他性。
     let database = Database::<T>::open_reserved_with_lock(
         &destination.target,
         config,

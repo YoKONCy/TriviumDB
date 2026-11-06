@@ -145,22 +145,27 @@ def run_lifecycle_contract(root: str) -> None:
         db.insert_with_id(case["later_node_id"], case["vector"], {})
         try:
             db.create_snapshot(snapshot, case["generation_id"])
-        except FileExistsError:
-            pass
+        except FileExistsError as error:
+            assert error.code == "TDB_SNAPSHOT_EXISTS"
+            assert error.write == {"phase": "validation", "outcome": "not_committed"}
         else:
             raise AssertionError("不得覆盖已有快照")
         assert triviumdb.verify_snapshot(snapshot, runtime)["node_count"] == 1
         assert triviumdb.restore_snapshot(snapshot, restored, runtime)["generation_id"] == case["generation_id"]
         try:
             triviumdb.restore_snapshot(snapshot, restored, runtime)
-        except FileExistsError:
-            pass
+        except FileExistsError as error:
+            assert error.code == "TDB_SNAPSHOT_EXISTS"
+            assert error.write == {"phase": "validation", "outcome": "not_committed"}
         else:
             raise AssertionError("不得覆盖已有恢复目标")
         reader = triviumdb.TriviumDB(os.path.join(restored, case["database_file"]),
             dim=case["dimension"], dtype=dtype, access_mode="immutable",
             memory_limit_mb=case["database_memory_limit_mb"], runtime=runtime)
         assert reader.get_payload(case["node_id"]) == case["original_payload"]
+        assert reader.all_node_ids() == [case["node_id"]]
+        assert reader.get(case["node_id"]).vector == case["vector"]
+        assert reader.get(case["node_id"]).edges == []
         assert case["later_node_id"] not in reader
         assert reader.close_timeout(case["close_timeout_ms"])
         assert triviumdb.verify_snapshot(restored, runtime)["node_count"] == 1

@@ -413,8 +413,8 @@ fn 各类索引构建在预算不足时保持事实定义缓存与wal并可重�
             let wal = std::fs::read(format!("{path}.wal")).unwrap();
             assert!(
                 matches!(
-                    create_index(&mut db, kind),
-                    Err(TriviumError::CapacityReservationRejected { .. })
+                    create_index(&mut db, kind).unwrap_err().underlying(),
+                    TriviumError::CapacityReservationRejected { .. }
                 ),
                 "{kind}"
             );
@@ -474,8 +474,8 @@ fn 唯一索引构建发现重复时保留原有非唯一索引定义() {
             db.create_unique_index("key")
         };
         assert!(matches!(
-            failed,
-            Err(TriviumError::UniqueConstraintViolation { .. })
+            failed.unwrap_err().underlying(),
+            TriviumError::UniqueConstraintViolation { .. }
         ));
         assert_eq!(
             serde_json::to_value(db.index_info().unwrap()).unwrap(),

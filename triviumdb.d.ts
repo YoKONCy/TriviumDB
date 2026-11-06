@@ -387,6 +387,7 @@ export interface ErrorDetailsByCode {
   TDB_MISSING_QUERY_PARAMETER: { parameter: string };
   TDB_UNEXPECTED_QUERY_PARAMETER: { parameter: string };
   TDB_QUERY_CANCELLED: Record<string, never>;
+  TDB_QUERY_DEADLINE_EXCEEDED: Record<string, never>;
   TDB_QUERY_BUDGET: { budget: ErrorInteger };
   TDB_PAYLOAD_BUDGET_EXCEEDED: { dimension: string; used: ErrorInteger; budget: ErrorInteger };
   TDB_TRAVERSAL_BUDGET_EXCEEDED: { dimension: 'visited_nodes' | 'examined_edges' | 'frontier_size' | 'depth'; visited_nodes: ErrorInteger; examined_edges: ErrorInteger; peak_frontier_size: ErrorInteger; depth_reached: ErrorInteger };
@@ -428,14 +429,16 @@ export type TriviumDBError = {
     code: Code;
     details: ErrorDetailsByCode[Code];
     stage?: 'lex' | 'parse' | 'bind';
-    target?: { query_span: QueryErrorSpan; parameter?: never } | { parameter: string; query_span?: never };
+    target?: { query_span: QueryErrorSpan; parameter?: never; field?: never }
+      | { parameter: string; query_span?: never; field?: never }
+      | { field: string; query_span?: never; parameter?: never };
     write?: WriteErrorInfo;
   }
 }[keyof ErrorDetailsByCode];
 
 /** 写入失败的阶段与结果，事务消费描述当前请求对内核操作缓冲的所有权转移。 */
 export interface WriteErrorInfo {
-  phase: 'admission' | 'validation' | 'wal' | 'apply' | 'group_sync' | 'response';
+  phase: 'admission' | 'validation' | 'wal' | 'apply' | 'publish' | 'group_sync' | 'response';
   outcome: 'not_committed' | 'unknown' | 'committed';
   transaction_consumed?: boolean;
 }
@@ -457,7 +460,10 @@ export interface ResourceBudgetError extends Error, ResourceBudgetDetails {
 
 export interface ResourceFailure {
   kind: 'resource_budget' | 'io' | 'capacity' | 'database_closed' | 'shutdown' | 'other';
+  code: keyof ErrorDetailsByCode;
   message: string;
+  details: ErrorDetailsByCode[keyof ErrorDetailsByCode];
+  write?: WriteErrorInfo;
   budget: ResourceBudgetDetails | null;
 }
 

@@ -60,10 +60,17 @@ fn run<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(case: &Va
         serde_json::json!({}),
     )
     .unwrap();
+    let error = db
+        .create_snapshot(&snapshot.to_string_lossy(), generation)
+        .unwrap_err();
     assert!(matches!(
-        db.create_snapshot(&snapshot.to_string_lossy(), generation),
-        Err(TriviumError::SnapshotDestinationExists { .. })
+        error.underlying(),
+        TriviumError::SnapshotDestinationExists { .. }
     ));
+    assert_eq!(
+        serde_json::to_value(error.info()).unwrap()["write"],
+        serde_json::json!({"phase":"validation","outcome":"not_committed"})
+    );
     assert_eq!(
         verify_snapshot_with_runtime(&snapshot.to_string_lossy(), &runtime)
             .unwrap()
@@ -78,14 +85,20 @@ fn run<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(case: &Va
     )
     .unwrap();
     assert_eq!(manifest.generation_id, generation);
+    let error = restore_snapshot_with_runtime(
+        &snapshot.to_string_lossy(),
+        &restored.to_string_lossy(),
+        &runtime,
+    )
+    .unwrap_err();
     assert!(matches!(
-        restore_snapshot_with_runtime(
-            &snapshot.to_string_lossy(),
-            &restored.to_string_lossy(),
-            &runtime
-        ),
-        Err(TriviumError::SnapshotDestinationExists { .. })
+        error.underlying(),
+        TriviumError::SnapshotDestinationExists { .. }
     ));
+    assert_eq!(
+        serde_json::to_value(error.info()).unwrap()["write"],
+        serde_json::json!({"phase":"validation","outcome":"not_committed"})
+    );
     let mut reader = Database::<T>::open_with_runtime(
         &restored
             .join(case["database_file"].as_str().unwrap())
@@ -101,6 +114,10 @@ fn run<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(case: &Va
         reader.get_payload(id).unwrap().unwrap(),
         case["original_payload"]
     );
+    assert_eq!(reader.all_node_ids().unwrap(), [id]);
+    let node = reader.get(id).unwrap().unwrap();
+    assert_eq!(node.vector, vector);
+    assert!(node.edges.is_empty());
     assert!(
         !reader
             .contains(case["later_node_id"].as_u64().unwrap())

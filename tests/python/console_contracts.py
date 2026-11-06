@@ -186,6 +186,13 @@ def run_console_contract(root: str) -> None:
     assert not worker.is_alive(), "原生请求必须实际退出"
     assert len(failures) == 1
     assert failures[0].code == "TDB_QUERY_CANCELLED"
+    assert failures[0].schema_version == 1
+    assert failures[0].details == {} and failures[0].write is None
+    assert not session.cancel("验收请求")
+    db.clear_hook()
+    resumed = triviumdb.ConsoleSession()
+    body = json.loads(db.console_request(resumed, wire({"operation": "getNodes", "ids": ["1"]})))
+    assert body["data"] == {"nodes": [{"id": "1", "vector": [1, 0], "payload": {"owner": "host"}, "edges": []}], "missingIds": []}
     assert db.get_payload(1) == {"owner": "host"}
     db.close()
     reopened = triviumdb.TriviumDB(file, dim=2)

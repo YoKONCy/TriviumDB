@@ -17,6 +17,7 @@ function check(code, details, write) {
 }
 
 function runWriteOutcomes(root, { TriviumDB, ConsoleSession }) {
+  require('./index_maintenance').runIndexMaintenance(root, TriviumDB)
   for (const dtype of ['f32', 'f16', 'u64']) {
     const file = path.join(root, `write-outcomes-${dtype}.tdb`)
     const db = new TriviumDB(file, { dim: 2, dtype, autoBuildQuiver: false })

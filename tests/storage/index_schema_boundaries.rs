@@ -192,12 +192,14 @@ fn 复合字段磁盘边界在构建与写日志前拒绝() {
     let before = std::fs::read(format!("{path}.wal")).unwrap();
     for fields in cases {
         assert!(matches!(
-            db.create_composite_index(&fields),
-            Err(TriviumError::InvalidInput(_))
+            db.create_composite_index(&fields).unwrap_err().underlying(),
+            TriviumError::InvalidInput(_)
         ));
         assert!(matches!(
-            db.create_unique_composite_index(&fields),
-            Err(TriviumError::InvalidInput(_))
+            db.create_unique_composite_index(&fields)
+                .unwrap_err()
+                .underlying(),
+            TriviumError::InvalidInput(_)
         ));
         assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
         assert_eq!(db.get_payload(1).unwrap(), Some(json!({"a":1})));

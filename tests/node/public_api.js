@@ -107,13 +107,24 @@ function runLifecycleContract(root) {
     assert.equal(manifest.complete, true)
     db.updatePayload(test.node_id, test.later_payload)
     db.insertWithId(test.later_node_id, test.vector, {})
-    assert.throws(() => db.createSnapshot(snapshot, test.generation_id), error => error.code === 'TDB_SNAPSHOT_EXISTS')
+    assert.throws(() => db.createSnapshot(snapshot, test.generation_id), error => {
+      assert.equal(error.code, 'TDB_SNAPSHOT_EXISTS')
+      assert.deepEqual(error.write, { phase: 'validation', outcome: 'not_committed' })
+      return true
+    })
     assert.equal(verifySnapshot(snapshot, runtime).node_count, 1)
     assert.equal(restoreSnapshot(snapshot, restored, runtime).generation_id, test.generation_id)
-    assert.throws(() => restoreSnapshot(snapshot, restored, runtime), error => error.code === 'TDB_SNAPSHOT_EXISTS')
+    assert.throws(() => restoreSnapshot(snapshot, restored, runtime), error => {
+      assert.equal(error.code, 'TDB_SNAPSHOT_EXISTS')
+      assert.deepEqual(error.write, { phase: 'validation', outcome: 'not_committed' })
+      return true
+    })
     const reader = new TriviumDB(path.join(restored, test.database_file), { dim: test.dimension,
       dtype, accessMode: 'immutable', memoryLimitMb: test.database_memory_limit_mb, runtime })
     assert.deepEqual(reader.getPayload(test.node_id), test.original_payload)
+    assert.deepEqual(reader.allNodeIds(), [test.node_id])
+    assert.deepEqual(reader.get(test.node_id).vector, test.vector)
+    assert.deepEqual(reader.get(test.node_id).edges, [])
     assert.equal(reader.contains(test.later_node_id), false)
     assert.equal(reader.closeTimeout(test.close_timeout_ms), true)
     assert.equal(verifySnapshot(restored, runtime).node_count, 1)

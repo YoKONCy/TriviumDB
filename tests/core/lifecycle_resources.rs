@@ -107,8 +107,8 @@ fn 普通析构后独立构建句柄拒绝新任务并保护文件租约() {
         let clone = handle.clone();
         drop(db);
         assert!(matches!(
-            handle.prepare_auto_build(),
-            Err(TriviumError::DatabaseClosed)
+            handle.prepare_auto_build().err().unwrap().underlying(),
+            TriviumError::DatabaseClosed
         ));
         assert!(matches!(
             Database::<f32>::open(&path, 3),

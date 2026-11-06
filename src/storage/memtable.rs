@@ -2403,7 +2403,7 @@ impl<T: VectorType> MemTable<T> {
             .map(|field| field.len().saturating_mul(4))
             .sum::<usize>()
             .saturating_add(1024);
-        for id in self.payloads.ids() {
+        for id in self.active_ids.iter() {
             let raw = self.payloads.raw(id).ok_or_else(|| {
                 TriviumError::CorruptedFile(
                     "索引构建缺少 Payload (Index build is missing a Payload)".into(),
@@ -2420,7 +2420,8 @@ impl<T: VectorType> MemTable<T> {
             self.ensure_additional_memory(limit, build_peak.saturating_add(parse_peak))?;
         }
         let mut candidate = PropertyIndexRegistry::empty_build(kind, fields, unique)?;
-        for id in self.payloads.ids() {
+        // 活跃 ID 目录按升序遍历，使唯一冲突的节点身份在各类型和重开后保持确定。
+        for id in self.active_ids.iter() {
             let raw = self.payloads.raw(id).ok_or_else(|| {
                 TriviumError::CorruptedFile(
                     "索引构建缺少 Payload (Index build is missing a Payload)".into(),
@@ -3758,6 +3759,27 @@ impl<T: VectorType> MemTable<T> {
             });
         }
         Ok(())
+    }
+
+    /// 正文分词、关键词转换与索引增长在分配前取得临时工作区。
+    pub(crate) fn reserve_text_update(
+        &self,
+        text: &str,
+    ) -> Result<crate::resources::WorkspaceReservation> {
+        let estimate = text
+            .len()
+            .checked_mul(64)
+            .and_then(|bytes| bytes.checked_add(512))
+            .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                reason: "文本更新工作区估算溢出 (Text update workspace estimate overflow)".into(),
+            })?;
+        self.check_text_memory_budget(estimate)?;
+        if self.resource_runtime.is_maintenance_task() {
+            self.resource_runtime
+                .reserve_maintenance_workspace(estimate)
+        } else {
+            self.resource_runtime.reserve_workspace(estimate)
+        }
     }
 
     /// 提交 WAL 前预留延期删除记录，避免事务应用期间再做可失败分配。

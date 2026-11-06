@@ -71,6 +71,9 @@ if (binding.TriviumDB) {
       error.operation = error.details.operation
       if (method === 'commitTransaction') {
         error.write = { phase: 'admission', outcome: 'not_committed', transaction_consumed: false }
+      } else if (['setSyncMode', 'setMemoryLimit', 'reserveNodes', 'repairGraphIndexes',
+        'setAutoBuildQuiver', 'enableAutoCompaction', 'publishGenerationManifest', 'tqlMut'].includes(method)) {
+        error.write = { phase: 'admission', outcome: 'not_committed' }
       }
       throw error
     }

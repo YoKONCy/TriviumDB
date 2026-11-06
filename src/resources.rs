@@ -88,7 +88,11 @@ impl ResourceBudgetDetails {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ResourceFailure {
     pub kind: &'static str,
+    pub code: &'static str,
     pub message: String,
+    pub details: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write: Option<crate::error::WriteErrorInfo>,
     pub budget: Option<ResourceBudgetDetails>,
 }
 
@@ -104,7 +108,10 @@ impl ResourceFailure {
         };
         Self {
             kind,
+            code: error.code(),
             message: error.to_string(),
+            details: error.details(),
+            write: error.info().write,
             budget: ResourceBudgetDetails::from_error(error),
         }
     }

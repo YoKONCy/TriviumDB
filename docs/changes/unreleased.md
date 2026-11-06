@@ -38,7 +38,67 @@
 - 直接写入在 WAL 追加后的应用阶段使用统一恢复保护。失败后当前实例和已准入的共享查询拒绝继续访问内存事实，调用方释放资源并重新打开后核对日志恢复结果。原有索引同步方式继续使用，资源运行时保留带写入上下文错误的预算和 I/O 分类。
 - TQL 写入在词法、解析、写计划和预算准入失败时返回 `validation/not_committed`，进入事务提交后保留内层阶段。CLI 的写语句预解析同步该状态，Python、Node、HTTP 与 Console 传递内核字段。
 
-> **验收范围** 本批使用独立完整事实样例验证三种 dtype、Rom／Mmap、WAL 同步故障和应用故障，覆盖后续写入拒绝、文件组移动、重新打开及再次持久化。文本和索引维护、语言实参提取及外部传输的结果确认继续按入口收敛。`committed` 的耐久性依照同步模式，分组内结果依照组尾完成点。
+> **验收范围** 本批使用独立完整事实样例验证三种 dtype、Rom／Mmap、WAL 同步故障和应用故障，覆盖后续写入拒绝、文件组移动、重新打开及再次持久化。语言实参提取及外部传输的结果确认继续按入口收敛。`committed` 的耐久性依照同步模式，分组内结果依照组尾完成点。
+
+### 文本与索引维护完成点
+
+- 文本登记、关键词、预热、完整重建、属性索引创建／删除、Rust 显式 QuIVer 构建、刷盘和压实补齐写入结果。维护入口统一核对权限、生命周期与 WAL 可写性，关闭的 writer 在改变文本或索引定义前拒绝请求。
+- 新增 `phase=publish`，由存储内核按文件组提交点记录结果。提交标记完成前的发布失败为 `unknown`，提交后的 WAL 清理失败为 `committed`。唯一约束候选预检失败保留原定义，发布失败隔离实例，重新打开后按提交点恢复约束及完整事实。
+- 正文与关键词更新在分词、转换和索引增长前核对实例预算并取得共享工作区。预算拒绝保留原文本和 WAL，返回时归还临时预留。创建唯一索引使用已有的有序活跃 ID 目录，重复值错误中的已有节点与冲突节点身份保持确定。
+- Node 类型增加 `publish`，共享样例同步 Rust、实际 Python wheel、Node 原生模块及 npm tarball。验证覆盖完整节点、向量、Payload、边、索引定义、文本查询、只读文件组、失败后重开和再次持久化。
+
+> **入口范围** Rust 与 Node 覆盖 Rom／Mmap，Python 当前构造接口使用默认 Mmap，三端均覆盖 f32／f16／u64。显式 QuIVer 构建、已捕获任务与运行期模式为现有 Rust 入口。
+
+### 后台维护与独立目标发布
+
+- QuIVer 独立任务及显式构建在发布候选前重新检查 WAL 和恢复保护，防止构建期间 writer 失效后仍安装候选。任务执行或丢弃后归还工作区与准入资源，已准入任务继续遵循原有文件租约生命周期。
+- 运行期 QuIVer 模式、自动构建开关及周期压实配置补齐写入错误字段和 WAL 准入。新压实登记成功后替换旧登记，配置失败保留原登记。后台 `last_failure` 增加规范 `code`、`details` 与可选 `write`，周期压实按真实发布阶段提供结果。
+- 快照、恢复、manifest 及维度迁移的最外层 `write` 描述目标发布。源检查点或暂存库失败在目标发布前报告 `validation/not_committed`，原错误链继续保留。快照重命名后的目录同步失败为 `publish/unknown`。
+- 迁移在公开目标前取得最终实例配额，防止提交与返回实例之间额度被其他实例占用。提交前回滚清理完成报告 `publish/not_committed`，标记重命名后的同步失败为 `publish/unknown`，耐久提交后的清理失败为 `publish/committed`。`generation_id` 在快照及 manifest 的源检查点前校验。
+- 验收复用维护契约与既有故障套件，覆盖受控构建交错、真实后台压实、目标配额竞争、完整恢复事实和再次持久化。类型声明与 Python／Node 实际制品同步检查。
+
+### 管理入口与普通字段诊断
+
+- 错误定位增加 `target.field`，为已覆盖的普通 API 输入保留字段名、原始类别、详情和 cause。字段与 Prepared 包装中的既有写入结果继续透传，外层准入保留实际执行点的事实。
+- 同步模式、容量预留和图索引修复在修改前核对 WAL；内存额度调整补齐拒绝阶段与字段定位，失败保留原配置和共享登记。Rust 使用 `bytes`，Python／Node 的 MiB 接口使用 `mb`；ReadOnly／Immutable 实例可调整自身运行时额度。
+- 图修复在内存应用后发生检查点错误时隔离实例，并按实际 `apply`／`publish` 阶段报告结果，释放相关句柄后通过重新打开恢复。既有 QuIVer 构建句柄在后续捕获任务时读取当前额度，修复运行期修改预算后仍采用旧额度的问题。
+- Python／Node 的运行期同步模式字符串错误和显式管理参数转换提供规范字段与 `validation/not_committed`。Python 的 MiB 换算溢出保留 `OverflowError` 继承。SDK 在同步模式、额度、容量及图修复回调重入时提供 `admission/not_committed`。
+- 共享维护矩阵扩展到 Rust 28 个入口及 Python／Node 23 个入口，补齐真实回调、预算拒绝回退、只读额度与文件组、图修复故障、重开内容和类型消费。语言框架其他自动提取、完整 AST 定位及外层传输继续分批收敛。
+
+### 管理实参提取与 Prepared 映射
+
+- Python 的容量预留、MiB 额度、自动压实间隔和自动构建开关在取得数据库请求借用后转换。已覆盖内置类型错误保留 `TypeError`／`OverflowError` 继承，并增加 `TDB_INVALID_INPUT`、`target.field` 和 `validation/not_committed`。自定义整数协议异常保留原对象、cause 与已有诊断。
+- Python Prepared 实现与声明统一接受字符串键 `Mapping`，包括 `MappingProxyType` 和 `UserDict`。容器及键拒绝使用 `target.field=parameters`，已知参数值转换失败使用 `stage=bind` 和原参数名。映射协议中的宿主异常沿原路径传播，转换回调的同库重入按公共准入契约拒绝。
+- Node 管理标量按原始数值或布尔类型校验，已覆盖类型拒绝提供规范字段与写入阶段。自动构建及自动压实回调重入提供 `admission/not_committed`。已转换的 Prepared 非对象容器使用 `target.field=parameters`。公开类型、Python 默认参数和 Node 可选间隔的默认行为保持原契约。
+- 实际绑定用例覆盖三种 dtype、宿主转换异常与 cause、回调必达、拒绝后的 WAL 和完整数据、后续有效请求及再次持久化。其余入口的语言框架实参提取、JSON 转换与完整 AST 定位继续分批收敛。
+
+### Prepared 原始标量与管理字符串
+
+- Node Prepared 在方法内读取原始参数，为 NaN、无穷、undefined、BigInt、Symbol、函数及复合参数值提供 `TDB_INVALID_INPUT`、`stage=bind` 和原始 `target.parameter`。外层错误容器提供 `target.field=parameters`，键名完整保留 NUL 和 Unicode。
+- 数组和对象参数在标量边界拒绝，循环复合值按结构化错误返回。属性枚举与 getter 抛出的宿主异常保留原对象、cause 和已有错误字段。有效标量复用原数值转换，属性枚举保持既有规则。
+- Python／Node 的同步模式和 generation 标识补齐字符串类型拒绝。Python 在请求借用后提取字符串，已覆盖错误保留原类型异常及规范字段；Node 严格检查原始字符串类型。manifest 回调重入提供 `admission/not_committed`，发布结果沿用 Core 完成点。
+- 实际制品覆盖三种 dtype、有效标量边界、getter／Proxy 异常、回调拒绝、错误后有效查询、WAL 与重开完整内容。其余 N-API／PyO3 实参、其他 JSON 入口、AST 定位和外部传输继续分批收敛。
+
+### 查询实参与 Filter 映射
+
+- Python 普通及分组检索的整数数量／展开字段、批量检索的数量／并行度字段在请求借用后提取。已覆盖内置类型错误保留 `TypeError`／`OverflowError` 及字段定位，宿主整数协议异常保留原对象与 cause。Node 对应入口补齐原始数值类型及安全整数拒绝，保留现有默认值与可选 null 行为。
+- 三个 TQL 查询入口补齐字符串类型拒绝的 `target.field=query`。拒绝发生在解析之前，阶段省略；读取错误省略 `write`，写查询类型拒绝提供 `validation/not_committed`，SDK 重入提供 `admission/not_committed`。Python 编码异常保留原类型。
+- Python 普通、分组、上下文、高级及混合检索实现声明中的外层 `Mapping` Filter 契约，支持 `MappingProxyType`／`UserDict`。转换在请求借用内执行，宿主映射异常原样传播。Python 的已覆盖 Filter 表示错误及两端 Core 语义拒绝提供规范类别和对应字段，继续复用 Core 过滤规则。
+- 实际绑定用例核对三种 dtype 的拒绝、真实转换回调、有效默认调用、原宿主异常、完整命中与排除集合、WAL、后续有效写入及重开内容。npm 实际安装包显式等待异步批量查询验收完成，类型消费保持公开参数边界。
+
+### 查询取消原因与期限传输
+
+- Core 的主动取消继续返回 `TDB_QUERY_CANCELLED`，期限到达增加 `QueryDeadlineExceeded` 及 `TDB_QUERY_DEADLINE_EXCEEDED`，详情为空对象。同一协作检查点同时观察到取消与期限到达时，期限优先；克隆共享取消信号，外部期限与 Console 会话期限取较早者。
+- 独立 Server 的期限拒绝统一使用规范期限码和 `legacyCode=REQUEST_TIMEOUT`，保持 HTTP 504 并纳入超时指标。已知写入结果继续附带原阶段与 `retryable=false`。嵌入 Console 的请求体读取期限为 HTTP 408，执行期限为 HTTP 504，主动取消仍为 HTTP 408。此前将执行期限归为取消的调用方需处理新增规范码，Rust 穷尽匹配需增加新变体分支。
+- Console 在分发前确认终止的写请求提供 `admission/not_committed`。事务、版本保护事务、节点导入及边导入在 WAL 前准备完成处终止时提供 `validation/not_committed`，准备的回执与响应工作区随请求退出归还。进入 WAL 后沿用原子提交完成点。
+- 用例以已过期控制器、真实提交前屏障和不完成的外部请求体验证原因、同一请求 ID 重用、WAL 与完整事实、回执工作区、实际异步退出及文件释放；覆盖三种 dtype、Rom／Mmap、HTTP 许可归还和后续有效写入。Python 错误映射、实际绑定及 npm 类型目录同步新增类别。
+
+### 扩展检索参数与锚点序列
+
+- 精确、图优先、上下文、高级及混合检索的已覆盖整数参数补齐类型拒绝与字段定位。Python 在请求借用后提取整数并保留原类型及宿主协议异常，Node 继续使用安全整数和既有正数规则。公开默认值与类型消费同步验证。
+- Python 图优先检索的锚点序列移入请求范围，序列取值及元素整数回调中的同库写入返回重入错误。混合检索文本提取补齐 `query_text`／`queryText` 字段，读取错误省略写入结果。
+- Node 上下文与高级配置的已覆盖数量字段提供规范类型诊断。配置字段以省略或 `undefined` 使用默认值，`null` 按既有类型边界拒绝。可选方法实参继续支持 `null` 默认值，配置 getter 的原异常和 cause 直接传播。
+- 三种 dtype 的实际绑定用例验证字段拒绝、整数／序列／配置回调、外层完整结果、原宿主异常、有效默认调用及后续写入。关闭后继续持有旧对象并移动 Windows 文件组，重开核对更新向量、Payload 和边。向量／嵌套成员定位与框架序列长度提示策略继续按独立契约收敛。
 
 ### Python 事务构造器的请求隔离与回收
 
@@ -141,7 +201,67 @@ Subsequent changes build on stable `0.9.0`. Published changes are recorded in th
 - Direct writes share recovery protection during application after WAL append. Failure quarantines the current instance and already admitted shared queries. Callers release resources, reopen, and reconcile recovered facts. Existing index synchronization remains in use, and resource diagnostics retain budget and I/O classification through write context.
 - TQL mutation lexing, parsing, planning, and budget-admission failures report `validation/not_committed`. Once transaction submission starts, its inner phase is preserved. CLI mutation pre-parsing provides the same outcome, and Python, Node, HTTP, and Console carry the Core fields.
 
-> **Validation scope** Independent complete-fact fixtures cover three dtypes, Rom and Mmap, WAL synchronization faults, application faults, rejection of later writes, file-group moves, reopening, and another persistence cycle. Text and index maintenance, language argument extraction, and external transport confirmation remain phased work. Durability follows the synchronization mode, and grouped results depend on the final group completion point.
+> **Validation scope** Independent complete-fact fixtures cover three dtypes, Rom and Mmap, WAL synchronization faults, application faults, rejection of later writes, file-group moves, reopening, and another persistence cycle. Language argument extraction and external transport confirmation remain phased work. Durability follows the synchronization mode, and grouped results depend on the final group completion point.
+
+### Text and index maintenance completion points
+
+- Text registration, keywords, warmup, full rebuilding, property-index creation and removal, explicit Rust QuIVer construction, flush, and compaction provide write outcomes. Maintenance admission checks permissions, lifecycle, and WAL writability before changing text or index definitions.
+- Adds `phase=publish`, recorded by the storage kernel at the file-group publication boundary. Publication failures before the commit marker completes report `unknown`, while later WAL cleanup failures report `committed`. Unique-constraint candidate rejection preserves the previous definitions. Publication failure quarantines the instance, and reopening restores constraints and complete facts according to the actual commit point.
+- Text and keyword updates check instance budgets and reserve shared workspace before tokenization, conversion, and index growth. Budget rejection preserves previous text and WAL contents, and temporary reservations return on completion. Unique-index construction uses the existing ordered active-ID directory to produce deterministic existing and conflicting node identities.
+- Node declarations add `publish`. Shared cases cover Rust, installed Python wheels, Node native modules, and installed npm tarballs, checking complete nodes, vectors, Payloads, edges, index definitions, text queries, read-only file groups, reopening, and another persistence cycle.
+
+> **Entry-point scope** Rust and Node cover Rom and Mmap. The current Python constructor uses default Mmap. All three cover f32, f16, and u64. Explicit QuIVer construction, captured tasks, and runtime modes are existing Rust entry points.
+
+### Background maintenance and independent destination publication
+
+- Captured QuIVer tasks and explicit builds recheck WAL writability and recovery protection before installing a candidate, rejecting publication when the writer fails during construction. Execution or cancellation returns workspace and admission resources. Admitted tasks retain their existing file-lease lifecycle.
+- Runtime QuIVer modes, automatic-build toggles, and periodic-compaction configuration provide write metadata and WAL admission. A replacement compaction registration is installed after creation succeeds, preserving the previous registration on configuration failure. Background `last_failure` adds canonical `code`, `details`, and optional `write`, with compaction reporting its actual publication progress.
+- The outermost `write` on snapshot creation, restoration, manifest publication, and dimension migration describes the destination. Source-checkpoint or staging failures before destination publication report `validation/not_committed` and retain the original error chain. Snapshot directory synchronization failure after rename reports `publish/unknown`.
+- Migration reserves the final database quota before exposing the destination, preventing another instance from taking that capacity between commit and return. Completed pre-commit rollback reports `publish/not_committed`, synchronization failure after marker rename reports `publish/unknown`, and cleanup failure after durable commit reports `publish/committed`. Snapshot and manifest operations validate `generation_id` before checkpointing the source.
+- Acceptance extends existing maintenance contracts and fault suites with controlled build interleavings, real background compaction, destination-quota contention, complete recovered facts, and another persistence cycle. Public declarations and actual Python and Node artifacts are checked together.
+
+### Management entry points and ordinary field diagnostics
+
+- Adds `target.field` for covered ordinary API inputs while retaining the original category, details, and cause. Existing write outcomes survive field and Prepared-parameter wrappers, preserving facts supplied by the actual execution point when outer admission adds context.
+- Synchronization configuration, capacity reservation, and graph-index repair check WAL writability before changes. Memory-quota rejection reports its phase and field while preserving the prior configuration and shared registration. Rust uses `bytes`; Python and Node use `mb` for their MiB interfaces. ReadOnly and Immutable instances can adjust their runtime quotas.
+- Checkpoint failure after in-memory graph repair quarantines the instance and reports its actual `apply` or `publish` phase. Recovery proceeds by releasing relevant handles and reopening. Existing QuIVer build handles read the current quota when capturing later tasks, fixing stale limits after runtime quota changes.
+- Runtime synchronization-mode string errors and covered explicit management conversions in Python and Node provide canonical fields and `validation/not_committed`. Python retains `OverflowError` inheritance for MiB conversion overflow. SDK callback reentry for synchronization, quota, capacity, and graph repair provides `admission/not_committed`.
+- Shared maintenance contracts cover 28 Rust entry points and 23 exposed Python and Node entry points, adding real callbacks, quota rollback, read-only quotas and file groups, graph-repair faults, reopened contents, and type consumption. Other automatic language extraction, complete AST locations, and outer transport remain phased work.
+
+### Management argument extraction and Prepared mappings
+
+- Python capacity reservation, MiB quotas, automatic compaction intervals, and automatic-build switches extract arguments after acquiring the database request borrow. Covered built-in type failures retain `TypeError` or `OverflowError` inheritance and add `TDB_INVALID_INPUT`, `target.field`, and `validation/not_committed`. Custom integer-protocol exceptions retain their original identity, cause, and existing diagnostics.
+- Python Prepared execution now implements its declared string-keyed `Mapping` contract, including `MappingProxyType` and `UserDict`. Container and key rejection uses `target.field=parameters`. Conversion failures for named values use `stage=bind` and the original parameter name. Mapping-protocol host exceptions propagate unchanged, and same-database conversion callback reentry follows the public admission contract.
+- Node management scalars validate their original numeric or boolean types. Covered type rejection includes canonical fields and write phases. Automatic-build and compaction callback reentry provides `admission/not_committed`. Converted non-object Prepared containers use `target.field=parameters`. Public types, Python defaults, and the default behavior of Node's optional interval retain their established contracts.
+- Actual binding cases cover three dtypes, host conversion exceptions and causes, mandatory callbacks, WAL and complete data after rejection, subsequent valid requests, and another persistence cycle. Framework extraction and JSON conversion in other entry points, together with complete AST locations, remain phased work.
+
+### Raw Prepared scalars and management strings
+
+- Node Prepared reads original arguments inside the method, providing `TDB_INVALID_INPUT`, `stage=bind`, and the literal `target.parameter` for NaN, infinities, undefined, BigInt, Symbol, functions, and compound parameter values. Invalid outer containers provide `target.field=parameters`. Parameter keys retain NUL and Unicode characters.
+- Arrays and objects are rejected at the scalar boundary, including cyclic compound values. Host exceptions from property enumeration and getters retain their original identity, cause, and existing error fields. Valid scalars reuse the existing numeric conversion, and property enumeration retains its established rules.
+- Python and Node add structured string-type rejection for synchronization modes and generation identifiers. Python extracts strings after acquiring the request borrow, retaining original exception types and canonical fields for covered failures. Node strictly checks original string types. Manifest callback reentry provides `admission/not_committed`, while publication outcomes continue to follow Core completion points.
+- Actual artifacts cover three dtypes, valid scalar boundaries, getter and Proxy exceptions, callback rejection, valid queries after errors, WAL contents, and complete reopened data. Other N-API and PyO3 arguments, other JSON entry points, AST locations, and external transport remain phased work.
+
+### Query arguments and Filter mappings
+
+- Python integer count and expansion fields in ordinary and grouped search, together with count and parallelism fields in batch search, are extracted after the request borrow is acquired. Covered built-in failures retain `TypeError` or `OverflowError` and field locations. Host integer-protocol exceptions retain their original identity and cause. Corresponding Node entry points add original numeric-type and safe-integer rejection while preserving established defaults and optional null behavior.
+- The three TQL query entry points add `target.field=query` for string-type rejection. These failures precede parsing and omit the stage. Read failures omit `write`, mutation-query type failures provide `validation/not_committed`, and SDK reentry provides `admission/not_committed`. Python encoding failures retain their original exception type.
+- Python ordinary, grouped, contextual, advanced, and hybrid search now implement their declared outer `Mapping` Filter contract, including `MappingProxyType` and `UserDict`. Conversion runs within the request borrow, and host mapping exceptions propagate unchanged. Covered Python Filter representation failures and Core semantic rejection in both languages provide canonical categories and the corresponding field while reusing Core filtering rules.
+- Actual binding cases verify rejection across three dtypes, real conversion callbacks, valid default calls, original host exceptions, complete matching and excluded result sets, WAL contents, subsequent valid writes, and complete reopened data. Actual npm installation explicitly awaits asynchronous batch-query acceptance, and type consumers retain the public argument boundaries.
+
+### Query cancellation causes and deadline transport
+
+- Core retains `TDB_QUERY_CANCELLED` for explicit cancellation and adds `QueryDeadlineExceeded` with `TDB_QUERY_DEADLINE_EXCEEDED` for expired deadlines, using empty details. When both conditions are observed at one cooperative checkpoint, the deadline takes precedence. Clones share the cancellation signal, and external and Console-session deadlines use the earlier bound.
+- Standalone Server deadline rejection uses the canonical deadline code and `legacyCode=REQUEST_TIMEOUT`, retaining HTTP 504 and timeout metrics. Known write outcomes retain their original phase and `retryable=false`. Embedded Console request-body deadlines use HTTP 408, execution deadlines use HTTP 504, and explicit cancellation retains HTTP 408. Callers that previously handled execution deadlines as cancellation must handle the new code, and exhaustive Rust matches must add the new variant.
+- Console write requests terminated before dispatch provide `admission/not_committed`. Transactions, guarded transactions, node imports, and edge imports terminated after preparation but before WAL submission provide `validation/not_committed`. Prepared receipt and response workspaces are returned when the request exits. Operations that enter WAL retain their atomic commit completion contract.
+- Cases use already-expired controls, real pre-commit barriers, and incomplete external request bodies to verify causes, reuse of request IDs, WAL and complete facts, receipt workspaces, actual asynchronous exit, and file release. Coverage includes three dtypes, Rom and Mmap, HTTP permit return, and subsequent valid writes. Python error mapping, actual bindings, and the npm type catalog include the new category.
+
+### Extended retrieval arguments and anchor sequences
+
+- Covered integer arguments in exact, graph-first, contextual, advanced, and hybrid retrieval add structured type rejection and field locations. Python extracts integers after acquiring the request borrow and retains original type and host-protocol exceptions. Node reuses safe-integer validation and established positivity rules. Public defaults and type consumption are verified together.
+- Python graph-first retrieval extracts anchor sequences inside the request scope. Same-database writes from sequence access and element integer callbacks return reentry errors. Hybrid text extraction adds `query_text` or `queryText` locations, and read failures omit write outcomes.
+- Covered count fields in Node contextual and advanced configuration provide canonical type diagnostics. Omitted or undefined fields use defaults, while null retains the established rejection boundary. Optional method arguments continue to support null defaults. Original configuration-getter exceptions and causes propagate directly.
+- Actual binding cases across three dtypes verify field rejection, integer, sequence and configuration callbacks, complete outer results, original host exceptions, valid defaults, and subsequent writes. Tests retain old objects after close, move the Windows file group, and reopen to verify updated vectors, payloads, and edges. Vector and nested-member locations and framework sequence length-hint policies remain separate contract work.
 
 ### Python transaction request isolation and collection
 

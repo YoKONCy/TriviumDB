@@ -33,6 +33,22 @@
 
 ## 近期契约验收
 
+`tests/contracts/index_maintenance_cases.json` 定义维护准入、字段拒绝及文本查询的独立预期。Rust 覆盖 28 个入口，Python／Node 覆盖已开放的 23 个入口；三种 dtype 核对只读、关闭、预算拒绝、完整事实及后续持久化。Rust 与 Node 使用 Rom／Mmap，Python 使用当前构造接口的默认 Mmap。故障套件验证 WAL 关闭后的全部维护拒绝、唯一约束发布前后恢复、刷盘与压实的 `publish` 结果，并通过文件组移动及再次重开验证资源和数据。共享配额用例核对文本工作区拒绝、归还、释放其他实例后的真实重试及完整内容。
+
+Python／Node 的维护用例补充管理整数与布尔提取、原始类型拒绝、默认参数、实际转换回调中的重入和失败后继续调用。Python 保留宿主协议异常对象与 cause，Node 核对错误类型拒绝过程中强制转换回调次数为零。Prepared 用例验证 Python 的 `MappingProxyType`／`UserDict`、映射回调、容器及具名值诊断，核对 WAL、完整重开内容和类型消费。
+
+管理字符串用例验证同步模式和 generation 标识的类型拒绝、Python 字符串子类与编码异常、manifest 的回调／关闭／只读拒绝。Node Prepared 用例核对原始 NaN、无穷、undefined、BigInt、Symbol、函数及复合参数的具名诊断，保留 NUL／Unicode 键名、有效标量转换和既有属性枚举。循环复合值在标量边界拒绝，getter 和 Proxy 原异常按身份及 cause 验证，随后继续查询并核对 WAL 与重开数据。
+
+`tests/python/query_arguments.py` 和 `tests/node/query_arguments.js` 验证检索整数、TQL 文本及 Filter 映射。整数协议回调和 Mapping 回调使用真实数据库借用，拒绝同库写入后继续验证外层完整结果。浮点相同向量以余弦 1 为预期，两段相同 u64 以 128 个匹配位为预期，普通检索用零深度隔离图扩散。用例核对原宿主异常、默认参数、过滤后的完整命中与排除集合、WAL、有效写入及重开内容。npm 制品入口显式等待异步查询契约完成，任务失败和缺少完成回执均导致验收失败。
+
+同一模块扩展到精确、图优先、上下文、高级和混合检索。Python 验证锚点序列的实际取值与元素整数回调，Node 验证配置 getter 的重入及原异常，分别核对配置字段和方法实参的 null／省略边界。混合检索按其入口契约核对完整 ID／Payload 和有限分数，精确及隔离图扩散的其他入口核对独立分数。关闭后保留旧绑定对象，移动独立数据库目录，再重开核对真实更新后的向量、Payload 和边。
+
+`tests/core/query_cancellation.rs` 通过已取消、已过期及两种条件同时成立的控制器验证读取、Prepared 和 Console 分发，覆盖三种 dtype 的 Rom／Mmap、同请求 ID 重用、完整事实和资源账本。`tests/concurrency/console_cancellation.rs` 在真实 WAL 前屏障取消四类事务／导入，核对未提交阶段、WAL 字节、回执工作区、完整记录和后续有效写入，并在持有旧宿主时移动文件组及重开。HTTP 用不完成的请求体触发真实请求期限，再次取得唯一许可并恢复有效读取。该类用例验证核心期限语义，断言以返回类别、真实完成及资源状态为依据。
+
+管理契约补充普通字段定位、同步模式和单位转换拒绝、SDK 重入、额度失败回退、只读额度调整与文件组字节比较。既有构建句柄的预算变化用例执行真实拒绝、释放和重试；图修复故障沿用完整事实 fixture，覆盖发布前后失败及二次持久化。错误包装用例核对字段／Prepared 上下文透传既有 WAL 结果。
+
+后台构建使用通道和发布 Hook 分别控制执行前与发布前的 WAL 失效，核对拒绝字段、工作区归还和重开后的全部记录。周期压实通过真实登记派发和完成通知验证 I/O 故障。快照／迁移沿用现有故障套件，补齐独立目标结果、完整内容及再次持久化，迁移配额在发布屏障上验证。
+
 当前未发布加固增加 `tests/contracts/error_cases.json`：Rust、已构建 Python wheel 与 Node 原生模块通过真实 API 核对错误码及完整字段，覆盖 Prepared 参数、维度、节点、唯一约束、只读、行预算、迁移、关闭、锁、I/O 与格式版本。Rust 描述符及 Python 映射测试使用独立的全部错误变体样例；Node 另验大整数详情与 Promise 拒绝。语言参数提取错误按各语言类型契约验证。
 
 `tests/contracts/prepared_diagnostics.json` 为 Prepared 缺参、多参、JSON 容器值和向量参数类型提供独立诊断预期。Core、三种 dtype 的 Python／Node 实际包、独立 Server、嵌入 HTTP 与 Console 数据传输核对原始类别、`stage=bind` 和参数原名；适用入口同时核对拒绝后的正常查询、WAL 字节与重开完整事实。Rust 另覆盖 NaN 与正负无穷参数，Python 核对原异常继承关系。

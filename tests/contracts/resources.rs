@@ -37,7 +37,7 @@ fn check_budget(error: TriviumError, expected: &Value) {
         requested,
         used,
         limit,
-    } = error
+    } = error.underlying()
     else {
         panic!("应返回预算拒绝：{error}");
     };

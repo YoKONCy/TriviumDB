@@ -6,7 +6,7 @@
 
 use crate::VectorType;
 use crate::database::StorageMode;
-use crate::error::{Result, TriviumError};
+use crate::error::{Result, TriviumError, WriteErrorInfo, WriteOutcome, WritePhase};
 use crate::index::bq::BqSignature;
 use crate::node::{Edge, NodeId};
 use crate::storage::fs::robust_rename_and_sync;
@@ -22,7 +22,11 @@ mod publication;
 pub(crate) use publication::recover as recover_publication;
 
 /// 从已关闭的独占暂存库排他移动完整文件组；不产生硬链接，保留目标互斥锁。
-pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) -> Result<()> {
+pub(crate) fn publish_new_database<T: VectorType>(
+    source: &str,
+    target: &str,
+    write: &mut WriteErrorInfo,
+) -> Result<()> {
     validate_checkpoint_type::<T>(source, &vec_path_from_db(source), source)?;
     let generation = read_marker_generation(&flush_ok_path_from_db(source)).ok_or_else(|| {
         TriviumError::CorruptedFile(
@@ -37,6 +41,8 @@ pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) ->
     }
     let mut created = Vec::new();
     let mut committed = false;
+    write.phase = WritePhase::Publish;
+    write.outcome = WriteOutcome::Unknown;
     let result = (|| -> Result<()> {
         publication::begin(target, generation, StorageMode::Mmap, false)?;
         let suffixes = crate::storage::snapshot::generation_suffixes(source);
@@ -79,6 +85,9 @@ pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) ->
         crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationAfterCommit)?;
         crate::storage::fs::sync_parent_directory(Path::new(source))?;
         crate::storage::fs::sync_parent_directory(Path::new(target))?;
+        write.outcome = WriteOutcome::Committed;
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationCleanup)?;
         publication::cleanup(target)?;
         Ok(())
     })();
@@ -98,6 +107,7 @@ pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) ->
             publication::cleanup(target)?;
         }
         crate::storage::fs::sync_parent_directory(Path::new(target))?;
+        write.outcome = WriteOutcome::NotCommitted;
     }
     result
 }
@@ -653,6 +663,19 @@ pub fn save<T: VectorType>(
     path: &str,
     mode: StorageMode,
 ) -> Result<()> {
+    let mut write = WriteErrorInfo {
+        transaction_consumed: None,
+        ..WriteErrorInfo::TRANSACTION_ADMISSION
+    };
+    save_with_write_info(memtable, path, mode, &mut write)
+}
+
+pub(crate) fn save_with_write_info<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    path: &str,
+    mode: StorageMode,
+    write: &mut WriteErrorInfo,
+) -> Result<()> {
     let runtime = memtable.resource_runtime().clone();
     let peak = memtable
         .estimated_memory_bytes()
@@ -667,7 +690,7 @@ pub fn save<T: VectorType>(
         runtime.reserve_workspace(peak)?
     };
     memtable.ensure_readable()?;
-    let result = save_inner(memtable, path, mode);
+    let result = save_inner(memtable, path, mode, write);
     if result.is_err() && memtable.vec_pool().recovery_required() {
         memtable.require_recovery();
     }
@@ -678,6 +701,7 @@ fn save_inner<T: VectorType>(
     memtable: &mut MemTable<T>,
     path: &str,
     mode: StorageMode,
+    write: &mut WriteErrorInfo,
 ) -> Result<()> {
     // 在主文件发布前处理延期操作；失败时保留原 sidecar 与所有待合并记录。
     let mut release_text_after_save =
@@ -696,6 +720,8 @@ fn save_inner<T: VectorType>(
     }
     // 保留原 CRC，不以重新计算校验和的方式“认可”未加载文件中的损坏。
     let preserved_text_meta = memtable.deferred_text_metadata();
+    write.phase = WritePhase::Publish;
+    write.outcome = WriteOutcome::Unknown;
     if mode == StorageMode::Rom && publication::pending(path) {
         memtable.vec_pool_mut().detach_mmap();
         publication::recover::<T>(path, true)?;
@@ -791,6 +817,7 @@ fn save_inner<T: VectorType>(
     } else {
         publication::commit_rom(path)?;
     }
+    write.outcome = WriteOutcome::Committed;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::hit_for_path(
         crate::test_hooks::ConcurrencyPoint::AfterPublicationCommitted,
@@ -1171,10 +1198,25 @@ pub(crate) fn checkpoint<T: VectorType>(
     mode: StorageMode,
     skip_clean: bool,
 ) -> Result<()> {
+    let mut write = WriteErrorInfo {
+        transaction_consumed: None,
+        ..WriteErrorInfo::TRANSACTION_ADMISSION
+    };
+    checkpoint_with_write_info(memtable, wal, path, mode, skip_clean, &mut write)
+}
+
+pub(crate) fn checkpoint_with_write_info<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    wal: &mut crate::storage::wal::Wal,
+    path: &str,
+    mode: StorageMode,
+    skip_clean: bool,
+    write: &mut WriteErrorInfo,
+) -> Result<()> {
     memtable.ensure_readable()?;
     wal.ensure_writable()?;
     if !skip_clean || memtable.needs_checkpoint() {
-        if let Err(error) = save(memtable, path, mode) {
+        if let Err(error) = save_with_write_info(memtable, path, mode, write) {
             if memtable.ensure_readable().is_err() {
                 // 关闭 writer，拦住失效前已准入、仍在等待 MemTable 锁的写操作。
                 wal.release_writer();

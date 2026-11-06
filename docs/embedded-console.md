@@ -44,6 +44,8 @@ Console v1 为 Rust、Python 和 Node.js 提供同一份 JSON 请求协议，直
 - TQL 读取使用内核 QueryControl 协作取消和 deadline。其余操作在支持的检查点检查取消；向量 Hook、索引构建及已进入提交的写入不能被强制中断。`info.transport.cooperativeCancellation` 明确列出协作取消的操作。
 - HTTP 客户端退出会传递取消信号。blocking 任务持有的并发许可在实际执行退出后归还。
 
+主动取消使用 `TDB_QUERY_CANCELLED`，期限到达使用 `TDB_QUERY_DEADLINE_EXCEEDED`，两者详情为空对象。同一检查点同时观察到取消与期限到达时，期限优先。HTTP 请求体期限返回 408，执行中的期限返回 504。命令分发前的写请求终止提供 `admission/not_committed`，四类事务／导入在 WAL 前准备完成处终止提供 `validation/not_committed`。资源归还以真实执行退出为完成点，详见[公共错误契约](error-contracts.md#取消与期限)。
+
 ### 宿主关闭顺序
 
 宿主先停止入口并调用 `detach`，再在自己的串行调度中调用 `Database.close`。关闭成功后释放文件锁，调用方可继续持有会话、Router、Prepared 或关闭后的 Database 对象。

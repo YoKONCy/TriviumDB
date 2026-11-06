@@ -48,7 +48,7 @@ Server 支持多客户端访问、Writer Actor、Group Commit、OCC、健康监�
 
 职责划分见[内核 SDK 与存储内核](kernel-sdk.md)。独立 Server 继续使用自己的有界 Writer 队列与合批；嵌入宿主可使用 `SharedDatabase` 和 `ConsoleHost::attach_shared` 复用实例。
 
-当前开发版将内核错误的 `code`、`details` 和 `schema_version: 1` 原样映射到 HTTP，`message` 与 RFC Problem Details 的 `detail` 同义。原 HTTP 分类名通过 `legacyCode` 提供迁移信息，例如 `QUERY_PARSE_ERROR` → `TDB_QUERY_PARSE`。超出 JavaScript 安全整数域的详情字段编码为十进制字符串。Server 自身的超时、队列与传输错误继续使用现有分类；取消查询返回 `TDB_QUERY_CANCELLED`。
+当前开发版将内核错误的 `code`、`details` 和 `schema_version: 1` 原样映射到 HTTP，`message` 与 RFC Problem Details 的 `detail` 同义。原 HTTP 分类名通过 `legacyCode` 提供迁移信息，例如 `QUERY_PARSE_ERROR` → `TDB_QUERY_PARSE`。超出 JavaScript 安全整数域的详情字段编码为十进制字符串。期限到达使用 `TDB_QUERY_DEADLINE_EXCEEDED`、HTTP 504 和 `legacyCode=REQUEST_TIMEOUT`，主动取消使用 `TDB_QUERY_CANCELLED` 和 HTTP 408。携带写入结果的期限错误保持 `retryable=false`。队列与其他传输错误按各自入口继续收敛，详见[公共错误契约](error-contracts.md#取消与期限)。
 
 开始关闭后，新读写请求使用 HTTP 503 和 `TDB_DATABASE_CLOSED`，`details` 为空对象，保留 `legacyCode: "SERVICE_UNAVAILABLE"`，`retryable` 为 `false`。调用方按实例生命周期处理该错误；已经准入的请求继续遵守排空与提交契约。
 
