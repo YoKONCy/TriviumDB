@@ -105,8 +105,15 @@ async function runErrorContract(root) {
 
 async function runQueryDiagnostics(root, api = require('../../index.js')) {
   await require('./query_arguments').runQueryArguments(root, api)
+  require('./graph_arguments').runGraphArguments(root, api)
+  require('./read_arguments').runReadArguments(root, api)
+  require('./call_arguments').runCallArguments(root, api)
+  require('./constructor_arguments').runConstructorArguments(root, api)
+  require('./crud_arguments').runCrudArguments(root, api)
+  await require('./retrieval_fields').runRetrievalFields(root, api)
   require('./write_outcomes').runWriteOutcomes(root, api)
   runPreparedDiagnostics(root, api)
+  require('./query_sources').runQuerySources(root, api)
   const { TriviumDB, ConsoleSession } = api
   const { cases } = require('../contracts/query_diagnostics.json')
   for (const dtype of ['f32', 'f16', 'u64']) {
@@ -181,7 +188,9 @@ function runPreparedDiagnostics(root, { TriviumDB, ConsoleSession }) {
             assert.equal(error.schema_version, 1)
             assert.equal(error.code, test.code, test.name)
             assert.equal(error.stage, 'bind')
-            assert.deepEqual(error.target, { parameter: test.parameter })
+            const target = { parameter: test.parameter }
+            if (test.span) target.query_span = test.span
+            assert.deepEqual(error.target, target, test.name)
             if (test.details) assert.deepEqual(error.details, test.details)
             else {
               assert.deepEqual(Object.keys(error.details), ['reason'])
@@ -193,12 +202,13 @@ function runPreparedDiagnostics(root, { TriviumDB, ConsoleSession }) {
         }
       }
       const prepared = db.prepareTql('MATCH (n) RETURN $x AS value')
+      const xTarget = { parameter: 'x', query_span: { start_byte: 17, end_byte: 19, line: 1, column: 18 } }
       assert.deepEqual(db.executePreparedTql(prepared, { x: 42 }), [{ value: 42 }])
       for (const parameters of [null, undefined, [], 42, 'x', true, 1n, Symbol('container'), () => 42]) {
         assert.throws(() => db.executePreparedTql(prepared, parameters), invalid({ field: 'parameters' }))
       }
       for (const value of [NaN, Infinity, -Infinity, undefined, 1n, Symbol('value'), () => 42]) {
-        assert.throws(() => db.executePreparedTql(prepared, { x: value }), invalid({ parameter: 'x' }, 'bind'))
+        assert.throws(() => db.executePreparedTql(prepared, { x: value }), invalid(xTarget, 'bind'))
       }
       for (const value of [null, true, false, '中文\u0000参数', 0, -2147483648, 4294967295, 4294967296, 1.25, Number.MAX_SAFE_INTEGER]) {
         assert.deepEqual(db.executePreparedTql(prepared, { x: value }), [{ value }])
@@ -206,7 +216,7 @@ function runPreparedDiagnostics(root, { TriviumDB, ConsoleSession }) {
       let nestedReads = 0
       const nested = { get rejected() { nestedReads++; throw new Error('复合参数应在标量边界拒绝') } }
       nested.self = nested
-      assert.throws(() => db.executePreparedTql(prepared, { x: nested }), invalid({ parameter: 'x' }, 'bind'))
+      assert.throws(() => db.executePreparedTql(prepared, { x: nested }), invalid(xTarget, 'bind'))
       assert.equal(nestedReads, 0)
       const literalName = 'extra\u0000中文.key'
       assert.throws(() => db.executePreparedTql(prepared, { [literalName]: undefined }),

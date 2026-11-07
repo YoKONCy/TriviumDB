@@ -10,6 +10,161 @@ use triviumdb::database::{Config, StorageMode};
 use triviumdb_server::{ServerConfig, build_app};
 
 #[tokio::test]
+async fn 解析前请求身份与路径和方法拒绝保留统一信封() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("transport.tdb");
+    let (app, shutdown) = triviumdb_server::build_app_with_shutdown(ServerConfig {
+        database_path: path.clone(),
+        database: Config {
+            dim: 2,
+            auto_build_quiver: false,
+            ..Default::default()
+        },
+        max_body_bytes: 8,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    for (method, uri, raw, status, code, legacy, field) in [
+        (
+            "GET",
+            "/v1/nodes/invalid",
+            "",
+            StatusCode::BAD_REQUEST,
+            "TDB_INVALID_INPUT",
+            "INVALID_REQUEST",
+            Some("path"),
+        ),
+        (
+            "POST",
+            "/v1/nodes/1",
+            "",
+            StatusCode::METHOD_NOT_ALLOWED,
+            "TDB_HTTP_METHOD_NOT_ALLOWED",
+            "METHOD_NOT_ALLOWED",
+            None,
+        ),
+        (
+            "POST",
+            "/v1/tql",
+            "{",
+            StatusCode::BAD_REQUEST,
+            "TDB_INVALID_INPUT",
+            "INVALID_REQUEST",
+            None,
+        ),
+        (
+            "POST",
+            "/v1/tql",
+            "123456789",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "TDB_HTTP_REQUEST_TOO_LARGE",
+            "PAYLOAD_TOO_LARGE",
+            None,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("x-request-id", "before-body")
+                    .header("content-type", "application/json")
+                    .body(Body::from(raw))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["x-request-id"], "before-body");
+        let error = json(response).await;
+        assert_eq!(error["schema_version"], 1);
+        assert_eq!(error["code"], code);
+        assert_eq!(error["legacyCode"], legacy);
+        assert_eq!(error["retryable"], false);
+        assert!(error.get("write").is_none());
+        if let Some(field) = field {
+            assert_eq!(error["target"], serde_json::json!({"field":field}));
+        }
+    }
+    shutdown.shutdown().await.unwrap();
+    let mut reopened =
+        triviumdb::Database::<f32>::open_read_only(path.to_str().unwrap(), 2).unwrap();
+    assert!(reopened.all_node_ids().unwrap().is_empty());
+    reopened.close().unwrap();
+}
+
+#[tokio::test]
+async fn plan_execute来源与写入结果按共享契约传递() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("query-sources.tdb");
+    let config = Config {
+        dim: 2,
+        auto_build_quiver: false,
+        max_query_rows: Some(1),
+        row_overflow: triviumdb::database::RowOverflowPolicy::Throw,
+        ..Default::default()
+    };
+    let mut seed =
+        triviumdb::Database::<f32>::open_with_config(path.to_str().unwrap(), config).unwrap();
+    seed.insert_with_id(7, &[1., 0.], serde_json::json!({"kind":"alpha"}))
+        .unwrap();
+    seed.insert_with_id(8, &[0., 1.], serde_json::json!({"kind":"beta"}))
+        .unwrap();
+    seed.create_unique_index("kind").unwrap();
+    seed.close().unwrap();
+    let (app, shutdown) = triviumdb_server::build_app_with_shutdown(ServerConfig {
+        database_path: path.clone(),
+        database: config,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../tests/contracts/query_execution_diagnostics.json"
+    ))
+    .unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let response = request(
+            app.clone(),
+            "POST",
+            "/v1/tql",
+            Some(serde_json::json!({"query":case["query"],"mutation":case["mutation"]})),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            response.status().as_u16(),
+            case["http_status"].as_u64().unwrap() as u16,
+            "{case}"
+        );
+        let error = json(response).await;
+        assert_eq!(error["schema_version"], 1);
+        assert_eq!(error["code"], case["code"], "{case}");
+        assert_eq!(error["stage"], case["stage"], "{case}");
+        assert_eq!(
+            error["target"],
+            serde_json::json!({"query_span":case["span"]}),
+            "{case}"
+        );
+        assert_eq!(error["write"], case["write"], "{case}");
+        assert_eq!(error["retryable"], false);
+    }
+    shutdown.shutdown().await.unwrap();
+    let mut reopened =
+        triviumdb::Database::<f32>::open_with_config(path.to_str().unwrap(), config).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), vec![7, 8]);
+    for (id, vector, kind) in [(7, vec![1., 0.], "alpha"), (8, vec![0., 1.], "beta")] {
+        let node = reopened.get(id).unwrap().unwrap();
+        assert_eq!(node.vector, vector);
+        assert_eq!(node.payload, serde_json::json!({"kind":kind}));
+        assert!(node.edges.is_empty());
+    }
+    reopened.close().unwrap();
+}
+
+#[tokio::test]
 async fn tql错误阶段及源码位置遵守共享契约() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("diagnostics.tdb");
@@ -97,10 +252,11 @@ async fn tql错误阶段及源码位置遵守共享契约() {
         let error = json(response).await;
         assert_eq!(error["code"], case["code"]);
         assert_eq!(error["stage"], "bind");
-        assert_eq!(
-            error["target"],
-            serde_json::json!({"parameter":case["parameter"]})
-        );
+        let mut target = serde_json::json!({"parameter":case["parameter"]});
+        if let Some(span) = case.get("span") {
+            target["query_span"] = span.clone();
+        }
+        assert_eq!(error["target"], target, "{case}");
         assert_eq!(error["retryable"], false);
         if let Some(details) = case.get("details") {
             assert_eq!(&error["details"], details);
@@ -527,7 +683,7 @@ async fn 健康检查与未知路由使用标准状态码和双语消息() {
     let missing = request(app, "GET", "/missing", None, &[]).await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     let body = json(missing).await;
-    assert_eq!(body["code"], "ROUTE_NOT_FOUND");
+    assert_eq!(body["code"], "TDB_HTTP_ROUTE_NOT_FOUND");
     assert!(body["title"].as_str().unwrap().contains("Route not found"));
 }
 
@@ -618,7 +774,7 @@ async fn 幂等键重放不重复写且同键不同请求返回409() {
     )
     .await;
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
-    assert_eq!(json(conflict).await["code"], "IDEMPOTENCY_KEY_REUSED");
+    assert_eq!(json(conflict).await["code"], "TDB_IDEMPOTENCY_CONFLICT");
 
     let count = request(
         app,
@@ -665,7 +821,7 @@ async fn 全局generation通过etag和if_match实施409冲突() {
     .await;
     assert_eq!(stale.status(), StatusCode::CONFLICT);
     let body = json(stale).await;
-    assert_eq!(body["code"], "WRITE_CONFLICT");
+    assert_eq!(body["code"], "TDB_HTTP_PRECONDITION_FAILED");
     assert_eq!(body["retryable"], true);
 }
 
@@ -970,7 +1126,7 @@ async fn 条件与幂等header边界被严格验证() {
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(json(response).await["code"], "INVALID_REQUEST");
+        assert_eq!(json(response).await["code"], "TDB_INVALID_INPUT");
     }
 
     for invalid in ["", "含中文"] {
@@ -1062,7 +1218,7 @@ async fn 事务header与body全局前置条件冲突时拒绝请求() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json(response).await["code"], "INVALID_REQUEST");
+    assert_eq!(json(response).await["code"], "TDB_INVALID_INPUT");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1165,7 +1321,7 @@ async fn prepared_cache参数绑定profile和淘汰契约完整() {
     )
     .await;
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-    assert_eq!(json(missing).await["code"], "PREPARED_NOT_FOUND");
+    assert_eq!(json(missing).await["code"], "TDB_PREPARED_NOT_FOUND");
 }
 
 #[tokio::test]
@@ -1562,7 +1718,7 @@ async fn 非法json也返回统一双语错误结构() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(json(response).await["code"], "INVALID_REQUEST");
+    assert_eq!(json(response).await["code"], "TDB_INVALID_INPUT");
 }
 
 #[tokio::test]
@@ -1578,7 +1734,7 @@ async fn 请求体上限使用标准payload_too_large状态码() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(json(response).await["code"], "PAYLOAD_TOO_LARGE");
+    assert_eq!(json(response).await["code"], "TDB_HTTP_REQUEST_TOO_LARGE");
 }
 
 #[tokio::test]
@@ -1770,7 +1926,7 @@ async fn 非法查询参数返回统一problem_json而不是text_plain() {
             "{uri} 应返回统一 JSON 错误体，而不是 text/plain"
         );
         let body = json(response).await;
-        assert_eq!(body["code"], "INVALID_REQUEST", "{uri} 错误码应统一");
+        assert_eq!(body["code"], "TDB_INVALID_INPUT", "{uri} 错误码应统一");
         assert_eq!(body["status"], 400);
         assert_eq!(body["retryable"], false);
         assert!(
@@ -1807,7 +1963,7 @@ async fn 非法查询参数返回统一problem_json而不是text_plain() {
     .await;
     assert_eq!(depth.status(), StatusCode::BAD_REQUEST);
     let depth_body = json(depth).await;
-    assert_eq!(depth_body["code"], "INVALID_REQUEST");
+    assert_eq!(depth_body["code"], "TDB_INVALID_INPUT");
     assert!(
         depth_body["detail"]
             .as_str()

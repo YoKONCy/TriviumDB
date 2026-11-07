@@ -9,6 +9,8 @@
   "createdPayload": {"body": "同笔事务创建", "owner": "console"},
   "createdId": "2",
   "receiptCapacity": 64,
+  "receiptDurable": true,
+  "receiptPersistence": "wal-checkpoint",
   "conflictCode": "TDB_WRITE_CONFLICT",
   "keyConflictCode": "TDB_IDEMPOTENCY_CONFLICT"
 }

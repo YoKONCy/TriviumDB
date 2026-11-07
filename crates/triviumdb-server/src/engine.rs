@@ -22,10 +22,7 @@ use triviumdb::{
     database::Config,
     graph::reachability::{ReachabilityConfig, ReachabilityOutput, SubgraphEdge, SubgraphResult},
     node::{NodeView, SearchHit},
-    query::{
-        tql_executor::QueryControl,
-        tql_prepared::{PreparedTql, TqlParamValue},
-    },
+    query::{tql_executor::QueryControl, tql_prepared::PreparedTql},
 };
 use uuid::Uuid;
 
@@ -224,7 +221,12 @@ struct EngineInner {
     batch_io_failure: Mutex<Option<triviumdb::test_hooks::IoPoint>>,
     #[cfg(all(test, feature = "test-hooks"))]
     batch_panic_after_write: AtomicBool,
+    #[cfg(all(test, feature = "test-hooks"))]
+    batch_before_execute: Mutex<Option<BeforeWriteBatch>>,
 }
+
+#[cfg(all(test, feature = "test-hooks"))]
+type BeforeWriteBatch = Box<dyn FnOnce(&mut [WriteCommand]) + Send>;
 
 type ShutdownReceiver = watch::Receiver<Option<Result<(), ApiError>>>;
 
@@ -407,6 +409,8 @@ impl EngineHandle {
             batch_io_failure: Mutex::new(None),
             #[cfg(all(test, feature = "test-hooks"))]
             batch_panic_after_write: AtomicBool::new(false),
+            #[cfg(all(test, feature = "test-hooks"))]
+            batch_before_execute: Mutex::new(None),
             database,
             read_slots,
             max_concurrent_reads: u32::try_from(config.max_concurrent_reads).map_err(|_| {
@@ -548,8 +552,9 @@ impl EngineHandle {
         let parameters = parameters
             .into_iter()
             .map(|(name, value)| {
-                let value =
-                    TqlParamValue::from_named_json(&name, &value).map_err(ApiError::from)?;
+                let value = prepared
+                    .parameter_from_json(&name, &value)
+                    .map_err(ApiError::from)?;
                 Ok((name, value))
             })
             .collect::<Result<HashMap<_, _>, ApiError>>()?;
@@ -1428,6 +1433,13 @@ async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteComma
         let mut database = write_or_recover(&database);
         let mut versions = lock_or_recover(&versions);
         #[cfg(all(test, feature = "test-hooks"))]
+        {
+            let before_execute = lock_or_recover(&task_inner.batch_before_execute).take();
+            if let Some(before_execute) = before_execute {
+                before_execute(&mut batch);
+            }
+        }
+        #[cfg(all(test, feature = "test-hooks"))]
         let _failure = lock_or_recover(&task_inner.batch_io_failure)
             .take()
             .map(triviumdb::test_hooks::fail_io_at);
@@ -1435,15 +1447,19 @@ async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteComma
         let sync_result = database
             .group_commit(|database| {
                 for command in batch.drain(..) {
+                    // 获取实际写锁及前序操作期间，等待者仍可能退出或到期。
+                    if command.response.is_closed() {
+                        continue;
+                    }
                     let execution_started = Instant::now();
                     if let Some(telemetry) = &command.telemetry {
                         telemetry.record_queue_wait(
                             execution_started.duration_since(command.enqueued_at),
                         );
                     }
-                    let outcome = if let Some(result) =
-                        lookup_idempotent_locked(&versions, &command)
-                    {
+                    let outcome = if execution_started >= command.deadline {
+                        Err(write_admission_error(ApiError::timeout()))
+                    } else if let Some(result) = lookup_idempotent_locked(&versions, &command) {
                         result
                     } else {
                         let result = execute_write(database, &mut versions, command.operation);
@@ -1979,6 +1995,77 @@ mod tests {
 
     #[cfg(feature = "test-hooks")]
     #[tokio::test]
+    async fn 真实写锁内重新核对取消及期限且保留可执行请求() {
+        let (engine, directory) = test_engine("late-write-admission", 4, 1).await;
+        let mut batch = Vec::new();
+        let mut receivers = Vec::new();
+        for state in ["cancelled", "expired", "accepted"] {
+            let (response, receiver) = oneshot::channel();
+            receivers.push(receiver);
+            batch.push(WriteCommand {
+                deadline: Instant::now() + Duration::from_secs(30),
+                enqueued_at: Instant::now(),
+                telemetry: None,
+                idempotency_key: None,
+                fingerprint: Vec::new(),
+                operation: WriteOperation::Tql {
+                    query: format!("CREATE ({{state: '{state}'}})"),
+                    expected_generation: None,
+                },
+                response,
+            });
+        }
+        let cancelled = receivers.remove(0);
+        // 在队列筛选之后注入连接退出和期限到期，避免依赖调度与真实等待。
+        *lock_or_recover(&engine.inner.batch_before_execute) = Some(Box::new(move |batch| {
+            assert_eq!(batch.len(), 3);
+            drop(cancelled);
+            batch[1].deadline = Instant::now();
+        }));
+        process_write_batch(&engine.inner, batch).await;
+        let mut receivers = receivers.into_iter();
+        let expired = receivers
+            .next()
+            .unwrap()
+            .await
+            .unwrap()
+            .err()
+            .expect("到期请求必须拒绝");
+        let body = error_body(expired).await;
+        assert_eq!(body["code"], "TDB_QUERY_DEADLINE_EXCEEDED");
+        assert_eq!(body["retryable"], false);
+        assert_eq!(
+            body["write"],
+            serde_json::json!({"phase":"admission","outcome":"not_committed"})
+        );
+        let StoredWriteResult::Mutation(accepted) =
+            receivers.next().unwrap().await.unwrap().unwrap()
+        else {
+            panic!("有效写入必须返回 Mutation 回执");
+        };
+        assert_eq!(accepted.mutation.created_ids, vec!["1".to_owned()]);
+        assert!(!engine.inner.metrics.writer_failed.load(Ordering::Acquire));
+        engine.shutdown().await.unwrap();
+        let path = directory.path().join("late-write-admission.tdb");
+        let mut reopened = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+        assert_eq!(reopened.all_node_ids().unwrap(), vec![1]);
+        let node = reopened.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, vec![0., 0.]);
+        assert_eq!(node.payload, serde_json::json!({"state":"accepted"}));
+        assert!(node.edges.is_empty());
+        reopened.flush().unwrap();
+        reopened.close().unwrap();
+        let mut reopened = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+        assert_eq!(reopened.all_node_ids().unwrap(), vec![1]);
+        let node = reopened.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, vec![0., 0.]);
+        assert_eq!(node.payload, serde_json::json!({"state":"accepted"}));
+        assert!(node.edges.is_empty());
+        reopened.close().unwrap();
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[tokio::test]
     async fn 后台写任务异常向请求返回未知结果且关闭后完整重开() {
         let (engine, directory) = test_engine("write-task-failure", 4, 1).await;
         engine
@@ -1995,7 +2082,8 @@ mod tests {
             .await
             .unwrap_err();
         let body = error_body(error).await;
-        assert_eq!(body["code"], "SERVICE_UNAVAILABLE");
+        assert_eq!(body["code"], "TDB_SERVER_UNAVAILABLE");
+        assert_eq!(body["legacyCode"], "SERVICE_UNAVAILABLE");
         assert_eq!(
             body["write"],
             serde_json::json!({"phase":"response","outcome":"unknown"})
@@ -2697,7 +2785,12 @@ mod tests {
             .await
             .unwrap_err();
         let body = error_body(error).await;
-        assert_eq!(body["code"], "WRITE_QUEUE_FULL");
+        assert_eq!(body["code"], "TDB_BUSY");
+        assert_eq!(
+            body["details"],
+            serde_json::json!({"resource":"write_queue"})
+        );
+        assert_eq!(body["legacyCode"], "WRITE_QUEUE_FULL");
         assert_eq!(
             body["write"],
             serde_json::json!({"phase":"admission","outcome":"not_committed"})
@@ -2743,7 +2836,7 @@ mod tests {
 
     #[tokio::test]
     async fn 取消写请求在出队前不产生副作用() {
-        let (engine, _directory) = test_engine("cancel", 4, 1).await;
+        let (engine, directory) = test_engine("cancel", 4, 1).await;
         let permit = engine
             .inner
             .read_slots
@@ -2751,41 +2844,43 @@ mod tests {
             .acquire_owned()
             .await
             .unwrap();
-        let deadline = Instant::now() + std::time::Duration::from_secs(2);
-        let task = tokio::spawn({
-            let engine = engine.clone();
-            async move {
-                engine
-                    .mutate(
-                        "CREATE ({name: \"cancelled\"})".into(),
-                        None,
-                        None,
-                        deadline,
-                    )
-                    .await
-            }
-        });
-        tokio::task::yield_now().await;
-        task.abort();
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while engine.inner.waiting_writers.load(Ordering::Acquire) != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        let (response, waiting) = oneshot::channel();
+        engine
+            .inner
+            .metrics
+            .queue_depth
+            .fetch_add(1, Ordering::AcqRel);
+        assert!(
+            engine
+                .writes
+                .try_send(WriteCommand {
+                    deadline: Instant::now() + Duration::from_secs(30),
+                    enqueued_at: Instant::now(),
+                    telemetry: None,
+                    idempotency_key: None,
+                    fingerprint: Vec::new(),
+                    operation: WriteOperation::Tql {
+                        query: "CREATE ({name: 'cancelled'})".into(),
+                        expected_generation: None,
+                    },
+                    response,
+                })
+                .is_ok(),
+            "必须先由真实队列接收写请求"
+        );
+        drop(waiting);
         drop(permit);
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let (rows, _) = engine
-            .query(
-                "MATCH (n) RETURN count(*) AS total".into(),
-                Instant::now() + std::time::Duration::from_secs(2),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            rows[0].get("total"),
-            Some(triviumdb::query::tql_executor::TqlValue::Int(0))
-        ));
+        engine.shutdown().await.unwrap();
+        let mut reopened =
+            Database::<f32>::open(directory.path().join("cancel.tdb").to_str().unwrap(), 2)
+                .unwrap();
+        assert_eq!(reopened.all_node_ids().unwrap(), Vec::<u64>::new());
+        reopened.flush().unwrap();
+        reopened.close().unwrap();
+        let mut reopened =
+            Database::<f32>::open(directory.path().join("cancel.tdb").to_str().unwrap(), 2)
+                .unwrap();
+        assert_eq!(reopened.all_node_ids().unwrap(), Vec::<u64>::new());
+        reopened.close().unwrap();
     }
 }

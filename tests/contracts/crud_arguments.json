@@ -1,0 +1,59 @@
+{
+  "before": [
+    {"id": 7, "vector": [1, 0], "payload": {"name": "源", "count": 1}, "num_edges": 1, "edges": [{"target_id": 11, "label": "route", "weight": 0.5, "metadata": {"part": "前段"}}]},
+    {"id": 11, "vector": [0, 1], "payload": {"name": "中"}, "num_edges": 0, "edges": []}
+  ],
+  "operations": [
+    {"python": "insert", "node": "insert", "args": [[1, 1], {}], "fields": [
+      {"index": 0, "field": "vector", "kind": "vector"}, {"index": 1, "field": "payload", "kind": "json"}
+    ]},
+    {"python": "insert_with_id", "node": "insertWithId", "args": [19, [1, 1], {}], "fields": [
+      {"index": 0, "field": "id", "kind": "id"}, {"index": 1, "field": "vector", "kind": "vector"}, {"index": 2, "field": "payload", "kind": "json"}
+    ]},
+    {"python": "upsert_with_id", "node": "upsertWithId", "args": [7, [1, 1], {}], "fields": [
+      {"index": 0, "field": "id", "kind": "id"}, {"index": 1, "field": "vector", "kind": "vector"}, {"index": 2, "field": "payload", "kind": "json"}
+    ]},
+    {"python": "batch_insert", "node": "batchInsert", "args": [[[1, 0], [0, 1]], [{}, {}]], "fields": [
+      {"index": 0, "field": "vectors", "kind": "vectors"}, {"index": 1, "field": "payloads", "kind": "payloads"}
+    ]},
+    {"python": "batch_insert_with_ids", "node": "batchInsertWithIds", "args": [[19, 23], [[1, 0], [0, 1]], [{}, {}]], "fields": [
+      {"index": 0, "field": "ids", "kind": "ids"}, {"index": 1, "field": "vectors", "kind": "vectors"}, {"index": 2, "field": "payloads", "kind": "payloads"}
+    ]},
+    {"python": "delete", "node": "delete", "args": [7], "fields": [{"index": 0, "field": "id", "kind": "id"}]},
+    {"python": "delete_many_atomic", "node": "deleteManyAtomic", "args": [[7, 11]], "fields": [{"index": 0, "field": "ids", "kind": "ids"}]},
+    {"python": "update_payload", "node": "updatePayload", "args": [7, {}], "fields": [
+      {"index": 0, "field": "id", "kind": "id"}, {"index": 1, "field": "payload", "kind": "json"}
+    ]},
+    {"python": "patch_payload", "node": "patchPayload", "args": [7, {"$set": {"name": "新"}}], "fields": [
+      {"index": 0, "field": "id", "kind": "id"}, {"index": 1, "field": "patch", "kind": "json"}
+    ]},
+    {"python": "compare_and_set_payload_field", "node": "compareAndSetPayloadField", "args": [7, "count", 1, 2], "fields": [
+      {"index": 0, "field": "id", "kind": "id"}, {"index": 1, "field": "field", "kind": "string"},
+      {"index": 2, "field": "expected", "kind": "json"}, {"index": 3, "field": "replacement", "kind": "json"}
+    ]},
+    {"python": "update_vector", "node": "updateVector", "args": [7, [1, 1]], "python_args": [[1, 1], 7], "fields": [
+      {"index": 0, "python_index": 1, "field": "id", "kind": "id"}, {"index": 1, "python_index": 0, "field": "vector", "kind": "vector"}
+    ]},
+    {"python": "link", "node": "link", "args": [7, 11, "new", 0.25], "fields": [
+      {"index": 0, "field": "src", "kind": "id"}, {"index": 1, "field": "dst", "kind": "id"},
+      {"index": 2, "field": "label", "kind": "string"}, {"index": 3, "field": "weight", "kind": "number"}
+    ]},
+    {"python": "upsert_edge", "node": "upsertEdge", "args": [7, 11, "route", 0.25, {}], "fields": [
+      {"index": 0, "field": "src", "kind": "id"}, {"index": 1, "field": "dst", "kind": "id"},
+      {"index": 2, "field": "label", "kind": "string"}, {"index": 3, "field": "weight", "kind": "number"}, {"index": 4, "field": "metadata", "kind": "json"}
+    ]},
+    {"python": "update_edge", "node": "updateEdge", "args": [7, 11, "route", 0.25, {}], "fields": [
+      {"index": 0, "field": "src", "kind": "id"}, {"index": 1, "field": "dst", "kind": "id"},
+      {"index": 2, "field": "label", "kind": "string"}, {"index": 3, "field": "weight", "kind": "number"}, {"index": 4, "field": "metadata", "kind": "json"}
+    ]},
+    {"python": "unlink", "node": "unlink", "args": [7, 11, "route"], "fields": [
+      {"index": 0, "field": "src", "kind": "id"}, {"index": 1, "field": "dst", "kind": "id"}, {"index": 2, "field": "label", "kind": "string"}
+    ]}
+  ],
+  "after": [
+    {"id": 7, "vector": [1, 1], "payload": {"name": "更新", "count": 2}, "num_edges": 1, "edges": [{"target_id": 11, "label": "route", "weight": 0.25, "metadata": {"part": "更新"}}]},
+    {"id": 11, "vector": [0, 1], "payload": {"name": "中"}, "num_edges": 0, "edges": []},
+    {"id": 19, "vector": [1, 0], "payload": {"词/行~\u0000": ["文档😀", null]}, "num_edges": 0, "edges": []},
+    {"id": 23, "vector": [1, 1], "payload": {"name": "替换"}, "num_edges": 0, "edges": []}
+  ]
+}

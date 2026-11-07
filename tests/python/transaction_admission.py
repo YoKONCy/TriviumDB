@@ -146,6 +146,24 @@ def conversion_failure(root, dtype):
     try:
         tx = db.transaction()
         tx.insert_with_id(2, [1, 0], {"state": "prepared"})
+        from query_arguments import check_input_error
+        for action, field in [
+            (lambda: tx.insert([1, "x"], {}), "/vector/1"),
+            (lambda: tx.insert_with_id("3", [1, 0], {}), "id"),
+            (lambda: tx.link(1, 2, label=1), "label"),
+            (lambda: tx.link(1, 2, weight="1"), "weight"),
+            (lambda: tx.unlink(1, "2"), "dst"),
+            (lambda: tx.delete("1"), "id"),
+            (lambda: tx.update_vector(1, [1, "x"]), "/vector/1"),
+            (lambda: tx.update_payload(1, {"a/b": object()}), "/payload/a~1b"),
+        ]:
+            try:
+                action()
+            except (TypeError, ValueError, triviumdb.TriviumDBError) as error:
+                check_input_error(error, field, {"phase":"validation", "outcome":"not_committed", "transaction_consumed":False})
+            else:
+                raise AssertionError(f"事务参数必须拒绝 {field}")
+            assert tx.pending_count() == 1
 
         class ConversionFailure(Exception):
             pass
@@ -165,6 +183,23 @@ def conversion_failure(root, dtype):
             assert error is original
         else:
             raise AssertionError("宿主转换异常必须保留")
+        assert tx.pending_count() == 1
+        context = triviumdb.RequestContext("buffer-cancel")
+        class CancelScalar:
+            def __float__(self):
+                context.cancel()
+                return 1.0
+            def __index__(self):
+                context.cancel()
+                return 1
+        try:
+            with context:
+                tx.insert_with_id(3, [CancelScalar(), 0], {"state":"cancelled"})
+        except triviumdb.TriviumDBError as error:
+            assert error.code == "TDB_QUERY_CANCELLED"
+            assert error.write == {"phase":"validation", "outcome":"not_committed", "transaction_consumed":False}
+        else:
+            raise AssertionError("转换中取消必须保留此前事务缓冲")
         assert tx.pending_count() == 1
         tx.insert_with_id(3, [1, 0], {"state": "retry"})
         assert tx.commit() == [2, 3]

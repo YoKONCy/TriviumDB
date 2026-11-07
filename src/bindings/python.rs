@@ -9,7 +9,7 @@ pub mod python {
     use crate::database::Database as GenericDatabase;
     use pyo3::exceptions::PyValueError;
     use pyo3::prelude::*;
-    use pyo3::types::{PyDict, PyList};
+    use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
     pyo3::create_exception!(triviumdb, TriviumDBError, pyo3::exceptions::PyRuntimeError);
     pyo3::create_exception!(triviumdb, InvalidInputError, pyo3::exceptions::PyValueError);
@@ -32,6 +32,107 @@ pub mod python {
         inner: crate::resources::ResourceRuntime,
     }
 
+    #[pyclass(name = "RequestContext", frozen)]
+    pub struct PyRequestContext {
+        inner: crate::sdk::RequestContext,
+    }
+
+    #[pymethods]
+    impl PyRequestContext {
+        #[new]
+        #[pyo3(signature = (*args, **kwargs), text_signature="(request_id, timeout_ms=0)")]
+        fn new(
+            py: Python<'_>,
+            args: &Bound<'_, PyTuple>,
+            kwargs: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<Self> {
+            let values = constructor_arguments(py, "RequestContext", args, kwargs)?;
+            let request_id: String = extract_argument(
+                py,
+                &constructor_argument(&values, "request_id")?,
+                "request_id",
+                None,
+            )?;
+            let timeout_ms: u64 = extract_argument(
+                py,
+                &constructor_argument(&values, "timeout_ms")?,
+                "timeout_ms",
+                None,
+            )?;
+            crate::sdk::RequestContext::with_timeout(
+                &request_id,
+                std::time::Duration::from_millis(timeout_ms),
+                false,
+            )
+            .map(|inner| Self { inner })
+            .map_err(to_py_error)
+        }
+
+        #[getter]
+        fn request_id(&self) -> &str {
+            self.inner.request_id()
+        }
+        fn cancel(&self) {
+            self.inner.cancel();
+        }
+        fn check(&self) -> PyResult<()> {
+            self.inner.control().check().map_err(to_py_error)
+        }
+
+        fn __enter__(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<Py<Self>> {
+            py.import("triviumdb._requests")?
+                .getattr("enter")?
+                .call1((slf,))
+                .map_err(|error| request_scope_error(py, error))?;
+            Ok(slf.clone().unbind())
+        }
+
+        fn __exit__(
+            slf: &Bound<'_, Self>,
+            py: Python<'_>,
+            _exc_type: &Bound<'_, PyAny>,
+            _exc_val: &Bound<'_, PyAny>,
+            _exc_tb: &Bound<'_, PyAny>,
+        ) -> PyResult<bool> {
+            py.import("triviumdb._requests")?
+                .getattr("exit")?
+                .call1((slf,))
+                .map_err(|error| request_scope_error(py, error))?;
+            Ok(false)
+        }
+    }
+
+    fn request_scope_error(py: Python<'_>, error: PyErr) -> PyErr {
+        if error.is_instance_of::<PyValueError>(py) {
+            attach_error_info(
+                error,
+                crate::TriviumError::InvalidInput(
+                    "请求上下文进入或退出无效 (Invalid request context entry or exit)".into(),
+                )
+                .at_field("request_context"),
+            )
+        } else {
+            error
+        }
+    }
+
+    #[pyfunction]
+    fn _invoke_request(
+        context: &PyRequestContext,
+        owner: &str,
+        operation: &str,
+        callback: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: &Bound<'_, PyDict>,
+    ) -> PyResult<PyObject> {
+        let admission = |error| to_py_error(crate::sdk::request_admission(error, owner, operation));
+        let _scope = context.inner.enter().map_err(admission)?;
+        if operation != "console_request" {
+            crate::request::check_current().map_err(admission)?;
+        }
+        Ok(callback.call(args, Some(kwargs))?.into_any().unbind())
+    }
+
     /// 控制台策略与取消状态不持有数据库或文件锁。
     #[pyclass(name = "ConsoleSession", frozen)]
     pub struct PyConsoleSession {
@@ -41,11 +142,22 @@ pub mod python {
     #[pymethods]
     impl PyConsoleSession {
         #[new]
-        #[pyo3(signature = (options_json="{}"))]
-        fn new(options_json: &str) -> PyResult<Self> {
-            crate::ConsoleSession::from_json(options_json)
+        #[pyo3(signature = (*args, **kwargs), text_signature="(options_json='{}')")]
+        fn new(
+            py: Python<'_>,
+            args: &Bound<'_, PyTuple>,
+            kwargs: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<Self> {
+            let values = constructor_arguments(py, "ConsoleSession", args, kwargs)?;
+            let options_json: String = extract_argument(
+                py,
+                &constructor_argument(&values, "options_json")?,
+                "options_json",
+                None,
+            )?;
+            crate::ConsoleSession::from_json(&options_json)
                 .map(|inner| Self { inner })
-                .map_err(to_py_error)
+                .map_err(|error| to_py_error(error.at_field("options_json")))
         }
 
         fn detach(&self) {
@@ -54,36 +166,62 @@ pub mod python {
         fn is_detached(&self) -> bool {
             self.inner.is_detached()
         }
-        fn cancel(&self, request_id: &str) -> bool {
-            self.inner.cancel(request_id)
+        fn is_drained(&self) -> bool {
+            self.inner.is_drained()
+        }
+        fn cancel(&self, request_id: Bound<'_, PyAny>) -> PyResult<bool> {
+            let request_id = read_string(&request_id, "request_id")?;
+            Ok(self.inner.cancel(&request_id))
         }
     }
 
     #[pymethods]
     impl PyResourceRuntime {
         #[new]
-        #[pyo3(signature = (memory_limit_mb=0, max_threads=0, max_active_tasks=0, maintenance_memory_limit_mb=0))]
+        #[pyo3(signature = (*args, **kwargs), text_signature="(memory_limit_mb=0, max_threads=0, max_active_tasks=0, maintenance_memory_limit_mb=0)")]
         fn new(
-            memory_limit_mb: usize,
-            max_threads: usize,
-            max_active_tasks: usize,
-            maintenance_memory_limit_mb: usize,
+            py: Python<'_>,
+            args: &Bound<'_, PyTuple>,
+            kwargs: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Self> {
-            let memory_limit = memory_limit_mb.checked_mul(1024 * 1024).ok_or_else(|| {
-                pyo3::exceptions::PyOverflowError::new_err("memory_limit_mb 换算溢出")
-            })?;
+            let values = constructor_arguments(py, "ResourceRuntime", args, kwargs)?;
+            let memory_limit_mb = constructor_argument(&values, "memory_limit_mb")?;
+            let max_threads = constructor_argument(&values, "max_threads")?;
+            let max_active_tasks = constructor_argument(&values, "max_active_tasks")?;
+            let maintenance_memory_limit_mb =
+                constructor_argument(&values, "maintenance_memory_limit_mb")?;
+            let memory_limit_mb = extract_argument(py, &memory_limit_mb, "memory_limit_mb", None)?;
+            let max_threads = extract_argument(py, &max_threads, "max_threads", None)?;
+            let max_active_tasks =
+                extract_argument(py, &max_active_tasks, "max_active_tasks", None)?;
+            let maintenance_memory_limit_mb = extract_argument(
+                py,
+                &maintenance_memory_limit_mb,
+                "maintenance_memory_limit_mb",
+                None,
+            )?;
+            let memory_limit = constructor_mib(memory_limit_mb, "memory_limit_mb")?;
             crate::resources::ResourceRuntime::new(crate::resources::ResourceLimits {
-                maintenance_memory_limit: maintenance_memory_limit_mb
-                    .checked_mul(1024 * 1024)
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyOverflowError::new_err("维护额度换算溢出")
-                    })?,
+                maintenance_memory_limit: constructor_mib(
+                    maintenance_memory_limit_mb,
+                    "maintenance_memory_limit_mb",
+                )?,
                 memory_limit,
                 max_threads,
                 max_active_tasks,
             })
             .map(|inner| Self { inner })
-            .map_err(to_py_error)
+            .map_err(|error| {
+                let error = match error.info().target {
+                    Some(crate::error::ErrorTarget::Field { field })
+                        if field == "maintenance_memory_limit" =>
+                    {
+                        error.at_field("maintenance_memory_limit_mb")
+                    }
+                    _ => error,
+                };
+                to_py_error(error)
+            })
         }
 
         fn stats(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -127,9 +265,12 @@ pub mod python {
     }
 
     fn attach_error_info(exception: PyErr, error: crate::TriviumError) -> PyErr {
+        attach_error_descriptor(exception, error.info())
+    }
+
+    fn attach_error_descriptor(exception: PyErr, info: crate::error::ErrorInfo) -> PyErr {
         Python::with_gil(|py| -> PyResult<()> {
             let value = exception.value(py);
-            let info = error.info();
             value.setattr("schema_version", info.schema_version)?;
             value.setattr("code", info.code)?;
             value.setattr("message", info.message)?;
@@ -174,11 +315,21 @@ pub mod python {
         U64(GenericDatabase<u64>),
     }
 
+    const TRANSACTION_VALIDATION: crate::error::WriteErrorInfo = crate::error::WriteErrorInfo {
+        transaction_consumed: Some(false),
+        ..crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION
+    };
+
+    fn check_transaction_control() -> PyResult<()> {
+        crate::request::check_current()
+            .map_err(|error| to_py_error(error.with_write_info(TRANSACTION_VALIDATION)))
+    }
+
     fn transaction_admission_error(error: PyErr) -> PyErr {
         python_write_error(error, crate::error::WriteErrorInfo::TRANSACTION_ADMISSION)
     }
 
-    fn maintenance_admission_error(error: PyErr) -> PyErr {
+    fn write_admission_error(error: PyErr) -> PyErr {
         python_write_error(error, crate::error::WriteErrorInfo::MAINTENANCE_ADMISSION)
     }
 
@@ -198,6 +349,94 @@ pub mod python {
         Python::with_gil(|py| match value.into_pyobject(py) {
             Ok(value) => value.into_any().unbind(),
             Err(never) => match never {},
+        })
+    }
+
+    fn string_argument(value: &str) -> Py<PyAny> {
+        Python::with_gil(|py| pyo3::types::PyString::new(py, value).into_any().unbind())
+    }
+
+    fn float_argument(value: f64) -> Py<PyAny> {
+        Python::with_gil(|py| pyo3::types::PyFloat::new(py, value).into_any().unbind())
+    }
+
+    fn boolean_argument(value: bool) -> Py<PyAny> {
+        Python::with_gil(|py| {
+            value
+                .into_pyobject(py)
+                .unwrap()
+                .to_owned()
+                .into_any()
+                .unbind()
+        })
+    }
+
+    fn constructor_arguments<'py>(
+        py: Python<'py>,
+        owner: &str,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        py.import("triviumdb.triviumdb")?
+            .getattr("_bind_constructor")?
+            .call1((owner, args, kwargs))?
+            .downcast_into::<PyDict>()
+            .map_err(Into::into)
+    }
+
+    fn constructor_argument<'py>(
+        values: &Bound<'py, PyDict>,
+        field: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        values.get_item(field)?.ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "构造签名绑定缺少字段 (Constructor signature binding omitted a field)",
+            )
+        })
+    }
+
+    fn parse_python_runtime(
+        runtime: Option<Bound<'_, PyAny>>,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> PyResult<crate::resources::ResourceRuntime> {
+        let Some(value) = runtime else {
+            return Ok(crate::resources::ResourceRuntime::shared_default());
+        };
+        // PyRef 按原生类型提取，错误对象的宿主属性和转换协议均不参与句柄校验。
+        let runtime = value
+            .extract::<PyRef<'_, PyResourceRuntime>>()
+            .map_err(|error| {
+                let input = crate::TriviumError::InvalidInput(
+                    "runtime 必须是 ResourceRuntime (runtime must be a ResourceRuntime)".into(),
+                )
+                .at_field("runtime");
+                let input = match write {
+                    Some(write) => input.with_write_info(write),
+                    None => input,
+                };
+                attach_error_info(error, input)
+            })?;
+        Ok(runtime.inner.clone())
+    }
+
+    fn constructor_input_error(error: PyErr, field: &str) -> PyErr {
+        attach_error_info(
+            error,
+            crate::TriviumError::InvalidInput(
+                "构造参数值无效 (Invalid constructor argument value)".into(),
+            )
+            .at_field(field),
+        )
+    }
+
+    fn constructor_mib(value: usize, field: &str) -> PyResult<usize> {
+        value.checked_mul(1024 * 1024).ok_or_else(|| {
+            constructor_input_error(
+                pyo3::exceptions::PyOverflowError::new_err(
+                    "MiB 换算字节时溢出 (MiB conversion to bytes overflowed)",
+                ),
+                field,
+            )
         })
     }
 
@@ -221,13 +460,14 @@ pub mod python {
         write: Option<crate::error::WriteErrorInfo>,
     ) -> PyResult<T> {
         value.extract().map_err(|error| {
-            use pyo3::types::{PyBool, PyBytes, PyFloat, PyInt, PyString, PyTuple};
+            use pyo3::types::{PyBool, PyBytes, PyComplex, PyFloat, PyInt, PyString, PyTuple};
             let value_type = value.get_type();
             let builtin = value.is_none()
                 || [
                     py.get_type::<PyBool>(),
                     py.get_type::<PyInt>(),
                     py.get_type::<PyFloat>(),
+                    py.get_type::<PyComplex>(),
                     py.get_type::<PyString>(),
                     py.get_type::<PyBytes>(),
                     py.get_type::<PyList>(),
@@ -253,8 +493,209 @@ pub mod python {
         })
     }
 
+    fn numeric_protocol(value: &Bound<'_, PyAny>, slot: i32) -> bool {
+        // SAFETY: Bound 与 GIL 保证对象和类型有效；只检测协议，不调用槽位指针。
+        // Python 3.9 的 PyType_GetSlot 只支持堆类型，静态类型交给既有数值协议提取。
+        unsafe {
+            let value_type = value.get_type();
+            if pyo3::ffi::PyType_GetFlags(value_type.as_type_ptr()) & pyo3::ffi::Py_TPFLAGS_HEAPTYPE
+                == 0
+            {
+                pyo3::ffi::PyNumber_Check(value.as_ptr()) != 0
+            } else {
+                !pyo3::ffi::PyType_GetSlot(value_type.as_type_ptr(), slot).is_null()
+            }
+        }
+    }
+
+    fn integer_value<'py, T: FromPyObject<'py>>(
+        value: &Bound<'py, PyAny>,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> PyResult<T> {
+        if !numeric_protocol(value, pyo3::ffi::Py_nb_index) {
+            return Err(argument_input_error(
+                pyo3::exceptions::PyTypeError::new_err(
+                    "参数必须支持整数协议 (Argument must support the integer protocol)",
+                ),
+                field,
+                write,
+            ));
+        }
+        extract_argument(value.py(), value, field, write)
+    }
+
+    fn float_value(
+        value: &Bound<'_, PyAny>,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> PyResult<f32> {
+        let numeric = numeric_protocol(value, pyo3::ffi::Py_nb_index)
+            || numeric_protocol(value, pyo3::ffi::Py_nb_float);
+        if !numeric {
+            return Err(argument_input_error(
+                pyo3::exceptions::PyTypeError::new_err(
+                    "参数必须支持数值协议 (Argument must support a numeric protocol)",
+                ),
+                field,
+                write,
+            ));
+        }
+        extract_argument(value.py(), value, field, write)
+    }
+
+    fn string_value(
+        value: &Bound<'_, PyAny>,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> PyResult<String> {
+        if !value.is_instance_of::<PyString>() {
+            return Err(argument_input_error(
+                pyo3::exceptions::PyTypeError::new_err(
+                    "参数必须是字符串 (Argument must be a string)",
+                ),
+                field,
+                write,
+            ));
+        }
+        value
+            .extract()
+            .map_err(|error| argument_input_error(error, field, write))
+    }
+
+    fn write_input_error(error: PyErr, field: &str) -> PyErr {
+        argument_input_error(
+            error,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    fn argument_input_error(
+        error: PyErr,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> PyErr {
+        let input =
+            crate::TriviumError::InvalidInput("参数无法转换 (Argument conversion failed)".into())
+                .at_field(field);
+        attach_error_info(
+            error,
+            match write {
+                Some(write) => input.with_write_info(write),
+                None => input,
+            },
+        )
+    }
+
+    fn read_id(value: &Bound<'_, PyAny>, field: &str) -> PyResult<u64> {
+        integer_value(value, field, None)
+    }
+
+    fn write_id(value: &Bound<'_, PyAny>, field: &str) -> PyResult<u64> {
+        integer_value(
+            value,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    fn read_float(value: &Bound<'_, PyAny>, field: &str) -> PyResult<f32> {
+        float_value(value, field, None)
+    }
+
+    fn write_float(value: &Bound<'_, PyAny>, field: &str) -> PyResult<f32> {
+        float_value(
+            value,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    fn read_string(value: &Bound<'_, PyAny>, field: &str) -> PyResult<String> {
+        string_value(value, field, None)
+    }
+
+    fn write_string(value: &Bound<'_, PyAny>, field: &str) -> PyResult<String> {
+        string_value(
+            value,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    fn write_list<'py>(value: &Bound<'py, PyAny>, field: &str) -> PyResult<Bound<'py, PyList>> {
+        value
+            .clone()
+            .downcast_into::<PyList>()
+            .map_err(|error| write_input_error(error.into(), field))
+    }
+
+    fn write_sequence<T>(
+        value: &Bound<'_, PyAny>,
+        field: &str,
+        parse: impl Fn(&Bound<'_, PyAny>, &str) -> PyResult<T>,
+    ) -> PyResult<Vec<T>> {
+        sequence_value(
+            value,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+            parse,
+        )
+    }
+
+    fn read_sequence<T>(
+        value: &Bound<'_, PyAny>,
+        field: &str,
+        parse: impl Fn(&Bound<'_, PyAny>, &str) -> PyResult<T>,
+    ) -> PyResult<Vec<T>> {
+        sequence_value(value, field, None, parse)
+    }
+
+    fn sequence_value<T>(
+        value: &Bound<'_, PyAny>,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+        parse: impl Fn(&Bound<'_, PyAny>, &str) -> PyResult<T>,
+    ) -> PyResult<Vec<T>> {
+        // SAFETY: Bound 保持对象存活且 GIL 覆盖检测；只调用 CPython 协议检测，不解引用裸内存。
+        let sequence = unsafe { pyo3::ffi::PySequence_Check(value.as_ptr()) != 0 };
+        if !sequence || value.is_instance_of::<PyString>() {
+            return Err(argument_input_error(
+                pyo3::exceptions::PyTypeError::new_err(
+                    "参数必须是非字符串序列 (Argument must be a non-string sequence)",
+                ),
+                field,
+                write,
+            ));
+        }
+        // 复用 PyO3 的长度提示容错规则；按真实元素增长，避免相信宿主提供的巨大提示。
+        let _ = value.len();
+        let mut result = Vec::new();
+        for (index, item) in value.try_iter()?.enumerate() {
+            let item = item?;
+            let path = crate::sdk::field_member(field, &index.to_string());
+            let parsed = parse(&item, &path)?;
+            result.try_reserve(1).map_err(|error| {
+                let error = crate::TriviumError::CapacityAllocationFailed {
+                    reason: format!(
+                        "参数缓冲分配失败 (Argument buffer allocation failed): {error}"
+                    ),
+                }
+                .at_field(&path);
+                to_py_error(match write {
+                    Some(write) => error.with_write_info(write),
+                    None => error,
+                })
+            })?;
+            result.push(parsed);
+        }
+        Ok(result)
+    }
+
     fn collect_prepared_parameters(
         parameters: &Bound<'_, PyAny>,
+        prepared: &crate::query::tql_prepared::PreparedTql,
     ) -> PyResult<std::collections::HashMap<String, crate::query::tql_prepared::TqlParamValue>>
     {
         let py = parameters.py();
@@ -269,17 +710,19 @@ pub mod python {
                     .at_field("parameters"),
                 )
             })?;
-            let json = pyobject_to_json(&value).map_err(|error| {
-                attach_error_info(
+            let json =
+                pyobject_to_json(&value).map_err(|error| {
+                    attach_error_info(
                     error,
-                    crate::TriviumError::InvalidInput(
+                    prepared.locate_parameter_error(crate::TriviumError::InvalidInput(
                         "参数值无法转换为 JSON (Parameter value cannot be converted to JSON)"
                             .into(),
                     )
-                    .at_query_parameter(&name),
+                    .at_query_parameter(&name)),
                 )
-            })?;
-            let value = crate::query::tql_prepared::TqlParamValue::from_named_json(&name, &json)
+                })?;
+            let value = prepared
+                .parameter_from_json(&name, &json)
                 .map_err(to_py_error)?;
             values.insert(name, value);
             Ok(())
@@ -668,102 +1111,152 @@ pub mod python {
     }
 
     fn pyobject_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
-        fn convert(obj: &Bound<'_, PyAny>, depth: usize) -> PyResult<serde_json::Value> {
-            use pyo3::exceptions::{PyOverflowError, PyTypeError};
-            use pyo3::types::{PyBool, PyFloat, PyInt, PyString, PyTuple};
-            if obj.is_none() {
-                return Ok(serde_json::Value::Null);
-            }
-            if obj.is_instance_of::<PyBool>() {
-                return Ok(obj.extract::<bool>()?.into());
-            }
-            if obj.is_instance_of::<PyInt>() {
-                if let Ok(value) = obj.extract::<i64>() {
-                    return Ok(value.into());
+        pyobject_to_json_at(obj, None, None)
+    }
+
+    fn write_json(obj: &Bound<'_, PyAny>, field: &str) -> PyResult<serde_json::Value> {
+        pyobject_to_json_at(
+            obj,
+            Some(field),
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    fn read_json(obj: &Bound<'_, PyAny>, field: &str) -> PyResult<serde_json::Value> {
+        pyobject_to_json_at(obj, Some(field), None)
+    }
+
+    fn pyobject_to_json_at(
+        obj: &Bound<'_, PyAny>,
+        field: Option<&str>,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> PyResult<serde_json::Value> {
+        fn convert(
+            obj: &Bound<'_, PyAny>,
+            depth: usize,
+            field: Option<&str>,
+            write: Option<crate::error::WriteErrorInfo>,
+        ) -> PyResult<serde_json::Value> {
+            let result = (|| {
+                use pyo3::exceptions::{PyOverflowError, PyTypeError};
+                use pyo3::types::{PyBool, PyFloat, PyInt, PyString, PyTuple};
+                if obj.is_none() {
+                    return Ok(serde_json::Value::Null);
                 }
-                return obj
-                    .extract::<u64>()
-                    .map(serde_json::Value::from)
-                    .map_err(|_| {
-                        PyOverflowError::new_err(
-                            "JSON 整数超出 i64/u64 范围 (JSON integer exceeds i64/u64 range)",
-                        )
-                    });
-            }
-            if obj.is_instance_of::<PyFloat>() {
-                return serde_json::Number::from_f64(obj.extract()?)
-                    .map(serde_json::Value::Number)
-                    .ok_or_else(|| {
-                        PyValueError::new_err("JSON 浮点数必须有限 (JSON floats must be finite)")
-                    });
-            }
-            if obj.is_instance_of::<PyString>() {
-                return Ok(obj.extract::<String>()?.into());
-            }
-            if depth >= 127 {
-                return Err(PyValueError::new_err(
-                    "JSON 容器嵌套超过 127 层 (JSON container nesting exceeds 127 levels)",
-                ));
-            }
-            if let Ok(dict) = obj.downcast::<PyDict>() {
-                let mut map = serde_json::Map::new();
-                for (k, v) in dict.iter() {
-                    if !k.is_instance_of::<PyString>() {
-                        return Err(PyTypeError::new_err(
-                            "JSON 对象键必须是字符串 (JSON object keys must be strings)",
-                        ));
+                if obj.is_instance_of::<PyBool>() {
+                    return Ok(obj.extract::<bool>()?.into());
+                }
+                if obj.is_instance_of::<PyInt>() {
+                    if let Ok(value) = obj.extract::<i64>() {
+                        return Ok(value.into());
                     }
-                    map.insert(k.extract::<String>()?, convert(&v, depth + 1)?);
+                    return obj
+                        .extract::<u64>()
+                        .map(serde_json::Value::from)
+                        .map_err(|_| {
+                            PyOverflowError::new_err(
+                                "JSON 整数超出 i64/u64 范围 (JSON integer exceeds i64/u64 range)",
+                            )
+                        });
                 }
-                return Ok(serde_json::Value::Object(map));
-            }
-            let values = if let Ok(list) = obj.downcast::<PyList>() {
-                list.iter()
-                    .map(|v| convert(&v, depth + 1))
-                    .collect::<PyResult<Vec<_>>>()?
-            } else if let Ok(tuple) = obj.downcast::<PyTuple>() {
-                tuple
-                    .iter()
-                    .map(|v| convert(&v, depth + 1))
-                    .collect::<PyResult<Vec<_>>>()?
-            } else {
-                return Err(PyTypeError::new_err(
-                    "Payload 包含不支持的类型 (Payload contains an unsupported type)",
-                ));
-            };
-            Ok(serde_json::Value::Array(values))
+                if obj.is_instance_of::<PyFloat>() {
+                    return serde_json::Number::from_f64(obj.extract()?)
+                        .map(serde_json::Value::Number)
+                        .ok_or_else(|| {
+                            PyValueError::new_err(
+                                "JSON 浮点数必须有限 (JSON floats must be finite)",
+                            )
+                        });
+                }
+                if obj.is_instance_of::<PyString>() {
+                    return Ok(obj.extract::<String>()?.into());
+                }
+                if depth >= 127 {
+                    return Err(PyValueError::new_err(
+                        "JSON 容器嵌套超过 127 层 (JSON container nesting exceeds 127 levels)",
+                    ));
+                }
+                if let Ok(dict) = obj.downcast::<PyDict>() {
+                    let mut map = serde_json::Map::new();
+                    for (k, v) in dict.iter() {
+                        if !k.is_instance_of::<PyString>() {
+                            return Err(PyTypeError::new_err(
+                                "JSON 对象键必须是字符串 (JSON object keys must be strings)",
+                            ));
+                        }
+                        let name = k.extract::<String>()?;
+                        let path = field.map(|field| crate::sdk::field_member(field, &name));
+                        map.insert(name, convert(&v, depth + 1, path.as_deref(), write)?);
+                    }
+                    return Ok(serde_json::Value::Object(map));
+                }
+                let values = if let Ok(list) = obj.downcast::<PyList>() {
+                    list.iter()
+                        .enumerate()
+                        .map(|(index, v)| {
+                            let path = field
+                                .map(|field| crate::sdk::field_member(field, &index.to_string()));
+                            convert(&v, depth + 1, path.as_deref(), write)
+                        })
+                        .collect::<PyResult<Vec<_>>>()?
+                } else if let Ok(tuple) = obj.downcast::<PyTuple>() {
+                    tuple
+                        .iter()
+                        .enumerate()
+                        .map(|(index, v)| {
+                            let path = field
+                                .map(|field| crate::sdk::field_member(field, &index.to_string()));
+                            convert(&v, depth + 1, path.as_deref(), write)
+                        })
+                        .collect::<PyResult<Vec<_>>>()?
+                } else {
+                    return Err(PyTypeError::new_err(
+                        "Payload 包含不支持的类型 (Payload contains an unsupported type)",
+                    ));
+                };
+                Ok(serde_json::Value::Array(values))
+            })();
+            result.map_err(|error: PyErr| match field {
+                Some(field) if !error.value(obj.py()).hasattr("target").unwrap_or(false) => {
+                    argument_input_error(error, field, write)
+                }
+                _ => error,
+            })
         }
-        convert(obj, 0)
+        convert(obj, 0, field, write)
     }
 
     use crate::filter::Filter;
 
-    fn mapping_to_filter(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Filter> {
-        let dictionary = if let Ok(dictionary) = value.downcast::<PyDict>() {
-            dictionary.clone()
+    fn mapping_dictionary<'py>(
+        value: &Bound<'py, PyAny>,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let py = value.py();
+        if let Ok(dictionary) = value.downcast::<PyDict>() {
+            Ok(dictionary.clone())
         } else {
             let mapping = py.import("collections.abc")?.getattr("Mapping")?;
             if !value.is_instance(&mapping)? {
-                let reason = "过滤器必须是映射 (Filter must be a mapping)";
-                return Err(attach_error_info(
+                let reason = "参数必须是映射 (Argument must be a mapping)";
+                return Err(argument_input_error(
                     pyo3::exceptions::PyTypeError::new_err(reason),
-                    crate::TriviumError::InvalidInput(reason.into()).at_field("payload_filter"),
+                    field,
+                    write,
                 ));
             }
             // 映射协议在已有数据库请求借用内执行，宿主异常保留原对象。
-            py.get_type::<PyDict>()
+            Ok(py
+                .get_type::<PyDict>()
                 .call1((value,))?
-                .downcast_into::<PyDict>()?
-        };
-        let json = pyobject_to_json(dictionary.as_any()).map_err(|error| {
-            attach_error_info(
-                error,
-                crate::TriviumError::InvalidInput(
-                    "过滤器无法转换为 JSON (Filter cannot be converted to JSON)".into(),
-                )
-                .at_field("payload_filter"),
-            )
-        })?;
+                .downcast_into::<PyDict>()?)
+        }
+    }
+
+    fn mapping_to_filter(_py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Filter> {
+        let dictionary = mapping_dictionary(value, "payload_filter", None)?;
+        let json = read_json(dictionary.as_any(), "payload_filter")?;
         Filter::from_json(&json).map_err(|reason| {
             to_py_error(crate::TriviumError::InvalidInput(reason).at_field("payload_filter"))
         })
@@ -800,8 +1293,12 @@ pub mod python {
             "out" | "outgoing" => Ok(crate::database::EdgeDirection::Outgoing),
             "in" | "incoming" => Ok(crate::database::EdgeDirection::Incoming),
             "both" => Ok(crate::database::EdgeDirection::Both),
-            _ => Err(pyo3::exceptions::PyValueError::new_err(
-                "edge_direction 必须是 out / in / both",
+            _ => Err(argument_input_error(
+                pyo3::exceptions::PyValueError::new_err(
+                    "edge_direction 必须是 out / in / both (edge_direction must be out / in / both)",
+                ),
+                "edge_direction",
+                None,
             )),
         }
     }
@@ -815,39 +1312,72 @@ pub mod python {
         }
 
         #[new]
-        #[pyo3(signature = (path, dim=1536, dtype="f32", sync_mode="normal", load_text_index=false, auto_build_quiver=true, expected_nodes=None, memory_limit_mb=0, payload_cache_mb=64, payload_cache_entry_mb=8, access_mode="read_write", missing_index_policy="fallback", max_query_rows=None, row_overflow="throw", runtime=None))]
+        #[pyo3(signature = (*args, **kwargs), text_signature="(path, dim=1536, dtype='f32', sync_mode='normal', load_text_index=False, auto_build_quiver=True, expected_nodes=None, memory_limit_mb=0, payload_cache_mb=64, payload_cache_entry_mb=8, access_mode='read_write', missing_index_policy='fallback', max_query_rows=None, row_overflow='throw', runtime=None)")]
         fn new(
-            path: &str,
-            dim: usize,
-            dtype: &str,
-            sync_mode: &str,
-            load_text_index: bool,
-            auto_build_quiver: bool,
-            expected_nodes: Option<usize>,
-            memory_limit_mb: usize,
-            payload_cache_mb: usize,
-            payload_cache_entry_mb: usize,
-            access_mode: &str,
-            missing_index_policy: &str,
-            max_query_rows: Option<usize>,
-            row_overflow: &str,
-            runtime: Option<PyRef<'_, PyResourceRuntime>>,
+            py: Python<'_>,
+            args: &Bound<'_, PyTuple>,
+            kwargs: Option<&Bound<'_, PyDict>>,
         ) -> PyResult<Self> {
-            let sm = parse_sync_mode(sync_mode)?;
-            let memory_limit = memory_limit_mb.checked_mul(1024 * 1024).ok_or_else(|| {
-                pyo3::exceptions::PyOverflowError::new_err("memory_limit_mb 换算字节时溢出")
-            })?;
-            let payload_cache_bytes =
-                payload_cache_mb.checked_mul(1024 * 1024).ok_or_else(|| {
-                    pyo3::exceptions::PyOverflowError::new_err("payload_cache_mb 换算字节时溢出")
-                })?;
-            let payload_cache_entry_bytes = payload_cache_entry_mb
-                .checked_mul(1024 * 1024)
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyOverflowError::new_err(
-                        "payload_cache_entry_mb 换算字节时溢出",
-                    )
-                })?;
+            let values = constructor_arguments(py, "TriviumDB", args, kwargs)?;
+            let path = constructor_argument(&values, "path")?;
+            let dim = constructor_argument(&values, "dim")?.unbind();
+            let dtype = constructor_argument(&values, "dtype")?.unbind();
+            let sync_mode = constructor_argument(&values, "sync_mode")?.unbind();
+            let load_text_index = constructor_argument(&values, "load_text_index")?.unbind();
+            let auto_build_quiver = constructor_argument(&values, "auto_build_quiver")?.unbind();
+            let expected_nodes: Option<Bound<'_, PyAny>> =
+                constructor_argument(&values, "expected_nodes")?.extract()?;
+            let memory_limit_mb = constructor_argument(&values, "memory_limit_mb")?.unbind();
+            let payload_cache_mb = constructor_argument(&values, "payload_cache_mb")?.unbind();
+            let payload_cache_entry_mb =
+                constructor_argument(&values, "payload_cache_entry_mb")?.unbind();
+            let access_mode = constructor_argument(&values, "access_mode")?.unbind();
+            let missing_index_policy =
+                constructor_argument(&values, "missing_index_policy")?.unbind();
+            let max_query_rows: Option<Bound<'_, PyAny>> =
+                constructor_argument(&values, "max_query_rows")?.extract()?;
+            let row_overflow = constructor_argument(&values, "row_overflow")?.unbind();
+            let runtime = constructor_argument(&values, "runtime")?.extract()?;
+            let path: String = extract_argument(py, &path, "path", None)?;
+            let dim = extract_argument(py, dim.bind(py), "dim", None)?;
+            let dtype: String = extract_argument(py, dtype.bind(py), "dtype", None)?;
+            let sync_mode: String = extract_argument(py, sync_mode.bind(py), "sync_mode", None)?;
+            let load_text_index =
+                extract_argument(py, load_text_index.bind(py), "load_text_index", None)?;
+            let auto_build_quiver =
+                extract_argument(py, auto_build_quiver.bind(py), "auto_build_quiver", None)?;
+            let expected_nodes = expected_nodes
+                .map(|value| extract_argument(py, &value, "expected_nodes", None))
+                .transpose()?;
+            let memory_limit_mb =
+                extract_argument(py, memory_limit_mb.bind(py), "memory_limit_mb", None)?;
+            let payload_cache_mb =
+                extract_argument(py, payload_cache_mb.bind(py), "payload_cache_mb", None)?;
+            let payload_cache_entry_mb = extract_argument(
+                py,
+                payload_cache_entry_mb.bind(py),
+                "payload_cache_entry_mb",
+                None,
+            )?;
+            let access_mode: String =
+                extract_argument(py, access_mode.bind(py), "access_mode", None)?;
+            let missing_index_policy: String = extract_argument(
+                py,
+                missing_index_policy.bind(py),
+                "missing_index_policy",
+                None,
+            )?;
+            let max_query_rows = max_query_rows
+                .map(|value| extract_argument(py, &value, "max_query_rows", None))
+                .transpose()?;
+            let row_overflow: String =
+                extract_argument(py, row_overflow.bind(py), "row_overflow", None)?;
+            let sm = parse_sync_mode(&sync_mode)
+                .map_err(|error| constructor_input_error(error, "sync_mode"))?;
+            let memory_limit = constructor_mib(memory_limit_mb, "memory_limit_mb")?;
+            let payload_cache_bytes = constructor_mib(payload_cache_mb, "payload_cache_mb")?;
+            let payload_cache_entry_bytes =
+                constructor_mib(payload_cache_entry_mb, "payload_cache_entry_mb")?;
             let config = crate::database::Config {
                 dim,
                 sync_mode: sm,
@@ -857,31 +1387,35 @@ pub mod python {
                 memory_limit,
                 payload_cache_bytes,
                 payload_cache_entry_bytes,
-                access_mode: parse_access_mode(access_mode)?,
-                missing_index_policy: parse_missing_index_policy(missing_index_policy)?,
+                access_mode: parse_access_mode(&access_mode)
+                    .map_err(|error| constructor_input_error(error, "access_mode"))?,
+                missing_index_policy: parse_missing_index_policy(&missing_index_policy)
+                    .map_err(|error| constructor_input_error(error, "missing_index_policy"))?,
                 max_query_rows,
-                row_overflow: parse_row_overflow(row_overflow)?,
+                row_overflow: parse_row_overflow(&row_overflow)
+                    .map_err(|error| constructor_input_error(error, "row_overflow"))?,
                 ..Default::default()
             };
-            let runtime = runtime
-                .map(|runtime| runtime.inner.clone())
-                .unwrap_or_else(crate::resources::ResourceRuntime::shared_default);
-            let inner = match dtype {
+            let runtime = parse_python_runtime(runtime, None)?;
+            let inner = match dtype.as_str() {
                 "f32" => DbBackend::F32(
-                    GenericDatabase::<f32>::open_with_runtime(path, config, runtime.clone())
+                    GenericDatabase::<f32>::open_with_runtime(&path, config, runtime.clone())
                         .map_err(to_py_error)?,
                 ),
                 "f16" => DbBackend::F16(
-                    GenericDatabase::<half::f16>::open_with_runtime(path, config, runtime.clone())
+                    GenericDatabase::<half::f16>::open_with_runtime(&path, config, runtime.clone())
                         .map_err(to_py_error)?,
                 ),
                 "u64" => DbBackend::U64(
-                    GenericDatabase::<u64>::open_with_runtime(path, config, runtime.clone())
+                    GenericDatabase::<u64>::open_with_runtime(&path, config, runtime.clone())
                         .map_err(to_py_error)?,
                 ),
                 _ => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "Unsupported dtype. Use 'f32', 'f16', or 'u64'",
+                    return Err(constructor_input_error(
+                        pyo3::exceptions::PyValueError::new_err(
+                            "dtype 必须是 f32 / f16 / u64 (dtype must be f32 / f16 / u64)",
+                        ),
+                        "dtype",
                     ));
                 }
             };
@@ -897,8 +1431,7 @@ pub mod python {
             py: Python<'_>,
             mode: Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) =
-                database_write(slf).map_err(maintenance_admission_error)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
             let mode: String = extract_management_argument(py, &mode, "mode")?;
             let sm = crate::storage::wal::SyncMode::parse(&mode).map_err(|reason| {
@@ -924,12 +1457,11 @@ pub mod python {
         /// db.load_ffi_hook("./libmy_plugin.so")
         /// results = db.search(query_vec)  # 自动经过 C++ Hook
         /// ```
-        fn load_ffi_hook(slf: &Bound<'_, Self>, lib_path: &str) -> PyResult<()> {
+        fn load_ffi_hook(slf: &Bound<'_, Self>, lib_path: Bound<'_, PyAny>) -> PyResult<()> {
             let (_request, mut borrowed) = database_write(slf)?;
             let this = &mut *borrowed;
-            let ffi_hook = crate::hook::FfiHook::load(lib_path).map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("加载 FFI Hook 失败: {}", e))
-            })?;
+            let lib_path = read_string(&lib_path, "lib_path")?;
+            let ffi_hook = crate::hook::FfiHook::load(&lib_path).map_err(to_py_error)?;
             dispatch!(this, mut db => db.set_hook(ffi_hook)).map_err(to_py_error)
         }
 
@@ -998,7 +1530,7 @@ pub mod python {
         /// print(ctx.timings)   # {'hook_pre_search': 0.1, 'graph_expand': 2.3, ...}
         /// print(ctx.custom_data)  # Hook 注入的自定义数据
         /// ```
-        #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(2), min_score=0.1, payload_filter=None), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None)")]
+        #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(2), min_score=float_argument(0.1), payload_filter=None), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None)")]
         fn search_with_context(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
@@ -1007,11 +1539,12 @@ pub mod python {
             recall_k: Py<PyAny>,
             rerank_k: Py<PyAny>,
             expand_depth: Py<PyAny>,
-            min_score: f32,
+            min_score: Py<PyAny>,
             payload_filter: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<(Vec<PySearchHit>, PyHookContext)> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let min_score = read_float(min_score.bind(py), "min_score")?;
             let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
             let recall_k = extract_argument(py, recall_k.bind(py), "recall_k", None)?;
             let rerank_k = extract_argument(py, rerank_k.bind(py), "rerank_k", None)?;
@@ -1032,16 +1565,16 @@ pub mod python {
 
             let (results, hook_ctx) = match &this.inner {
                 DbBackend::F32(db) => {
-                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     py.allow_threads(|| db.search_hybrid_with_context(None, Some(&vec), &config))
                 }
                 DbBackend::F16(db) => {
-                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
                     py.allow_threads(|| db.search_hybrid_with_context(None, Some(&vec16), &config))
                 }
                 DbBackend::U64(db) => {
-                    let vec: Vec<u64> = query_vector.extract()?;
+                    let vec: Vec<u64> = read_sequence(&query_vector, "query_vector", read_id)?;
                     py.allow_threads(|| db.search_hybrid_with_context(None, Some(&vec), &config))
                 }
             }
@@ -1093,21 +1626,21 @@ pub mod python {
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<u64> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            let json = pyobject_to_json(payload)?;
+            let json = write_json(payload, "payload")?;
             match &mut this.inner {
                 DbBackend::F32(db) => {
-                    let vec: Vec<f32> = vector.extract()?;
+                    let vec: Vec<f32> = write_sequence(&vector, "vector", write_float)?;
                     db.insert(&vec, json).map_err(to_py_error)
                 }
                 DbBackend::F16(db) => {
-                    let vec: Vec<f32> = vector.extract()?;
+                    let vec: Vec<f32> = write_sequence(&vector, "vector", write_float)?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
                     db.insert(&vec16, json).map_err(to_py_error)
                 }
                 DbBackend::U64(db) => {
-                    let vec: Vec<u64> = vector.extract()?;
+                    let vec: Vec<u64> = write_sequence(&vector, "vector", write_id)?;
                     db.insert(&vec, json).map_err(to_py_error)
                 }
             }
@@ -1116,25 +1649,26 @@ pub mod python {
         fn insert_with_id(
             slf: &Bound<'_, Self>,
             _py: Python<'_>,
-            id: u64,
+            id: Bound<'_, PyAny>,
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            let json = pyobject_to_json(payload)?;
+            let id = write_id(&id, "id")?;
+            let json = write_json(payload, "payload")?;
             match &mut this.inner {
                 DbBackend::F32(db) => {
-                    let vec: Vec<f32> = vector.extract()?;
+                    let vec: Vec<f32> = write_sequence(&vector, "vector", write_float)?;
                     db.insert_with_id(id, &vec, json)
                 }
                 DbBackend::F16(db) => {
-                    let vec: Vec<f32> = vector.extract()?;
+                    let vec: Vec<f32> = write_sequence(&vector, "vector", write_float)?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
                     db.insert_with_id(id, &vec16, json)
                 }
                 DbBackend::U64(db) => {
-                    let vec: Vec<u64> = vector.extract()?;
+                    let vec: Vec<u64> = write_sequence(&vector, "vector", write_id)?;
                     db.insert_with_id(id, &vec, json)
                 }
             }
@@ -1143,52 +1677,63 @@ pub mod python {
 
         fn upsert_with_id(
             slf: &Bound<'_, Self>,
-            id: u64,
+            id: Bound<'_, PyAny>,
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            let json = pyobject_to_json(payload)?;
+            let id = write_id(&id, "id")?;
+            let json = write_json(payload, "payload")?;
             match &mut this.inner {
-                DbBackend::F32(db) => db.upsert_with_id(id, &vector.extract::<Vec<f32>>()?, json),
+                DbBackend::F32(db) => {
+                    db.upsert_with_id(id, &write_sequence(&vector, "vector", write_float)?, json)
+                }
                 DbBackend::F16(db) => {
-                    let vector = vector
-                        .extract::<Vec<f32>>()?
+                    let vector = write_sequence(&vector, "vector", write_float)?
                         .into_iter()
                         .map(half::f16::from_f32)
                         .collect::<Vec<_>>();
                     db.upsert_with_id(id, &vector, json)
                 }
-                DbBackend::U64(db) => db.upsert_with_id(id, &vector.extract::<Vec<u64>>()?, json),
+                DbBackend::U64(db) => {
+                    db.upsert_with_id(id, &write_sequence(&vector, "vector", write_id)?, json)
+                }
             }
             .map_err(to_py_error)
         }
 
-        #[pyo3(signature = (src, dst, label="related", weight=1.0))]
+        #[pyo3(signature = (src, dst, label=string_argument("related"), weight=float_argument(1.0)), text_signature="($self, src, dst, label='related', weight=1.0)")]
         fn link(
             slf: &Bound<'_, Self>,
-            src: u64,
-            dst: u64,
-            label: &str,
-            weight: f32,
+            src: Bound<'_, PyAny>,
+            dst: Bound<'_, PyAny>,
+            label: Py<PyAny>,
+            weight: Py<PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.link(src, dst, label, weight)).map_err(to_py_error)
+            let src = write_id(&src, "src")?;
+            let dst = write_id(&dst, "dst")?;
+            let label: String = write_string(label.bind(slf.py()), "label")?;
+            let weight = write_float(weight.bind(slf.py()), "weight")?;
+            dispatch!(this, mut db => db.link(src, dst, &label, weight)).map_err(to_py_error)
         }
 
         fn get_edge(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
-            src: u64,
-            dst: u64,
-            label: &str,
+            src: Bound<'_, PyAny>,
+            dst: Bound<'_, PyAny>,
+            label: Bound<'_, PyAny>,
         ) -> PyResult<Option<PyEdge>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let src = extract_argument(py, &src, "src", None)?;
+            let dst = extract_argument(py, &dst, "dst", None)?;
+            let label: String = extract_argument(py, &label, "label", None)?;
             Ok({
-                dispatch!(this, db => db.get_edge(src, dst, label).map_err(to_py_error)?)
+                dispatch!(this, db => db.get_edge(src, dst, &label).map_err(to_py_error)?)
                     .map(|edge| -> PyResult<PyEdge> {
                         Ok(PyEdge {
                             target_id: edge.target_id,
@@ -1201,47 +1746,57 @@ pub mod python {
             })
         }
 
-        #[pyo3(signature = (src, dst, label, weight=1.0, metadata=None))]
+        #[pyo3(signature = (src, dst, label, weight=float_argument(1.0), metadata=None), text_signature="($self, src, dst, label, weight=1.0, metadata=None)")]
         fn upsert_edge(
             slf: &Bound<'_, Self>,
-            src: u64,
-            dst: u64,
-            label: &str,
-            weight: f32,
+            src: Bound<'_, PyAny>,
+            dst: Bound<'_, PyAny>,
+            label: Bound<'_, PyAny>,
+            weight: Py<PyAny>,
             metadata: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
+            let src = write_id(&src, "src")?;
+            let dst = write_id(&dst, "dst")?;
+            let label: String = write_string(&label, "label")?;
+            let weight = write_float(weight.bind(slf.py()), "weight")?;
             let metadata = metadata
-                .map(pyobject_to_json)
+                .map(|value| write_json(value, "metadata"))
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
-            dispatch!(this, mut db => db.upsert_edge(src, dst, label, weight, metadata))
+            dispatch!(this, mut db => db.upsert_edge(src, dst, &label, weight, metadata))
                 .map_err(to_py_error)
         }
 
         #[pyo3(signature = (src, dst, label, weight=None, metadata=None))]
         fn update_edge(
             slf: &Bound<'_, Self>,
-            src: u64,
-            dst: u64,
-            label: &str,
-            weight: Option<f32>,
+            src: Bound<'_, PyAny>,
+            dst: Bound<'_, PyAny>,
+            label: Bound<'_, PyAny>,
+            weight: Option<Bound<'_, PyAny>>,
             metadata: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
+            let src = write_id(&src, "src")?;
+            let dst = write_id(&dst, "dst")?;
+            let label: String = write_string(&label, "label")?;
+            let weight = weight
+                .map(|value| write_float(&value, "weight"))
+                .transpose()?;
             dispatch!(this, mut db => db.update_edge(
                 src,
                 dst,
-                label,
+                &label,
                 weight,
-                metadata.map(pyobject_to_json).transpose()?,
+                metadata.map(|value| write_json(value, "metadata")).transpose()?,
             ))
             .map_err(to_py_error)
         }
 
-        #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(0), min_score=0.5, payload_filter=None, max_edges_per_node=integer_argument(0), min_edge_weight=0.0, edge_direction="out"), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out')")]
+        #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(0), min_score=float_argument(0.5), payload_filter=None, max_edges_per_node=integer_argument(0), min_edge_weight=float_argument(0.0), edge_direction=string_argument("out")), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out')")]
         fn search(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
@@ -1250,14 +1805,17 @@ pub mod python {
             recall_k: Py<PyAny>,
             rerank_k: Py<PyAny>,
             expand_depth: Py<PyAny>,
-            min_score: f32,
+            min_score: Py<PyAny>,
             payload_filter: Option<&Bound<'_, PyAny>>,
             max_edges_per_node: Py<PyAny>,
-            min_edge_weight: f32,
-            edge_direction: &str,
+            min_edge_weight: Py<PyAny>,
+            edge_direction: Py<PyAny>,
         ) -> PyResult<Vec<PySearchHit>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let min_score = read_float(min_score.bind(py), "min_score")?;
+            let min_edge_weight = read_float(min_edge_weight.bind(py), "min_edge_weight")?;
+            let edge_direction = read_string(edge_direction.bind(py), "edge_direction")?;
             let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
             let recall_k = extract_argument(py, recall_k.bind(py), "recall_k", None)?;
             let rerank_k = extract_argument(py, rerank_k.bind(py), "rerank_k", None)?;
@@ -1279,22 +1837,22 @@ pub mod python {
                 payload_filter: rust_filter,
                 max_edges_per_node,
                 min_edge_weight,
-                edge_direction: parse_edge_direction(edge_direction)?,
+                edge_direction: parse_edge_direction(&edge_direction)?,
                 ..Default::default()
             };
 
             let results = match &this.inner {
                 DbBackend::F32(db) => {
-                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     py.allow_threads(|| db.search_hybrid(None, Some(&vec), &config))
                 }
                 DbBackend::F16(db) => {
-                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
                     py.allow_threads(|| db.search_hybrid(None, Some(&vec16), &config))
                 }
                 DbBackend::U64(db) => {
-                    let vec: Vec<u64> = query_vector.extract()?;
+                    let vec: Vec<u64> = read_sequence(&query_vector, "query_vector", read_id)?;
                     py.allow_threads(|| db.search_hybrid(None, Some(&vec), &config))
                 }
             }
@@ -1312,7 +1870,7 @@ pub mod python {
                 .collect::<PyResult<Vec<_>>>()
         }
 
-        #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(2), min_score=0.1, payload_filter=None, max_edges_per_node=integer_argument(0), min_edge_weight=0.0, edge_direction="out"), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out')")]
+        #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(2), min_score=float_argument(0.1), payload_filter=None, max_edges_per_node=integer_argument(0), min_edge_weight=float_argument(0.0), edge_direction=string_argument("out")), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out')")]
         fn search_grouped(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
@@ -1321,14 +1879,17 @@ pub mod python {
             recall_k: Py<PyAny>,
             rerank_k: Py<PyAny>,
             expand_depth: Py<PyAny>,
-            min_score: f32,
+            min_score: Py<PyAny>,
             payload_filter: Option<&Bound<'_, PyAny>>,
             max_edges_per_node: Py<PyAny>,
-            min_edge_weight: f32,
-            edge_direction: &str,
+            min_edge_weight: Py<PyAny>,
+            edge_direction: Py<PyAny>,
         ) -> PyResult<PyGroupedSearchResult> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let min_score = read_float(min_score.bind(py), "min_score")?;
+            let min_edge_weight = read_float(min_edge_weight.bind(py), "min_edge_weight")?;
+            let edge_direction = read_string(edge_direction.bind(py), "edge_direction")?;
             let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
             let recall_k = extract_argument(py, recall_k.bind(py), "recall_k", None)?;
             let rerank_k = extract_argument(py, rerank_k.bind(py), "rerank_k", None)?;
@@ -1347,22 +1908,24 @@ pub mod python {
                 payload_filter: rust_filter,
                 max_edges_per_node,
                 min_edge_weight,
-                edge_direction: parse_edge_direction(edge_direction)?,
+                edge_direction: parse_edge_direction(&edge_direction)?,
                 ..Default::default()
             };
             let result = match &this.inner {
                 DbBackend::F32(db) => {
-                    let vector: Vec<f32> = query_vector.extract()?;
+                    let vector: Vec<f32> =
+                        read_sequence(&query_vector, "query_vector", read_float)?;
                     py.allow_threads(|| db.search_hybrid_grouped(None, Some(&vector), &config))
                 }
                 DbBackend::F16(db) => {
-                    let vector: Vec<f32> = query_vector.extract()?;
+                    let vector: Vec<f32> =
+                        read_sequence(&query_vector, "query_vector", read_float)?;
                     let vector: Vec<half::f16> =
                         vector.into_iter().map(half::f16::from_f32).collect();
                     py.allow_threads(|| db.search_hybrid_grouped(None, Some(&vector), &config))
                 }
                 DbBackend::U64(db) => {
-                    let vector: Vec<u64> = query_vector.extract()?;
+                    let vector: Vec<u64> = read_sequence(&query_vector, "query_vector", read_id)?;
                     py.allow_threads(|| db.search_hybrid_grouped(None, Some(&vector), &config))
                 }
             }
@@ -1389,7 +1952,7 @@ pub mod python {
             })
         }
 
-        #[pyo3(signature = (query_vectors, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(0), min_score=0.5, parallelism=integer_argument(0)), text_signature="($self, query_vectors, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, parallelism=0)")]
+        #[pyo3(signature = (query_vectors, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(0), min_score=float_argument(0.5), parallelism=integer_argument(0)), text_signature="($self, query_vectors, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, parallelism=0)")]
         fn search_batch(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
@@ -1398,11 +1961,12 @@ pub mod python {
             recall_k: Py<PyAny>,
             rerank_k: Py<PyAny>,
             expand_depth: Py<PyAny>,
-            min_score: f32,
+            min_score: Py<PyAny>,
             parallelism: Py<PyAny>,
         ) -> PyResult<Vec<Vec<PySearchHit>>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let min_score = read_float(min_score.bind(py), "min_score")?;
             let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
             let recall_k = extract_argument(py, recall_k.bind(py), "recall_k", None)?;
             let rerank_k = extract_argument(py, rerank_k.bind(py), "rerank_k", None)?;
@@ -1420,11 +1984,17 @@ pub mod python {
             let batch_config = crate::database::BatchSearchConfig { parallelism };
             let results = match &this.inner {
                 DbBackend::F32(db) => {
-                    let queries: Vec<Vec<f32>> = query_vectors.extract()?;
+                    let queries: Vec<Vec<f32>> =
+                        read_sequence(&query_vectors, "query_vectors", |value, field| {
+                            read_sequence(value, field, read_float)
+                        })?;
                     py.allow_threads(|| db.search_batch(&queries, &config, &batch_config))
                 }
                 DbBackend::F16(db) => {
-                    let queries: Vec<Vec<f32>> = query_vectors.extract()?;
+                    let queries: Vec<Vec<f32>> =
+                        read_sequence(&query_vectors, "query_vectors", |value, field| {
+                            read_sequence(value, field, read_float)
+                        })?;
                     let queries: Vec<Vec<half::f16>> = queries
                         .into_iter()
                         .map(|query| query.into_iter().map(half::f16::from_f32).collect())
@@ -1432,7 +2002,10 @@ pub mod python {
                     py.allow_threads(|| db.search_batch(&queries, &config, &batch_config))
                 }
                 DbBackend::U64(db) => {
-                    let queries: Vec<Vec<u64>> = query_vectors.extract()?;
+                    let queries: Vec<Vec<u64>> =
+                        read_sequence(&query_vectors, "query_vectors", |value, field| {
+                            read_sequence(value, field, read_id)
+                        })?;
                     py.allow_threads(|| db.search_batch(&queries, &config, &batch_config))
                 }
             }
@@ -1460,24 +2033,24 @@ pub mod python {
             recall_k=integer_argument(0),
             rerank_k=integer_argument(0),
             expand_depth=integer_argument(2),
-            min_score=0.1,
-            teleport_alpha=0.0,
-            enable_advanced_pipeline=true,
-            enable_sparse_residual=false,
-            fista_lambda=0.1,
-            fista_threshold=0.3,
-            enable_dpp=false,
-            dpp_quality_weight=1.0,
-            enable_refractory_fatigue=false,
-            enable_text_hybrid_search=false,
-            text_boost=1.5,
+            min_score=float_argument(0.1),
+            teleport_alpha=float_argument(0.0),
+            enable_advanced_pipeline=boolean_argument(true),
+            enable_sparse_residual=boolean_argument(false),
+            fista_lambda=float_argument(0.1),
+            fista_threshold=float_argument(0.3),
+            enable_dpp=boolean_argument(false),
+            dpp_quality_weight=float_argument(1.0),
+            enable_refractory_fatigue=boolean_argument(false),
+            enable_text_hybrid_search=boolean_argument(false),
+            text_boost=float_argument(1.5),
             custom_query_text=None,
             payload_filter=None,
-            force_brute_force=false,
+            force_brute_force=boolean_argument(false),
             expand_labels=None,
             max_edges_per_node=integer_argument(0),
-            min_edge_weight=0.0,
-            edge_direction="out"
+            min_edge_weight=float_argument(0.0),
+            edge_direction=string_argument("out")
         ), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, teleport_alpha=0.0, enable_advanced_pipeline=True, enable_sparse_residual=False, fista_lambda=0.1, fista_threshold=0.3, enable_dpp=False, dpp_quality_weight=1.0, enable_refractory_fatigue=False, enable_text_hybrid_search=False, text_boost=1.5, custom_query_text=None, payload_filter=None, force_brute_force=False, expand_labels=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out')")]
         fn search_advanced(
             slf: &Bound<'_, Self>,
@@ -1487,27 +2060,68 @@ pub mod python {
             recall_k: Py<PyAny>,
             rerank_k: Py<PyAny>,
             expand_depth: Py<PyAny>,
-            min_score: f32,
-            teleport_alpha: f32,
-            enable_advanced_pipeline: bool,
-            enable_sparse_residual: bool,
-            fista_lambda: f32,
-            fista_threshold: f32,
-            enable_dpp: bool,
-            dpp_quality_weight: f32,
-            enable_refractory_fatigue: bool,
-            enable_text_hybrid_search: bool,
-            text_boost: f32,
-            custom_query_text: Option<String>,
+            min_score: Py<PyAny>,
+            teleport_alpha: Py<PyAny>,
+            enable_advanced_pipeline: Py<PyAny>,
+            enable_sparse_residual: Py<PyAny>,
+            fista_lambda: Py<PyAny>,
+            fista_threshold: Py<PyAny>,
+            enable_dpp: Py<PyAny>,
+            dpp_quality_weight: Py<PyAny>,
+            enable_refractory_fatigue: Py<PyAny>,
+            enable_text_hybrid_search: Py<PyAny>,
+            text_boost: Py<PyAny>,
+            custom_query_text: Option<Bound<'_, PyAny>>,
             payload_filter: Option<&Bound<'_, PyAny>>,
-            force_brute_force: bool,
-            expand_labels: Option<Vec<String>>,
+            force_brute_force: Py<PyAny>,
+            expand_labels: Option<Bound<'_, PyAny>>,
             max_edges_per_node: Py<PyAny>,
-            min_edge_weight: f32,
-            edge_direction: &str,
+            min_edge_weight: Py<PyAny>,
+            edge_direction: Py<PyAny>,
         ) -> PyResult<Vec<PySearchHit>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let min_score = read_float(min_score.bind(py), "min_score")?;
+            let teleport_alpha = read_float(teleport_alpha.bind(py), "teleport_alpha")?;
+            let fista_lambda = read_float(fista_lambda.bind(py), "fista_lambda")?;
+            let fista_threshold = read_float(fista_threshold.bind(py), "fista_threshold")?;
+            let dpp_quality_weight = read_float(dpp_quality_weight.bind(py), "dpp_quality_weight")?;
+            let text_boost = read_float(text_boost.bind(py), "text_boost")?;
+            let min_edge_weight = read_float(min_edge_weight.bind(py), "min_edge_weight")?;
+            let enable_advanced_pipeline = extract_argument(
+                py,
+                enable_advanced_pipeline.bind(py),
+                "enable_advanced_pipeline",
+                None,
+            )?;
+            let enable_sparse_residual = extract_argument(
+                py,
+                enable_sparse_residual.bind(py),
+                "enable_sparse_residual",
+                None,
+            )?;
+            let enable_dpp = extract_argument(py, enable_dpp.bind(py), "enable_dpp", None)?;
+            let enable_refractory_fatigue = extract_argument(
+                py,
+                enable_refractory_fatigue.bind(py),
+                "enable_refractory_fatigue",
+                None,
+            )?;
+            let enable_text_hybrid_search = extract_argument(
+                py,
+                enable_text_hybrid_search.bind(py),
+                "enable_text_hybrid_search",
+                None,
+            )?;
+            let force_brute_force =
+                extract_argument(py, force_brute_force.bind(py), "force_brute_force", None)?;
+            let edge_direction = read_string(edge_direction.bind(py), "edge_direction")?;
+            let custom_query_text = custom_query_text
+                .map(|value| read_string(&value, "custom_query_text"))
+                .transpose()?;
+            let expand_labels = expand_labels
+                .map(|value| read_sequence(&value, "expand_labels", read_string))
+                .transpose()?;
             let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
             let recall_k = extract_argument(py, recall_k.bind(py), "recall_k", None)?;
             let rerank_k = extract_argument(py, rerank_k.bind(py), "rerank_k", None)?;
@@ -1540,7 +2154,7 @@ pub mod python {
                 expand_labels,
                 max_edges_per_node,
                 min_edge_weight,
-                edge_direction: parse_edge_direction(edge_direction)?,
+                edge_direction: parse_edge_direction(&edge_direction)?,
                 payload_filter: rust_filter,
                 ..Default::default()
             };
@@ -1549,16 +2163,16 @@ pub mod python {
 
             let results = match &this.inner {
                 DbBackend::F32(db) => {
-                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     py.allow_threads(|| db.search_hybrid(q_text, Some(&vec), &config))
                 }
                 DbBackend::F16(db) => {
-                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
                     py.allow_threads(|| db.search_hybrid(q_text, Some(&vec16), &config))
                 }
                 DbBackend::U64(db) => {
-                    let vec: Vec<u64> = query_vector.extract()?;
+                    let vec: Vec<u64> = read_sequence(&query_vector, "query_vector", read_id)?;
                     py.allow_threads(|| db.search_hybrid(q_text, Some(&vec), &config))
                 }
             }
@@ -1576,7 +2190,7 @@ pub mod python {
                 .collect::<PyResult<Vec<_>>>()
         }
 
-        #[pyo3(signature = (query_vector, query_text, top_k=integer_argument(5), expand_depth=integer_argument(2), min_score=0.1, hybrid_alpha=0.7, payload_filter=None), text_signature="($self, query_vector, query_text, top_k=5, expand_depth=2, min_score=0.1, hybrid_alpha=0.7, payload_filter=None)")]
+        #[pyo3(signature = (query_vector, query_text, top_k=integer_argument(5), expand_depth=integer_argument(2), min_score=float_argument(0.1), hybrid_alpha=float_argument(0.7), payload_filter=None), text_signature="($self, query_vector, query_text, top_k=5, expand_depth=2, min_score=0.1, hybrid_alpha=0.7, payload_filter=None)")]
         fn search_hybrid(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
@@ -1584,12 +2198,14 @@ pub mod python {
             query_text: Bound<'_, PyAny>,
             top_k: Py<PyAny>,
             expand_depth: Py<PyAny>,
-            min_score: f32,
-            hybrid_alpha: f32,
+            min_score: Py<PyAny>,
+            hybrid_alpha: Py<PyAny>,
             payload_filter: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<Vec<PySearchHit>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let min_score = read_float(min_score.bind(py), "min_score")?;
+            let hybrid_alpha = read_float(hybrid_alpha.bind(py), "hybrid_alpha")?;
             let query_text: String = extract_argument(py, &query_text, "query_text", None)?;
             let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
             let expand_depth = extract_argument(py, expand_depth.bind(py), "expand_depth", None)?;
@@ -1600,7 +2216,7 @@ pub mod python {
 
             // hybrid_alpha 越大，向量分数占比越高。
             // TriviumDB 底层使用 text_boost = (1.0 - alpha) * 2.5 作为启发式倍率
-            let boost = (1.0 - hybrid_alpha).max(0.1) * 3.0;
+            let boost = crate::sdk::hybrid_text_boost(hybrid_alpha).map_err(to_py_error)?;
             let config = crate::database::SearchConfig {
                 top_k,
                 expand_depth,
@@ -1613,16 +2229,16 @@ pub mod python {
             let query_text = query_text.to_owned();
             let results = match &this.inner {
                 DbBackend::F32(db) => {
-                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     py.allow_threads(|| db.search_hybrid(Some(&query_text), Some(&vec), &config))
                 }
                 DbBackend::F16(db) => {
-                    let vec: Vec<f32> = query_vector.extract()?;
+                    let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
                     py.allow_threads(|| db.search_hybrid(Some(&query_text), Some(&vec16), &config))
                 }
                 DbBackend::U64(db) => {
-                    let vec: Vec<u64> = query_vector.extract()?;
+                    let vec: Vec<u64> = read_sequence(&query_vector, "query_vector", read_id)?;
                     py.allow_threads(|| db.search_hybrid(Some(&query_text), Some(&vec), &config))
                 }
             }
@@ -1639,38 +2255,52 @@ pub mod python {
                 .collect::<PyResult<Vec<_>>>()
         }
 
-        fn delete_many_atomic(slf: &Bound<'_, Self>, ids: Vec<u64>) -> PyResult<usize> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn delete_many_atomic(slf: &Bound<'_, Self>, ids: Bound<'_, PyAny>) -> PyResult<usize> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
+            let ids = write_sequence(&ids, "ids", write_id)?;
             dispatch!(this, mut db => db.delete_many_atomic(&ids)).map_err(to_py_error)
         }
 
         fn compare_and_set_payload_field(
             slf: &Bound<'_, Self>,
-            id: u64,
-            field: &str,
+            id: Bound<'_, PyAny>,
+            field: Bound<'_, PyAny>,
             expected: &Bound<'_, PyAny>,
             replacement: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            let expected = pyobject_to_json(expected)?;
-            let replacement = pyobject_to_json(replacement)?;
-            dispatch!(this, mut db => db.compare_and_set_payload_field(id, field, &expected, replacement))
+            let id = write_id(&id, "id")?;
+            let field: String = write_string(&field, "field")?;
+            let expected = write_json(expected, "expected")?;
+            let replacement = write_json(replacement, "replacement")?;
+            dispatch!(this, mut db => db.compare_and_set_payload_field(id, &field, &expected, replacement))
                 .map_err(to_py_error)
         }
 
-        fn delete(slf: &Bound<'_, Self>, id: u64) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn delete(slf: &Bound<'_, Self>, id: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
+            let id = write_id(&id, "id")?;
             dispatch!(this, mut db => db.delete(id)).map_err(to_py_error)
         }
 
         #[pyo3(signature = (src, dst, label=None))]
-        fn unlink(slf: &Bound<'_, Self>, src: u64, dst: u64, label: Option<&str>) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn unlink(
+            slf: &Bound<'_, Self>,
+            src: Bound<'_, PyAny>,
+            dst: Bound<'_, PyAny>,
+            label: Option<Bound<'_, PyAny>>,
+        ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            match label {
+            let src = write_id(&src, "src")?;
+            let dst = write_id(&dst, "dst")?;
+            let label: Option<String> = label
+                .map(|value| write_string(&value, "label"))
+                .transpose()?;
+            match label.as_deref() {
                 Some(label) => dispatch!(this, mut db => db.unlink_label(src, dst, label)),
                 None => dispatch!(this, mut db => db.unlink(src, dst)),
             }
@@ -1680,12 +2310,13 @@ pub mod python {
         fn update_payload(
             slf: &Bound<'_, Self>,
             _py: Python<'_>,
-            id: u64,
+            id: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            let json = pyobject_to_json(payload)?;
+            let id = write_id(&id, "id")?;
+            let json = write_json(payload, "payload")?;
             dispatch!(this, mut db => db.update_payload(id, json)).map_err(to_py_error)
         }
 
@@ -1698,90 +2329,102 @@ pub mod python {
         /// db.patch_payload(id, {"$set": {"name": "Alice"}})
         /// db.patch_payload(id, {"$inc": {"visits": 1}})
         /// db.patch_payload(id, {"$unset": {"old_field": True}})
-        /// db.patch_payload(id, {"name": "Bob"})  # 简写，等价于 $set
         /// ```
         fn patch_payload(
             slf: &Bound<'_, Self>,
             _py: Python<'_>,
-            id: u64,
+            id: Bound<'_, PyAny>,
             patch: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            let json = pyobject_to_json(patch)?;
+            let id = write_id(&id, "id")?;
+            let json = write_json(patch, "patch")?;
             dispatch!(this, mut db => db.patch_payload(id, json)).map_err(to_py_error)
         }
-        fn update_vector(slf: &Bound<'_, Self>, vector: Bound<'_, PyAny>, id: u64) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn update_vector(
+            slf: &Bound<'_, Self>,
+            vector: Bound<'_, PyAny>,
+            id: Bound<'_, PyAny>,
+        ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
+            let id = write_id(&id, "id")?;
             match &mut this.inner {
                 DbBackend::F32(db) => {
-                    let vec: Vec<f32> = vector.extract()?;
+                    let vec: Vec<f32> = write_sequence(&vector, "vector", write_float)?;
                     db.update_vector(id, &vec).map_err(to_py_error)
                 }
                 DbBackend::F16(db) => {
-                    let vec: Vec<f32> = vector.extract()?;
+                    let vec: Vec<f32> = write_sequence(&vector, "vector", write_float)?;
                     let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
                     db.update_vector(id, &vec16).map_err(to_py_error)
                 }
                 DbBackend::U64(db) => {
-                    let vec: Vec<u64> = vector.extract()?;
+                    let vec: Vec<u64> = write_sequence(&vector, "vector", write_id)?;
                     db.update_vector(id, &vec).map_err(to_py_error)
                 }
             }
         }
 
-        fn index_text(slf: &Bound<'_, Self>, id: u64, text: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn index_text(
+            slf: &Bound<'_, Self>,
+            id: Bound<'_, PyAny>,
+            text: Bound<'_, PyAny>,
+        ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.index_text(id, text)).map_err(to_py_error)
+            let id = write_id(&id, "id")?;
+            let text = write_string(&text, "text")?;
+            dispatch!(this, mut db => db.index_text(id, &text)).map_err(to_py_error)
         }
 
-        fn index_keyword(slf: &Bound<'_, Self>, id: u64, keyword: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn index_keyword(
+            slf: &Bound<'_, Self>,
+            id: Bound<'_, PyAny>,
+            keyword: Bound<'_, PyAny>,
+        ) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.index_keyword(id, keyword)).map_err(to_py_error)
+            let id = write_id(&id, "id")?;
+            let keyword = write_string(&keyword, "keyword")?;
+            dispatch!(this, mut db => db.index_keyword(id, &keyword)).map_err(to_py_error)
         }
 
         fn build_text_index(slf: &Bound<'_, Self>) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
             dispatch!(this, mut db => db.build_text_index()).map_err(to_py_error)
         }
 
         /// 从完整正文与关键词集合重建文本索引，通过 flush 或 close 持久化。
-        fn rebuild_text_index(
-            slf: &Bound<'_, Self>,
-            documents: Vec<Bound<'_, PyDict>>,
-        ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn rebuild_text_index(slf: &Bound<'_, Self>, documents: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            let documents = documents
-                .iter()
-                .map(|document| {
-                    for key in document.keys() {
-                        let key = key.extract::<String>()?;
-                        if !matches!(key.as_str(), "id" | "text" | "keywords") {
-                            return Err(PyValueError::new_err(format!("文本重建字段无效：{key}")));
-                        }
+            // 先固定本批记录对象，字段转换回调对外层列表的修改留待下次调用处理。
+            let records = write_sequence(&documents, "documents", |value, _| {
+                Ok(value.clone().unbind())
+            })?;
+            let documents = records.iter().enumerate().map(|(index, value)| {
+                let path = crate::sdk::field_member("documents", &index.to_string());
+                let document = mapping_dictionary(value.bind(slf.py()), &path, Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION))?;
+                for key in document.keys() {
+                    let key = write_string(&key, &path)?;
+                    if !matches!(key.as_str(), "id" | "text" | "keywords") {
+                        return Err(write_input_error(PyValueError::new_err(
+                            "文本重建记录包含未知字段 (Text rebuild record contains an unknown field)"),
+                            &crate::sdk::field_member(&path, &key)));
                     }
-                    Ok(crate::index::text::TextIndexDocument {
-                        id: document
-                            .get_item("id")?
-                            .ok_or_else(|| PyValueError::new_err("文本重建记录缺少 id"))?
-                            .extract()?,
-                        text: document
-                            .get_item("text")?
-                            .ok_or_else(|| PyValueError::new_err("文本重建记录缺少 text"))?
-                            .extract()?,
-                        keywords: document
-                            .get_item("keywords")?
-                            .map(|value| value.extract())
-                            .transpose()?
-                            .unwrap_or_default(),
-                    })
+                }
+                let required = |name: &str| document.get_item(name)?.ok_or_else(|| write_input_error(
+                    PyValueError::new_err("文本重建记录缺少字段 (Text rebuild record is missing a field)"),
+                    &crate::sdk::field_member(&path, name)));
+                Ok(crate::index::text::TextIndexDocument {
+                    id: write_id(&required("id")?, &crate::sdk::field_member(&path, "id"))?,
+                    text: write_string(&required("text")?, &crate::sdk::field_member(&path, "text"))?,
+                    keywords: document.get_item("keywords")?.map(|value| write_sequence(&value, &crate::sdk::field_member(&path, "keywords"), write_string)).transpose()?.unwrap_or_default(),
                 })
-                .collect::<PyResult<Vec<_>>>()?;
+            }).collect::<PyResult<Vec<_>>>()?;
             dispatch!(this, mut db => db.rebuild_text_index(&documents)).map_err(to_py_error)
         }
 
@@ -1794,18 +2437,21 @@ pub mod python {
         /// db.create_index("name")    # 之后 tql('FIND {name: "Alice"} RETURN *') 使用 O(1) 索引
         /// db.create_index("type")
         /// ```
-        #[pyo3(signature = (equalities, max_results=10000))]
+        #[pyo3(signature = (equalities, max_results=integer_argument(10000)), text_signature="($self, equalities, max_results=10000)")]
         fn indexed_lookup(
             slf: &Bound<'_, Self>,
             equalities: &Bound<'_, PyAny>,
-            max_results: usize,
+            max_results: Py<PyAny>,
         ) -> PyResult<Vec<u64>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
-            let value = pyobject_to_json(equalities)?;
+            let max_results = integer_value(max_results.bind(slf.py()), "max_results", None)?;
+            let value = read_json(equalities, "equalities")?;
             let object = value.as_object().ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "equalities 必须是对象 (equalities must be an object)",
+                argument_input_error(
+                    PyValueError::new_err("equalities 必须是对象 (equalities must be an object)"),
+                    "equalities",
+                    None,
                 )
             })?;
             let equalities = object
@@ -1815,43 +2461,50 @@ pub mod python {
             dispatch!(this, db => db.indexed_lookup(&equalities, max_results)).map_err(to_py_error)
         }
 
-        fn create_ngram_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn create_ngram_index(slf: &Bound<'_, Self>, field: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.create_ngram_index(field)).map_err(to_py_error)
+            let field = write_string(&field, "field")?;
+            dispatch!(this, mut db => db.create_ngram_index(&field)).map_err(to_py_error)
         }
 
-        fn drop_ngram_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn drop_ngram_index(slf: &Bound<'_, Self>, field: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.drop_ngram_index(field)).map_err(to_py_error)
+            let field = write_string(&field, "field")?;
+            dispatch!(this, mut db => db.drop_ngram_index(&field)).map_err(to_py_error)
         }
 
-        #[pyo3(signature = (field, needle, max_results=10000))]
+        #[pyo3(signature = (field, needle, max_results=integer_argument(10000)), text_signature="($self, field, needle, max_results=10000)")]
         fn substring_lookup(
             slf: &Bound<'_, Self>,
-            field: &str,
-            needle: &str,
-            max_results: usize,
+            field: Bound<'_, PyAny>,
+            needle: Bound<'_, PyAny>,
+            max_results: Py<PyAny>,
         ) -> PyResult<Vec<u64>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
-            dispatch!(this, db => db.substring_lookup(field, needle, max_results))
+            let field = read_string(&field, "field")?;
+            let needle = read_string(&needle, "needle")?;
+            let max_results = integer_value(max_results.bind(slf.py()), "max_results", None)?;
+            dispatch!(this, db => db.substring_lookup(&field, &needle, max_results))
                 .map_err(to_py_error)
         }
 
-        fn create_unique_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn create_unique_index(slf: &Bound<'_, Self>, field: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.create_unique_index(field)).map_err(to_py_error)
+            let field = write_string(&field, "field")?;
+            dispatch!(this, mut db => db.create_unique_index(&field)).map_err(to_py_error)
         }
 
         fn create_unique_composite_index(
             slf: &Bound<'_, Self>,
-            fields: Vec<String>,
+            fields: Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
+            let fields = write_sequence(&fields, "fields", write_string)?;
             dispatch!(this, mut db => db.create_unique_composite_index(&fields))
                 .map_err(to_py_error)
         }
@@ -1862,53 +2515,61 @@ pub mod python {
             Ok(dispatch!(this, db => db.list_unique_indexes().map_err(to_py_error)?))
         }
 
-        fn create_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn create_index(slf: &Bound<'_, Self>, field: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.create_index(field)).map_err(to_py_error)
+            let field = write_string(&field, "field")?;
+            dispatch!(this, mut db => db.create_index(&field)).map_err(to_py_error)
         }
 
-        fn create_ordered_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn create_ordered_index(slf: &Bound<'_, Self>, field: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.create_ordered_index(field)).map_err(to_py_error)
+            let field = write_string(&field, "field")?;
+            dispatch!(this, mut db => db.create_ordered_index(&field)).map_err(to_py_error)
         }
 
-        fn create_composite_index(slf: &Bound<'_, Self>, fields: Vec<String>) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn create_composite_index(slf: &Bound<'_, Self>, fields: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
+            let fields = write_sequence(&fields, "fields", write_string)?;
             dispatch!(this, mut db => db.create_composite_index(&fields)).map_err(to_py_error)
         }
 
-        fn create_bitmap_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn create_bitmap_index(slf: &Bound<'_, Self>, field: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.create_bitmap_index(field)).map_err(to_py_error)
+            let field = write_string(&field, "field")?;
+            dispatch!(this, mut db => db.create_bitmap_index(&field)).map_err(to_py_error)
         }
 
         /// 删除属性索引（查询仍可用，退化为全扫描）
-        fn drop_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn drop_index(slf: &Bound<'_, Self>, field: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.drop_index(field)).map_err(to_py_error)
+            let field = write_string(&field, "field")?;
+            dispatch!(this, mut db => db.drop_index(&field)).map_err(to_py_error)
         }
 
-        fn drop_ordered_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn drop_ordered_index(slf: &Bound<'_, Self>, field: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.drop_ordered_index(field)).map_err(to_py_error)
+            let field = write_string(&field, "field")?;
+            dispatch!(this, mut db => db.drop_ordered_index(&field)).map_err(to_py_error)
         }
 
-        fn drop_composite_index(slf: &Bound<'_, Self>, fields: Vec<String>) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn drop_composite_index(slf: &Bound<'_, Self>, fields: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
+            let fields = write_sequence(&fields, "fields", write_string)?;
             dispatch!(this, mut db => db.drop_composite_index(&fields)).map_err(to_py_error)
         }
 
-        fn drop_bitmap_index(slf: &Bound<'_, Self>, field: &str) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+        fn drop_bitmap_index(slf: &Bound<'_, Self>, field: Bound<'_, PyAny>) -> PyResult<()> {
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            dispatch!(this, mut db => db.drop_bitmap_index(field)).map_err(to_py_error)
+            let field = write_string(&field, "field")?;
+            dispatch!(this, mut db => db.drop_bitmap_index(&field)).map_err(to_py_error)
         }
 
         fn index_info(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
@@ -1936,10 +2597,11 @@ pub mod python {
         fn get_payload(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
-            id: u64,
+            id: Bound<'_, PyAny>,
         ) -> PyResult<Option<PyObject>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let id = extract_argument(py, &id, "id", None)?;
             Ok({
                 dispatch!(this, db => db.get_payload(id).map_err(to_py_error)?)
                     .map(|p| json_to_pyobject(py, &p))
@@ -1948,9 +2610,14 @@ pub mod python {
         }
 
         /// 获取节点的出边列表
-        fn get_edges(slf: &Bound<'_, Self>, py: Python<'_>, id: u64) -> PyResult<Vec<PyEdge>> {
+        fn get_edges(
+            slf: &Bound<'_, Self>,
+            py: Python<'_>,
+            id: Bound<'_, PyAny>,
+        ) -> PyResult<Vec<PyEdge>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let id = extract_argument(py, &id, "id", None)?;
             Ok({
                 dispatch!(this, db => db.get_edges(id).map_err(to_py_error)?)
                     .into_iter()
@@ -1970,13 +2637,17 @@ pub mod python {
         fn get_incoming_edges(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
-            id: u64,
-            label: Option<&str>,
+            id: Bound<'_, PyAny>,
+            label: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<Vec<PyIncomingEdge>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let id = extract_argument(py, &id, "id", None)?;
+            let label: Option<String> = label
+                .map(|value| extract_argument(py, value, "label", None))
+                .transpose()?;
             Ok({
-                dispatch!(this, db => db.get_incoming_edges(id, label).map_err(to_py_error)?)
+                dispatch!(this, db => db.get_incoming_edges(id, label.as_deref()).map_err(to_py_error)?)
                     .into_iter()
                     .map(|edge| {
                         Ok(PyIncomingEdge {
@@ -1991,9 +2662,14 @@ pub mod python {
             })
         }
 
-        fn get(slf: &Bound<'_, Self>, py: Python<'_>, id: u64) -> PyResult<Option<PyNodeView>> {
+        fn get(
+            slf: &Bound<'_, Self>,
+            py: Python<'_>,
+            id: Bound<'_, PyAny>,
+        ) -> PyResult<Option<PyNodeView>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let id = extract_argument(py, &id, "id", None)?;
             match &this.inner {
                 DbBackend::F32(db) => {
                     if let Some(n) = db.get(id).map_err(to_py_error)? {
@@ -2066,42 +2742,61 @@ pub mod python {
             Ok(None)
         }
 
-        #[pyo3(signature = (id, depth=1, labels=None))]
+        #[pyo3(signature = (id, depth=integer_argument(1), labels=None), text_signature="($self, id, depth=1, labels=None)")]
         fn neighbors(
             slf: &Bound<'_, Self>,
-            id: u64,
-            depth: usize,
-            labels: Option<Vec<String>>,
+            py: Python<'_>,
+            id: Bound<'_, PyAny>,
+            depth: Py<PyAny>,
+            labels: Option<&Bound<'_, PyAny>>,
         ) -> PyResult<Vec<u64>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let id = extract_argument(py, &id, "id", None)?;
+            let depth = extract_argument(py, depth.bind(py), "depth", None)?;
+            let labels: Option<Vec<String>> = labels
+                .map(|value| read_sequence(value, "labels", read_string))
+                .transpose()?;
             Ok({
                 dispatch!(this, db => db.neighbors_with_labels(id, depth, labels.as_deref()).map_err(to_py_error)?)
             })
         }
 
-        #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000, max_results=10_000, max_edges=50_000))]
+        #[pyo3(signature = (id, min_depth=integer_argument(1), max_depth=integer_argument(1), labels=None, direction=string_argument("outgoing"), max_visited_nodes=integer_argument(10_000), max_results=integer_argument(10_000), max_edges=integer_argument(50_000)), text_signature="($self, id, min_depth=1, max_depth=1, labels=None, direction='outgoing', max_visited_nodes=10000, max_results=10000, max_edges=50000)")]
         fn reachable(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
-            id: u64,
-            min_depth: usize,
-            max_depth: usize,
-            labels: Option<Vec<String>>,
-            direction: &str,
-            max_visited_nodes: usize,
-            max_results: usize,
-            max_edges: usize,
+            id: Bound<'_, PyAny>,
+            min_depth: Py<PyAny>,
+            max_depth: Py<PyAny>,
+            labels: Option<&Bound<'_, PyAny>>,
+            direction: Py<PyAny>,
+            max_visited_nodes: Py<PyAny>,
+            max_results: Py<PyAny>,
+            max_edges: Py<PyAny>,
         ) -> PyResult<Vec<PyReachabilityResult>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
-            let direction = match direction {
+            let id = extract_argument(py, &id, "id", None)?;
+            let min_depth = extract_argument(py, min_depth.bind(py), "min_depth", None)?;
+            let max_depth = extract_argument(py, max_depth.bind(py), "max_depth", None)?;
+            let labels = labels
+                .map(|value| read_sequence(value, "labels", read_string))
+                .transpose()?;
+            let direction: String = extract_argument(py, direction.bind(py), "direction", None)?;
+            let max_visited_nodes =
+                extract_argument(py, max_visited_nodes.bind(py), "max_visited_nodes", None)?;
+            let max_results = extract_argument(py, max_results.bind(py), "max_results", None)?;
+            let max_edges = extract_argument(py, max_edges.bind(py), "max_edges", None)?;
+            let direction = match direction.as_str() {
                 "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
                 "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
                 "both" => crate::graph::reachability::ReachabilityDirection::Both,
                 _ => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "direction 必须是 outgoing / incoming / both",
+                    let reason = "direction 必须是 outgoing / incoming / both (direction must be outgoing / incoming / both)";
+                    return Err(attach_error_info(
+                        pyo3::exceptions::PyValueError::new_err(reason),
+                        crate::TriviumError::InvalidInput(reason.into()).at_field("direction"),
                     ));
                 }
             };
@@ -2126,28 +2821,41 @@ pub mod python {
                 .map_err(to_py_error)?
         }
 
-        #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000, max_results=10_000, max_edges=50_000))]
+        #[pyo3(signature = (id, min_depth=integer_argument(1), max_depth=integer_argument(1), labels=None, direction=string_argument("outgoing"), max_visited_nodes=integer_argument(10_000), max_results=integer_argument(10_000), max_edges=integer_argument(50_000)), text_signature="($self, id, min_depth=1, max_depth=1, labels=None, direction='outgoing', max_visited_nodes=10000, max_results=10000, max_edges=50000)")]
         fn reachable_detailed(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
-            id: u64,
-            min_depth: usize,
-            max_depth: usize,
-            labels: Option<Vec<String>>,
-            direction: &str,
-            max_visited_nodes: usize,
-            max_results: usize,
-            max_edges: usize,
+            id: Bound<'_, PyAny>,
+            min_depth: Py<PyAny>,
+            max_depth: Py<PyAny>,
+            labels: Option<&Bound<'_, PyAny>>,
+            direction: Py<PyAny>,
+            max_visited_nodes: Py<PyAny>,
+            max_results: Py<PyAny>,
+            max_edges: Py<PyAny>,
         ) -> PyResult<PyObject> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
-            let direction = match direction {
+            let id = extract_argument(py, &id, "id", None)?;
+            let min_depth = extract_argument(py, min_depth.bind(py), "min_depth", None)?;
+            let max_depth = extract_argument(py, max_depth.bind(py), "max_depth", None)?;
+            let labels = labels
+                .map(|value| read_sequence(value, "labels", read_string))
+                .transpose()?;
+            let direction: String = extract_argument(py, direction.bind(py), "direction", None)?;
+            let max_visited_nodes =
+                extract_argument(py, max_visited_nodes.bind(py), "max_visited_nodes", None)?;
+            let max_results = extract_argument(py, max_results.bind(py), "max_results", None)?;
+            let max_edges = extract_argument(py, max_edges.bind(py), "max_edges", None)?;
+            let direction = match direction.as_str() {
                 "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
                 "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
                 "both" => crate::graph::reachability::ReachabilityDirection::Both,
                 _ => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "direction 必须是 outgoing / incoming / both",
+                    let reason = "direction 必须是 outgoing / incoming / both (direction must be outgoing / incoming / both)";
+                    return Err(attach_error_info(
+                        pyo3::exceptions::PyValueError::new_err(reason),
+                        crate::TriviumError::InvalidInput(reason.into()).at_field("direction"),
                     ));
                 }
             };
@@ -2169,28 +2877,41 @@ pub mod python {
             json_to_pyobject(py, &value)
         }
 
-        #[pyo3(signature = (id, min_depth=1, max_depth=1, labels=None, direction="outgoing", max_visited_nodes=10_000, max_results=10_000, max_edges=50_000))]
+        #[pyo3(signature = (id, min_depth=integer_argument(1), max_depth=integer_argument(1), labels=None, direction=string_argument("outgoing"), max_visited_nodes=integer_argument(10_000), max_results=integer_argument(10_000), max_edges=integer_argument(50_000)), text_signature="($self, id, min_depth=1, max_depth=1, labels=None, direction='outgoing', max_visited_nodes=10000, max_results=10000, max_edges=50000)")]
         fn query_subgraph(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
-            id: u64,
-            min_depth: usize,
-            max_depth: usize,
-            labels: Option<Vec<String>>,
-            direction: &str,
-            max_visited_nodes: usize,
-            max_results: usize,
-            max_edges: usize,
+            id: Bound<'_, PyAny>,
+            min_depth: Py<PyAny>,
+            max_depth: Py<PyAny>,
+            labels: Option<&Bound<'_, PyAny>>,
+            direction: Py<PyAny>,
+            max_visited_nodes: Py<PyAny>,
+            max_results: Py<PyAny>,
+            max_edges: Py<PyAny>,
         ) -> PyResult<PyObject> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
-            let direction = match direction {
+            let id = extract_argument(py, &id, "id", None)?;
+            let min_depth = extract_argument(py, min_depth.bind(py), "min_depth", None)?;
+            let max_depth = extract_argument(py, max_depth.bind(py), "max_depth", None)?;
+            let labels = labels
+                .map(|value| read_sequence(value, "labels", read_string))
+                .transpose()?;
+            let direction: String = extract_argument(py, direction.bind(py), "direction", None)?;
+            let max_visited_nodes =
+                extract_argument(py, max_visited_nodes.bind(py), "max_visited_nodes", None)?;
+            let max_results = extract_argument(py, max_results.bind(py), "max_results", None)?;
+            let max_edges = extract_argument(py, max_edges.bind(py), "max_edges", None)?;
+            let direction = match direction.as_str() {
                 "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
                 "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
                 "both" => crate::graph::reachability::ReachabilityDirection::Both,
                 _ => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "direction 必须是 outgoing / incoming / both",
+                    let reason = "direction 必须是 outgoing / incoming / both (direction must be outgoing / incoming / both)";
+                    return Err(attach_error_info(
+                        pyo3::exceptions::PyValueError::new_err(reason),
+                        crate::TriviumError::InvalidInput(reason.into()).at_field("direction"),
                     ));
                 }
             };
@@ -2223,23 +2944,24 @@ pub mod python {
         ) -> PyResult<Vec<PySearchHit>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
-            let anchor_ids: Vec<u64> = anchor_ids.extract()?;
+
+            let anchor_ids = read_sequence(&anchor_ids, "anchor_ids", read_id)?;
             let top_k = extract_argument(py, &top_k, "top_k", None)?;
             let max_anchor_nodes =
                 extract_argument(py, max_anchor_nodes.bind(py), "max_anchor_nodes", None)?;
             let hits = match &this.inner {
                 DbBackend::F32(db) => {
-                    let query: Vec<f32> = query_vector.extract()?;
+                    let query: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     db.search_graph_first(&query, &anchor_ids, top_k, max_anchor_nodes)
                 }
                 DbBackend::F16(db) => {
-                    let query: Vec<f32> = query_vector.extract()?;
+                    let query: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     let query: Vec<half::f16> =
                         query.into_iter().map(half::f16::from_f32).collect();
                     db.search_graph_first(&query, &anchor_ids, top_k, max_anchor_nodes)
                 }
                 DbBackend::U64(db) => {
-                    let query: Vec<u64> = query_vector.extract()?;
+                    let query: Vec<u64> = read_sequence(&query_vector, "query_vector", read_id)?;
                     db.search_graph_first(&query, &anchor_ids, top_k, max_anchor_nodes)
                 }
             }
@@ -2264,20 +2986,21 @@ pub mod python {
         ) -> PyResult<Vec<PySearchHit>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+
             let top_k = extract_argument(py, &top_k, "top_k", None)?;
             let hits = match &this.inner {
                 DbBackend::F32(db) => {
-                    let query: Vec<f32> = query_vector.extract()?;
+                    let query: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     db.search_exact(&query, top_k)
                 }
                 DbBackend::F16(db) => {
-                    let query: Vec<f32> = query_vector.extract()?;
+                    let query: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                     let query: Vec<half::f16> =
                         query.into_iter().map(half::f16::from_f32).collect();
                     db.search_exact(&query, top_k)
                 }
                 DbBackend::U64(db) => {
-                    let query: Vec<u64> = query_vector.extract()?;
+                    let query: Vec<u64> = read_sequence(&query_vector, "query_vector", read_id)?;
                     db.search_exact(&query, top_k)
                 }
             }
@@ -2315,8 +3038,7 @@ pub mod python {
         }
 
         fn repair_graph_indexes(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<PyObject> {
-            let (_request, mut borrowed) =
-                database_write(slf).map_err(maintenance_admission_error)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
             let report =
                 dispatch!(this, mut db => db.repair_graph_indexes()).map_err(to_py_error)?;
@@ -2342,8 +3064,7 @@ pub mod python {
             py: Python<'_>,
             generation_id: Bound<'_, PyAny>,
         ) -> PyResult<PyObject> {
-            let (_request, mut borrowed) =
-                database_write(slf).map_err(maintenance_admission_error)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
             let generation_id: String =
                 extract_management_argument(py, &generation_id, "generation_id")?;
@@ -2382,20 +3103,26 @@ pub mod python {
         ///     new_vec = new_model.encode(payloads[nid]["text"]).tolist()
         ///     new_db.update_vector(new_vec, nid)
         /// ```
-        fn migrate(slf: &Bound<'_, Self>, new_path: &str, new_dim: usize) -> PyResult<Vec<u64>> {
-            let (_request, borrowed) = database_read(slf)?;
+        fn migrate(
+            slf: &Bound<'_, Self>,
+            new_path: Bound<'_, PyAny>,
+            new_dim: Bound<'_, PyAny>,
+        ) -> PyResult<Vec<u64>> {
+            let (_request, borrowed) = database_read(slf).map_err(write_admission_error)?;
             let this = &*borrowed;
+            let new_path = write_string(&new_path, "new_path")?;
+            let new_dim: usize = extract_management_argument(slf.py(), &new_dim, "new_dim")?;
             match &this.inner {
                 DbBackend::F32(db) => {
-                    let (_new_db, ids) = db.migrate_to(new_path, new_dim).map_err(to_py_error)?;
+                    let (_new_db, ids) = db.migrate_to(&new_path, new_dim).map_err(to_py_error)?;
                     Ok(ids)
                 }
                 DbBackend::F16(db) => {
-                    let (_new_db, ids) = db.migrate_to(new_path, new_dim).map_err(to_py_error)?;
+                    let (_new_db, ids) = db.migrate_to(&new_path, new_dim).map_err(to_py_error)?;
                     Ok(ids)
                 }
                 DbBackend::U64(db) => {
-                    let (_new_db, ids) = db.migrate_to(new_path, new_dim).map_err(to_py_error)?;
+                    let (_new_db, ids) = db.migrate_to(&new_path, new_dim).map_err(to_py_error)?;
                     Ok(ids)
                 }
             }
@@ -2407,8 +3134,7 @@ pub mod python {
             py: Python<'_>,
             interval_secs: Py<PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) =
-                database_write(slf).map_err(maintenance_admission_error)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
             let interval_secs: u64 =
                 extract_management_argument(py, interval_secs.bind(py), "interval_secs")?;
@@ -2421,8 +3147,7 @@ pub mod python {
             py: Python<'_>,
             enabled: Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) =
-                database_write(slf).map_err(maintenance_admission_error)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
             let enabled: bool = extract_management_argument(py, &enabled, "enabled")?;
             dispatch!(this, mut db => db.set_auto_build_quiver(enabled)).map_err(to_py_error)
@@ -2453,8 +3178,7 @@ pub mod python {
             py: Python<'_>,
             additional: Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) =
-                database_write(slf).map_err(maintenance_admission_error)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
             let additional: usize = extract_management_argument(py, &additional, "additional")?;
             dispatch!(this, db => db.reserve_nodes(additional)).map_err(to_py_error)
@@ -2463,8 +3187,7 @@ pub mod python {
         /// 设置内核内存预算（MiB），0 表示不限制。
         #[pyo3(signature = (mb=integer_argument(0)), text_signature = "($self, mb=0)")]
         fn set_memory_limit(slf: &Bound<'_, Self>, py: Python<'_>, mb: Py<PyAny>) -> PyResult<()> {
-            let (_request, mut borrowed) =
-                database_write(slf).map_err(maintenance_admission_error)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
             let mb: usize = extract_management_argument(py, mb.bind(py), "mb")?;
             let bytes = mb.checked_mul(1024 * 1024).ok_or_else(|| {
@@ -2518,9 +3241,14 @@ pub mod python {
             dispatch!(this, db => db.node_count()).map_err(to_py_error)
         }
 
-        fn __contains__(slf: &Bound<'_, Self>, id: u64) -> PyResult<bool> {
+        fn __contains__(
+            slf: &Bound<'_, Self>,
+            py: Python<'_>,
+            id: Bound<'_, PyAny>,
+        ) -> PyResult<bool> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let id = extract_argument(py, &id, "id", None)?;
             Ok(dispatch!(this, db => db.contains(id).map_err(to_py_error)?))
         }
 
@@ -2556,45 +3284,101 @@ pub mod python {
         fn batch_insert(
             slf: &Bound<'_, Self>,
             _py: Python<'_>,
-            vectors: Bound<'_, PyList>,
-            payloads: &Bound<'_, PyList>,
+            vectors: Bound<'_, PyAny>,
+            payloads: &Bound<'_, PyAny>,
         ) -> PyResult<Vec<u64>> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
+            let vectors = write_list(&vectors, "vectors")?;
+            let payloads = write_list(payloads, "payloads")?;
             if vectors.len() != payloads.len() {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "vectors and payloads must have the same length",
+                return Err(write_input_error(
+                    pyo3::exceptions::PyValueError::new_err(
+                        "vectors 与 payloads 长度必须相同 (vectors and payloads must have the same length)",
+                    ),
+                    "payloads",
                 ));
             }
             match &mut this.inner {
                 DbBackend::F32(db) => {
                     let mut tx = crate::database::TxBuilder::new();
-                    for (i, payload_obj) in payloads.iter().enumerate() {
-                        let vec_obj = vectors.get_item(i)?;
-                        let vec: Vec<f32> = vec_obj.extract()?;
-                        tx.insert(&vec, pyobject_to_json(&payload_obj)?);
+                    for i in 0..payloads.len() {
+                        let payload_obj = payloads.get_item(i).map_err(|error| {
+                            write_input_error(
+                                error,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )
+                        })?;
+                        let path = crate::sdk::field_member("vectors", &i.to_string());
+                        let vec_obj = vectors
+                            .get_item(i)
+                            .map_err(|error| write_input_error(error, &path))?;
+                        let vec: Vec<f32> = write_sequence(&vec_obj, &path, write_float)?;
+                        tx.insert(
+                            &vec,
+                            write_json(
+                                &payload_obj,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )?,
+                        );
                     }
-                    db.commit_tx(tx).map_err(to_py_error)
+                    db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
+                        .map_err(to_py_error)
                 }
                 DbBackend::F16(db) => {
                     let mut tx = crate::database::TxBuilder::new();
-                    for (i, payload_obj) in payloads.iter().enumerate() {
-                        let vec_obj = vectors.get_item(i)?;
-                        let vec: Vec<f32> = vec_obj.extract()?;
+                    for i in 0..payloads.len() {
+                        let payload_obj = payloads.get_item(i).map_err(|error| {
+                            write_input_error(
+                                error,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )
+                        })?;
+                        let path = crate::sdk::field_member("vectors", &i.to_string());
+                        let vec_obj = vectors
+                            .get_item(i)
+                            .map_err(|error| write_input_error(error, &path))?;
+                        let vec: Vec<f32> = write_sequence(&vec_obj, &path, write_float)?;
                         let vec16: Vec<half::f16> =
                             vec.into_iter().map(half::f16::from_f32).collect();
-                        tx.insert(&vec16, pyobject_to_json(&payload_obj)?);
+                        tx.insert(
+                            &vec16,
+                            write_json(
+                                &payload_obj,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )?,
+                        );
                     }
-                    db.commit_tx(tx).map_err(to_py_error)
+                    db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
+                        .map_err(to_py_error)
                 }
                 DbBackend::U64(db) => {
                     let mut tx = crate::database::TxBuilder::new();
-                    for (i, payload_obj) in payloads.iter().enumerate() {
-                        let vec_obj = vectors.get_item(i)?;
-                        let vec: Vec<u64> = vec_obj.extract()?;
-                        tx.insert(&vec, pyobject_to_json(&payload_obj)?);
+                    for i in 0..payloads.len() {
+                        let payload_obj = payloads.get_item(i).map_err(|error| {
+                            write_input_error(
+                                error,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )
+                        })?;
+                        let path = crate::sdk::field_member("vectors", &i.to_string());
+                        let vec_obj = vectors
+                            .get_item(i)
+                            .map_err(|error| write_input_error(error, &path))?;
+                        let vec: Vec<u64> = write_sequence(&vec_obj, &path, write_id)?;
+                        tx.insert(
+                            &vec,
+                            write_json(
+                                &payload_obj,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )?,
+                        );
                     }
-                    db.commit_tx(tx).map_err(to_py_error)
+                    db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
+                        .map_err(to_py_error)
                 }
             }
         }
@@ -2602,44 +3386,142 @@ pub mod python {
         fn batch_insert_with_ids(
             slf: &Bound<'_, Self>,
             _py: Python<'_>,
-            ids: Vec<u64>,
-            vectors: Bound<'_, PyList>,
-            payloads: &Bound<'_, PyList>,
+            ids: Bound<'_, PyAny>,
+            vectors: Bound<'_, PyAny>,
+            payloads: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
-            if vectors.len() != payloads.len() || ids.len() != vectors.len() {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "ids, vectors and payloads must have the same length",
+            let ids = write_sequence(&ids, "ids", write_id)?;
+            let vectors = write_list(&vectors, "vectors")?;
+            let payloads = write_list(payloads, "payloads")?;
+            if vectors.len() != payloads.len() {
+                return Err(write_input_error(
+                    pyo3::exceptions::PyValueError::new_err(
+                        "vectors 与 payloads 长度必须相同 (vectors and payloads must have the same length)",
+                    ),
+                    "payloads",
+                ));
+            }
+            if ids.len() != vectors.len() {
+                return Err(write_input_error(
+                    pyo3::exceptions::PyValueError::new_err(
+                        "ids 与 vectors 长度必须相同 (ids and vectors must have the same length)",
+                    ),
+                    "ids",
                 ));
             }
 
             match &mut this.inner {
                 DbBackend::F32(db) => {
                     let mut tx = crate::database::TxBuilder::new();
-                    for (i, payload_obj) in payloads.iter().enumerate() {
-                        let vec: Vec<f32> = vectors.get_item(i)?.extract()?;
-                        tx.insert_with_id(ids[i], &vec, pyobject_to_json(&payload_obj)?);
+                    for i in 0..payloads.len() {
+                        let payload_obj = payloads.get_item(i).map_err(|error| {
+                            write_input_error(
+                                error,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )
+                        })?;
+                        let path = crate::sdk::field_member("vectors", &i.to_string());
+                        let value = vectors
+                            .get_item(i)
+                            .map_err(|error| write_input_error(error, &path))?;
+                        let vec: Vec<f32> = write_sequence(&value, &path, write_float)?;
+                        let id = ids.get(i).copied().ok_or_else(|| {
+                            write_input_error(
+                                PyValueError::new_err(
+                                    "转换期间批次长度改变 (Batch length changed during conversion)",
+                                ),
+                                "ids",
+                            )
+                        })?;
+                        tx.insert_with_id(
+                            id,
+                            &vec,
+                            write_json(
+                                &payload_obj,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )?,
+                        );
                     }
-                    db.commit_tx(tx).map(|_| ()).map_err(to_py_error)
+                    db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
+                        .map(|_| ())
+                        .map_err(to_py_error)
                 }
                 DbBackend::F16(db) => {
                     let mut tx = crate::database::TxBuilder::new();
-                    for (i, payload_obj) in payloads.iter().enumerate() {
-                        let vec: Vec<f32> = vectors.get_item(i)?.extract()?;
+                    for i in 0..payloads.len() {
+                        let payload_obj = payloads.get_item(i).map_err(|error| {
+                            write_input_error(
+                                error,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )
+                        })?;
+                        let path = crate::sdk::field_member("vectors", &i.to_string());
+                        let value = vectors
+                            .get_item(i)
+                            .map_err(|error| write_input_error(error, &path))?;
+                        let vec: Vec<f32> = write_sequence(&value, &path, write_float)?;
                         let vec16: Vec<half::f16> =
                             vec.into_iter().map(half::f16::from_f32).collect();
-                        tx.insert_with_id(ids[i], &vec16, pyobject_to_json(&payload_obj)?);
+                        let id = ids.get(i).copied().ok_or_else(|| {
+                            write_input_error(
+                                PyValueError::new_err(
+                                    "转换期间批次长度改变 (Batch length changed during conversion)",
+                                ),
+                                "ids",
+                            )
+                        })?;
+                        tx.insert_with_id(
+                            id,
+                            &vec16,
+                            write_json(
+                                &payload_obj,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )?,
+                        );
                     }
-                    db.commit_tx(tx).map(|_| ()).map_err(to_py_error)
+                    db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
+                        .map(|_| ())
+                        .map_err(to_py_error)
                 }
                 DbBackend::U64(db) => {
                     let mut tx = crate::database::TxBuilder::new();
-                    for (i, payload_obj) in payloads.iter().enumerate() {
-                        let vec: Vec<u64> = vectors.get_item(i)?.extract()?;
-                        tx.insert_with_id(ids[i], &vec, pyobject_to_json(&payload_obj)?);
+                    for i in 0..payloads.len() {
+                        let payload_obj = payloads.get_item(i).map_err(|error| {
+                            write_input_error(
+                                error,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )
+                        })?;
+                        let path = crate::sdk::field_member("vectors", &i.to_string());
+                        let value = vectors
+                            .get_item(i)
+                            .map_err(|error| write_input_error(error, &path))?;
+                        let vec: Vec<u64> = write_sequence(&value, &path, write_id)?;
+                        let id = ids.get(i).copied().ok_or_else(|| {
+                            write_input_error(
+                                PyValueError::new_err(
+                                    "转换期间批次长度改变 (Batch length changed during conversion)",
+                                ),
+                                "ids",
+                            )
+                        })?;
+                        tx.insert_with_id(
+                            id,
+                            &vec,
+                            write_json(
+                                &payload_obj,
+                                &crate::sdk::field_member("payloads", &i.to_string()),
+                            )?,
+                        );
                     }
-                    db.commit_tx(tx).map(|_| ()).map_err(to_py_error)
+                    db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
+                        .map(|_| ())
+                        .map_err(to_py_error)
                 }
             }
         }
@@ -2769,12 +3651,15 @@ pub mod python {
         fn execute_prepared_tql(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
-            prepared: &PyPreparedTql,
+            prepared: Bound<'_, PyAny>,
             parameters: &Bound<'_, PyAny>,
         ) -> PyResult<Vec<PyQueryRow>> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
-            let values = collect_prepared_parameters(parameters)?;
+            let prepared = prepared
+                .extract::<PyRef<'_, PyPreparedTql>>()
+                .map_err(|error| argument_input_error(error, "prepared", None))?;
+            let values = collect_prepared_parameters(parameters, &prepared.inner)?;
             let rows = match &this.inner {
                 DbBackend::F32(db) => db
                     .execute_prepared_tql(&prepared.inner, &values)
@@ -2799,14 +3684,18 @@ pub mod python {
         fn console_request(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
-            session: &PyConsoleSession,
-            request_json: &str,
+            session: Bound<'_, PyAny>,
+            request_json: Bound<'_, PyAny>,
         ) -> PyResult<String> {
             let (_request, mut borrowed) = database_write(slf)?;
             let this = &mut *borrowed;
+            let session = session
+                .extract::<PyRef<'_, PyConsoleSession>>()
+                .map_err(|error| argument_input_error(error, "session", None))?;
             let session = session.inner.clone();
+            let request_json = read_string(&request_json, "request_json")?;
             py.allow_threads(
-                || dispatch!(this, mut db => db.console_request(&session, request_json)),
+                || dispatch!(this, mut db => db.console_request(&session, &request_json)),
             )
             .map_err(to_py_error)
         }
@@ -2829,8 +3718,7 @@ pub mod python {
             py: Python<'_>,
             query: Bound<'_, PyAny>,
         ) -> PyResult<PyObject> {
-            let (_request, mut borrowed) =
-                database_write(slf).map_err(maintenance_admission_error)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
             let query: String = extract_management_argument(py, &query, "query")?;
             let result = dispatch!(this, mut db => db.tql_mut(&query)).map_err(to_py_error)?;
@@ -2857,16 +3745,21 @@ pub mod python {
         /// for community in result["communities"]:
         ///     print(f"社区: {community}")
         /// ```
-        #[pyo3(signature = (min_community_size=3, max_iterations=15, compute_centroids=true))]
+        #[pyo3(signature = (min_community_size=integer_argument(3), max_iterations=integer_argument(15), compute_centroids=boolean_argument(true)), text_signature="($self, min_community_size=3, max_iterations=15, compute_centroids=True)")]
         fn leiden_cluster(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
-            min_community_size: usize,
-            max_iterations: usize,
-            compute_centroids: bool,
+            min_community_size: Py<PyAny>,
+            max_iterations: Py<PyAny>,
+            compute_centroids: Py<PyAny>,
         ) -> PyResult<PyObject> {
             let (_request, borrowed) = database_read(slf)?;
             let this = &*borrowed;
+            let min_community_size =
+                integer_value(min_community_size.bind(py), "min_community_size", None)?;
+            let max_iterations = integer_value(max_iterations.bind(py), "max_iterations", None)?;
+            let compute_centroids: bool =
+                extract_argument(py, compute_centroids.bind(py), "compute_centroids", None)?;
             let result = dispatch!(this, db => db.leiden_cluster(
                 min_community_size,
                 Some(max_iterations),
@@ -2961,9 +3854,14 @@ pub mod python {
             json_to_pyobject(py, &value)
         }
 
-        fn close_timeout(slf: &Bound<'_, Self>, py: Python<'_>, timeout_ms: u64) -> PyResult<bool> {
+        fn close_timeout(
+            slf: &Bound<'_, Self>,
+            py: Python<'_>,
+            timeout_ms: Bound<'_, PyAny>,
+        ) -> PyResult<bool> {
             let (_request, mut borrowed) = database_write(slf)?;
             let this = &mut *borrowed;
+            let timeout_ms: u64 = integer_value(&timeout_ms, "timeout_ms", None)?;
             py.allow_threads(|| dispatch!(this, mut db => db.close_timeout(std::time::Duration::from_millis(timeout_ms))))
                 .map_err(to_py_error)
         }
@@ -2971,14 +3869,16 @@ pub mod python {
         fn create_snapshot(
             slf: &Bound<'_, Self>,
             py: Python<'_>,
-            destination: &str,
-            generation_id: &str,
+            destination: Bound<'_, PyAny>,
+            generation_id: Bound<'_, PyAny>,
         ) -> PyResult<PyObject> {
-            let (_request, mut borrowed) = database_write(slf)?;
+            let (_request, mut borrowed) = database_write(slf).map_err(write_admission_error)?;
             let this = &mut *borrowed;
+            let destination = write_string(&destination, "destination")?;
+            let generation_id = write_string(&generation_id, "generation_id")?;
             let manifest = py
                 .allow_threads(
-                    || dispatch!(this, mut db => db.create_snapshot(destination, generation_id)),
+                    || dispatch!(this, mut db => db.create_snapshot(&destination, &generation_id)),
                 )
                 .map_err(to_py_error)?;
             let value = serde_json::to_value(manifest)
@@ -3042,20 +3942,28 @@ pub mod python {
             transaction.as_ptr() as usize,
             "python_transaction_callback",
         )
-        .map_err(to_py_error)?;
+        .map_err(|error| {
+            to_py_error(error.with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION))
+        })?;
         let borrowed = transaction.try_borrow_mut().map_err(|_| {
-            to_py_error(crate::TriviumError::DatabaseBusy {
-                resource: "python_transaction",
-            })
+            to_py_error(
+                crate::TriviumError::DatabaseBusy {
+                    resource: "python_transaction",
+                }
+                .with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION),
+            )
         })?;
         Ok((request, borrowed))
     }
 
     impl PyTransaction {
         fn active_builder(&mut self) -> PyResult<&mut TxBuilderBackend> {
-            self.builder
-                .as_mut()
-                .ok_or_else(|| to_py_error(crate::TriviumError::TransactionFinished))
+            self.builder.as_mut().ok_or_else(|| {
+                to_py_error(
+                    crate::TriviumError::TransactionFinished
+                        .with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION),
+                )
+            })
         }
 
         fn pending_count_inner(&self) -> usize {
@@ -3109,19 +4017,37 @@ pub mod python {
         ) -> PyResult<()> {
             let (_request, mut this) = transaction_write(slf)?;
             let builder = this.active_builder()?;
-            let json = pyobject_to_json(payload)?;
+            let json = pyobject_to_json_at(payload, Some("payload"), Some(TRANSACTION_VALIDATION))?;
             match builder {
                 TxBuilderBackend::F32(b) => {
-                    let v: Vec<f32> = vector.extract()?;
+                    let v: Vec<f32> = sequence_value(
+                        &vector,
+                        "vector",
+                        Some(TRANSACTION_VALIDATION),
+                        |value, field| float_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    )?;
+                    check_transaction_control()?;
                     b.insert(&v, json);
                 }
                 TxBuilderBackend::F16(b) => {
-                    let values: Vec<f32> = vector.extract()?;
+                    let values: Vec<f32> = sequence_value(
+                        &vector,
+                        "vector",
+                        Some(TRANSACTION_VALIDATION),
+                        |value, field| float_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    )?;
                     let v: Vec<half::f16> = values.into_iter().map(half::f16::from_f32).collect();
+                    check_transaction_control()?;
                     b.insert(&v, json);
                 }
                 TxBuilderBackend::U64(b) => {
-                    let v: Vec<u64> = vector.extract()?;
+                    let v: Vec<u64> = sequence_value(
+                        &vector,
+                        "vector",
+                        Some(TRANSACTION_VALIDATION),
+                        |value, field| integer_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    )?;
+                    check_transaction_control()?;
                     b.insert(&v, json);
                 }
             }
@@ -3132,25 +4058,44 @@ pub mod python {
         fn insert_with_id(
             slf: &Bound<'_, Self>,
             _py: Python<'_>,
-            id: u64,
+            id: Bound<'_, PyAny>,
             vector: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
             let (_request, mut this) = transaction_write(slf)?;
+            let id = integer_value(&id, "id", Some(TRANSACTION_VALIDATION))?;
             let builder = this.active_builder()?;
-            let json = pyobject_to_json(payload)?;
+            let json = pyobject_to_json_at(payload, Some("payload"), Some(TRANSACTION_VALIDATION))?;
             match builder {
                 TxBuilderBackend::F32(b) => {
-                    let v: Vec<f32> = vector.extract()?;
+                    let v: Vec<f32> = sequence_value(
+                        &vector,
+                        "vector",
+                        Some(TRANSACTION_VALIDATION),
+                        |value, field| float_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    )?;
+                    check_transaction_control()?;
                     b.insert_with_id(id, &v, json);
                 }
                 TxBuilderBackend::F16(b) => {
-                    let values: Vec<f32> = vector.extract()?;
+                    let values: Vec<f32> = sequence_value(
+                        &vector,
+                        "vector",
+                        Some(TRANSACTION_VALIDATION),
+                        |value, field| float_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    )?;
                     let v: Vec<half::f16> = values.into_iter().map(half::f16::from_f32).collect();
+                    check_transaction_control()?;
                     b.insert_with_id(id, &v, json);
                 }
                 TxBuilderBackend::U64(b) => {
-                    let v: Vec<u64> = vector.extract()?;
+                    let v: Vec<u64> = sequence_value(
+                        &vector,
+                        "vector",
+                        Some(TRANSACTION_VALIDATION),
+                        |value, field| integer_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    )?;
+                    check_transaction_control()?;
                     b.insert_with_id(id, &v, json);
                 }
             }
@@ -3158,26 +4103,37 @@ pub mod python {
         }
 
         /// 缓冲一个连边操作
-        #[pyo3(signature = (src, dst, label="related", weight=1.0))]
+        #[pyo3(signature = (src, dst, label=string_argument("related"), weight=float_argument(1.0)), text_signature="($self, src, dst, label='related', weight=1.0)")]
         fn link(
             slf: &Bound<'_, Self>,
-            src: u64,
-            dst: u64,
-            label: &str,
-            weight: f32,
+            src: Bound<'_, PyAny>,
+            dst: Bound<'_, PyAny>,
+            label: Py<PyAny>,
+            weight: Py<PyAny>,
         ) -> PyResult<()> {
             let (_request, mut this) = transaction_write(slf)?;
+            let src = integer_value(&src, "src", Some(TRANSACTION_VALIDATION))?;
+            let dst = integer_value(&dst, "dst", Some(TRANSACTION_VALIDATION))?;
+            let label = string_value(label.bind(slf.py()), "label", Some(TRANSACTION_VALIDATION))?;
+            let weight = float_value(
+                weight.bind(slf.py()),
+                "weight",
+                Some(TRANSACTION_VALIDATION),
+            )?;
+            check_transaction_control()?;
             match this.active_builder()? {
-                TxBuilderBackend::F32(b) => b.link(src, dst, label, weight),
-                TxBuilderBackend::F16(b) => b.link(src, dst, label, weight),
-                TxBuilderBackend::U64(b) => b.link(src, dst, label, weight),
+                TxBuilderBackend::F32(b) => b.link(src, dst, &label, weight),
+                TxBuilderBackend::F16(b) => b.link(src, dst, &label, weight),
+                TxBuilderBackend::U64(b) => b.link(src, dst, &label, weight),
             }
             Ok(())
         }
 
         /// 缓冲一个删除操作
-        fn delete(slf: &Bound<'_, Self>, id: u64) -> PyResult<()> {
+        fn delete(slf: &Bound<'_, Self>, id: Bound<'_, PyAny>) -> PyResult<()> {
             let (_request, mut this) = transaction_write(slf)?;
+            let id = integer_value(&id, "id", Some(TRANSACTION_VALIDATION))?;
+            check_transaction_control()?;
             match this.active_builder()? {
                 TxBuilderBackend::F32(b) => b.delete(id),
                 TxBuilderBackend::F16(b) => b.delete(id),
@@ -3188,9 +4144,20 @@ pub mod python {
 
         /// 缓冲一个断边操作
         #[pyo3(signature = (src, dst, label=None))]
-        fn unlink(slf: &Bound<'_, Self>, src: u64, dst: u64, label: Option<&str>) -> PyResult<()> {
+        fn unlink(
+            slf: &Bound<'_, Self>,
+            src: Bound<'_, PyAny>,
+            dst: Bound<'_, PyAny>,
+            label: Option<Bound<'_, PyAny>>,
+        ) -> PyResult<()> {
             let (_request, mut this) = transaction_write(slf)?;
-            match (this.active_builder()?, label) {
+            let src = integer_value(&src, "src", Some(TRANSACTION_VALIDATION))?;
+            let dst = integer_value(&dst, "dst", Some(TRANSACTION_VALIDATION))?;
+            let label = label
+                .map(|value| string_value(&value, "label", Some(TRANSACTION_VALIDATION)))
+                .transpose()?;
+            check_transaction_control()?;
+            match (this.active_builder()?, label.as_deref()) {
                 (TxBuilderBackend::F32(b), Some(label)) => b.unlink_label(src, dst, label),
                 (TxBuilderBackend::F16(b), Some(label)) => b.unlink_label(src, dst, label),
                 (TxBuilderBackend::U64(b), Some(label)) => b.unlink_label(src, dst, label),
@@ -3205,12 +4172,14 @@ pub mod python {
         fn update_payload(
             slf: &Bound<'_, Self>,
             _py: Python<'_>,
-            id: u64,
+            id: Bound<'_, PyAny>,
             payload: &Bound<'_, PyAny>,
         ) -> PyResult<()> {
             let (_request, mut this) = transaction_write(slf)?;
+            let id = integer_value(&id, "id", Some(TRANSACTION_VALIDATION))?;
             let builder = this.active_builder()?;
-            let json = pyobject_to_json(payload)?;
+            let json = pyobject_to_json_at(payload, Some("payload"), Some(TRANSACTION_VALIDATION))?;
+            check_transaction_control()?;
             match builder {
                 TxBuilderBackend::F32(b) => b.update_payload(id, json),
                 TxBuilderBackend::F16(b) => b.update_payload(id, json),
@@ -3220,20 +4189,44 @@ pub mod python {
         }
 
         /// 缓冲一个更新向量操作
-        fn update_vector(slf: &Bound<'_, Self>, id: u64, vector: Bound<'_, PyAny>) -> PyResult<()> {
+        fn update_vector(
+            slf: &Bound<'_, Self>,
+            id: Bound<'_, PyAny>,
+            vector: Bound<'_, PyAny>,
+        ) -> PyResult<()> {
             let (_request, mut this) = transaction_write(slf)?;
+            let id = integer_value(&id, "id", Some(TRANSACTION_VALIDATION))?;
+            check_transaction_control()?;
             match this.active_builder()? {
                 TxBuilderBackend::F32(b) => {
-                    let v: Vec<f32> = vector.extract()?;
+                    let v: Vec<f32> = sequence_value(
+                        &vector,
+                        "vector",
+                        Some(TRANSACTION_VALIDATION),
+                        |value, field| float_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    )?;
+                    check_transaction_control()?;
                     b.update_vector(id, &v);
                 }
                 TxBuilderBackend::F16(b) => {
-                    let values: Vec<f32> = vector.extract()?;
+                    let values: Vec<f32> = sequence_value(
+                        &vector,
+                        "vector",
+                        Some(TRANSACTION_VALIDATION),
+                        |value, field| float_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    )?;
                     let v: Vec<half::f16> = values.into_iter().map(half::f16::from_f32).collect();
+                    check_transaction_control()?;
                     b.update_vector(id, &v);
                 }
                 TxBuilderBackend::U64(b) => {
-                    let v: Vec<u64> = vector.extract()?;
+                    let v: Vec<u64> = sequence_value(
+                        &vector,
+                        "vector",
+                        Some(TRANSACTION_VALIDATION),
+                        |value, field| integer_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    )?;
+                    check_transaction_control()?;
                     b.update_vector(id, &v);
                 }
             }
@@ -3641,15 +4634,14 @@ pub mod python {
     #[pyo3(signature = (directory, runtime=None))]
     fn verify_snapshot(
         py: Python<'_>,
-        directory: &str,
-        runtime: Option<PyRef<'_, PyResourceRuntime>>,
+        directory: Bound<'_, PyAny>,
+        runtime: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
-        let runtime = runtime
-            .map(|r| r.inner.clone())
-            .unwrap_or_else(crate::resources::ResourceRuntime::shared_default);
+        let directory = read_string(&directory, "directory")?;
+        let runtime = parse_python_runtime(runtime, None)?;
         let manifest = py
             .allow_threads(|| {
-                crate::storage::snapshot::verify_snapshot_with_runtime(directory, &runtime)
+                crate::storage::snapshot::verify_snapshot_with_runtime(&directory, &runtime)
             })
             .map_err(to_py_error)?;
         let value = serde_json::to_value(manifest)
@@ -3661,18 +4653,21 @@ pub mod python {
     #[pyo3(signature = (source, destination, runtime=None))]
     fn restore_snapshot(
         py: Python<'_>,
-        source: &str,
-        destination: &str,
-        runtime: Option<PyRef<'_, PyResourceRuntime>>,
+        source: Bound<'_, PyAny>,
+        destination: Bound<'_, PyAny>,
+        runtime: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
-        let runtime = runtime
-            .map(|r| r.inner.clone())
-            .unwrap_or_else(crate::resources::ResourceRuntime::shared_default);
+        let source = write_string(&source, "source")?;
+        let destination = write_string(&destination, "destination")?;
+        let runtime = parse_python_runtime(
+            runtime,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )?;
         let manifest = py
             .allow_threads(|| {
                 crate::storage::snapshot::restore_snapshot_with_runtime(
-                    source,
-                    destination,
+                    &source,
+                    &destination,
                     &runtime,
                 )
             })
@@ -3717,6 +4712,7 @@ pub mod python {
             m.py().get_type::<SnapshotPublicationError>(),
         )?;
         m.add_class::<PyResourceRuntime>()?;
+        m.add_class::<PyRequestContext>()?;
         m.add_class::<PyConsoleSession>()?;
         m.add_class::<PyPreparedTql>()?;
         m.add_class::<PyTriviumDB>()?;
@@ -3733,7 +4729,41 @@ pub mod python {
         m.add_function(wrap_pyfunction!(init_logger, m)?)?;
         m.add_function(wrap_pyfunction!(verify_snapshot, m)?)?;
         m.add_function(wrap_pyfunction!(restore_snapshot, m)?)?;
+        // 私有诊断桥接不加入公开导出目录。
+        m.setattr(
+            "_call_argument_error",
+            wrap_pyfunction!(_call_argument_error, m)?,
+        )?;
+        m.setattr("_invoke_request", wrap_pyfunction!(_invoke_request, m)?)?;
+        m.setattr(
+            "_request_operation",
+            wrap_pyfunction!(_request_operation, m)?,
+        )?;
         Ok(())
+    }
+
+    #[pyfunction]
+    fn _request_operation(owner: &str, operation: &str) -> bool {
+        crate::sdk::request_operation(owner, operation)
+    }
+
+    #[pyfunction]
+    fn _call_argument_error(
+        py: Python<'_>,
+        exception: Bound<'_, PyAny>,
+        owner: &str,
+        operation: &str,
+        field: &Bound<'_, PyString>,
+        kind: &str,
+    ) -> PyResult<Py<pyo3::exceptions::PyBaseException>> {
+        let info = crate::sdk::call_argument_info(owner, operation, "arguments", kind)
+            .map_err(to_py_error)?;
+        let exception = attach_error_descriptor(PyErr::from_value(exception), info);
+        // Python 关键字允许孤立 surrogate，目标字段直接保留原始 PyString 内容。
+        let target = PyDict::new(py);
+        target.set_item("field", field)?;
+        exception.value(py).setattr("target", target)?;
+        Ok(exception.into_value(py))
     }
 
     #[cfg(test)]

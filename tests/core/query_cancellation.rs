@@ -25,13 +25,23 @@ fn controls() -> [(QueryControl, &'static str); 3] {
     ]
 }
 
-fn check_error(error: TriviumError, code: &str, write: Option<Value>) {
+fn check_error(error: TriviumError, code: &str, write: Option<Value>, query_started: bool) {
     let info = error.info();
     assert_eq!(info.code, code);
     assert_eq!(info.schema_version, 1);
     assert_eq!(info.details, json!({}));
-    assert!(info.stage.is_none());
-    assert!(info.target.is_none());
+    if query_started {
+        assert_eq!(info.stage, Some(triviumdb::error::QueryErrorStage::Execute));
+        assert_eq!(
+            serde_json::to_value(info.target.as_ref().unwrap()).unwrap(),
+            json!({"query_span":{
+                "start_byte":0,"end_byte":18,"line":1,"column":1
+            }})
+        );
+    } else {
+        assert!(info.stage.is_none());
+        assert!(info.target.is_none());
+    }
     assert_eq!(
         info.write.map(|write| serde_json::to_value(write).unwrap()),
         write
@@ -59,12 +69,14 @@ fn matrix<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(dtype:
                     .unwrap_err(),
                 code,
                 None,
+                true,
             );
             check_error(
                 db.execute_prepared_tql_with_control(&prepared, &HashMap::new(), control)
                     .unwrap_err(),
                 code,
                 None,
+                true,
             );
             assert_eq!(db.resource_stats().reserved_workspace_bytes, 0);
             assert_eq!(db.resource_stats().active_tasks, 0);
@@ -99,6 +111,7 @@ fn matrix<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(dtype:
                         .unwrap_err(),
                     code,
                     write,
+                    false,
                 );
                 assert!(!host.session().cancel("相同请求"));
                 let retry = json!({"version":1,"requestId":"相同请求","command":{

@@ -16,6 +16,7 @@ mod public_api_alignment;
 mod query_cancellation;
 mod query_numeric_indexes;
 mod quiver_threshold;
+mod request_contexts;
 mod retrieval_migration;
 mod retrieval_validation;
 mod runtime_types;

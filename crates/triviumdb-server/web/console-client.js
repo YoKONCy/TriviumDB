@@ -37,62 +37,125 @@
   function errorStatus(code) {
     if (['TDB_WRITE_CONFLICT', 'TDB_IDEMPOTENCY_CONFLICT', 'TDB_WRITE_OUTCOME_UNKNOWN', 'TDB_REENTRANT_ACCESS', 'TDB_TRANSACTION_FINISHED'].includes(code)) return 409;
     if (code === 'TDB_BUSY') return 503;
+    if (code === 'TDB_QUERY_CANCELLED') return 408;
+    if (code === 'TDB_QUERY_DEADLINE_EXCEEDED') return 504;
     if (code === 'TDB_READ_ONLY') return 403;
     if (['TDB_DATABASE_CLOSED', 'TDB_CONSOLE_SESSION_CLOSED'].includes(code)) return 410;
     if (['TDB_IO', 'TDB_WAL_CLOSED', 'TDB_RECOVERY_REQUIRED', 'TDB_CONSOLE_TASK_FAILED', 'TDB_HOST_LOCK_POISONED'].includes(code)) return 500;
     return 400;
   }
-  function httpTransport({ endpoint, headers = {}, credentials = 'same-origin', detach }) {
+  function transportFailure(cause, status = 502) {
+    const cancelled = cause?.name === 'AbortError';
+    const error = failure(cancelled ? 'TDB_QUERY_CANCELLED' : 'TDB_CONSOLE_TRANSPORT',
+      cancelled ? '请求已取消 (Request cancelled)' : '控制台响应交付失败 (Console response delivery failed)',
+      {}, cancelled ? 408 : (status >= 400 && status <= 599 ? status : 502));
+    error.cause = cause;
+    if (cancelled) error.name = 'AbortError';
+    return error;
+  }
+  function remoteFailure(value, status) {
+    if (!value || typeof value.code !== 'string' || !value.code.startsWith('TDB_')
+        || typeof value.message !== 'string' || !value.details || typeof value.details !== 'object'
+        || Array.isArray(value.details) || (value.schema_version != null && value.schema_version !== 1)) throw transportFailure(value);
+    const error = failure(value.code, value.message, value.details, status ?? errorStatus(value.code), value.schema_version ?? 1, value);
+    if (value instanceof Error) error.cause = value;
+    return error;
+  }
+  function httpTransport({ endpoint, headers = {}, credentials = 'same-origin', detach, drain }) {
     const send = async (url, init) => {
-      const response = await fetch(url, { credentials, ...init,
-        headers: { ...headers, 'Content-Type': 'application/json' } });
-      const body = await response.json();
-      if (!response.ok && !body.error) throw failure('TDB_CONSOLE_TRANSPORT',
-        '控制台 HTTP 请求失败 (Console HTTP request failed)', {}, response.status);
+      let response, body;
+      try {
+        const requestHeaders = new Headers(headers);
+        for (const [name, value] of new Headers(init.headers)) requestHeaders.set(name, value);
+        requestHeaders.set('Content-Type', 'application/json');
+        response = await fetch(url, { credentials, ...init,
+          headers: requestHeaders });
+        body = await response.json();
+      } catch (cause) { throw transportFailure(cause, response?.status); }
+      if (!response.ok) {
+        if (body?.error) {
+          if (body.version !== 1 || (init.body && body.requestId !== undefined
+              && body.requestId !== JSON.parse(init.body).requestId)) throw transportFailure(body);
+          throw remoteFailure(body.error, response.status);
+        }
+        throw transportFailure(body, response.status);
+      }
       return body;
     };
     return {
-      request: raw => send(endpoint, { method: 'POST', body: raw }),
+      request: (raw, { signal, requestId } = {}) => send(endpoint, { method: 'POST', body: raw, signal,
+        headers: requestId === undefined ? {} : { 'X-TDB-Request-ID': JSON.stringify(requestId)
+          .replace(/[^\x20-\x7e]/g, value => '\\u' + value.charCodeAt(0).toString(16).padStart(4, '0')) } }),
       cancel: id => send(endpoint.replace(/\/$/, '') + '/cancel/' + encodeURIComponent(id), { method: 'POST' }),
       detach,
+      drain,
     };
   }
   function create(options) {
-    if (!options || typeof options.request !== 'function') throw new TypeError('需要请求桥接 (Request bridge required)');
+    const requestBridge = options?.request;
+    if (typeof requestBridge !== 'function') throw new TypeError('需要请求桥接 (Request bridge required)');
+    const cancelBridge = options.cancel;
+    const detachBridge = options.detach;
+    const drainBridge = options.drain;
+    if (drainBridge != null && typeof drainBridge !== 'function') throw failure('TDB_INVALID_INPUT', '排空桥接必须是函数 (Drain bridge must be a function)', {}, 400, 1, { target: { field: 'drain' } });
     let closed = false, sequence = 0, tail = Promise.resolve(), disposing = null;
     const prefix = Array.from(globalThis.crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, '0')).join('');
     const pending = new Map();
+    const cancellations = new Set();
     const client = { info: null };
     client.call = (command, { signal } = {}) => {
       if (closed) return Promise.reject(failure('TDB_CONSOLE_SESSION_CLOSED', '控制台已卸载 (Console detached)', {}, 410));
       const requestId = prefix + '-' + (++sequence);
       // 排队前复制请求，调用方继续编辑也不能改写已准入内容。
       const raw = JSON.stringify({ version: 1, requestId, command });
-      let started = false;
+      const operation = JSON.parse(raw).command?.operation;
+      const write = ['mutate', 'manageIndex', 'buildQuiver', 'transaction', 'guardedTransaction', 'importNodes', 'importEdges'].includes(operation);
+      let started = false, settled = false, cancellation = null;
       const cancel = () => {
-        if (started && typeof options.cancel === 'function') Promise.resolve().then(() => options.cancel(requestId)).catch(() => {});
+        if (!started || settled || cancellation || typeof cancelBridge !== 'function') return;
+        cancellation = Promise.resolve().then(() => cancelBridge.call(options, requestId));
+        cancellations.add(cancellation);
+        cancellation.finally(() => cancellations.delete(cancellation)).catch(() => {});
       };
       signal?.addEventListener('abort', cancel, { once: true });
       const task = tail.then(async () => {
-        if (closed || signal?.aborted) throw new DOMException('请求已取消 (Request cancelled)', 'AbortError');
-        started = true;
-        let response;
-        try { response = await options.request(raw); } catch (error) {
-          // 原生 SDK 直接抛结构化错误，HTTP 桥接则返回 error 信封。
-          if (error.code && !error.status) throw failure(error.code, error.message, error.details || {}, errorStatus(error.code), error.schema_version ?? 1, error);
+        if (closed || signal?.aborted) {
+          const error = transportFailure(new DOMException('请求已取消 (Request cancelled)', 'AbortError'));
+          if (write) error.write = { phase: 'admission', outcome: 'not_committed' };
           throw error;
         }
-        if (typeof response === 'string') response = JSON.parse(response);
+        started = true;
+        let response;
+        const context = Object.freeze({ requestId, operation, write, signal });
+        try { response = await requestBridge.call(options, raw, context); } catch (error) {
+          // 原生 SDK 直接抛结构化错误，HTTP 桥接则返回 error 信封。
+          if (typeof error?.code === 'string' && error.code.startsWith('TDB_')) {
+            if (!error.status) throw remoteFailure(error);
+            throw error;
+          }
+          throw transportFailure(error);
+        }
+        if (typeof response === 'string') {
+          try { response = JSON.parse(response); } catch (cause) { throw transportFailure(cause); }
+        }
         if (response?.error) {
-          const e = response.error;
-          throw failure(e.code, e.message, e.details, errorStatus(e.code), e.schema_version ?? 1, e);
+          if (response.version !== 1 || (response.requestId !== undefined && response.requestId !== requestId)) throw transportFailure(response);
+          throw remoteFailure(response.error);
         }
         if (response?.version !== 1 || response.requestId !== requestId || !Object.hasOwn(response, 'data')) {
           throw failure('TDB_CONSOLE_TRANSPORT', '控制台响应身份无效 (Invalid console response identity)', {}, 502);
         }
-        if (command.operation === 'info') client.info = response.data;
+        if (operation === 'info') client.info = response.data;
         return response.data;
+      }).catch(cause => {
+        const error = typeof cause?.code === 'string' && cause.code.startsWith('TDB_') ? cause : transportFailure(cause);
+        if (write && started && error.write == null
+            && (['TDB_CONSOLE_TRANSPORT', 'TDB_CONSOLE_TASK_FAILED'].includes(error.code) || error.name === 'AbortError')) {
+          error.write = { phase: 'response', outcome: 'unknown' };
+        }
+        throw error;
       }).finally(() => {
+        settled = true;
         signal?.removeEventListener('abort', cancel);
         pending.delete(requestId);
       });
@@ -103,12 +166,18 @@
     client.submit = async (body, confirmOnly = false) => {
       const command = JSON.parse(body);
       if (confirmOnly) command.operation = 'transactionStatus';
-      const result = await client.call(command);
-      if (confirmOnly && result.outcome === 'unknown') throw failure('TDB_WRITE_OUTCOME_UNKNOWN',
-        '原事务结果待核对，已保留完整请求 (Original outcome needs reconciliation; complete request retained)', {}, 409);
-      if ((confirmOnly && result.outcome !== 'committed') || !Array.isArray(result.createdIds)
+      let result;
+      try { result = await client.call(command); } catch (error) {
+        if (confirmOnly && error.write == null) error.write = { phase: 'response', outcome: 'unknown' };
+        throw error;
+      }
+      if (confirmOnly && result?.outcome === 'unknown') throw failure('TDB_WRITE_OUTCOME_UNKNOWN',
+        '原事务结果待核对，已保留完整请求 (Original outcome needs reconciliation; complete request retained)', {}, 409, 1,
+        { write: { phase: 'response', outcome: 'unknown' } });
+      if (!result || (confirmOnly && result.outcome !== 'committed') || !Array.isArray(result.createdIds)
           || typeof result.revision !== 'string') {
-        throw failure('TDB_CONSOLE_TRANSPORT', '事务确认响应无效 (Invalid transaction acknowledgement)', {}, 502);
+        throw failure('TDB_CONSOLE_TRANSPORT', '事务确认响应无效 (Invalid transaction acknowledgement)', {}, 502, 1,
+          { write: { phase: 'response', outcome: 'unknown' } });
       }
       return result;
     };
@@ -117,12 +186,16 @@
       closed = true;
       for (const cancel of pending.values()) cancel();
       // detach 先阻止宿主接收新请求，再等待已准入请求完成；数据库关闭由宿主执行。
-      disposing = Promise.allSettled([Promise.resolve().then(() => options.detach?.()), tail]).then(results => {
+      disposing = Promise.allSettled([Promise.resolve().then(() => detachBridge?.call(options)), tail]).then(async results => {
+        await Promise.allSettled([...cancellations]);
         if (results[0].status === 'rejected') {
           disposing = null;
           throw results[0].reason;
         }
-      });
+        const drained = await drainBridge?.call(options);
+        if (drained === false) throw failure('TDB_BUSY', '宿主请求尚未排空 (Host requests are still draining)', { resource: 'console_bridge_drain' }, 503);
+        if (drained !== undefined && drained !== true) throw failure('TDB_CONSOLE_TRANSPORT', '宿主排空确认无效 (Invalid host drain acknowledgement)', {}, 502);
+      }).catch(error => { disposing = null; throw error; });
       return disposing;
     };
     const getNodes = (ids, signal) => client.call({ operation: 'getNodes', ids: ids.map(nodeId), withRevision: true }, { signal });

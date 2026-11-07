@@ -1,12 +1,12 @@
-//! 实例内编辑版本和有界事务回执。版本与事实共用 MemTable 锁，不写入磁盘格式。
+//! 实例内编辑版本与有界持久回执，共用事实锁及原子提交边界。
 
 use crate::resources::{ResourceRuntime, WorkspaceReservation};
 use crate::{Result, TriviumError};
 use serde::{Serialize, Serializer};
 use std::collections::VecDeque;
 
-pub(crate) const RECEIPT_CAPACITY: usize = 64;
-pub(crate) const RECEIPT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const RECEIPT_CAPACITY: usize = crate::storage::edit_receipts::MAX_RECEIPTS;
+pub(crate) const RECEIPT_BYTES: usize = crate::storage::edit_receipts::MAX_HEAP_BYTES;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Revision {
@@ -34,7 +34,8 @@ pub(crate) struct EditReceipt {
     /// None 表示已进入 WAL 提交阶段，但还没有可确认的成功回执。
     pub committed: Option<Revision>,
     pub bytes: usize,
-    pub _workspace: WorkspaceReservation,
+    pub planned: Option<Revision>,
+    pub _workspace: Option<WorkspaceReservation>,
 }
 
 pub(crate) struct EditState {
@@ -58,6 +59,85 @@ impl Default for EditState {
 }
 
 impl EditState {
+    pub fn next_revision(&self) -> Result<Revision> {
+        let mut revision = self.revision()?;
+        revision.counter = revision.counter.checked_add(1).ok_or_else(|| {
+            TriviumError::InvalidInput("编辑版本空间已耗尽 (Edit revision exhausted)".into())
+        })?;
+        Ok(revision)
+    }
+
+    pub fn restore(&mut self, raw: &[u8]) -> Result<()> {
+        let stored = crate::storage::edit_receipts::decode(raw)?;
+        let revision = parse_revision(&stored.revision)?;
+        parse_revision(&stored.expected)?;
+        if let Some(index) = self
+            .receipts
+            .iter()
+            .position(|receipt| receipt.key == stored.key)
+            && let Some(old) = self.receipts.remove(index)
+        {
+            self.receipt_bytes -= old.bytes;
+        }
+        let bytes = stored.fingerprint.capacity()
+            + stored.key.capacity()
+            + stored.expected.capacity()
+            + stored.ids.capacity() * std::mem::size_of::<u64>()
+            + 256;
+        if bytes > RECEIPT_BYTES {
+            return Err(TriviumError::CorruptedFile(
+                "回执超过容量限制 (Receipt exceeds capacity)".into(),
+            ));
+        }
+        while self.receipts.len() >= RECEIPT_CAPACITY || self.receipt_bytes + bytes > RECEIPT_BYTES
+        {
+            if let Some(old) = self.receipts.pop_front() {
+                self.receipt_bytes -= old.bytes;
+            }
+        }
+        self.receipts
+            .try_reserve(1)
+            .map_err(|error| TriviumError::CapacityAllocationFailed {
+                reason: format!("恢复回执分配失败 (Receipt recovery allocation failed): {error}"),
+            })?;
+        self.receipt_bytes += bytes;
+        self.receipts.push_back(EditReceipt {
+            key: stored.key,
+            expected: stored.expected,
+            fingerprint: stored.fingerprint,
+            ids: stored.ids,
+            committed: Some(revision),
+            planned: Some(revision),
+            bytes,
+            _workspace: None,
+        });
+        Ok(())
+    }
+
+    pub fn checkpoint(&self) -> Result<Vec<u8>> {
+        let completed = self
+            .receipts
+            .iter()
+            .filter(|receipt| receipt.committed.is_some());
+        let mut bytes = Vec::new();
+        let count = completed.clone().count();
+        bytes.extend_from_slice(&(count as u16).to_le_bytes());
+        for receipt in completed {
+            if let Some(revision) = receipt.committed {
+                let raw = receipt.encode(&receipt.ids, revision)?;
+                bytes.try_reserve(raw.len() + 4).map_err(|error| {
+                    TriviumError::CapacityAllocationFailed {
+                        reason: format!(
+                            "检查点回执分配失败 (Checkpoint receipt allocation failed): {error}"
+                        ),
+                    }
+                })?;
+                bytes.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(&raw);
+            }
+        }
+        Ok(bytes)
+    }
     pub fn revision(&self) -> Result<Revision> {
         self.counter
             .map(|counter| Revision { epoch: self.epoch, counter })
@@ -111,6 +191,7 @@ impl EditState {
         runtime: &ResourceRuntime,
     ) -> Result<()> {
         self.check(&receipt.expected)?;
+        receipt.planned = Some(self.next_revision()?);
         if self.counter == Some(u64::MAX) {
             return Err(TriviumError::InvalidInput(
                 "编辑版本空间已耗尽 (Edit revision exhausted)".into(),
@@ -129,7 +210,7 @@ impl EditState {
         }
         if self.queue_workspace.is_none() {
             let mut workspace = runtime.reserve_workspace(self.queue_bytes())?;
-            self.receipts.try_reserve_exact(RECEIPT_CAPACITY).map_err(|error| {
+            self.receipts.try_reserve_exact(RECEIPT_CAPACITY.saturating_sub(self.receipts.len())).map_err(|error| {
                 TriviumError::CapacityAllocationFailed { reason: format!(
                     "事务回执队列分配失败 (Transaction receipt queue allocation failed): {error}"
                 ) }
@@ -157,15 +238,37 @@ impl EditState {
     }
 
     pub fn complete(&mut self, key: &str) -> Result<()> {
-        let revision = self
-            .revision()
-            .map_err(|_| TriviumError::WriteOutcomeUnknown)?;
         let receipt = self
             .receipts
             .iter_mut()
             .find(|receipt| receipt.key == key)
             .ok_or(TriviumError::WriteOutcomeUnknown)?;
+        let revision = receipt.planned.ok_or(TriviumError::WriteOutcomeUnknown)?;
         receipt.committed = Some(revision);
+        self.counter = Some(revision.counter);
         Ok(())
     }
+}
+
+impl EditReceipt {
+    pub fn encode(&self, ids: &[u64], revision: Revision) -> Result<Vec<u8>> {
+        crate::storage::edit_receipts::encode(
+            &self.key,
+            &self.expected,
+            &self.fingerprint,
+            ids,
+            &revision.to_string(),
+        )
+    }
+}
+
+fn parse_revision(raw: &str) -> Result<Revision> {
+    let invalid =
+        || TriviumError::CorruptedFile("回执版本令牌无效 (Invalid receipt revision token)".into());
+    if raw.len() != 49 || !raw.is_ascii() || raw.as_bytes()[32] != b':' {
+        return Err(invalid());
+    }
+    let epoch = uuid::Uuid::parse_str(&raw[..32]).map_err(|_| invalid())?;
+    let counter = u64::from_str_radix(&raw[33..], 16).map_err(|_| invalid())?;
+    Ok(Revision { epoch, counter })
 }

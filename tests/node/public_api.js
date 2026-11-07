@@ -372,6 +372,7 @@ async function main() {
     runSharedContract(root)
     await runErrorContract(root)
     runConsoleContract(root)
+    await require('./request_contexts')(root)
     runKernelBoundaries(root)
     runTransactionContract(root)
     await require('./write_boundaries.js')(root, TriviumDB)
@@ -380,7 +381,7 @@ async function main() {
     await runAsyncResourceContract(root)
     assert.throws(
       () => new TriviumDB(file, 2),
-      /object|对象|options/i,
+      error => error.code === 'TDB_API_MIGRATION_REQUIRED' && error.target?.field === 'options',
       '旧位置参数构造器必须明确拒绝',
     )
 
@@ -447,7 +448,7 @@ async function main() {
     assert.deepEqual(indexes.find(item => item.kind === 'composite').fields, ['tenant', 'region'])
 
     const storage = db.storageInfo()
-    assert.equal(storage.database_format_current, 10)
+    assert.equal(storage.database_format_current, 11)
     assert.equal(storage.property_index_format, 8)
     assert.equal(storage.node_count, 2)
 

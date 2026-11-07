@@ -17,11 +17,23 @@ export type SyncMode = 'full' | 'normal' | 'off';
 
 export type DType = 'f32' | 'f16' | 'u64';
 
+/** 请求身份与取消控制，timeoutMs 为 0 时由宿主管理期限。 */
+export class RequestContext {
+  constructor(requestId: string, timeoutMs?: number | null);
+  readonly requestId: string;
+  cancel(): void;
+  check(): void;
+  /** 任务局部传播到原生调用及异步批量检索。 */
+  run<T>(operation: () => T): T;
+}
+
 /** 宿主可信代码创建的控制台策略与取消状态；不持有数据库文件锁。 */
 export class ConsoleSession {
   constructor(optionsJson?: string | null);
   detach(): void;
   isDetached(): boolean;
+  /** 停止准入且全部 Core 请求实际退出后返回 true。 */
+  isDrained(): boolean;
   cancel(requestId: string): boolean;
 }
 
@@ -411,11 +423,11 @@ export interface ErrorDetailsByCode {
   TDB_UNSUPPORTED_DATABASE_VERSION: { found: number; minimum_supported: number; current: number };
   TDB_API_MIGRATION_REQUIRED: { removed_api: string; replacement: string };
   TDB_UNSUPPORTED_SIDECAR_VERSION: { component: string; found: number; minimum_supported: number; current: number; action: string };
-  TDB_INVALID_INPUT: { reason: string };
+  TDB_INVALID_INPUT: { reason: string; argument_kind?: 'missing' | 'unknown_keyword' | 'multiple_values' | 'positional_only' | 'too_many_positional' | 'invalid_arguments' };
   TDB_ERROR: { reason: string };
 }
 
-/** 原始 TQL 中的 UTF-8 字节锚点；行列从 1 开始，列按 Unicode 标量计数。 */
+/** 原始 TQL 中的 UTF-8 半开字节范围；行列从 1 开始，列按 Unicode 标量计数。 */
 export interface QueryErrorSpan {
   start_byte: number;
   end_byte: number;
@@ -428,10 +440,10 @@ export type TriviumDBError = {
     schema_version: 1;
     code: Code;
     details: ErrorDetailsByCode[Code];
-    stage?: 'lex' | 'parse' | 'bind';
+    stage?: 'lex' | 'parse' | 'bind' | 'plan' | 'execute';
     target?: { query_span: QueryErrorSpan; parameter?: never; field?: never }
-      | { parameter: string; query_span?: never; field?: never }
-      | { field: string; query_span?: never; parameter?: never };
+      | { parameter: string; query_span?: QueryErrorSpan; field?: never }
+      | { field: string; query_span?: QueryErrorSpan; parameter?: never };
     write?: WriteErrorInfo;
   }
 }[keyof ErrorDetailsByCode];
@@ -491,7 +503,7 @@ export interface InstanceStats {
 
 /** 多实例共享的配额与计算运行时；额度不等于进程 RSS。 */
 export class ResourceRuntime {
-  constructor(options?: ResourceLimits);
+  constructor(options?: ResourceLimits | null);
   stats(): ResourceStats;
 }
 
@@ -513,8 +525,8 @@ export interface SnapshotManifest {
   files: Array<{ suffix: string; size: number; crc32: number }>;
 }
 
-export function verifySnapshot(directory: string, runtime?: ResourceRuntime): SnapshotManifest;
-export function restoreSnapshot(source: string, destination: string, runtime?: ResourceRuntime): SnapshotManifest;
+export function verifySnapshot(directory: string, runtime?: ResourceRuntime | null): SnapshotManifest;
+export function restoreSnapshot(source: string, destination: string, runtime?: ResourceRuntime | null): SnapshotManifest;
 
 export interface TriviumDBOptions {
   /** 共享运行时，省略时复用进程默认运行时 */
@@ -589,7 +601,7 @@ export class TriviumDB {
    * @param dtype        数据类型设定: "f32" | "f16" | "u64", 默认为 "f32"
    * @param syncMode     WAL 同步模式设定: "full" | "normal" | "off", 默认为 "normal"
    */
-  constructor(path: string, options?: TriviumDBOptions);
+  constructor(path: string, options?: TriviumDBOptions | null);
 
   publishGenerationManifest(generationId: string): {
     formatVersion: number;
@@ -641,7 +653,7 @@ export class TriviumDB {
    * console.log(context.customData)  // Hook 注入的自定义数据
    * ```
    */
-  searchWithContext(queryVector: Vector, config?: JsSearchConfig): JsSearchWithContextResult;
+  searchWithContext(queryVector: Vector, config?: JsSearchConfig | null): JsSearchWithContextResult;
 
   // ── CRUD ──
 
@@ -726,6 +738,9 @@ export class TriviumDB {
    */
   patchPayload(id: number, patch: any): void;
 
+  /** 按字段当前值执行原子条件替换。 */
+  compareAndSetPayloadField(id: number, field: string, expected: any, replacement: any): void;
+
   /**
    * 更换节点的特征向量（必须保持与 dim 维度一致）
    * @param id 节点 ID
@@ -739,6 +754,9 @@ export class TriviumDB {
    * @param id 要删除的节点 ID
    */
   delete(id: number): void;
+
+  /** 在同一事务中删除指定节点，返回实际删除数量。 */
+  deleteManyAtomic(ids: number[]): number;
 
   /**
    * 检查节点是否存在
@@ -789,7 +807,7 @@ export class TriviumDB {
    * @param depth 跳数 (默认 1)
    * @returns 深度之内的所有不重复的周边点 ID
    */
-  neighbors(id: number, depth?: number, labels?: string[]): number[];
+  neighbors(id: number, depth?: number | null, labels?: string[] | null): number[];
 
   /**
    * 获取节点的出边列表
@@ -802,16 +820,16 @@ export class TriviumDB {
   getIncomingEdges(id: number, label?: string): JsIncomingEdge[];
 
   /** 按方向、标签和深度执行确定性可达性查询 */
-  reachable(id: number, options?: JsReachabilityOptions): JsReachabilityResult[];
+  reachable(id: number, options?: JsReachabilityOptions | null): JsReachabilityResult[];
 
   /** 返回部分结果、预算统计及 truncated 标记 */
-  reachableDetailed(id: number, options?: JsReachabilityOptions): JsReachabilityOutput;
+  reachableDetailed(id: number, options?: JsReachabilityOptions | null): JsReachabilityOutput;
 
   /** 返回确定性最短路径并集子图 */
-  querySubgraph<T = any>(id: number, options?: JsReachabilityOptions): JsSubgraphResult<T>;
+  querySubgraph<T = any>(id: number, options?: JsReachabilityOptions | null): JsSubgraphResult<T>;
 
   /** 只在给定 anchor 集合内执行精确向量 Top-K */
-  searchGraphFirst(queryVector: Vector, anchorIds: number[], topK: number, maxAnchorNodes?: number): JsSearchHit[];
+  searchGraphFirst(queryVector: Vector, anchorIds: number[], topK: number, maxAnchorNodes?: number | null): JsSearchHit[];
 
   /** 全库精确向量 Top-K，用于 ANN 质量基准和小规模精确检索 */
   searchExact(queryVector: Vector, topK: number): JsSearchHit[];
@@ -825,17 +843,17 @@ export class TriviumDB {
    * @param expandDepth 获取到上述锚点后，在图谱里扩散的跳跃深度 (默认 0，纯粹退化为向量相似度检索)
    * @param minScore    只接受相似度大于这个阈值的搜索命中 (默认 0.5)
    */
-  search(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number, payloadFilter?: Record<string, unknown>): JsSearchHit[];
+  search(queryVector: Vector, topK?: number | null, expandDepth?: number | null, minScore?: number | null, payloadFilter?: Record<string, unknown> | null): JsSearchHit[];
 
-  searchGrouped(queryVector: Vector, topK?: number, expandDepth?: number, minScore?: number, payloadFilter?: Record<string, unknown>): JsGroupedSearchResult;
-  searchBatch(queryVectors: Vector[], topK?: number, parallelism?: number, minScore?: number): Promise<JsSearchHit[][]>;
+  searchGrouped(queryVector: Vector, topK?: number | null, expandDepth?: number | null, minScore?: number | null, payloadFilter?: Record<string, unknown> | null): JsGroupedSearchResult;
+  searchBatch(queryVectors: Vector[], topK?: number | null, parallelism?: number | null, minScore?: number | null): Promise<JsSearchHit[][]>;
 
   /**
    * 认知管线检索：向量锚定 + FISTA残差 + SA-PPR有限深度扩散 + DPP多样性采样
    * @param queryVector 查询向量
    * @param config      管线配置（所有字段均可选，有安全默认值）
    */
-  searchAdvanced(queryVector: Vector, config?: JsSearchConfig): JsSearchHit[];
+  searchAdvanced(queryVector: Vector, config?: JsSearchConfig | null): JsSearchHit[];
 
   /**
    * 向量 + 文本双路混合检索：带图扩散的双路检索入口
@@ -846,7 +864,7 @@ export class TriviumDB {
    * @param minScore    最小分数
    * @param hybridAlpha 混合权重 (0.0~1.0)，越大向量占比越高。默认 0.7
    */
-  searchHybrid(queryVector: Vector, queryText: string, topK?: number, expandDepth?: number, minScore?: number, hybridAlpha?: number, payloadFilter?: Record<string, unknown>): JsSearchHit[];
+  searchHybrid(queryVector: Vector, queryText: string, topK?: number | null, expandDepth?: number | null, minScore?: number | null, hybridAlpha?: number | null, payloadFilter?: Record<string, unknown> | null): JsSearchHit[];
 
   /**
    * 替换节点的 BM25 正文；空文本清除正文，关键词保持不变
@@ -880,9 +898,9 @@ export class TriviumDB {
    * ```
    */
   createIndex(field: string): void;
-  indexedLookup(equalities: Record<string, any>, maxResults?: number): number[];
+  indexedLookup(equalities: Record<string, any>, maxResults?: number | null): number[];
   createNgramIndex(field: string): void;
-  substringLookup(field: string, needle: string, maxResults?: number): number[];
+  substringLookup(field: string, needle: string, maxResults?: number | null): number[];
   createUniqueIndex(field: string): void;
   createUniqueCompositeIndex(fields: string[]): void;
   listUniqueIndexes(): string[][];

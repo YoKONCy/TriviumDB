@@ -28,6 +28,7 @@
 - [文本索引生命周期](#文本索引生命周期)
 - [写入边界与索引事实一致性](#写入边界与索引事实一致性)
 - [类型、解析与加载边界回归](#类型解析与加载边界回归)
+- [SDK 请求上下文与持久回执](#sdk-请求上下文与持久回执)
 
 ---
 
@@ -43,15 +44,41 @@ Python／Node 的维护用例补充管理整数与布尔提取、原始类型拒
 
 同一模块扩展到精确、图优先、上下文、高级和混合检索。Python 验证锚点序列的实际取值与元素整数回调，Node 验证配置 getter 的重入及原异常，分别核对配置字段和方法实参的 null／省略边界。混合检索按其入口契约核对完整 ID／Payload 和有限分数，精确及隔离图扩散的其他入口核对独立分数。关闭后保留旧绑定对象，移动独立数据库目录，再重开核对真实更新后的向量、Payload 和边。
 
+`tests/contracts/graph_arguments.json` 提供三节点链的独立事实、完整路径及出向／双向扫描量，Python／Node 的 `graph_arguments` 模块通过既有公共接口和实际 npm 包入口执行。用例覆盖四个图读取入口的字段、默认值、真实整数／标签序列／配置 getter 回调、宿主原异常和十五个 CRUD 入口的 SDK 拒绝结果。双向展开会在中间节点额外扫描回源边。拒绝后核对 WAL、路径、逐跳属性和子图，再实际更新向量、关闭并移动 Windows 文件组，重开核对全部记录。随后执行条件 Payload 更新与原子批量删除，再次重开核对持久化内容。Node 类型消费同时验证这两个已有运行接口的公开声明。
+
+`read_arguments` 用例复用三节点事实并通过 `tests/contracts/read_arguments.json` 增加空标签和 Unicode／NUL 标签，验证六类基础读取的完整节点／向量／Payload／边、入边顺序、不存在节点和语言整数表示边界。Python 的真实整数回调必须执行，同线程读取／写入重入明确拒绝；Event 控制的跨线程读取继续返回完整内容，写争用返回 Busy。Node 核对原始类型拒绝过程中数值／字符串强制转换次数为零，并通过真实参数 getter 验证全部读取入口的重入拒绝。保留已返回的结果与旧数据库对象后关闭并移动目录，再核对旧结果快照和两次重开的完整持久化事实。
+
+`tests/contracts/call_arguments.json` 独立列出基础读取、图、检索、TQL、CRUD、快照和关闭的缺参字段。Python／Node 的 `call_arguments` 模块通过公共契约及实际安装包执行，核对调用形状、错误继承、字段和执行前写入结果。Python 补充未知关键字、Unicode／NUL／孤立 surrogate 键、重复赋值、位置专用参数、额外位置、原宿主异常及事务拒绝后真实提交。Node 验证缺参与显式 undefined 的区别、额外位置参数和回调重入优先级。错误调用的值转换回调次数为零，WAL 保持原字节；随后提交独立事务、持有旧结果关闭、移动 Windows 文件组并两次重开核对完整记录。存根生成和 npm 类型正反消费覆盖公开表示。
+
+`tests/contracts/constructor_arguments.json` 登记构造器的数量、字符串和运行时字段及独立保存记录。Python／Node 的 constructor_arguments 模块验证内置类型、范围、MiB 换算、枚举、会话配置、原宿主异常及 Node getter。共享运行时逐次核对失败后的活动任务、工作区、附加数据库和登记配额，再验证重复 writer 的持有者、Windows 文件组移动、身份不匹配后的重试、完整节点与两次持久化重开。Python 覆盖三种 dtype 的现有 Mmap 构造入口，Node 覆盖三种 dtype 的 Rom／Mmap。Rust boundary 用例以 usize::MAX 验证维度拒绝的诊断算术及同路径重试。
+
+同一构造模块扩展 Python 内置布尔及 runtime 类型拒绝、Node 外层配置容器与旧数字迁移详情。正向覆盖 null 默认配置的完整 1536 维记录、无原型配置、继承 getter 与未知属性，反向验证数组在属性读取前拒绝。runtime 用例逐一经过数据库、快照校验与恢复入口，核对原生类型、无宿主属性转换、错误句柄、getter／Proxy 原异常及恢复的执行前结果。持有 writer 时拒绝无效构造并比较 WAL，随后实际创建／校验／恢复快照并重开核对完整节点及配额。类型正反消费同步可空默认形式。
+
+构造模块同时覆盖 Python 三个构造器的缺参、重复赋值、未知原始关键字和额外位置，以及错误形状下的零次协议调用。Node 验证 path 缺参、严格 Unicode 解码和原生构造转发中的子类、prototype、constructor 与 instanceof，实际写入完整节点验证转发后的实例。
+
+构造签名的独立预期同时约束参数顺序和默认值。Python 3.9 与当前解释器使用同一份实际 wheel 检查构造和普通 CRUD，核对原生类的公开签名及数值协议兼容。SDK 单元用例验证批量错误省略内部消费字段后仍保留 validation、wal、apply、publish 阶段、原提交结果和错误类别。
+
+`tests/contracts/crud_arguments.json` 给出十五个普通写入口的字段矩阵及独立完整前后事实。两端 crud_arguments 模块逐字段验证类型、表示范围、批量和 JSON 成员路径、转义键、原宿主异常、同库回调拒绝及 WAL。Python 补充长度提示失败、巨大提示下的小序列与回调修改批量输入；Node 补充 getter、Proxy 和非法 Unicode。随后通过全部十五个入口执行有效写入，持有旧结果及错误关闭数据库，移动 Windows 文件组，两次重开核对全部 ID、向量、Payload 和边，并再次持久化。Python 使用当前 Mmap 入口，Node 覆盖 Rom／Mmap，均覆盖 f32／f16／u64。实际 npm tarball 与安装 wheel 使用相同契约模块。
+
+`tests/contracts/retrieval_fields.json` 登记检索浮点／布尔字段、完整查询事实和文本重建记录拒绝路径。两端 retrieval_fields 模块覆盖八类检索及六类查找／文本入口，图模块补充四类遍历的标签成员、Node 配置容器、原始 getter 和 Python 长度提示策略。检索验证完整 ID、分数和 Payload、u64 批量的 Promise 拒绝位置、原宿主异常与 WAL，文本维护验证失败保留完整正文／关键词查询和节点，再通过 Mapping 或原始对象重建、持有结果关闭、移动文件组并两次重开核对完整事实。线程争用通过 Event 控制，原持有者继续执行。Python 使用三种 dtype 的 Mmap，Node 使用三种 dtype 的 Rom／Mmap，文本重开显式加载现有文本索引。
+
+Core 的 retrieval_validation 补充配置非有限值在普通和空批次中的准确字段、原错误及拒绝后的完整恢复事实。SDK 单元用例以独立权重样例验证混合换算，并拒绝非有限输入及溢出。实际 wheel、npm tarball、存根和类型消费使用同一公共入口，覆盖 Python 3.9 的适配兼容。
+
 `tests/core/query_cancellation.rs` 通过已取消、已过期及两种条件同时成立的控制器验证读取、Prepared 和 Console 分发，覆盖三种 dtype 的 Rom／Mmap、同请求 ID 重用、完整事实和资源账本。`tests/concurrency/console_cancellation.rs` 在真实 WAL 前屏障取消四类事务／导入，核对未提交阶段、WAL 字节、回执工作区、完整记录和后续有效写入，并在持有旧宿主时移动文件组及重开。HTTP 用不完成的请求体触发真实请求期限，再次取得唯一许可并恢复有效读取。该类用例验证核心期限语义，断言以返回类别、真实完成及资源状态为依据。
 
 管理契约补充普通字段定位、同步模式和单位转换拒绝、SDK 重入、额度失败回退、只读额度调整与文件组字节比较。既有构建句柄的预算变化用例执行真实拒绝、释放和重试；图修复故障沿用完整事实 fixture，覆盖发布前后失败及二次持久化。错误包装用例核对字段／Prepared 上下文透传既有 WAL 结果。
+
+请求完成点验收使用真实 Console 请求和受控 Hook 验证 detach 后仍有活动执行时的 `is_drained=false`，实际退出后才返回 true。Rust、Python 和 Node 复用 Core 状态，嵌入 HTTP 核对独立状态入口及 `no-store`。Server 在队列筛选后注入接收端退出和期限到期，确认实际写锁内逐条拒绝，并验证同批有效写入及两次重开完整事实。排队取消用真实队列接收和关闭排空确认完成。
+
+Console 数据传输用例在真实事务提交后注入连接失败、损坏 JSON、错误响应身份和无效回执，核对 `response/unknown`、完整原事务确认和数据库事实。外部 fetch 边界验证原异常 cause、HTTP 状态、预分发取消与活动 AbortSignal。取消和卸载用受控 Promise 验证去重及排空，断言以明确的进入、释放与完成通知为依据。
 
 后台构建使用通道和发布 Hook 分别控制执行前与发布前的 WAL 失效，核对拒绝字段、工作区归还和重开后的全部记录。周期压实通过真实登记派发和完成通知验证 I/O 故障。快照／迁移沿用现有故障套件，补齐独立目标结果、完整内容及再次持久化，迁移配额在发布屏障上验证。
 
 当前未发布加固增加 `tests/contracts/error_cases.json`：Rust、已构建 Python wheel 与 Node 原生模块通过真实 API 核对错误码及完整字段，覆盖 Prepared 参数、维度、节点、唯一约束、只读、行预算、迁移、关闭、锁、I/O 与格式版本。Rust 描述符及 Python 映射测试使用独立的全部错误变体样例；Node 另验大整数详情与 Promise 拒绝。语言参数提取错误按各语言类型契约验证。
 
-`tests/contracts/prepared_diagnostics.json` 为 Prepared 缺参、多参、JSON 容器值和向量参数类型提供独立诊断预期。Core、三种 dtype 的 Python／Node 实际包、独立 Server、嵌入 HTTP 与 Console 数据传输核对原始类别、`stage=bind` 和参数原名；适用入口同时核对拒绝后的正常查询、WAL 字节与重开完整事实。Rust 另覆盖 NaN 与正负无穷参数，Python 核对原异常继承关系。
+`tests/contracts/prepared_diagnostics.json` 为 Prepared 缺参、多参、JSON 容器值和向量参数类型提供独立诊断预期。Core、三种 dtype 的 Python／Node 实际包、独立 Server、嵌入 HTTP 与 Console 数据传输核对原始类别、`stage=bind`、参数原名和首个真实引用范围，覆盖注释、Unicode／CRLF／Tab、重复引用、文档过滤操作符同名，以及 WITH、WHERE、ORDER BY、聚合和嵌套表达式。适用入口核对拒绝后的正常查询、WAL 字节与重开完整事实。Rust 另覆盖 NaN 与正负无穷参数、独立标量转换及手工 AST 的已知信息、原查询释放与 Prepared 克隆继续持有时的关闭和文件移动。Python 核对原异常继承关系。
+
+`tests/contracts/query_execution_diagnostics.json` 固定规划与执行错误的原始范围、阶段、类别、HTTP 状态及写入结果。Core、三种 dtype 的实际 wheel／npm 包、Console 与两类 HTTP 核对同一结构，验证拒绝后的正常绑定、WAL 字节和重开完整节点。`tests/query/source_locations.rs` 逐层核对表达式、谓词、聚合、分页、全部 PipelineStage 及写入构造的范围，验证合成来源、取消、原始 AST、空匹配集的写目标绑定，以及融合与拆分路径各自的来源范围。`DisableFusion` Hook 执行原始逻辑阶段，拆分 RANK 使用真实算子完成验证；差分套件继续核对完整结果等价性。
 
 `tests/contracts/write_outcomes.json` 指定写入阶段、结果和事务消费状态。Core 与语言实际制品核对准入保留、预检消费、只读拒绝、响应失败后的回执及重开事实；Rom／Mmap 故障用例覆盖 WAL、应用和恢复。Server 的 `test-hooks` 套件使用真实分组同步故障与受控 blocking 任务异常，验证请求逐一收到结果、独立校验错误保留、任务排空和重开完整内容。队列满与执行前过期用例核对 `not_committed` 及 HTTP 重试字段，CLI JSON 与 Console 数据适配验证实际错误出口。
 
@@ -780,4 +807,27 @@ cargo test --test contracts 共享json契约由rust适配器完整执行
 - `cargo test --test storage kernel_boundaries -- --test-threads=1`：三种 dtype 的 Rom/Mmap 交叉打开、拒绝时文件组字节保持、带类型空检查点与未检查点 WAL、实例/共享预算准入及预算不足后的恢复重试。Windows 用真实文件共享标志阻止 `.vec` 替换，核对当前句柄隔离及重新打开后的向量和精确结果。
 - `cargo test --release --test query parser_limits -- --test-threads=1`：独立进程在 2 MiB 栈中解析连续 NOT、长加法/乘法、逻辑链与函数嵌套，要求正常返回拒绝。普通测试覆盖合法边界、最大维度负向量、完整输入消费，以及非法写尾部下的事实和 WAL 保持。
 - Linux CI 增加 release 小栈解析回归；现有跨平台测试继续执行 Windows 文件占用回归。Python/Node 公共 API 使用 `tests/contracts/kernel_boundaries.json`，基于实际原生模块核对错误码、完整详情、原值与重开事实。
-- WAL 独立样本搭配同类型基础检查点，历史 fixture 保留原始字节。格式规格覆盖 v10 新增文件头字段；v5–v9 兼容验证与 v10 类型校验分别执行。
+- WAL 独立样本搭配同类型基础检查点，历史 fixture 保留原始字节。格式规格覆盖 v10 引入的类型头及 v11 的有界回执尾块，WAL v4 增加同事务回执；历史格式兼容与当前格式校验分别执行。
+
+---
+
+## SDK 请求上下文与持久回执
+
+- `cargo test --features test-hooks --test core shared_sdk -- --test-threads=1` 验证同一请求控制器贯通 SDK 准入和内核 WAL 前检查。受控 Hook 在事务预检完成后取消，核对固定错误码、写入阶段、builder 消费状态、WAL 字节、空事实及后续有效提交与完整重开。准入拒绝单独验证 builder 保留和回调执行次数。
+- `tests/core/console_editing.rs` 使用真实完整 WAL 与缺少提交封条的 WAL 两组恢复样本，分别核对完整节点、Payload、边、创建 ID、原事务版本及回执。已封条事务支持幂等重放且 WAL 字节保持，未封条事务与回执共同不可见，随后检查持久化及只读再次打开。容量用例填满 64 条后重开追加无事实变化事务，核对首条淘汰、正常关闭及 WAL 恢复后的关闭保存新回执，随后只读重开核对全部事实。既有用例覆盖 Rom／Mmap、WAL／应用故障与资源释放。
+- `tests/storage/receipt_history.rs` 读取 `tests/fixtures/v0900_format10/` 的独立历史制品样本。三种 dtype 分别覆盖 v10 检查点、v3 WAL 和物理截断尾帧，核对只读零写或恢复拒绝、全部事实、格式升级及再次只读打开。样本来源、生产制品身份与内容预期由 `provenance.json` 记录。
+- `storage::edit_receipts` 单元用例使用独立编码样例验证完整 u64、每个截断前缀、过量 ID、回执数量及尾块长度／CRC。Python、Node 和实际安装 npm 包的 Console 公共契约核对跨重开确认及完整原事务重放。
+
+### 类型化作用域与宿主桥接
+
+- `cargo test --features test-hooks --test core request_contexts -- --test-threads=1` 覆盖 Reader／Writer 作用域、外层取消与期限、64 帧内部边界、异常展开后的归还，以及直接写入和普通共享事务取得 WAL 锁后的取消。Hook 断言事务消费状态、自动 ID 保留、WAL 字节和完整重开事实。
+- Python／Node 的 `request_contexts` 复用独立字段与内容样例，执行转换期间取消、事务准入、嵌套控制、32 层边界和异步任务隔离。Python 在第二次检索的原生工作线程中取消，Node 分别通过同步 Hook 与参数 getter 验证 Core 检查点及异步任务控制，整批返回按最终结果判断。后续有效批量查询核对全部分数与 Payload，再持有上下文关闭、移动 Windows 文件组并只读重开。
+- 自定义桥接验证冻结身份和写入类别、真实原生 RequestContext／Console 调用、受控 Promise 的 drain 等待、负面及非法确认、失败后重试，以及 null 拒绝的原始 cause 和未知写入结果。同步依据来自实际 Hook、事件和 Promise 完成。
+- Python 存根由安装制品生成，Node 类型消费核对同步与 Promise 的精确返回值及非法调用。实际 wheel 与 npm tarball 分别消费新增作用域和清理契约，范围见本批验收记录。
+
+### 工程收口的定向验证
+
+- request_contexts 的受控 Hook 位于精确评分分片和图计算迭代。用例分别选择串行／并行策略，在到达计算检查点后取消，核对固定错误、工作区和任务归还、WAL 原字节、稳定 Top-K 及完整只读重开内容。
+- retrieval_fields 复用共享入口表验证属性索引、复合字段、Leiden、快照、迁移、关闭超时和会话参数。Python 事务用例核对成员定位、原宿主异常及已有缓冲，Node 事务用例核对 operations 路径和未消费状态。
+- Console 嵌入 HTTP 验证请求体前身份、Unicode 编码、头与正文冲突、正确读回及完整重开。独立 Server 验证路径、方法、JSON、请求体预算、legacyCode 与请求头身份，CLI 验证 JSON 参数和输入文件错误。
+- 上述定向命令用于检查本批回归。整批交付验收另外执行适用的完整套件、安装制品、优化构建及平台矩阵，证据对应最终源码与提交。

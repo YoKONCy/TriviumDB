@@ -121,8 +121,13 @@ function runKernelBoundaries(root, TriviumDB = require('../../index.js').Trivium
     assert.deepEqual(db.tql('MATCH (n {id:3}) RETURN n')[0].n.payload, special)
     const cycle = {}; cycle.self = cycle
     const before = fs.readFileSync(file + '.wal')
-    for (const invalid of [cycle, { value: 1n }]) {
-      assert.throws(() => db.insert([1, 0], invalid), error => error.code === 'InvalidArg')
+    for (const [invalid, field] of [[cycle, '/payload' + '/self'.repeat(257)], [{ value: 1n }, '/payload/value']]) {
+      assert.throws(() => db.insert([1, 0], invalid), error => {
+        assert.equal(error.code, 'TDB_INVALID_INPUT')
+        assert.deepEqual(error.target, { field })
+        assert.deepEqual(error.write, { phase: 'validation', outcome: 'not_committed' })
+        return true
+      })
       assert.deepEqual(fs.readFileSync(file + '.wal'), before)
     }
     db.close()

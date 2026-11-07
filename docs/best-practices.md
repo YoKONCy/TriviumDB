@@ -768,13 +768,15 @@ db_b = triviumdb.TriviumDB("shared.tdb", dim=768)  # 💥 文件锁冲突!
 
 ### 数据库文件版本策略
 
-- TriviumDB 保证从 `0.7.0` 开始的已发布数据库文件可由后续版本读取并迁移。
-- `0.7.0` 的 v5/32-chunk BQ 和 `0.7.1–0.8.x` 的 v5/48-chunk BQ 会被自动识别；可写句柄下一次 `flush()` 或 `close()` 原子升级为自描述 v6。
+- 当前开发内核支持 v5–v11 主文件，历史来源的 dtype、检查点与 WAL 组合按对应校验规则打开。
+- `0.7.0` 的 v5/32-chunk BQ 和 `0.7.1–0.8.x` 的 v5/48-chunk BQ 按历史布局识别，可写句柄在后续检查点发布当前 v11 格式。
 - ReadOnly 以原格式读取受支持的历史文件；Immutable 的 manifest 必须与现有文件字节匹配。
-- 当前主文件为 v10，可读取 v5–v10；早于 v5 使用对应旧版导出迁移。Mmap 的 Payload generation 文件与 `.tdb/.vec/.flush_ok` 一同管理，ReadOnly/Immutable 不升级格式。无头 WAL 不再自动解析。不要手工修改文件头或 sidecar 版本号。
+- 当前主文件为 v11，WAL 为 v4，有界编辑回执与事实共用提交封条及检查点。Mmap 的 Payload generation 文件与 `.tdb/.vec/.flush_ok` 一同管理，ReadOnly/Immutable 保持原文件格式。早于 v5 的文件通过对应旧版导出迁移。
 - 当前内核按声明的版本范围解析文件；范围之外的版本返回明确错误，并保留原文件。
 
 文件格式升级与下文的 Embedding 维度迁移是两件不同的事：前者保留现有向量并由内核自动完成，后者用于更换向量模型和维度。
+
+> **升级提醒**　切换格式前保留完整文件组备份，旧内核环境使用升级前备份。文件头与 sidecar 版本由内核管理，历史无头 WAL 使用对应旧内核恢复后再迁移。
 
 当你需要切换 Embedding 模型（导致向量维度变化）时，不必重建整个数据库——使用 `migrate()` 保留全部 Payload 和图谱结构。
 

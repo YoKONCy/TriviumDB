@@ -558,8 +558,8 @@ fn prepared默认列名稳定且非法槽位和未绑定参数明确拒绝() {
     assert_eq!(json_value(&result[0]["$a"]), json!(1));
     assert_eq!(json_value(&result[0]["$b"]), json!(1));
     assert!(matches!(
-        db.tql("MATCH (n) RETURN $a"),
-        Err(TriviumError::QueryExecution(_))
+        db.tql("MATCH (n) RETURN $a").unwrap_err().underlying(),
+        TriviumError::QueryExecution(_)
     ));
     for slots in [
         vec![(usize::MAX, "a".into())],
@@ -636,7 +636,10 @@ fn 检索转换在空库中同样拒绝超出dtype范围的分量() {
             format!("MATCH (n) RANK n BY VECTOR [{literal}] TOP 1 RETURN n"),
         ] {
             assert!(
-                matches!(db.tql(&query), Err(TriviumError::InvalidVector { .. })),
+                matches!(
+                    db.tql(&query).unwrap_err().underlying(),
+                    TriviumError::InvalidVector { .. }
+                ),
                 "{query}"
             );
         }

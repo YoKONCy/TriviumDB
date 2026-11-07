@@ -24,6 +24,20 @@
     "importEdges": ["records"]
   },
   "transactionOperations": ["insert", "updatePayload", "updateVector", "delete", "link", "unlink"],
+  "writeOperations": ["mutate", "manageIndex", "buildQuiver", "transaction", "guardedTransaction", "importNodes", "importEdges"],
+  "completion": {
+    "cancelAcknowledgement": "signal-issued",
+    "detachAcknowledgement": "admission-closed",
+    "drainedCondition": "detached-and-no-active-core-requests",
+    "httpStatusPath": "/v1/console/status",
+    "httpIdentityHeader": "x-tdb-request-id",
+    "httpIdentityEncoding": "ascii-json-string",
+    "httpIdentityMustMatchBody": true,
+    "transportWriteFailure": {"phase":"response","outcome":"unknown"},
+    "bridgeContextFields": ["requestId", "operation", "write", "signal"],
+    "hostDrainPendingCode": "TDB_BUSY",
+    "hostDrainResource": "console_bridge_drain"
+  },
   "editing": {
     "revisionScope": "database-instance",
     "snapshotOperation": "getNodes",
@@ -32,12 +46,12 @@
     "legacyWritesRemainUnconditional": true,
     "maxReceipts": 64,
     "maxReceiptBytes": 8388608,
-    "receiptPersistence": "instance-only",
+    "receiptPersistence": "wal-checkpoint",
     "receiptMissMeans": "unknown",
     "requestIdIsIdempotencyKey": false,
     "replayIdentity": ["idempotencyKey", "expectedRevision", "operations"]
   },
-  "unsupported": ["open-path", "close-database", "interactive-transaction", "per-node-occ", "durable-idempotency", "ndjson-streaming"],
+  "unsupported": ["open-path", "close-database", "interactive-transaction", "per-node-occ", "unbounded-idempotency", "ndjson-streaming"],
   "frontend": {"legacyHtmlTransport": "server-http-v1", "embeddedTransport": "console-rpc-v1", "requiresTransportAdapter": false, "mountEntry": "console-embed.js", "clientEntry": "console-client.js", "isolation": "same-origin-iframe", "storageIdentity": "host-provided"},
   "documentation": "docs/embedded-console.md"
 }

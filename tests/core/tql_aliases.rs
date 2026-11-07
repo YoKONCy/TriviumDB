@@ -329,8 +329,10 @@ fn with保存的大值计入查询工作区预算() {
                 memory_limit: 16 * 1024,
                 ..Default::default()
             }
-        ),
-        Err(TriviumError::QueryExecution(_))
+        )
+        .unwrap_err()
+        .underlying(),
+        TriviumError::QueryExecution(_)
     ));
 }
 
@@ -367,7 +369,10 @@ fn with投影遵守共享配额并在拒绝后释放工作区() {
         .join(",");
     let result = db.tql(&format!("MATCH (n) AS n WITH n, {columns} RETURN v0"));
     assert!(
-        matches!(result, Err(TriviumError::ResourceBudgetExceeded { .. })),
+        matches!(
+            result.as_ref().unwrap_err().underlying(),
+            TriviumError::ResourceBudgetExceeded { .. }
+        ),
         "{result:?}"
     );
     assert_eq!(runtime.stats().reserved_workspace_bytes, 0);

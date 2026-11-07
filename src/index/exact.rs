@@ -74,16 +74,20 @@ pub fn search<T: VectorType>(
             reason: "精确查询工作区估算溢出".into(),
         })?;
     let _workspace = runtime.reserve_workspace(estimate)?;
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     runtime
         .pool(runtime.parallelism())?
-        .install(|| search_inner(db, query, top_k))
+        .install(|| search_inner(db, query, top_k, &control))
 }
 
 fn search_inner<T: VectorType>(
     db: &MemTable<T>,
     query: &[T],
     top_k: usize,
+    control: &crate::query::tql_executor::QueryControl,
 ) -> Result<Vec<SearchHit>> {
+    control.check()?;
     if top_k == 0 {
         return Err(TriviumError::InvalidInput(
             "search_exact 的 top_k 必须大于 0".into(),
@@ -100,6 +104,9 @@ fn search_inner<T: VectorType>(
         .try_fold(
             || BinaryHeap::with_capacity(top_k),
             |mut heap, slot| {
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::ExactScanStep);
+                control.check()?;
                 if let Some((id, vector)) = db.active_vector_at_slot(slot)? {
                     let score = T::similarity(query, vector);
                     if score.is_finite() {
@@ -112,6 +119,7 @@ fn search_inner<T: VectorType>(
         .try_reduce(
             || BinaryHeap::with_capacity(top_k),
             |mut left, right| {
+                control.check()?;
                 for candidate in right {
                     insert_candidate(&mut left, candidate, top_k);
                 }
@@ -119,7 +127,8 @@ fn search_inner<T: VectorType>(
             },
         )?;
 
-    hydrate_candidates(db, candidates)
+    control.check()?;
+    hydrate_candidates(db, candidates, control)
 }
 
 /// GraphFirst 只对去重后的合法 anchor 评分，先保留 Top-K，再读取 Payload。
@@ -140,7 +149,9 @@ pub(crate) fn rank_unique_ids<T: VectorType>(
         })?;
     let _workspace = db.resource_runtime().reserve_workspace(bytes)?;
     let mut heap = BinaryHeap::with_capacity(k);
+    let control = crate::request::control().unwrap_or_default();
     for &id in ids {
+        control.check()?;
         if let Some(slot) = db.internal_slot_of(id)
             && let Some((_, vector)) = db.active_vector_at_slot(slot)?
         {
@@ -150,13 +161,15 @@ pub(crate) fn rank_unique_ids<T: VectorType>(
             }
         }
     }
-    hydrate_candidates(db, heap)
+    hydrate_candidates(db, heap, &control)
 }
 
 fn hydrate_candidates<T: VectorType>(
     db: &MemTable<T>,
     candidates: BinaryHeap<Candidate>,
+    control: &crate::query::tql_executor::QueryControl,
 ) -> Result<Vec<SearchHit>> {
+    control.check()?;
     let mut candidates = candidates.into_vec();
     candidates.sort_by(|left, right| {
         right
@@ -169,6 +182,7 @@ fn hydrate_candidates<T: VectorType>(
             .len()
             .saturating_mul(std::mem::size_of::<SearchHit>()),
         |sum, candidate| {
+            control.check()?;
             sum.checked_add(db.payload_query_peak(candidate.id)?)
                 .ok_or_else(|| TriviumError::CapacityAllocationFailed {
                     reason: "精确结果工作区溢出 (Exact result workspace overflowed)".into(),
@@ -179,6 +193,7 @@ fn hydrate_candidates<T: VectorType>(
     candidates
         .into_iter()
         .map(|candidate| {
+            control.check()?;
             let payload = db
                 .try_get_payload(candidate.id)?
                 .ok_or(TriviumError::NodeNotFound(candidate.id))?;

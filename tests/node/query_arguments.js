@@ -171,4 +171,4 @@ async function runQueryArguments(root, { TriviumDB }) {
   }
 }
 
-module.exports = { runQueryArguments }
+module.exports = { runQueryArguments, invalid }

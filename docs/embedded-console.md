@@ -14,6 +14,7 @@
 - [请求、权限和数据表示](#请求权限和数据表示)
 - [编辑快照、冲突与原事务确认](#编辑快照冲突与原事务确认)
 - [错误与写入确认](#错误与写入确认)
+- [宿主自定义桥接](#宿主自定义桥接)
 - [资源交付与组件挂载](#资源交付与组件挂载)
 
 ---
@@ -41,6 +42,7 @@ Console v1 为 Rust、Python 和 Node.js 提供同一份 JSON 请求协议，直
 ### 请求调度与取消
 
 - detach 阻止新请求并发出取消信号。数据库持久化与关闭由宿主调度。多个独立会话各自管理状态；同一会话的克隆共享卸载及取消状态。
+- `cancel(id)` 的布尔值确认取消信号是否发给活动请求。`is_drained()`／`isDrained()` 在会话已 detach 且所有 Core 请求实际退出后返回 `true`，新建的开放会话返回 `false`。状态查询仅访问会话自身的锁。
 - TQL 读取使用内核 QueryControl 协作取消和 deadline。其余操作在支持的检查点检查取消；向量 Hook、索引构建及已进入提交的写入不能被强制中断。`info.transport.cooperativeCancellation` 明确列出协作取消的操作。
 - HTTP 客户端退出会传递取消信号。blocking 任务持有的并发许可在实际执行退出后归还。
 
@@ -49,6 +51,8 @@ Console v1 为 Rust、Python 和 Node.js 提供同一份 JSON 请求协议，直
 ### 宿主关闭顺序
 
 宿主先停止入口并调用 `detach`，再在自己的串行调度中调用 `Database.close`。关闭成功后释放文件锁，调用方可继续持有会话、Router、Prepared 或关闭后的 Database 对象。
+
+宿主可用 `is_drained()` 确认会话执行排空，嵌入 HTTP 对应 `GET /v1/console/status` 和 `{"drained": bool}`。HTTP 请求体、适配任务与响应消费按传输层任务记录完成点，数据库文件资源以显式关闭结果确认。
 
 > **关闭提醒**：准入或持久化失败时保留锁和原实例，处理原因后重试。持久化完成后的 Hook 析构异常仍完成资源释放，此时实例已为 `closed`。宿主结合关闭阶段判断资源状态，详见[生命周期契约](lifecycle-snapshots.md)。
 
@@ -202,7 +206,9 @@ Python/Node 提供同步 JSON 调用入口。HTTP 或 IPC 包装、端口监听�
 
 本协议复用内核默认排序、事务、持久化和关闭语义。读取行工作集预算取数据库与 maxOperations 的较小有效值，超限明确拒绝，不返回静默截断结果。写计划按模式每行的操作上界约束匹配集，在匹配集和写向量物化前准入，复杂模式可能需要拆分批次；确认响应预算在 WAL 前检查。TQL 读取与写计划可协作取消，已经开始的提交遵循原子完成语义。
 
-> **能力范围**：Console RPC v1 使用整请求事务、全库版本校验和实例内回执。NDJSON、交互式事务、节点级 OCC/ETag 和跨重启持久幂等记录属于当前协议范围之外的能力。
+Console RPC v1 使用整请求事务、全库版本校验和有界持久回执。请求与结果协议在 Rust、Python、Node 和嵌入 HTTP 之间共享。
+
+> **能力范围**　NDJSON、交互式事务、节点级 OCC/ETag 和无限期幂等历史需要单独的协议设计。
 
 ---
 
@@ -241,15 +247,17 @@ const status = rpc('confirm-1', { ...original, operation: 'transactionStatus' })
 
 ### 回执与结果确认
 
-成功响应为 `{createdIds, revision, replayed:false}`。在同一实例内以原键、原版本和完整原操作重试，命中回执后返回原 createdIds/revision 和 `replayed:true`，直接复用原结果；新的 requestId 可以不同。所有会话共享该实例的回执，键应由调用方生成并保持全局唯一。键命中但原版本或操作内容不同，返回 `TDB_IDEMPOTENCY_CONFLICT`。transactionStatus 使用相同的完整事务身份进行校验。
+成功响应为 `{createdIds, revision, replayed:false}`。以原键、原版本和完整原操作重试，命中保留的回执后返回原 createdIds/revision 和 `replayed:true`，直接复用原结果。新的 requestId 可以不同。回执与事实共用 WAL 事务封条，并随完整检查点保存，正常关闭、恢复和重开后继续提供确认。键应由调用方生成并保持全局唯一。键命中但原版本或操作内容不同，返回 `TDB_IDEMPOTENCY_CONFLICT`。transactionStatus 使用相同的完整事务身份进行校验。
 
-`transactionStatus` 接收与原事务相同的 expectedRevision、idempotencyKey、operations；需要 transactions 能力，允许只读会话查询。确认成功时返回 `{outcome:"committed", createdIds, revision}`，其持久性仍服从数据库 SyncMode；没有完整成功回执时仅返回 `{outcome:"unknown"}`。此接口只读取回执。
+`transactionStatus` 接收与原事务相同的 expectedRevision、idempotencyKey、operations，需要 transactions 能力，允许只读会话查询。确认成功时返回 `{outcome:"committed", createdIds, revision}`，其持久性服从数据库 SyncMode。缺少完整成功回执时返回 `{outcome:"unknown"}`，此接口读取当前保留的回执。
 
-> **结果确认**：unknown 表示当前缺少完整成功回执，实际提交结果需要另行核对。若实例因 WAL/应用故障要求恢复，宿主需先处理恢复错误。
+> **结果确认**　unknown 表示当前缺少完整成功回执，实际提交结果需要另行核对。若实例因 WAL/应用故障要求恢复，宿主需先处理恢复错误。
 
-回执最多保留 64 条，记录内容合计最多 8 MiB，先入先出淘汰；队列和回执内存参与实例及共享运行时预算，确认缓冲也在 WAL 前准入。回执保存在内存中，关闭后释放。WAL 提交开始前会消耗原编辑版本，无事实变化的操作和结果不确定的提交同样消耗原版本；回执淘汰后重放旧请求会被拒绝。重新打开使用新实例标识，旧请求返回冲突，旧回执查询返回 unknown。
+回执最多保留 64 条，记录内容合计最多 8 MiB，先入先出淘汰。回执保存原键、原版本、完整事务指纹字节、创建 ID 及提交版本，加载计入实例堆预算，运行期及编码暂存按共享资源预算准入。只有完整提交封条中的回执参与恢复，缺少封条的事务及回执一起丢弃。检查点中的回执与事实一同原子发布。
 
-> **恢复提醒**：回执淘汰、重开或未知事务重试发生冲突时，应按业务身份核对整笔事务的实际结果，再决定后续操作。
+重新打开会生成新的编辑版本身份。保留的原事务回执继续确认历史提交，后续编辑从当前快照取得版本令牌。回执缺失或已淘汰时返回 unknown，旧版本条件按当前实例校验。无事实变化的受保护事务也消耗一个版本并保存回执，进入 WAL 后的未知结果通过恢复完成后再确认。
+
+> **恢复提醒**　回执受容量和淘汰约束，unknown 的事务按业务身份核对完整事实。当前开发格式为主文件 v11、WAL v4，切换内核前保留完整文件组备份，旧内核环境通过升级前备份恢复。
 
 `info.transport` 与 console-contract.json 公布这些能力及上限。旧的 transaction、mutate、importNodes/importEdges 保持无版本前置条件的原语义；这些写入会使旧编辑令牌失效。版本条件和幂等处理由 guardedTransaction 提供。
 
@@ -267,11 +275,52 @@ const status = rpc('confirm-1', { ...original, operation: 'transactionStatus' })
 
 Rust/Python/Node 保留内核错误码与 details；HTTP 将它们放入 error.code、error.message、error.details，并把详情中超出 JavaScript 安全范围的整数转换为十进制字符串。卸载后的会话返回 TDB_CONSOLE_SESSION_CLOSED，关闭的实例返回 TDB_DATABASE_CLOSED；同路径的新实例仍需新会话。
 
+HTTP 数据适配器发送 `X-TDB-Request-ID`，值为原 requestId 的 ASCII JSON 字符串，非 ASCII 字符按 UTF-16 的 `\uXXXX` 转义。服务端在读取正文之前验证单一身份头，允许的原始 ID 为 1—128 个 UTF-8 字节，头编码最多 770 字节。请求体读取、期限和并发拒绝沿该身份返回，响应头保留相同编码，错误信封附加原 requestId。进入 Core 之前核对正文身份，相异身份按 TDB_INVALID_INPUT 拒绝。
+
+现有直接调用 HTTP 的宿主可继续发送原正文协议。提供身份头时遵守上述编码及正文匹配要求。HTTP 读取正文前的错误仅提供此时已知的事实，已解析命令的写入结果继续由 Core 返回。认证及跨域配置由宿主维护，跨域接入时将该请求头纳入允许列表。
+
 ### 响应预算与提交状态
 
 响应编码严格受 maxResponseBytes 限制，超限返回 TDB_CONSOLE_RESPONSE_TOO_LARGE，details 包含 max_bytes 和 committed。响应缓冲按扩容峰值参与 ResourceRuntime 共享工作区准入，返回拥有型字符串后由调用方管理其内存。所有写入口在提交前验证确认响应的编码上界，并保留已分配的确认缓冲及额度跨越提交，避免提交后额度被其他实例抢走；TQL 在内核生成实际写计划后、写 WAL 前准入，预算不足时在提交前拒绝。编码器保留提交后检查；committed=true 表示写入已经提交，响应交付失败。
 
-> **写入确认**：客户端退出、超时或传输失败后，应查询原事务回执或核对实际数据，再决定后续操作。
+Console 数据适配器将连接中断、JSON 解码、响应身份及回执结构错误按 `TDB_CONSOLE_TRANSPORT` 返回，保留原宿主异常 cause。已交给桥接的写请求提供 `response/unknown`，本地排队取消提供 `admission/not_committed`。内核及 HTTP 错误信封沿用原类别、实际 HTTP 状态和已有写入事实。HTTP 的 AbortSignal 传入 fetch，原事务确认失败继续保留待确认结果。
+
+`dispose()` 等待 detach 回调、本地请求队列和已经发出的取消调用结束，再调用已配置的 drain 桥接。取消调用按请求去重，Core 会话状态及数据库关闭由宿主各自确认。详细完成点见[公共错误契约](error-contracts.md#请求与传输完成点)。
+
+> **写入确认**　客户端退出、超时或传输失败后，应查询完整原事务回执或核对实际数据，再决定后续操作。
+
+---
+
+## 宿主自定义桥接
+
+`create(options)` 在创建时捕获 request、cancel、detach 和 drain 回调，并保留 options 作为回调 receiver。request 接收完整 JSON 字符串及冻结的 `{requestId, operation, write, signal}` 元数据。前三个字段来自排队前的请求快照，signal 由当前进程处理。
+
+```javascript
+const client = create({
+  request(raw, { requestId, signal }) {
+    const context = new RequestContext(requestId);
+    const abort = () => context.cancel();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) context.cancel();
+    try {
+      return context.run(() => db.consoleRequest(session, raw));
+    } finally {
+      signal?.removeEventListener('abort', abort);
+    }
+  },
+  cancel(requestId) { return session.cancel(requestId); },
+  detach() { session.detach(); },
+  drain() { return session.isDrained(); },
+});
+```
+
+Core 将外层控制器、会话期限及会话取消合并。宿主使用 Rust、Python 或 Node 的原生控制句柄时，取消和期限继续进入相同检查点。IPC 跨进程通过宿主消息传递身份及控制事件，接收端建立本地控制器并执行实际调用。
+
+drain 可返回 Promise，完成值为 undefined 或 true 时确认宿主排空。false 返回 `TDB_BUSY`，`details.resource` 为 `console_bridge_drain`。其他完成值返回 `TDB_CONSOLE_TRANSPORT`。detach 或 drain 失败后，客户端保持停止准入，后续 dispose 可重试清理。HTTP 适配器接受同样的 drain 回调。
+
+任意宿主拒绝值，包括 null 和原始值，按传输错误保存 cause。已分发写入仍按未知响应结果处理。完成点分别覆盖请求执行、传输消费、宿主排空和数据库关闭。
+
+> **完成提醒**　宿主的 drain 回调确认其实际持有的工作。同步原生调用使用宿主执行线程，异步任务及跨进程消息的调度和取消由对应桥接管理。数据库文件资源通过显式关闭完成点确认释放。
 
 ---
 

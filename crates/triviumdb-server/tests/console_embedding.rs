@@ -36,6 +36,174 @@ fn setup(path: &str) -> Arc<Mutex<Database<f32>>> {
     Arc::new(Mutex::new(db))
 }
 
+async fn session_status(app: Router) -> Value {
+    let response = app
+        .oneshot(
+            Request::get("/v1/console/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn 请求体解析前保留身份且头正文不符时保留全部事实() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("identity.tdb");
+    let database = setup(path.to_str().unwrap());
+    let before = std::fs::read(format!("{}.wal", path.to_str().unwrap())).unwrap();
+    let host = ConsoleHost::attach(&database, ConsoleOptions::default()).unwrap();
+    let app = build_console_app(host, ConsoleHttpOptions::default()).unwrap();
+    let identity = r#""\u8bf7\u6c42\ud83d\udc31""#;
+    for headers in [
+        vec!["[]".to_owned()],
+        vec!["\"\"".to_owned()],
+        vec![format!("\"{}\"", "a".repeat(129))],
+        vec![identity.to_owned(), identity.to_owned()],
+    ] {
+        let mut request = Request::post("/v1/console");
+        for header in headers {
+            request = request.header("x-tdb-request-id", header);
+        }
+        let body = Body::from_stream(futures_util::stream::pending::<
+            Result<bytes::Bytes, std::io::Error>,
+        >());
+        let response = app
+            .clone()
+            .oneshot(request.body(body).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(error["error"]["code"], "TDB_INVALID_INPUT");
+        assert_eq!(error["error"]["target"], json!({"field":"request_id"}));
+        assert!(error.get("requestId").is_none());
+    }
+    for (raw, code) in [
+        ("{".to_owned(), "TDB_INVALID_INPUT"),
+        (
+            wire(
+                "other",
+                json!({"operation":"transaction","operations":[{"op":"delete","id":"1"}]}),
+            ),
+            "TDB_INVALID_INPUT",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/console")
+                    .header("x-tdb-request-id", identity)
+                    .body(Body::from(raw))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()["x-tdb-request-id"], identity);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["requestId"], "请求🐱");
+        assert_eq!(body["error"]["code"], code);
+    }
+    let response = app
+        .oneshot(
+            Request::post("/v1/console")
+                .header("x-tdb-request-id", identity)
+                .body(Body::from(wire(
+                    "请求🐱",
+                    json!({"operation":"getNodes","ids":["1"]}),
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["requestId"], "请求🐱");
+    assert_eq!(
+        body["data"],
+        json!({"nodes":[{"id":"1","vector":[1.,0.],"payload":{"host":true},"edges":[]}],"missingIds":[]})
+    );
+    assert_eq!(
+        std::fs::read(format!("{}.wal", path.to_str().unwrap())).unwrap(),
+        before
+    );
+    database.lock().unwrap().close().unwrap();
+    let mut reopened = Database::<f32>::open_read_only(path.to_str().unwrap(), 2).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), vec![1]);
+    let node = reopened.get(1).unwrap().unwrap();
+    assert_eq!(node.vector, vec![1., 0.]);
+    assert_eq!(node.payload, json!({"host":true}));
+    assert!(node.edges.is_empty());
+    reopened.close().unwrap();
+}
+
+#[tokio::test]
+async fn 嵌入http传递plan_execute来源并保留原始事务结果() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("query-sources.tdb");
+    let config = triviumdb::database::Config {
+        dim: 2,
+        auto_build_quiver: false,
+        max_query_rows: Some(1),
+        row_overflow: triviumdb::database::RowOverflowPolicy::Throw,
+        ..Default::default()
+    };
+    let mut db = Database::<f32>::open_with_config(path.to_str().unwrap(), config).unwrap();
+    db.insert_with_id(7, &[1., 0.], json!({"kind":"alpha"}))
+        .unwrap();
+    db.insert_with_id(8, &[0., 1.], json!({"kind":"beta"}))
+        .unwrap();
+    db.create_unique_index("kind").unwrap();
+    let database = Arc::new(Mutex::new(db));
+    let host = ConsoleHost::attach(
+        &database,
+        ConsoleOptions {
+            read_only: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let app = build_console_app(host, ConsoleHttpOptions::default()).unwrap();
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../tests/contracts/query_execution_diagnostics.json"
+    ))
+    .unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let (status, body) = post(app.clone(), wire(case["name"].as_str().unwrap(), json!({"operation":if case["mutation"] == true {"mutate"} else {"query"}, "query":case["query"]}))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {body}");
+        let error = &body["error"];
+        assert_eq!(error["code"], case["code"], "{case}");
+        assert_eq!(error["stage"], case["stage"], "{case}");
+        assert_eq!(
+            error["target"],
+            json!({"query_span":case["span"]}),
+            "{case}"
+        );
+        assert_eq!(error["write"], case["write"], "{case}");
+    }
+    database.lock().unwrap().close().unwrap();
+    let mut reopened = Database::<f32>::open_with_config(path.to_str().unwrap(), config).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), vec![7, 8]);
+    for (id, vector, kind) in [(7, vec![1., 0.], "alpha"), (8, vec![0., 1.], "beta")] {
+        let node = reopened.get(id).unwrap().unwrap();
+        assert_eq!(node.vector, vector);
+        assert_eq!(node.payload, json!({"kind":kind}));
+        assert!(node.edges.is_empty());
+    }
+    reopened.close().unwrap();
+}
+
 #[tokio::test]
 async fn 请求体期限使用独立错误码并归还并发许可() {
     let root = tempfile::tempdir().unwrap();
@@ -220,7 +388,11 @@ async fn 嵌入http保留查询阶段及源码位置并隔离拒绝写入() {
         let error = &body["error"];
         assert_eq!(error["code"], case["code"]);
         assert_eq!(error["stage"], "bind");
-        assert_eq!(error["target"], json!({"parameter":case["parameter"]}));
+        let mut target = json!({"parameter":case["parameter"]});
+        if let Some(span) = case.get("span") {
+            target["query_span"] = span.clone();
+        }
+        assert_eq!(error["target"], target, "{case}");
         if let Some(details) = case.get("details") {
             assert_eq!(&error["details"], details);
         } else {
@@ -413,6 +585,7 @@ async fn 客户端退出后许可保留到真实任务退出() {
         })
         .unwrap();
     let host = ConsoleHost::attach(&database, ConsoleOptions::default()).unwrap();
+    let session = host.session();
     let app = build_console_app(host, ConsoleHttpOptions { max_in_flight: 1 }).unwrap();
     let first = app.clone();
     let running = tokio::spawn(async move {
@@ -426,6 +599,7 @@ async fn 客户端退出后许可保留到真实任务退出() {
         .await
     });
     entered.wait();
+    assert_eq!(session_status(app.clone()).await, json!({"drained":false}));
     running.abort();
     assert!(running.await.unwrap_err().is_cancelled());
     let (status, error) = post(app.clone(), wire("背压", json!({"operation":"info"}))).await;
@@ -463,6 +637,8 @@ async fn 客户端退出后许可保留到真实任务退出() {
         result["data"]["nodes"][0],
         json!({"id":"1","vector":[1.0,0.0],"payload":{"host":true},"edges":[]})
     );
+    session.detach();
+    assert_eq!(session_status(app.clone()).await, json!({"drained":true}));
     database.lock().unwrap().close().unwrap();
     let mut reopened = Database::<f32>::open(file.to_str().unwrap(), 2).unwrap();
     assert_eq!(reopened.get_payload(1).unwrap(), Some(json!({"host":true})));

@@ -40,7 +40,7 @@ Server 支持多客户端访问、Writer Actor、Group Commit、OCC、健康监�
 
 > **部署提醒**：nightly Server 用于开发和集成评估。将监听端口限定在可信网络，需要远程访问时由上层服务或反向代理提供认证与 TLS。
 
-宿主已经打开嵌入式数据库时，使用独立的 `console::build_console_app` 接入 Console RPC v1，复用现有实例和文件锁。该适配器通过 ConsoleHost 直接调用宿主实例。当前开发版本复用 Core 的全库快照条件事务及实例内回执；Console 使用独立的版本令牌和整请求响应协议。编辑版本冲突、幂等键错配和结果未知映射为 HTTP 409，并保留 Core 错误码与详情。前端传输适配与完整契约见[嵌入式 Console 宿主接入](embedded-console.md)。现有 `build_app(ServerConfig)` 与 `/ui` 的 HTTP v1 控制台继续保留原有行为。
+宿主已经打开嵌入式数据库时，使用独立的 `console::build_console_app` 接入 Console RPC v1，复用现有实例和文件锁。该适配器通过 ConsoleHost 直接调用宿主实例。当前开发版本复用 Core 的全库快照条件事务、有界持久回执及请求控制器，保留回执支持跨重开确认。Console 使用独立的版本令牌和整请求响应协议。编辑版本冲突、幂等键错配和结果未知映射为 HTTP 409，并保留 Core 错误码与详情。前端传输适配与完整契约见[嵌入式 Console 宿主接入](embedded-console.md)。`build_app(ServerConfig)` 与 `/ui` 使用 HTTP v1 控制台协议。
 
 ---
 
@@ -48,7 +48,7 @@ Server 支持多客户端访问、Writer Actor、Group Commit、OCC、健康监�
 
 职责划分见[内核 SDK 与存储内核](kernel-sdk.md)。独立 Server 继续使用自己的有界 Writer 队列与合批；嵌入宿主可使用 `SharedDatabase` 和 `ConsoleHost::attach_shared` 复用实例。
 
-当前开发版将内核错误的 `code`、`details` 和 `schema_version: 1` 原样映射到 HTTP，`message` 与 RFC Problem Details 的 `detail` 同义。原 HTTP 分类名通过 `legacyCode` 提供迁移信息，例如 `QUERY_PARSE_ERROR` → `TDB_QUERY_PARSE`。超出 JavaScript 安全整数域的详情字段编码为十进制字符串。期限到达使用 `TDB_QUERY_DEADLINE_EXCEEDED`、HTTP 504 和 `legacyCode=REQUEST_TIMEOUT`，主动取消使用 `TDB_QUERY_CANCELLED` 和 HTTP 408。携带写入结果的期限错误保持 `retryable=false`。队列与其他传输错误按各自入口继续收敛，详见[公共错误契约](error-contracts.md#取消与期限)。
+当前开发版将内核错误的 `code`、`details` 和 `schema_version: 1` 原样映射到 HTTP，`message` 与 RFC Problem Details 的 `detail` 同义。原 HTTP 分类名通过 `legacyCode` 提供迁移信息，例如 `QUERY_PARSE_ERROR` → `TDB_QUERY_PARSE`。超出 JavaScript 安全整数域的详情字段编码为十进制字符串。期限到达使用 `TDB_QUERY_DEADLINE_EXCEEDED`、HTTP 504 和 `legacyCode=REQUEST_TIMEOUT`，主动取消使用 `TDB_QUERY_CANCELLED` 和 HTTP 408。携带写入结果的期限错误保持 `retryable=false`。写队列满采用 `TDB_BUSY`、`details.resource=write_queue` 及 `legacyCode=WRITE_QUEUE_FULL`，其余 HTTP 和缓存类别见[重试与兼容目录](error-contracts.md#重试与兼容目录)。
 
 开始关闭后，新读写请求使用 HTTP 503 和 `TDB_DATABASE_CLOSED`，`details` 为空对象，保留 `legacyCode: "SERVICE_UNAVAILABLE"`，`retryable` 为 `false`。调用方按实例生命周期处理该错误；已经准入的请求继续遵守排空与提交契约。
 
@@ -78,6 +78,8 @@ HTTP / JSON / NDJSON / 二进制 f32
 - 请求断开或 deadline 到期会传播取消信号；已经进入 durable commit 的写入继续完成原子提交。
 
 写请求错误的可选 `write` 字段记录阶段与结果。队列满、入队前过期和 Worker 明确拒绝的待执行请求返回 `admission/not_committed`；入队后等待响应超时或通道丢失返回 `response/unknown`。分组同步失败向已经执行成功的等待请求返回 `group_sync/unknown`，独立操作错误保留自身字段。携带写入上下文时 `retryable=false`，调用方依据回执和实际事实决定重新准入、重放或对账。字段说明见[公共错误契约](error-contracts.md#写入结果字段)。
+
+Writer 在取得实际数据库写锁后、每条操作开始前再次核对响应接收端和期限。等待者已经退出时跳过对应操作，到期时交回 `admission/not_committed`，同批其他有效请求继续执行。该检查覆盖等待写锁及前序操作期间的状态变化，已进入 Core 的提交按原子协议完成。
 
 ---
 
@@ -196,7 +198,7 @@ curl -X POST http://127.0.0.1:8080/v1/tql \
 
 Server 不为认知算子维护另一套 HTTP API；`TEXT`、`RESIDUAL`、`DIVERSIFY`、`TOPICS` 和 `SA_PPR_CONFIG` 均通过 `/v1/tql` 使用 Core 的相同 Parser、Cascades、预算和确定性语义。Refractory Fatigue 未开放为普通 TQL 算子，因为它会修改进程内检索状态。
 
-普通 JSON 查询响应有 16 MiB 硬上限。超限返回 `413 RESPONSE_TOO_LARGE`；应改用属性投影、`LIMIT` 或 NDJSON 响应。
+普通 JSON 查询响应有 16 MiB 硬上限。超限返回 `413 TDB_HTTP_RESPONSE_TOO_LARGE`，旧类别保存在 legacyCode。可使用属性投影、`LIMIT` 或 NDJSON 响应控制返回量。
 
 请求头设置 `Accept: application/x-ndjson` 时，响应按 `meta → row... → summary` 输出；`meta.columns` 明确声明每个投影列的 `node`、`edge`、`path` 或标量类型。普通 JSON 响应也在顶层 `columns` 返回相同元数据。HTTP 输出逐行生成，但排序、聚合和 Top-K 等 Core 算子仍可能先物化结果。
 
@@ -269,8 +271,8 @@ Content-Type: application/vnd.triviumdb.vector+f32
 - 全局 ETag 为 `"<epoch>-g<n>"`，成功写入后递增；
 - `GET /v1/nodes/{id}` 返回节点和边 ETag；
 - `If-Match`、`expectedGeneration`、`expectedNodes` 和 `expectedEdges` 提供 OCC；
-- 版本不匹配返回 `409 WRITE_CONFLICT`，整笔事务拒绝；
-- `Idempotency-Key` 同键同请求重放首次结果，同键不同请求返回 `409 IDEMPOTENCY_KEY_REUSED`；
+- Core 版本不匹配返回 `409 TDB_WRITE_CONFLICT`，HTTP 前置头条件拒绝使用 `TDB_HTTP_PRECONDITION_FAILED` 并保留 `legacyCode=WRITE_CONFLICT`。
+- `Idempotency-Key` 同键同请求重放首次结果，同键不同请求返回 `409 TDB_IDEMPOTENCY_CONFLICT`，旧类别为 IDEMPOTENCY_KEY_REUSED。
 - 幂等缓存和 Server generation 是进程内状态，重启后 epoch 改变。
 
 统一错误响应包含 `code`、双语 `title`、`detail` 和 `retryable`。常见状态码包括 400、404、409、413、415、422、423、500、503 和 504。

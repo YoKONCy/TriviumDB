@@ -1,8 +1,10 @@
 //! Prepared TQL 的参数收集与严格绑定。
 
 use super::tql_ast::*;
+use super::tql_source::{LocatedTql, TqlSource};
 use crate::error::TriviumError;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 /// Prepared TQL 支持的标量参数值。
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +55,7 @@ impl TqlParamValue {
 pub struct PreparedTql {
     query: TqlQuery,
     parameters: BTreeSet<String>,
+    source: Option<Arc<TqlSource>>,
 }
 
 impl PreparedTql {
@@ -67,7 +70,39 @@ impl PreparedTql {
         }
         let mut parameters = BTreeSet::new();
         collect_query_parameters(&query, &mut parameters);
-        Self { query, parameters }
+        Self {
+            query,
+            parameters,
+            source: None,
+        }
+    }
+
+    pub fn from_located(parsed: LocatedTql<TqlQuery>) -> Self {
+        let mut prepared = Self::from_query(parsed.ast);
+        prepared.source = Some(parsed.source);
+        prepared
+    }
+
+    pub(crate) fn source(&self) -> Option<Arc<TqlSource>> {
+        self.source.clone()
+    }
+
+    /// 使用解析器保存的参数引用，保持错误码、异常分类和既有写入结果。
+    pub(crate) fn locate_parameter_error(&self, error: TriviumError) -> TriviumError {
+        match &self.source {
+            Some(source) => source.locate_parameter_error(error),
+            None => error,
+        }
+    }
+
+    /// JSON 适配复用内核的标量转换与原始查询定位。
+    pub fn parameter_from_json(
+        &self,
+        name: &str,
+        value: &serde_json::Value,
+    ) -> Result<TqlParamValue, TriviumError> {
+        TqlParamValue::from_named_json(name, value)
+            .map_err(|error| self.locate_parameter_error(error))
     }
 
     /// 返回按名称稳定排序的必需参数。
@@ -77,6 +112,14 @@ impl PreparedTql {
 
     /// 绑定全部参数；缺参、额外参数和非有限浮点均 fail-closed。
     pub fn bind(&self, values: &HashMap<String, TqlParamValue>) -> Result<TqlQuery, TriviumError> {
+        self.bind_values(values)
+            .map_err(|error| self.locate_parameter_error(error))
+    }
+
+    fn bind_values(
+        &self,
+        values: &HashMap<String, TqlParamValue>,
+    ) -> Result<TqlQuery, TriviumError> {
         if let Some(name) = self
             .parameters
             .iter()

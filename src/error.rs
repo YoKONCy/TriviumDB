@@ -86,13 +86,15 @@ impl WriteErrorInfo {
     }
 }
 
-/// TQL 解析与参数绑定能够确认的失败阶段。
+/// TQL 各处理阶段在实际失败检查点提供的分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryErrorStage {
     Lex,
     Parse,
     Bind,
+    Plan,
+    Execute,
 }
 
 impl QueryErrorStage {
@@ -101,11 +103,13 @@ impl QueryErrorStage {
             Self::Lex => "lex",
             Self::Parse => "parse",
             Self::Bind => "bind",
+            Self::Plan => "plan",
+            Self::Execute => "execute",
         }
     }
 }
 
-/// 原始查询的 UTF-8 字节范围；当前解析诊断使用零长度锚点。
+/// 原始查询的 UTF-8 半开字节范围；输入末尾可使用零长度锚点。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct QuerySpan {
     pub start_byte: usize,
@@ -115,6 +119,14 @@ pub struct QuerySpan {
 }
 
 impl QuerySpan {
+    /// 范围两端必须落在真实字符边界上，起点的行列沿用统一计数规则。
+    pub fn range(input: &str, start: usize, end: usize) -> Option<Self> {
+        input.get(start..end)?;
+        let mut span = Self::at(input, start)?;
+        span.end_byte = end;
+        Some(span)
+    }
+
     /// 只接受真实字符边界；列按 Unicode 标量计数，CRLF 合并，Tab 计一列。
     pub fn at(input: &str, byte: usize) -> Option<Self> {
         let prefix = input.get(..byte)?;
@@ -146,13 +158,54 @@ impl QuerySpan {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(untagged)]
 pub enum ErrorTarget {
-    Query { query_span: QuerySpan },
-    Parameter { parameter: String },
-    Field { field: String },
+    Query {
+        query_span: QuerySpan,
+    },
+    Parameter {
+        parameter: String,
+    },
+    ParameterReference {
+        parameter: String,
+        query_span: QuerySpan,
+    },
+    Field {
+        field: String,
+    },
+    FieldReference {
+        field: String,
+        query_span: QuerySpan,
+    },
+}
+
+impl ErrorTarget {
+    fn source_span(&self) -> Option<QuerySpan> {
+        match self {
+            Self::Query { query_span }
+            | Self::ParameterReference { query_span, .. }
+            | Self::FieldReference { query_span, .. } => Some(*query_span),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Error, Debug)]
 pub enum TriviumError {
+    /// 查询的实际失败节点提供阶段与来源，保留内部更精确的诊断。
+    #[error("{source}")]
+    QuerySource {
+        stage: QueryErrorStage,
+        span: Option<QuerySpan>,
+        #[source]
+        source: Box<TriviumError>,
+    },
+    /// Prepared 参数引用的源码范围保留原始分类、详情与错误链。
+    #[error("{source}")]
+    QueryParameterSource {
+        parameter: String,
+        query_span: QuerySpan,
+        #[source]
+        source: Box<TriviumError>,
+    },
     /// 普通 API 字段定位保留原始错误类别、详情与 cause。
     #[error("{source}")]
     ApiField {
@@ -440,9 +493,10 @@ impl TriviumError {
     fn write_info(&self) -> Option<WriteErrorInfo> {
         match self {
             Self::WriteFailure { write, .. } => Some(*write),
-            Self::QueryParameter { source, .. } | Self::ApiField { source, .. } => {
-                source.write_info()
-            }
+            Self::QueryParameter { source, .. }
+            | Self::QuerySource { source, .. }
+            | Self::QueryParameterSource { source, .. }
+            | Self::ApiField { source, .. } => source.write_info(),
             _ => None,
         }
     }
@@ -462,10 +516,29 @@ impl TriviumError {
         }
     }
 
+    pub(crate) fn at_query_source(self, stage: QueryErrorStage, span: Option<QuerySpan>) -> Self {
+        let info = self.info();
+        let located = info
+            .target
+            .as_ref()
+            .and_then(ErrorTarget::source_span)
+            .is_some();
+        if info.stage.is_some() && (span.is_none() || located) {
+            return self;
+        }
+        Self::QuerySource {
+            stage: info.stage.unwrap_or(stage),
+            span,
+            source: Box::new(self),
+        }
+    }
+
     /// 语言异常分类与 Rust 模式匹配使用原始错误变体。
     pub fn underlying(&self) -> &Self {
         match self {
             Self::QueryParameter { source, .. }
+            | Self::QuerySource { source, .. }
+            | Self::QueryParameterSource { source, .. }
             | Self::WriteFailure { source, .. }
             | Self::ApiField { source, .. } => source.underlying(),
             _ => self,
@@ -473,11 +546,74 @@ impl TriviumError {
     }
 
     pub fn info(&self) -> ErrorInfo {
+        if let Self::QuerySource {
+            stage,
+            span,
+            source,
+        } = self
+        {
+            let mut info = source.info();
+            info.stage = Some(*stage);
+            if let Some(query_span) = span {
+                info.target = Some(match info.target {
+                    Some(ErrorTarget::Parameter { parameter }) => ErrorTarget::ParameterReference {
+                        parameter,
+                        query_span: *query_span,
+                    },
+                    Some(ErrorTarget::Field { field }) => ErrorTarget::FieldReference {
+                        field,
+                        query_span: *query_span,
+                    },
+                    Some(target) => target,
+                    None => ErrorTarget::Query {
+                        query_span: *query_span,
+                    },
+                });
+            }
+            return info;
+        }
+        if let Self::QueryParameterSource {
+            parameter,
+            query_span,
+            source,
+        } = self
+        {
+            let mut info = source.info();
+            info.target = Some(ErrorTarget::ParameterReference {
+                parameter: parameter.clone(),
+                query_span: *query_span,
+            });
+            return info;
+        }
         if let Self::ApiField { field, source } = self {
             let mut info = source.info();
-            info.target = Some(ErrorTarget::Field {
-                field: field.clone(),
-            });
+            info.target = Some(
+                match info.target.as_ref().and_then(ErrorTarget::source_span) {
+                    Some(query_span) => ErrorTarget::FieldReference {
+                        field: field.clone(),
+                        query_span,
+                    },
+                    None => ErrorTarget::Field {
+                        field: field.clone(),
+                    },
+                },
+            );
+            return info;
+        }
+        if let Self::QueryParameter { parameter, source } = self {
+            let mut info = source.info();
+            info.stage = Some(QueryErrorStage::Bind);
+            info.target = Some(
+                match info.target.as_ref().and_then(ErrorTarget::source_span) {
+                    Some(query_span) => ErrorTarget::ParameterReference {
+                        parameter: parameter.clone(),
+                        query_span,
+                    },
+                    None => ErrorTarget::Parameter {
+                        parameter: parameter.clone(),
+                    },
+                },
+            );
             return info;
         }
         if let Self::WriteFailure { source, write } = self {
@@ -491,8 +627,7 @@ impl TriviumError {
                 span.map(|query_span| ErrorTarget::Query { query_span }),
             ),
             Self::MissingQueryParameter { parameter }
-            | Self::UnexpectedQueryParameter { parameter }
-            | Self::QueryParameter { parameter, .. } => (
+            | Self::UnexpectedQueryParameter { parameter } => (
                 Some(QueryErrorStage::Bind),
                 Some(ErrorTarget::Parameter {
                     parameter: parameter.clone(),
@@ -515,6 +650,8 @@ impl TriviumError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::QueryParameter { source, .. }
+            | Self::QuerySource { source, .. }
+            | Self::QueryParameterSource { source, .. }
             | Self::WriteFailure { source, .. }
             | Self::ApiField { source, .. } => source.code(),
             Self::Io(_) => "TDB_IO",
@@ -575,6 +712,8 @@ impl TriviumError {
         use serde_json::json;
         match self {
             Self::QueryParameter { source, .. }
+            | Self::QuerySource { source, .. }
+            | Self::QueryParameterSource { source, .. }
             | Self::WriteFailure { source, .. }
             | Self::ApiField { source, .. } => source.details(),
             Self::DatabaseBusy { resource } | Self::HostLockPoisoned { resource } => {

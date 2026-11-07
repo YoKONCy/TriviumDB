@@ -28,6 +28,8 @@ pub fn shortest_path_bidirectional<T: VectorType>(
     label_filter: Option<&str>,
     budget: &TraversalBudget,
 ) -> Result<ShortestPathOutput> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     budget.validate()?;
     if !mt.contains(src) {
         return Err(crate::error::TriviumError::NodeNotFound(src));
@@ -61,6 +63,7 @@ pub fn shortest_path_bidirectional<T: VectorType>(
     let mut best_meeting: Option<(usize, NodeId)> = None;
 
     while !forward_frontier.is_empty() && !backward_frontier.is_empty() {
+        crate::graph::budget::check_control(&control)?;
         let combined_depth = forward[&forward_frontier[0]].0 + backward[&backward_frontier[0]].0;
         if best_meeting.is_some_and(|(distance, _)| combined_depth >= distance) {
             break;
@@ -80,6 +83,7 @@ pub fn shortest_path_bidirectional<T: VectorType>(
         let mut next_frontier = Vec::new();
         let mut meeting = Vec::new();
         for &current in frontier {
+            crate::graph::budget::check_control(&control)?;
             let current_depth = if expand_forward {
                 forward[&current].0
             } else {
@@ -101,6 +105,7 @@ pub fn shortest_path_bidirectional<T: VectorType>(
             neighbors.sort_unstable();
             neighbors.dedup();
             for neighbor in neighbors {
+                crate::graph::budget::check_control(&control)?;
                 if metrics.examined_edges >= budget.max_examined_edges {
                     if exhausted(budget, BudgetDimension::ExaminedEdges, metrics)? {
                         truncated = true;
@@ -139,6 +144,7 @@ pub fn shortest_path_bidirectional<T: VectorType>(
         }
         if !meeting.is_empty() {
             for node in meeting {
+                crate::graph::budget::check_control(&control)?;
                 let candidate = (forward[&node].0 + backward[&node].0, node);
                 if best_meeting.is_none_or(|best| candidate < best) {
                     best_meeting = Some(candidate);
@@ -390,6 +396,8 @@ pub fn bounded_all_paths<T: VectorType>(
     config: &BoundedPathConfig,
     budget: &TraversalBudget,
 ) -> Result<BoundedPathsOutput> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     budget.validate()?;
     if !mt.contains(src) {
         return Err(crate::error::TriviumError::NodeNotFound(src));
@@ -446,6 +454,8 @@ fn bounded_path_dfs<T: VectorType>(
     max_depth: usize,
     state: &mut BoundedPathState,
 ) -> Result<()> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     if state.truncated {
         return Ok(());
     }
@@ -489,6 +499,7 @@ fn bounded_path_dfs<T: VectorType>(
         return Ok(());
     }
     for edge in edges {
+        crate::graph::budget::check_control(&control)?;
         if state.metrics.examined_edges >= budget.max_examined_edges {
             state.truncated = exhausted(budget, BudgetDimension::ExaminedEdges, state.metrics)?;
             break;

@@ -19,6 +19,7 @@ from request_admission import run_request_admission_contract
 from transaction_admission import run_transaction_admission_contract
 from console_contracts import run_console_contract
 from kernel_boundaries import run_kernel_boundaries
+from request_contexts import run_request_contexts
 
 
 def run_transaction_contract(root: str) -> None:
@@ -416,6 +417,7 @@ def main() -> None:
         run_request_admission_contract(root)
         run_transaction_admission_contract(root)
         run_console_contract(root)
+        run_request_contexts(root)
         run_kernel_boundaries(root)
         run_transaction_contract(root)
         run_write_boundaries(root)
@@ -487,7 +489,7 @@ def main() -> None:
         ]
 
         storage = db.storage_info()
-        assert storage["database_format_current"] == 10
+        assert storage["database_format_current"] == 11
         assert storage["property_index_format"] == 8
         assert storage["node_count"] == 2
 

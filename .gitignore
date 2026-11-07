@@ -21,6 +21,8 @@ dist/
 *.tdb.wal
 !tests/fixtures/v0810_text_mmap/sample.tdb
 !tests/fixtures/v0810_text_mmap/sample.tdb.wal
+!tests/fixtures/v0900_format10/*/*/sample.tdb
+!tests/fixtures/v0900_format10/*/*/sample.tdb.wal
 
 # ══════ Node.js & napi-rs ══════
 node_modules/

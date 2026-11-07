@@ -377,13 +377,33 @@ fn 写入上下文保留原始错误且外层准入不覆盖执行事实() {
         info["write"],
         json!({"phase":"wal","outcome":"unknown","transaction_consumed":true})
     );
+    let error = E::QueryParameterSource {
+        parameter: "input".into(),
+        query_span: super::QuerySpan::range("$input", 0, 6).unwrap(),
+        source: Box::new(error.at_query_parameter("input")),
+    }
+    .with_write_info(WriteErrorInfo::TRANSACTION_ADMISSION);
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(
+        info["target"],
+        json!({"parameter":"input","query_span":{
+            "start_byte":0,"end_byte":6,"line":1,"column":1
+        }})
+    );
+    assert_eq!(info["stage"], "bind");
+    assert!(matches!(error.underlying(), E::Io(_)));
+    assert_eq!(info["write"]["phase"], "wal");
     let error = error
-        .at_query_parameter("input")
         .at_field("mb")
         .with_write_info(WriteErrorInfo::TRANSACTION_ADMISSION);
     let info = serde_json::to_value(error.info()).unwrap();
     assert!(matches!(error.underlying(), E::Io(_)));
-    assert_eq!(info["target"], json!({"field":"mb"}));
+    assert_eq!(
+        info["target"],
+        json!({"field":"mb","query_span":{
+            "start_byte":0,"end_byte":6,"line":1,"column":1
+        }})
+    );
     assert_eq!(info["stage"], "bind");
     assert_eq!(info["code"], "TDB_IO");
     assert_eq!(info["details"], json!({"io_kind":"NotFound","os_code":2}));
@@ -402,4 +422,34 @@ fn 写入上下文保留原始错误且外层准入不覆盖执行事实() {
         info["write"],
         json!({"phase":"admission","outcome":"not_committed","transaction_consumed":false})
     );
+}
+
+#[test]
+fn 查询来源补齐未知位置并保留内部阶段字段与写入事实() {
+    use super::{QueryErrorStage, QuerySpan, WriteErrorInfo, WriteOutcome, WritePhase};
+    let span = QuerySpan::range("$x", 0, 2).unwrap();
+    let error = E::InvalidInput("输入被拒绝 (Input rejected)".into())
+        .at_field("vector")
+        .with_write_info(WriteErrorInfo {
+            phase: WritePhase::Wal,
+            outcome: WriteOutcome::Unknown,
+            transaction_consumed: Some(true),
+        })
+        .at_query_source(QueryErrorStage::Plan, None)
+        .at_query_source(QueryErrorStage::Execute, Some(span))
+        .at_query_source(QueryErrorStage::Execute, QuerySpan::range("other", 0, 5));
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["code"], "TDB_INVALID_INPUT");
+    assert_eq!(info["stage"], "plan");
+    assert_eq!(info["target"], json!({"field":"vector","query_span":span}));
+    assert_eq!(
+        info["write"],
+        json!({"phase":"wal","outcome":"unknown","transaction_consumed":true})
+    );
+    let error = error.at_field("values").at_query_parameter("x");
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["target"], json!({"parameter":"x","query_span":span}));
+    assert_eq!(info["stage"], "bind");
+    assert_eq!(info["write"]["phase"], "wal");
+    assert!(matches!(error.underlying(), E::InvalidInput(_)));
 }

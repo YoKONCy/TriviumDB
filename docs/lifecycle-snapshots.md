@@ -147,6 +147,8 @@ Rust 校验和恢复还有接收 `&ResourceRuntime` 的 `_with_runtime` 入口�
 
 创建快照需要可写句柄。内核持有源库写锁，完成 checkpoint 和 WAL 清理，再复制该代所需的主文件、向量、冷载荷及索引制品。目标使用独立目录，内部数据库名固定为 `database.tdb`。源库在快照完成后可继续更新，快照中的事实保持在捕获时刻。
 
+当前 v11 检查点包含捕获时保留的有界编辑回执，随主文件进入快照与恢复目标。打开目标时使用新的编辑版本身份，原回执按完整事务身份确认历史提交。维度迁移从节点和边构建新的目标谱系，目标的编辑身份与回执从新实例开始。回执容量及恢复规则见[Console 回执协议](embedded-console.md#回执与结果确认)。
+
 创建和恢复使用已存在的父目录及全新的目标目录，恢复目标位于源快照目录之外。已有目标返回 `SnapshotDestinationExists`。快照目录由 manifest 和其中声明的普通文件组成；校验发现符号链接、管道、WAL、临时文件、额外制品或 manifest 错配时返回错误。
 
 ### 发布过程与错误处理
@@ -186,6 +188,8 @@ reader = triviumdb.TriviumDB(
 reader.close()
 ```
 
-恢复完成后，宿主选择以 Immutable、ReadOnly 或 ReadWrite 模式打开 `database.tdb`，并配置 dtype、维度与预算。以可写模式打开后，恢复目录作为活动数据库使用；后续状态通过再次创建快照捕获。
+恢复完成后，宿主选择以 Immutable、ReadOnly 或 ReadWrite 模式打开 `database.tdb`，并配置 dtype、维度与预算。以可写模式打开后，恢复目录作为活动数据库使用，后续状态通过再次创建快照捕获。
+
+> **打开提醒**　独立快照保存 manifest 声明的数据文件，Immutable 按 manifest 验证并打开。ReadOnly 使用预先存在的 `database.tdb.lock` 协调文件，该文件由宿主准备或由首次 ReadWrite 打开创建。
 
 独立快照接口复用现有 generation manifest 格式。`GenerationStore` 的 current 发布与 Reader 租约机制继续可用，适合需要原子切换多个不可变代际的宿主；新快照接口提供从活动实例到完整目录的统一捕获与恢复步骤。

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import MappingProxyType
 import triviumdb
 from write_outcomes import run_write_outcomes
+from query_sources import run_query_sources
 
 
 def run_error_contract(root):
@@ -70,6 +71,7 @@ def run_error_contract(root):
             db.close()
     run_query_diagnostics(root)
     run_prepared_diagnostics(root)
+    run_query_sources(root)
     run_write_outcomes(root)
 
 
@@ -97,7 +99,10 @@ def run_prepared_diagnostics(root):
                         assert error.code == case["code"], case
                         assert error.schema_version == 1
                         assert error.stage == "bind"
-                        assert error.target == {"parameter": case["parameter"]}
+                        target = {"parameter": case["parameter"]}
+                        if "span" in case:
+                            target["query_span"] = case["span"]
+                        assert error.target == target, case
                         if "details" in case:
                             assert error.details == case["details"]
                         else:
@@ -127,7 +132,9 @@ def run_prepared_diagnostics(root):
                     db.execute_prepared_tql(prepared, {"x": value})
                 except exception as error:
                     assert error.code == "TDB_INVALID_INPUT"
-                    assert error.target == {"parameter": "x"}
+                    assert error.target == {"parameter": "x", "query_span": {
+                        "start_byte": 17, "end_byte": 19, "line": 1, "column": 18,
+                    }}
                     assert error.stage == "bind" and error.write is None
                 else:
                     raise AssertionError("参数值必须经过具名绑定诊断")
@@ -172,7 +179,19 @@ def run_prepared_diagnostics(root):
 
 def run_query_diagnostics(root):
     from query_arguments import run_query_arguments
+    from graph_arguments import run_graph_arguments
+    from read_arguments import run_read_arguments
+    from call_arguments import run_call_arguments
+    from constructor_arguments import run_constructor_arguments
+    from crud_arguments import run_crud_arguments
+    from retrieval_fields import run_retrieval_fields
     run_query_arguments(root)
+    run_graph_arguments(root)
+    run_read_arguments(root)
+    run_call_arguments(root)
+    run_constructor_arguments(root)
+    run_crud_arguments(root)
+    run_retrieval_fields(root)
     cases = json.loads((Path(__file__).parents[1] / "contracts/query_diagnostics.json").read_text(encoding="utf-8"))["cases"]
     for dtype in ("f32", "f16", "u64"):
         file = str(Path(root) / f"diagnostics-{dtype}.tdb")

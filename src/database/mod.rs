@@ -605,6 +605,7 @@ impl<T: VectorType> SearchHandle<T> {
     }
 
     fn enter_operation(&self) -> Result<OperationGuard> {
+        crate::request::check_current()?;
         reject_hook_reentrant_access(&self.memtable)?;
         let mut state = lock_or_recover(&self.lifecycle.0);
         if state.recovery_required.load(Ordering::Acquire) {
@@ -647,10 +648,11 @@ impl<T: VectorType> SearchHandle<T> {
                 "批量查询 parallelism 不得超过 64".into(),
             ));
         }
+        let dim = read_or_recover(&self.memtable).dim();
+        pipeline::validate_config(search_config, dim)?;
         if query_vectors.is_empty() {
             return Ok(Vec::new());
         }
-        let dim = read_or_recover(&self.memtable).dim();
         for query in query_vectors {
             if query.len() != dim {
                 return Err(TriviumError::DimensionMismatch {
@@ -666,7 +668,13 @@ impl<T: VectorType> SearchHandle<T> {
             }
         }
 
+        let request = crate::request::current();
         let search_one = |query: &Vec<T>| {
+            let _context = request
+                .as_ref()
+                .map(crate::request::RequestContext::enter)
+                .transpose()?;
+            crate::request::check_current()?;
             let mut ctx = HookContext::new();
             pipeline::execute_pipeline_with_limit(
                 &self.memtable,
@@ -733,6 +741,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
     /// 事务消费前核对生命周期、写权限和 WAL 写入能力。
     pub(crate) fn check_transaction_admission(&self) -> Result<()> {
+        crate::request::check_current()?;
         self.check_request_admission()?;
         self.require_write_access("transaction commit")?;
         lock_or_recover(&self.wal).ensure_writable()
@@ -747,6 +756,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     }
 
     fn enter_operation_kind(&self, maintenance: bool) -> Result<OperationGuard> {
+        crate::request::check_current()?;
         reject_hook_reentrant_access(&self.memtable)?;
         let mut state = lock_or_recover(&self.lifecycle.0);
         if state.recovery_required.load(Ordering::Acquire) {
@@ -825,19 +835,17 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         // ═══ 维度安全校验 ═══
         if dim == 0 {
             return Err(TriviumError::InvalidInput(
-                "Vector dimension must be at least 1".into(),
-            ));
+                "向量维度必须至少为 1 (Vector dimension must be at least 1)".into(),
+            )
+            .at_field("dim"));
         }
         // 上限 65536：单向量 65536×f32 = 256KB，已远超实际使用范围。
         // 超过此值会导致内存分配溢出或 32 位平台上的指针寻址越界。
         const MAX_DIM: usize = 65536;
         if dim > MAX_DIM {
             return Err(TriviumError::InvalidInput(format!(
-                "Vector dimension {} exceeds maximum allowed {} (would require {}MB per vector pool page)",
-                dim,
-                MAX_DIM,
-                dim * 4 / 1024 / 1024
-            )));
+                "向量维度 {dim} 超过上限 {MAX_DIM} (Vector dimension {dim} exceeds maximum {MAX_DIM})"
+            )).at_field("dim"));
         }
 
         // ═══ 自动递归创建上层目录 ═══
@@ -991,7 +999,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
         }
         if config.access_mode == AccessMode::ReadWrite {
-            Wal::admit_legacy_migration(
+            Wal::admit_legacy_migration::<T>(
                 path,
                 config.memory_limit,
                 memtable.estimated_memory_bytes(),
@@ -1697,9 +1705,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         write: &mut WriteErrorInfo,
         apply: impl FnOnce(&mut MemTable<T>) -> Result<R>,
     ) -> Result<R> {
+        let mut wal = lock_or_recover(&self.wal);
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::DirectWriteWalLockAcquired);
+        crate::request::check_current()?;
         write.phase = WritePhase::Wal;
         write.outcome = WriteOutcome::Unknown;
-        lock_or_recover(&self.wal).append(&entry)?;
+        wal.append(&entry)?;
+        drop(wal);
         write.phase = WritePhase::Apply;
         let guard = transaction::ApplicationGuard::direct(mt, &self.wal, &self.lifecycle.0);
         let result = apply(guard.mt)?;
@@ -2348,6 +2361,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             let node_ids = mt.all_node_ids();
             let mut edges = std::collections::HashMap::new();
             for &id in &node_ids {
+                crate::request::check_current()?;
                 if let Some(e) = mt.get_edges(id) {
                     edges.insert(
                         id,
@@ -2362,10 +2376,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         };
 
         // Step 2: 纯计算聚类 (无锁)
+        let control = crate::request::control().unwrap_or_default();
         let mut result = self
             .resource_runtime
             .pool(self.resource_runtime.parallelism())?
-            .install(|| crate::graph::leiden::run_leiden(&snapshot, &config));
+            .install(|| {
+                crate::graph::leiden::run_leiden_controlled(&snapshot, &config, &control)
+            })?;
 
         // Step 3: 可选质心计算
         if config.compute_centroids && !result.node_to_cluster.is_empty() {
@@ -2373,6 +2390,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 let mt = read_or_recover(&self.memtable);
                 let mut vecs = std::collections::HashMap::new();
                 for &node_id in result.node_to_cluster.keys() {
+                    control.check()?;
                     if let Some(v) = mt.get_vector(node_id) {
                         vecs.insert(node_id, v.iter().map(|x| x.to_f32()).collect::<Vec<f32>>());
                     }
@@ -2381,7 +2399,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             };
             crate::graph::leiden::compute_centroids(&mut result, &vectors, dim);
         }
-
+        control.check()?;
         Ok(result)
     }
 
@@ -2902,13 +2920,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             return Err(TriviumError::InvalidInput(
                 "索引等值查询至少需要一个字段 (Indexed equality lookup requires at least one field)"
                     .into(),
-            ));
+            ).at_field("equalities"));
         }
         if max_results == 0 || max_results > 1_000_000 {
             return Err(TriviumError::InvalidInput(
                 "索引等值查询 max_results 必须在 1..=1000000 (max_results must be within 1..=1000000)"
                     .into(),
-            ));
+            ).at_field("max_results"));
         }
         let mt = read_or_recover(&self.memtable);
         let filter = if equalities.len() == 1 {
@@ -2980,10 +2998,22 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         max_results: usize,
     ) -> Result<Vec<NodeId>> {
         let _operation = self.enter_operation()?;
-        if field.is_empty() || needle.is_empty() || max_results == 0 || max_results > 1_000_000 {
+        if field.is_empty() {
             return Err(TriviumError::InvalidInput(
-                "子串查询参数无效 (Invalid substring lookup parameters)".into(),
-            ));
+                "子串查询字段不能为空 (Substring lookup field must be non-empty)".into(),
+            )
+            .at_field("field"));
+        }
+        if needle.is_empty() {
+            return Err(TriviumError::InvalidInput(
+                "子串查询内容不能为空 (Substring lookup needle must be non-empty)".into(),
+            )
+            .at_field("needle"));
+        }
+        if max_results == 0 || max_results > 1_000_000 {
+            return Err(TriviumError::InvalidInput(
+                "子串查询数量必须在 1..=1000000 (Substring lookup limit must be within 1..=1000000)".into(),
+            ).at_field("max_results"));
         }
         let mt = read_or_recover(&self.memtable);
         let candidates = mt
@@ -3274,12 +3304,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 执行 TQL，并返回可同时承载节点与标量列的一等值结果。
     pub fn tql(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
-        let query = crate::query::tql_parser::parse_tql_diagnostic(input)?;
+        let parsed = crate::query::tql_parser::parse_tql_located(input)?;
         let mt = read_or_recover(&self.memtable);
-        crate::query::tql_executor::execute_tql_values_with_limits(
-            &query,
+        crate::query::tql_executor::execute_tql_values_with_source(
+            &parsed.ast,
             &mt,
             self.tql_limits.clone(),
+            Some(parsed.source),
         )
     }
 
@@ -3289,30 +3320,41 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         control: crate::query::tql_executor::QueryControl,
     ) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
-        let query = crate::query::tql_parser::parse_tql_diagnostic(input)?;
+        let parsed = crate::query::tql_parser::parse_tql_located(input)?;
         let mt = read_or_recover(&self.memtable);
         let mut limits = self.tql_limits.clone();
         limits.query_control = Some(control);
-        crate::query::tql_executor::execute_tql_values_with_limits(&query, &mt, limits)
+        crate::query::tql_executor::execute_tql_values_with_source(
+            &parsed.ast,
+            &mt,
+            limits,
+            Some(parsed.source),
+        )
     }
 
     /// 执行仅返回节点绑定的 TQL。
     pub fn tql_nodes(&self, input: &str) -> Result<crate::query::tql_executor::TqlResult<T>> {
         let _operation = self.enter_operation()?;
-        let query = crate::query::tql_parser::parse_tql_diagnostic(input)?;
+        let parsed = crate::query::tql_parser::parse_tql_located(input)?;
         let mt = read_or_recover(&self.memtable);
-        crate::query::tql_executor::execute_tql_with_limits(&query, &mt, self.tql_limits.clone())
+        crate::query::tql_executor::execute_tql_with_source(
+            &parsed.ast,
+            &mt,
+            self.tql_limits.clone(),
+            Some(parsed.source),
+        )
     }
 
     /// 执行 TQL，并返回可同时承载节点与标量列的一等值结果。
     pub fn query(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
-        let query = crate::query::tql_parser::parse_tql_diagnostic(input)?;
+        let parsed = crate::query::tql_parser::parse_tql_located(input)?;
         let mt = read_or_recover(&self.memtable);
-        crate::query::tql_executor::execute_tql_values_with_limits(
-            &query,
+        crate::query::tql_executor::execute_tql_values_with_source(
+            &parsed.ast,
             &mt,
             self.tql_limits.clone(),
+            Some(parsed.source),
         )
     }
 
@@ -3325,8 +3367,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 解析并准备可重复绑定执行的只读 TQL。
     pub fn prepare_tql(&self, input: &str) -> Result<crate::query::tql_prepared::PreparedTql> {
         let _operation = self.enter_operation()?;
-        let query = crate::query::tql_parser::parse_tql_diagnostic(input)?;
-        Ok(crate::query::tql_prepared::PreparedTql::from_query(query))
+        crate::query::tql_parser::prepare_tql_diagnostic(input)
     }
 
     /// 执行已准备的 TQL，并返回一等值结果。
@@ -3338,10 +3379,11 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let _operation = self.enter_operation()?;
         let query = prepared.bind(parameters)?;
         let mt = read_or_recover(&self.memtable);
-        crate::query::tql_executor::execute_tql_values_with_limits(
+        crate::query::tql_executor::execute_tql_values_with_source(
             &query,
             &mt,
             self.tql_limits.clone(),
+            prepared.source(),
         )
     }
 
@@ -3373,7 +3415,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             });
             limits.row_overflow = RowOverflowPolicy::Throw;
         }
-        crate::query::tql_executor::execute_tql_values_with_limits(&query, &mt, limits)
+        crate::query::tql_executor::execute_tql_values_with_source(
+            &query,
+            &mt,
+            limits,
+            prepared.source(),
+        )
     }
 
     /// TQL 写操作入口
@@ -3412,7 +3459,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         control: Option<crate::query::tql_executor::QueryControl>,
         admit: impl FnOnce(usize, usize) -> Result<()>,
     ) -> Result<crate::query::tql_executor::TqlMutResult> {
-        Self::write_operation(|write| {
+        let mut query_origin = None;
+        let mut query_stage = crate::error::QueryErrorStage::Plan;
+        let result = Self::write_operation(|write| {
             self.require_write_access("tql_mut")?;
             let _operation = self.enter_operation()?;
             lock_or_recover(&self.wal).ensure_writable()?;
@@ -3420,7 +3469,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             use crate::query::tql_ast::TqlStatement;
             use crate::query::tql_executor::{MutationOp, TqlMutResult};
 
-            let stmt = crate::query::tql_parser::parse_tql_statement_diagnostic(input)?;
+            let parsed = crate::query::tql_parser::parse_tql_statement_located(input)?;
+            query_origin = Some(
+                parsed
+                    .source
+                    .origin(crate::query::tql_source::SourceSelector::Action),
+            );
+            let stmt = parsed.ast;
 
             match stmt {
                 TqlStatement::Query(_) => Err(TriviumError::ApiMigrationRequired {
@@ -3431,18 +3486,16 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     let (ops, mut next_id) = {
                         let mt = read_or_recover(&self.memtable);
                         let mut limits = self.tql_limits.clone();
-                        if let Some(control) = control {
-                            limits.query_control = Some(control);
+                        if let Some(control) = &control {
+                            limits.query_control = Some(control.clone());
                         }
-                        let ops = if let Some(limit) = plan_limit {
-                            crate::query::tql_executor::execute_tql_mutation_with_operation_budget(
-                                &mutation, &mt, limits, limit,
-                            )?
-                        } else {
-                            crate::query::tql_executor::execute_tql_mutation_with_limits(
-                                &mutation, &mt, limits,
-                            )?
-                        };
+                        let ops = crate::query::tql_executor::execute_tql_mutation_with_source(
+                            &mutation,
+                            &mt,
+                            limits,
+                            plan_limit,
+                            Some(parsed.source.clone()),
+                        )?;
                         (ops, mt.next_id_value())
                     };
 
@@ -3541,7 +3594,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         })
                         .count();
                     admit(affected, created_count)?;
-                    let created_ids = self.commit_ops(tx_ops)?;
+                    query_stage = crate::error::QueryErrorStage::Execute;
+                    let created_ids = self.commit_ops_guarded(tx_ops, None, control.as_ref())?;
 
                     Ok(TqlMutResult {
                         affected,
@@ -3549,6 +3603,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     })
                 }
             }
+        });
+        result.map_err(|error| match query_origin {
+            Some(origin) => origin.error(error, query_stage),
+            None => error,
         })
     }
 

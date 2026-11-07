@@ -19,6 +19,7 @@ pub mod index;
 pub mod node;
 pub mod observability;
 pub mod query;
+mod request;
 pub mod resources;
 pub mod sdk;
 pub mod storage;

@@ -9,8 +9,36 @@ pub struct NodeJson(pub Value);
 
 impl NodeJson {
     pub(super) fn from_js(env: Env, value: JsUnknown) -> napi::Result<Self> {
-        read_json(env, value, 0).map(Self)
+        read_json(env, value, 0, None, None).map(Self)
     }
+
+    pub(super) fn from_js_at(env: Env, value: JsUnknown, field: &str) -> napi::Result<Self> {
+        Self::from_js_field(
+            env,
+            value,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    pub(super) fn from_js_field(
+        env: Env,
+        value: JsUnknown,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> napi::Result<Self> {
+        read_json(env, value, 0, Some(field), write).map(Self)
+    }
+}
+
+pub(super) fn string_from_js(value: JsUnknown) -> napi::Result<String> {
+    let text = napi::JsString::try_from(value)?.into_utf16()?;
+    text.as_str().map_err(|_| {
+        napi::Error::new(
+            napi::Status::InvalidArg,
+            "字符串包含孤立 surrogate (String contains an isolated surrogate)",
+        )
+    })
 }
 
 impl From<Value> for NodeJson {
@@ -53,49 +81,79 @@ impl ToNapiValue for NodeJson {
     }
 }
 
-fn read_json(env: Env, value: JsUnknown, depth: usize) -> napi::Result<Value> {
-    // 该上限保护绑定递归；写入契约仍由内核的 JSON 校验统一决定。
-    if depth > 256 {
-        return Err(napi::Error::new(
-            napi::Status::InvalidArg,
-            "JS JSON 转换深度超过 256 (JS JSON conversion depth exceeds 256)",
-        ));
-    }
-    match value.get_type()? {
-        ValueType::Object => {
-            // SAFETY: 已确认 Object 类型；句柄和 env 均来自当前作用域。
-            let object = unsafe { JsObject::from_raw_unchecked(env.raw(), value.raw()) };
-            if object.is_array()? {
-                let mut values = Vec::new();
-                for index in 0..object.get_array_length()? {
-                    values.push(read_json(env, object.get_element(index)?, depth + 1)?);
-                }
-                Ok(Value::Array(values))
-            } else {
-                let keys = object.get_property_names()?;
-                let mut values = serde_json::Map::new();
-                for index in 0..keys.get_array_length()? {
-                    let key = keys
-                        .get_element::<napi::JsString>(index)?
-                        .into_utf8()?
-                        .as_str()?
-                        .to_owned();
-                    let value = object.get_property(env.create_string(&key)?)?;
-                    values.insert(key, read_json(env, value, depth + 1)?);
-                }
-                Ok(Value::Object(values))
-            }
+fn read_json(
+    env: Env,
+    value: JsUnknown,
+    depth: usize,
+    field: Option<&str>,
+    write: Option<crate::error::WriteErrorInfo>,
+) -> napi::Result<Value> {
+    let result = (|| {
+        // 该上限保护绑定递归；写入契约仍由内核的 JSON 校验统一决定。
+        if depth > 256 {
+            return Err(napi::Error::new(
+                napi::Status::InvalidArg,
+                "JS JSON 转换深度超过 256 (JS JSON conversion depth exceeds 256)",
+            ));
         }
-        ValueType::BigInt => Err(napi::Error::new(
-            napi::Status::InvalidArg,
-            "Payload BigInt 请使用十进制字符串 (Represent Payload BigInt as a decimal string)",
-        )),
-        // 标量沿用 napi 既有数值与非法值边界，避免经 JSON.stringify 改写 NaN 等输入。
-        _ => unsafe {
-            // SAFETY: 句柄类型已由 napi 检测，标量转换不持有跨作用域引用。
-            Value::from_napi_value(env.raw(), value.raw())
-        },
-    }
+        match value.get_type()? {
+            ValueType::Object => {
+                // SAFETY: 已确认 Object 类型；句柄和 env 均来自当前作用域。
+                let object = unsafe { JsObject::from_raw_unchecked(env.raw(), value.raw()) };
+                if object.is_array()? {
+                    let mut values = Vec::new();
+                    for index in 0..object.get_array_length()? {
+                        let path =
+                            field.map(|field| crate::sdk::field_member(field, &index.to_string()));
+                        values.push(read_json(
+                            env,
+                            object.get_element(index)?,
+                            depth + 1,
+                            path.as_deref(),
+                            write,
+                        )?);
+                    }
+                    Ok(Value::Array(values))
+                } else {
+                    let keys = object.get_property_names()?;
+                    let mut values = serde_json::Map::new();
+                    for index in 0..keys.get_array_length()? {
+                        let key = string_from_js(keys.get_element(index)?)?;
+                        let value = object.get_property(env.create_string(&key)?)?;
+                        let path = field.map(|field| crate::sdk::field_member(field, &key));
+                        values.insert(
+                            key,
+                            read_json(env, value, depth + 1, path.as_deref(), write)?,
+                        );
+                    }
+                    Ok(Value::Object(values))
+                }
+            }
+            ValueType::BigInt => Err(napi::Error::new(
+                napi::Status::InvalidArg,
+                "Payload BigInt 请使用十进制字符串 (Represent Payload BigInt as a decimal string)",
+            )),
+            ValueType::String => string_from_js(value).map(Value::String),
+            // 标量沿用 napi 既有数值与非法值边界，避免经 JSON.stringify 改写 NaN 等输入。
+            _ => unsafe {
+                // SAFETY: 句柄类型已由 napi 检测，标量转换不持有跨作用域引用。
+                Value::from_napi_value(env.raw(), value.raw())
+            },
+        }
+    })();
+    result.map_err(|error| match field {
+        Some(field) if error.status == napi::Status::InvalidArg => {
+            let input = crate::TriviumError::InvalidInput(error.reason).at_field(field);
+            crate::bindings::nodejs::nodejs::to_napi_error(
+                env,
+                match write {
+                    Some(write) => input.with_write_info(write),
+                    None => input,
+                },
+            )
+        }
+        _ => error,
+    })
 }
 
 fn write_json(env: Env, value: Value) -> napi::Result<JsUnknown> {

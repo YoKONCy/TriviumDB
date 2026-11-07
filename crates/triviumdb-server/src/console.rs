@@ -59,7 +59,17 @@ pub fn build_console_app<T: VectorType + Serialize + DeserializeOwned>(
         .route("/v1/console", post(request::<T>))
         .route("/v1/console/cancel/{id}", post(cancel::<T>))
         .route("/v1/console/contract", get(contract))
+        .route("/v1/console/status", get(status::<T>))
         .with_state(state))
+}
+
+async fn status<T: VectorType + Serialize + DeserializeOwned>(
+    State(state): State<Arc<HostState<T>>>,
+) -> impl IntoResponse {
+    (
+        [("cache-control", "no-store")],
+        Json(json!({"drained":state.host.session().is_drained()})),
+    )
 }
 
 async fn contract() -> impl IntoResponse {
@@ -80,6 +90,48 @@ async fn request<T: VectorType + Serialize + DeserializeOwned>(
     State(state): State<Arc<HostState<T>>>,
     request: Request,
 ) -> Response {
+    let mut identities = request.headers().get_all("x-tdb-request-id").iter();
+    let first = identities.next();
+    if identities.next().is_some() {
+        let error =
+            TriviumError::InvalidInput("请求身份头重复 (Duplicate request identity header)".into())
+                .at_field("request_id");
+        return error_response(StatusCode::BAD_REQUEST, json!(error.info()), None);
+    }
+    let identity = match first {
+        Some(header) => match header
+            .to_str()
+            .ok()
+            .filter(|value| value.len() <= 770)
+            .and_then(|value| serde_json::from_str::<String>(value).ok())
+        {
+            Some(id) if !id.is_empty() && id.len() <= 128 => Some(id),
+            _ => {
+                let error = TriviumError::InvalidInput(
+                    "请求身份头无效 (Invalid request identity header)".into(),
+                )
+                .at_field("request_id");
+                return error_response(StatusCode::BAD_REQUEST, json!(error.info()), None);
+            }
+        },
+        None => None,
+    };
+    let header = request.headers().get("x-tdb-request-id").cloned();
+    let mut response = request_inner(state, request, identity).await;
+    if let Some(header) = header {
+        response.headers_mut().insert("x-tdb-request-id", header);
+    }
+    response
+}
+
+async fn request_inner<T: VectorType + Serialize + DeserializeOwned>(
+    state: Arc<HostState<T>>,
+    request: Request,
+    identity: Option<String>,
+) -> Response {
+    let failure = |status, code: &str, message: &str, details| {
+        failure(status, code, message, details, identity.as_deref())
+    };
     // 先准入再读取请求体，未获许可的连接不能提前物化整个 JSON。
     let permit = match state.slots.clone().try_acquire_owned() {
         Ok(permit) => permit,
@@ -149,12 +201,31 @@ async fn request<T: VectorType + Serialize + DeserializeOwned>(
             );
         }
     };
+    let expected_identity = identity.clone();
     let task = tokio::task::spawn_blocking(move || {
         // 许可随真实 blocking 工作释放，客户端断开不会提前归还并发额度。
         let _permit = permit;
         let raw = std::str::from_utf8(&body).map_err(|_| {
             TriviumError::InvalidInput("请求必须为 UTF-8 (Request must be UTF-8)".into())
         })?;
+        if let Some(expected) = expected_identity {
+            #[derive(serde::Deserialize)]
+            struct Identity {
+                #[serde(rename = "requestId")]
+                request_id: String,
+            }
+            let actual: Identity = serde_json::from_str(raw).map_err(|error| {
+                TriviumError::InvalidInput(format!(
+                    "请求身份解析失败 (Request identity parsing failed): {error}"
+                ))
+            })?;
+            if actual.request_id != expected {
+                return Err(TriviumError::InvalidInput(
+                    "请求头与正文身份不一致 (Request header and body identities differ)".into(),
+                )
+                .at_field("request_id"));
+            }
+        }
         state.host.request_with_control(raw, control)
     })
     .await;
@@ -191,7 +262,7 @@ async fn request<T: VectorType + Serialize + DeserializeOwned>(
             };
             let mut info = error.info();
             info.details = triviumdb::sdk::json_error_details(info.details);
-            (status, Json(json!({"version":1,"error":info}))).into_response()
+            error_response(status, json!(info), identity.as_deref())
         }
         Err(error) => failure(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -202,10 +273,28 @@ async fn request<T: VectorType + Serialize + DeserializeOwned>(
     }
 }
 
-fn failure(status: StatusCode, code: &str, message: &str, details: serde_json::Value) -> Response {
-    (
+fn failure(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    details: serde_json::Value,
+    identity: Option<&str>,
+) -> Response {
+    error_response(
         status,
-        Json(json!({"version":1,"error":{"schema_version":triviumdb::error::ERROR_SCHEMA_VERSION,"code":code,"message":message,"details":triviumdb::sdk::json_error_details(details)}})),
+        json!({"schema_version":triviumdb::error::ERROR_SCHEMA_VERSION,"code":code,"message":message,"details":triviumdb::sdk::json_error_details(details)}),
+        identity,
     )
-        .into_response()
+}
+
+fn error_response(
+    status: StatusCode,
+    error: serde_json::Value,
+    identity: Option<&str>,
+) -> Response {
+    let mut body = json!({"version":1,"error":error});
+    if let Some(identity) = identity {
+        body["requestId"] = json!(identity);
+    }
+    (status, Json(body)).into_response()
 }

@@ -1,0 +1,12 @@
+{
+  "dimension": 2,
+  "requestId": "typed-request",
+  "id": 7,
+  "vector": [1, 0],
+  "floatScore": 1,
+  "binaryScore": 128,
+  "payload": {"body": "请求原文", "stable": true},
+  "cancelCode": "TDB_QUERY_CANCELLED",
+  "admission": {"phase": "admission", "outcome": "not_committed"},
+  "transactionAdmission": {"phase": "admission", "outcome": "not_committed", "transaction_consumed": false}
+}

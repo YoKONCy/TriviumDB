@@ -15,7 +15,7 @@ pub(super) struct Scope<'a, T: VectorType> {
     pub memory: &'a QueryMemory,
     pub query: &'a TqlQuery,
     pub mt: &'a MemTable<T>,
-    pub limits: &'a TqlLimits,
+    pub limits: &'a ExecutionContext,
     pub pipeline: Option<(&'a str, &'a std::collections::BTreeSet<String>)>,
 }
 
@@ -328,8 +328,17 @@ fn project<T: VectorType>(
     let mut values = HashMap::new();
     match &scope.query.returns {
         ReturnClause::Expressions(items) => {
-            for item in items {
-                values.insert(column_name(item), kind_value(&item.kind, input, scope)?);
+            for (index, item) in items.iter().enumerate() {
+                values.insert(
+                    column_name(item),
+                    kind_value(&item.kind, input, scope).map_err(|error| {
+                        scope.limits.error(
+                            error,
+                            QueryErrorStage::Execute,
+                            SourceSelector::ReturnItem(index),
+                        )
+                    })?,
+                );
             }
         }
         ReturnClause::Variables(vars) => {
@@ -495,6 +504,17 @@ pub(super) fn finish<T: VectorType>(
     inputs: &[Input<'_, T>],
     scope: &Scope<'_, T>,
 ) -> Result<Vec<Row<T>>, TriviumError> {
+    finish_inner(inputs, scope).map_err(|error| {
+        scope
+            .limits
+            .error(error, QueryErrorStage::Execute, SourceSelector::Return)
+    })
+}
+
+fn finish_inner<T: VectorType>(
+    inputs: &[Input<'_, T>],
+    scope: &Scope<'_, T>,
+) -> Result<Vec<Row<T>>, TriviumError> {
     validate_return_columns(&scope.query.returns)?;
     admit_return_workspace(inputs, scope)?;
     let expressions = match &scope.query.returns {
@@ -540,16 +560,25 @@ pub(super) fn finish<T: VectorType>(
         for group in groups.into_values() {
             let source = group.first().copied();
             let mut values = HashMap::new();
-            for item in items {
-                let value = match &item.kind {
-                    ReturnExprKind::Aggregate(func, inner) => {
-                        aggregate(*func, inner, item.distinct, &group, inputs, scope)?
-                    }
-                    kind => source
-                        .map(|index| kind_value(kind, &inputs[index], scope))
-                        .transpose()?
-                        .unwrap_or(TqlValue::Null),
-                };
+            for (item_index, item) in items.iter().enumerate() {
+                let value = (|| {
+                    Ok(match &item.kind {
+                        ReturnExprKind::Aggregate(func, inner) => {
+                            aggregate(*func, inner, item.distinct, &group, inputs, scope)?
+                        }
+                        kind => source
+                            .map(|index| kind_value(kind, &inputs[index], scope))
+                            .transpose()?
+                            .unwrap_or(TqlValue::Null),
+                    })
+                })()
+                .map_err(|error| {
+                    scope.limits.error(
+                        error,
+                        QueryErrorStage::Execute,
+                        SourceSelector::ReturnItem(item_index),
+                    )
+                })?;
                 values.insert(column_name(item), value);
             }
             rows.push(Row { source, values });
@@ -586,7 +615,16 @@ pub(super) fn finish<T: VectorType>(
                     .query
                     .order_by
                     .iter()
-                    .map(|order| order_value(&order.expr, &row, inputs, scope))
+                    .enumerate()
+                    .map(|(index, order)| {
+                        order_value(&order.expr, &row, inputs, scope).map_err(|error| {
+                            scope.limits.error(
+                                error,
+                                QueryErrorStage::Execute,
+                                SourceSelector::Order(index),
+                            )
+                        })
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((row, keys))
             })

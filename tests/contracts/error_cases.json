@@ -24,6 +24,6 @@
     {"operation": "closed", "code": "TDB_DATABASE_CLOSED", "details": {}},
     {"operation": "locked", "code": "TDB_DATABASE_LOCKED", "details": {}, "string_fields": ["reason"]},
     {"operation": "io", "code": "TDB_IO", "details": {}, "string_fields": ["io_kind"], "integer_fields": ["os_code"]},
-    {"operation": "version", "code": "TDB_UNSUPPORTED_DATABASE_VERSION", "details": {"found": 65535, "minimum_supported": 5, "current": 10}}
+    {"operation": "version", "code": "TDB_UNSUPPORTED_DATABASE_VERSION", "details": {"found": 65535, "minimum_supported": 5, "current": 11}}
   ]
 }

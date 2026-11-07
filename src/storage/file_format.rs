@@ -114,7 +114,7 @@ pub(crate) fn publish_new_database<T: VectorType>(
 
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
-pub const CURRENT_VERSION: u16 = 10;
+pub const CURRENT_VERSION: u16 = 11;
 pub const MINIMUM_SUPPORTED_VERSION: u16 = 5;
 const LEGACY_HEADER_SIZE: u64 = 58;
 const HEADER_SIZE: u64 = 74;
@@ -1118,6 +1118,19 @@ fn save_tdb<T: VectorType>(
     unique_bytes.extend_from_slice(&unique_crc.to_le_bytes());
     w.write_all(&unique_bytes)?;
 
+    let _receipt_workspace = memtable.resource_runtime().reserve_workspace(
+        memtable
+            .editing
+            .memory_bytes()
+            .saturating_mul(3)
+            .saturating_add(128),
+    )?;
+    let receipts = memtable.editing.checkpoint()?;
+    w.write_all(&receipts)?;
+    w.write_all(&(receipts.len() as u64).to_le_bytes())?;
+    w.write_all(&crc32fast::hash(&receipts).to_le_bytes())?;
+    w.write_all(b"TREC")?;
+
     w.flush()?;
     let file = w
         .into_inner()
@@ -1888,6 +1901,12 @@ fn load_unique_constraints<T: VectorType>(
     if version < 8 {
         return Ok(());
     }
+    let (bytes, receipts) = if version >= 11 {
+        let (bytes, receipts) = crate::storage::edit_receipts::split_checkpoint(bytes)?;
+        (bytes, Some(receipts))
+    } else {
+        (bytes, None)
+    };
     let start = layout.map_or(bytes.len(), |layout| layout.end_offset);
     let block = bytes.get(start..).ok_or_else(|| {
         TriviumError::CorruptedFile(
@@ -1988,7 +2007,18 @@ fn load_unique_constraints<T: VectorType>(
             .saturating_mul(count)
             .saturating_mul(256),
     )?;
-    memtable.restore_unique_index_definitions(&definitions)
+    memtable.restore_unique_index_definitions(&definitions)?;
+    if let Some(receipts) = receipts {
+        for raw in crate::storage::edit_receipts::records(receipts)? {
+            memtable.check_load_allocation(
+                raw.len()
+                    .saturating_mul(4)
+                    .saturating_add(memtable.editing.queue_bytes()),
+            )?;
+            memtable.editing.restore(raw)?;
+        }
+    }
+    Ok(())
 }
 
 fn admit_sidecar<T: VectorType>(mt: &MemTable<T>, path: &str, expansion: usize) -> Result<()> {

@@ -1,13 +1,14 @@
 {
   "cases": [
-    {"name":"single_equals","query":"MATCH (n) WHERE n.x = 1 RETURN n","stage":"lex","span":{"start_byte":20,"end_byte":20,"line":1,"column":21}},
-    {"name":"unterminated_string","query":"MATCH (n) RETURN '秘密","stage":"lex","span":{"start_byte":17,"end_byte":17,"line":1,"column":18}},
-    {"name":"unicode_crlf_tab","query":"MATCH (n)\r\nRETURN \"中🙂é\" +\t好","stage":"lex","span":{"start_byte":33,"end_byte":33,"line":2,"column":17}},
-    {"name":"identifier","query":"MATCH (123) RETURN n","stage":"parse","span":{"start_byte":7,"end_byte":7,"line":1,"column":8}},
-    {"name":"trailing_token","query":"MATCH (n) RETURN n extra","stage":"parse","span":{"start_byte":19,"end_byte":19,"line":1,"column":20}},
+    {"name":"single_equals","query":"MATCH (n) WHERE n.x = 1 RETURN n","stage":"lex","span":{"start_byte":20,"end_byte":21,"line":1,"column":21}},
+    {"name":"unterminated_string","query":"MATCH (n) RETURN '秘密","stage":"lex","span":{"start_byte":17,"end_byte":24,"line":1,"column":18}},
+    {"name":"unicode_crlf_tab","query":"MATCH (n)\r\nRETURN \"中🙂é\" +\t好","stage":"lex","span":{"start_byte":33,"end_byte":36,"line":2,"column":17}},
+    {"name":"identifier","query":"MATCH (123) RETURN n","stage":"parse","span":{"start_byte":7,"end_byte":10,"line":1,"column":8}},
+    {"name":"trailing_token","query":"MATCH (n) RETURN n extra","stage":"parse","span":{"start_byte":19,"end_byte":24,"line":1,"column":20}},
+    {"name":"trailing_comment","query":"MATCH (n) RETURN n extra -- suffix","stage":"parse","span":{"start_byte":19,"end_byte":24,"line":1,"column":20}},
     {"name":"missing_expression","query":"MATCH (n) RETURN","stage":"parse","span":{"start_byte":16,"end_byte":16,"line":1,"column":17}},
-    {"name":"delimiter","query":"MATCH (n] RETURN n","stage":"parse","span":{"start_byte":8,"end_byte":8,"line":1,"column":9}},
-    {"name":"semantic_alias","query":"MATCH (n) RETURN n AS x, n AS x","stage":"parse","span":null},
-    {"name":"mutation","query":"CREATE ({ok:1}), (123)","mutation":true,"stage":"parse","span":{"start_byte":18,"end_byte":18,"line":1,"column":19}}
+    {"name":"delimiter","query":"MATCH (n] RETURN n","stage":"parse","span":{"start_byte":8,"end_byte":9,"line":1,"column":9}},
+    {"name":"semantic_alias","query":"MATCH (n) RETURN n AS x, n AS x","stage":"plan","span":{"start_byte":25,"end_byte":31,"line":1,"column":26}},
+    {"name":"mutation","query":"CREATE ({ok:1}), (123)","mutation":true,"stage":"parse","span":{"start_byte":18,"end_byte":21,"line":1,"column":19}}
   ]
 }

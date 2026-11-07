@@ -70,23 +70,26 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> ConsoleHost
     }
 
     fn request_inner(&self, request_json: &str, control: Option<QueryControl>) -> Result<String> {
-        if self.session.is_detached() {
-            return Err(TriviumError::ConsoleSessionClosed);
-        }
-        let execute = |core: &mut Database<T>| {
-            core.console_request_inner(&self.session, request_json, control)
-        };
+        let prepared = self.session.prepare_request(request_json, control)?;
+        let context = prepared.context.clone();
+        let execute =
+            |core: &mut Database<T>| core.execute_console_request(&self.session, prepared);
         match &self.database {
             HostDatabase::External(database) => {
-                let database = database.upgrade().ok_or(TriviumError::DatabaseClosed)?;
+                let database = database
+                    .upgrade()
+                    .ok_or_else(|| context.admission_error(TriviumError::DatabaseClosed))?;
                 let mut guard = database
                     .try_lock()
-                    .map_err(|error| lock_error(error, "host_database"))?;
+                    .map_err(|error| context.admission_error(lock_error(error, "host_database")))?;
+                context.check_admission()?;
                 execute(&mut guard)
             }
             HostDatabase::Shared(database) => {
-                let database = database.upgrade().ok_or(TriviumError::DatabaseClosed)?;
-                database.try_write(execute)
+                let database = database
+                    .upgrade()
+                    .ok_or_else(|| context.admission_error(TriviumError::DatabaseClosed))?;
+                database.try_write_with_context(&context, execute)
             }
         }
     }

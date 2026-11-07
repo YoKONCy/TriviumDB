@@ -133,9 +133,27 @@ enum RepairAction {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let args = std::env::args_os().collect::<Vec<_>>();
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(error) => {
+            if error.use_stderr() && json_requested(&args) {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "schema_version": triviumdb::error::ERROR_SCHEMA_VERSION,
+                        "code": "TDB_CLI_ARGUMENT",
+                        "message": format!("命令行参数无效 (Invalid command-line arguments): {error}"),
+                        "details": {"argument_kind": format!("{:?}", error.kind())}
+                    })
+                );
+                std::process::exit(error.exit_code());
+            }
+            error.exit();
+        }
+    };
     apply_color(cli.color);
-    let cfg = config::Config::load();
+    let cfg = config::Config::load(cli.format == Some(OutputFormat::Json));
     let error_format = resolve_format(cli.format, &cfg);
 
     let result = run(cli, cfg);
@@ -151,11 +169,52 @@ fn main() {
                     error
                 );
             }
+        } else if error_format == OutputFormat::Json {
+            eprintln!("{}", command_error_info(e.as_ref()));
         } else {
             eprintln!("{} {}", "错误 / Error:".red().bold(), e);
         }
         std::process::exit(1);
     }
+}
+
+fn json_requested(args: &[std::ffi::OsString]) -> bool {
+    let mut args = args.iter().skip(1);
+    let mut format = None;
+    while let Some(argument) = args.next() {
+        if argument == "--" {
+            break;
+        }
+        if argument == "--format" {
+            format = args.next().and_then(|value| value.to_str());
+        } else if let Some(value) = argument
+            .to_str()
+            .and_then(|value| value.strip_prefix("--format="))
+        {
+            format = Some(value);
+        }
+    }
+    format.and_then(|value| OutputFormat::parse(value).ok()) == Some(OutputFormat::Json)
+}
+
+fn command_error_info(error: &(dyn std::error::Error + 'static)) -> serde_json::Value {
+    let (code, details) = if let Some(error) = error.downcast_ref::<std::io::Error>() {
+        (
+            "TDB_IO",
+            serde_json::json!({"io_kind": format!("{:?}", error.kind()), "os_code": error.raw_os_error()}),
+        )
+    } else {
+        (
+            "TDB_CLI_COMMAND",
+            serde_json::json!({"reason": error.to_string()}),
+        )
+    };
+    serde_json::json!({
+        "schema_version": triviumdb::error::ERROR_SCHEMA_VERSION,
+        "code": code,
+        "message": format!("命令执行失败 (Command failed): {error}"),
+        "details": details
+    })
 }
 
 fn apply_color(when: ColorWhen) {

@@ -15,7 +15,7 @@
 - 修复 Python 事务提交在数据库借用前消费 builder、借用冲突触发 panic 的路径。提交先取得借用并完成内核准入，锁忙、重入、关闭或恢复保护拒绝保留操作，调用方可继续安排提交或回滚；已关闭实例拒绝创建事务对象。
 - 独立 Server 开始关闭后，新读写请求统一返回 `TDB_DATABASE_CLOSED` 和空详情，HTTP 保持 503，旧分类通过 `legacyCode: "SERVICE_UNAVAILABLE"` 保留，`retryable` 为 `false`。
 
-> **适用范围**：本轮保持磁盘格式与单写事务模型。绑定参数提取、其他包装对象的借用异常、完整字段定位和写入结果元数据继续按分阶段契约收敛。Python 事务对象的进展见下一节。宿主锁中毒需要结束相关句柄并检查恢复；关闭超时只结束等待。接入示例见[内核 SDK 文档](../kernel-sdk.md)。
+> **适用范围**　共享访问采用单写事务模型，格式变化见统一请求上下文与跨重开确认一节。其他包装对象及其余公共入口按分阶段契约收敛。宿主锁中毒需要结束相关句柄并检查恢复，关闭超时结束当前等待。接入示例见[内核 SDK 文档](../kernel-sdk.md)。
 
 ### Prepared 参数诊断与公共错误目录
 
@@ -100,6 +100,58 @@
 - Node 上下文与高级配置的已覆盖数量字段提供规范类型诊断。配置字段以省略或 `undefined` 使用默认值，`null` 按既有类型边界拒绝。可选方法实参继续支持 `null` 默认值，配置 getter 的原异常和 cause 直接传播。
 - 三种 dtype 的实际绑定用例验证字段拒绝、整数／序列／配置回调、外层完整结果、原宿主异常、有效默认调用及后续写入。关闭后继续持有旧对象并移动 Windows 文件组，重开核对更新向量、Payload 和边。向量／嵌套成员定位与框架序列长度提示策略继续按独立契约收敛。
 
+### 图读取参数与直接 CRUD 准入结果
+
+- 邻居、可达性、详细可达性及子图读取补齐 ID、深度／预算和方向的字段诊断。Python 在请求借用内转换参数及标签序列，保留原类型异常、方向枚举的 ValueError 和宿主协议异常。Node 对已覆盖字段执行原始类型校验，并保留配置 getter 的原异常及既有 null 默认规则。
+- 十五个直接 CRUD 入口在 SDK 层拒绝重入或借用争用时提供 admission/not_committed，消费字段省略。覆盖节点及边写入、两类批量插入、原子批量删除、Payload 补丁／条件替换及向量更新。进入内核后的事务、WAL 与发布结果继续由内核确定。
+- Node 公共声明补齐已有运行接口 deleteManyAtomic 和 compareAndSetPayloadField，并加入精确返回类型及错误输入消费样例。
+- 独立三节点链样例覆盖三种 dtype、完整路径、逐跳属性、出向／双向扫描量、默认值、回调拒绝及 WAL 完整性。关闭后持有旧对象并移动 Windows 文件组，重开核对全部事实，再执行条件更新和原子删除并再次重开。嵌套成员、框架长度提示异常策略和其他入口继续按各自契约收敛。
+
+### 基础读取参数与结果所有权
+
+- 节点、Payload、存在性、出边、入边和精确边读取补齐 ID／标签提取诊断，字段使用 id、src、dst 和 label。Python 在读请求借用内执行整数协议，内置错误保留异常继承，自定义整数协议原异常直接传播。Node 执行原始类型与安全整数检查。
+- Python 存在性指南采用实际公开入口 id in db。入边读取的 None／null 与省略标签表示全部标签，空标签按其内容精确匹配；精确边读取要求标签实参。Unicode／NUL 标签完整保留。
+- 真实制品验证三种 dtype、完整节点和边、不存在节点、语言整数范围、回调重入、Python 跨线程共享读取及写争用。关闭时继续持有节点、向量、Payload、边和旧数据库对象，文件组移动后旧结果保持独立快照，更新后的事实在两次重开中完整保留。
+
+### 公开调用形状与框架诊断
+
+- Python 包按原生公开签名预检实例方法、选定魔术方法和模块函数的实参结构。缺参、未知关键字、重复赋值、位置专用参数和位置数量错误保留 TypeError 继承，提供 TDB_INVALID_INPUT、target.field 及 details.argument_kind。多项问题按固定结构顺序定位，Python 目标字段保留原始 Unicode／NUL／孤立 surrogate 关键字。
+- Node 公共加载器在 N-API 转换前定位已登记的必需位置缺参，显式 undefined 继续执行既有类型校验，额外位置参数和配置对象沿用各入口规则。回调重入继续优先拒绝。
+- SDK 统一构造已覆盖写调用的 validation/not_committed 结果，Python 事务和 Node commitTransaction 提供 transaction_consumed=false。Python 有效调用继续转交原生绑定，宿主异常对象、cause、类身份、签名与默认值保留。
+- 三种 dtype 的实际制品用例核对诊断、转换回调零次、完整事实及 WAL，随后真实提交、持有旧结果关闭并移动 Windows 文件组，两次重开验证持久化。构造期诊断、错误 receiver 和 callable 入口之前的解释器展开错误继续单独收敛。
+
+### 构造参数值与失败资源归还
+
+- 数据库和资源运行时构造的已覆盖整数、字符串、枚举及 MiB 换算提供 TDB_INVALID_INPUT 和 target.field，Node 同时覆盖数据库布尔配置。Python 保留内置类型异常继承、自定义整数协议的原异常与 cause，Node 保留配置 getter 的原异常。会话配置的类型与 JSON 拒绝定位 options_json／optionsJson。
+- 修复极端维度拒绝诊断中的整数乘法溢出。零维度和超过 65536 的维度由内核直接拒绝并定位 dim，运行时线程上限与维护额度冲突同样提供字段。打开失败后已登记任务与配额按所有权归还。
+- 独立记录验证三种 dtype、重复 writer、打开失败后的配额归还、持有旧结果及错误对象时的 Windows 文件移动、身份不匹配后的同路径重试和两次持久化重开。Python 使用当前 Mmap 构造接口，Node 覆盖 Rom／Mmap。Python 公共存根将缓存 MiB 参数明确为 int，正反类型消费同步。
+- 本节记录构造参数值；构造调用形状及普通 CRUD 的后续收敛见下文。
+
+### 配置容器与 runtime 句柄诊断
+
+- Node 数据库和资源运行时的 options 在属性读取前校验为非数组对象。资源运行时先前将原始值或数组按默认配置接受的路径现返回 TDB_INVALID_INPUT，字段为 options；省略、undefined 和 null 保留默认配置。具名属性按既有原型链读取，未知属性沿各入口规则处理。
+- Node 旧数字位置数据库构造补齐 TDB_API_MIGRATION_REQUIRED、迁移详情和 options 字段。npm 声明补齐配置及快照模块 runtime 的既有 null 默认形式，数据库配置中的 runtime 成员继续要求有效句柄。
+- Python 数据库的内置布尔提取和原生 runtime 类型拒绝补齐字段。两端 runtime 校验同时服务数据库、快照校验和恢复模块；已知恢复句柄拒绝提供 validation/not_committed。Node getter／Proxy 及 Python 宿主转换异常保留原对象、cause 和已有属性。
+- 实际制品验证非法配置、原异常、完整默认维度记录、无原型配置、继承 getter、未知属性及持有 writer 时的 WAL。随后实际创建、校验和恢复快照，重开核对完整节点与配额，再执行关闭、文件移动和再次持久化。
+
+### 构造调用形状与普通 CRUD 转换
+
+- Python 的 TriviumDB、ResourceRuntime 和 ConsoleSession 在原生构造入口按 SDK 公开签名元数据绑定实参，补齐缺参、未知关键字、重复赋值和额外位置的 TypeError、TDB_INVALID_INPUT、target.field 与 details.argument_kind。相同元数据提供 __signature__，兼容 Python 3.9，生成存根同步准确类型。批量插入的 vectors／payloads 外层声明更正为 list，与既有原生表示一致；ID 集合与单条向量继续采用 Sequence。形状拒绝发生在值协议、文件创建和资源登记前，原生类身份、签名及默认值保留。
+- Node 数据库构造在缺少 path 时提供规范缺参，构造转发保留 prototype、constructor、instanceof、子类与 newTarget。显式 undefined 路径沿类型拒绝处理，额外位置参数遵循原有 JavaScript 调用规则。
+- 十五个普通 CRUD 的已知语言类型、表示范围和 JSON 转换拒绝补齐 validation/not_committed，省略事务消费字段。批量插入的内部临时事务消费字段由 SDK 隐去，保留内核阶段、结果与 cause；Node 自动 ID 的安全整数拒绝补齐提交前结果。顶层 target.field 保留参数名，批量和 JSON 成员使用 RFC 6901 JSON Pointer，保留数组下标、转义键、Unicode 与 NUL。无法表示为 JSON 字符串的对象键定位所属容器。
+- Python 的 ID、向量分量、边权和 JSON 转换在请求借用内完成，普通整数／浮点协议和原有 Sequence 输入继续接受。长度提示异常沿既有规则忽略，缓冲按实际元素增长。批量转换固定外层下标范围，回调缩短列表造成成员缺失时定位成员并拒绝整批，追加成员留待后续调用处理。宿主整数、浮点、迭代、getitem、getter 与 Proxy 的原异常身份、cause 和已有属性保留，同库回调重入按请求准入拒绝。
+- Node 构造字符串、普通 CRUD 字符串和 JSON 字符串严格解码 UTF-16，孤立 surrogate 按输入错误拒绝，避免替换字符改变路径、标签或 JSON 键。有效 Unicode 和 NUL 完整保留。可选边参数沿各语言原有默认规则，Node upsertEdge 的 weight 继续必填。移除 Payload 补丁的已废弃简写示例。
+- 新增独立 CRUD 字段矩阵及完整前后事实。实际绑定契约覆盖三种 dtype、Python 当前 Mmap 和 Node Rom／Mmap，逐字段验证失败后的内容与 WAL，再通过全部十五个入口写入、持有旧对象关闭、移动 Windows 文件组及两次持久化重开。解释器在 callable 之前的展开错误、错误 receiver 和 JavaScript 非构造调用遵循宿主异常契约。其余检索、索引、AST 与包装对象继续按各自入口推进。
+
+### 检索、图读取与文本入口字段
+
+- 八类检索补齐浮点、布尔、向量、锚点、标签和 JSON 成员的转换诊断。顶层字段沿公开参数名提供，嵌套字段使用 JSON Pointer，读取错误省略 write。Python 转换在请求借用内执行，Node 保留 getter 原异常、数组读取和既有同步／Promise 完成方式，u64 批量范围错误包含行列位置。
+- 检索配置的有限性、扩散偏置维度与最小边权约束由内核提供准确字段，空批次在返回空结果前验证同一配置。混合权重由共享 SDK 换算，hybrid_alpha／hybridAlpha 的 NaN、Infinity 及换算溢出按输入错误拒绝，修复 max 运算掩盖非法输入的路径。Rust 通过 underlying() 取得带字段错误的原类别。
+- 四类图读取补齐 Node 标签容器和成员、配置外层及方向的诊断。Python 图标签与检索序列共用既有长度提示容错规则，缓冲按实际元素增长。Node 高级／上下文检索和可达性配置按非数组对象校验，省略／null 使用默认配置，可选位置参数的 null 与配置成员规则分别保留，npm 声明同步有效默认形式。
+- 属性／子串查找补齐对象、JSON、数量、字段和内容诊断，1—1000000 数量范围、空条件及空子串输入由内核判定。正文、关键词、构建和完整文本重建入口补齐已知参数转换与 SDK 拒绝的写入结果，失败保留既有文本和索引事实。
+- 完整重建记录使用 id、text 和可选 keywords。成员缺失、类型、编码与未知字段提供记录路径，Node 先前忽略的未知重建字段按闭合记录契约拒绝。本批 Node 文本、标签、字段和记录字符串严格解码 UTF-16，孤立 surrogate 按输入错误拒绝，Unicode 与 NUL 完整传递。Python 按声明接受 Mapping，先固定本批记录对象，再物化和转换字段，回调修改外层列表时继续处理本批已捕获记录。宿主映射、数值协议和 getter 的异常保留原对象、cause 与已有属性。
+- 独立字段矩阵覆盖三种 dtype，Python 当前 Mmap 与 Node Rom／Mmap。用例验证完整分数／Payload、字段路径、原异常、线程借用争用、拒绝后的 WAL、完整正文／关键词与图事实，关闭后移动文件组并两次重开。公共签名、默认值、存根和实际包的类型正反消费同步维护。
+
 ### Python 事务构造器的请求隔离与回收
 
 - Python 事务方法改用显式借用，方法内转换回调的同事务重入返回 `TDB_REENTRANT_ACCESS` 和 `operation: "python_transaction_callback"`，线程争用返回 `TDB_BUSY` 和 `resource: "python_transaction"`。拒绝保留缓冲操作，其他事务按自身准入继续工作。
@@ -112,17 +164,58 @@
 ### TQL 结构化解析诊断
 
 - 数据库查询、Prepared TQL 准备和写语句解析增加 `stage: "lex" | "parse"` 与可选 `target.query_span`，保留 `TDB_QUERY_PARSE`、`schema_version: 1` 和 `details.reason`。Rust 新增 `QuerySyntax` 变体及结构化解析入口；旧 `QueryParse(String)` 与独立解析入口保留，直接匹配数据库解析错误的 Rust 调用者需适配新变体。
-- 修正词法失败和已消费错误 token 的定位。源码锚点采用原始 UTF-8 字节的零长度范围，行列从 1 开始；CRLF 合并换行，列按 Unicode 标量计数，Tab 计一列。缺少准确位置的语义检查和超长输入省略位置。
+- 修正词法失败和已消费错误 token 的定位。可靠位置采用原始 UTF-8 半开字节范围，终点来自实际扫描，空白与注释独立于相邻 token。输入结束及 token 预算边界使用零长度锚点。行列从 1 开始，CRLF 合并换行，列按 Unicode 标量计数，Tab 计一列。缺少准确位置的语义检查和超长输入省略位置。
+- 数据库准备的 Prepared 参数错误同时携带参数名与首个真实引用范围，包含 `$` 前缀。源码由 Core 保存，缺参、已引用参数的 JSON 转换和向量槽位绑定共享定位，字符串、注释与文档过滤操作符按解析语义区分。额外参数及独立标量转换、手工 AST 准备使用已知参数名。源码元数据由 Prepared 克隆共享，Rust `QueryParameterSource` 包装保留原始类别、详情、cause 和已知写入结果，原始变体通过 `underlying()` 匹配。
 - Python、Node、CLI JSON、嵌入 Console HTTP 和独立 Server 保留同一结构。内置 Console 数据适配器在原生异常、JSON 错误信封与 fetch 响应中透传扩展字段。Python 对缺失扩展字段提供 `None`，Node／JSON 省略字段；HTTP 查询解析拒绝保持 400 和原兼容类别。共享样例覆盖 f32／f16／u64 绑定、Unicode 与换行、读取与写语句拒绝及关闭重开后的完整内容。
 
-> **接入提醒**：本批覆盖解析阶段与已确认的诊断锚点。完整 AST 范围、Prepared 参数绑定位置、其他操作阶段和写入结果字段继续分批补齐，详见 [TQL 诊断](../tql-reference.md#结构化查询诊断)。
+- AST 构造来源树覆盖查询入口、模式、过滤、全部 PipelineStage、表达式与谓词、返回／聚合／排序／分页，以及写入源、动作、节点／边、赋值、向量和 JSON。Rust 新增配对的 `LocatedTql` 解析入口、只读 AST／来源视图和 `PreparedTql::from_located`，手工 AST 执行按持有的信息提供阶段与定位。
+- 诊断增加 `plan` 和 `execute`。符号校验沿 AST 路径定位具体引用或冲突返回项，算子装配、计算、预算、投影与事务在实际检查点记录来源。融合算子提供参与逻辑节点的最小包围范围，内核生成的子查询沿原入口追溯。`QuerySource` 与字段／参数包装保留原始类别、cause、详情及写入结果，普通字段或参数可与查询范围同时出现。
+- 空匹配集同样校验 SET、SET VECTOR、DELETE 的节点变量，GraphFirst RANK 校验绑定及节点类型。基础 SEARCH 将取消控制传入真实管线。修正 `DisableFusion` 测试 Hook 沿用融合消除标记、可能跳过 RANK 的问题，拆分路径执行原始逻辑阶段。共享样例验证三种 dtype、实际语言制品、两类 HTTP、原始 AST、取消、WAL 与重开事实。
+
+> **接入提醒**　Rust 错误变体匹配使用 `underlying()`，公共诊断通过 `info()` 读取。查询阶段与写入结果分别判断，详见 [TQL 诊断](../tql-reference.md#结构化查询诊断)。
+
+### 工程收口的参数、取消与传输契约
+
+- 补齐属性索引、复合字段和 Leiden 参数的字段诊断，快照、迁移、关闭超时、FFI 路径、Console 字符串及取消 ID 使用相同的表示校验。Python 转换在请求借用内执行，Node 复用同步重入准入，原宿主异常继续传播。
+- Python 事务缓冲的标量、向量和 JSON 成员拒绝附加字段及 validation/not_committed、transaction_consumed=false，此前操作保留，转换中取消在追加缓冲前拒绝。Node commitTransaction 增加 operations 成员路径，显式错误类型的 label／weight 按字段拒绝，省略字段保留原默认值。ConsoleSession 与 PreparedTql 句柄的已知拒绝附加对应字段，Node 公共加载器核对句柄来源，重入错误的写入字段复用 SDK 操作目录。
+- 精确扫描在 Rayon 分片中观察取消，图算法、遍历及结构分析增加节点、边和迭代检查点。工作线程继承组合控制，受控拒绝归还工作区。现有低层同步辅助函数的返回类型保留，数据库和 TQL 使用可失败路径，WAL 之后的原子提交沿原协议完成。
+- 嵌入 HTTP 增加可选 X-TDB-Request-ID，采用 ASCII JSON 字符串编码并在正文读取前保存身份，执行前核对正文 requestId。数据适配器自动发送身份头，支持 Unicode，早期拒绝附加原请求身份。
+- Server 的队列满改用 TDB_BUSY 和 write_queue 资源，HTTP、缓存和服务类别采用规范码，legacyCode 保留旧类别。路径、方法、请求体及适配异常使用结构化响应，外层请求身份覆盖提取拒绝。带 write 的错误继续提供 retryable=false，调用方依照阶段、结果及消费状态处理。
+- CLI 显式 JSON 格式覆盖命令解析、非 Core 命令错误、I/O 及配置警告。入口字段、重试决策、兼容处理和 SDK／Core 当前依赖同步记入公共文档。
+
+### 类型化请求作用域与宿主桥接
+
+- Python 和 Node 新增公开 `RequestContext`，分别通过 `with context` 和 `context.run` 将请求身份、取消及期限传递到普通类型化调用。ID 使用 1–128 个 UTF-8 字节，毫秒期限从构造时开始计算，0 由宿主取消管理。嵌套作用域保留外层控制，两端最多嵌套 32 层。
+- Rust 提供同步 `RequestContext::run` 和 Reader／Writer 的 `with_request_context`。SDK 借用与 Core 作用域在创建线程退出，控制句柄可克隆传递。Python ContextVar 和 Node AsyncLocalStorage 隔离任务，原生批量查询显式将控制器传递到工作线程。
+- 类型化事务在 SDK 借用及准入成功后消费缓冲，普通共享事务继承 WAL 前取消检查。直接 CRUD 和事务取得实际 WAL 锁后再次检查控制，覆盖等待锁及回执编码期间的取消。Console 执行安装组合后的 Core 作用域，TQL 与检索沿已接入的执行检查点检查。关闭、回滚及已登记的资源诊断使用自身的生命周期与借用规则，调用结果沿实际内核完成点返回。
+- Console 自定义桥接接收冻结的请求元数据，创建时捕获宿主回调，并提供可等待的 drain 完成确认。false 返回 `TDB_BUSY/console_bridge_drain`，其他无效值返回 `TDB_CONSOLE_TRANSPORT`。卸载失败后维持停止准入并可重试清理。宿主原始值拒绝保留 cause，已分发写入保留未知响应结果。
+- 共享独立样例覆盖三种 dtype、转换回调取消、事务缓冲、异步任务隔离、第二个查询工作线程的取消、嵌套边界、宿主原异常及完整重开事实。Python 存根、Node 声明、实际安装包及非 UI 桥接契约同步验收。
+
+> **调度提醒**　控制器在实际检查点观察取消。宿主自行建立的线程、进程与外部任务显式传递身份及控制事件，并通过对应完成点确认排空和资源释放。
+
+### 统一请求上下文与跨重开确认
+
+- Core 定义 `RequestContext`，统一保存请求 ID、取消／期限控制和写入类别，通过 `sdk` 导出。Rust 共享句柄新增 `try_read_with_context`、`try_write_with_context` 和 `commit_tx_with_context`。准入拒绝保留事务 builder，消费后的预检取消明确返回 `validation/not_committed` 和 `transaction_consumed=true`，实际提交结果由存储内核提供。
+- Console 先解析借用的协议信封和命令类别，取得宿主借用及内核准入后再解析完整命令。会话登记、取消、SDK 准入和事务 WAL 前检查共享同一控制器。Rust、Python、Node 及嵌入 HTTP 通过原有 Console JSON 入口复用该路径。
+- 版本保护事务的完整身份、创建 ID 和提交版本与事实写入同一个 WAL 事务，完整提交封条生效后一起恢复，随后随检查点原子发布。保留的回执支持关闭、恢复及重开后的 `transactionStatus` 和原事务幂等重放。每个数据库最多保留 64 条、合计 8 MiB 回执，按先入先出淘汰。缺失或淘汰的事务返回 `unknown`，应用按持久化业务身份核对完整事实。
+- 主文件格式升级至 v11，在唯一约束块后增加带长度和 CRC32 的回执块，WAL 升级至 v4。当前内核读取 v5–v11 主文件，可写打开按原有路径升级历史 v2 WAL。v3 WAL 先流式验证，再原子转换完整事务前缀并丢弃物理截断尾帧。空的合法 v3 WAL 支持只读打开，v2 WAL 继续由可写恢复处理。
+- 新增受控提交前取消、事务缓冲消费、同封条恢复、未封条事务不可见及旧制品来源样本。三种 dtype 的独立 v10／v3 样本验证只读零写、升级、完整节点／向量／Payload／边和再次重开；样本来源与哈希保存在测试 fixture 的 provenance 中。
+
+> **持久化提醒**　回执的耐久性遵循 SyncMode。重新打开会创建新的编辑版本身份，保留的原回执确认历史提交，后续编辑使用当前快照。切换到 v11／v4 前保留完整文件组备份，旧内核环境通过升级前备份恢复。
+
+### 请求执行与传输完成点
+
+- ConsoleSession 新增 Rust／Python `is_drained()` 和 Node `isDrained()`，在 detach 已关闭准入且全部 Core 请求退出时返回 true。嵌入 HTTP 新增 `GET /v1/console/status`，返回相同的 drained 状态。Core 已解析写命令的会话、能力与权限拒绝补齐 admission/not_committed，保留原错误类别和详情。
+- 修复 Server 写请求在出队筛选后等待写锁或同批前序操作期间发生取消、到期，仍被执行的问题。取得实际写锁后逐条核对响应接收端和期限，跳过已经退出的请求，到期请求返回 admission/not_committed，同批有效操作继续提交。
+- Console 数据适配器将连接、解码、响应身份与回执结构失败按 TDB_CONSOLE_TRANSPORT 返回，保留原异常 cause。已分发写请求与原事务确认失败提供 response/unknown，本地排队取消提供 TDB_QUERY_CANCELLED、AbortError 和 admission/not_committed。HTTP 错误保留实际状态、内核诊断及既有写入结果，活动请求的 AbortSignal 传入 fetch。
+- 请求身份与命令内容使用排队前的序列化快照。取消调用按活动请求去重，dispose 等待 detach 回调、请求队列和已发出的取消调用。Core 会话排空、传输任务结束和数据库关闭按各自完成点确认。受控验收覆盖真实写入后的响应损坏、完整原事务确认、WAL／重开事实、锁内迟到拒绝，以及各语言实际制品和类型消费。
 
 ### 嵌入式 Console 编辑冲突与事务确认
 
 - Console RPC v1 增加 `getNodes(withRevision:true)`、`guardedTransaction` 和 `transactionStatus`，Rust、Python、Node 共用现有 JSON 入口。快照版本与节点内容在同一读锁下取得，版本前置条件在 Core 事务写锁内、WAL 前校验，冲突拒绝整笔事务。
 - 编辑版本由 Core 事实变化驱动，宿主直接 CRUD、CAS、TQL、普通事务、向量和边更新都会使旧版本失效，删除重建会产生新令牌。版本覆盖整个数据库实例，因此不同节点的修改也可能冲突。
-- 受保护事务按幂等键、原版本和完整操作匹配实例内回执，重试命中回执后直接返回原结果。确认接口校验完整原事务。WAL 提交阶段消耗原版本；成功回执缺失时保留未知状态。
-- 回执按先入先出保留至多 64 条、记录内容合计至多 8 MiB，回执队列、记录和响应缓冲均受内存准入约束；关闭释放相应资源。回执淘汰或重新打开后可能无法确认结果，旧令牌会被拒绝；幂等回执使用实例内存，磁盘格式保持原样。
+- 受保护事务按幂等键、原版本和完整操作匹配有界持久回执，重试命中回执后直接返回原结果。确认接口校验完整原事务。WAL 提交阶段消耗原版本；成功回执缺失时保留未知状态。
+- 回执按先入先出保留至多 64 条、记录内容合计至多 8 MiB，回执队列、记录和响应缓冲均受内存准入约束，关闭释放相应内存。保留回执通过 WAL 与检查点持久化，重开后仍可确认原事务，缺失或淘汰后需要按应用身份对账。
 - 嵌入 HTTP 适配器将版本冲突、幂等键错配和结果未知映射为 409，保留结构化 Core 错误。原有无条件写入口保持原语义；HTML 的嵌入模式通过内置客户端接入版本保护事务。接入和可执行请求示例见[编辑协议](../embedded-console.md#编辑快照冲突与原事务确认)。
 
 ### 嵌入式 WebUI 组件接入
@@ -178,7 +271,7 @@ Subsequent changes build on stable `0.9.0`. Published changes are recorded in th
 - Fixed Python transaction commits consuming the builder before borrowing the database and panicking on borrow conflicts. Commit now acquires the borrow and passes kernel admission before consuming operations. Contention, reentry, closure, or recovery protection preserves pending operations for later submission or rollback. Closed instances reject creation of new transaction objects.
 - Once standalone Server shutdown begins, new reads and writes return `TDB_DATABASE_CLOSED` with empty details. HTTP status remains 503, `legacyCode: "SERVICE_UNAVAILABLE"` preserves the former category, and `retryable` is `false`.
 
-> **Scope**: Disk formats and the single-writer transaction model remain at their existing versions. Binding argument extraction, borrow exceptions on other wrapper objects, complete field locations, and write-outcome metadata remain phased follow-up work. The next section covers Python transaction objects. Poisoned host locks require releasing related handles and checking recovery. Shutdown timeout only ends the wait. See the [kernel SDK guide](../kernel-sdk.md) for usage.
+> **Scope**　Shared access uses the single-writer transaction model. Format changes appear in the unified request contexts and cross-reopen confirmation section. Other wrappers and remaining public entries follow the phased contract. Poisoned host locks require releasing related handles and checking recovery. Shutdown timeout ends the current wait. See the [kernel SDK guide](../kernel-sdk.md) for usage.
 
 ### Prepared parameter diagnostics and public error catalog
 
@@ -263,6 +356,58 @@ Subsequent changes build on stable `0.9.0`. Published changes are recorded in th
 - Covered count fields in Node contextual and advanced configuration provide canonical type diagnostics. Omitted or undefined fields use defaults, while null retains the established rejection boundary. Optional method arguments continue to support null defaults. Original configuration-getter exceptions and causes propagate directly.
 - Actual binding cases across three dtypes verify field rejection, integer, sequence and configuration callbacks, complete outer results, original host exceptions, valid defaults, and subsequent writes. Tests retain old objects after close, move the Windows file group, and reopen to verify updated vectors, payloads, and edges. Vector and nested-member locations and framework sequence length-hint policies remain separate contract work.
 
+### Graph arguments and direct CRUD admission outcomes
+
+- Neighbor, reachability, detailed reachability, and subgraph reads add field diagnostics for IDs, depths, budgets, and directions. Python converts parameters and label sequences inside the request borrow while retaining original type exceptions, ValueError for direction enumeration rejection, and host-protocol exceptions. Node checks raw types for the covered fields and retains original configuration-getter exceptions and established null default rules.
+- Fifteen direct CRUD entries provide admission/not_committed when the SDK rejects reentry or borrow contention, with the consumption field omitted. Coverage includes node and edge writes, both batch insertion forms, atomic batch deletion, payload patches and conditional replacement, and vector updates. Transaction, WAL, and publication outcomes after core entry remain determined by the core.
+- Public Node declarations include the existing deleteManyAtomic and compareAndSetPayloadField runtime methods, with precise return-type and invalid-input consumption cases.
+- An independent three-node chain covers three dtypes, complete paths, per-hop attributes, outgoing and bidirectional scan counts, defaults, callback rejection, and unchanged WAL contents. Tests retain old objects after close, move the Windows file group, reopen to verify all facts, then perform conditional updates and atomic deletion and reopen again. Nested members, framework length-hint exception policies, and other entries continue under their respective contracts.
+
+### Basic read arguments and result ownership
+
+- Node, payload, existence, outgoing-edge, incoming-edge, and exact-edge reads add ID and label extraction diagnostics through id, src, dst, and label fields. Python executes integer protocols inside the read-request borrow, retains built-in exception inheritance, and propagates original custom integer-protocol exceptions. Node checks raw types and safe integers.
+- The Python existence guide uses the public id in db entry. None, null, and omitted labels select all incoming labels, while an empty label is matched by its contents. Exact-edge reads require the label argument. Unicode and NUL labels remain intact.
+- Actual artifacts cover three dtypes, complete nodes and edges, absent nodes, language integer ranges, callback reentry, and Python cross-thread shared reads with competing writes. Tests retain nodes, vectors, payloads, edges, and old database objects during close. After moving the file group, old results remain independent snapshots and updated facts survive two reopenings.
+
+### Public call shapes and framework diagnostics
+
+- The Python package validates argument structure against native public signatures for instance methods, selected special methods, and module functions. Missing arguments, unknown keywords, duplicate values, positional-only arguments, and excessive positional counts retain TypeError inheritance and expose TDB_INVALID_INPUT, target.field, and details.argument_kind. Calls with multiple issues use a fixed structural ordering. Python target fields preserve original Unicode, NUL, and isolated-surrogate keyword names.
+- The Node public loader identifies registered missing required positions before N-API conversion. Explicit undefined continues through existing type checks, while extra positional arguments and configuration objects follow their entry-specific rules. Callback reentry retains rejection priority.
+- The SDK constructs validation/not_committed results for covered write calls, with transaction_consumed=false for Python transactions and Node commitTransaction. Valid Python calls continue into the native binding, preserving original host exception objects, causes, class identity, signatures, and defaults.
+- Actual artifact tests across three dtypes check diagnostics, zero conversion callbacks, complete facts, and unchanged WAL bytes, followed by a real commit, close while retaining old results, Windows file-group movement, and two reopenings. Constructor diagnostics, invalid receivers, and interpreter expansion errors before callable entry remain separate follow-up boundaries.
+
+### Constructor values and resource return after failure
+
+- Covered integer, string, enum, and MiB conversions in database and resource-runtime constructors expose TDB_INVALID_INPUT and target.field. Node also covers database boolean configuration. Python retains built-in exception inheritance and original custom integer-protocol exceptions and causes. Node retains original configuration-getter exceptions. Session configuration type and JSON rejection identify options_json or optionsJson.
+- Fixed integer multiplication overflow while formatting an extreme-dimension rejection. The kernel rejects zero dimensions and dimensions above 65536 with the dim field, and identifies runtime worker-limit and maintenance-budget conflicts. Registered tasks and quotas return through ownership after open failures.
+- Independent records cover three dtypes, duplicate writers, quota return, Windows file movement while retaining old results and error objects, same-path retry after stored-identity mismatch, and two persistence reopenings. Python uses its current Mmap constructor API, while Node covers Rom and Mmap. Python public stubs now specify int for cache MiB arguments, with positive and negative type consumption.
+- This section records constructor values. Constructor call shapes and ordinary CRUD convergence are described below.
+
+### Configuration containers and runtime-handle diagnostics
+
+- Node database and resource-runtime options are checked as non-array objects before reading properties. Resource-runtime calls that previously treated primitive values or arrays as default configuration now return TDB_INVALID_INPUT with the options field. Omitted, undefined, and null options retain default configuration. Named properties follow the existing prototype-chain lookup, and unknown properties follow their entry-specific rules.
+- Legacy numeric-position database construction now provides TDB_API_MIGRATION_REQUIRED, migration details, and the options field. npm declarations add the existing null default forms for configuration and snapshot-module runtime arguments. The runtime member inside database options continues to require a valid handle.
+- Python database built-in boolean extraction and native runtime type rejection add field diagnostics. Runtime validation serves database construction, snapshot verification, and restoration in both bindings. Known restoration-handle rejection provides validation/not_committed. Node getter and Proxy exceptions and Python host conversion exceptions preserve their original objects, causes, and existing attributes.
+- Actual artifacts cover invalid configuration, original exceptions, complete default-dimension records, prototype-free configuration, inherited getters, unknown properties, and WAL integrity while retaining a writer. Tests then create, verify, and restore real snapshots, reopen to check complete nodes and quota state, and perform close, file movement, and subsequent persistence.
+
+### Constructor call shapes and ordinary CRUD conversion
+
+- Python TriviumDB, ResourceRuntime, and ConsoleSession bind arguments against SDK public-signature metadata inside the native constructor entry. Missing arguments, unknown keywords, duplicate values, and excess positional arguments provide TypeError, TDB_INVALID_INPUT, target.field, and details.argument_kind. The same metadata provides __signature__ for Python 3.9 compatibility, with precise generated stub types. Batch-insert vectors/payloads outer declarations are corrected to list to match their existing native representation. ID collections and individual vectors retain Sequence. Shape rejection precedes value protocols, file creation, and resource registration. Native class identity, signatures, and defaults are preserved.
+- Node database construction supplies the canonical missing-path diagnostic. Constructor forwarding preserves prototype, constructor, instanceof, subclasses, and newTarget. An explicit undefined path follows type rejection, and extra positional arguments follow the existing JavaScript call rules.
+- Known language-type, representation-range, and JSON conversion failures in fifteen ordinary CRUD entry points provide validation/not_committed and omit transaction consumption. The SDK removes internal temporary-transaction consumption from batch-insert errors while preserving kernel phases, outcomes, and causes. Node automatic-ID safe-integer rejection adds its pre-commit outcome. Top-level target.field retains the parameter name. Batch and JSON members use RFC 6901 JSON Pointer with array indexes, escaped keys, Unicode, and NUL preserved. Object keys that cannot be represented as JSON strings identify their containing object.
+- Python converts IDs, vector components, edge weights, and JSON while holding the request borrow. Existing integer, floating-point, and Sequence protocols remain accepted. Length-hint exceptions retain their existing tolerance, and buffers grow from actual elements. Batch conversion fixes its outer index range. If a callback shortens a list and removes a required member, the entire batch is rejected with that member's location. Appended members are left for subsequent calls. Original integer, float, iterator, getitem, getter, and Proxy exceptions retain identity, causes, and existing attributes. Same-database callback reentry follows request admission.
+- Node constructor strings, ordinary CRUD strings, and JSON strings use strict UTF-16 decoding. Isolated surrogates are rejected as input errors, preventing replacement characters from changing paths, labels, or JSON keys. Valid Unicode and NUL are preserved. Optional edge arguments retain each language's default rules, and Node upsertEdge still requires weight. Removes obsolete Payload patch shorthand examples.
+- An independent CRUD field matrix defines complete before-and-after facts. Actual binding contracts cover all three dtypes, Python's current Mmap entry, and Node Rom/Mmap. They verify content and WAL after field rejection, then use all fifteen write entry points, retain old objects across close, move Windows file groups, and reopen and persist twice. Interpreter unpacking before callable entry, invalid receivers, and JavaScript non-constructor calls follow host exception contracts. Retrieval, index, AST, and other wrapper work continues in their respective entry groups.
+
+### Retrieval, graph-read, and text-entry fields
+
+- Eight retrieval entry points add conversion diagnostics for floats, booleans, vectors, anchors, labels, and JSON members. Top-level fields use public parameter names, nested fields use JSON Pointer, and read errors omit write. Python conversion runs within the request borrow. Node preserves original getter exceptions, array reads, and existing synchronous/Promise completion, with row and component locations for batch u64 range failures.
+- The kernel supplies precise fields for finite search configuration, diffusion-bias dimensions, and minimum-edge-weight constraints. Empty batches validate the same configuration before returning an empty result. Shared SDK conversion rejects NaN, Infinity, and arithmetic overflow in hybrid_alpha/hybridAlpha, fixing paths where max masked invalid input. Rust callers use underlying() to inspect original categories beneath field context.
+- Four graph-read entry points add Node label-container, member, configuration-container, and direction diagnostics. Python graph labels and retrieval sequences retain existing length-hint tolerance, with buffers growing from actual elements. Node advanced/context search and reachability configuration require non-array objects. Omitted/null configuration retains defaults, positional null defaults and configuration-member rules remain distinct, and npm declarations reflect valid default forms.
+- Indexed equality and substring lookup add object, JSON, limit, field, and text diagnostics. The kernel validates the 1–1000000 limit, empty equality conditions, and empty substring inputs. Text, keyword, build, and complete-rebuild entry points add write outcomes for known conversion and SDK-admission failures. Failed requests preserve existing text and index facts.
+- Complete rebuild records contain id, text, and optional keywords. Missing members, types, encoding failures, and unknown fields provide record locations. Node now rejects previously ignored unknown rebuild fields under the closed-record contract. Text, label, field, and record strings in these Node entry points use strict UTF-16 decoding, rejecting isolated surrogates while preserving valid Unicode and NUL. Python accepts the declared Mapping input, captures this batch's record objects before materializing and converting fields, and continues with captured records when a callback modifies the outer list. Host mapping, numeric-protocol, and getter exceptions retain identity, causes, and existing attributes.
+- An independent field matrix covers all three dtypes, Python's current Mmap entry, and Node Rom/Mmap. Cases verify complete scores/Payloads, member locations, original exceptions, thread-borrow contention, WAL after rejection, complete text/keyword and graph facts, file movement after close, and two reopenings. Public signatures, defaults, generated stubs, and positive/negative type consumption against actual artifacts are maintained together.
+
 ### Python transaction request isolation and collection
 
 - Python transaction methods now acquire explicit fallible borrows. Reentry from an in-method conversion callback returns `TDB_REENTRANT_ACCESS` with `operation: "python_transaction_callback"`; cross-thread contention returns `TDB_BUSY` with `resource: "python_transaction"`. Rejection retains buffered operations, while other transactions follow their own admission state.
@@ -275,17 +420,58 @@ Subsequent changes build on stable `0.9.0`. Published changes are recorded in th
 ### Structured TQL parsing diagnostics
 
 - Database queries, Prepared TQL preparation, and mutation parsing add `stage: "lex" | "parse"` and optional `target.query_span`, preserving `TDB_QUERY_PARSE`, `schema_version: 1`, and `details.reason`. Rust adds the `QuerySyntax` variant and structured parser entry points. The existing `QueryParse(String)` variant and standalone parser entry points remain available; Rust callers matching database parse errors must handle the new variant.
-- Corrects locations for failed lexical units and consumed unexpected tokens. Anchors use zero-length ranges in the original UTF-8 byte offsets, with one-based lines and columns. CRLF counts as one newline, columns count Unicode scalar values, and a tab counts as one column. Semantic checks without an accurate location and oversized input omit the location.
+- Corrects locations for failed lexical units and consumed unexpected tokens. Confirmed positions use half-open UTF-8 byte ranges whose ends come from actual scanning. Whitespace and comments are separate from adjacent tokens. End-of-input and token-budget boundaries use zero-length anchors. Lines and columns are one-based, CRLF counts as one newline, columns count Unicode scalar values, and a tab counts as one column. Semantic checks without an accurate location and oversized input omit the location.
+- Errors for database-prepared parameters carry both the parameter name and its first actual reference range, including the `$` prefix. Core retains the source and supplies locations for missing parameters, JSON conversion of referenced parameters, and vector-slot binding. Parsing distinguishes references from strings, comments, and document-filter operators. Extra parameters, standalone scalar conversion, and preparation from manually constructed ASTs retain their known parameter names. Prepared clones share source metadata. The Rust `QueryParameterSource` wrapper preserves the original category, details, cause, and known write outcomes, with `underlying()` exposing the original variant for matching.
 - Python, Node, CLI JSON, embedded Console HTTP, and standalone Server preserve the same structure. The built-in Console data adapter forwards extension fields through native exceptions, JSON error envelopes, and fetch responses. Python uses `None` for absent extension fields; Node and JSON omit them. HTTP parsing rejection retains status 400 and the legacy category. Shared fixtures cover f32/f16/u64 bindings, Unicode and newlines, rejected reads and mutations, and complete data after close and reopen.
 
-> **Integration note**: this batch covers parsing stages and confirmed diagnostic anchors. Full AST ranges, Prepared parameter binding locations, other operation stages, and write-outcome fields remain phased work. See [TQL diagnostics](../tql-reference.md#结构化查询诊断).
+- AST construction origins cover entries, patterns, filters, every PipelineStage, expressions and predicates, return/aggregate/order/pagination nodes, and mutation sources, actions, nodes/edges, assignments, vectors, and JSON. Rust adds paired `LocatedTql` parser entry points, read-only AST/source views, and `PreparedTql::from_located`. Execution from manually constructed ASTs reports stages and locations according to its available provenance.
+- Diagnostics add `plan` and `execute`. Symbol checks follow AST paths to the exact reference or conflicting return item. Operator construction, computation, budgets, projection, and transactions attach origins at their actual checkpoints. Fused operators use the smallest enclosing range of participating logical nodes, and generated subqueries retain their original entry origin. `QuerySource` and field/parameter wrappers preserve the underlying category, cause, details, and write outcomes. Field or parameter names can accompany a query range.
+- SET, SET VECTOR, and DELETE validate node-variable bindings for empty match sets, and GraphFirst RANK validates bindings and node type. Basic SEARCH forwards cancellation control to its real pipeline. Fixes the `DisableFusion` test hook retaining fused elision markers and potentially skipping RANK. The split path executes the original logical stages. Shared cases verify three dtypes, real language artifacts, both HTTP forms, raw ASTs, cancellation, WAL contents, and complete data after reopening.
+
+> **Integration note**　Rust variant matching uses `underlying()`, and `info()` exposes the public diagnostic. Query stages and write outcomes are evaluated separately. See [TQL diagnostics](../tql-reference.md#结构化查询诊断).
+
+### Closing parameter, cancellation, and transport contracts
+
+- Adds field diagnostics to property-index, composite-field, and Leiden arguments. Snapshot, migration, close-timeout, FFI-path, Console-string, and cancellation-ID inputs use the same representation checks. Python converts within request borrowing, Node reuses synchronous reentry admission, and original host exceptions propagate.
+- Python transaction-buffer conversion failures include member paths and validation/not_committed with transaction_consumed=false, preserving earlier operations. Cancellation during conversion rejects the operation before appending to the buffer. Node commitTransaction reports operations member paths and rejects explicitly mistyped label/weight fields while retaining defaults for omitted fields. Known ConsoleSession and PreparedTql handle rejections identify the corresponding field. The public Node loader validates handle provenance and obtains reentry write metadata from the SDK operation catalog.
+- Exact scans observe cancellation inside Rayon shards. Graph algorithms, traversal, and structural analysis check at node, edge, and iteration boundaries. Worker threads inherit combined controls and release workspaces on rejection. Existing low-level synchronous helper return types remain available, while Database and TQL use fallible execution. Transactions follow their atomic protocol after entering WAL.
+- Embedded HTTP accepts X-TDB-Request-ID as an ASCII JSON string, preserving identity before reading the body and verifying the body's requestId before execution. The data adapter sends the header automatically, supports Unicode, and receives the original identity on early rejection.
+- Server queue saturation uses TDB_BUSY with resource write_queue. HTTP, cache, and service failures use canonical codes with legacyCode for previous categories. Path, method, body, and adapter failures return structured envelopes with outer request identity. Errors carrying write retain retryable=false, leaving decisions to the caller's phase, outcome, and consumption handling.
+- Explicit CLI JSON output covers argument parsing, non-Core command errors, I/O, and configuration warnings. Public documentation records entry fields, retry decisions, compatibility, and current SDK/Core dependencies.
+
+### Typed request scopes and host bridges
+
+- Python and Node add public `RequestContext` classes. `with context` and `context.run` propagate request identity, cancellation, and deadlines into ordinary typed calls. IDs use 1–128 UTF-8 bytes. Millisecond deadlines start at construction, and zero delegates cancellation to the host. Nested scopes retain outer controls, with at most 32 user scopes in each binding.
+- Rust adds synchronous `RequestContext::run` and Reader/Writer `with_request_context` methods. SDK borrow guards and Core scopes exit on their creating thread, while control handles can be cloned for workers. Python ContextVar and Node AsyncLocalStorage isolate tasks, and native batch queries explicitly carry their controller into worker threads.
+- Typed transactions consume buffers after SDK borrowing and admission succeed. Ordinary shared transactions inherit the pre-WAL cancellation check. Direct CRUD and transactions recheck control after acquiring the actual WAL lock, covering cancellation during lock waiting and receipt encoding. Console execution installs the combined Core scope. TQL and retrieval check their integrated execution checkpoints. Close, rollback, and registered resource diagnostics use their own lifecycle and borrowing rules. Results follow actual kernel completion points.
+- Custom Console bridges receive frozen request metadata and capture host callbacks at creation. Optional drain callbacks provide awaitable host completion. A false acknowledgement returns `TDB_BUSY` with resource `console_bridge_drain`, and other invalid acknowledgements return `TDB_CONSOLE_TRANSPORT`. Failed disposal keeps admission closed and permits cleanup retries. Primitive host rejections retain their cause, and dispatched writes retain unknown response outcomes.
+- Independent shared cases cover three dtypes, cancellation from conversion callbacks, transaction buffers, asynchronous task isolation, cancellation in the second query's worker, nesting boundaries, original host exceptions, and complete reopened facts. Python stubs, Node declarations, installed packages, and non-UI bridge contracts are validated together.
+
+> **Scheduling reminder**　Controllers observe cancellation at actual checkpoints. Host-created threads, processes, and external tasks explicitly carry identities and control events and confirm drain and resource release at their respective completion points.
+
+### Unified request contexts and confirmation across reopening
+
+- Core defines `RequestContext` with a request ID, shared cancellation/deadline control, and write classification, exported through `sdk`. Shared Rust handles add `try_read_with_context`, `try_write_with_context`, and `commit_tx_with_context`. Admission rejection preserves the transaction builder. Cancellation during validation after consumption returns `validation/not_committed` with `transaction_consumed=true`. The storage kernel supplies the actual commit outcome.
+- Console first parses a borrowed protocol envelope and command classification, then decodes the complete command after acquiring the host borrow and kernel admission. Session registration, cancellation, SDK admission, and the final pre-WAL check share one controller. Existing Console JSON entry points in Rust, Python, Node, and embedded HTTP use this path.
+- Guarded transactions store their complete identity, created IDs, and commit revision in the same WAL transaction as their facts. Recovery exposes both after a complete commit seal, and checkpoints publish them atomically. Retained receipts support `transactionStatus` and idempotent replay after close, recovery, and reopening. Each database retains at most 64 receipts totaling 8 MiB, with FIFO eviction. Missing or evicted receipts return `unknown`, requiring reconciliation against complete facts using application-persisted identities.
+- The main-file format advances to v11, adding a length- and CRC32-protected receipt block after unique constraints, and WAL advances to v4. The current kernel reads main-file versions v5–v11. Writable opening retains the existing v2 WAL upgrade path. It validates v3 WAL as a stream, atomically converts the complete transaction prefix, and discards physically truncated tail frames. Valid empty v3 WAL supports read-only opening. v2 WAL continues through writable recovery.
+- Controlled regression cases cover pre-WAL cancellation, transaction-buffer consumption, recovery under one commit seal, and invisible unsealed transactions. Independent v10/v3 fixtures produced by the previous artifact verify three dtypes, byte-preserving read-only access, upgrades, complete nodes/vectors/Payloads/edges, and subsequent reopening. Fixture provenance records the producer and hashes.
+
+> **Persistence reminder**　Receipt durability follows SyncMode. Reopening creates a fresh edit-revision identity. Retained receipts confirm historical commits, and subsequent edits use the current snapshot. Preserve a complete file-group backup before switching to v11/v4. Earlier kernels use the pre-upgrade backup for recovery.
+
+### Request execution and transport completion
+
+- ConsoleSession adds `is_drained()` in Rust/Python and `isDrained()` in Node. It returns true after detach closes admission and every Core request exits. Embedded HTTP adds `GET /v1/console/status` with the same drained state. Session, capability, and permission rejection for parsed write commands now carry admission/not_committed while preserving the original category and details.
+- Fixes Server write requests being executed after cancellation or expiry while waiting for the actual write lock or earlier operations in the same batch. Each operation rechecks its response receiver and deadline under the actual database write lock. Requests whose waiters exited are skipped, expired requests return admission/not_committed, and valid operations in the batch continue to commit.
+- The Console data adapter reports connection, decoding, response identity, and receipt-shape failures as TDB_CONSOLE_TRANSPORT and preserves the original cause. Dispatched writes and failed original-transaction confirmation carry response/unknown. Local queued cancellation carries TDB_QUERY_CANCELLED, AbortError, and admission/not_committed. HTTP failures retain their actual status, kernel diagnostics, and existing write outcomes. Active request AbortSignals are forwarded to fetch.
+- Request identity and command contents use the serialized snapshot taken before queueing. Cancellation calls are deduplicated per active request. Dispose waits for its detach callback, request queue, and issued cancellation calls. Core session drain, transport-task termination, and database close have separate completion points. Controlled validation covers damaged responses after real writes, complete original-transaction confirmation, WAL and reopened facts, late rejection under the write lock, and actual language artifacts and type consumption.
 
 ### Embedded Console edit conflicts and transaction confirmation
 
 - Console RPC v1 adds `getNodes(withRevision:true)`, `guardedTransaction`, and `transactionStatus` through the existing JSON entry points shared by Rust, Python, and Node. Node data and its revision are captured under one read lock; Core validates the revision under the transaction write lock before WAL append, rejecting the entire transaction on conflict.
 - Core fact changes advance the edit revision, including direct host CRUD, CAS, TQL, ordinary transactions, vectors, and edges. Deleting and recreating the same content produces a new token. Revisions cover the whole database instance, so changes to unrelated nodes can conflict.
 - Guarded transactions match receipts by idempotency key, original revision, and complete operations, returning the original result when a retry matches a receipt. Status requests verify the complete original transaction. WAL submission consumes the original revision; a missing success receipt leaves the outcome unknown.
-- Instance-local receipts retain at most 64 entries and 8 MiB of record contents, evicting the oldest first. Receipt queues, records, and acknowledgement buffers are admitted against memory budgets and released on close. Eviction or reopening can make confirmation unavailable; old tokens are rejected. Idempotency receipts use instance memory, and the disk format remains unchanged.
+- Bounded receipts retain at most 64 entries and 8 MiB of record contents, evicting the oldest first. Receipt queues, records, and acknowledgement buffers are admitted against memory budgets, with memory released on close. Retained receipts persist through WAL and checkpoints and confirm original transactions after reopening. Missing or evicted receipts require reconciliation using application identities.
 - The embedded HTTP adapter maps edit conflicts, key mismatches, and unknown outcomes to 409 while preserving structured Core errors. Existing unconditional writes retain their behavior. Embedded HTML uses its built-in client for guarded transactions. See the [editing protocol](../embedded-console.md#编辑快照冲突与原事务确认) for integration and request examples.
 
 ### Embedded WebUI component integration

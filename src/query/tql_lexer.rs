@@ -102,6 +102,14 @@ pub struct PosToken {
     pub byte_start: usize,
 }
 
+/// 词法单元的原始半开字节范围，保留转义前的字符串及参数前缀。
+#[derive(Debug, Clone)]
+pub struct SpanToken {
+    pub token: TqlToken,
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
 /// 带位置的词法/语法错误
 #[derive(Debug, Clone)]
 pub struct ParseErrorAt {
@@ -139,6 +147,8 @@ pub struct TqlLexer {
     input_too_large: bool,
     /// 当前 token 的起点；消费失败后仍指向被拒绝的词法单元。
     token_byte_start: usize,
+    /// 预算拒绝发生在 token 之间，保留该边界的零长度范围。
+    error_end: Option<usize>,
 }
 
 impl TqlLexer {
@@ -150,6 +160,7 @@ impl TqlLexer {
                 char_byte_offsets: vec![0],
                 input_too_large: true,
                 token_byte_start: 0,
+                error_end: None,
             };
         }
         let chars: Vec<char> = input.chars().collect();
@@ -166,6 +177,7 @@ impl TqlLexer {
             char_byte_offsets,
             input_too_large: false,
             token_byte_start: 0,
+            error_end: None,
         }
     }
 
@@ -218,22 +230,53 @@ impl TqlLexer {
     /// 同时返回 token 流与每个 token 在输入中的字节起始位置。
     /// 错误指向失败词法单元的起点。
     pub fn tokenize_with_positions(&mut self) -> Result<Vec<PosToken>, ParseErrorAt> {
-        let mut positions = Vec::new();
+        self.tokenize_with_spans().map(|tokens| {
+            tokens
+                .into_iter()
+                .map(|token| PosToken {
+                    token: token.token,
+                    byte_start: token.byte_start,
+                })
+                .collect()
+        })
+    }
+
+    /// 同步记录扫描器实际消费的终点，空白与注释不属于相邻 token。
+    pub fn tokenize_with_spans(&mut self) -> Result<Vec<SpanToken>, ParseErrorAt> {
+        let mut ranges = Vec::new();
         let tokens = self
-            .tokenize_inner(Some(&mut positions))
+            .tokenize_inner(Some(&mut ranges))
             .map_err(|msg| ParseErrorAt::new(msg, self.token_byte_start))?;
-        debug_assert_eq!(tokens.len(), positions.len());
+        debug_assert_eq!(tokens.len(), ranges.len());
         Ok(tokens
             .into_iter()
-            .zip(positions)
-            .map(|(token, byte_start)| PosToken { token, byte_start })
+            .zip(ranges)
+            .map(|(token, range)| SpanToken {
+                token,
+                byte_start: range.start,
+                byte_end: range.end,
+            })
             .collect())
+    }
+
+    /// 消费失败使用已消费范围，未消费的非法字符使用该字符的完整范围。
+    pub(crate) fn error_byte_end(&self) -> usize {
+        if let Some(end) = self.error_end {
+            return end;
+        }
+        let end = self.current_byte_pos();
+        if end > self.token_byte_start {
+            end
+        } else {
+            end + self.peek().map_or(0, char::len_utf8)
+        }
     }
 
     fn tokenize_inner(
         &mut self,
-        mut positions: Option<&mut Vec<usize>>,
+        mut positions: Option<&mut Vec<std::ops::Range<usize>>>,
     ) -> Result<Vec<TqlToken>, String> {
+        self.error_end = None;
         if self.input_too_large {
             return Err(format!(
                 "TQL 输入超过 {MAX_TQL_INPUT_BYTES} 字节 (TQL input byte limit exceeded)"
@@ -244,6 +287,7 @@ impl TqlLexer {
         loop {
             self.token_byte_start = self.current_byte_pos();
             if tokens.len() >= MAX_TQL_TOKENS {
+                self.error_end = Some(self.token_byte_start);
                 return Err(format!(
                     "TQL token 数量超过 {MAX_TQL_TOKENS} (TQL token limit exceeded)"
                 ));
@@ -254,7 +298,7 @@ impl TqlLexer {
             match self.peek() {
                 None => {
                     if let Some(rec) = positions.as_deref_mut() {
-                        rec.push(self.current_byte_pos());
+                        rec.push(self.current_byte_pos()..self.current_byte_pos());
                     }
                     tokens.push(TqlToken::Eof);
                     break;
@@ -499,7 +543,7 @@ impl TqlLexer {
                         _ => return Err(format!("Unexpected character: '{}'", ch)),
                     };
                     if let Some(rec) = positions.as_deref_mut() {
-                        rec.push(token_byte_start);
+                        rec.push(token_byte_start..self.current_byte_pos());
                     }
                     tokens.push(tok);
                 }

@@ -25,6 +25,131 @@ fn snapshot<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(
         json!({"operation":"getNodes","ids":["1"],"withRevision":true}),
     )
 }
+
+#[test]
+fn 完整WAL封条同时恢复事实与回执且未封条事务全部不可见() {
+    let root = TestDir::new("durable-receipt-wal");
+    let source = root.0.join("source.tdb");
+    let config = Config {
+        dim: 2,
+        storage_mode: StorageMode::Rom,
+        auto_build_quiver: false,
+        ..Default::default()
+    };
+    let mut db = Database::<f32>::open_with_config(source.to_str().unwrap(), config).unwrap();
+    db.insert_with_id(1, &[1., 0.], json!({"state":"before"}))
+        .unwrap();
+    db.flush().unwrap();
+    let base = std::fs::read_dir(&root.0)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name().to_str().unwrap().to_owned(), entry.path())
+        })
+        .filter_map(|(name, path)| {
+            let suffix = name.strip_prefix("source.tdb")?;
+            if suffix == ".lock" || suffix == ".wal" {
+                return None;
+            }
+            Some((suffix.to_owned(), std::fs::read(path).unwrap()))
+        })
+        .collect::<Vec<_>>();
+    assert!(base.iter().any(|(suffix, _)| suffix.is_empty()));
+    let session = ConsoleSession::from_json(r#"{"readOnly":false}"#).unwrap();
+    let revision = snapshot(&mut db, &session)["revision"].clone();
+    let command = guarded(
+        &revision,
+        "sealed",
+        json!([
+            {"op":"updatePayload","id":"1","payload":{"state":"after"}},
+            {"op":"insert","vector":[0,1],"payload":{"state":"created"}},
+            {"op":"link","source":"1","target":"2","label":"rel","weight":0.5,"metadata":{"fact":true}}
+        ]),
+    );
+    let acknowledged = call(&mut db, &session, command.clone());
+    assert_eq!(acknowledged["createdIds"], json!(["2"]));
+    let wal = std::fs::read(source.with_extension("tdb.wal")).unwrap();
+    assert_eq!(&wal[..6], b"TVWL\x04\0");
+    let mut cursor = 6;
+    let mut commit_start = 6;
+    while cursor < wal.len() {
+        commit_start = cursor;
+        let len = u32::from_le_bytes(wal[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 8 + len;
+    }
+    assert_eq!(cursor, wal.len());
+    db.close().unwrap();
+    for sealed in [false, true] {
+        let target = root
+            .0
+            .join(if sealed { "sealed.tdb" } else { "pending.tdb" });
+        for (suffix, bytes) in &base {
+            std::fs::write(format!("{}{suffix}", target.display()), bytes).unwrap();
+        }
+        std::fs::write(
+            target.with_extension("tdb.wal"),
+            if sealed {
+                &wal[..]
+            } else {
+                &wal[..commit_start]
+            },
+        )
+        .unwrap();
+        let mut recovered =
+            Database::<f32>::open_with_config(target.to_str().unwrap(), config).unwrap();
+        let fresh = ConsoleSession::from_json(r#"{"readOnly":false}"#).unwrap();
+        let receipt = call(&mut recovered, &fresh, status(command.clone()));
+        if sealed {
+            assert_eq!(
+                receipt,
+                json!({"outcome":"committed","createdIds":["2"],"revision":acknowledged["revision"]})
+            );
+            let before = std::fs::read(target.with_extension("tdb.wal")).unwrap();
+            assert_eq!(
+                call(&mut recovered, &fresh, command.clone()),
+                json!({"createdIds":["2"],"revision":acknowledged["revision"],"replayed":true})
+            );
+            assert_eq!(
+                std::fs::read(target.with_extension("tdb.wal")).unwrap(),
+                before
+            );
+            assert_eq!(recovered.all_node_ids().unwrap(), vec![1, 2]);
+            let first = recovered.get(1).unwrap().unwrap();
+            assert_eq!(first.vector, vec![1., 0.]);
+            assert_eq!(first.payload, json!({"state":"after"}));
+            assert_eq!(first.edges.len(), 1);
+            assert_eq!(first.edges[0].target_id, 2);
+            assert_eq!(first.edges[0].label, "rel");
+            assert_eq!(first.edges[0].weight, 0.5);
+            assert_eq!(first.edges[0].metadata, json!({"fact":true}));
+            let second = recovered.get(2).unwrap().unwrap();
+            assert_eq!(second.vector, vec![0., 1.]);
+            assert_eq!(second.payload, json!({"state":"created"}));
+            assert!(second.edges.is_empty());
+        } else {
+            assert_eq!(receipt, json!({"outcome":"unknown"}));
+            assert_eq!(recovered.all_node_ids().unwrap(), vec![1]);
+            let node = recovered.get(1).unwrap().unwrap();
+            assert_eq!(node.vector, vec![1., 0.]);
+            assert_eq!(node.payload, json!({"state":"before"}));
+            assert!(node.edges.is_empty());
+        }
+        recovered.flush().unwrap();
+        recovered.close().unwrap();
+        let before = std::fs::read(&target).unwrap();
+        let mut readonly = Database::<f32>::open_read_only(target.to_str().unwrap(), 2).unwrap();
+        assert_eq!(
+            call(
+                &mut readonly,
+                &ConsoleSession::new(Default::default()).unwrap(),
+                status(command.clone())
+            ),
+            receipt
+        );
+        readonly.close().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+    }
+}
 fn guarded(revision: &Value, key: &str, operations: Value) -> Value {
     json!({"operation":"guardedTransaction","expectedRevision":revision,"idempotencyKey":key,"operations":operations})
 }
@@ -50,6 +175,15 @@ fn shared_contract<T: VectorType + serde::Serialize + serde::de::DeserializeOwne
         .unwrap();
         let session = ConsoleSession::from_json(r#"{"readOnly":false}"#).unwrap();
         let vector = [T::from_f32(1.), T::from_f32(0.)];
+        let info = call(&mut db, &session, json!({"operation":"info"}));
+        assert_eq!(
+            info["transport"]["idempotency"]["durable"],
+            fixture["receiptDurable"]
+        );
+        assert_eq!(
+            info["transport"]["idempotency"]["persistence"],
+            fixture["receiptPersistence"]
+        );
         db.insert_with_id(1, &vector, fixture["basePayload"].clone())
             .unwrap();
         let old = snapshot(&mut db, &session);
@@ -124,15 +258,12 @@ fn shared_contract<T: VectorType + serde::Serialize + serde::de::DeserializeOwne
             first["revision"]
         );
         assert_eq!(
-            reopened
-                .console_request(&fresh, &wire(command.clone()))
-                .unwrap_err()
-                .code(),
-            fixture["conflictCode"]
+            call(&mut reopened, &fresh, command.clone()),
+            json!({"createdIds":["2"],"revision":first["revision"],"replayed":true})
         );
         assert_eq!(
             call(&mut reopened, &fresh, status(command)),
-            json!({"outcome":"unknown"})
+            json!({"outcome":"committed","createdIds":["2"],"revision":first["revision"]})
         );
         let mut ids = reopened.all_node_ids().unwrap();
         ids.sort_unstable();
@@ -235,7 +366,8 @@ fn 各业务写入入口与删除重建均使旧编辑版本失效() {
 #[test]
 fn 回执淘汰及无事实变化的事务都不能使旧请求重新执行() {
     let root = TestDir::new("edit-eviction");
-    let mut db = Database::<f32>::open(root.0.join("sample.tdb").to_str().unwrap(), 2).unwrap();
+    let path = root.0.join("sample.tdb");
+    let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
     db.insert_with_id(1, &[1., 0.], json!({"value":"original"}))
         .unwrap();
     let session = ConsoleSession::from_json(r#"{"readOnly":false}"#).unwrap();
@@ -244,7 +376,8 @@ fn 回执淘汰及无事实变化的事务都不能使旧请求重新执行() {
     let first = guarded(&old, "first", operations.clone());
     let ack = call(&mut db, &session, first.clone());
     assert_ne!(old, ack["revision"]);
-    for index in 0..64 {
+    // 首条加后续 63 条恰好填满回执容量，关闭后仍应保留首条。
+    for index in 0..63 {
         let revision = snapshot(&mut db, &session)["revision"].clone();
         call(
             &mut db,
@@ -252,6 +385,20 @@ fn 回执淘汰及无事实变化的事务都不能使旧请求重新执行() {
             guarded(&revision, &format!("later-{index}"), operations.clone()),
         );
     }
+    let reserved = db.resource_stats().reserved_workspace_bytes;
+    assert!(reserved > 0);
+    db.close().unwrap();
+    assert!(db.resource_stats().reserved_workspace_bytes < reserved);
+    let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+    let session = ConsoleSession::from_json(r#"{"readOnly":false}"#).unwrap();
+    assert_eq!(
+        call(&mut db, &session, status(first.clone())),
+        json!({"outcome":"committed","createdIds":[],"revision":ack["revision"]})
+    );
+    let revision = snapshot(&mut db, &session)["revision"].clone();
+    assert_ne!(revision, ack["revision"]);
+    let newest = guarded(&revision, "after-reopen", operations);
+    let newest_ack = call(&mut db, &session, newest.clone());
     assert_eq!(
         call(&mut db, &session, status(first.clone())),
         json!({"outcome":"unknown"})
@@ -265,10 +412,33 @@ fn 回执淘汰及无事实变化的事务都不能使旧请求重新执行() {
         db.get_payload(1).unwrap().unwrap(),
         json!({"value":"original"})
     );
-    let reserved = db.resource_stats().reserved_workspace_bytes;
-    assert!(reserved > 0);
+    // 保留该笔已确认事务的 WAL，另行验证恢复后的关闭也会保存纯回执变化。
+    let recovery = TestDir::new("edit-eviction-recovery");
+    for entry in std::fs::read_dir(&root.0).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name != "sample.tdb.lock" {
+            std::fs::copy(entry.path(), recovery.0.join(name)).unwrap();
+        }
+    }
     db.close().unwrap();
-    assert!(db.resource_stats().reserved_workspace_bytes < reserved);
+    let recovered_path = recovery.0.join("sample.tdb");
+    let mut recovered = Database::<f32>::open(recovered_path.to_str().unwrap(), 2).unwrap();
+    recovered.close().unwrap();
+    for path in [path, recovered_path] {
+        let mut reopened = Database::<f32>::open_read_only(path.to_str().unwrap(), 2).unwrap();
+        let readonly = ConsoleSession::new(Default::default()).unwrap();
+        assert_eq!(
+            call(&mut reopened, &readonly, status(newest.clone())),
+            json!({"outcome":"committed","createdIds":[],"revision":newest_ack["revision"]})
+        );
+        assert_eq!(reopened.all_node_ids().unwrap(), vec![1]);
+        let node = reopened.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, vec![1., 0.]);
+        assert_eq!(node.payload, json!({"value":"original"}));
+        assert!(node.edges.is_empty());
+        reopened.close().unwrap();
+    }
 }
 
 #[test]
@@ -436,16 +606,12 @@ fn WAL同步与应用故障不把未知事务当作可重放的新写入() {
         drop(db);
         let mut reopened = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
         let fresh = ConsoleSession::from_json(r#"{"readOnly":false}"#).unwrap();
-        assert!(matches!(
-            reopened
-                .console_request(&fresh, &wire(command.clone()))
-                .unwrap_err()
-                .underlying(),
-            TriviumError::WriteConflict { .. }
-        ));
+        let confirmed = call(&mut reopened, &fresh, status(command.clone()));
+        assert_eq!(confirmed["outcome"], "committed");
+        assert_eq!(confirmed["createdIds"], json!(["2"]));
         assert_eq!(
-            call(&mut reopened, &fresh, status(command)),
-            json!({"outcome":"unknown"})
+            call(&mut reopened, &fresh, command),
+            json!({"createdIds":["2"],"revision":confirmed["revision"],"replayed":true})
         );
         assert_eq!(reopened.node_count().unwrap(), 2);
         assert_eq!(

@@ -3597,6 +3597,10 @@ impl<T: VectorType> MemTable<T> {
         self.checkpoint_dirty
     }
 
+    pub(crate) fn mark_checkpoint_dirty(&mut self) {
+        self.checkpoint_dirty = true;
+    }
+
     pub(crate) fn mark_checkpoint_clean(&mut self) {
         self.checkpoint_dirty = false;
     }

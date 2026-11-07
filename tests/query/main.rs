@@ -16,6 +16,7 @@ mod tql_reverse;
 mod diagnostics;
 mod match_boundaries;
 mod parser_limits;
+mod source_locations;
 
 #[path = "../support/mod.rs"]
 mod support;

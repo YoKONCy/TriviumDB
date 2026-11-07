@@ -190,8 +190,9 @@ impl ResourceRuntime {
     pub fn new(mut limits: ResourceLimits) -> Result<Self> {
         if limits.max_threads > 64 {
             return Err(TriviumError::InvalidInput(
-                "运行时工作线程上限不得超过 64".into(),
-            ));
+                "运行时工作线程上限不得超过 64 (Runtime worker limit must not exceed 64)".into(),
+            )
+            .at_field("max_threads"));
         }
         if limits.memory_limit > 0 {
             if limits.maintenance_memory_limit == 0 {
@@ -199,8 +200,8 @@ impl ResourceRuntime {
             }
             if limits.maintenance_memory_limit > limits.memory_limit {
                 return Err(TriviumError::InvalidInput(
-                    "维护保护额度不能超过运行时总内存额度".into(),
-                ));
+                    "维护保护额度不能超过运行时总内存额度 (Maintenance memory limit must not exceed the runtime memory limit)".into(),
+                ).at_field("maintenance_memory_limit"));
             }
         }
         if limits.max_threads == 0 {

@@ -39,6 +39,8 @@ def run_editing_contract(root: str) -> None:
             info = call(db, session, {"operation": "info"})
             assert info["transport"]["occ"] is True
             assert info["transport"]["idempotency"]["maxReceipts"] == fixture["receiptCapacity"]
+            assert info["transport"]["idempotency"]["durable"] is fixture["receiptDurable"]
+            assert info["transport"]["idempotency"]["persistence"] == fixture["receiptPersistence"]
             db.update_payload(1, fixture["hostPayload"])
             command = {"operation": "guardedTransaction", "expectedRevision": old["revision"], "idempotencyKey": "edit-1", "operations": [
                 {"op": "insert", "vector": fixture["vector"], "payload": fixture["createdPayload"]},
@@ -69,8 +71,8 @@ def run_editing_contract(root: str) -> None:
         reopened = triviumdb.TriviumDB(path, dim=fixture["dimension"], dtype=dtype, auto_build_quiver=False)
         try:
             fresh = triviumdb.ConsoleSession('{"readOnly":false}')
-            expect_error(reopened, fresh, command, fixture["conflictCode"])
-            assert call(reopened, fresh, {**command, "operation": "transactionStatus"}) == {"outcome": "unknown"}
+            assert call(reopened, fresh, command) == {**committed, "replayed": True}
+            assert call(reopened, fresh, {**command, "operation": "transactionStatus"}) == {"outcome": "committed", "revision": committed["revision"], "createdIds": committed["createdIds"]}
             assert len(reopened) == 2
             for node_id, payload in [(1, fixture["draftPayload"]), (2, fixture["createdPayload"])]:
                 node = reopened.get(node_id)
@@ -136,6 +138,7 @@ def run_console_contract(root: str) -> None:
                 reopened.close()
             session.detach()
             assert session.is_detached()
+            assert session.is_drained()
             assert not session.cancel("验收请求")
         finally:
             db.close()
@@ -179,11 +182,14 @@ def run_console_contract(root: str) -> None:
     worker.start()
     try:
         assert entered.wait(30), "真实原生请求必须进入 Hook"
+        assert not session.is_drained()
         session.detach()
+        assert not session.is_drained()
     finally:
         release.set()
         worker.join(30)
     assert not worker.is_alive(), "原生请求必须实际退出"
+    assert session.is_drained()
     assert len(failures) == 1
     assert failures[0].code == "TDB_QUERY_CANCELLED"
     assert failures[0].schema_version == 1

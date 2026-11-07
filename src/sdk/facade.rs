@@ -23,6 +23,14 @@ pub struct DatabaseReader<T: VectorType> {
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseReader<T> {
+    pub fn with_request_context<R>(
+        &self,
+        context: &super::RequestContext,
+        operation: impl FnOnce(&Self) -> Result<R>,
+    ) -> Result<R> {
+        context.run(|| operation(self))
+    }
+
     pub fn open_read_only(path: &str, dim: usize) -> Result<Self> {
         Database::open_read_only(path, dim).map(|inner| Self { inner })
     }
@@ -317,6 +325,14 @@ pub struct DatabaseWriter<T: VectorType> {
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseWriter<T> {
+    pub fn with_request_context<R>(
+        &mut self,
+        context: &super::RequestContext,
+        operation: impl FnOnce(&mut Self) -> Result<R>,
+    ) -> Result<R> {
+        context.run(|| operation(self))
+    }
+
     pub fn open(path: &str, dim: usize) -> Result<Self> {
         Database::open(path, dim).map(|inner| Self { inner })
     }

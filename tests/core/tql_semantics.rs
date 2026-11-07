@@ -303,8 +303,10 @@ fn with与普通入口遵守行预算偏移预算和取消() {
         ] {
             assert!(
                 matches!(
-                    db.tql(&format!("{source} RETURN n")),
-                    Err(TriviumError::QueryRowBudgetExceeded { budget: 2 })
+                    db.tql(&format!("{source} RETURN n"))
+                        .unwrap_err()
+                        .underlying(),
+                    TriviumError::QueryRowBudgetExceeded { budget: 2 }
                 ),
                 "{source}"
             );
@@ -315,16 +317,20 @@ fn with与普通入口遵守行预算偏移预算和取消() {
             );
             assert!(
                 matches!(
-                    db.tql(&format!("{source} RETURN n LIMIT 2 OFFSET 10000")),
-                    Err(TriviumError::QueryRowBudgetExceeded { .. })
+                    db.tql(&format!("{source} RETURN n LIMIT 2 OFFSET 10000"))
+                        .unwrap_err()
+                        .underlying(),
+                    TriviumError::QueryRowBudgetExceeded { .. }
                 ),
                 "{source}"
             );
             let cancelled = QueryControl::default();
             cancelled.cancel();
             assert!(matches!(
-                db.tql_with_control(&format!("{source} RETURN n LIMIT 3"), cancelled),
-                Err(TriviumError::QueryCancelled)
+                db.tql_with_control(&format!("{source} RETURN n LIMIT 3"), cancelled)
+                    .unwrap_err()
+                    .underlying(),
+                TriviumError::QueryCancelled
             ));
         }
         db.close().unwrap();

@@ -49,7 +49,7 @@ fn call_hook<T: VectorType, R>(
     Ok(call())
 }
 
-fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
+pub(super) fn validate_config(config: &SearchConfig, dim: usize) -> Result<()> {
     for (name, value) in [
         ("min_score", config.min_score),
         ("fista_lambda", config.fista_lambda),
@@ -64,7 +64,8 @@ fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
         if !value.is_finite() {
             return Err(crate::error::TriviumError::InvalidInput(format!(
                 "检索配置 {name} 必须是有限数值 (Search config {name} must be finite)"
-            )));
+            ))
+            .at_field(name));
         }
     }
 
@@ -73,17 +74,30 @@ fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
             return Err(crate::error::TriviumError::DimensionMismatch {
                 expected: dim,
                 got: bias.len(),
-            });
+            }
+            .at_field("diffusion_bias"));
         }
         if bias.iter().any(|value| !value.is_finite()) {
             return Err(crate::error::TriviumError::InvalidVector {
                 reason:
                     "扩散偏置向量包含 NaN 或 Infinity (Diffusion bias contains NaN or Infinity)"
                         .to_string(),
-            });
+            }
+            .at_field("diffusion_bias"));
         }
     }
 
+    if config.min_edge_weight < 0.0 {
+        return Err(crate::error::TriviumError::InvalidInput(
+            "min_edge_weight 不得为负数 (min_edge_weight must be non-negative)".into(),
+        )
+        .at_field("min_edge_weight"));
+    }
+    Ok(())
+}
+
+fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
+    validate_config(config, dim)?;
     config.top_k = config.top_k.max(1);
     config.recall_k = if config.recall_k == 0 {
         config.top_k.saturating_mul(8).max(64)
@@ -100,11 +114,6 @@ fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
     config.teleport_alpha = config.teleport_alpha.clamp(0.0, 1.0);
     config.dpp_quality_weight = config.dpp_quality_weight.clamp(0.0, 10.0);
     config.fista_threshold = config.fista_threshold.clamp(0.0, f32::MAX);
-    if config.min_edge_weight < 0.0 {
-        return Err(crate::error::TriviumError::InvalidInput(
-            "min_edge_weight 不得为负数 (min_edge_weight must be non-negative)".into(),
-        ));
-    }
     Ok(())
 }
 
@@ -128,7 +137,7 @@ fn check_hook_error(ctx: &mut HookContext) -> Result<()> {
     if let Some(error) = ctx.error.take() {
         return Err(crate::error::TriviumError::HookExecutionError(error));
     }
-    Ok(())
+    crate::request::check_current()
 }
 
 /// 执行完整的混合检索管线
@@ -148,6 +157,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     config: &SearchConfig,
     ctx: &mut HookContext,
 ) -> Result<PipelineOutput> {
+    crate::request::check_current()?;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeSearchReadLock);
     let runtime = read_or_recover(memtable).resource_runtime().clone();
@@ -218,6 +228,8 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         ctx.record_timing("hook_pre_search", t0.elapsed());
         check_hook_error(ctx)?;
     }
+
+    crate::request::check_current()?;
 
     // 如果 Hook 请求提前终止管线，直接返回空结果
     if ctx.abort {

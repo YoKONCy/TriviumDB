@@ -47,6 +47,12 @@ pub enum ConcurrencyPoint {
     MigrationCommitted,
     TqlPathStep,
     ConsoleBeforeCommit,
+    BeforeTransactionWal,
+    TransactionWalLockAcquired,
+    DirectWriteWalLockAcquired,
+    ExactScanStep,
+    GraphAlgorithmStep,
+    GraphAlgorithmIteration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

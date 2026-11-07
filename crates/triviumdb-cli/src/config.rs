@@ -41,7 +41,7 @@ pub struct TuiConfig {
 
 impl Config {
     /// 读取 `~/.triviumdb.toml`。文件缺失返回默认；解析失败打印警告后返回默认。
-    pub fn load() -> Self {
+    pub fn load(json_diagnostics: bool) -> Self {
         let Some(path) = config_path() else {
             return Self::default();
         };
@@ -52,10 +52,23 @@ impl Config {
         match toml::from_str::<Self>(&text) {
             Ok(cfg) => cfg,
             Err(e) => {
-                eprintln!(
-                    "警告 / Warning: 配置解析失败 / Failed to parse configuration {}: {e}（已忽略并使用默认值 / Ignored; using defaults）",
-                    path.display()
-                );
+                if json_diagnostics {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "schema_version": triviumdb::error::ERROR_SCHEMA_VERSION,
+                            "code": "TDB_CLI_CONFIG",
+                            "level": "warning",
+                            "message": format!("配置解析失败，使用默认配置 (Configuration parsing failed, using defaults): {e}"),
+                            "details": {"path":path, "reason":e.to_string()}
+                        })
+                    );
+                } else {
+                    eprintln!(
+                        "警告 / Warning: 配置解析失败 / Failed to parse configuration {}: {e}（已忽略并使用默认值 / Ignored; using defaults）",
+                        path.display()
+                    );
+                }
                 Self::default()
             }
         }

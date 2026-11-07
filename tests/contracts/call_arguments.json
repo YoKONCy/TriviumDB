@@ -1,0 +1,31 @@
+{
+  "missing": [
+    {"python": "get", "node": "get", "args": [], "field": "id"},
+    {"python": "get_payload", "node": "getPayload", "args": [], "field": "id"},
+    {"python": "__contains__", "node": "contains", "args": [], "python_field": "key", "node_field": "id"},
+    {"python": "get_edges", "node": "getEdges", "args": [], "field": "id"},
+    {"python": "get_incoming_edges", "node": "getIncomingEdges", "args": [], "field": "id"},
+    {"python": "get_edge", "node": "getEdge", "args": [7], "field": "dst"},
+    {"python": "get_edge", "node": "getEdge", "args": [7, 11], "field": "label"},
+    {"python": "neighbors", "node": "neighbors", "args": [], "field": "id"},
+    {"python": "reachable", "node": "reachable", "args": [], "field": "id"},
+    {"python": "reachable_detailed", "node": "reachableDetailed", "args": [], "field": "id"},
+    {"python": "query_subgraph", "node": "querySubgraph", "args": [], "field": "id"},
+    {"python": "search", "node": "search", "args": [], "python_field": "query_vector", "node_field": "queryVector"},
+    {"python": "search_exact", "node": "searchExact", "args": [[1, 0]], "python_field": "top_k", "node_field": "topK"},
+    {"python": "search_graph_first", "node": "searchGraphFirst", "args": [[1, 0], [7]], "python_field": "top_k", "node_field": "topK"},
+    {"python": "search_hybrid", "node": "searchHybrid", "args": [[1, 0]], "python_field": "query_text", "node_field": "queryText"},
+    {"python": "tql", "node": "tql", "args": [], "field": "query"},
+    {"python": "prepare_tql", "node": "prepareTql", "args": [], "field": "query"},
+    {"python": "execute_prepared_tql", "node": "executePreparedTql", "args": [null], "field": "parameters"},
+    {"python": "console_request", "node": "consoleRequest", "args": [null], "python_field": "request_json", "node_field": "requestJson"},
+    {"python": "insert", "node": "insert", "args": [[1, 0]], "field": "payload", "write": true},
+    {"python": "insert_with_id", "node": "insertWithId", "args": [19], "field": "vector", "write": true},
+    {"python": "update_vector", "node": "updateVector", "args": [], "python_field": "vector", "node_field": "id", "write": true},
+    {"python": "link", "node": "link", "args": [7], "field": "dst", "write": true},
+    {"python": "upsert_edge", "node": "upsertEdge", "args": [7, 11], "field": "label", "write": true},
+    {"python": "tql_mut", "node": "tqlMut", "args": [], "field": "query", "write": true},
+    {"python": "create_snapshot", "node": "createSnapshot", "args": ["unused"], "python_field": "generation_id", "node_field": "generationId", "write": true},
+    {"python": "close_timeout", "node": "closeTimeout", "args": [], "python_field": "timeout_ms", "node_field": "timeoutMs"}
+  ]
+}

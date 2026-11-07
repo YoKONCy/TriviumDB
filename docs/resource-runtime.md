@@ -115,6 +115,10 @@ second.close()
 
 Python 配额参数单位为 MiB，资源拒绝抛出 `ResourceBudgetError`，它继承 `RuntimeError`。数据库的 `resource_stats()` 和运行时的 `stats()` 返回同一运行时的共享统计。
 
+构造参数的已覆盖提取、换算和配置拒绝提供 `target.field`。Rust 资源约束使用 max_threads 和 maintenance_memory_limit，Python 对应 max_threads 和 maintenance_memory_limit_mb，Node 对应 maxThreads 和 maintenanceMemoryLimitMb。数据库打开因维度、文件锁或身份不匹配而失败后，已登记配额及活动任务随失败路径归还，宿主可以修正输入后重新打开。完整范围见[构造参数值](error-contracts.md#构造参数值)。
+
+Python runtime 参数按原生类型提取；Node 按既有类型标记句柄校验，配置 getter 和 Proxy 的原异常直接传播。Node 资源运行时 options 使用非数组对象，原始值和数组配置返回 options 字段拒绝，省略／null 使用默认配置。Node 数据库配置中的 runtime 成员要求有效句柄，模块函数的可选 runtime 支持 null 默认值。
+
 内核产生的 `ResourceBudgetError` 实例包含 `resource`、`requested`、`used`、`limit` 属性。`resource` 标识预算维度，内存维度单位为字节，线程与任务维度单位为个数。宿主可直接读取这些字段决定退避或释放资源。
 
 ---

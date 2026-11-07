@@ -116,11 +116,13 @@ fn 路径栈工作区在展开前受实例预算限制() {
         ..Default::default()
     };
     assert!(matches!(
-        execute_tql_with_limits(&query, &mt, limits),
-        Err(TriviumError::ResourceBudgetExceeded {
+        execute_tql_with_limits(&query, &mt, limits)
+            .unwrap_err()
+            .underlying(),
+        TriviumError::ResourceBudgetExceeded {
             resource: "query_memory_bytes",
             ..
-        })
+        }
     ));
     let rows = execute_tql_with_limits(&query, &mt, TqlLimits::default()).unwrap();
     assert_eq!(rows.len(), 1);
@@ -227,8 +229,10 @@ fn small_stack_worker() {
                 ..Default::default()
             };
             assert!(matches!(
-                execute_tql_with_limits(&query, &mt, limits),
-                Err(TriviumError::QueryDeadlineExceeded | TriviumError::QueryExecution(_))
+                execute_tql_with_limits(&query, &mt, limits)
+                    .unwrap_err()
+                    .underlying(),
+                TriviumError::QueryDeadlineExceeded | TriviumError::QueryExecution(_)
             ));
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(2),
@@ -236,8 +240,10 @@ fn small_stack_worker() {
             );
             let started = std::time::Instant::now();
             assert!(matches!(
-                execute_tql_with_limits(&query, &mt, TqlLimits::default()),
-                Err(TriviumError::QueryExecution(_))
+                execute_tql_with_limits(&query, &mt, TqlLimits::default())
+                    .unwrap_err()
+                    .underlying(),
+                TriviumError::QueryExecution(_)
             ));
             assert!(started.elapsed() < std::time::Duration::from_secs(2));
         })

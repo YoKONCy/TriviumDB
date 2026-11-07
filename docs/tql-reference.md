@@ -28,13 +28,23 @@
 
 ## 结构化查询诊断
 
-当前开发版本的数据库查询、Prepared TQL 准备和写语句解析共享 `TDB_QUERY_PARSE`。错误保留 `schema_version`、`message` 与 `details.reason`，并增加 `stage`：`lex` 表示词法阶段，`parse` 表示语法及解析期语义检查。
+当前开发版本的数据库查询、Prepared TQL 准备和写语句解析共享结构化错误契约。错误保留原有 `code`、`schema_version`、`message` 与 `details`，并由实际检查点提供 `stage`。
+
+| `stage` | 检查点 |
+| --- | --- |
+| `lex` | 词法扫描 |
+| `parse` | 语法与局部语法约束 |
+| `bind` | 参数值转换、必需参数与参数槽位绑定 |
+| `plan` | 作用域、列名、向量常量、算子装配与写计划 |
+| `execute` | 数据读取、实际算子、投影、事务执行及相应预算与取消 |
+
+未定义变量与重复列名提供 `stage=plan`，错误码沿用 `TDB_QUERY_PARSE`。写入目标在匹配前核对节点绑定，空库与空匹配集使用同一拒绝契约。各阶段保留原始错误类别、详情、cause 和写入结果。
 
 能够确定位置时，`target.query_span` 提供以下字段：
 
 | 字段 | 含义 |
 | --- | --- |
-| `start_byte`、`end_byte` | 原始查询 UTF-8 字节的零起点、左闭右开范围；当前诊断使用两者相等的零长度锚点 |
+| `start_byte`、`end_byte` | 原始查询 UTF-8 字节的零起点、左闭右开范围；输入结束及 token 预算边界使用零长度锚点 |
 | `line` | 从 1 开始的行号；CRLF 计一个换行，单独 CR 或 LF 也换行 |
 | `column` | 从 1 开始的列号；按 Unicode 标量值计数，Tab 计一列，组合字符分别计数 |
 
@@ -46,20 +56,32 @@
   "code": "TDB_QUERY_PARSE",
   "stage": "parse",
   "target": {
-    "query_span": { "start_byte": 7, "end_byte": 7, "line": 1, "column": 8 }
+    "query_span": { "start_byte": 7, "end_byte": 10, "line": 1, "column": 8 }
   }
 }
 ```
 
-词法锚点指向失败词法单元的起点，包括非法字符、不完整运算符和未闭合字符串。语法锚点覆盖明确的 token 预期、括号校验、尾部输入及输入结束。别名冲突等缺少精确位置的检查仅提供阶段；JSON 和 Node 省略对应 `target`，Python 使用 `None`。超过输入字节上限时也省略源码位置。
+词法范围覆盖扫描器已消费的失败片段，未消费的非法字符使用该字符的完整范围。未闭合字符串从引号覆盖到输入末尾。语法范围覆盖明确的 token 预期、括号校验及尾部输入，范围终点取自词法扫描，空白与注释独立于相邻 token。符号检查按 AST 路径定位具体的引用，重复列名指向产生冲突的返回项。JSON 和 Node 省略缺失的定位字段，Python 使用 `None`。超过输入字节上限时省略源码位置。
 
 Prepared 参数绑定使用 `stage=bind` 和 `target.parameter`。缺参、多参、命名 JSON 参数转换，以及向量槽位中的非数值和 Rust 非有限参数均携带参数原名。缺参和多参保留原有专用错误码，容器值沿用 `TDB_INVALID_INPUT`，向量槽位类型错误沿用 `TDB_QUERY_EXECUTION`。参数名按映射键传递，点、斜杠、方括号与 Unicode 字符保持原样。字段与各入口的覆盖边界见[公共错误契约](error-contracts.md)。
 
+数据库 `prepare_tql` 保存原始查询及解析器确认的参数引用。缺参和已引用参数的转换／绑定拒绝同时提供 `target.parameter` 与 `target.query_span`，范围包含 `$` 前缀。同名参数选择查询中首个真实引用，字符串、注释与文档过滤操作符独立处理。额外参数仅提供名称。Rust 从手工 AST 调用 `PreparedTql::from_query` 时提供 AST 已知的参数名。Prepared 克隆共享源码元数据，源码及错误对象的生命周期独立于数据库文件资源。
+
+带源码范围的 Rust 参数错误通过 `TriviumError::QueryParameterSource` 包装原错误。调用者使用 `info()` 读取位置，使用 `underlying()` 匹配原始缺参、类型等变体，标准错误链继续提供原始 cause。
+
+Rust 的 `parse_tql_located` 与 `parse_tql_statement_located` 返回 `LocatedTql`。`ast()` 和 `source()` 提供配对的只读视图，`into_ast()` 提供可单独编辑的 AST，`PreparedTql::from_located` 保留来源。原有 AST 结构及解析入口继续提供对应构造和返回形式。
+
+`TqlSource` 保存原始输入和构造来源树，`TqlSourceNode` 提供 `kind`、可选 UTF-8 `range` 与 `children`，`child(kind, index)` 按同类节点的源码顺序取值。来源覆盖查询入口、图模式、过滤、全部 PipelineStage、WITH 项、二元与嵌套表达式、谓词、聚合、返回和排序项、分页，以及写入源、动作、创建节点／边、赋值、向量和 JSON。来源树同时保留语法分组与合成来源，隐式变量和默认结构的 `range` 为 `None`。`source.span(node)` 按统一行列规则生成公共诊断范围。来源收集受输入字节、token、操作数和嵌套上限约束，Prepared 克隆共享来源元数据。
+
+执行器在实际装配与计算节点附加来源。融合算子使用参与逻辑节点的最小包围范围，单独节点范围保留在来源树中。内核生成的入口查询沿原入口追溯，生成的投影共享该来源。初始取消等请求级检查使用查询根节点范围。手工 AST 执行提供已知阶段，来源范围按调用入口持有的信息提供。
+
+`stage` 描述查询处理位置，`write` 描述写入阶段与结果。唯一约束在事务校验时拒绝，可以同时提供 `stage=execute` 与 `write.phase=validation`。普通字段或参数包装保留已有查询范围，`target.field` 或 `target.parameter` 可与 `target.query_span` 同时出现。Rust 的 `QuerySource` 包装通过 `underlying()` 提供原始变体。
+
 Rust 的数据库解析入口返回 `TriviumError::QuerySyntax { reason, stage, span }`；原 `QueryParse(String)` 继续保留，稳定错误码一致。独立解析可使用 `parse_tql_diagnostic` 和 `parse_tql_statement_diagnostic`。旧字符串及 `ParseErrorAt` 入口继续提供原返回类型；需要区分准确位置与缺失位置的调用者使用结构化入口。
 
-Python／Node 异常、CLI JSON、嵌入 Console HTTP 与独立 Server 直接传递内核诊断。独立 Server 使用 HTTP 400 和 `legacyCode: "QUERY_PARSE_ERROR"`。查询范围使用原始 UTF-8 字节，JavaScript 按 UTF-16 索引处理字符串时需先换算。
+Python／Node 异常、CLI JSON、嵌入 Console HTTP 与独立 Server 直接传递内核诊断。独立 Server 依据原始错误类别保留 HTTP 状态与 `legacyCode`，词法、语法和作用域错误为 HTTP 400／`QUERY_PARSE_ERROR`。查询范围使用原始 UTF-8 字节，JavaScript 按 UTF-16 索引处理字符串时需先换算。
 
-> **接入提醒**：诊断锚点用于定位当前检查的失败位置。完整 AST 源码范围、Prepared 参数绑定位置及执行期位置按后续契约补充；写入结果继续依据事务与回执判断。
+> **接入提醒**　程序判断使用稳定错误码、阶段、目标字段与写入结果。来源范围对应原始 UTF-8 输入，JavaScript 的 UTF-16 索引需先换算。Rust 错误变体匹配使用 `underlying()`。
 
 ---
 

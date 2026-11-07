@@ -25,6 +25,8 @@ pub fn build_workspace<T: VectorType>(
     max_examined_edges: usize,
     max_bytes: usize,
 ) -> Result<GraphWorkspace> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     let base_bytes = nodes
         .len()
         .checked_mul(std::mem::size_of::<NodeId>() * 10)
@@ -37,7 +39,9 @@ pub fn build_workspace<T: VectorType>(
     let mut examined_edges = 0usize;
     let mut retained_edges = 0usize;
     for &source in nodes {
+        crate::graph::budget::check_control(&control)?;
         for edge in mt.get_edges(source).unwrap_or_default() {
+            crate::graph::budget::check_control(&control)?;
             examined_edges = examined_edges.saturating_add(1);
             if examined_edges > max_examined_edges {
                 return Err(TriviumError::QueryExecution(
@@ -63,7 +67,9 @@ pub fn build_workspace<T: VectorType>(
     let mut reverse = directed.clone();
     let mut weighted = BTreeMap::from_iter(nodes.iter().map(|&id| (id, Vec::new())));
     for &source in nodes {
+        crate::graph::budget::check_control(&control)?;
         for edge in mt.get_edges(source).unwrap_or_default() {
+            crate::graph::budget::check_control(&control)?;
             if nodes.contains(&edge.target_id)
                 && label_filter.is_none_or(|label| edge.label == label)
             {
@@ -77,14 +83,17 @@ pub fn build_workspace<T: VectorType>(
         }
     }
     for targets in directed.values_mut() {
+        crate::graph::budget::check_control(&control)?;
         targets.sort_unstable();
         targets.dedup();
     }
     for sources in reverse.values_mut() {
+        crate::graph::budget::check_control(&control)?;
         sources.sort_unstable();
         sources.dedup();
     }
     for targets in weighted.values_mut() {
+        crate::graph::budget::check_control(&control)?;
         targets.sort_by(|left, right| {
             left.0
                 .cmp(&right.0)
@@ -92,6 +101,7 @@ pub fn build_workspace<T: VectorType>(
         });
         let mut deduplicated = Vec::<(NodeId, f64)>::new();
         for &(target, weight) in targets.iter() {
+            crate::graph::budget::check_control(&control)?;
             if let Some((last_target, last_weight)) = deduplicated.last_mut()
                 && *last_target == target
             {
@@ -104,7 +114,9 @@ pub fn build_workspace<T: VectorType>(
     }
     let mut undirected = BTreeMap::from_iter(nodes.iter().map(|&id| (id, Vec::new())));
     for (&source, targets) in &directed {
+        crate::graph::budget::check_control(&control)?;
         for &target in targets {
+            crate::graph::budget::check_control(&control)?;
             if source != target {
                 undirected.entry(source).or_default().push(target);
                 undirected.entry(target).or_default().push(source);
@@ -112,6 +124,7 @@ pub fn build_workspace<T: VectorType>(
         }
     }
     for neighbors in undirected.values_mut() {
+        crate::graph::budget::check_control(&control)?;
         neighbors.sort_unstable();
         neighbors.dedup();
     }
@@ -125,14 +138,32 @@ pub fn build_workspace<T: VectorType>(
 }
 
 pub fn strongly_connected_components(graph: &GraphWorkspace) -> BTreeMap<NodeId, NodeId> {
-    fn finish_order(
+    strongly_connected_components_checked(graph, &|| Ok::<(), std::convert::Infallible>(()))
+        .unwrap_or_else(|never| match never {})
+}
+
+pub(crate) fn strongly_connected_components_controlled(
+    graph: &GraphWorkspace,
+) -> Result<BTreeMap<NodeId, NodeId>> {
+    let control = crate::request::control().unwrap_or_default();
+    strongly_connected_components_checked(graph, &|| crate::graph::budget::check_control(&control))
+}
+
+fn strongly_connected_components_checked<E>(
+    graph: &GraphWorkspace,
+    check: &impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<BTreeMap<NodeId, NodeId>, E> {
+    check()?;
+    fn finish_order<E>(
         start: NodeId,
         adjacency: &BTreeMap<NodeId, Vec<NodeId>>,
         visited: &mut BTreeSet<NodeId>,
         order: &mut Vec<NodeId>,
-    ) {
+        check: &impl Fn() -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
         let mut stack = vec![(start, false)];
         while let Some((node, expanded)) = stack.pop() {
+            check()?;
             if expanded {
                 order.push(node);
                 continue;
@@ -143,23 +174,27 @@ pub fn strongly_connected_components(graph: &GraphWorkspace) -> BTreeMap<NodeId,
             stack.push((node, true));
             if let Some(neighbors) = adjacency.get(&node) {
                 for &neighbor in neighbors.iter().rev() {
+                    check()?;
                     if !visited.contains(&neighbor) {
                         stack.push((neighbor, false));
                     }
                 }
             }
         }
+        Ok(())
     }
     let mut visited = BTreeSet::new();
     let mut order = Vec::new();
     for &node in graph.directed.keys() {
+        check()?;
         if !visited.contains(&node) {
-            finish_order(node, &graph.directed, &mut visited, &mut order);
+            finish_order(node, &graph.directed, &mut visited, &mut order, check)?;
         }
     }
     let mut result = BTreeMap::new();
     visited.clear();
     for &start in order.iter().rev() {
+        check()?;
         if visited.contains(&start) {
             continue;
         }
@@ -167,9 +202,11 @@ pub fn strongly_connected_components(graph: &GraphWorkspace) -> BTreeMap<NodeId,
         let mut component = Vec::new();
         visited.insert(start);
         while let Some(node) = stack.pop() {
+            check()?;
             component.push(node);
             if let Some(neighbors) = graph.reverse.get(&node) {
                 for &neighbor in neighbors.iter().rev() {
+                    check()?;
                     if visited.insert(neighbor) {
                         stack.push(neighbor);
                     }
@@ -178,13 +215,28 @@ pub fn strongly_connected_components(graph: &GraphWorkspace) -> BTreeMap<NodeId,
         }
         let component_id = component.iter().copied().min().unwrap_or(start);
         for node in component {
+            check()?;
             result.insert(node, component_id);
         }
     }
-    result
+    Ok(result)
 }
 
 pub fn k_core(graph: &GraphWorkspace) -> BTreeMap<NodeId, u64> {
+    k_core_checked(graph, &|| Ok::<(), std::convert::Infallible>(()))
+        .unwrap_or_else(|never| match never {})
+}
+
+pub(crate) fn k_core_controlled(graph: &GraphWorkspace) -> Result<BTreeMap<NodeId, u64>> {
+    let control = crate::request::control().unwrap_or_default();
+    k_core_checked(graph, &|| crate::graph::budget::check_control(&control))
+}
+
+fn k_core_checked<E>(
+    graph: &GraphWorkspace,
+    check: &impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<BTreeMap<NodeId, u64>, E> {
+    check()?;
     let mut degree = BTreeMap::from_iter(
         graph
             .undirected
@@ -199,10 +251,12 @@ pub fn k_core(graph: &GraphWorkspace) -> BTreeMap<NodeId, u64> {
         .map(|id| (id, degree.get(id).unwrap_or(&0)))
         .min_by_key(|(id, degree)| (**degree, **id))
     {
+        check()?;
         remaining.remove(&node);
         core = core.max(node_degree);
         output.insert(node, core as u64);
         for neighbor in graph.undirected.get(&node).into_iter().flatten() {
+            check()?;
             if remaining.contains(neighbor) {
                 degree
                     .entry(*neighbor)
@@ -210,16 +264,31 @@ pub fn k_core(graph: &GraphWorkspace) -> BTreeMap<NodeId, u64> {
             }
         }
     }
-    output
+    Ok(output)
 }
 
 pub fn articulation_points(graph: &GraphWorkspace) -> BTreeSet<NodeId> {
+    articulation_points_checked(graph, &|| Ok::<(), std::convert::Infallible>(()))
+        .unwrap_or_else(|never| match never {})
+}
+
+pub(crate) fn articulation_points_controlled(graph: &GraphWorkspace) -> Result<BTreeSet<NodeId>> {
+    let control = crate::request::control().unwrap_or_default();
+    articulation_points_checked(graph, &|| crate::graph::budget::check_control(&control))
+}
+
+fn articulation_points_checked<E>(
+    graph: &GraphWorkspace,
+    check: &impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<BTreeSet<NodeId>, E> {
+    check()?;
     let mut discovery = BTreeMap::<NodeId, usize>::new();
     let mut low = BTreeMap::<NodeId, usize>::new();
     let mut parent = BTreeMap::<NodeId, NodeId>::new();
     let mut points = BTreeSet::new();
     let mut time = 0usize;
     for &root in graph.undirected.keys() {
+        check()?;
         if discovery.contains_key(&root) {
             continue;
         }
@@ -229,6 +298,7 @@ pub fn articulation_points(graph: &GraphWorkspace) -> BTreeSet<NodeId> {
         discovery.insert(root, time);
         low.insert(root, time);
         while let Some((node, next_index)) = stack.pop() {
+            check()?;
             let neighbors = graph
                 .undirected
                 .get(&node)
@@ -276,21 +346,26 @@ pub fn articulation_points(graph: &GraphWorkspace) -> BTreeSet<NodeId> {
             points.insert(root);
         }
     }
-    points
+    Ok(points)
 }
 
 pub fn triangle_metrics(
     graph: &GraphWorkspace,
     max_work: usize,
 ) -> Result<BTreeMap<NodeId, (u64, f64)>> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     let mut counts = BTreeMap::from_iter(graph.undirected.keys().map(|&id| (id, 0u64)));
     let mut work = 0usize;
     for (&a, neighbors) in &graph.undirected {
+        crate::graph::budget::check_control(&control)?;
         for &b in neighbors.iter().filter(|&&neighbor| neighbor > a) {
+            crate::graph::budget::check_control(&control)?;
             let Some(b_neighbors) = graph.undirected.get(&b) else {
                 continue;
             };
             for &c in b_neighbors.iter().filter(|&&neighbor| neighbor > b) {
+                crate::graph::budget::check_control(&control)?;
                 work = work.saturating_add(1);
                 if work > max_work {
                     return Err(TriviumError::QueryExecution(
@@ -325,6 +400,8 @@ pub fn hits(
     tolerance: f64,
     max_work: usize,
 ) -> Result<BTreeMap<NodeId, (f64, f64)>> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     if max_iterations == 0 || !tolerance.is_finite() || tolerance <= 0.0 {
         return Err(TriviumError::InvalidInput(
             "HITS 参数无效 (Invalid HITS parameters)".into(),
@@ -345,6 +422,7 @@ pub fn hits(
     let mut authorities = hubs.clone();
     let mut work = 0usize;
     for _ in 0..max_iterations {
+        crate::graph::budget::check_control(&control)?;
         work = work
             .checked_add(per_iteration)
             .ok_or_else(|| TriviumError::QueryExecution("HITS 工作预算溢出".into()))?;
@@ -355,6 +433,7 @@ pub fn hits(
         }
         let mut next_authorities = BTreeMap::new();
         for &id in &ids {
+            crate::graph::budget::check_control(&control)?;
             let score = graph
                 .reverse
                 .get(&id)
@@ -367,6 +446,7 @@ pub fn hits(
         normalize(&mut next_authorities);
         let mut next_hubs = BTreeMap::new();
         for &id in &ids {
+            crate::graph::budget::check_control(&control)?;
             let score = graph
                 .directed
                 .get(&id)
@@ -437,6 +517,8 @@ fn shortest_weighted_path(
     work: &mut usize,
     max_work: usize,
 ) -> Result<WeightedSearchState> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     let mut distances =
         BTreeMap::from_iter(graph.weighted.keys().copied().map(|id| (id, f64::INFINITY)));
     let mut paths = BTreeMap::<NodeId, Vec<NodeId>>::new();
@@ -447,6 +529,7 @@ fn shortest_weighted_path(
     paths.insert(source, vec![source]);
     let mut settled = BTreeSet::new();
     loop {
+        crate::graph::budget::check_control(&control)?;
         let next = distances
             .iter()
             .filter(|(id, distance)| !settled.contains(*id) && distance.is_finite())
@@ -468,6 +551,7 @@ fn shortest_weighted_path(
             continue;
         };
         for &(neighbor, weight) in graph.weighted.get(&node).into_iter().flatten() {
+            crate::graph::budget::check_control(&control)?;
             *work = work
                 .checked_add(1)
                 .ok_or_else(|| TriviumError::QueryExecution("加权路径工作预算溢出".into()))?;
@@ -501,6 +585,8 @@ fn shortest_weighted_path(
 }
 
 fn validate_weighted_graph(graph: &GraphWorkspace) -> Result<()> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     if graph
         .weighted
         .values()
@@ -520,6 +606,8 @@ pub fn weighted_dijkstra(
     target: NodeId,
     max_work: usize,
 ) -> Result<Option<WeightedPath>> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     validate_weighted_graph(graph)?;
     let mut work = 0usize;
     let (distances, paths) = shortest_weighted_path(
@@ -541,10 +629,13 @@ pub fn harmonic_centrality(
     graph: &GraphWorkspace,
     max_work: usize,
 ) -> Result<BTreeMap<NodeId, f64>> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     validate_weighted_graph(graph)?;
     let mut work = 0usize;
     let mut output = BTreeMap::new();
     for &source in graph.weighted.keys() {
+        crate::graph::budget::check_control(&control)?;
         let (distances, _) = shortest_weighted_path(
             graph,
             source,
@@ -574,6 +665,8 @@ pub fn yen_k_shortest_paths(
     max_work: usize,
     max_candidates: usize,
 ) -> Result<Vec<WeightedPath>> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     validate_weighted_graph(graph)?;
     if k == 0 || max_candidates == 0 {
         return Err(TriviumError::InvalidInput(
@@ -599,11 +692,13 @@ pub fn yen_k_shortest_paths(
     }];
     let mut candidates = BTreeMap::<Vec<NodeId>, f64>::new();
     while accepted.len() < k {
+        crate::graph::budget::check_control(&control)?;
         let previous = accepted
             .last()
             .cloned()
             .ok_or_else(|| TriviumError::QueryExecution("Yen 已接受路径状态不一致".into()))?;
         for spur_index in 0..previous.nodes.len().saturating_sub(1) {
+            crate::graph::budget::check_control(&control)?;
             let root = &previous.nodes[..=spur_index];
             let spur = previous.nodes[spur_index];
             let banned_nodes = root[..root.len().saturating_sub(1)]
@@ -637,6 +732,7 @@ pub fn yen_k_shortest_paths(
             let mut cost = 0.0;
             let mut valid = true;
             for edge in nodes.windows(2) {
+                crate::graph::budget::check_control(&control)?;
                 let Some(weight) = graph
                     .weighted
                     .get(&edge[0])
@@ -697,6 +793,8 @@ pub fn node_similarity(
     max_comparisons: usize,
     max_bytes: usize,
 ) -> Result<PairSet> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     if top_k == 0 || !cutoff.is_finite() || !(0.0..=1.0).contains(&cutoff) {
         return Err(TriviumError::InvalidInput(
             "节点相似度参数无效 (Invalid node similarity parameters)".into(),
@@ -725,12 +823,14 @@ pub fn node_similarity(
     let mut pairs = Vec::with_capacity(capacity);
     let mut work = 0usize;
     for (index, &left) in ids.iter().enumerate() {
+        crate::graph::budget::check_control(&control)?;
         let left_neighbors = graph
             .undirected
             .get(&left)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         for &right in &ids[index + 1..] {
+            crate::graph::budget::check_control(&control)?;
             work = work
                 .checked_add(1)
                 .ok_or_else(|| TriviumError::QueryExecution("节点相似度工作预算溢出".into()))?;
@@ -748,6 +848,7 @@ pub fn node_similarity(
             let mut right_index = 0usize;
             let mut intersection = 0usize;
             while left_index < left_neighbors.len() && right_index < right_neighbors.len() {
+                crate::graph::budget::check_control(&control)?;
                 work = work
                     .checked_add(1)
                     .ok_or_else(|| TriviumError::QueryExecution("节点相似度工作预算溢出".into()))?;

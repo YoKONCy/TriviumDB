@@ -118,6 +118,12 @@ impl ConsoleSession {
         lock_or_recover(&self.state).detached
     }
 
+    /// 已停止准入且所有 Core 请求实际退出，响应交付由宿主传输单独确认。
+    pub fn is_drained(&self) -> bool {
+        let state = lock_or_recover(&self.state);
+        state.detached && state.requests.is_empty()
+    }
+
     pub fn options(&self) -> &ConsoleOptions {
         &self.options
     }
@@ -135,12 +141,9 @@ impl ConsoleSession {
     fn enter(
         &self,
         instance: &Arc<Instance>,
-        request_id: &str,
-        external: Option<QueryControl>,
+        context: &crate::request::RequestContext,
     ) -> Result<RequestGuard> {
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(self.options.query_timeout_ms))
-            .ok_or_else(|| invalid("查询 deadline 溢出 (Query deadline overflow)"))?;
+        let request_id = context.request_id();
         let mut state = lock_or_recover(&self.state);
         if state.detached {
             return Err(TriviumError::ConsoleSessionClosed);
@@ -159,10 +162,7 @@ impl ConsoleSession {
                 resource: "console_request_id",
             });
         }
-        let control = external.map_or_else(
-            || QueryControl::with_deadline(deadline),
-            |control| control.bounded_by(deadline),
-        );
+        let control = context.control().clone();
         state
             .requests
             .insert(request_id.to_owned(), control.clone());
@@ -233,7 +233,7 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
 fn invalid(message: impl Into<String>) -> TriviumError {
     TriviumError::InvalidInput(message.into())
 }
-fn parse<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
+fn parse<'a, T: serde::Deserialize<'a>>(raw: &'a str) -> Result<T> {
     serde_json::from_str(raw).map_err(|error| {
         invalid(format!(
             "控制台 JSON 无效 (Invalid console JSON): category={:?}, line={}, column={}",
@@ -255,12 +255,99 @@ fn id(raw: &str) -> Result<u64> {
         .ok_or_else(|| invalid("节点 ID 超出范围 (Node ID is out of range)"))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Request {
-    version: u32,
     request_id: String,
     command: Command,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Envelope<'a> {
+    version: u32,
+    request_id: String,
+    #[serde(borrow)]
+    command: &'a serde_json::value::RawValue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum CommandKind {
+    Info,
+    Query,
+    Mutate,
+    GetNodes,
+    Search,
+    Subgraph,
+    Edges,
+    Path,
+    Indexes,
+    ManageIndex,
+    BuildQuiver,
+    Transaction,
+    GuardedTransaction,
+    TransactionStatus,
+    ImportNodes,
+    ImportEdges,
+}
+
+#[derive(Deserialize)]
+struct CommandHeader {
+    operation: CommandKind,
+}
+
+pub(crate) struct PreparedConsoleRequest<'a> {
+    envelope: Envelope<'a>,
+    pub(crate) context: crate::request::RequestContext,
+}
+
+impl ConsoleSession {
+    pub(crate) fn prepare_request<'a>(
+        &self,
+        raw: &'a str,
+        external: Option<QueryControl>,
+    ) -> Result<PreparedConsoleRequest<'a>> {
+        if self.is_detached() {
+            return Err(TriviumError::ConsoleSessionClosed);
+        }
+        if raw.len() > self.options.max_request_bytes {
+            return Err(TriviumError::ResourceBudgetExceeded {
+                resource: "console_request_bytes",
+                requested: raw.len(),
+                used: 0,
+                limit: self.options.max_request_bytes,
+            });
+        }
+        let request: Envelope<'_> = parse(raw)?;
+        if request.version != CONSOLE_PROTOCOL_VERSION
+            || request.request_id.is_empty()
+            || request.request_id.len() > 128
+        {
+            return Err(invalid(
+                "控制台协议版本或请求 ID 无效 (Invalid console protocol version or request ID)",
+            ));
+        }
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(self.options.query_timeout_ms))
+            .ok_or_else(|| invalid("查询 deadline 溢出 (Query deadline overflow)"))?;
+        let mut control = external.map_or_else(
+            || QueryControl::with_deadline(deadline),
+            |control| control.bounded_by(deadline),
+        );
+        if let Some(parent) = crate::request::control() {
+            control = control.combined_with(&parent);
+        }
+        let header: CommandHeader = parse(request.command.get())?;
+        let context = crate::request::RequestContext::new(
+            &request.request_id,
+            control,
+            header.operation.permission().1,
+        )?;
+        context.check_admission()?;
+        Ok(PreparedConsoleRequest {
+            envelope: request,
+            context,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -403,17 +490,41 @@ enum Operation {
 
 impl Command {
     fn permission(&self) -> (ConsoleFeature, bool) {
+        let kind = match self {
+            Self::Info => CommandKind::Info,
+            Self::Query { .. } => CommandKind::Query,
+            Self::Mutate { .. } => CommandKind::Mutate,
+            Self::GetNodes { .. } => CommandKind::GetNodes,
+            Self::Search { .. } => CommandKind::Search,
+            Self::Subgraph { .. } => CommandKind::Subgraph,
+            Self::Edges { .. } => CommandKind::Edges,
+            Self::Path { .. } => CommandKind::Path,
+            Self::Indexes => CommandKind::Indexes,
+            Self::ManageIndex { .. } => CommandKind::ManageIndex,
+            Self::BuildQuiver => CommandKind::BuildQuiver,
+            Self::Transaction { .. } => CommandKind::Transaction,
+            Self::GuardedTransaction { .. } => CommandKind::GuardedTransaction,
+            Self::TransactionStatus { .. } => CommandKind::TransactionStatus,
+            Self::ImportNodes { .. } => CommandKind::ImportNodes,
+            Self::ImportEdges { .. } => CommandKind::ImportEdges,
+        };
+        kind.permission()
+    }
+}
+
+impl CommandKind {
+    fn permission(&self) -> (ConsoleFeature, bool) {
         use ConsoleFeature::*;
         match self {
-            Self::Info | Self::Query { .. } | Self::GetNodes { .. } => (Query, false),
-            Self::Mutate { .. } => (Query, true),
-            Self::Search { .. } => (Vector, false),
-            Self::Subgraph { .. } | Self::Edges { .. } | Self::Path { .. } => (Graph, false),
+            Self::Info | Self::Query | Self::GetNodes => (Query, false),
+            Self::Mutate => (Query, true),
+            Self::Search => (Vector, false),
+            Self::Subgraph | Self::Edges | Self::Path => (Graph, false),
             Self::Indexes => (Indexes, false),
-            Self::ManageIndex { .. } | Self::BuildQuiver => (Indexes, true),
-            Self::Transaction { .. } | Self::GuardedTransaction { .. } => (Transactions, true),
-            Self::TransactionStatus { .. } => (Transactions, false),
-            Self::ImportNodes { .. } | Self::ImportEdges { .. } => (Import, true),
+            Self::ManageIndex | Self::BuildQuiver => (Indexes, true),
+            Self::Transaction | Self::GuardedTransaction => (Transactions, true),
+            Self::TransactionStatus => (Transactions, false),
+            Self::ImportNodes | Self::ImportEdges => (Import, true),
         }
     }
 }
@@ -434,43 +545,43 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
         request_json: &str,
         external: Option<QueryControl>,
     ) -> Result<String> {
-        if session.is_detached() {
-            return Err(TriviumError::ConsoleSessionClosed);
-        }
-        let _operation = self.enter_operation()?;
+        let prepared = session.prepare_request(request_json, external)?;
+        self.execute_console_request(session, prepared)
+    }
+
+    pub(crate) fn execute_console_request(
+        &mut self,
+        session: &ConsoleSession,
+        prepared: PreparedConsoleRequest<'_>,
+    ) -> Result<String> {
+        let PreparedConsoleRequest { envelope, context } = prepared;
+        let _operation = self
+            .enter_operation()
+            .map_err(|error| context.admission_error(error))?;
         let options = &session.options;
-        if request_json.len() > options.max_request_bytes {
-            return Err(TriviumError::ResourceBudgetExceeded {
-                resource: "console_request_bytes",
-                requested: request_json.len(),
-                used: 0,
-                limit: options.max_request_bytes,
-            });
-        }
-        let request: Request = parse(request_json)?;
-        if request.version != CONSOLE_PROTOCOL_VERSION
-            || request.request_id.is_empty()
-            || request.request_id.len() > 128
-        {
-            return Err(invalid(
-                "控制台协议版本或请求 ID 无效 (Invalid console protocol version or request ID)",
-            ));
-        }
-        let active = session.enter(&self.lifecycle, &request.request_id, external)?;
+        context.check_admission()?;
+        let active = session
+            .enter(&self.lifecycle, &context)
+            .map_err(|error| context.admission_error(error))?;
+        let _request_context = context
+            .enter()
+            .map_err(|error| context.admission_error(error))?;
+        let command =
+            parse(envelope.command.get()).map_err(|error| context.admission_error(error))?;
+        let request = Request {
+            request_id: envelope.request_id,
+            command,
+        };
         let (feature, write) = request.command.permission();
+        let admission_error = |error| context.admission_error(error);
         if !matches!(request.command, Command::Info) {
-            session.require(feature, write)?;
+            session.require(feature, write).map_err(admission_error)?;
         }
         if write {
-            self.require_write_access("console_request")?;
+            self.require_write_access("console_request")
+                .map_err(admission_error)?;
         }
-        active.control.check().map_err(|error| {
-            if write {
-                error.with_write_info(WriteErrorInfo::MAINTENANCE_ADMISSION)
-            } else {
-                error
-            }
-        })?;
+        active.control.check().map_err(admission_error)?;
         let limit = options.max_response_bytes;
         let runtime = self.resource_runtime.clone();
         let respond = |data: &Value, committed| {
@@ -505,7 +616,7 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                     "limits": {"maxRequestBytes":options.max_request_bytes,"maxResponseBytes":limit,
                         "maxOperations":options.max_operations,"maxQueryRows":max_rows,"queryTimeoutMs":options.query_timeout_ms},
                     "transport": {"streaming":false,"occ":true,"occScope":"database-instance",
-                        "idempotency":{"operation":"guardedTransaction","statusOperation":"transactionStatus","durable":false,"maxReceipts":super::editing::RECEIPT_CAPACITY,"maxReceiptBytes":super::editing::RECEIPT_BYTES},
+                        "idempotency":{"operation":"guardedTransaction","statusOperation":"transactionStatus","durable":true,"persistence":"wal-checkpoint","maxReceipts":super::editing::RECEIPT_CAPACITY,"maxReceiptBytes":super::editing::RECEIPT_BYTES},
                         "idEncoding":"decimal-string","cooperativeCancellation":["query"],"cooperativeWritePlanning":true}}),
                     false,
                 )
@@ -515,7 +626,8 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 let parameters = parameters
                     .iter()
                     .map(|(key, value)| {
-                        crate::query::tql_prepared::TqlParamValue::from_named_json(key, value)
+                        prepared
+                            .parameter_from_json(key, value)
                             .map(|value| (key.clone(), value))
                     })
                     .collect::<Result<HashMap<_, _>>>()?;
@@ -814,14 +926,15 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                     ids,
                     committed: None,
                     bytes,
-                    _workspace: fingerprint.workspace,
+                    planned: None,
+                    _workspace: Some(fingerprint.workspace),
                 };
                 let mut builder = TxBuilder::new();
                 for operation in operations {
                     append_operation(&mut builder, operation)?;
                 }
                 active.check_before_commit()?;
-                self.commit_ops_guarded(builder.into_ops(), Some(receipt))?;
+                self.commit_ops_guarded(builder.into_ops(), Some(receipt), Some(&active.control))?;
                 let mt = super::read_or_recover(&self.memtable);
                 let receipt = mt
                     .editing
@@ -893,7 +1006,8 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                     append_operation(&mut builder, operation)?;
                 }
                 active.check_before_commit()?;
-                let ids = self.commit_tx(builder)?;
+                let ids =
+                    self.commit_ops_guarded(builder.into_ops(), None, Some(&active.control))?;
                 prepared.complete(&json!({"createdIds":strings(ids)}))
             }
             Command::ImportNodes { records } => {
@@ -905,7 +1019,8 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                     append_operation(&mut builder, Operation::Insert { record })?;
                 }
                 active.check_before_commit()?;
-                let ids = self.commit_tx(builder)?;
+                let ids =
+                    self.commit_ops_guarded(builder.into_ops(), None, Some(&active.control))?;
                 prepared.complete(&json!({"createdIds":strings(ids)}))
             }
             Command::ImportEdges { records } => {
@@ -922,7 +1037,7 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                     append_operation(&mut builder, Operation::Link { record })?;
                 }
                 active.check_before_commit()?;
-                self.commit_tx(builder)?;
+                self.commit_ops_guarded(builder.into_ops(), None, Some(&active.control))?;
                 prepared.into_response()
             }
         }

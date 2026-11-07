@@ -6,7 +6,8 @@
 # PEP 561: maturin renames this to triviumdb/__init__.pyi and adds py.typed.
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, final
+from inspect import Signature
+from typing import Any, ClassVar, Literal, final
 
 Vector = Sequence[float | int]
 DType = Literal["f32", "f16", "u64"]
@@ -43,6 +44,7 @@ __all__ = [
     "Transaction",
     "ResourceRuntime",
     "ConsoleSession",
+    "RequestContext",
     "TriviumDB",
     "init_logger",
     "verify_snapshot",
@@ -56,7 +58,7 @@ class TriviumDBError(RuntimeError):
     code: str
     message: str
     details: dict[str, Any]
-    stage: Literal['lex', 'parse', 'bind'] | None
+    stage: Literal['lex', 'parse', 'bind', 'plan', 'execute'] | None
     target: dict[str, str | dict[str, int]] | None
     write: dict[str, str | bool] | None
 
@@ -65,7 +67,7 @@ class InvalidInputError(ValueError):
     code: str
     message: str
     details: dict[str, Any]
-    stage: Literal['lex', 'parse', 'bind'] | None
+    stage: Literal['lex', 'parse', 'bind', 'plan', 'execute'] | None
     target: dict[str, str | dict[str, int]] | None
     write: dict[str, str | bool] | None
 
@@ -74,7 +76,7 @@ class CapacityError(MemoryError):
     code: str
     message: str
     details: dict[str, Any]
-    stage: Literal['lex', 'parse', 'bind'] | None
+    stage: Literal['lex', 'parse', 'bind', 'plan', 'execute'] | None
     target: dict[str, str | dict[str, int]] | None
     write: dict[str, str | bool] | None
 
@@ -83,7 +85,7 @@ class SnapshotDestinationError(FileExistsError):
     code: str
     message: str
     details: dict[str, Any]
-    stage: Literal['lex', 'parse', 'bind'] | None
+    stage: Literal['lex', 'parse', 'bind', 'plan', 'execute'] | None
     target: dict[str, str | dict[str, int]] | None
     write: dict[str, str | bool] | None
 
@@ -193,23 +195,38 @@ class Transaction:
 
 @final
 class ResourceRuntime:
+    __signature__: ClassVar[Signature]
     def __new__(cls, memory_limit_mb: int = 0, max_threads: int = 0, max_active_tasks: int = 0, maintenance_memory_limit_mb: int = 0) -> "ResourceRuntime": ...
     def stats(self) -> dict[str, Any]: ...
 
 @final
 class ConsoleSession:
+    __signature__: ClassVar[Signature]
     def __new__(cls, options_json: str = '{}') -> "ConsoleSession": ...
     def cancel(self, request_id: str) -> bool: ...
     def detach(self) -> None: ...
     def is_detached(self) -> bool: ...
+    def is_drained(self) -> bool: ...
+
+@final
+class RequestContext:
+    @property
+    def request_id(self) -> str: ...
+    __signature__: ClassVar[Signature]
+    def __new__(cls, request_id: str, timeout_ms: int = 0) -> "RequestContext": ...
+    def cancel(self) -> None: ...
+    def check(self) -> None: ...
+    def __enter__(self) -> "RequestContext": ...
+    def __exit__(self, _exc_type: object, _exc_val: object, _exc_tb: object) -> bool: ...
 
 @final
 class TriviumDB:
     dtype: str
-    def __new__(cls, path: str, dim: int = 1536, dtype: DType = 'f32', sync_mode: SyncMode = 'normal', load_text_index: bool = False, auto_build_quiver: bool = True, expected_nodes: int | None = None, memory_limit_mb: int = 0, payload_cache_mb: Any = 64, payload_cache_entry_mb: Any = 8, access_mode: AccessMode = 'read_write', missing_index_policy: MissingIndexPolicy = 'fallback', max_query_rows: int | None = None, row_overflow: RowOverflowPolicy = 'throw', runtime: ResourceRuntime | None = None) -> "TriviumDB": ...
+    __signature__: ClassVar[Signature]
+    def __new__(cls, path: str, dim: int = 1536, dtype: DType = 'f32', sync_mode: SyncMode = 'normal', load_text_index: bool = False, auto_build_quiver: bool = True, expected_nodes: int | None = None, memory_limit_mb: int = 0, payload_cache_mb: int = 64, payload_cache_entry_mb: int = 8, access_mode: AccessMode = 'read_write', missing_index_policy: MissingIndexPolicy = 'fallback', max_query_rows: int | None = None, row_overflow: RowOverflowPolicy = 'throw', runtime: ResourceRuntime | None = None) -> "TriviumDB": ...
     def all_node_ids(self) -> list[int]: ...
-    def batch_insert(self, vectors: Sequence[Vector], payloads: Sequence[Any]) -> list[int]: ...
-    def batch_insert_with_ids(self, ids: Sequence[int], vectors: Sequence[Vector], payloads: Sequence[Any]) -> None: ...
+    def batch_insert(self, vectors: list[Vector], payloads: list[Any]) -> list[int]: ...
+    def batch_insert_with_ids(self, ids: Sequence[int], vectors: list[Vector], payloads: list[Any]) -> None: ...
     def build_text_index(self) -> None: ...
     def clear_hook(self) -> None: ...
     def clear_search_state(self) -> None: ...

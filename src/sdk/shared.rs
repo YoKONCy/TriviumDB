@@ -54,7 +54,7 @@ impl<T: VectorType> SharedDatabase<T> {
     }
 }
 
-pub(crate) struct RequestScope;
+pub(crate) struct RequestScope(std::marker::PhantomData<std::rc::Rc<()>>);
 
 impl RequestScope {
     #[cfg(feature = "python")]
@@ -81,7 +81,7 @@ impl RequestScope {
                     ),
                 })?;
             active.push(identity);
-            Ok(Self)
+            Ok(Self(std::marker::PhantomData))
         })
     }
 }
@@ -102,6 +102,50 @@ pub(crate) fn lock_error<T>(error: TryLockError<T>, resource: &'static str) -> T
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> SharedDatabase<T> {
+    pub fn try_read_with_context<R>(
+        &self,
+        context: &super::RequestContext,
+        operation: impl FnOnce(&Database<T>) -> Result<R>,
+    ) -> Result<R> {
+        let _context = context
+            .enter()
+            .map_err(|error| context.admission_error(error))?;
+        crate::request::check_current().map_err(|error| context.admission_error(error))?;
+        let _scope = RequestScope::enter(Arc::as_ptr(&self.inner) as usize, "shared_read")
+            .map_err(|error| context.admission_error(error))?;
+        let guard = self
+            .inner
+            .try_read()
+            .map_err(|error| context.admission_error(lock_error(error, "shared_database")))?;
+        guard
+            .check_request_admission()
+            .map_err(|error| context.admission_error(error))?;
+        crate::request::check_current().map_err(|error| context.admission_error(error))?;
+        operation(&guard)
+    }
+
+    pub fn try_write_with_context<R>(
+        &self,
+        context: &super::RequestContext,
+        operation: impl FnOnce(&mut Database<T>) -> Result<R>,
+    ) -> Result<R> {
+        let _context = context
+            .enter()
+            .map_err(|error| context.admission_error(error))?;
+        crate::request::check_current().map_err(|error| context.admission_error(error))?;
+        let _scope = RequestScope::enter(Arc::as_ptr(&self.inner) as usize, "shared_write")
+            .map_err(|error| context.admission_error(error))?;
+        let mut guard = self
+            .inner
+            .try_write()
+            .map_err(|error| context.admission_error(lock_error(error, "shared_database")))?;
+        guard
+            .check_request_admission()
+            .map_err(|error| context.admission_error(error))?;
+        crate::request::check_current().map_err(|error| context.admission_error(error))?;
+        operation(&mut guard)
+    }
+
     /// 移入已打开的内核；文件租约保持原有所有权。
     pub fn new(database: Database<T>) -> Self {
         Self {
@@ -152,6 +196,31 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> SharedDatab
             database.commit_tx(std::mem::take(transaction))
         })
         .map_err(|error| error.with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION))
+    }
+
+    /// 上下文准入与内核预检成功后再消费 builder，拒绝时保留原缓冲。
+    pub fn commit_tx_with_context(
+        &self,
+        context: &super::RequestContext,
+        transaction: &mut TxBuilder<T>,
+    ) -> Result<Vec<NodeId>> {
+        let consumed = std::cell::Cell::new(false);
+        self.try_write_with_context(context, |database| {
+            database.check_transaction_admission()?;
+            let transaction = std::mem::take(transaction);
+            consumed.set(true);
+            database.commit_ops_guarded(transaction.into_ops(), None, Some(context.control()))
+        })
+        .map_err(|error| {
+            if consumed.get() {
+                error
+            } else {
+                TriviumError::WriteFailure {
+                    source: Box::new(error),
+                    write: crate::error::WriteErrorInfo::TRANSACTION_ADMISSION,
+                }
+            }
+        })
     }
 
     pub fn request_shutdown(&self) -> Result<ShutdownStatus> {

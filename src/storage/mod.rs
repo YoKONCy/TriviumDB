@@ -4,6 +4,7 @@
 //! 原子替换；ReadOnly/Immutable 路径禁止修复、补建或创建任何制品。
 
 pub mod compaction;
+pub(crate) mod edit_receipts;
 pub mod file_format;
 pub(crate) mod fs;
 pub mod generation;

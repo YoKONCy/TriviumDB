@@ -273,6 +273,15 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    pub(crate) fn at_field(mut self, field: &str) -> Self {
+        if self.target.is_none() {
+            self.target = Some(Box::new(triviumdb::error::ErrorTarget::Field {
+                field: field.into(),
+            }));
+        }
+        self
+    }
+
     pub(crate) fn with_write_info(mut self, write: triviumdb::error::WriteErrorInfo) -> Self {
         if self.write.is_none() {
             self.write = Some(write);
@@ -288,16 +297,32 @@ impl ApiError {
         detail: impl Into<String>,
         retryable: bool,
     ) -> Self {
+        let detail = detail.into();
+        let (canonical, details) = match code {
+            "INVALID_REQUEST" => ("TDB_INVALID_INPUT", serde_json::json!({"reason":detail})),
+            "WRITE_QUEUE_FULL" => ("TDB_BUSY", serde_json::json!({"resource":"write_queue"})),
+            "SERVICE_UNAVAILABLE" => ("TDB_SERVER_UNAVAILABLE", serde_json::json!({})),
+            "INTERNAL_ERROR" => ("TDB_SERVER_INTERNAL", serde_json::json!({})),
+            "PAYLOAD_TOO_LARGE" => ("TDB_HTTP_REQUEST_TOO_LARGE", serde_json::json!({})),
+            "RESPONSE_TOO_LARGE" => ("TDB_HTTP_RESPONSE_TOO_LARGE", serde_json::json!({})),
+            "UNSUPPORTED_MEDIA_TYPE" => ("TDB_HTTP_UNSUPPORTED_MEDIA_TYPE", serde_json::json!({})),
+            "ROUTE_NOT_FOUND" => ("TDB_HTTP_ROUTE_NOT_FOUND", serde_json::json!({})),
+            "METHOD_NOT_ALLOWED" => ("TDB_HTTP_METHOD_NOT_ALLOWED", serde_json::json!({})),
+            "PREPARED_NOT_FOUND" => ("TDB_PREPARED_NOT_FOUND", serde_json::json!({})),
+            "IDEMPOTENCY_KEY_REUSED" => ("TDB_IDEMPOTENCY_CONFLICT", serde_json::json!({})),
+            "WRITE_CONFLICT" => ("TDB_HTTP_PRECONDITION_FAILED", serde_json::json!({})),
+            _ => (code, serde_json::json!({})),
+        };
         Self {
             status,
-            code,
+            code: canonical,
             title,
-            detail: detail.into(),
-            details: serde_json::json!({}),
+            detail,
+            details,
             stage: None,
             target: None,
             write: None,
-            legacy_code: None,
+            legacy_code: (canonical != code).then_some(code),
             retryable,
         }
     }
@@ -305,7 +330,9 @@ impl ApiError {
     pub(crate) fn metric(&self) -> Option<ErrorMetric> {
         match self.code {
             "REQUEST_TIMEOUT" | "TDB_QUERY_DEADLINE_EXCEEDED" => Some(ErrorMetric::Timeout),
-            "WRITE_CONFLICT" | "TDB_WRITE_CONFLICT" => Some(ErrorMetric::OccConflict),
+            "WRITE_CONFLICT" | "TDB_WRITE_CONFLICT" | "TDB_HTTP_PRECONDITION_FAILED" => {
+                Some(ErrorMetric::OccConflict)
+            }
             _ => None,
         }
     }
@@ -381,6 +408,8 @@ impl From<TriviumError> for ApiError {
         let mut mapped =
             match error {
                 TriviumError::QueryParameter { source, .. }
+                | TriviumError::QuerySource { source, .. }
+                | TriviumError::QueryParameterSource { source, .. }
                 | TriviumError::ApiField { source, .. }
                 | TriviumError::WriteFailure { source, .. } => Self::from(*source),
                 TriviumError::QueryParse(detail)
@@ -532,7 +561,7 @@ impl From<TriviumError> for ApiError {
                 ),
                 _ => Self::internal(error.to_string()),
             };
-        if mapped.code != info.code {
+        if mapped.code != info.code && mapped.legacy_code.is_none() {
             mapped.legacy_code = Some(mapped.code);
         }
         mapped.code = info.code;

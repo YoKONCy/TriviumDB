@@ -15,6 +15,121 @@ fn assert_error<T>(result: triviumdb::Result<T>, code: &str, details: Value) {
     assert_eq!(error.details(), details);
 }
 
+#[cfg(feature = "test-hooks")]
+#[test]
+fn 上下文取消贯通内核预检后的WAL边界并保留完整事实() {
+    use triviumdb::query::tql_executor::QueryControl;
+    use triviumdb::sdk::RequestContext;
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
+    let root = TestDir::new("sdk_late_cancel");
+    let path = root.file("db.tdb");
+    let database = SharedDatabase::<f32>::open(&path, 2).unwrap();
+    let before = std::fs::read(format!("{path}.wal")).unwrap();
+    let control = QueryControl::default();
+    let context = RequestContext::new("late", control.clone(), true).unwrap();
+    let pause = pause_at(ConcurrencyPoint::BeforeTransactionWal);
+    let worker = database.clone();
+    let running = std::thread::spawn(move || {
+        let mut transaction = TxBuilder::new();
+        transaction.insert(&[1., 0.], json!({"state":"cancelled"}));
+        let error = worker
+            .commit_tx_with_context(&context, &mut transaction)
+            .unwrap_err();
+        (error, transaction.pending_count())
+    });
+    pause.wait_until_arrived();
+    control.cancel();
+    pause.release();
+    let (error, pending) = running.join().unwrap();
+    assert_eq!(error.code(), "TDB_QUERY_CANCELLED");
+    assert_eq!(
+        serde_json::to_value(error.info().write).unwrap(),
+        json!({"phase":"validation","outcome":"not_committed","transaction_consumed":true})
+    );
+    assert_eq!(pending, 0);
+    assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
+    assert_eq!(
+        database.try_read(|core| core.all_node_ids()).unwrap(),
+        Vec::<u64>::new()
+    );
+    let mut transaction = TxBuilder::new();
+    transaction.insert(&[0., 1.], json!({"state":"saved"}));
+    assert_eq!(database.commit_tx(&mut transaction).unwrap(), vec![1]);
+    database.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, 2).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), vec![1]);
+    let node = reopened.get(1).unwrap().unwrap();
+    assert_eq!(node.vector, vec![0., 1.]);
+    assert_eq!(node.payload, json!({"state":"saved"}));
+    assert!(node.edges.is_empty());
+    reopened.close().unwrap();
+}
+
+#[test]
+fn 请求上下文在借用前拒绝取消并保留原始内核结果() {
+    use triviumdb::query::tql_executor::QueryControl;
+    use triviumdb::sdk::RequestContext;
+    let root = TestDir::new("sdk_context");
+    let path = root.file("db.tdb");
+    let database = SharedDatabase::<f32>::open(&path, 2).unwrap();
+    let control = QueryControl::default();
+    let context = RequestContext::new("write-1", control.clone(), true).unwrap();
+    assert_eq!(context.request_id(), "write-1");
+    assert!(context.is_write());
+    control.cancel();
+    let error = database
+        .try_write_with_context(&context, |_| -> triviumdb::Result<()> {
+            panic!("取消请求必须在调用业务闭包之前拒绝");
+        })
+        .unwrap_err();
+    assert_eq!(error.code(), "TDB_QUERY_CANCELLED");
+    assert_eq!(
+        serde_json::to_value(error.info().write).unwrap(),
+        json!({"phase":"admission","outcome":"not_committed"})
+    );
+    let mut transaction = TxBuilder::new();
+    transaction.insert_with_id(7, &[1., 0.], json!({"state":"saved"}));
+    let error = database
+        .commit_tx_with_context(&context, &mut transaction)
+        .unwrap_err();
+    assert_eq!(error.code(), "TDB_QUERY_CANCELLED");
+    assert_eq!(transaction.pending_count(), 1);
+    assert_eq!(
+        serde_json::to_value(error.info().write).unwrap(),
+        json!({"phase":"admission","outcome":"not_committed","transaction_consumed":false})
+    );
+    let context = RequestContext::new("write-2", QueryControl::default(), true).unwrap();
+    assert_eq!(
+        database
+            .commit_tx_with_context(&context, &mut transaction)
+            .unwrap(),
+        vec![7]
+    );
+    assert_eq!(transaction.pending_count(), 0);
+    let error = database
+        .try_read(|_| database.try_write_with_context(&context, |_| Ok(())))
+        .unwrap_err();
+    assert_eq!(error.code(), "TDB_REENTRANT_ACCESS");
+    assert_eq!(
+        serde_json::to_value(error.info().write).unwrap(),
+        json!({"phase":"admission","outcome":"not_committed"})
+    );
+    let read = RequestContext::new("read-1", QueryControl::default(), false).unwrap();
+    assert_eq!(
+        database
+            .try_read_with_context(&read, |core| core.all_node_ids())
+            .unwrap(),
+        vec![7]
+    );
+    database.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, 2).unwrap();
+    let node = reopened.get(7).unwrap().unwrap();
+    assert_eq!(node.vector, vec![1., 0.]);
+    assert_eq!(node.payload, json!({"state":"saved"}));
+    assert!(node.edges.is_empty());
+    reopened.close().unwrap();
+}
+
 #[test]
 fn 并发借用允许读取且繁忙关闭保持实例开放() {
     let root = TestDir::new("sdk_readers");
