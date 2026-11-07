@@ -317,7 +317,7 @@ tests/
 | `Database`  | `unit/database.rs`  | open/close、CRUD、search、TQL、事务（全 7 种 TxOp）、Hook 管理 |
 | `Filter`    | `unit/filter.rs`    | 数字/字符串范围、RFC3339 时区、错误路径、bloom mask             |
 | `Vector`    | `unit/vector.rs`    | 余弦相似度、SIMD 尾部处理、标量回退、多 dtype                  |
-| `WAL`       | `unit/wal.rs`       | v3 显式头、无头拒绝、未来版本门禁、CRC、SyncMode、崩溃恢复       |
+| `WAL`       | `unit/wal.rs`       | v4 显式头、v2 显式迁移、v3 兼容读取、无头拒绝、未来版本门禁、CRC、SyncMode、崩溃恢复 |
 | `.tdb` 格式 | `storage/format_migration.rs` | v5 32/48-chunk 自动迁移、v6 自描述布局、未来/过旧版本门禁与损坏拒绝 |
 | 图扩散参数 | `unit/traversal.rs` | 出/入/双向、强边上限、绝对权重阈值、稳定排序、自环去重与组合过滤 |
 | Python 类型 | `python/typing_smoke.py` | Wheel 内 `py.typed/.pyi`、mypy strict 与 pyright 双门禁 |

@@ -835,7 +835,8 @@ impl Wal {
                 ));
             }
             let version = u16::from_le_bytes([prefix[4], prefix[5]]);
-            if !matches!(version, 2 | 3 | WAL_VERSION) {
+            // v2 继续由持有写锁的显式迁移路径处理，普通读取保留原拒绝契约。
+            if !matches!(version, 3 | WAL_VERSION) {
                 return Err(TriviumError::UnsupportedWalVersion {
                     found: version,
                     supported: WAL_VERSION,

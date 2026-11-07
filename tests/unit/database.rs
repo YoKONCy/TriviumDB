@@ -115,16 +115,34 @@ fn open_非空v2_wal自动迁移并恢复已提交事务() {
     }
     std::fs::write(format!("{}.wal", path), wal).unwrap();
 
-    let db = Database::<f32>::open(&path, 3).unwrap();
-    assert_eq!(db.node_count().unwrap(), 2);
-    assert_eq!(db.get_payload(2).unwrap().unwrap()["kind"], "recovered");
-    let edges = db.get_edges(1).unwrap();
-    assert_eq!(edges.len(), 1);
-    assert_eq!(edges[0].target_id, 2);
-    assert_eq!(edges[0].label, "legacy");
-    assert!(edges[0].metadata.is_null());
+    let assert_recovered = |db: &Database<f32>| {
+        assert_eq!(db.all_node_ids().unwrap(), vec![1, 2]);
+        for (id, vector, kind) in [
+            (1, vec![1.0, 0.0, 0.0], "base"),
+            (2, vec![0.0, 1.0, 0.0], "recovered"),
+        ] {
+            let node = db.get(id).unwrap().unwrap();
+            assert_eq!(node.vector, vector);
+            assert_eq!(node.payload, json!({"kind": kind}));
+        }
+        let edges = db.get_edges(1).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target_id, 2);
+        assert_eq!(edges[0].label, "legacy");
+        assert_eq!(edges[0].weight, 0.75);
+        assert!(edges[0].metadata.is_null());
+        assert!(db.get_edges(2).unwrap().is_empty());
+    };
+    let mut db = Database::<f32>::open(&path, 3).unwrap();
+    assert_recovered(&db);
     let wal = std::fs::read(format!("{}.wal", path)).unwrap();
-    assert_eq!(u16::from_le_bytes([wal[4], wal[5]]), 3);
+    assert_eq!(u16::from_le_bytes([wal[4], wal[5]]), 4);
+    db.flush().unwrap();
+    db.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, 3).unwrap();
+    assert_recovered(&reopened);
+    reopened.flush().unwrap();
+    reopened.close().unwrap();
 }
 
 #[test]
