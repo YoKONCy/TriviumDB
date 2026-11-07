@@ -23,7 +23,7 @@ jobs:
         run: |
           cargo test --locked -p triviumdb-server --features test-hooks --lib engine::tests -- --test-threads=1
           cargo test --locked -p triviumdb-server --test console_embedding -- --test-threads=1
-          cargo test --locked -p triviumdb-server --test http_contract -- --test-threads=1 --skip webui --skip if_none_match
+          cargo test --locked -p triviumdb-server --test http_contract -- --test-threads=1
       - name: 打包宿主接入资源
         run: python scripts/package_console.py --output .tmp/console/triviumdb-console.zip
       - name: 上传宿主接入资源

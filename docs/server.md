@@ -323,7 +323,7 @@ Server 执行非 UI 的引擎、HTTP 数据契约与嵌入生命周期验收：
 ```bash
 cargo test -p triviumdb-server --features test-hooks --lib engine::tests -- --test-threads=1
 cargo test -p triviumdb-server --test console_embedding -- --test-threads=1
-cargo test -p triviumdb-server --test http_contract -- --test-threads=1 --skip webui --skip if_none_match
+cargo test -p triviumdb-server --test http_contract -- --test-threads=1
 ```
 
 禁止编写、新增或执行 UI/UX、样式、布局、视觉基线、动画、开屏时间及界面耗时阈值测试，也不将其用作本地、CI、合并或发布门禁。上述命令排除现存的页面测试；前端改动只做代码审查、语法检查及非 UI 数据契约验证。常规嵌入式验收覆盖 Core、SDK 与 CLI 的非 UI 公共契约。

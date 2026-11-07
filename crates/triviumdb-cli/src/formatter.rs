@@ -201,11 +201,6 @@ mod tests {
     // ── format_rows empty ──────────────────────────────────────
 
     #[test]
-    fn empty_rows_table() {
-        assert_eq!(format_rows(&vec![], OutputFormat::Table), "(0 rows)");
-    }
-
-    #[test]
     fn empty_rows_json() {
         assert_eq!(format_rows(&vec![], OutputFormat::Json), "[]");
     }
@@ -227,14 +222,6 @@ mod tests {
         assert_eq!(parsed[0]["n"]["payload"]["name"].as_str().unwrap(), "Alice");
         assert!(parsed[0]["n"]["edges"].is_array());
         assert!(parsed[0]["n"]["vector_dim"].is_u64());
-    }
-
-    #[test]
-    fn table_format_contains_row_count() {
-        let rows = two_rows();
-        let output = format_rows(&rows, OutputFormat::Table);
-        assert!(output.contains("2 row(s)"));
-        assert!(output.contains("n"));
     }
 
     #[test]
@@ -268,24 +255,6 @@ mod tests {
     #[test]
     fn csv_escape_with_newline() {
         assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
-    }
-
-    // ── compact_json ───────────────────────────────────────────
-
-    #[test]
-    fn compact_json_short_no_truncation() {
-        let v = serde_json::json!({"a": 1});
-        let s = compact_json(&v);
-        assert!(!s.contains('…'));
-    }
-
-    #[test]
-    fn compact_json_long_truncates() {
-        let long = "x".repeat(200);
-        let v = serde_json::json!({"data": long});
-        let s = compact_json(&v);
-        assert!(s.ends_with('…'));
-        assert!(s.chars().count() <= 121);
     }
 
     // ── collect_columns ────────────────────────────────────────

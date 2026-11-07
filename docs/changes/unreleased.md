@@ -182,6 +182,7 @@
 - 嵌入 HTTP 增加可选 X-TDB-Request-ID，采用 ASCII JSON 字符串编码并在正文读取前保存身份，执行前核对正文 requestId。数据适配器自动发送身份头，支持 Unicode，早期拒绝附加原请求身份。
 - Server 的队列满改用 TDB_BUSY 和 write_queue 资源，HTTP、缓存和服务类别采用规范码，legacyCode 保留旧类别。路径、方法、请求体及适配异常使用结构化响应，外层请求身份覆盖提取拒绝。带 write 的错误继续提供 retryable=false，调用方依照阶段、结果及消费状态处理。
 - CLI 显式 JSON 格式覆盖命令解析、非 Core 命令错误、I/O 及配置警告。入口字段、重试决策、兼容处理和 SDK／Core 当前依赖同步记入公共文档。
+- 清除遗留的 TUI／REPL 交互、着色、布局、显示截断及 WebUI 页面用例。CLI 继续验证命令与 JSON／CSV 数据契约，Server HTTP 套件直接执行数据、事务及传输验证。
 
 ### 类型化请求作用域与宿主桥接
 
@@ -438,6 +439,7 @@ Subsequent changes build on stable `0.9.0`. Published changes are recorded in th
 - Embedded HTTP accepts X-TDB-Request-ID as an ASCII JSON string, preserving identity before reading the body and verifying the body's requestId before execution. The data adapter sends the header automatically, supports Unicode, and receives the original identity on early rejection.
 - Server queue saturation uses TDB_BUSY with resource write_queue. HTTP, cache, and service failures use canonical codes with legacyCode for previous categories. Path, method, body, and adapter failures return structured envelopes with outer request identity. Errors carrying write retain retryable=false, leaving decisions to the caller's phase, outcome, and consumption handling.
 - Explicit CLI JSON output covers argument parsing, non-Core command errors, I/O, and configuration warnings. Public documentation records entry fields, retry decisions, compatibility, and current SDK/Core dependencies.
+- Removes legacy TUI/REPL interaction, highlighting, layout, display-truncation, and WebUI page cases. CLI acceptance covers commands and JSON/CSV data contracts, while the Server HTTP suite directly verifies data, transactions, and transport.
 
 ### Typed request scopes and host bridges
 

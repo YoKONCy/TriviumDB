@@ -693,7 +693,7 @@ TriviumDB 通过多条独立 GitHub Actions 工作流执行测试、故障注入
 常规 CI 与嵌入式发布验收覆盖 Core、Rust/Python/Node SDK 和 CLI。Server 与 WebUI 采用 nightly 开发流程，Server 非 UI 契约独立执行。禁止新增或执行 UI/UX、样式、布局、视觉基线、动画及耗时阈值测试，不以冒烟、行为、诊断或手动入口绕过禁令，也不将其作为本地、CI、合并或发布门禁，见 [WebUI 验收边界](webui-testing.md)。
 
 ### 1. 核心 CI 管线 (`ci.yml`)
-面向 master/dev 的 Push 或 PR 会运行多平台 Rust 测试、CLI/TUI、Python/Node 生命周期、短时 fuzz、ASan、TSan、Miri、覆盖率、类型存根和 Clippy 等门禁；另有内存压力观测，以及手动 mutation/benchmark Job。平台矩阵和 Job 数会随工具链演进，具体以 workflow 为准。
+面向 master/dev 的 Push 或 PR 会运行多平台 Rust 测试、CLI 命令及数据契约、Python/Node 生命周期、短时 fuzz、ASan、TSan、Miri、覆盖率、类型存根和 Clippy 等门禁。另有内存压力观测，以及手动 mutation/benchmark Job。平台矩阵和 Job 数会随工具链演进，具体以 workflow 为准。
 
 - **Compile Check**：默认、Python、Node 和 aarch64 编译检查
 - **Rust Test**：Linux/Windows/macOS x86_64、macOS ARM64，并以 QEMU 补充 Linux ARM64
