@@ -75,6 +75,7 @@ async function runErrorContract(root) {
   const integers = new TriviumDB(path.join(root, 'error-u64-vectors.tdb'), { dim: 1, dtype: 'u64', autoBuildQuiver: false })
   try {
     integers.insertWithId(1, [1], {})
+    const beforeWal = fs.readFileSync(path.join(root, 'error-u64-vectors.tdb.wal'))
     const invalid = error => {
       assert.equal(error.code, 'TDB_INVALID_INPUT')
       assert.deepEqual(Object.keys(error.details), ['reason'])
@@ -94,9 +95,18 @@ async function runErrorContract(root) {
     // JSON 参数转换在进入事务构造前拒绝非有限值。
     for (const component of [NaN, Infinity]) {
       assert.throws(() => integers.commitTransaction([{ type: 'insertWithId', id: 2, vector: [component], payload: {} }]),
-        error => error instanceof Error && error.code === 'InvalidArg')
+        error => {
+          invalid(error)
+          assert.equal(error.schema_version, 1)
+          assert.deepEqual(error.target, { field: '/operations/0/vector/0' })
+          assert.deepEqual(error.write, { phase: 'validation', outcome: 'not_committed', transaction_consumed: false })
+          return true
+        })
       assert.equal(integers.getPayload(2), null)
     }
+    assert.deepEqual(integers.allNodeIds(), [1])
+    assert.deepEqual(integers.get(1), { id: 1, vector: [1], payload: {}, edges: [], numEdges: 0 })
+    assert.deepEqual(fs.readFileSync(path.join(root, 'error-u64-vectors.tdb.wal')), beforeWal)
   } finally {
     integers.close()
   }

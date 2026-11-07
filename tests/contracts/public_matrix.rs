@@ -112,10 +112,14 @@ fn 结构化错误契约覆盖维度_节点_只读_查询预算和API迁移() {
             .underlying(),
         TriviumError::ReadOnlyViolation { .. }
     ));
+    let budget_error = readonly
+        .tql_nodes("MATCH (n) RETURN n LIMIT 10 OFFSET 1")
+        .unwrap_err();
     assert!(matches!(
-        readonly.tql_nodes("MATCH (n) RETURN n LIMIT 10 OFFSET 1"),
-        Err(TriviumError::QueryRowBudgetExceeded { .. })
+        budget_error.underlying(),
+        TriviumError::QueryRowBudgetExceeded { .. }
     ));
+    assert_eq!(budget_error.code(), "TDB_QUERY_BUDGET");
     drop(readonly);
     cleanup(&path);
 }
