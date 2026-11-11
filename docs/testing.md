@@ -706,7 +706,7 @@ TriviumDB 通过多条独立 GitHub Actions 工作流执行测试、故障注入
 面向 master/dev 的 Push 或 PR 会运行多平台 Rust 测试、CLI 命令及数据契约、Python/Node 生命周期、短时 fuzz、ASan、TSan、Miri、覆盖率、类型存根和 Clippy 等门禁。另有内存压力观测，以及手动 mutation/benchmark Job。平台矩阵和 Job 数会随工具链演进，具体以 workflow 为准。
 
 - **Compile Check**：默认、Python、Node 和 aarch64 编译检查
-- **Rust Test**：Linux/Windows/macOS x86_64、macOS ARM64，并以 QEMU 补充 Linux ARM64
+- **Rust Test**：Linux/Windows/macOS x86_64、macOS ARM64，并在 Ubuntu 24.04 上以 QEMU 补充 Linux ARM64
 - **Test Hooks**：多平台补跑确定性交错、物理策略差分、定点 I/O 故障和发布阶段强杀；发布质量门禁同样执行这些套件
 - **Binding Lifecycle**：Python wheel + mypy/pyright；Node 原生绑定、生命周期测试与 npm tarball 的 TypeScript 消费运行验收
 - **Short Fuzz / ASan / Coverage**：解析器、WAL、QuIVer fuzz，unsafe 路径检测与行覆盖率 80% 门禁。Unix 硬件崩溃样本的子进程按用例将所注入的 SEGV/BUS 或 FPE 信号交给操作系统直接处理，保留 ASan 内存插桩和其余选项；父测试进程沿用完整 ASan 配置，并验证异常终止与恢复内容

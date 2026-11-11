@@ -295,7 +295,8 @@ jobs:
   # ═══════════════════════════════════════════
   test-arm64-linux:
     name: Test (Linux ARM64 via QEMU)
-    runs-on: ubuntu-latest
+    # 固定交叉工具链的 LTS 环境，保持 APT 来源与目标动态库基线明确。
+    runs-on: ubuntu-24.04
     needs: check
 
     steps:
