@@ -185,5 +185,10 @@ required-features = ["ablation"]
 lto = true
 codegen-units = 1
 
+# 优化故障契约采用独立配置，便于隔离 Windows 编译器的跨 crate LTO 路径。
+[profile.release-contracts]
+inherits = "release"
+lto = "off"
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }

@@ -30,6 +30,8 @@
 | `bench_tsng_pipeline` | Q1–Q14 管线覆盖及 Q5 分层诊断 | `TDB_PIPELINE_NODES`、`TDB_PIPELINE_DIM` |
 | `bench_pipeline_gate` | 四维度、四查询族最终 matched-result Gate | `TDB_PIPELINE_GATE_NODES`；`pipeline-gate.json` |
 
+`bench_pipeline_gate` 对每个计划逐行验证预期的 `property_origin`，随后按原始顺序精确比较其余完整 `NodeRow` 字段。`property_filter_rank` 的全量评分加交集计划清除属性入口，直接属性召回加精排计划保留 `active=true`；其他三个查询族的两侧均按集合合并规则清除该入口。报告中的哈希用于结果标识，正确性由完整行比较验证。属性执行来源语义见 [TQL 参考](../docs/tql-reference.md)。
+
 ## C. 图与查询并行
 
 | Cargo 名称 | 目的 | 默认矩阵 |

@@ -132,7 +132,17 @@ TriviumDB 采用 **五层防御式测试体系**，从函数级正确性到系�
 
 Node 类型验收有两个入口：`npm run test:types` 严格检查公共声明与消费样例；`npm run test:package` 将实际 npm tarball 安装到独立项目，编译正向调用与错误输入样例，再加载原生模块检查事务、Prepared TQL、向量分数、关键词关联和重新打开。制品验收同时注入一个未定义的公共类型，要求编译失败。普通 CI 使用制品入口，发布质量门禁先检查类型，npm 发布前再验收装配完成的制品。
 
-定时浸泡使用一百条存活记录的有界负载，要求每次查询成功并返回存活节点的完整 Payload。RSS 用例预热后连续运行五分钟，最终 RSS 上限为基线的三倍；文件用例执行五百轮维护并统计完整文件组，上限为基线的五倍。RSS 取自独立操作系统观测：Windows 采样进程读取 WorkingSet64，Linux 读取 VmRSS，其他平台使用 ps；观测必须有效。`unsafe_audit` 的向量文件用例先关闭数据库，再截断或删除向量文件，并保留提交标记，验证重新打开返回结构化损坏错误。
+定时浸泡使用一百条存活记录的有界负载，要求每次查询成功并返回存活节点的完整 Payload。五分钟用例配置 8 MiB 内核预算及其中的 256 KiB Payload 解析缓存，在维护完成点核对内存估算、缓存占用及工作区／任务归还，关闭后检查数据库配额与附着计数归零。最终逐项验证节点、向量、Payload 与边，再完成可写重开、再次持久化及只读重开；工作负载异常退出时先释放对象并清理文件，再传播原失败。文件用例执行五百轮维护并统计完整文件组，上限为基线的五倍。
+
+RSS 记录初始、峰值和最终字节，作为独立的操作系统资源观测。Windows 采样进程读取 WorkingSet64，Linux 读取 VmRSS，其他平台使用 ps；观测必须有效。资源调查结合工作集、映射、分配器保留、缓存及内核对象存量解释增长。`unsafe_audit` 的向量文件用例先关闭数据库，再截断或删除向量文件，并保留提交标记，验证重新打开返回结构化损坏错误。
+
+Windows 优化故障契约使用 `release-contracts` profile，继承 release 的优化设置并显式关闭 LTO。CI 在该配置下实际执行 allocator、定点 I/O 和发布强杀套件。复现入口如下。
+
+```bash
+cargo test --locked --profile release-contracts --features test-hooks --test fault_allocator --test fault_io --test fault_power -- --test-threads=1
+```
+
+定位 release 编译器崩溃时，对同一源码、工具链和锁文件分别记录原始 `--release` 与 `--profile release-contracts` 的完整编译及运行结果。Rust 工具链升级另建对照，保留每项成功或失败的实际范围。
 
 ---
 

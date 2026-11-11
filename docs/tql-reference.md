@@ -784,6 +784,8 @@ Path 当前是一等 NodeId 序列；`path_length` 返回边数。`WEIGHTED_PATH
 
 集合阶段公开 `UNION/INTERSECT/EXCEPT`，普通 NodeSet 仍按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。所有路径与集合算法均受节点数、字节和遍历预算约束。
 
+Rust `NodeRow.provenance.property_origin` 记录物理计划当前保留的单个等值属性入口，用于成本估算与执行审计。合并行的该字段一致时保留，来源有差异时清除。直接属性召回后精排可以保留入口；先全量评分再与属性召回求交，会按合并规则得到相应来源。比较这类等价物理计划时，分别验证各自预期的 `property_origin`，再按原始顺序精确比较其余完整字段，包括其他 provenance、分数值与分数类别。
+
 ---
 
 ## 历史 API 迁移

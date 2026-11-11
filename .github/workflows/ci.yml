@@ -154,7 +154,13 @@ jobs:
           cargo test --target ${{ matrix.target }} --features test-hooks --test core console_host -- --test-threads=1
 
       - name: 运行定点 I/O 故障与发布阶段强杀测试
-        run: cargo test --target ${{ matrix.target }} --features test-hooks --test fault_io --test fault_power -- --test-threads=1
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cargo test --locked --profile release-contracts --target ${{ matrix.target }} --features test-hooks --test fault_allocator --test fault_io --test fault_power -- --test-threads=1
+          else
+            cargo test --target ${{ matrix.target }} --features test-hooks --test fault_io --test fault_power -- --test-threads=1
+          fi
 
       - name: 运行文档测试
         run: cargo test --target ${{ matrix.target }} --doc

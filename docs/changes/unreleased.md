@@ -2,6 +2,12 @@
 
 后续变更以 `0.9.0` 正式版为基线。已发布内容见[完整中英文变更说明](0.9.0.md)。
 
+### 管线基准来源与浸泡资源验收
+
+- 修复 `bench_pipeline_gate` 在属性过滤前后精排对照中，因两种算子序列的 `property_origin` 差异而停止的问题。基准逐项验证各计划的属性入口，再按原始顺序精确比较其余完整行字段；回归覆盖完整解析分数、来源、成员及可选零分差异。公开文档补齐该字段的物理计划语义。
+- 五分钟有界浸泡采用明确的内核与 Payload 缓存配额，验证维护后的资源归还、完整记录和两次持久化后的重开事实。RSS 保留初始、峰值与最终观测，用于分析工作集和内存组成；失败退出先释放对象并清理样本。
+- 新增继承 release 优化设置并关闭 LTO 的 `release-contracts` profile，提供 Windows 优化故障契约入口。CI 在该配置下实际执行 allocator、定点 I/O 和发布阶段强杀套件；原始 release 与工具链诊断按各自配置记录。
+
 ### 内核 SDK 分层、共享访问与请求拒绝
 
 - 新增 `sdk` 模块与 `SharedDatabase`、`WeakDatabase`。多个调用者共用一个存储内核；事务可在锁外通过 `TxBuilder` 准备，SDK 准入成功后由内核原子提交。锁忙、重入或关闭状态拒绝时保留尚未提交的 builder。
@@ -258,6 +264,12 @@
 ## Unreleased
 
 Subsequent changes build on stable `0.9.0`. Published changes are recorded in the [complete Chinese and English release notes](0.9.0.md).
+
+### Pipeline benchmark provenance and soak resource validation
+
+- Fixed `bench_pipeline_gate` stopping on the `property_origin` difference between scoring before and after property filtering. The benchmark validates each plan's expected property entry, then compares every remaining row field in its original order. Regressions cover complete analytical scores, provenance, membership, and an absent score versus an explicit zero score. Public documentation defines the field's physical-plan semantics.
+- The five-minute bounded soak uses explicit kernel and Payload-cache budgets, verifies resource return after maintenance, checks complete records, and reopens after two persistence cycles. Initial, peak, and final RSS observations support working-set and memory-composition analysis. Failure paths release objects and clean up fixtures before propagating the failure.
+- Added a `release-contracts` profile that inherits release optimization settings and disables LTO for Windows optimized fault contracts. CI executes allocator, targeted I/O, and publication-kill suites with this profile. Original release and toolchain diagnostics retain their respective configurations and results.
 
 ### Kernel SDK layering, shared access, and request rejection
 

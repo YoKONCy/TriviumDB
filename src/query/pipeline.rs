@@ -93,7 +93,8 @@ pub struct PropertyOrigin {
 pub struct Provenance {
     pub source_ids: Vec<NodeId>,
     pub min_depth: Option<usize>,
-    /// 仅在集合由单个等值属性谓词产生时保留，供后续成本估算与审计使用。
+    /// 记录当前物理计划保留的单个等值属性入口，供成本估算与执行审计使用。
+    /// 合并来源不同时清除；采用不同算子序列的等价计划可返回不同的该字段。
     pub property_origin: Option<PropertyOrigin>,
 }
 

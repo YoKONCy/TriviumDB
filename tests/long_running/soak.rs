@@ -1,12 +1,16 @@
 #![allow(non_snake_case)]
 //! GJB-5000B 长时间稳定性浸泡测试
 //!
-//! 验证 TriviumDB 在有界数据量和持续负载下的 RSS 增长、文件大小与查询内容。
+//! 验证有界数据量下的内核配额、资源归还、文件大小与完整持久化内容，并记录 RSS。
 //! 长时用例标记为 #[ignore]，通过 `cargo test --test long_running soak -- --ignored` 运行。
 
-use triviumdb::database::Database;
+use triviumdb::database::{Config, Database};
+use triviumdb::resources::{ResourceLimits, ResourceRuntime};
 
 const DIM: usize = 4;
+// 一百条小记录采用明确的宿主配额，解析缓存属于这八 MiB 内核预算。
+const DATABASE_BUDGET: usize = 8 * 1024 * 1024;
+const PAYLOAD_CACHE_BUDGET: usize = 256 * 1024;
 
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test").join(format!(
@@ -99,68 +103,105 @@ fn RSS采样必须取得有效进程观测() {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  1. 五分钟有界数据量 RSS 增长验收
+//  1. 五分钟有界数据量配额、资源归还与重开验收
 // ════════════════════════════════════════════════════════════════
 
 #[test]
 #[ignore]
-fn SOAK_01_连续运行5分钟_RSS增长有界() {
+fn SOAK_01_连续运行5分钟_配额归还与完整重开() {
     let path = tmp_db("mem_leak");
+    let runtime = ResourceRuntime::new(ResourceLimits {
+        memory_limit: 2 * DATABASE_BUDGET,
+        max_threads: 2,
+        ..Default::default()
+    })
+    .unwrap();
+    let config = Config {
+        dim: DIM,
+        memory_limit: DATABASE_BUDGET,
+        payload_cache_bytes: PAYLOAD_CACHE_BUDGET,
+        payload_cache_entry_bytes: 4096,
+        ..Default::default()
+    };
+    // 工作负载及其全部持有者在闭包内退出，清理后再传播原始断言失败。
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut db = Database::<f32>::open_with_runtime(&path, config, runtime.clone()).unwrap();
+        let mut live = std::collections::VecDeque::new();
+        write_round(&mut db, &mut live, 0);
+        db.compact().unwrap();
+        db.flush().unwrap();
+        let initial_rss = get_rss_bytes();
+        let start = std::time::Instant::now();
+        let duration = std::time::Duration::from_secs(300);
+        let mut round = 1u64;
+        let mut peak_rss = initial_rss;
 
-    let mut db = Database::<f32>::open(&path, DIM).unwrap();
-    // 先完成一轮写入、查询和压实，使 RSS 基线包含首次分配和维护开销。
-    let mut live = std::collections::VecDeque::new();
-    write_round(&mut db, &mut live, 0);
-    db.compact().unwrap();
-    db.flush().unwrap();
-    let initial_rss = get_rss_bytes();
-    let start = std::time::Instant::now();
-    let duration = std::time::Duration::from_secs(300); // 五分钟持续负载验收窗口。
-    let mut round = 1u64;
-    let mut peak_rss = initial_rss;
-
-    while start.elapsed() < duration {
-        write_round(&mut db, &mut live, round);
-
-        // 每 10 轮 compact + flush
-        if round.is_multiple_of(10) {
-            db.compact().unwrap();
-            db.flush().unwrap();
+        while start.elapsed() < duration {
+            write_round(&mut db, &mut live, round);
+            if round.is_multiple_of(10) {
+                db.compact().unwrap();
+                db.flush().unwrap();
+                assert_quiescent_budget(&db);
+            }
+            peak_rss = peak_rss.max(get_rss_bytes());
+            round += 1;
         }
+        db.compact().unwrap();
+        db.flush().unwrap();
+        assert_quiescent_budget(&db);
+        assert_live_facts(&db, &live);
+        let final_rss = get_rss_bytes();
+        eprintln!(
+            "浸泡资源观测 (Soak resource observation): rounds={round}, initial_rss_bytes={initial_rss}, peak_rss_bytes={peak_rss}, final_rss_bytes={final_rss}, estimated_memory_bytes={}",
+            db.estimated_memory()
+        );
+        db.close().unwrap();
+        assert_eq!(runtime.stats().reserved_database_bytes, 0);
+        assert_eq!(runtime.stats().attached_databases, 0);
 
-        // 采样 RSS
-        let current_rss = get_rss_bytes();
-        if current_rss > peak_rss {
-            peak_rss = current_rss;
-        }
-
-        round += 1;
-    }
-
-    db.compact().unwrap();
-    db.flush().unwrap();
-    let final_rss = get_rss_bytes();
-
-    eprintln!("  浸泡测试完成: {} 轮", round);
-    eprintln!(
-        "  内存: initial={}MB, peak={}MB, final={}MB",
-        initial_rss / 1024 / 1024,
-        peak_rss / 1024 / 1024,
-        final_rss / 1024 / 1024
-    );
-
-    // 三倍是当前有界负载的进程 RSS 增长验收界限。
-    assert!(
-        final_rss < initial_rss.checked_mul(3).unwrap(),
-        "RSS 增长超限：初始={}MiB，最终={}MiB",
-        initial_rss / 1024 / 1024,
-        final_rss / 1024 / 1024,
-    );
-    let mut actual = db.all_node_ids().unwrap();
-    actual.sort_unstable();
-    assert_eq!(actual, live.into_iter().collect::<Vec<_>>());
-    db.close().unwrap();
+        let mut reopened =
+            Database::<f32>::open_with_runtime(&path, config, runtime.clone()).unwrap();
+        assert_live_facts(&reopened, &live);
+        reopened.flush().unwrap();
+        reopened.close().unwrap();
+        let mut readonly = Database::<f32>::open_read_only(&path, DIM).unwrap();
+        assert_live_facts(&readonly, &live);
+        readonly.close().unwrap();
+        let resources = runtime.stats();
+        assert_eq!(resources.reserved_database_bytes, 0);
+        assert_eq!(resources.reserved_workspace_bytes, 0);
+        assert_eq!(resources.reserved_maintenance_bytes, 0);
+        assert_eq!(resources.active_tasks, 0);
+        assert_eq!(resources.attached_databases, 0);
+    }));
     cleanup(&path);
+    if let Err(failure) = outcome {
+        std::panic::resume_unwind(failure);
+    }
+}
+
+fn assert_quiescent_budget(db: &Database<f32>) {
+    assert!(db.estimated_memory() <= DATABASE_BUDGET);
+    assert!(db.payload_memory_stats().parsed_cache_bytes <= PAYLOAD_CACHE_BUDGET);
+    let resources = db.resource_stats();
+    assert_eq!(resources.reserved_database_bytes, DATABASE_BUDGET);
+    assert_eq!(resources.reserved_workspace_bytes, 0);
+    assert_eq!(resources.reserved_maintenance_bytes, 0);
+    assert_eq!(resources.active_tasks, 0);
+    assert_eq!(resources.active_maintenance_tasks, 0);
+}
+
+fn assert_live_facts(db: &Database<f32>, live: &std::collections::VecDeque<u64>) {
+    assert_eq!(
+        db.all_node_ids().unwrap(),
+        live.iter().copied().collect::<Vec<_>>()
+    );
+    for &id in live {
+        let node = db.get(id).unwrap().unwrap();
+        assert_eq!(node.vector, vec![id as f32, 1.0, 0.0, 0.0]);
+        assert_eq!(node.payload, serde_json::json!({"id": id}));
+        assert!(db.get_edges(id).unwrap().is_empty());
+    }
 }
 
 fn write_round(db: &mut Database<f32>, live: &mut std::collections::VecDeque<u64>, round: u64) {

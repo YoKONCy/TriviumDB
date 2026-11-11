@@ -8,12 +8,132 @@ use triviumdb::query::parallel::QueryParallelismBudget;
 use triviumdb::query::pipeline::{
     DegreeCentralityOperator, ExactRerank, ExactVectorSearch, Expand, ExpandExactRerank,
     GraphMetric, GraphSubsetMode, Limit, NodeIdsSource, NodeRow, NodeSet, PayloadFilter,
-    PipelineBudget, PipelineContext, PipelineOperator, PropertyLookup, ScoreKind, ScoreValue,
-    SetOperation, combine_sets, execute_pipeline,
+    PipelineBudget, PipelineContext, PipelineOperator, PropertyLookup, PropertyOrigin, ScoreKind,
+    ScoreValue, SetOperation, combine_sets, execute_pipeline,
 };
 use triviumdb::storage::memtable::MemTable;
 
 const DIM: usize = 4;
+
+#[path = "../../benches/support/pipeline_results.rs"]
+mod pipeline_results;
+
+#[test]
+fn 属性过滤前后精排保留完整逻辑结果及各自执行来源() {
+    let mut mt = MemTable::<f32>::new(DIM);
+    for (id, active) in [(20, true), (30, false), (10, true)] {
+        mt.insert_with_id(id, &[1.0, 0.0, 0.0, 0.0], json!({"active": active}))
+            .unwrap();
+    }
+    mt.register_property_index("active");
+    let active = PropertyLookup {
+        field: "active".into(),
+        value: json!(true),
+    }
+    .apply(
+        NodeSet::empty(),
+        &mut PipelineContext::new(&mt, PipelineBudget::default()),
+    )
+    .unwrap();
+    let rank = |input| {
+        ExactRerank {
+            query: vec![1.0, 0.0, 0.0, 0.0],
+            top_k: None,
+        }
+        .apply(
+            input,
+            &mut PipelineContext::new(&mt, PipelineBudget::default()),
+        )
+        .unwrap()
+    };
+    let baseline = rank(combine_sets(
+        rank(NodeSet::from_ids([10, 20, 30])),
+        active.clone(),
+        SetOperation::Intersect,
+    ));
+    let optimized = rank(active);
+    let origin = PropertyOrigin {
+        field: "active".into(),
+        value: json!(true),
+    };
+    let mut expected = [10, 20].map(|id| {
+        let mut row = NodeRow::new(id);
+        row.similarity = Some(ScoreValue {
+            value: 1.0,
+            kind: ScoreKind::Exact,
+        });
+        row.property_score = Some(ScoreValue {
+            value: 1.0,
+            kind: ScoreKind::Exact,
+        });
+        row
+    });
+    assert_eq!(baseline.rows(), expected);
+    for row in &mut expected {
+        row.provenance.property_origin = Some(origin.clone());
+    }
+    assert_eq!(optimized.rows(), expected);
+    pipeline_results::assert_matched_results(
+        "属性精排",
+        &baseline,
+        &optimized,
+        [None, Some(origin)],
+    );
+}
+
+#[test]
+fn 基准完整行比较识别可选零分类型来源和成员差异() {
+    let mut exact_zero = NodeRow::new(10);
+    exact_zero.property_score = Some(ScoreValue {
+        value: 0.0,
+        kind: ScoreKind::Exact,
+    });
+    let baseline = NodeSet::from_rows(vec![exact_zero.clone(), NodeRow::new(20)]);
+    pipeline_results::assert_matched_results("完整一致", &baseline, &baseline, [None, None]);
+    let mut approximate_zero = exact_zero.clone();
+    approximate_zero.property_score = Some(ScoreValue {
+        value: 0.0,
+        kind: ScoreKind::Approximate,
+    });
+    let mut graph_origin = exact_zero.clone();
+    graph_origin.provenance.source_ids = vec![7];
+    for changed in [
+        NodeSet::from_ids([10, 20]),
+        NodeSet::from_rows(vec![approximate_zero, NodeRow::new(20)]),
+        NodeSet::from_rows(vec![graph_origin, NodeRow::new(20)]),
+        NodeSet::from_rows(vec![exact_zero]),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| {
+                pipeline_results::assert_matched_results(
+                    "拒绝差异",
+                    &baseline,
+                    &changed,
+                    [None, None],
+                );
+            })
+            .is_err()
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "属性执行来源不符")]
+fn 基准逐项验证预期执行来源() {
+    let rows = NodeSet::from_ids([10]);
+    pipeline_results::assert_matched_results(
+        "来源缺失",
+        &rows,
+        &rows,
+        [
+            None,
+            Some(PropertyOrigin {
+                field: "active".into(),
+                value: json!(true),
+            }),
+        ],
+    );
+}
 
 #[test]
 fn compact_遍历与完整参考实现逐项一致() {
