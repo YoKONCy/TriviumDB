@@ -291,12 +291,11 @@ jobs:
         run: npm run test:package
 
   # ═══════════════════════════════════════════
-  #  Job 2b: ARM64 Linux 原生测试 (QEMU)
+  #  Job 2b: ARM64 Linux 原生测试
   # ═══════════════════════════════════════════
   test-arm64-linux:
-    name: Test (Linux ARM64 via QEMU)
-    # 固定交叉工具链的 LTS 环境，保持 APT 来源与目标动态库基线明确。
-    runs-on: ubuntu-24.04
+    name: Test (Linux ARM64 native)
+    runs-on: ubuntu-24.04-arm
     needs: check
 
     steps:
@@ -308,30 +307,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: arm64-linux
-
-      - name: 安装交叉编译工具链
-        run: |
-          sudo apt-get update \
-            -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" \
-            -o Dir::Etc::sourceparts="-"
-          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
-
-      - name: 设置 Cargo 链接器
-        run: |
-          mkdir -p .cargo
-          cat >> .cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          runner = "qemu-aarch64 -L /usr/aarch64-linux-gnu"
-          EOF
+          key: arm64-linux-native
 
       - name: 构建测试 (aarch64)
         run: cargo test --target aarch64-unknown-linux-gnu --lib --tests --no-run
 
-      - name: 运行测试 (aarch64 via QEMU, 跳过硬件测试)
-        env:
-          TRIVIUM_TEST_QEMU_AARCH64: "1"
+      - name: 运行测试 (aarch64 原生, 跳过硬件测试)
         run: |
           cargo test --target aarch64-unknown-linux-gnu --lib --tests -- \
             --test-threads=1 \
