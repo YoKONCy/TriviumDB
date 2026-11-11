@@ -1,28 +1,12 @@
 # TriviumDB 支持特性详解
 
-> TriviumDB `0.9.0` 的架构、核心能力与技术实现。版本记录见[变更说明](changes/0.9.0.md)。
-
-## 当前能力快照
-
-- **持久化索引**：QuIVer ANN、Hash、Ordered ART、Composite ART、Roaring Bitmap、AC+BM25 TextIndex、业务图块索引。
-- **自由 DIY 混合查询**：TQL 提供可编排执行管线。开发者可将向量召回、BM25/AC 文本召回、属性过滤、图扩展、图算法、FISTA 残差召回、DPP 多样化、NMF 主题分配、路径、集合代数、迭代、聚合和重排按业务语义自由串联，并由 Cascades 在预算内选择物理计划。
-- **双形态认知检索**：`search_advanced()` 保留组件可开关、顺序固定的官方模板；TQL 复用相同 BM25、AC、FISTA、DPP、NMF 与图扩散底层实现，允许自由编排无状态组件。疲劳不应期仍仅属于有状态 API。
-- **统一查询底座**：TQL Parser/AST、WITH 管线、Cascades 优化、Prepared TQL、Path 与一等值结果共同支撑上述自由组合；数字字面量支持科学计数法，MATCH 属性/ID 投影按实际值去重，`SET VECTOR` 通过原子 mutation 更新向量。
-- **统一返回与匹配写入**：MATCH、FIND、WITH 和单跳具名边共享分组、聚合、去重、别名排序与分页；COUNT 按表达式值计数。多字段 SET 按节点合并，CREATE 按完整匹配集建立独立变量作用域，SET VECTOR 保留完整 u64 整数并按 dtype 准入。
-- **系统保证**：确定性执行、查询/遍历/内存/并行预算、ReadOnly/Immutable 零写、generation 原子发布。
-- **事实绑定与类型检查**：`.tdb` v10 保存 dtype、元素宽度和头部 CRC；QuIVer 元数据 v2 绑定主文件、向量内容及活跃 ID/slot，图与属性 sidecar 在采用前检查当前事实。
-- **查询物化准入**：TQL、精确与 GraphFirst 检索、可达性及子图在复制 Payload、向量、边和 Metadata 前申请工作区；DML 匹配使用实例内存预算，返回阶段按实际求值列计量。
-- **跨语言能力**：Rust、Python、Node 同步提供四类属性索引管理、Prepared TQL、一等查询值和存储格式观测。
-- **多实例运行管理**：共享 `ResourceRuntime` 统一登记数据库配额和工作区，管理工作线程及前台/维护任务名额；共享与实例诊断提供预算余额、维护延期和故障详情。
-- **生命周期与状态迁移**：关闭请求、排空、限时等待、目录快照、校验及恢复，Rust/Python/Node 接口同步提供。
-- **资源释放与恢复**：关闭完成时释放数据库文件、映射和 Hook；WAL 按帧流式回放，加载后回收干净向量页，支持持有关闭对象时复用数据库路径。
-- **文本重建与文件组发布**：三端提供完整正文、关键词集合重建接口；主数据与文本、属性、图索引共同参与检查点发布和中断恢复。
-- **严格升级策略**：历史静默 API 已移除；误用返回迁移错误。主文件保留有限读取窗口，可重建 sidecar 独立版本化。
+> 本文介绍以 TriviumDB `0.9.0` 为基线的当前开发版本。发布记录见[变更说明](changes/0.9.0.md)，开发进展见[未发布说明](changes/unreleased.md)。
 
 ---
 
 ## 目录
 
+- [当前能力快照](#当前能力快照)
 - [架构总览](#架构总览)
 - [三位一体数据模型](#三位一体数据模型)
 - [存储引擎与双模式切换](#存储引擎与双模式切换)
@@ -33,9 +17,30 @@
 - [持久化属性索引体系](#持久化属性索引体系)
 - [崩溃恢复机制](#崩溃恢复机制)
 - [多实例资源与生命周期](#多实例资源与生命周期)
-- [并发安全与零开销事务](#并发安全与零开销事务)
-- [Python 与 Node.js 绑定](#python-绑定架构)
+- [并发安全与事务](#并发安全与事务)
+- [Python 绑定架构](#python-绑定架构)
+- [🔌 Hook 扩展系统架构 (v0.6.0)](#-hook-扩展系统架构-v060)
+- [模块化架构](#模块化架构)
 - [跨架构 SIMD 加速](#跨架构-simd-加速)
+
+---
+
+## 当前能力快照
+
+- **持久化索引**：QuIVer ANN、Hash、Ordered ART、Composite ART、Roaring Bitmap、AC+BM25 TextIndex、业务图块索引。
+- **自由 DIY 混合查询**：TQL 提供可编排执行管线。开发者可将向量召回、BM25/AC 文本召回、属性过滤、图扩展、图算法、FISTA 残差召回、DPP 多样化、NMF 主题分配、路径、集合代数、迭代、聚合和重排按业务语义自由串联，并由 Cascades 在预算内选择物理计划。
+- **双形态认知检索**：`search_advanced()` 保留组件可开关、顺序固定的官方模板；TQL 复用相同 BM25、AC、FISTA、DPP、NMF 与图扩散底层实现，允许自由编排无状态组件。疲劳不应期仍仅属于有状态 API。
+- **统一查询底座**：TQL Parser/AST、WITH 管线、Cascades 优化、Prepared TQL、Path 与一等值结果共同支撑上述自由组合；数字字面量支持科学计数法，MATCH 属性/ID 投影按实际值去重，`SET VECTOR` 通过原子 mutation 更新向量。
+- **统一返回与匹配写入**：MATCH、FIND、WITH 和单跳具名边共享分组、聚合、去重、别名排序与分页；COUNT 按表达式值计数。多字段 SET 按节点合并，CREATE 按完整匹配集建立独立变量作用域，SET VECTOR 保留完整 u64 整数并按 dtype 准入。
+- **系统保证**：确定性执行、查询/遍历/内存/并行预算、ReadOnly/Immutable 零写、generation 原子发布。
+- **事实绑定与类型检查**　`.tdb` v11 保存 dtype、元素宽度、头部 CRC 和有界编辑回执，QuIVer 元数据 v2 绑定主文件、向量内容及活跃 ID/slot，图与属性 sidecar 在采用前检查当前事实。
+- **查询物化准入**：TQL、精确与 GraphFirst 检索、可达性及子图在复制 Payload、向量、边和 Metadata 前申请工作区；DML 匹配使用实例内存预算，返回阶段按实际求值列计量。
+- **跨语言能力**：Rust、Python、Node 同步提供四类属性索引管理、Prepared TQL、一等查询值和存储格式观测。
+- **多实例运行管理**：共享 `ResourceRuntime` 统一登记数据库配额和工作区，管理工作线程及前台/维护任务名额；共享与实例诊断提供预算余额、维护延期和故障详情。
+- **生命周期与状态迁移**：关闭请求、排空、限时等待、目录快照、校验及恢复，Rust/Python/Node 接口同步提供。
+- **资源释放与恢复**：关闭完成时释放数据库文件、映射和 Hook；WAL 按帧流式回放，加载后回收干净向量页，支持持有关闭对象时复用数据库路径。
+- **文本重建与文件组发布**：三端提供完整正文、关键词集合重建接口；主数据与文本、属性、图索引共同参与检查点发布和中断恢复。
+- **严格升级策略**：历史静默 API 已移除；误用返回迁移错误。主文件保留有限读取窗口，可重建 sidecar 独立版本化。
 
 ---
 
@@ -114,7 +119,7 @@ flowchart TD
 每个节点在内部同时持有三种数据，共享全局唯一的 `u64` 主键：
 
 | 数据层 | 存储位置 | 内容 | 用途 |
-|--------|----------|------|------|
+| -------- | ---------- | ------ | ------ |
 | **向量层** (Vector) | 连续 `Vec<T>` 数组 (SoA) | `f32 × dim` 浮点数组 | 语义相似度检索 (稠密召回) |
 | **稀疏层** (Sparse Text)| 内存倒排 / AC自动机 | BM25 词频统计 / 匹配树表 | 精确词汇与长文本全文检索 |
 | **元数据层** (Payload) | `HashMap<u64, JSON>` | 任意 JSON Key-Value | 条件过滤、业务数据 |
@@ -123,10 +128,12 @@ flowchart TD
 ### SoA 数据布局
 
 **AoS (Array of Structures)**：每个节点的 `{vector, payload, edges}` 紧挨存放。
+
 - ❌ 向量检索时 CPU 缓存被无用的 payload 数据污染
 - ❌ 无法对向量数组做 SIMD 批量计算
 
 **SoA (Structure of Arrays)**：所有向量连续存入一个大数组，payload 和 edges 各自独立存储。
+
 - ✅ 向量检索时 CPU L1/L2 缓存命中率极高
 - ✅ rayon 并行 + SIMD 友好
 - ✅ mmap 映射时可直接 OS 层分页 zero-copy 加载向量块
@@ -143,9 +150,9 @@ TriviumDB 提供两种互斥的存储模式（`StorageMode`），且**系统支�
 
 ### 2. Mmap 模式（大规模零拷贝优先，默认）
 
-启动时，持续增长的大体积向量与已发布 raw Payload 分别位于 `.vec` 和 generation 化 `.pld.<generation>`；`.tdb` v10 保存节点 slot、关系边和必要元数据，不再重复内嵌完整 raw Payload。
+启动时，持续增长的大体积向量与已发布 raw Payload 分别位于 `.vec` 和 generation 化 `.pld.<generation>`。`.tdb` v11 保存节点 slot、关系边、约束与有界编辑回执。
 
-- **MAP_PRIVATE (COW)**：通过 `memmap2` 库将数 GB 的向量文件映射到操作系统的虚拟内存中。进程不会真的霸占物理内存，而是由 OS 根据查询压力按需（Page Fault）换入换出。
+- **MAP_PRIVATE (COW)**：通过 `memmap2` 库将数 GB 的向量文件映射到操作系统的虚拟内存中。OS 根据访问按需调入页面；实际驻留内存取决于工作集和页面缓存状态。
 - **分层向量池（VecPool）**：内存中维护 `基础层（mmap）+ 增量层（Vec）` 两段结构。新插入的向量只进增量层；delete/update 操作对基础层做 COW 写入，直到显式 `flush()` 时统一发布。
 - **分层 PayloadStore**：NodeId 目录常驻内存；已发布 raw JSON 引用只读 `.pld` mmap，新写入和更新保存在堆 delta，删除以 tombstone 语义覆盖基础层。解析结果由 `Arc<Value>` 承载并进入有总字节和单条字节上限的 LRU Cache；cache=0 或超大条目绕过缓存，不影响查询结果。
 - **Late Materialization**：BQ/QuIVer/Exact 候选生成、向量精排和 Top-K 截断不访问 Payload。只有最终返回、Payload 谓词、字段排序或聚合需要时才 hydrate。纯向量候选阶段固定满足 `payload_lookup_count = 0`、`payload_parsed_bytes = 0`。
@@ -160,14 +167,14 @@ QuIVer 的 BQ、SM 位码与幅值、图拓扑和工作区位于匿名堆内存�
 
 正式查询直接扫描 mmap 基础层与内存增量层，过滤回退、残差和强制精确扫描共用这条路径。单层 `flat_vectors()` 直接借用已有内存；仅显式请求混合两层的连续切片时才生成 merged，并在写入后释放失效副本。Rom 写盘也逐段输出，切换为 Rom 拥有型存储时最多复制一次向量数据。
 
-当前查询不使用历史 `Vec<BqSignature>`。旧 Rust 整库签名接口仍可显式按需生成，容量计入堆内存估算；单条 getter 不分配整库数组。普通查询、flush、重开不物化旧数组。新快照保留原格式已允许的空 `TBQF` 缓存块（16 字节），不再为每个 slot 写入 384 字节。旧 v5 的 32/48-chunk 和后续自描述块继续验证格式几何，读取事实数据后不把旧缓存转成常驻状态；主文件使用 v10。此处变化不涉及 QuIVer 的 BQ2/SM 位码与导航算法。
+历史 Rust 整库签名接口按需生成 `Vec<BqSignature>`，容量计入堆内存估算。当前持久化写入 16 字节的空 `TBQF` 缓存块，历史 v5 的 32/48-chunk 和后续自描述块按对应几何校验。当前主文件格式为 v11，查询的量化与导航由现用 QuIVer 路径提供。
 
 ### VecPool 混合 Flush 策略
 
 `flush()` 会根据内部 `has_dirty_base` 标志自动选择最优写入路径，无需用户干预：
 
 | 场景 | 触发条件 | I/O 代价 | 写入路径 |
-|------|----------|----------|----------|
+| ------ | ---------- | ---------- | ---------- |
 | 纯写入（仅 insert） | `has_dirty_base = false` | **O(Δ)**，只写新增向量 | **追加路径** |
 | 有删改（delete/update 触碰基础层） | `has_dirty_base = true` | O(N)，重写全部数据 | 全量重写路径 |
 | 首次 flush（无现有 .vec） | mmap 为空 | O(N)，创建新文件 | 全量重写路径 |
@@ -182,14 +189,15 @@ QuIVer 的 BQ、SM 位码与幅值、图拓扑和工作区位于匿名堆内存�
 ```
 
 以 100 万节点（f32 × 1536 维，约 6 GB）为例，若单次 flush 只有 1 万条新增：
+
 - 全量重写：写 6 GB 数据
 - 追加路径：写 60 MB 数据（仅新增 delta）
 
-**标志位精确追踪**：`has_dirty_base` 只在 `zero_out()` 和 `update()` 操作落入 `index < mmap_count`（基础层区域）时才置 true。对 delta 层内节点的 delete/update **不会**触发全量重写——因为 delta 层本就要在追加时写入，可直接写修改后的值。
+**标志位精确追踪**：`has_dirty_base` 只在 `zero_out()` 和 `update()` 操作落入 `index < mmap_count`（基础层区域）时才置 true。delta 层内的 delete/update 在追加时直接写入修改后的值，使用增量持久化路径。
 
 ### Flush 与 ANN 构建隔离
 
-持久化直接分段写入向量，不物化旧 1-bit BQ 数组或全库合并缓存，也不会隐式构建 QuIVer。自动 QuIVer 只在查询准备阶段触发，显式构建则由 `build_quiver_index()` 发起。这避免了大规模导入在定期 flush 时突然进入 CPU 密集构图。
+持久化直接分段写入向量，使用有界缓冲保存现有内容。自动 QuIVer 只在查询准备阶段触发，显式构建则由 `build_quiver_index()` 发起。这避免了大规模导入在定期 flush 时突然进入 CPU 密集构图。
 
 QuIVer 按 slot 流式读取 FP16/FP32/mmap 向量，准备 BQ 编码与默认 SM 状态，不常驻第二份全库 `Vec<f32>`。构建前还会保守估算 BQ/SM 状态、双邻接表、ID/slot 映射和 worker bitset 峰值；设置内存预算后，超限构建会在大分配前拒绝。
 
@@ -205,11 +213,11 @@ QuIVer 按 slot 流式读取 FP16/FP32/mmap 向量，准备 BQ 编码与默认 S
 
 压实在持有 MemTable 写锁期间保存数据，并在保存成功后按 `MemTable → WAL` 锁顺序清理日志。宿主可配置周期维护，或使用 `disable_auto_compaction()` 撤销登记，在选定时段调用同步 `compact()`。关闭任务在已有操作排空后优先调度。
 
-### `.tdb` v10 与 Payload sidecar 布局
+### `.tdb` v11 与 Payload sidecar 布局
 
-v10 使用 74 字节文件头，持久化 `f32`、`f16`、`u64` 类型、元素宽度和文件头 CRC32；Rom 向量块及 Mmap `.vec` 的长度须精确等于 slot 数 × 维度 × 元素宽度。新库在容量准入成功后、第一条 WAL 写入前保存空的带类型检查点。
+v11 使用自 v10 引入的 74 字节类型头，保存 `f32`、`f16`、`u64`、元素宽度及头部 CRC32。Rom 向量块及 Mmap `.vec` 的长度须精确等于 slot 数 × 维度 × 元素宽度。新库在容量准入成功后、第一条 WAL 写入前保存带类型的空检查点。
 
-Rom 模式仍将完整 Payload 写入单个 `.tdb`。Mmap 模式的 `.tdb` v10 只保存活跃 NodeId slot 和图/BQ 元数据，raw JSON 位于与提交 generation 绑定的 `.pld.<generation>`：
+Rom 模式将完整 Payload 写入 `.tdb`。Mmap 模式的 `.tdb` v11 保存活跃 NodeId slot、图/BQ、约束及回执元数据，raw JSON 位于与提交 generation 绑定的 `.pld.<generation>`。
 
 ```text
 .tdb                 slot + graph + BQ metadata
@@ -220,7 +228,9 @@ Rom 模式仍将完整 Payload 写入单个 `.tdb`。Mmap 模式的 `.tdb` v10 �
 
 `.pld` 目录按 NodeId 严格递增，记录数据连续且每条带 CRC；header/目录 reserved、flags、offset、范围、JSON 完整性和整文件 CRC 均 fail-closed。Writer 先写临时文件并 fsync，再发布 generation marker；只有 marker v3 明确声明的 `.pld` 才可加载，旧 marker 附近的游离 sidecar 会被忽略。generation 文件名避免 Windows 上替换仍被旧 Reader mmap 的同名文件，旧 generation 在失去引用后 best-effort 回收。
 
-加载 v5-v8 时继续读取 `.tdb` 内嵌 Payload。ReadWrite 在后续持久化时发布 v10；空的历史检查点在首次可写打开准入成功后补齐类型身份。ReadOnly/Immutable 按原格式读取，保持原文件组。
+加载 v5-v8 时读取 `.tdb` 内嵌 Payload。ReadWrite 在后续持久化时发布 v11，空的历史检查点在首次可写打开准入成功后补齐类型身份。ReadOnly/Immutable 按原格式读取。
+
+v11 在唯一约束块之后保存有界回执块，尾部记录块长度、CRC32 和 `TREC` 标识。已完成回执与节点、向量及边事实同次发布，容量、完整原事务身份和恢复规则见[Console 回执](embedded-console.md#回执与结果确认)。
 
 > **边持久化格式** 从 v7 起保存任意 JSON `metadata`，唯一键为 `(src, dst, label)`，重复 Upsert 原地覆盖权重与元数据。加载器继续兼容 v5/v6，旧边的元数据恢复为 `null`。BQ 元数据块仍采用从 v6 开始的自描述固定小端序布局。
 >
@@ -232,17 +242,18 @@ Rom 模式仍将完整 Payload 写入单个 `.tdb`。Mmap 模式的 `.tdb` v10 �
 内存数据 → 写入 .tdb.tmp → fsync 落盘 → 原子 rename 替换 .tdb → 清除 WAL
 ```
 
-不管在哪一步崩溃，都不会损坏已有数据：
+发布流程按提交标记恢复完整代际：
+
 - 步骤 1-2 崩溃：`.tmp` 残留但旧 `.tdb`/`.vec` 完好 → 重启用旧数据 + WAL 回放
 - 步骤 3 崩溃：新文件已就绪 + WAL 仍在 → 重启回放幂等数据（安全冗余）
 - 全部完成：清理 WAL，进入干净状态
 
 ### 跨平台 I/O 加固（Windows 兼容性）
 
-TriviumDB 的存储层针对 Windows 的强制锁定（Mandatory Locking）语义做了专项加固，消除了在 Linux 上不会出现的幽灵故障：
+TriviumDB 的存储层针对 Windows 文件共享和映射生命周期提供以下处理：
 
 | 问题 | 根因 | 修复方案 |
-|------|------|----------|
+| ------ | ------ | ---------- |
 | Mmap 模式 flush 100% 失败 | Windows 不允许 rename 覆盖正在被映射的文件 | `flush()` 前强制 `self.mmap = None`，解除内核映射锁 |
 | 偶发 rename 失败 | 杀毒软件（Defender/火绒）扫描新文件时短暂独占句柄 | `robust_rename()`：对 `ERROR_ACCESS_DENIED(5)` / `ERROR_SHARING_VIOLATION(32)` 进行指数退避重试（最多 10 次，1→50ms） |
 | WAL clear 触发重复扫描 | `remove + create` 使杀毒软件将重建的文件视为新文件再次扫描 | WAL 清空改为 `truncate(true)` 语义，文件句柄不变，不触发新文件扫描 |
@@ -253,8 +264,8 @@ TriviumDB 的存储层针对 Windows 的强制锁定（Mandatory Locking）语�
 
 所有写操作（insert / delete / link / unlink / update）在生效前先追加写入 WAL 文件。
 
-- **Append-Only**：仅顺序追加，绝不随机写入，SSD 友好
-- **CRC32 校验**：每条记录都附带 CRC32；遇到截断或校验失败时停止回放，绝不跨过损坏继续解释后续字节
+- **Append-Only**：记录按顺序追加写入
+- **CRC32 校验**：每条记录附带 CRC32；完整坏帧拒绝恢复，未完成尾帧按最后提交边界处理
 - **三种同步模式**：Full（fsync）/ Normal（flush）/ Off（无）
 
 ---
@@ -292,7 +303,7 @@ flat_vectors
 - **拓扑边界**：增量剪枝保护导航树；旧索引通过重建应用修复。入口全可达仅保证拓扑可遍历，有限搜索宽度与精排预算下的召回需另行测量。
 
 | 对比 | BruteForce | QuIVer |
-|------|-----------|------|
+| ------ | ----------- | ------ |
 | 召回 | 精确 Top-K | 近似，依赖数据分布、搜索宽度与精排预算 |
 | 查询工作 | 全量向量评分 | 图导航与有界精排，性能按具体工作负载测量 |
 | 增量维护 | 向量池直接更新 | Insert / Tombstone Delete / Update，并同步默认 SM 状态 |
@@ -300,7 +311,7 @@ flat_vectors
 | 热组件 | 扫描所需工作区 | 保留的 BQ、SM 位码/幅值、图、ID/slot 映射及线程工作区 |
 | 激活方式 | 小规模默认 | 达到 209–834 节点的维度相关阈值时构建 |
 
-默认 `QuIVerSearchConfig` 的精排预算为 64，实际受候选宽度约束，并至少覆盖 `top_k`；显式预算继续生效。低 `ef` 不会令普通默认查询静默回退 BQ。校正/锚点模式、显式原生 L2 与自定义 TSNG scorer 各有独立语义，见 [QuIVer 架构与配置](quiver.md)。
+默认 `QuIVerSearchConfig` 的精排预算为 64，实际受候选宽度约束，并至少覆盖 `top_k`；显式预算继续生效。低 `ef` 下普通默认查询继续使用 SM-L2。校正/锚点模式、显式原生 L2 与自定义 TSNG scorer 各有独立语义，见 [QuIVer 架构与配置](quiver.md)。
 
 ---
 
@@ -313,12 +324,12 @@ TriviumDB 的核心创新——**Spreading Activation（扩散激活）**（受 
 图能力分为三条互不混淆的语义路径：
 
 | 路径 | 语义 | 返回内容 | 适用场景 |
-|------|------|----------|----------|
+| ------ | ------ | ---------- | ---------- |
 | SA-PPR / Spreading Activation | 边权驱动的软相关性能量传播 | 带 score 的检索命中 | RAG 联想与相关节点补充 |
 | Reachability | 按方向、label、深度判断结构可达性 | 确定性最短路径与逐跳 label | 权限链、依赖链、血缘与结构查询 |
 | GraphFirst | 图模式先限定合法 anchor，再做集合内精确向量 Top-K | 规范绑定行或 SearchHit | 只允许在结构合法对象中做语义排名 |
 
-Reachability 默认沿出边，可选入边或双向，并通过 `max_visited_nodes` 防止稠密图失控。GraphFirst 按 anchor NodeId 去重，超过候选预算直接报错；它不会把全库向量近邻混入图约束结果。
+Reachability 默认沿出边，可选入边或双向，并通过 `max_visited_nodes` 防止稠密图失控。GraphFirst 按 anchor NodeId 去重，超过候选预算直接报错；评分和结果均限定在 anchor 集合内。
 
 ### 工作流程
 
@@ -330,7 +341,7 @@ Reachability 默认沿出边，可选入边或双向，并通过 `max_visited_no
 ### 扩散深度与行为
 
 | `expand_depth` | 行为 |
-|----------------|------|
+| ---------------- | ------ |
 | `0` | 纯向量检索，不进行图谱扩散 |
 | `1` | 返回锚点 + 锚点的直接邻居 |
 | `2` | 返回锚点 + 1 跳邻居 + 2 跳邻居 |
@@ -362,7 +373,7 @@ inhibition_factor = 1.0 / in_degree^0.55
 ```
 
 | 节点入度 | log10 惩罚系数 | powf(0.55) 惩罚系数 | 效果对比 |
-|---------|-------------|-------------------|--------|
+| --------- | ------------- | ------------------- | -------- |
 | 1（叶节点）| 0.500 | 1.000 | 不惩罚 |
 | 10 | 0.333 | 0.282 | 更有力 |
 | 100 | 0.250 | 0.089 | **显著压制** |
@@ -372,13 +383,13 @@ inhibition_factor = 1.0 / in_degree^0.55
 
 ### 不应期（Refractory Period，疲劳机制，本项目自研）
 
-这是缓解「重复召回」问题的核心机制。**命名灵感来源于**生物神经元在高频放电后进入不应期、暂时无法再次触发的电生理现象（注：此处为类比性借用，并非精确复现生物神经元行为）。
+疲劳不应期用于抑制连续查询中的重复召回。名称借用了生物神经元不应期的概念，具体状态变化由下述检索规则定义。
 
 **工作流程：**
 
 1. **标记（Mark）**：每次图漫游结束后，排名最高的 Top-15 赢家节点会被打上「疲劳」标记（`fatigue = 1`），写入 MemTable 的内部状态映射（`RwLock<HashMap<NodeId, u8>>`）。
 2. **抑制（Suppress）**：下一轮扩散中，若发现目标节点处于疲劳期，该传导路径的能量片段会被**直接削减 85%**（`fatigue_discount = 0.15`）。
-3. **恢复（Recover）**：一旦该路径在本轮中被抑制并消耗了疲劳标记，节点的不应期**立即解除**，不会造成永久封印。
+3. **恢复（Recover）**：一旦该路径在本轮中被抑制并消耗了疲劳标记，节点的不应期解除，后续查询可重新召回。
 
 ```
 常规场景（无重复访问）：
@@ -392,6 +403,7 @@ inhibition_factor = 1.0 / in_degree^0.55
 **内存开销**：疲劳状态存储在独立的 `HashMap` 中，与向量 SoA 连续内存完全物理隔离，**不破坏任何 SIMD / mmap 对齐**，零额外计算开销。
 
 **关键特性**：
+
 - ✅ 仅影响相邻两次搜索——无记忆效应，不影响长期联想
 - ✅ 不修改任何边权重——图谱结构本身保持不变
 - ✅ 完全运行时状态，不写入 WAL 和 .tdb，无持久化开销
@@ -400,7 +412,7 @@ inhibition_factor = 1.0 / in_degree^0.55
 
 ## 认知检索管线
 
-TriviumDB 内置了一套多层认知检索管线（本项目自研的功能性分层设计，而非业界标准分层模型）。所有数学算子均为纯 Rust 手写，零依赖外部矩阵库。其中借鉴的学术算法包括：
+TriviumDB 按检索功能组织多层管线，数学算子使用 Rust 实现。其中采用的算法包括：
 
 - **FISTA**: Beck & Teboulle, 2009, *"A Fast Iterative Shrinkage-Thresholding Algorithm for Linear Inverse Problems"*
 - **DPP**: Kulesza & Taskar, 2012, *"Determinantal Point Processes for Machine Learning"*
@@ -416,7 +428,7 @@ TriviumDB 内置了一套多层认知检索管线（本项目自研的功能性�
 ### 管线架构（功能性分层）
 
 | 层级 | 功能 | 实现位置 |
-|:---|:---|:---|
+| :--- | :--- | :--- |
 | **L1/L2** | 意图拆分 + 向量召回 | 外部客户端 + MemTable 向量池 |
 | **L3** | NMF 语义分解分析 | `cognitive.rs` · `nmf_multiplicative_update` |
 | **L4/L5** | FISTA 稀疏残差 + 影子查询 | `cognitive.rs` · `fista_solve` + `database.rs` 自动触发 |
@@ -429,7 +441,7 @@ TriviumDB 内置了一套多层认知检索管线（本项目自研的功能性�
 所有进入 `search_advanced` 的查询会首先经过安全拦截：
 
 - **维度检查**：向量维度与库不匹配时立即报错
-- **NaN / Infinity 毒素检测**：向量中包含无效浮点数时扔出清晰错误
+- **非有限数值检查**：向量包含 NaN 或 Infinity 时返回结构化错误
 - **参数安全钳位**：`teleport_alpha`、`fista_lambda`、`dpp_quality_weight` 等全部被强制约束在合法数学范围内
 
 ---
@@ -445,7 +457,7 @@ WITH 保存每行的带类型投影，EXPAND 传递起点快照，多源汇合�
 它统一图遍历、文档过滤、向量检索、图算法、聚合与写操作。核心模块包括：
 
 | 模块 | 文件 | 职责 |
-|------|------|------|
+| ------ | ------ | ------ |
 | **词法分析器** | `query/tql_lexer.rs` | Token、参数和位置诊断 |
 | **语法分析器** | `query/tql_parser.rs` | 递归下降解析、作用域验证 |
 | **抽象语法树** | `query/tql_ast.rs` | 查询、管线、表达式、聚合和路径结构 |
@@ -456,7 +468,7 @@ WITH 保存每行的带类型投影，EXPAND 传递起点快照，多源汇合�
 ### 查询入口与可组合管线
 
 | 入口 | 用途 | 示例 |
-|------|------|------|
+| ------ | ------ | ------ |
 | **MATCH** | 图谱遍历（沿边跳转） | `MATCH (a)-[:knows]->(b) RETURN b` |
 | **FIND** | 文档过滤（类 MongoDB） | `FIND {type: "event", heat: {$gte: 0.7}} RETURN *` |
 | **SEARCH** | 向量检索 | `SEARCH VECTOR [...] TOP 10 RETURN *` |
@@ -469,7 +481,7 @@ WITH 保存每行的带类型投影，EXPAND 传递起点快照，多源汇合�
 ### DML 写操作（v0.6.0 新增）
 
 | 语法 | 功能 | 示例 |
-|------|------|------|
+| ------ | ------ | ------ |
 | **CREATE** | 创建节点 | `CREATE (a {name: "Alice", age: 30})` |
 | **SET** | 更新属性 | `MATCH (a {name: "Alice"}) SET a.age == 31` |
 | **DELETE** | 删除节点 | `MATCH (a {name: "Alice"}) DELETE a` |
@@ -478,7 +490,7 @@ WITH 保存每行的带类型投影，EXPAND 传递起点快照，多源汇合�
 ### 支持的语法元素
 
 | 元素 | 语法 | 示例 |
-|------|------|------|
+| ------ | ------ | ------ |
 | 节点匹配 | `(变量名)` | `(a)` |
 | 节点+属性 | `(变量名 {key: value})` | `(a {id: 42})` |
 | 有向边 | `-[:标签]->` | `-[:knows]->` |
@@ -486,7 +498,6 @@ WITH 保存每行的带类型投影，EXPAND 传递起点快照，多源汇合�
 | WHERE 条件 | `WHERE 表达式 AND/OR 表达式` | `WHERE a.age > 18` |
 | RETURN | `RETURN 变量名列表` | `RETURN a, b` |
 | 比较运算符 | `==`, `!=`, `>`, `>=`, `<`, `<=` | `b.score >= 0.8` |
-
 
 ### 执行优化
 
@@ -507,7 +518,7 @@ TQL 的 FIND 入口底层采用三层加速策略：
 **数值键编码 v2**：Ordered/Composite ART 的有序键使用统一的数值全序编码——`i64`/`u64`/`f64` 共享同一数值顺序，整数范围查询（如 `age: {$gte: 30}`）与浮点阈值不再因键前缀不同而错配为空集。等值索引（Hash/Bitmap）继续保留 JSON 数字的精确类型与值，可区分超过 f64 精度的相邻大整数；Filter 的范围比较也使用精确整数比较。数值边界的绝对值达到 2^53 时，有序范围查询回退精确扫描；有序索引包含此范围的数值键时，`ORDER BY` 按实际 Payload 数值排序后分页。整数比较覆盖完整 `i64/u64` 域，并支持与有限浮点数混合比较。旧 key v1 编码的 `.pidx` 在打开时有界读取并按索引定义在内存中重建为 v2 编码：ReadOnly/Immutable 保持零写，Writer 在下一次显式 flush 发布 v2 sidecar。
 
 | 类型 | 数据结构 | 主要用途 |
-|---|---|---|
+| --- | --- | --- |
 | Hash | 类型稳定键 → posting | 等值过滤 |
 | Ordered | Safe Rust ART | 范围、前缀、ORDER BY |
 | Composite | 多字段 ART | 左前缀、等值 + 末列范围 |
@@ -549,7 +560,7 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 ```text
 1. ReadWrite 持有排他锁后检查 .publish；Mmap marker 或 Rom 日志尚未提交时恢复旧文件组
 2. 验证 .tdb/.vec/.pld/.flush_ok 同代；已提交的新代不得回滚
-3. 校验 WAL 的 TVWL + v3 版本头；无头或未知版本在回放前拒绝
+3. 校验 WAL 的 TVWL + v4 版本头，Writer 按历史布局处理 v2/v3 的升级
 4. 逐条读取长度、记录体与 CRC32，只回放有效前缀中的已提交事务
 5. 遇到截断、非法长度、CRC 或反序列化错误时停止，不越过损坏边界
 ```
@@ -557,7 +568,7 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 ### 崩溃场景矩阵
 
 | 崩溃时机 | .tdb 状态 | .vec 状态 | .flush_ok | 恢复路径 |
-|----------|-----------|-----------|-----------|----------|
+| ---------- | ----------- | ----------- | ----------- | ---------- |
 | 写 .tdb.tmp 中途 | 旧版本完好 | 旧版本完好 | 有效 | 直接加载旧数据 + WAL 回放 |
 | .tdb rename 后、.flush_ok 更新前 | 新版本 | 新版本 | 仍指向旧代 | 校验 `.publish` 与独立备份，恢复旧事实后回放 WAL |
 | 追加写 .vec 后、.tdb 重写前 | 旧版本 | 已追加 | 仍指向旧代 | 同上，不能忽略基础向量或用空库代替 |
@@ -569,10 +580,10 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 
 ### WAL 记录类型
 
-WAL 文件以 `TVWL + u16 version` 版本头开场。ReadWrite 持有排他锁时支持完整校验并原子迁移 v2 WAL；当前 v3 按帧流式回放。ReadOnly/Immutable 保持物理零写，迁移和中断恢复由 Writer 完成。无头、未知版本与非法迁移输入返回结构化错误。图写入支持 `(src,dst,label)` 唯一边的 weight upsert，以及独立的指定标签 `UnlinkLabel` 记录。
+WAL 文件以 `TVWL + u16 version` 版本头开场，当前为 v4。受保护事务的回执作为独立记录置于同一事务封条内，恢复同时接纳完整事务的事实与回执。ReadWrite 持有排他锁时，v2 按独立历史布局校验并转换，v3 流式验证完整提交前缀并复制到 v4。完整帧损坏返回结构化错误。ReadOnly/Immutable 按物理零写契约处理历史文件，迁移及中断恢复由 Writer 完成。图写入提供 `(src,dst,label)` 唯一边的 weight upsert 和指定标签 `UnlinkLabel` 记录。
 
 | 类型 | 内容 |
-|------|------|
+| ------ | ------ |
 | `TxBegin` | 事务开始标记（含 tx_id） |
 | `TxCommit` | 事务提交封条（含 tx_id，缺失则整个事务丢弃） |
 | `Insert` | id + vector + payload |
@@ -606,11 +617,12 @@ WAL 文件以 `TVWL + u16 version` 版本头开场。ReadWrite 持有排他锁�
 
 ---
 
-## 并发安全与零开销事务
+## 并发安全与事务
 
 TriviumDB 通过四层机制保障并发安全与数据完整性：
 
 ### 1. 进程与线程锁：
+
 - `fs2` 独占文件锁避免多进程同时打开同一数据库写入。
 - `Arc<RwLock<MemTable>>` 允许普通无状态查询共享读；写入、flush、compaction 使用写锁。
 - WAL 使用独立 `Arc<Mutex<Wal>>`，固定锁顺序为 `MemTable write → WAL Mutex`。
@@ -621,12 +633,13 @@ TriviumDB 通过四层机制保障并发安全与数据完整性：
 TriviumDB 的 `begin_tx()` 提供了一种**比传统 MVCC 和 Undo Log 都轻量级得多的验证前置（Dry-Run）架构**。
 
 在调用 `tx.commit()` 后：
+
 1. **预检前置**：引擎在虚拟映射中验证维度、有限数值、节点存在性、ID 冲突和 Payload 上限。
 2. **容量门禁**：使用 checked arithmetic 估算整批核心容器增量，检查内存预算并调用 `try_reserve`；失败时不写 WAL、不推进 ID/generation。
 3. **WAL-first**：全部验证与预留成功后，一次性追加带事务边界的 WAL。
 4. **Infallible Apply**：应用已经验证的操作，再统一同步 QuIVer 增量状态。
 
-普通无状态查询持共享 read guard 完成整条 pipeline；generation 校验保证锁外 QuIVer 构建不会发布过期索引。
+普通无状态查询持共享 read guard 完成整条 pipeline；锁外 QuIVer 构建结果在发布前校验 generation，过期结果被拒绝。
 
 ---
 
@@ -649,7 +662,7 @@ enum DbBackend {
 ### dtype 选择指南
 
 | dtype | 单维度字节 | 精度 | 适用场景 |
-|-------|-----------|------|----------|
+| ------- | ----------- | ------ | ---------- |
 | `f32` | 4 B | 完整精度 | 通用 embedding（推荐默认值） |
 | `f16` | 2 B | 半精度 | 大规模数据集，内存减半，精度损失极小 |
 | `u64` | 8 B | 整数 | SimHash 等二值化/离散化向量 |
@@ -669,12 +682,13 @@ Node.js 侧通过 `napi-rs` 提供原生扩展，自带完整的 TypeScript 类�
 Python 和 Node.js 绑定均新增了以下 Hook 管理接口：
 
 | Python 方法 | Node.js 方法 | 说明 |
-|------------|-------------|------|
+| ------------ | ------------- | ------ |
 | `db.load_ffi_hook(path)` | `db.loadFfiHook(path)` | 加载 C/C++ 动态库插件 |
 | `db.clear_hook()` | `db.clearHook()` | 清除 Hook，恢复 NoopHook |
 | `db.search_with_context(vec, ...)` | `db.searchWithContext(vec, config?)` | 带管线上下文的检索 |
 
 返回的 `HookContext` / `JsHookContext` 对象包含：
+
 - **timings**：各管线阶段耗时（毫秒）
 - **custom_data**：Hook 注入的自定义数据
 - **aborted**：管线是否被 Hook 提前终止
@@ -703,7 +717,7 @@ SearchHook (trait)
 ### 6 个管线注入点详解
 
 | Hook 点 | 阶段 | 可修改的数据 | 典型用途 |
-|---------|------|------------|---------|
+| --------- | ------ | ------------ | --------- |
 | `on_pre_search` | 查询预处理 | 查询向量、SearchConfig、HookContext | 查询改写、用户上下文注入、条件拦截 |
 | `on_custom_recall` | 自定义召回 | 返回 `Option<Vec<SearchHit>>` | 对接外部 FAISS/ScaNN 索引替代内置召回 |
 | `on_post_recall` | 召回后处理 | `&mut Vec<SearchHit>` | 业务过滤、分数调权、去重 |
@@ -716,7 +730,7 @@ SearchHook (trait)
 `HookContext` 在管线各阶段之间传递共享状态：
 
 | 字段 | 类型 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `custom_data` | `serde_json::Value` | 开发者自定义附加数据（任意 JSON） |
 | `stage_timings` | `Vec<(String, Duration)>` | 管线阶段计时统计（自动填充） |
 | `abort` | `bool` | 设为 true 则跳过后续所有阶段 |
@@ -746,7 +760,8 @@ for stage, ms in ctx.timings.items():
 | --- | --- |
 | `database/mod.rs` | Database、CRUD、操作准入与持久化编排 |
 | `database/config.rs` | StorageMode、Config、SearchConfig 配置类型 |
-| `database/facade.rs` | DatabaseReader / DatabaseWriter 类型化接口 |
+| `sdk/facade.rs` | DatabaseReader / DatabaseWriter 类型化接口 |
+| `sdk/shared.rs` | 共享句柄、按请求借用与宿主重入拒绝 |
 | `database/lifecycle.rs` | 关闭状态机、限时等待、实例诊断 |
 | `database/pipeline.rs` | 混合检索管线与六阶段 Hook |
 | `database/transaction.rs` | 事务预检、提交与 WAL 回放 |
@@ -757,7 +772,7 @@ for stage, ms in ctx.timings.items():
 ### pipeline.rs 内部子函数
 
 | 函数 | 职责 |
-|------|------|
+| ------ | ------ |
 | `execute_pipeline()` | 管线总控 + 6 个 Hook 调用入口 |
 | `recall_text()` | L1: AC 自动机 + BM25 文本召回 |
 | `recall_vector()` | L2+L3: 向量稠密召回 + 自适应引擎路由 |
@@ -778,7 +793,7 @@ v0.6.0 新增 ARM64 (aarch64) NEON SIMD 支持，与已有的 x86 AVX2 并列，
 ### 余弦相似度 SIMD 调度
 
 | 架构 | SIMD 路径 | 并行度 | 核心指令 |
-|------|---------|:---:|------|
+| ------ | --------- | :---: | ------ |
 | x86_64 | AVX2 + FMA | 8 × f32 | `_mm256_fmadd_ps` |
 | aarch64 | NEON | 4 × f32 | `vfmaq_f32` + `vaddvq_f32` |
 | 其他 | 标量回退 | 1 × f32 | 四路展开循环 |
@@ -786,13 +801,11 @@ v0.6.0 新增 ARM64 (aarch64) NEON SIMD 支持，与已有的 x86 AVX2 并列，
 ### 缓存预取
 
 | 架构 | 预取指令 |
-|------|------|
+| ------ | ------ |
 | x86_64 | `_mm_prefetch` (SSE) |
 | aarch64 | `prfm pldl1keep` (inline asm) |
 
-编译时自动选择最优路径，零开销回退，无需用户配置。
-
-
+构建与运行时按平台能力选择 SIMD 或标量路径。
 
 ### 派生索引的事实绑定
 
@@ -801,7 +814,6 @@ v0.6.0 新增 ARM64 (aarch64) NEON SIMD 支持，与已有的 x86 AVX2 并列，
 Node 的 JSON 边界使用带长度的属性名处理 Payload、Metadata、过滤器、事务和查询结果，保留嵌套 NUL 字段与 `__proto__` 自有数据属性；标量数值沿用既有转换规则。非法 JSON 值与循环结构在写入前拒绝。
 
 `.gidx v3` 在节点数之外记录主文件长度与 CRC。打开时完整解码边块，校验数量、UTF-8、JSON、有限边权和重复边，并将反向/标签目录与边块逐项比对，再流式比对主文件中的端点、标签、边权与 Metadata。校验和堆分配准入完成后安装只读视图；失配返回 `CorruptedFile`。Writer 从主文件读取事实，可通过 `repair_graph_indexes()` 重建并持久化。历史 v1/v2 图索引由主文件图数据提供读取结果，后续显式持久化发布当前格式。只读图的入度按边数计算，多标签平行边共享来源时仍分别计数，查询分数、排序和完整性检查与可写图一致。
-
 
 ### 索引覆盖与图资源边界
 

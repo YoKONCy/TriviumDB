@@ -46,9 +46,9 @@ impl<T: VectorType> Database<T> {
         if lock_or_recover(&self.lifecycle.0).group_commit_owner
             == Some(std::thread::current().id())
         {
-            return Err(TriviumError::InvalidInput(
-                "分组提交闭包内不能关闭数据库".into(),
-            ));
+            return Err(TriviumError::ReentrantAccess {
+                operation: "group_commit_shutdown",
+            });
         }
         Ok(())
     }
@@ -91,7 +91,7 @@ impl<T: VectorType> Database<T> {
 
     /// 拒绝新操作并登记关闭任务。已有操作和后台维护先排空，完成后才释放文件锁。
     pub fn request_shutdown(&mut self) -> Result<ShutdownStatus> {
-        reject_hook_reentrant_write()?;
+        reject_hook_reentrant_access(&self.memtable)?;
         self.reject_group_shutdown()?;
         let mut state = lock_or_recover(&self.lifecycle.0);
         if state.lifecycle == DatabaseLifecycle::Closed
@@ -111,7 +111,7 @@ impl<T: VectorType> Database<T> {
         }
         let background = self.compaction.take();
         let work = Arc::new(CloseWork {
-            background,
+            background: Mutex::new(background),
             hook: self.hook.clone(),
             memtable: self.memtable.clone(),
             wal: self.wal.clone(),
@@ -126,12 +126,12 @@ impl<T: VectorType> Database<T> {
         });
         let ready_work = work.clone();
         let completed_work = work.clone();
+        let rollback_work = work.clone();
         let scheduled = ScheduledMaintenance::schedule(
             self.resource_runtime.clone(),
             move || {
                 lock_or_recover(&ready_work.lifecycle.0).active_operations == 0
-                    && !ready_work
-                        .background
+                    && !lock_or_recover(&ready_work.background)
                         .as_ref()
                         .is_some_and(|b| b.is_running())
             },
@@ -141,6 +141,10 @@ impl<T: VectorType> Database<T> {
         match scheduled {
             Ok(job) => state.shutdown_job = Some(job),
             Err(error) => {
+                self.compaction = lock_or_recover(&rollback_work.background).take();
+                if let Some(background) = &mut self.compaction {
+                    background.resume();
+                }
                 state.lifecycle = previous;
                 state.shutdown_phase = if previous == DatabaseLifecycle::Open {
                     ShutdownPhase::Open
@@ -166,11 +170,11 @@ impl<T: VectorType> Database<T> {
     pub(super) fn wait_for_shutdown(&self, deadline: Option<Instant>) -> Result<bool> {
         let mut state = lock_or_recover(&self.lifecycle.0);
         loop {
-            if state.lifecycle == DatabaseLifecycle::Closed {
-                return Ok(true);
-            }
             if let Some(error) = state.shutdown_error.take() {
                 return Err(error);
+            }
+            if state.lifecycle == DatabaseLifecycle::Closed {
+                return Ok(true);
             }
             if let Some(deadline) = deadline {
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -196,7 +200,7 @@ impl<T: VectorType> Database<T> {
 
 struct CloseWork<T: VectorType> {
     hook: HookSlot,
-    background: Option<CompactionThread>,
+    background: Mutex<Option<CompactionThread>>,
     memtable: Arc<RwLock<MemTable<T>>>,
     wal: Arc<Mutex<Wal>>,
     file_lock: Arc<Mutex<Option<std::fs::File>>>,
@@ -204,9 +208,14 @@ struct CloseWork<T: VectorType> {
     path: String,
     mode: StorageMode,
     access: AccessMode,
-    result: Mutex<Option<Result<()>>>,
+    result: Mutex<Option<CloseOutcome>>,
     #[cfg(feature = "test-hooks")]
     io_failure: Option<crate::test_hooks::IoPoint>,
+}
+
+struct CloseOutcome {
+    resources_released: bool,
+    result: Result<()>,
 }
 
 impl<T: VectorType> CloseWork<T> {
@@ -214,6 +223,7 @@ impl<T: VectorType> CloseWork<T> {
         lock_or_recover(&self.lifecycle.0).shutdown_phase = ShutdownPhase::Flushing;
         #[cfg(feature = "test-hooks")]
         let _injection = self.io_failure.map(crate::test_hooks::fail_io_at);
+        let mut resources_released = false;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
             let mut mt = write_or_recover(&self.memtable);
             if self.access == AccessMode::ReadWrite {
@@ -223,20 +233,24 @@ impl<T: VectorType> CloseWork<T> {
             }
             mt.release_resource_storage();
             drop(mt);
-            clear_hook_slot(&self.hook);
+            let result = clear_hook_for_close(&self.hook);
             lock_or_recover(&self.file_lock).take();
-            Ok(())
+            resources_released = true;
+            result
         }))
         .unwrap_or_else(|_| {
             Err(TriviumError::ShutdownFailed {
-                reason: "关闭工作发生异常展开".into(),
+                reason: "关闭工作发生异常展开 (Shutdown work panicked)".into(),
             })
         });
         let failed = result.is_err();
-        *lock_or_recover(&self.result) = Some(result);
+        *lock_or_recover(&self.result) = Some(CloseOutcome {
+            resources_released,
+            result,
+        });
         if failed {
             Err(TriviumError::ShutdownFailed {
-                reason: "关闭未完成，可读取状态并重试".into(),
+                reason: "关闭发生错误，请检查关闭阶段与故障详情 (Shutdown reported an error; inspect its phase and failure details)".into(),
             })
         } else {
             Ok(true)
@@ -244,19 +258,26 @@ impl<T: VectorType> CloseWork<T> {
     }
 
     fn complete(&self) {
-        let result = lock_or_recover(&self.result).take().unwrap_or_else(|| {
-            Err(TriviumError::ShutdownFailed {
-                reason: "关闭任务未提供完成结果".into(),
-            })
-        });
+        let outcome = lock_or_recover(&self.result)
+            .take()
+            .unwrap_or_else(|| CloseOutcome {
+                resources_released: false,
+                result: Err(TriviumError::ShutdownFailed {
+                    reason: "关闭任务未提供完成结果 (Shutdown task supplied no completion result)"
+                        .into(),
+                }),
+            });
         let mut state = lock_or_recover(&self.lifecycle.0);
-        match result {
-            Ok(()) => {
-                state.lifecycle = DatabaseLifecycle::Closed;
-                state.shutdown_phase = ShutdownPhase::Closed;
-            }
+        if outcome.resources_released {
+            state.lifecycle = DatabaseLifecycle::Closed;
+            state.shutdown_phase = ShutdownPhase::Closed;
+        }
+        match outcome.result {
+            Ok(()) => {}
             Err(error) => {
-                state.shutdown_phase = ShutdownPhase::Failed;
+                if !outcome.resources_released {
+                    state.shutdown_phase = ShutdownPhase::Failed;
+                }
                 state.shutdown_last_error = Some(error.to_string());
                 state.shutdown_last_failure =
                     Some(crate::resources::ResourceFailure::from_error(&error));
@@ -300,12 +321,8 @@ mod tests {
     }
 
     fn open() -> (Database<f32>, ResourceRuntime) {
-        static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let path = std::env::temp_dir().join(format!(
-            "tdb_shutdown_{}_{}.tdb",
-            std::process::id(),
-            NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        // Windows 会复用进程号，样本身份需跨运行唯一，避免读到旧测试留下的数据。
+        let path = std::env::temp_dir().join(format!("tdb_shutdown_{}.tdb", uuid::Uuid::new_v4()));
         let runtime = ResourceRuntime::new(ResourceLimits {
             memory_limit: 64 * 1024 * 1024,
             maintenance_memory_limit: 8 * 1024 * 1024,
@@ -482,8 +499,10 @@ mod tests {
         assert_eq!(db.shutdown_status().phase, ShutdownPhase::Draining);
         assert_eq!(db.instance_stats().shutdown.active_operations, 1);
         assert!(matches!(
-            db.insert(&[0.0, 1.0, 0.0], serde_json::json!({})),
-            Err(TriviumError::DatabaseClosed)
+            db.insert(&[0.0, 1.0, 0.0], serde_json::json!({}))
+                .unwrap_err()
+                .underlying(),
+            TriviumError::DatabaseClosed
         ));
         assert!(matches!(
             Database::<f32>::open(&path, 3),
@@ -513,6 +532,63 @@ mod tests {
         }
         assert_eq!(runtime.stats().attached_databases, 0);
         assert_eq!(runtime.stats().active_maintenance_tasks, 0);
+    }
+
+    #[test]
+    fn 未请求关闭直接析构仍保护正在执行的独立查询() {
+        let (mut db, runtime) = open();
+        let path = db.db_path.clone();
+        db.flush().unwrap();
+        let (entered, arrived) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        db.set_hook(Gate {
+            entered,
+            release: Mutex::new(wait),
+        })
+        .unwrap();
+        let handle = db.search_handle();
+        let idle = handle.clone();
+        let query = std::thread::spawn(move || {
+            handle.search_batch(
+                &[vec![1., 0., 0.]],
+                &SearchConfig {
+                    top_k: 1,
+                    expand_depth: 0,
+                    ..Default::default()
+                },
+                &BatchSearchConfig::default(),
+            )
+        });
+        arrived.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(db);
+        let locked = matches!(
+            Database::<f32>::open(&path, 3),
+            Err(TriviumError::DatabaseLocked(_))
+        );
+        // 先放行工作线程，再做断言，失败时也能释放真实资源。
+        release.send(()).unwrap();
+        let hits = query.join().unwrap().unwrap();
+        assert!(locked);
+        assert_eq!(hits[0].len(), 1);
+        assert_eq!(hits[0][0].id, 1);
+        assert_eq!(hits[0][0].payload, serde_json::json!({"state":"saved"}));
+        assert!(matches!(
+            idle.enter_operation(),
+            Err(TriviumError::DatabaseClosed)
+        ));
+        assert!(matches!(
+            Database::<f32>::open(&path, 3),
+            Err(TriviumError::DatabaseLocked(_))
+        ));
+        drop(idle);
+        assert_eq!(runtime.stats().attached_databases, 0);
+        let mut reopened = Database::<f32>::open(&path, 3).unwrap();
+        assert_eq!(reopened.get(1).unwrap().unwrap().vector, vec![1., 0., 0.]);
+        assert_eq!(
+            reopened.get_payload(1).unwrap().unwrap(),
+            serde_json::json!({"state":"saved"})
+        );
+        reopened.close().unwrap();
     }
 
     #[test]

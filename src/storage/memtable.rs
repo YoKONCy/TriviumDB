@@ -557,6 +557,7 @@ pub struct MemTable<T: VectorType> {
     generation: u64,
     /// 最近一次完整检查点之后是否发生了需要持久化的变更。
     checkpoint_dirty: bool,
+    pub(crate) editing: crate::database::editing::EditState,
     recovery_required: Arc<AtomicBool>,
     load_memory_limit: usize,
     vector_generation: u64,
@@ -672,6 +673,7 @@ impl<T: VectorType> MemTable<T> {
             next_id: 1, // 从 1 开始，保留 0 作为特殊标记
             generation: 0,
             checkpoint_dirty: true,
+            editing: Default::default(),
             recovery_required: Arc::new(AtomicBool::new(false)),
             load_memory_limit: 0,
             vector_generation: 0,
@@ -728,6 +730,7 @@ impl<T: VectorType> MemTable<T> {
             next_id,
             generation: 0,
             checkpoint_dirty: true,
+            editing: Default::default(),
             recovery_required: Arc::new(AtomicBool::new(false)),
             load_memory_limit: 0,
             vector_generation: 0,
@@ -822,6 +825,7 @@ impl<T: VectorType> MemTable<T> {
     #[inline]
     fn mark_changed(&mut self, vectors_changed: bool) {
         self.checkpoint_dirty = true;
+        self.editing.changed();
         self.generation = self.generation.wrapping_add(1);
         if vectors_changed {
             self.bq_signatures.take();
@@ -1459,6 +1463,7 @@ impl<T: VectorType> MemTable<T> {
             if changed {
                 self.checkpoint_dirty = true;
                 self.generation = self.generation.wrapping_add(1);
+                self.editing.changed();
             }
             return Ok(());
         }
@@ -2398,7 +2403,7 @@ impl<T: VectorType> MemTable<T> {
             .map(|field| field.len().saturating_mul(4))
             .sum::<usize>()
             .saturating_add(1024);
-        for id in self.payloads.ids() {
+        for id in self.active_ids.iter() {
             let raw = self.payloads.raw(id).ok_or_else(|| {
                 TriviumError::CorruptedFile(
                     "索引构建缺少 Payload (Index build is missing a Payload)".into(),
@@ -2415,7 +2420,8 @@ impl<T: VectorType> MemTable<T> {
             self.ensure_additional_memory(limit, build_peak.saturating_add(parse_peak))?;
         }
         let mut candidate = PropertyIndexRegistry::empty_build(kind, fields, unique)?;
-        for id in self.payloads.ids() {
+        // 活跃 ID 目录按升序遍历，使唯一冲突的节点身份在各类型和重开后保持确定。
+        for id in self.active_ids.iter() {
             let raw = self.payloads.raw(id).ok_or_else(|| {
                 TriviumError::CorruptedFile(
                     "索引构建缺少 Payload (Index build is missing a Payload)".into(),
@@ -3478,6 +3484,7 @@ impl<T: VectorType> MemTable<T> {
             + self.pending_text_bytes;
         let property_index_bytes = self.property_indexes.estimated_memory_bytes();
         vec_bytes
+            + self.editing.memory_bytes()
             + self.bq_cache_bytes()
             + payload_bytes
             + edge_bytes
@@ -3588,6 +3595,10 @@ impl<T: VectorType> MemTable<T> {
 
     pub(crate) fn needs_checkpoint(&self) -> bool {
         self.checkpoint_dirty
+    }
+
+    pub(crate) fn mark_checkpoint_dirty(&mut self) {
+        self.checkpoint_dirty = true;
     }
 
     pub(crate) fn mark_checkpoint_clean(&mut self) {
@@ -3752,6 +3763,27 @@ impl<T: VectorType> MemTable<T> {
             });
         }
         Ok(())
+    }
+
+    /// 正文分词、关键词转换与索引增长在分配前取得临时工作区。
+    pub(crate) fn reserve_text_update(
+        &self,
+        text: &str,
+    ) -> Result<crate::resources::WorkspaceReservation> {
+        let estimate = text
+            .len()
+            .checked_mul(64)
+            .and_then(|bytes| bytes.checked_add(512))
+            .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                reason: "文本更新工作区估算溢出 (Text update workspace estimate overflow)".into(),
+            })?;
+        self.check_text_memory_budget(estimate)?;
+        if self.resource_runtime.is_maintenance_task() {
+            self.resource_runtime
+                .reserve_maintenance_workspace(estimate)
+        } else {
+            self.resource_runtime.reserve_workspace(estimate)
+        }
     }
 
     /// 提交 WAL 前预留延期删除记录，避免事务应用期间再做可失败分配。

@@ -105,8 +105,8 @@ fn 删除唯一索引同时删除约束并允许重复值持久化() {
         db.insert_with_id(2, &[0., 1.], json!({"email":"same"}))
             .unwrap();
         assert!(matches!(
-            db.create_unique_index("email"),
-            Err(TriviumError::UniqueConstraintViolation { .. })
+            db.create_unique_index("email").unwrap_err().underlying(),
+            TriviumError::UniqueConstraintViolation { .. }
         ));
         assert!(db.list_unique_indexes().unwrap().is_empty());
         db.close().unwrap();
@@ -219,8 +219,10 @@ fn 复合唯一约束保留完整标量精度并支持事务交换与重开() {
         let wal = std::fs::read(format!("{path}.wal")).unwrap();
         for v in &values {
             assert!(matches!(
-                db.insert_with_id(20, &[1., 0.], json!({"tenant":"a","v":v})),
-                Err(TriviumError::UniqueConstraintViolation { .. })
+                db.insert_with_id(20, &[1., 0.], json!({"tenant":"a","v":v}))
+                    .unwrap_err()
+                    .underlying(),
+                TriviumError::UniqueConstraintViolation { .. }
             ));
             assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), wal);
         }
@@ -230,8 +232,10 @@ fn 复合唯一约束保留完整标量精度并支持事务交换与重开() {
         db.commit_tx(tx).unwrap();
         for v in &values[..2] {
             assert!(matches!(
-                db.insert_with_id(20, &[1., 0.], json!({"tenant":"a","v":v})),
-                Err(TriviumError::UniqueConstraintViolation { .. })
+                db.insert_with_id(20, &[1., 0.], json!({"tenant":"a","v":v}))
+                    .unwrap_err()
+                    .underlying(),
+                TriviumError::UniqueConstraintViolation { .. }
             ));
         }
         db.close().unwrap();
@@ -241,8 +245,10 @@ fn 复合唯一约束保留完整标量精度并支持事务交换与重开() {
             Some(json!({"tenant":"a","v":values[1]}))
         );
         assert!(matches!(
-            db.insert_with_id(20, &[1., 0.], json!({"tenant":"a","v":values[0]})),
-            Err(TriviumError::UniqueConstraintViolation { .. })
+            db.insert_with_id(20, &[1., 0.], json!({"tenant":"a","v":values[0]}))
+                .unwrap_err()
+                .underlying(),
+            TriviumError::UniqueConstraintViolation { .. }
         ));
         db.delete(2).unwrap();
         db.insert_with_id(20, &[1., 0.], json!({"tenant":"a","v":values[0]}))
@@ -278,7 +284,10 @@ fn 边标签字节上限在所有入口的wal之前检查() {
                 }
             };
             assert!(
-                matches!(result, Err(TriviumError::InvalidInput(_))),
+                matches!(
+                    result.as_ref().unwrap_err().underlying(),
+                    TriviumError::InvalidInput(_)
+                ),
                 "{operation}: {result:?}"
             );
             assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
@@ -337,8 +346,8 @@ fn 图标签和metadata增长在直接及事务入口遵守预算() {
             };
             assert!(
                 matches!(
-                    result,
-                    Err(TriviumError::CapacityReservationRejected { .. })
+                    result.as_ref().unwrap_err().underlying(),
+                    TriviumError::CapacityReservationRejected { .. }
                 ),
                 "{operation}: {result:?}"
             );

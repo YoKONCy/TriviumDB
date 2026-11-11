@@ -348,8 +348,8 @@ fn 文本重建验证完整输入与预算后替换并遵守只读权限() {
     db.close().unwrap();
     let mut reader = Database::<f32>::open_read_only(&path, 3).unwrap();
     assert!(matches!(
-        reader.rebuild_text_index(&[]),
-        Err(triviumdb::TriviumError::ReadOnlyViolation { .. })
+        reader.rebuild_text_index(&[]).unwrap_err().underlying(),
+        triviumdb::TriviumError::ReadOnlyViolation { .. }
     ));
     reader.close().unwrap();
 }
@@ -386,8 +386,8 @@ fn 延期文本解码执行共享工作区准入且拒绝后保持原文件() {
     )
     .unwrap();
     assert!(matches!(
-        db.build_text_index(),
-        Err(triviumdb::TriviumError::ResourceBudgetExceeded { .. })
+        db.build_text_index().unwrap_err().underlying(),
+        triviumdb::TriviumError::ResourceBudgetExceeded { .. }
     ));
     assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), original);
     assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
@@ -704,7 +704,7 @@ fn 损坏索引原样保留且显式重建可恢复正文和关键词() {
             assert_eq!(std::fs::read(&text).unwrap(), original);
             let error = db.build_text_index().unwrap_err();
             assert!(matches!(
-                error,
+                error.underlying(),
                 triviumdb::TriviumError::ImmutableArtifactInvalid { .. }
             ));
             db.insert_with_id(3, &[0., 0., 1.], json!({})).unwrap();
@@ -789,15 +789,15 @@ fn 延期加载与删除预留遵守预算且失败不追加WAL() {
     let before_text = std::fs::read(format!("{path}.text")).unwrap();
     db.set_memory_limit(db.estimated_memory() + 1024).unwrap();
     assert!(matches!(
-        db.build_text_index(),
-        Err(triviumdb::TriviumError::CapacityReservationRejected { .. })
+        db.build_text_index().unwrap_err().underlying(),
+        triviumdb::TriviumError::CapacityReservationRejected { .. }
     ));
     db.set_memory_limit(1).unwrap();
     let mut tx = db.begin_tx();
     tx.delete(1);
     assert!(matches!(
-        tx.commit(),
-        Err(triviumdb::TriviumError::CapacityReservationRejected { .. })
+        tx.commit().unwrap_err().underlying(),
+        triviumdb::TriviumError::CapacityReservationRejected { .. }
     ));
     assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before_wal);
     assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), before_text);

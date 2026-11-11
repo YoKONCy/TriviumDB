@@ -1,6 +1,7 @@
 //! 独立快照目录的流式复制、完整性校验与原子发布。
 
 use super::*;
+use crate::error::{WriteErrorInfo, WriteOutcome, WritePhase};
 use crate::resources::ResourceRuntime;
 use fs2::FileExt;
 use std::io::{Read, Write};
@@ -101,22 +102,25 @@ pub fn restore_snapshot_with_runtime(
     destination: &str,
     runtime: &ResourceRuntime,
 ) -> Result<GenerationManifest> {
-    let _task = runtime.enter_maintenance_task()?;
-    let _workspace = runtime.reserve_maintenance_workspace(TRANSFER_BYTES)?;
-    let source = std::fs::canonicalize(source)?;
-    let manifest = verify(&source)?;
-    let stage = Stage::new(destination, Some(&source))?;
-    for file in &manifest.files {
-        let name = format!("{DATABASE_FILE}{}", file.suffix);
-        let copied = copy_file(&source.join(&name), &stage.directory.join(&name))?;
-        if copied != (file.size, file.crc32) {
-            return Err(invalid("恢复复制期间源快照发生变化"));
+    WriteErrorInfo::capture_destination(|write| {
+        let _task = runtime.enter_maintenance_task()?;
+        write.phase = WritePhase::Validation;
+        let _workspace = runtime.reserve_maintenance_workspace(TRANSFER_BYTES)?;
+        let source = std::fs::canonicalize(source)?;
+        let manifest = verify(&source)?;
+        let stage = Stage::new(destination, Some(&source))?;
+        for file in &manifest.files {
+            let name = format!("{DATABASE_FILE}{}", file.suffix);
+            let copied = copy_file(&source.join(&name), &stage.directory.join(&name))?;
+            if copied != (file.size, file.crc32) {
+                return Err(invalid("恢复复制期间源快照发生变化"));
+            }
         }
-    }
-    write_copied_manifest(&stage.directory, &manifest)?;
-    verify(&stage.directory)?;
-    stage.publish()?;
-    Ok(manifest)
+        write_copied_manifest(&stage.directory, &manifest)?;
+        verify(&stage.directory)?;
+        stage.publish(write)?;
+        Ok(manifest)
+    })
 }
 
 pub(crate) fn copy_database_snapshot(
@@ -127,12 +131,9 @@ pub(crate) fn copy_database_snapshot(
     dim: usize,
     node_count: usize,
     runtime: &ResourceRuntime,
+    write: &mut WriteErrorInfo,
 ) -> Result<GenerationManifest> {
-    if generation_id.trim().is_empty() || generation_id.len() > 256 {
-        return Err(TriviumError::InvalidInput(
-            "generation_id 必须为 1 到 256 字节".into(),
-        ));
-    }
+    validate_generation_id(generation_id)?;
     let _workspace = runtime.reserve_maintenance_workspace(TRANSFER_BYTES)?;
     let stage = Stage::new(destination, None)?;
     let files = generation_suffixes(source)
@@ -160,7 +161,7 @@ pub(crate) fn copy_database_snapshot(
     };
     write_copied_manifest(&stage.directory, &manifest)?;
     verify(&stage.directory)?;
-    stage.publish()?;
+    stage.publish(write)?;
     Ok(manifest)
 }
 
@@ -271,7 +272,7 @@ impl Stage {
         })
     }
 
-    fn publish(self) -> Result<()> {
+    fn publish(self, write: &mut WriteErrorInfo) -> Result<()> {
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::io_result(crate::test_hooks::IoPoint::SnapshotPublish)?;
         if std::fs::symlink_metadata(&self.target).is_ok() {
@@ -281,6 +282,8 @@ impl Stage {
         }
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeSnapshotPublish);
+        write.phase = WritePhase::Publish;
+        write.outcome = WriteOutcome::Unknown;
         let published = (|| -> std::io::Result<()> {
             crate::storage::fs::robust_rename(&self.directory, &self.target)?;
             #[cfg(feature = "test-hooks")]
@@ -296,6 +299,7 @@ impl Stage {
             }
             return Err(error.into());
         }
+        write.outcome = WriteOutcome::Committed;
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::AfterSnapshotPublish);
         Ok(())

@@ -70,10 +70,10 @@ fn 四类属性索引和存储格式可结构化观测() {
     );
 
     let storage = db.storage_info();
-    assert_eq!(storage.database_format_current, 10);
+    assert_eq!(storage.database_format_current, 11);
     assert_eq!(storage.property_index_format, 8);
     assert_eq!(storage.graph_index_format, 3);
-    assert_eq!(storage.wal_format, 3);
+    assert_eq!(storage.wal_format, 4);
     assert_eq!(storage.dim, 2);
     assert_eq!(storage.node_count, 1);
     cleanup(&path);
@@ -116,12 +116,16 @@ fn 历史静默_api全部明确拒绝() {
     let id = db.insert(&[1.0, 0.0], json!({"value": 1})).unwrap();
 
     assert!(matches!(
-        db.patch_payload(id, json!({"value": 2})),
-        Err(triviumdb::TriviumError::ApiMigrationRequired { .. })
+        db.patch_payload(id, json!({"value": 2}))
+            .unwrap_err()
+            .underlying(),
+        triviumdb::TriviumError::ApiMigrationRequired { .. }
     ));
     assert!(matches!(
-        db.tql_mut("FIND {value: 1} RETURN *"),
-        Err(triviumdb::TriviumError::ApiMigrationRequired { .. })
+        db.tql_mut("FIND {value: 1} RETURN *")
+            .unwrap_err()
+            .underlying(),
+        triviumdb::TriviumError::ApiMigrationRequired { .. }
     ));
     cleanup(&path);
 }

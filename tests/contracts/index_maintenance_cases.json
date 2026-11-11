@@ -1,0 +1,58 @@
+{
+  "nodes": [
+    {"id":1,"vector":[1.0,0.0],"payload":{"tag":"alpha","tenant":"t","category":"same"},"edges":[{"target":2,"label":"related","weight":1.0,"metadata":null}]},
+    {"id":2,"vector":[0.0,1.0],"payload":{"tag":"beta","tenant":"t","category":"same"},"edges":[]}
+  ],
+  "queries": [
+    {"mode":"BM25","term":"oldalpha","before":[1],"after":[]},
+    {"mode":"BM25","term":"oldbeta","before":[2],"after":[2]},
+    {"mode":"AC","term":"oldanchor","before":[1],"after":[]},
+    {"mode":"BM25","term":"nexttext","before":[],"after":[1]},
+    {"mode":"AC","term":"nextanchor","before":[],"after":[1]}
+  ],
+  "rebuilt_documents": [{"id":1,"text":"nexttext","keywords":["nextanchor"]},{"id":2,"text":"oldbeta","keywords":[]}],
+  "operations": [
+    {"api":"index_text","id":1,"text":"nexttext"},
+    {"api":"index_keyword","id":1,"keyword":"nextanchor"},
+    {"api":"build_text_index"},
+    {"api":"rebuild_text_index"},
+    {"api":"create_index","field":"tag"},
+    {"api":"create_composite_index","fields":["tenant","tag"]},
+    {"api":"create_bitmap_index","field":"category"},
+    {"api":"create_ordered_index","field":"tag"},
+    {"api":"create_ngram_index","field":"tag"},
+    {"api":"create_unique_index","field":"tag"},
+    {"api":"create_unique_composite_index","fields":["tenant","tag"]},
+    {"api":"drop_index","field":"tag"},
+    {"api":"drop_composite_index","fields":["tenant","tag"]},
+    {"api":"drop_bitmap_index","field":"category"},
+    {"api":"drop_ordered_index","field":"tag"},
+    {"api":"drop_ngram_index","field":"tag"},
+    {"api":"build_quiver_index","rust_only":true},
+    {"api":"flush"},
+    {"api":"compact"},
+    {"api":"set_sync_mode","mode":"normal"},
+    {"api":"reserve_nodes","additional":1},
+    {"api":"repair_graph_indexes"},
+    {"api":"set_auto_build_quiver","enabled":true},
+    {"api":"enable_auto_compaction","interval_secs":3600},
+    {"api":"enable_quiver_corrected_sm","rust_only":true},
+    {"api":"enable_quiver_sm_l2","rust_only":true},
+    {"api":"enable_quiver_sm_native_l2","rust_only":true},
+    {"api":"prepare_auto_quiver_build","rust_only":true}
+  ],
+  "validation": [
+    {"api":"reserve_nodes","additional":0,"code":"TDB_INVALID_INPUT","reason":true,"target":{"field":"additional"}},
+    {"api":"index_text","id":999,"text":"nexttext","code":"TDB_NODE_NOT_FOUND","details":{"id":999}},
+    {"api":"index_keyword","id":1,"keyword":"","code":"TDB_INVALID_INPUT","reason":true},
+    {"api":"enable_auto_compaction","interval_secs":0,"code":"TDB_INVALID_INPUT","reason":true},
+    {"api":"create_index","field":"","code":"TDB_INVALID_INPUT","reason":true},
+    {"api":"create_composite_index","fields":["tag"],"code":"TDB_INVALID_INPUT","reason":true},
+    {"api":"create_unique_index","field":"category","code":"TDB_UNIQUE_CONSTRAINT","details":{"fields":["category"],"existing_id":1,"conflicting_id":2}},
+    {"api":"create_unique_composite_index","fields":["tenant","category"],"code":"TDB_UNIQUE_CONSTRAINT","details":{"fields":["tenant","category"],"existing_id":1,"conflicting_id":2}}
+  ],
+  "admission": {"phase":"admission","outcome":"not_committed"},
+  "validation_write": {"phase":"validation","outcome":"not_committed"},
+  "publish_unknown": {"phase":"publish","outcome":"unknown"},
+  "publish_committed": {"phase":"publish","outcome":"committed"}
+}

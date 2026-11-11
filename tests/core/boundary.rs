@@ -90,6 +90,119 @@ fn BND_03_dim等于65537_超限拒绝() {
 }
 
 #[test]
+fn BND_03B_极端维度拒绝归还配额并允许同路径重试() {
+    use triviumdb::{ResourceLimits, ResourceRuntime};
+    let directory = super::support::TestDir::new("constructor_dimension");
+    let path = directory.0.join("nested/database.tdb");
+    let file = path.to_str().unwrap();
+    let runtime = ResourceRuntime::new(ResourceLimits {
+        memory_limit: 8 * 1024 * 1024,
+        max_threads: 2,
+        ..Default::default()
+    })
+    .unwrap();
+    // usize 最大值会触发旧诊断中的 dim * 4 溢出；三个边界都应在文件创建前拒绝。
+    for dim in [0, 65_537, usize::MAX] {
+        let error = Database::<f32>::open_with_runtime(
+            file,
+            Config {
+                dim,
+                memory_limit: 1024 * 1024,
+                auto_build_quiver: false,
+                ..Default::default()
+            },
+            runtime.clone(),
+        )
+        .err()
+        .expect("极端维度必须拒绝");
+        let info = error.info();
+        assert_eq!(info.code, "TDB_INVALID_INPUT");
+        assert_eq!(
+            serde_json::to_value(info.target).unwrap(),
+            serde_json::json!({"field":"dim"})
+        );
+        assert!(info.write.is_none());
+        assert!(!path.parent().unwrap().exists());
+        let stats = runtime.stats();
+        assert_eq!(
+            (
+                stats.attached_databases,
+                stats.reserved_database_bytes,
+                stats.active_tasks
+            ),
+            (0, 0, 0)
+        );
+    }
+    {
+        let mut db = Database::<f32>::open_with_runtime(
+            file,
+            Config {
+                dim: 2,
+                memory_limit: 1024 * 1024,
+                auto_build_quiver: false,
+                ..Default::default()
+            },
+            runtime.clone(),
+        )
+        .unwrap();
+        db.insert_with_id(7, &[1.0, 0.0], serde_json::json!({"name":"完整事实"}))
+            .unwrap();
+        db.close().unwrap();
+    }
+    for _ in 0..2 {
+        let mut db = Database::<f32>::open_with_runtime(
+            file,
+            Config {
+                dim: 2,
+                memory_limit: 1024 * 1024,
+                auto_build_quiver: false,
+                ..Default::default()
+            },
+            runtime.clone(),
+        )
+        .unwrap();
+        assert_eq!(db.all_node_ids().unwrap(), vec![7]);
+        let saved = db.get(7).unwrap().unwrap();
+        assert_eq!(saved.vector, vec![1.0, 0.0]);
+        assert_eq!(saved.payload, serde_json::json!({"name":"完整事实"}));
+        db.close().unwrap();
+        assert_eq!(runtime.stats().reserved_database_bytes, 0);
+    }
+}
+
+#[test]
+fn 构造资源配置拒绝定位原始字段() {
+    use triviumdb::{ResourceLimits, ResourceRuntime};
+    for (limits, field) in [
+        (
+            ResourceLimits {
+                max_threads: 65,
+                ..Default::default()
+            },
+            "max_threads",
+        ),
+        (
+            ResourceLimits {
+                memory_limit: 8,
+                maintenance_memory_limit: 9,
+                ..Default::default()
+            },
+            "maintenance_memory_limit",
+        ),
+    ] {
+        let info = ResourceRuntime::new(limits)
+            .expect_err("配置违反约束时必须拒绝")
+            .info();
+        assert_eq!(info.code, "TDB_INVALID_INPUT");
+        assert_eq!(
+            serde_json::to_value(info.target).unwrap(),
+            serde_json::json!({"field":field})
+        );
+        assert!(info.write.is_none());
+    }
+}
+
+#[test]
 fn BND_03A_超3072维手动QuIVer构建安全拒绝并保持可检索() {
     let path = tmp_db("bnd_quiver_dim3073");
     let mut db = Database::<f32>::open(&path, 3073).unwrap();

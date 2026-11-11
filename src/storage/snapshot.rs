@@ -95,11 +95,28 @@ pub fn write_manifest(
     dim: usize,
     node_count: usize,
 ) -> Result<GenerationManifest> {
+    let mut write = crate::error::WriteErrorInfo::MAINTENANCE_ADMISSION;
+    write_manifest_with_write_info(db_path, generation_id, dtype, dim, node_count, &mut write)
+}
+
+pub(crate) fn validate_generation_id(generation_id: &str) -> Result<()> {
     if generation_id.trim().is_empty() || generation_id.len() > 256 {
         return Err(TriviumError::InvalidInput(
-            "generation_id 必须为 1 到 256 字节".into(),
+            "generation_id 必须为 1 到 256 字节 (generation_id must contain 1 to 256 bytes)".into(),
         ));
     }
+    Ok(())
+}
+
+pub(crate) fn write_manifest_with_write_info(
+    db_path: &str,
+    generation_id: &str,
+    dtype: &str,
+    dim: usize,
+    node_count: usize,
+    write: &mut crate::error::WriteErrorInfo,
+) -> Result<GenerationManifest> {
+    validate_generation_id(generation_id)?;
     let files = generation_suffixes(db_path)
         .into_iter()
         .map(|suffix| {
@@ -138,7 +155,10 @@ pub fn write_manifest(
         file.write_all(&bytes)?;
         file.sync_all()?;
     }
+    write.phase = crate::error::WritePhase::Publish;
+    write.outcome = crate::error::WriteOutcome::Unknown;
     robust_rename_and_sync(&tmp, &path)?;
+    write.outcome = crate::error::WriteOutcome::Committed;
     Ok(manifest)
 }
 

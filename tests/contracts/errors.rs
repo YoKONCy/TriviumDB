@@ -118,6 +118,11 @@ fn 共享错误用例保留类别与完整字段() {
             );
         }
         assert_eq!(details, case["details"], "{operation}");
+        assert_eq!(
+            serde_json::to_value(actual.info()).unwrap()["write"],
+            case["write"],
+            "{operation}"
+        );
         if operation != "closed" {
             db.close().unwrap();
         }

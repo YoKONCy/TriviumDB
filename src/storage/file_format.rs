@@ -6,7 +6,7 @@
 
 use crate::VectorType;
 use crate::database::StorageMode;
-use crate::error::{Result, TriviumError};
+use crate::error::{Result, TriviumError, WriteErrorInfo, WriteOutcome, WritePhase};
 use crate::index::bq::BqSignature;
 use crate::node::{Edge, NodeId};
 use crate::storage::fs::robust_rename_and_sync;
@@ -22,7 +22,11 @@ mod publication;
 pub(crate) use publication::recover as recover_publication;
 
 /// 从已关闭的独占暂存库排他移动完整文件组；不产生硬链接，保留目标互斥锁。
-pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) -> Result<()> {
+pub(crate) fn publish_new_database<T: VectorType>(
+    source: &str,
+    target: &str,
+    write: &mut WriteErrorInfo,
+) -> Result<()> {
     validate_checkpoint_type::<T>(source, &vec_path_from_db(source), source)?;
     let generation = read_marker_generation(&flush_ok_path_from_db(source)).ok_or_else(|| {
         TriviumError::CorruptedFile(
@@ -37,6 +41,8 @@ pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) ->
     }
     let mut created = Vec::new();
     let mut committed = false;
+    write.phase = WritePhase::Publish;
+    write.outcome = WriteOutcome::Unknown;
     let result = (|| -> Result<()> {
         publication::begin(target, generation, StorageMode::Mmap, false)?;
         let suffixes = crate::storage::snapshot::generation_suffixes(source);
@@ -79,6 +85,9 @@ pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) ->
         crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationAfterCommit)?;
         crate::storage::fs::sync_parent_directory(Path::new(source))?;
         crate::storage::fs::sync_parent_directory(Path::new(target))?;
+        write.outcome = WriteOutcome::Committed;
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationCleanup)?;
         publication::cleanup(target)?;
         Ok(())
     })();
@@ -98,13 +107,14 @@ pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) ->
             publication::cleanup(target)?;
         }
         crate::storage::fs::sync_parent_directory(Path::new(target))?;
+        write.outcome = WriteOutcome::NotCommitted;
     }
     result
 }
 
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
-pub const CURRENT_VERSION: u16 = 10;
+pub const CURRENT_VERSION: u16 = 11;
 pub const MINIMUM_SUPPORTED_VERSION: u16 = 5;
 const LEGACY_HEADER_SIZE: u64 = 58;
 const HEADER_SIZE: u64 = 74;
@@ -653,6 +663,19 @@ pub fn save<T: VectorType>(
     path: &str,
     mode: StorageMode,
 ) -> Result<()> {
+    let mut write = WriteErrorInfo {
+        transaction_consumed: None,
+        ..WriteErrorInfo::TRANSACTION_ADMISSION
+    };
+    save_with_write_info(memtable, path, mode, &mut write)
+}
+
+pub(crate) fn save_with_write_info<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    path: &str,
+    mode: StorageMode,
+    write: &mut WriteErrorInfo,
+) -> Result<()> {
     let runtime = memtable.resource_runtime().clone();
     let peak = memtable
         .estimated_memory_bytes()
@@ -667,7 +690,7 @@ pub fn save<T: VectorType>(
         runtime.reserve_workspace(peak)?
     };
     memtable.ensure_readable()?;
-    let result = save_inner(memtable, path, mode);
+    let result = save_inner(memtable, path, mode, write);
     if result.is_err() && memtable.vec_pool().recovery_required() {
         memtable.require_recovery();
     }
@@ -678,6 +701,7 @@ fn save_inner<T: VectorType>(
     memtable: &mut MemTable<T>,
     path: &str,
     mode: StorageMode,
+    write: &mut WriteErrorInfo,
 ) -> Result<()> {
     // 在主文件发布前处理延期操作；失败时保留原 sidecar 与所有待合并记录。
     let mut release_text_after_save =
@@ -696,6 +720,8 @@ fn save_inner<T: VectorType>(
     }
     // 保留原 CRC，不以重新计算校验和的方式“认可”未加载文件中的损坏。
     let preserved_text_meta = memtable.deferred_text_metadata();
+    write.phase = WritePhase::Publish;
+    write.outcome = WriteOutcome::Unknown;
     if mode == StorageMode::Rom && publication::pending(path) {
         memtable.vec_pool_mut().detach_mmap();
         publication::recover::<T>(path, true)?;
@@ -791,6 +817,7 @@ fn save_inner<T: VectorType>(
     } else {
         publication::commit_rom(path)?;
     }
+    write.outcome = WriteOutcome::Committed;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::hit_for_path(
         crate::test_hooks::ConcurrencyPoint::AfterPublicationCommitted,
@@ -1091,6 +1118,19 @@ fn save_tdb<T: VectorType>(
     unique_bytes.extend_from_slice(&unique_crc.to_le_bytes());
     w.write_all(&unique_bytes)?;
 
+    let _receipt_workspace = memtable.resource_runtime().reserve_workspace(
+        memtable
+            .editing
+            .memory_bytes()
+            .saturating_mul(3)
+            .saturating_add(128),
+    )?;
+    let receipts = memtable.editing.checkpoint()?;
+    w.write_all(&receipts)?;
+    w.write_all(&(receipts.len() as u64).to_le_bytes())?;
+    w.write_all(&crc32fast::hash(&receipts).to_le_bytes())?;
+    w.write_all(b"TREC")?;
+
     w.flush()?;
     let file = w
         .into_inner()
@@ -1171,10 +1211,25 @@ pub(crate) fn checkpoint<T: VectorType>(
     mode: StorageMode,
     skip_clean: bool,
 ) -> Result<()> {
+    let mut write = WriteErrorInfo {
+        transaction_consumed: None,
+        ..WriteErrorInfo::TRANSACTION_ADMISSION
+    };
+    checkpoint_with_write_info(memtable, wal, path, mode, skip_clean, &mut write)
+}
+
+pub(crate) fn checkpoint_with_write_info<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    wal: &mut crate::storage::wal::Wal,
+    path: &str,
+    mode: StorageMode,
+    skip_clean: bool,
+    write: &mut WriteErrorInfo,
+) -> Result<()> {
     memtable.ensure_readable()?;
     wal.ensure_writable()?;
     if !skip_clean || memtable.needs_checkpoint() {
-        if let Err(error) = save(memtable, path, mode) {
+        if let Err(error) = save_with_write_info(memtable, path, mode, write) {
             if memtable.ensure_readable().is_err() {
                 // 关闭 writer，拦住失效前已准入、仍在等待 MemTable 锁的写操作。
                 wal.release_writer();
@@ -1846,6 +1901,12 @@ fn load_unique_constraints<T: VectorType>(
     if version < 8 {
         return Ok(());
     }
+    let (bytes, receipts) = if version >= 11 {
+        let (bytes, receipts) = crate::storage::edit_receipts::split_checkpoint(bytes)?;
+        (bytes, Some(receipts))
+    } else {
+        (bytes, None)
+    };
     let start = layout.map_or(bytes.len(), |layout| layout.end_offset);
     let block = bytes.get(start..).ok_or_else(|| {
         TriviumError::CorruptedFile(
@@ -1946,7 +2007,18 @@ fn load_unique_constraints<T: VectorType>(
             .saturating_mul(count)
             .saturating_mul(256),
     )?;
-    memtable.restore_unique_index_definitions(&definitions)
+    memtable.restore_unique_index_definitions(&definitions)?;
+    if let Some(receipts) = receipts {
+        for raw in crate::storage::edit_receipts::records(receipts)? {
+            memtable.check_load_allocation(
+                raw.len()
+                    .saturating_mul(4)
+                    .saturating_add(memtable.editing.queue_bytes()),
+            )?;
+            memtable.editing.restore(raw)?;
+        }
+    }
+    Ok(())
 }
 
 fn admit_sidecar<T: VectorType>(mt: &MemTable<T>, path: &str, expansion: usize) -> Result<()> {

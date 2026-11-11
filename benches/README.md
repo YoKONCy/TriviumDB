@@ -30,6 +30,8 @@
 | `bench_tsng_pipeline` | Q1–Q14 管线覆盖及 Q5 分层诊断 | `TDB_PIPELINE_NODES`、`TDB_PIPELINE_DIM` |
 | `bench_pipeline_gate` | 四维度、四查询族最终 matched-result Gate | `TDB_PIPELINE_GATE_NODES`；`pipeline-gate.json` |
 
+`bench_pipeline_gate` 对每个计划逐行验证预期的 `property_origin`，随后按原始顺序精确比较其余完整 `NodeRow` 字段。`property_filter_rank` 的全量评分加交集计划清除属性入口，直接属性召回加精排计划保留 `active=true`；其他三个查询族的两侧均按集合合并规则清除该入口。报告中的哈希用于结果标识，正确性由完整行比较验证。属性执行来源语义见 [TQL 参考](../docs/tql-reference.md)。
+
 ## C. 图与查询并行
 
 | Cargo 名称 | 目的 | 默认矩阵 |
@@ -38,7 +40,7 @@
 | `bench_graph_parallel` | BFS、PageRank、WCC、Betweenness、标签传播线程扩展 | 100K；1/2/4/8/16 线程 |
 | `bench_deep_traversal` | 单源大前沿 BFS 与 TEPS | 1M × 出度 4/8/16 × 深度 3/5/8 |
 
-这三个套件都校验不同线程数的稳定结果哈希。哈希不一致属于正确性失败，而不是性能噪声。
+这三个套件校验不同线程数的稳定结果哈希，哈希不一致按正确性失败处理。
 
 ## D. QuIVer 质量与规模
 
@@ -56,11 +58,11 @@
 | `bench_sensitivity` | 参数敏感性 |
 | `bench_quiver_ablation` | QuIVer 组件消融 |
 
-外部数据集套件不会静默下载数据。运行前应按源码顶部说明准备输入路径，并记录数据集版本和校验和。
+> **数据准备**：运行外部数据集套件前，按源码顶部说明下载数据并配置输入路径，同时记录数据集版本和校验和。
 
 ## E. 研究与硬件消融
 
-以下套件不是日常回归基准，必须显式启用 `ablation` feature：
+以下研究套件通过 `ablation` feature 显式启用：
 
 ```powershell
 cargo bench --features ablation --bench bench_encoding_ablation

@@ -93,7 +93,10 @@ fn 复合唯一键仅反映事务最终状态且wal恢复保留其他所有者()
                     let result =
                         instance.insert_with_id(9, &[1., 0.], json!({"tenant":"t","key":key}));
                     assert!(
-                        matches!(result, Err(TriviumError::UniqueConstraintViolation { .. })),
+                        matches!(
+                            result.as_ref().unwrap_err().underlying(),
+                            TriviumError::UniqueConstraintViolation { .. }
+                        ),
                         "{ending}/{key}: {result:?}"
                     );
                     assert_eq!(std::fs::read(format!("{base}.wal")).unwrap(), before);
@@ -110,8 +113,11 @@ fn 复合唯一键仅反映事务最终状态且wal恢复保留其他所有者()
                     Some(json!({"tenant":"t","key":"free"}))
                 );
                 assert!(matches!(
-                    reopened.insert_with_id(10, &[1., 0.], json!({"tenant":"t","key":"b"})),
-                    Err(TriviumError::UniqueConstraintViolation { .. })
+                    reopened
+                        .insert_with_id(10, &[1., 0.], json!({"tenant":"t","key":"b"}))
+                        .unwrap_err()
+                        .underlying(),
+                    TriviumError::UniqueConstraintViolation { .. }
                 ));
                 reopened.close().unwrap();
             }
@@ -407,8 +413,8 @@ fn 各类索引构建在预算不足时保持事实定义缓存与wal并可重�
             let wal = std::fs::read(format!("{path}.wal")).unwrap();
             assert!(
                 matches!(
-                    create_index(&mut db, kind),
-                    Err(TriviumError::CapacityReservationRejected { .. })
+                    create_index(&mut db, kind).unwrap_err().underlying(),
+                    TriviumError::CapacityReservationRejected { .. }
                 ),
                 "{kind}"
             );
@@ -468,8 +474,8 @@ fn 唯一索引构建发现重复时保留原有非唯一索引定义() {
             db.create_unique_index("key")
         };
         assert!(matches!(
-            failed,
-            Err(TriviumError::UniqueConstraintViolation { .. })
+            failed.unwrap_err().underlying(),
+            TriviumError::UniqueConstraintViolation { .. }
         ));
         assert_eq!(
             serde_json::to_value(db.index_info().unwrap()).unwrap(),

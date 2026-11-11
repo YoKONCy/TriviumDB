@@ -46,10 +46,18 @@ pub enum ConcurrencyPoint {
     MigrationBeforeCommit,
     MigrationCommitted,
     TqlPathStep,
+    ConsoleBeforeCommit,
+    BeforeTransactionWal,
+    TransactionWalLockAcquired,
+    DirectWriteWalLockAcquired,
+    ExactScanStep,
+    GraphAlgorithmStep,
+    GraphAlgorithmIteration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoPoint {
+    DirectWriteApply,
     TransactionApply,
     SnapshotCopy,
     SnapshotSync,
@@ -74,6 +82,7 @@ pub enum IoPoint {
     MigrationAfterFirstFile,
     MigrationPublishMarker,
     MigrationAfterCommit,
+    MigrationCleanup,
     WalFlush,
     WalSync,
     WalMigrationCreate,

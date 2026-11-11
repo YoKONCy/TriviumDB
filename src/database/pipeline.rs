@@ -41,12 +41,15 @@ impl PipelineOutput {
 
 use super::{HookReadScope, read_or_recover, try_start_quiver_build, write_or_recover};
 
-fn call_hook<R>(call: impl FnOnce() -> R) -> R {
-    let _scope = HookReadScope::enter();
-    call()
+fn call_hook<T: VectorType, R>(
+    memtable: &Arc<RwLock<MemTable<T>>>,
+    call: impl FnOnce() -> R,
+) -> Result<R> {
+    let _scope = HookReadScope::enter(memtable)?;
+    Ok(call())
 }
 
-fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
+pub(super) fn validate_config(config: &SearchConfig, dim: usize) -> Result<()> {
     for (name, value) in [
         ("min_score", config.min_score),
         ("fista_lambda", config.fista_lambda),
@@ -61,7 +64,8 @@ fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
         if !value.is_finite() {
             return Err(crate::error::TriviumError::InvalidInput(format!(
                 "检索配置 {name} 必须是有限数值 (Search config {name} must be finite)"
-            )));
+            ))
+            .at_field(name));
         }
     }
 
@@ -70,17 +74,30 @@ fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
             return Err(crate::error::TriviumError::DimensionMismatch {
                 expected: dim,
                 got: bias.len(),
-            });
+            }
+            .at_field("diffusion_bias"));
         }
         if bias.iter().any(|value| !value.is_finite()) {
             return Err(crate::error::TriviumError::InvalidVector {
                 reason:
                     "扩散偏置向量包含 NaN 或 Infinity (Diffusion bias contains NaN or Infinity)"
                         .to_string(),
-            });
+            }
+            .at_field("diffusion_bias"));
         }
     }
 
+    if config.min_edge_weight < 0.0 {
+        return Err(crate::error::TriviumError::InvalidInput(
+            "min_edge_weight 不得为负数 (min_edge_weight must be non-negative)".into(),
+        )
+        .at_field("min_edge_weight"));
+    }
+    Ok(())
+}
+
+fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
+    validate_config(config, dim)?;
     config.top_k = config.top_k.max(1);
     config.recall_k = if config.recall_k == 0 {
         config.top_k.saturating_mul(8).max(64)
@@ -97,11 +114,6 @@ fn sanitize_config(config: &mut SearchConfig, dim: usize) -> Result<()> {
     config.teleport_alpha = config.teleport_alpha.clamp(0.0, 1.0);
     config.dpp_quality_weight = config.dpp_quality_weight.clamp(0.0, 10.0);
     config.fista_threshold = config.fista_threshold.clamp(0.0, f32::MAX);
-    if config.min_edge_weight < 0.0 {
-        return Err(crate::error::TriviumError::InvalidInput(
-            "min_edge_weight 不得为负数 (min_edge_weight must be non-negative)".into(),
-        ));
-    }
     Ok(())
 }
 
@@ -125,7 +137,7 @@ fn check_hook_error(ctx: &mut HookContext) -> Result<()> {
     if let Some(error) = ctx.error.take() {
         return Err(crate::error::TriviumError::HookExecutionError(error));
     }
-    Ok(())
+    crate::request::check_current()
 }
 
 /// 执行完整的混合检索管线
@@ -145,6 +157,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     config: &SearchConfig,
     ctx: &mut HookContext,
 ) -> Result<PipelineOutput> {
+    crate::request::check_current()?;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeSearchReadLock);
     let runtime = read_or_recover(memtable).resource_runtime().clone();
@@ -209,10 +222,14 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     let original_hook_query = crate::vector::is_binary_vector::<T>().then(|| query_vec_f32.clone());
     {
         let t0 = std::time::Instant::now();
-        call_hook(|| hook.on_pre_search(&mut query_vec_f32, &mut safe_cfg, ctx));
+        call_hook(memtable, || {
+            hook.on_pre_search(&mut query_vec_f32, &mut safe_cfg, ctx)
+        })?;
         ctx.record_timing("hook_pre_search", t0.elapsed());
         check_hook_error(ctx)?;
     }
+
+    crate::request::check_current()?;
 
     // 如果 Hook 请求提前终止管线，直接返回空结果
     if ctx.abort {
@@ -272,7 +289,9 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     let custom_recall_result = {
         let t0 = std::time::Instant::now();
-        let result = call_hook(|| hook.on_custom_recall(&query_vec_f32, config, ctx));
+        let result = call_hook(memtable, || {
+            hook.on_custom_recall(&query_vec_f32, config, ctx)
+        })?;
         ctx.record_timing("hook_custom_recall", t0.elapsed());
         result
     };
@@ -355,7 +374,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     {
         let t0 = std::time::Instant::now();
-        call_hook(|| hook.on_post_recall(&mut anchor_hits, ctx));
+        call_hook(memtable, || hook.on_post_recall(&mut anchor_hits, ctx))?;
         ctx.record_timing("hook_post_recall", t0.elapsed());
     }
 
@@ -377,7 +396,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     {
         let t0 = std::time::Instant::now();
-        call_hook(|| hook.on_pre_graph_expand(&mut seeds, ctx));
+        call_hook(memtable, || hook.on_pre_graph_expand(&mut seeds, ctx))?;
         ctx.record_timing("hook_pre_graph_expand", t0.elapsed());
     }
 
@@ -412,7 +431,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     {
         let t0 = std::time::Instant::now();
-        if let Some(reranked) = call_hook(|| hook.on_rerank(&mut expanded, ctx)) {
+        if let Some(reranked) = call_hook(memtable, || hook.on_rerank(&mut expanded, ctx))? {
             expanded = reranked;
         }
         check_hook_error(ctx)?;
@@ -455,7 +474,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         // 🔌 Hook #6: on_post_search（DPP 分支）
         {
             let t0 = std::time::Instant::now();
-            call_hook(|| hook.on_post_search(&mut final_results, ctx));
+            call_hook(memtable, || hook.on_post_search(&mut final_results, ctx))?;
             ctx.record_timing("hook_post_search", t0.elapsed());
         }
         return Ok(PipelineOutput {
@@ -472,7 +491,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     // ═══════════════════════════════════════════════════════
     {
         let t0 = std::time::Instant::now();
-        call_hook(|| hook.on_post_search(&mut expanded, ctx));
+        call_hook(memtable, || hook.on_post_search(&mut expanded, ctx))?;
         ctx.record_timing("hook_post_search", t0.elapsed());
         check_hook_error(ctx)?;
     }
@@ -1610,22 +1629,31 @@ mod tests {
 
     #[test]
     fn test_hook回调期间写重入保护已激活() {
-        struct ProbeHook(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        struct ProbeHook(
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+            Arc<RwLock<MemTable<f32>>>,
+        );
         impl SearchHook for ProbeHook {
             fn on_pre_search(&self, _: &mut Vec<f32>, _: &mut SearchConfig, _: &mut HookContext) {
                 self.0.store(
-                    super::super::reject_hook_reentrant_write().is_err(),
+                    matches!(
+                        super::super::reject_hook_reentrant_access(&self.1),
+                        Err(crate::TriviumError::ReentrantAccess {
+                            operation: "hook_callback"
+                        })
+                    ),
                     std::sync::atomic::Ordering::SeqCst,
                 );
             }
         }
 
         let blocked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let hook: Arc<dyn SearchHook> = Arc::new(ProbeHook(std::sync::Arc::clone(&blocked)));
         let mt = wrap(make_memtable(
             3,
             &[(1, vec![1.0, 0.0, 0.0], serde_json::json!({}))],
         ));
+        let hook: Arc<dyn SearchHook> =
+            Arc::new(ProbeHook(std::sync::Arc::clone(&blocked), mt.clone()));
         let mut ctx = HookContext::new();
         execute_pipeline(
             &mt,
@@ -1638,7 +1666,7 @@ mod tests {
         )
         .unwrap();
         assert!(blocked.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(super::super::reject_hook_reentrant_write().is_ok());
+        assert!(super::super::reject_hook_reentrant_access(&mt).is_ok());
     }
 
     #[test]

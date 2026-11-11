@@ -67,7 +67,7 @@ pub struct ResourceBudgetDetails {
 
 impl ResourceBudgetDetails {
     pub(crate) fn from_error(error: &TriviumError) -> Option<Self> {
-        match error {
+        match error.underlying() {
             TriviumError::ResourceBudgetExceeded {
                 resource,
                 requested,
@@ -88,13 +88,17 @@ impl ResourceBudgetDetails {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ResourceFailure {
     pub kind: &'static str,
+    pub code: &'static str,
     pub message: String,
+    pub details: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write: Option<crate::error::WriteErrorInfo>,
     pub budget: Option<ResourceBudgetDetails>,
 }
 
 impl ResourceFailure {
     pub(crate) fn from_error(error: &TriviumError) -> Self {
-        let kind = match error {
+        let kind = match error.underlying() {
             TriviumError::ResourceBudgetExceeded { .. } => "resource_budget",
             TriviumError::Io(_) => "io",
             TriviumError::CapacityAllocationFailed { .. } => "capacity",
@@ -104,7 +108,10 @@ impl ResourceFailure {
         };
         Self {
             kind,
+            code: error.code(),
             message: error.to_string(),
+            details: error.details(),
+            write: error.info().write,
             budget: ResourceBudgetDetails::from_error(error),
         }
     }
@@ -183,8 +190,9 @@ impl ResourceRuntime {
     pub fn new(mut limits: ResourceLimits) -> Result<Self> {
         if limits.max_threads > 64 {
             return Err(TriviumError::InvalidInput(
-                "运行时工作线程上限不得超过 64".into(),
-            ));
+                "运行时工作线程上限不得超过 64 (Runtime worker limit must not exceed 64)".into(),
+            )
+            .at_field("max_threads"));
         }
         if limits.memory_limit > 0 {
             if limits.maintenance_memory_limit == 0 {
@@ -192,8 +200,8 @@ impl ResourceRuntime {
             }
             if limits.maintenance_memory_limit > limits.memory_limit {
                 return Err(TriviumError::InvalidInput(
-                    "维护保护额度不能超过运行时总内存额度".into(),
-                ));
+                    "维护保护额度不能超过运行时总内存额度 (Maintenance memory limit must not exceed the runtime memory limit)".into(),
+                ).at_field("maintenance_memory_limit"));
             }
         }
         if limits.max_threads == 0 {
@@ -785,6 +793,33 @@ impl ResourcePool {
 mod tests {
     use super::*;
     use rayon::prelude::*;
+
+    #[test]
+    fn 写入上下文保留资源故障类别与预算字段() {
+        let budget = TriviumError::ResourceBudgetExceeded {
+            resource: "memory_bytes",
+            requested: 512,
+            used: 768,
+            limit: 1024,
+        }
+        .with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION);
+        let failure = ResourceFailure::from_error(&budget);
+        assert_eq!(failure.kind, "resource_budget");
+        assert_eq!(
+            failure.budget,
+            Some(ResourceBudgetDetails {
+                resource: "memory_bytes",
+                requested: 512,
+                used: 768,
+                limit: 1024,
+            })
+        );
+        let io = TriviumError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION);
+        let failure = ResourceFailure::from_error(&io);
+        assert_eq!(failure.kind, "io");
+        assert_eq!(failure.budget, None);
+    }
 
     #[test]
     fn 工作区扩缩容拒绝与释放准确维护两类账本() {

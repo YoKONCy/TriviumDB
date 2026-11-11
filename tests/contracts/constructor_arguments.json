@@ -1,0 +1,33 @@
+{
+  "python_signatures": {
+    "TriviumDB": "(path, dim=1536, dtype='f32', sync_mode='normal', load_text_index=False, auto_build_quiver=True, expected_nodes=None, memory_limit_mb=0, payload_cache_mb=64, payload_cache_entry_mb=8, access_mode='read_write', missing_index_policy='fallback', max_query_rows=None, row_overflow='throw', runtime=None)",
+    "ResourceRuntime": "(memory_limit_mb=0, max_threads=0, max_active_tasks=0, maintenance_memory_limit_mb=0)",
+    "ConsoleSession": "(options_json='{}')"
+  },
+  "integers": [
+    {"python":"dim", "node":"dim"},
+    {"python":"expected_nodes", "node":"expectedNodes"},
+    {"python":"memory_limit_mb", "node":"memoryLimitMb"},
+    {"python":"payload_cache_mb", "node":"payloadCacheMb"},
+    {"python":"payload_cache_entry_mb", "node":"payloadCacheEntryMb"},
+    {"python":"max_query_rows", "node":"maxQueryRows"}
+  ],
+  "strings": [
+    {"python":"dtype", "node":"dtype"},
+    {"python":"sync_mode", "node":"syncMode"},
+    {"python":"access_mode", "node":"accessMode"},
+    {"python":"missing_index_policy", "node":"missingIndexPolicy"},
+    {"python":"row_overflow", "node":"rowOverflow"}
+  ],
+  "booleans": [
+    {"python":"auto_build_quiver", "node":"autoBuildQuiver"},
+    {"python":"load_text_index", "node":"loadTextIndex"}
+  ],
+  "runtime_integers": [
+    {"python":"memory_limit_mb", "node":"memoryLimitMb"},
+    {"python":"max_threads", "node":"maxThreads"},
+    {"python":"max_active_tasks", "node":"maxActiveTasks"},
+    {"python":"maintenance_memory_limit_mb", "node":"maintenanceMemoryLimitMb"}
+  ],
+  "saved": {"id":7,"vector":[1,0],"payload":{"name":"构造失败后的完整事实"}}
+}

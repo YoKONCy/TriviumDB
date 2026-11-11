@@ -476,7 +476,7 @@ fn COV2_17_tql_mut_rejects_read_query() {
 
     let error = db.tql_mut(r#"FIND {type: "user"} RETURN *"#).unwrap_err();
     assert!(matches!(
-        error,
+        error.underlying(),
         triviumdb::TriviumError::ApiMigrationRequired { .. }
     ));
 

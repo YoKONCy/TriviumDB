@@ -1,17 +1,12 @@
 # TriviumDB API 完整参考
 
-嵌入式 Console 新增 `ConsoleSession`、Rust `ConsoleHost` 和 `Database::console_request`；Python 对应 `db.console_request(session, request_json)`，Node 对应 `db.consoleRequest(session, requestJson)`。三端均收发原始 JSON 字符串，复用同一数据库实例与生命周期；权限、取消、完整 u64 ID、HTTP 适配及资源包见[宿主接入文档](embedded-console.md)。该入口不自动挂载或改写现有 HTML。
-
-> **版本**: `0.9.0` 公共 API；见[变更说明](changes/0.9.0.md)。
-> **语言**: Rust 核心 + Python 绑定 (PyO3) + Node.js 绑定 (napi-rs)  
-> **许可**: Apache-2.0
-
-共享资源运行时、实例诊断、受控关闭和目录快照从 `0.9.0-beta.1` 起提供。配置与示例见[资源运行时](resource-runtime.md)和[关闭、快照与恢复](lifecycle-snapshots.md)。
+> 本文列出 `0.9.0` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本记录见[变更说明](changes/0.9.0.md)，开发中的接口扩展见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
 
 ---
 
 ## 目录
 
+- [嵌入式 Console 与共享资源](#嵌入式-console-与共享资源)
 - [数据库生命周期](#数据库生命周期)
 - [节点 CRUD](#节点-crud)
 - [图谱操作](#图谱操作)
@@ -24,17 +19,60 @@
 - [持久化与压缩](#持久化与压缩)
 - [多实例资源运行时与诊断](#多实例资源运行时与诊断)
 - [内存管理](#内存管理)
+- [文本索引与稀疏检索](#文本索引与稀疏检索)
 - [工具方法](#工具方法)
 - [维度迁移](#维度迁移)
 - [事务支持](#事务支持)
 - [Pythonic 魔术方法](#pythonic-魔术方法)
 - [数据类型说明](#数据类型说明)
+- [写入与数值边界](#写入与数值边界)
+- [持久化类型、解析与打开准入](#持久化类型解析与打开准入)
+
+---
+
+## 嵌入式 Console 与共享资源
+
+嵌入式 Console 新增 `ConsoleSession`、Rust `ConsoleHost` 和 `Database::console_request`；Python 对应 `db.console_request(session, request_json)`，Node 对应 `db.consoleRequest(session, requestJson)`。三端均收发原始 JSON 字符串，复用同一数据库实例与生命周期。HTML 内置 Console RPC 适配，`console-embed.js` 提供同源 iframe 挂载、草稿命名空间和卸载入口；权限、取消、完整 u64 ID、HTTP/IPC 桥接及资源包见[宿主接入文档](embedded-console.md)。
+
+`ConsoleSession::is_drained()`、Python `session.is_drained()` 和 Node `session.isDrained()` 在 detach 后全部 Core 请求实际退出时返回 `true`。嵌入 HTTP 通过 `GET /v1/console/status` 返回相同的 `drained` 字段。请求执行、客户端取消调用与响应交付的完成范围见[请求与传输完成点](error-contracts.md#请求与传输完成点)。
+
+当前开发版本扩展 Console RPC v1：`getNodes(withRevision:true)` 返回一致的编辑快照，`guardedTransaction` 原子校验全库版本并提供实例内幂等回执，`transactionStatus` 以完整原请求确认结果。这些是未发布能力，普通事务的无条件写入语义保持不变；具体字段、冲突和重启边界见[编辑协议](embedded-console.md#编辑快照冲突与原事务确认)。Rust、Python、Node 继续通过现有 JSON 字符串入口调用，三端使用同一份协议字段。
+
+共享资源运行时、实例诊断、受控关闭和目录快照从 `0.9.0-beta.1` 起提供。配置与示例见[资源运行时](resource-runtime.md)和[关闭、快照与恢复](lifecycle-snapshots.md)。
+
+当前开发版本为 Python 公开实例方法、选定魔术方法和模块函数的缺参、未知关键字、重复赋值及位置数量错误提供 `TypeError`、`TDB_INVALID_INPUT`、`target.field` 与 `details.argument_kind`。Node 公共加载器为已登记的必需位置参数提供同类缺参字段。已覆盖写调用在执行前拒绝时返回 `validation/not_committed`，事务缓冲保留。调用形状与构造期覆盖范围见[错误契约](error-contracts.md#公开调用形状)。
+
+数据库、资源运行时和会话构造补齐已覆盖参数值的字段诊断。Python 保留内置提取错误继承及宿主原异常，Node 校验已覆盖配置的原始类型。维度、运行时线程上限、维护额度和 MiB 换算拒绝提供对应字段，打开失败后配额归还；字段清单与剩余范围见[构造参数值](error-contracts.md#构造参数值)。
+
+Node 数据库及资源运行时的 options 使用非数组对象，省略／null 使用默认配置。资源运行时的原始值及数组配置现按对象契约拒绝，字段为 options。旧数字位置数据库构造提供 TDB_API_MIGRATION_REQUIRED 和规范迁移详情。Python 内置布尔提取及两端 runtime 句柄拒绝补齐字段，快照恢复模块的已知句柄拒绝提供 validation/not_committed。npm 声明同步可选配置及模块 runtime 的 null 默认形式。
+
+Python 的 TriviumDB、ResourceRuntime 和 ConsoleSession 构造器补齐缺参、未知关键字、重复赋值与额外位置诊断，Node 数据库构造补齐 path 缺参。十五个普通 CRUD 的已知参数转换拒绝提供 validation/not_committed，批量与 JSON 成员使用 `/vectors/1/0` 等 JSON Pointer 定位。顶层字段沿当前参数名提供，完整规则与宿主异常边界见[普通 CRUD 参数](error-contracts.md#普通-crud-参数与成员定位)。
+
+Python 批量插入的 vectors 和 payloads 外层为 list，ID 集合与单条向量为非字符串 Sequence。生成存根按此表示提供精确类型，三个构造器的 __signature__ 及默认值由 SDK 元数据维护，支持 Python 3.9。
+
+八类检索、四类图读取、属性／子串查找和文本维护补齐浮点、布尔、向量、标签、JSON 与重建记录的字段诊断。读取省略 write，文本维护的已知转换拒绝提供 validation/not_committed。Python 重建记录接受 Mapping，Node 配置使用非数组对象，未知重建字段按记录契约拒绝。可选位置参数和配置成员的 null 区别、成员路径及 searchBatch 的 Promise 完成方式见[检索、图与文本参数](error-contracts.md#检索图与文本参数)。
 
 ---
 
 ## 数据库生命周期
 
 实例通过同步关闭或受控关闭完成持久化与资源释放。独立目录快照支持捕获、校验和恢复已打开数据库的状态。
+
+当前开发版的数据库共享访问及结构化拒绝见[SDK 指南](kernel-sdk.md#请求失败与错误字段)。Python 数据库方法区分同库回调重入和跨线程借用争用；事务提交在借用或内核准入被拒绝时保留待提交操作。
+
+Rust 的 `sdk::RequestContext` 统一携带请求 ID、取消／期限及写入类别，供共享句柄的 `try_read_with_context`、`try_write_with_context` 和 `commit_tx_with_context` 使用。Console 复用同一 Core 上下文，版本保护事务通过有界持久回执支持跨重开确认，调用及完成点见[统一请求上下文](kernel-sdk.md#统一请求上下文)和[回执协议](embedded-console.md#回执与结果确认)。
+
+普通类型化方法通过 Python `with RequestContext(...)` 和 Node `context.run(...)` 继承请求控制，Rust Reader／Writer 提供 `with_request_context`。两端构造器的期限单位为毫秒，0 由宿主取消管理，期限从创建时开始计算。任务局部传播、原生工作线程、事务消费及取消后的清理入口见[类型化绑定与包装对象](kernel-sdk.md#类型化绑定与包装对象)。
+
+当前开发版的 TQL 解析错误保留 `TDB_QUERY_PARSE` 和 `details.reason`，补充 `stage` 与可选 `target.query_span`。位置来自原始查询的 UTF-8 字节，行列按 Unicode 标量计算；字段、跨语言表示及 Rust 变体见 [TQL 结构化诊断](tql-reference.md#结构化查询诊断)。
+
+可靠解析位置提供完整 token 的半开范围。数据库准备的 Prepared 参数拒绝同时提供 `target.parameter` 和首个真实引用的 `target.query_span`。输入结束使用零长度锚点，额外参数提供名称，手工 AST 与独立标量转换按各自已知信息定位。
+
+Rust 的 `PreparedTql::parameter_from_json(name, value)` 将 JSON 标量转换与该查询的参数源码定位组合，返回 `Result<TqlParamValue>`。Python、Node、Console 和独立 Server 的 Prepared JSON 参数转换复用此入口。Rust 参数错误通过 `underlying()` 匹配原始变体，`info()` 提供参数名及可用范围。
+
+TQL 增加 `plan` 和 `execute` 诊断，来源树覆盖完整的 AST 构造节点。符号检查定位具体引用，实际算子、投影和事务在执行点附加来源，融合算子保留参与节点的包围范围。Rust 使用 `parse_tql_located` 与 `parse_tql_statement_located` 创建配对解析结果，通过 `LocatedTql` 的 `ast()`、`source()`、`into_ast()` 及 `PreparedTql::from_located` 访问或保留来源。普通字段与参数目标可同时携带查询范围，源码与阶段由 Core 提供。
+
+已覆盖的普通 API 输入使用 `target.field` 定位，并保留原始错误码、详情和完成阶段。容量预留使用 `additional`，同步模式使用 `mode`，内存额度的 Rust 字节接口使用 `bytes`，Python／Node 的 MiB 接口使用 `mb`。Rust 通过 `at_field()` 附加位置、`underlying()` 匹配原始变体。已知 Node 管理数字转换和 MiB 换算拒绝提供 `validation/not_committed`，Python 的单位换算溢出保留 `OverflowError` 继承。详见[公共错误契约](error-contracts.md)。
 
 ### Python
 
@@ -51,13 +89,13 @@ db = triviumdb.TriviumDB(
     dtype="f32",             # 向量类型："f32" | "f16" | "u64"
     sync_mode="normal",      # WAL 同步模式："full" | "normal" | "off"
     load_text_index=False,    # 打开时是否加载持久化全文索引
-    auto_build_quiver=True,   # 是否允许查询自动构建 QuIVer；flush 不会触发 ANN 构建
+    auto_build_quiver=True,   # 是否允许查询自动构建 QuIVer；flush 仅负责持久化
     expected_nodes=3_600_000, # 预计总节点数，用于本次打开的容量预留
     memory_limit_mb=28_672,   # 内核内存预算，0 表示不限制
     runtime=None,            # 使用进程共享运行时，可传入自建 ResourceRuntime
 )
 
-# 推荐：使用上下文管理器（退出时自动 flush 落盘）
+# 使用上下文管理器，退出时执行 close，完成持久化与资源释放
 with triviumdb.TriviumDB("my_data.tdb", dim=1536) as db:
     # ... 所有操作 ...
     pass  # 退出时自动调用 db.flush()
@@ -66,9 +104,9 @@ with triviumdb.TriviumDB("my_data.tdb", dim=1536) as db:
 **参数说明：**
 
 | 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
+| ------ | ------ | -------- | ------ |
 | `path` | `str` | *必填* | `.tdb` 文件路径，不存在时自动创建 |
-| `dim` | `int` | `1536` | 向量维度，必须与后续插入的向量长度一致；强烈建议不超过 3072 |
+| `dim` | `int` | `1536` | 向量维度，必须与后续插入的向量长度一致；建议不超过 3072 |
 | `dtype` | `str` | `"f32"` | 向量存储精度：`f32`（标准）、`f16`（省内存）、`u64`（SimHash） |
 | `sync_mode` | `str` | `"normal"` | WAL 写入安全级别，详见[持久化与压缩](#持久化与压缩) |
 | `load_text_index` | `bool` | `False` | 是否在打开时加载持久化全文索引 |
@@ -82,7 +120,7 @@ with triviumdb.TriviumDB("my_data.tdb", dim=1536) as db:
 
 `search_with_context` / `searchWithContext` 返回的上下文除阶段耗时和候选数外，还包含 `observations`：`estimated_heap_bytes`、`mmap_vector_bytes`、`node_count`、查询路由与 QuIVer `ef_search`；Linux 额外提供进程 RSS、累计主缺页和次缺页。缺页计数是进程累计值，调用方应计算相邻采样差值。
 
-> ⚠️ **强烈建议 `dim <= 3072`。** 数据库存储和精确 BruteForce 检索支持 3073–65536 维，但 QuIVer 仅支持 1–3072 维。高于 3072 维时，自动 QuIVer 构建会被安全跳过，搜索回退到 BruteForce；显式构建 QuIVer 会返回错误，不会 panic。若数据规模可能达到当前维度的动态 QuIVer 阈值并依赖 ANN 性能，请在建库前选择不超过 3072 维的 embedding 模型或先做降维。
+> **维度提醒**：QuIVer 支持 1–3072 维。3073–65536 维数据库使用精确 BruteForce 检索，显式构建 QuIVer 返回错误。依赖 ANN 性能时，请选择最多 3072 维的 embedding 模型或先降维。
 
 ### 只读访问模式
 
@@ -126,6 +164,8 @@ db.publish_generation_manifest("generation-42")?;
 
 Python 使用 `db.publish_generation_manifest("generation-42")`，Node.js 使用 `db.publishGenerationManifest("generation-42")`。该操作会先执行安全 `flush()`，随后为当前 `.tdb`、`.vec`、`.pld.<generation>`、`.flush_ok` 及已存在的 TextIndex/QuIVer sidecar 记录文件大小和 CRC32，并最后原子发布 `<path>.manifest.json`。
 
+同步模式和 generation 标识采用字符串参数。已覆盖的绑定类型拒绝提供 `TDB_INVALID_INPUT`、`target.field` 与 `validation/not_committed`，Python 保留原异常类型。generation 字段按语言入口使用 `generation_id` 或 `generationId`。manifest 回调重入提供 `admission/not_committed`，发布中的错误继续依据 Core 完成点判断。
+
 发布完成后可在不需要 `.lock` 和 `.wal` 的部署目录中使用：
 
 ```rust
@@ -145,9 +185,9 @@ Immutable 会在加载前验证 manifest 版本、完成状态、dtype、维度�
 `Config.missing_index_policy` 控制 Reader 遇到 QuIVer/TextIndex 缺失、错配或损坏时的行为：
 
 | 策略 | 行为 |
-|---|---|
+| --- | --- |
 | `Fallback` | 默认；忽略不可用 sidecar，QuIVer 回退安全检索路径 |
-| `BuildInMemory` | 允许当前进程在内存中惰性构建 QuIVer，但绝不写回 sidecar |
+| `BuildInMemory` | 允许当前进程在内存中惰性构建 QuIVer，磁盘 sidecar 保持原样 |
 | `Error` | 严格模式；立即返回 `ImmutableArtifactInvalid`，不修改任何文件 |
 
 Python 使用 `missing_index_policy="fallback|build_in_memory|error"`；Node.js 使用 `missingIndexPolicy: "fallback" | "buildInMemory" | "error"`。ReadOnly/Immutable Reader 禁止启用 `enable_refractory_fatigue`，避免不同 Worker 因进程本地疲劳状态产生不一致结果。
@@ -209,7 +249,7 @@ generations/
 
 `publish_current()` 使用临时文件、文件 `fsync`、原子 rename 和父目录同步，并在切换前完整验证 manifest、文件 checksum、generation ID 与实际 node count。`open_current()` 在解析 current 与获取 generation 共享租约期间持有管理共享锁，避免与切代或回收竞态。`GenerationReader` 在整个生命周期持有外部 runtime 共享租约；`reclaim_generation()` 只有取得排他租约后才删除旧代际，并且在 current 损坏时 fail closed。
 
-租约不会写入不可变 generation。默认 runtime 目录位于系统临时目录的 `triviumdb-runtime/store-<hash>`，也可以使用 `GenerationStore::with_runtime_dir(root, runtime_dir)` 指定可写位置。generation root 因此可以保持只读。
+租约写入独立 runtime 目录，generation root 保持只读。默认 runtime 位于系统临时目录的 `triviumdb-runtime/store-<hash>`，也可使用 `GenerationStore::with_runtime_dir(root, runtime_dir)` 指定可写位置。
 
 构造时固定相对根目录和运行目录的绝对位置；默认锁空间在根目录存在后按规范路径解析，根目录创建前后的 Store 共享租约。跨进程参与者使用一致的规范根路径与运行目录配置；跨容器将运行目录设为共享可写挂载，并保持根目录挂载路径一致。Reader 存活期间保持根目录位置稳定。升级时先结束旧版本 Reader 进程，再恢复旧代回收。
 
@@ -246,14 +286,14 @@ db.set_sync_mode(SyncMode::Off)?;
 
 数据访问统一执行生命周期检查：Rust 的 `get`、`get_payload`、`get_edge`、`get_edges`、`get_incoming_edges`、`get_all_ids`、`all_node_ids`、`node_count`、`contains`、`neighbors`、`neighbors_with_labels`、`shortest_path`、`graph_stats`、`validate_graph`、`list_indexes`、`list_unique_indexes`、`index_info` 与 `clear_search_state` 返回 `Result`；`set_hook` 也返回 `Result<()>`。调用方使用 `?` 或显式处理错误。Python/Node 的打开状态返回类型保持一致，关闭后抛错。状态、资源统计和配置诊断继续可读。
 
-`flush()` 通过 `.publish` 撤销日志管理主数据、向量、QuIVer、文本、属性与图索引文件组。Mmap 在各文件同步后提交 marker，Rom 在同步后提交日志状态；ReadWrite `open()` 先完成中断恢复，再流式回放 WAL。备份使用有界缓冲，额外磁盘空间与纳入发布的旧文件组大小对应。主文件使用 v10、marker 使用 v3、发布日志使用 v2，并支持读取历史 v1 日志。协议见[恢复说明](security.md#8-mmap-三文件一致性标记flush_ok-v3)。
+`flush()` 通过 `.publish` 撤销日志管理主数据、向量、QuIVer、文本、属性与图索引文件组。Mmap 在各文件同步后提交 marker，Rom 在同步后提交日志状态。ReadWrite `open()` 先完成中断恢复，再流式回放 WAL。备份使用有界缓冲，额外磁盘空间与纳入发布的旧文件组大小对应。当前开发主文件为 v11，marker 为 v3，发布日志为 v2，并支持读取历史 v1 日志。有界编辑回执随主文件一同发布，协议见[恢复说明](security.md#8-mmap-三文件一致性标记flush_ok-v3)。
 
 WAL 的完整帧发生 CRC、解码或超长字段损坏时，`open()` 返回 `CorruptedFile` 并保留完整日志；物理未写完的尾帧继续按提交边界恢复。QuIVer 元数据 v2 将索引绑定到主文件、向量内容及活跃 ID/slot；失配按 `missing_index_policy` 回退或报错。底层 BQ Rust 距离、签名读取和原始存储解码接口返回 `Result`，详见 [QuIVer 边界](quiver.md#索引事实绑定与-bq-边界)。
 
 **泛型类型参数 `T`：**
 
 | 类型 | 说明 | 适用场景 |
-|------|------|----------|
+| ------ | ------ | ---------- |
 | `f32` | 32 位浮点 | 标准 embedding（OpenAI、BGE 等） |
 | `half::f16` | 16 位半精度浮点 | 大规模数据集省内存 |
 | `u64` | 64 位无符号整数 | SimHash / 二值化向量 |
@@ -334,7 +374,7 @@ db.insert_with_id(42, &[0.1, 0.2, 0.3], json!({"source": "external"}))?;
 
 ### reserve_nodes — 主动预留增量容量
 
-`expected_nodes` 表示目标总节点数；`reserve_nodes(additional)` 表示从当前容量再增加可插入空间。两者只覆盖向量增量层、Payload/ID 映射、槽位与快速标签，不会提前构建 BQ、QuIVer、文本索引或图边。
+`expected_nodes` 表示目标总节点数；`reserve_nodes(additional)` 表示从当前容量再增加可插入空间。两者的容量预留范围为向量增量层、Payload/ID 映射、槽位与快速标签。BQ、QuIVer、文本索引和图边按各自构建或写入流程分配。
 
 ```python
 db.reserve_nodes(200_000)
@@ -368,7 +408,7 @@ db.reserveNodes(200_000)
 
 ### batch_insert — 批量插入
 
-一次性插入多个节点，返回所有新 ID 的列表。Python/Node 绑定会先转换并验证整个批次，再为整批预留核心容器，最后通过单个事务写入；任一向量、ID、容量预算或 WAL 步骤失败都不会产生半批数据。
+一次性插入多个节点，返回所有新 ID 的列表。Python/Node 绑定会先转换并验证整个批次，再为整批预留核心容器，最后通过单个事务写入；向量、ID、容量预算和 WAL 步骤遵循整批原子提交语义。
 
 **Python：**
 ```python
@@ -443,7 +483,7 @@ db.delete(42)
 db.delete(42)?;
 ```
 
-> ⚠️ 删除操作不可逆。删除后，该节点的向量区间被逻辑置零，待 Compaction 时物理回收。
+> **提醒**：删除操作不可逆。删除后，该节点的向量区间被逻辑置零，待 Compaction 时物理回收。
 
 ### get_payload — 轻量级获取元数据
 
@@ -483,7 +523,7 @@ edges.forEach(e => console.log(`${e.targetId} (${e.label})`))
 
 **Python：**
 ```python
-if db.contains(42):     # 或用 42 in db
+if 42 in db:
     print("节点存在")
 ```
 
@@ -492,13 +532,15 @@ if db.contains(42):     # 或用 42 in db
 if (db.contains(42)) console.log('节点存在')
 ```
 
+基础读取的 ID 类型及表示范围错误提供 `target.field=id`。Python 在请求借用内执行整数协议，`id in db` 使用同一规则。精确边读取分别定位 `src`、`dst`、`label`，入边读取定位 `id` 与 `label`。读取错误省略写入结果，详见[公共错误契约](error-contracts.md)。
+
 ---
 
 ## 图谱操作
 
 ### link — 建立有向边
 
-在两个节点之间建立一条有向带权边。边以 `(src, dst, label)` 三元组唯一；重复调用会更新 weight，不会增加重复边。两个端点必须已存在，weight 必须是有限 `f32`。标签长度最多为 65,535 个 UTF-8 字节，标签、Metadata、图索引容量与暂存峰值在写 WAL 前执行校验和预算准入。
+在两个节点之间建立一条有向带权边。边以 `(src, dst, label)` 三元组唯一；重复调用原位更新 weight。两个端点必须已存在，weight 必须是有限 `f32`。标签长度最多为 65,535 个 UTF-8 字节，标签、Metadata、图索引容量与暂存峰值在写 WAL 前执行校验和预算准入。
 
 **Python：**
 ```python
@@ -513,13 +555,13 @@ db.link(1, 2, "knows", 0.95)?;
 **参数说明：**
 
 | 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
+| ------ | ------ | -------- | ------ |
 | `src` | `u64` | *必填* | 源节点 ID |
 | `dst` | `u64` | *必填* | 目标节点 ID |
 | `label` | `str` | `"related"` | 边的类型标签（自定义字符串） |
 | `weight` | `f32` | `1.0` | 边的权重（支持负值，可用于表达抑制关系） |
 
-> 💡 边是**有向**的。如需双向关系，需调用两次 `link()`：`link(A, B)` + `link(B, A)`。
+> **提醒**：边是**有向**的。如需双向关系，需调用两次 `link()`：`link(A, B)` + `link(B, A)`。
 
 ### 精确边读取与 Upsert
 
@@ -582,6 +624,8 @@ let knows = db.neighbors_with_labels(1, 2, Some(&["knows".to_string()]));
 
 返回 `source_id`、`target_id`、`label` 和 `weight`，可按单个标签过滤。
 
+返回内容同时包含完整 Metadata，顺序按源 NodeId、标签升序。省略标签或传入 None／null 表示全部标签，空字符串精确匹配空标签。Unicode 与 NUL 继续作为标签内容处理。
+
 ```python
 incoming = db.get_incoming_edges(id=2, label="knows")
 ```
@@ -639,6 +683,10 @@ const paths = db.reachable(1, {
 - Python：`reachable_detailed()`、`query_subgraph()`
 - Node.js：`reachableDetailed()`、`querySubgraph()`
 
+Python 的上述三个入口及 `neighbors` 在请求借用内提取 ID、深度／预算、方向和标签序列。已覆盖类型拒绝提供 `target.field`，方向枚举拒绝保留 `ValueError`。Node 对 ID、深度／预算及方向补齐规范字段诊断，配置 getter 原异常直接传播。具体字段与可选参数规则见[公共错误契约](error-contracts.md)。
+
+SDK 在重入或借用争用时拒绝直接 CRUD 请求，错误提供 `write.phase=admission` 与 `write.outcome=not_committed`。读取请求省略写入结果。Node 公共声明同步提供已有运行接口 `deleteManyAtomic(ids): number` 和 `compareAndSetPayloadField(id, field, expected, replacement): void`。
+
 详细可达性同时返回 `visited_nodes/visitedNodes`、`traversed_edges/traversedEdges` 与 `truncated`。逐跳结果包含遍历方向的 `from/to`、原始边权重和元数据。子图按 NodeId 和原始 `(source, target, label)` 确定性排序，并保持入边的原始方向。
 
 ### 图统计、校验与修复
@@ -647,7 +695,7 @@ const paths = db.reachable(1, {
 
 ### 自定义 ID Upsert 与 Node.js 原子事务
 
-`upsert_with_id/upsertWithId` 在 ID 不存在时插入，存在时原子覆盖向量和 Payload。Node.js 的 `commitTransaction(operations)` 可在同一个 WAL-first 事务中混合 `insert`、`insertWithId`、`delete`、`updatePayload`、`updateVector`、`link/upsertEdge`、`unlink` 和 `unlinkLabel`；任何预检失败都不会应用部分操作。
+`upsert_with_id/upsertWithId` 在 ID 不存在时插入，存在时原子覆盖向量和 Payload。Node.js 的 `commitTransaction(operations)` 可在同一个 WAL-first 事务中混合 `insert`、`insertWithId`、`delete`、`updatePayload`、`updateVector`、`link/upsertEdge`、`unlink` 和 `unlinkLabel`；预检失败时整笔事务拒绝，原数据保持不变。
 
 ---
 
@@ -655,7 +703,7 @@ const paths = db.reachable(1, {
 
 ### search_graph_first — 图候选集内精确向量排名
 
-GraphFirst 先由业务图查询产生 anchor ID 集合，再只在该集合内进行精确向量评分。输入 anchor 会按 NodeId 去重；超过 `max_anchor_nodes` 时直接报错，不会退化为全库搜索。
+GraphFirst 先由业务图查询产生 anchor ID 集合，再只在该集合内进行精确向量评分。输入 anchor 会按 NodeId 去重；超过 `max_anchor_nodes` 时直接返回预算错误。
 
 anchor 容器与有界 Top-K 堆在分配前申请共享工作区，最终命中集合确定后再解析和复制 Payload。精确检索采用相同的最终物化步骤；工作区余额不足返回结构化资源预算错误，失败和完成均归还预留。
 
@@ -686,7 +734,7 @@ const hits = db.searchGraphFirst(
 )
 ```
 
-该 API 保证 anchor 集合内 Top-K 完备，但不会使用 QuIVer ANN。查询维度不匹配、`top_k=0`、预算为 0 或去重后的 anchor 数量超预算时返回错误；不存在的 anchor ID 会被忽略。
+该 API 对 anchor 集合执行精确评分，返回集合内完整的 Top-K。查询维度不匹配、`top_k=0`、预算为 0 或去重后的 anchor 数量超预算时返回错误；不存在的 anchor ID 会被忽略。
 
 ### search_hybrid — 双路混合认知检索 (强推)
 
@@ -735,7 +783,7 @@ for hit in &results {
 **参数说明：**
 
 | 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
+| ------ | ------ | -------- | ------ |
 | `query_vector` | `list[float]` | *必填* | 查询向量 |
 | `top_k` | `int` | `5` | 向量阶段返回的最相似节点数 |
 | `expand_depth` | `int` | `0` | 图谱扩散深度。设为 0 则退化为纯向量检索 |
@@ -744,10 +792,16 @@ for hit in &results {
 **返回值 `SearchHit`：**
 
 | 属性 | 类型 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `id` | `u64` | 命中节点的 ID |
 | `score` | `f32` | 相似度得分（余弦相似度或扩散热度） |
 | `payload` | `dict` | 节点的 JSON 元数据 |
+
+Python 普通／分组检索的整数数量及展开参数、批量检索的数量及并行度在请求借用后转换，已覆盖类型拒绝提供 `TDB_INVALID_INPUT` 与 `target.field`，保留原类型异常。Node 的对应数值拒绝提供公开参数名，读取错误省略写入结果。各入口的具体字段范围见[公共错误契约](error-contracts.md)。
+
+精确、图优先、上下文、高级及混合检索的已覆盖整数数量字段采用同一错误契约。Python 图优先检索在请求范围内提取锚点序列，转换回调的同库写入明确拒绝。混合检索文本类型错误定位 `query_text` 或 `queryText`。Node 上下文／高级配置的数字字段以省略或 `undefined` 使用默认值，`null` 按既有类型边界拒绝。可选方法数字实参继续支持 `null` 默认值。
+
+Python 的 `search`、`search_grouped`、`search_with_context`、`search_advanced` 和 `search_hybrid` 接受外层 `Mapping` 过滤器，包括 `MappingProxyType` 和 `UserDict`。Mapping 协议在请求范围内执行，转换中的宿主异常保留原对象与 cause。已覆盖 Filter 表示及语义错误定位 `payload_filter`，Node 对应语义错误定位 `payloadFilter`。
 
 ### search_batch — 批量并行 ANN 检索
 
@@ -790,7 +844,7 @@ let results = db.search_batch(
 ```
 
 | 约束 | 语义 |
-|------|------|
+| ------ | ------ |
 | `parallelism = 0` | 自动选择并发度 |
 | `parallelism = 1..64` | 指定批内最大并发度 |
 | `parallelism > 64` | 明确拒绝，防止过度并行 |
@@ -878,7 +932,7 @@ let results = db.search_advanced(&query_vec, &config)?;
 **SearchConfig 参数说明：**
 
 | 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
+| ------ | ------ | -------- | ------ |
 | `top_k` | `usize` | `5` | 最终返回的结果数量 |
 | `recall_k` | `usize` | `0`（自动） | 初始召回池；自动值为 `max(top_k × 8, 64)` |
 | `rerank_k` | `usize` | `0`（自动） | 高级处理候选池；自动值为 `max(top_k × 4, 32)`，且不超过 `recall_k` |
@@ -901,7 +955,7 @@ let results = db.search_advanced(&query_vec, &config)?;
 
 > 所有参数均执行安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]。
 
-> 💡 当 `enable_advanced_pipeline = false` 时，`search_advanced` 的行为与 `search` 完全一致。
+> **提醒**：当 `enable_advanced_pipeline = false` 时，`search_advanced` 的行为与 `search` 完全一致。
 
 ---
 
@@ -1071,7 +1125,7 @@ db.set_hook(MyHook)?;
 
 默认 `NoopHook` 的回调为空实现。查询通过共享 Hook 槽取得本次执行的所有权，调用方可按需注册和替换扩展。
 
-> ⚠️ **FFI 插件安全提示**：`FfiHook` 加载的动态库将在进程内执行任意代码，请确保动态库来源可信。
+> **FFI 安全提醒**：`FfiHook` 加载的动态库将在进程内执行任意代码，请确保动态库来源可信。
 
 ---
 
@@ -1106,7 +1160,7 @@ results = db.filter_where({
 **支持的操作符：**
 
 | 操作符 | 含义 | 值类型 | 示例 |
-|--------|------|--------|------|
+| -------- | ------ | -------- | ------ |
 | `$eq` | 等于 | 任意 | `{"name": {"$eq": "Alice"}}` 或直接 `{"name": "Alice"}` |
 | `$ne` | 不等于 | 任意 | `{"status": {"$ne": "deleted"}}` |
 | `$gt` | 大于 | 数字或字符串 | `{"age": {"$gt": 18}}` |
@@ -1128,7 +1182,7 @@ results = db.filter_where({
 | `$and` | 逻辑与 | 条件数组 | `{"$and": [{...}, {...}]}` |
 | `$or` | 逻辑或 | 条件数组 | `{"$or": [{...}, {...}]}` |
 
-数字只与数字比较，字符串只与字符串按原始 Unicode 字典序比较，类型不同视为不匹配。RFC3339 操作符会解析时区并按绝对时间比较；非法查询操作数直接报错，节点中的脏时间字段视为不匹配。范围查询当前不会使用属性 Hash 索引加速。
+数字只与数字比较，字符串只与字符串按原始 Unicode 字典序比较，类型不同视为不匹配。RFC3339 操作符会解析时区并按绝对时间比较；非法查询操作数直接报错，节点中的脏时间字段视为不匹配。属性 Hash 索引用于等值查询；范围查询按相应查询计划执行。
 
 **字符串匹配示例（v0.7.2 新增）：**
 
@@ -1232,12 +1286,20 @@ const rows = db.executePreparedTql(prepared, { bonus: 4 })
 
 Prepared 参数只接受 null/bool/string/number；缺参、额外参数、数组/对象和非有限数值明确失败。
 
+Python 的参数容器接受字符串键 `Mapping`，包括 `dict`、`MappingProxyType` 和 `UserDict`。Node 接受 JSON 对象。已覆盖的容器或键类型拒绝提供 `TDB_INVALID_INPUT` 和 `target.field=parameters`，阶段省略。
+
+`tql`、`prepare_tql` 和 `tql_mut` 的查询文本类型拒绝定位 `query`，发生在解析之前，阶段省略。Python 保留原类型及编码异常。写入口类型拒绝提供 `validation/not_committed`，回调重入提供 `admission/not_committed`，读取入口省略写入结果。
+
+Node Prepared 对 NaN、无穷、undefined、BigInt、Symbol、函数及复合值提供具名绑定错误。数组和对象参数在标量边界拒绝。属性枚举与 getter 抛出的宿主异常保留原对象与 cause；有效标量沿用原有数值和字符串转换规则。
+
+当前开发版本的命名参数转换及绑定错误提供 `stage=bind` 和 `target.parameter`。缺参、多参与类型错误保留各自错误码和详情，Python 保留原异常继承关系。映射协议产生的宿主异常保留原对象与 cause。Rust 使用 `TriviumError::underlying()` 取得带定位错误的原始变体。覆盖边界见[公共错误契约](error-contracts.md)。
+
 SEARCH 向量的字面量与数值参数按数据库 dtype 转换，u64 分量保持整数位模式。RANK 和 RESIDUAL 的向量字面量采用相同转换。Rust 的 `QueryEntry::Search.vector`、`RankClause.vector` 和 `ResidualStage.vector` 使用 `Vec<serde_json::Number>`；`pipeline::lower_search_entry()` 返回 `Result`，调用方传播数值转换错误。
 
 ### 一等值映射
 
 | TQL 值 | Python | Node |
-|---|---|---|
+| --- | --- | --- |
 | Node | dict | object，NodeId 为字符串 |
 | Edge | `{type, source, target, label, weight, metadata}` | `{type, source, target, label, weight, metadata}`，NodeId 为字符串 |
 | Int/UInt | 精确 int | 安全整数为 number；超范围整数为十进制字符串 |
@@ -1284,7 +1346,7 @@ console.log(result.createdIds)   // [1]
 **返回值：**
 
 | 字段 | 类型 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `affected` | `int` | 受影响的节点数 |
 | `created_ids` / `createdIds` | `list[int]` / `number[]` | CREATE 新建的节点 ID 列表 |
 
@@ -1302,7 +1364,7 @@ Condition  := CompareExpr ((AND | OR) CompareExpr)*
 ReturnList := Ident (',' Ident)* | '*'
 ```
 
-> 💡 当起始节点已知 ID 时，强烈建议将 `id` 写入节点属性过滤器。主键 `id` 走 **O(1) 哈希短路扫描**，而 `type` 等非主键字段会触发 O(N) 全表扫描（除非已建立属性索引）。
+> **提醒**：当起始节点已知 ID 时，建议将 `id` 写入节点属性过滤器。主键 `id` 走 **O(1) 哈希短路扫描**，而 `type` 等非主键字段会触发 O(N) 全表扫描（除非已建立属性索引）。
 
 > MATCH 使用显式有向模式；管线 EXPAND 和 Reachability 另行支持 OUTGOING/INCOMING/BOTH。
 
@@ -1313,7 +1375,7 @@ ReturnList := Ident (',' Ident)* | '*'
 四类属性索引均持久化到 `.pidx` 并由 Planner 透明选择：
 
 | 类型 | Python | Node | Rust |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Hash | `create_index` | `createIndex` | `create_index` |
 | Ordered ART | `create_ordered_index` | `createOrderedIndex` | `create_ordered_index` |
 | Composite ART | `create_composite_index` | `createCompositeIndex` | `create_composite_index` |
@@ -1362,15 +1424,21 @@ db.drop_index("name")
 db.dropIndex('name')
 ```
 
+---
 
 ## 存储格式观测与迁移错误
 
 ### 三端结构化错误
 
-内核的 `TriviumError::code()` 和 `details()` 提供稳定错误码与类别所需字段。Python 的内核异常提供 `code: str`、`details: dict[str, Any]`；Node 的同步异常与异步 Promise 拒绝提供同名属性。消息用于诊断与展示，程序通过错误码和字段处理重试、输入修正与迁移。
+内核的 `TriviumError::info()` 提供 `schema_version: 1`、`code`、`message` 和 `details`；`code()`、`details()` 继续提供对应字段。Python 的内核异常及 Node 同步异常、异步 Promise 拒绝提供同名属性。消息用于诊断，程序通过错误码和字段处理请求。共享句柄、关闭和失败边界见[内核 SDK 与存储内核分层](kernel-sdk.md)。
 
 | 情况 | `code` | `details` 字段 |
 | --- | --- | --- |
+| 文件租约冲突 | `TDB_DATABASE_LOCKED` | `reason` |
+| SDK 或 Console 准入繁忙 | `TDB_BUSY` | `resource` |
+| 同库回调或持锁重入 | `TDB_REENTRANT_ACCESS` | `operation` |
+| 宿主锁中毒 | `TDB_HOST_LOCK_POISONED` | `resource` |
+| 关闭或已关闭 | `TDB_DATABASE_CLOSED` | 空对象 |
 | 向量维度 | `TDB_DIMENSION_MISMATCH` | `expected`、`got` |
 | 节点不存在/重复 | `TDB_NODE_NOT_FOUND` / `TDB_NODE_ALREADY_EXISTS` | `id` |
 | 唯一约束 | `TDB_UNIQUE_CONSTRAINT` | `fields`、`existing_id`、`conflicting_id` |
@@ -1386,6 +1454,8 @@ db.dropIndex('name')
 
 完整类别与字段由 [Rust 错误模型](../src/error.rs)及 [Node 类型声明](../triviumdb.d.ts)列出。Python 的 `TriviumDBError` 继承 `RuntimeError`；已有只读、恢复、代际和资源异常继承它。`InvalidInputError`、`CapacityError`、`SnapshotDestinationError` 分别继承 `ValueError`、`MemoryError`、`FileExistsError`，并提供同样的错误码与详情。SDK 参数提取阶段沿用各语言的参数类型异常。
 
+Rust `QueryControl` 在协作检查点分别返回主动取消的 `TDB_QUERY_CANCELLED` 和期限到达的 `TDB_QUERY_DEADLINE_EXCEEDED`，详情为空对象。同一检查点两者同时成立时，期限优先。Console 的已知提交前终止附带对应的未提交阶段，Server 期限使用规范码及兼容字段 `legacyCode=REQUEST_TIMEOUT`。具体 HTTP 状态、重试条件与资源完成点见[取消与期限](error-contracts.md#取消与期限)。
+
 Node 错误详情中的安全整数使用 Number，超出 `Number.MAX_SAFE_INTEGER` 的整数使用十进制字符串；Python 与 Rust 保留原始整数精度。已有资源错误的 `resource/requested/used/limit` 直接属性继续提供，字段内容与 `details` 相同。
 
 ```python
@@ -1396,7 +1466,7 @@ except triviumdb.TriviumDBError as error:
         required_parameter = error.details["parameter"]
 ```
 
-`storage_info/storageInfo` 是只读诊断入口，返回产品版本、`.tdb` 当前/最低版本、WAL/Property/Graph/QuIVer/Text/Manifest 格式、dim、node count、访问模式、估算内存和 sidecar 存在状态。它不会创建、修复或重写文件。
+`storage_info/storageInfo` 是只读诊断入口，返回产品版本、`.tdb` 当前/最低版本、WAL/Property/Graph/QuIVer/Text/Manifest 格式、dim、node count、访问模式、估算内存和 sidecar 存在状态。整个诊断过程保持数据库文件组原样。
 
 ```python
 info = db.storage_info()
@@ -1405,7 +1475,9 @@ print(info["property_index_format"])    # 8
 print(info["sidecars"])
 ```
 
-`tql_mut` 读查询、patch 普通对象简写、Node 数字构造参数分别返回迁移错误；Rust 同步配置通过 `Config.sync_mode` 提供。ReadWrite 打开支持完整校验并原子迁移 v2 WAL，当前 v3 WAL 按帧流式恢复。ReadOnly/Immutable 保持物理零写，旧格式升级由 Writer 完成。无头、未知版本及非法迁移输入返回结构化错误。
+`tql_mut` 读查询、patch 普通对象简写、Node 数字构造参数分别返回迁移错误。Rust 同步配置通过 `Config.sync_mode` 提供。当前 WAL 为 v4，ReadWrite 按历史布局校验并原子升级 v2/v3，流式恢复完整提交前缀。ReadOnly/Immutable 采用物理零写契约，旧格式升级由 Writer 完成。无头、未知版本及非法迁移输入返回结构化错误。
+
+---
 
 ## 持久化与压缩
 
@@ -1423,7 +1495,7 @@ db.flush()
 通过构造函数参数或运行时方法切换 WAL（Write-Ahead Log）的同步策略：
 
 | 模式 | 安全性 | 性能 | 说明 |
-|------|--------|------|------|
+| ------ | -------- | ------ | ------ |
 | `"full"` | ★★★ | 最慢 | 每条写入后 fsync，断电零丢失 |
 | `"normal"` | ★★☆ | 均衡 | flush 到 OS 缓冲区，操作系统崩溃可能丢少量数据（**默认**） |
 | `"off"` | ★☆☆ | 最快 | 不主动 flush，仅适合测试/批量导入 |
@@ -1453,8 +1525,9 @@ db.disable_auto_compaction();
 
 ### compact — 手动强制压实 (Manual Compaction)
 
-主动触发一次全量数据重写与压实。**此调用会阻塞当前线程**，直到所有的内存数据被安全落盘，并彻底截断清理旧的 WAL 文件。
-为了极致的崩溃安全性，执行压实时会短暂阻塞前台读写。强烈建议在关闭了自动压缩后，于业务低峰期（如凌晨调度）执行此方法。
+主动触发全量数据重写与压实，完成持久化后清理已纳入检查点的 WAL。
+
+> **调度提醒**：此调用阻塞当前线程，压实期间持有数据写锁。关闭自动压缩后，可在业务低峰期调度显式压实。
 
 **Python：**
 ```python
@@ -1465,7 +1538,6 @@ db.compact()
 ```rust
 db.compact()?;
 ```
-
 
 ---
 
@@ -1512,6 +1584,10 @@ print(db.instance_stats())
 
 设置本实例内存预算。写入增量、容量预留和已接入的大工作区在执行前检查预算。共享运行时先核对配额调整，成功后同步更新实例配置，失败时保留原配额。Rust `set_memory_limit(bytes)` 返回 `Result<()>`。
 
+ReadOnly／Immutable 实例可调整自身运行时额度。已有 QuIVer 构建句柄在后续捕获任务时使用当前额度，释放额度后可重新尝试捕获。额度拒绝保留现有数据与配置，已知输入错误提供字段定位及写入结果。
+
+Python 的 `set_memory_limit()` 默认值为 0，`enable_auto_compaction()` 默认间隔为 7200 秒。容量、额度和压实间隔沿用 Python 整数协议，自动构建开关沿用布尔提取规则。已覆盖的内置类型拒绝保留 `TypeError`／`OverflowError`，并提供字段定位和 `validation/not_committed`。Node 的对应接口严格接收数值或布尔值；运行时省略压实间隔或传入 `null` 时沿用 7200 秒默认值。
+
 **Python：**
 ```python
 db.set_memory_limit(mb=256)  # 设置为 256 MiB
@@ -1535,7 +1611,7 @@ print(f"当前内存占用: {usage_bytes / 1024 / 1024:.1f} MB")
 ### index_text — 建立全文稀疏索引
 对指定节点的长文本内容提取 BM25 特征，用于后续的混合检索召回。需在节点 insert 后调用；节点不存在时返回错误。
 
-重复调用会替换该节点的旧正文与词频，空字符串会清除其 BM25 内容；显式注册的关键词保持不变。多字段或多段正文应拼接后一次登记。修改 Payload 不会自动改写单独登记的正文。中文使用字符二元分词，两字名字可参与检索。
+重复调用会替换该节点的旧正文与词频，空字符串会清除其 BM25 内容；显式注册的关键词保持不变。多字段或多段正文应拼接后一次登记。Payload 与单独登记的正文分别更新。中文使用字符二元分词，两字名字可参与检索。
 
 **Python：**
 ```python
@@ -1553,7 +1629,7 @@ db.index_keyword(id=42, keyword="Rust")
 ```
 
 ### build_text_index — 预热文本索引
-可在批量登记后调用，以提前编译 AC 自动机。正文统计随写入更新，关键词变更后也可由首次查询按需编译，无需每次修改都显式构建。构建失败会向 Rust、Python 和 Node.js 调用方返回错误；此方法不会扫描 Payload 自动生成全文索引。
+可在批量登记后调用，以提前编译 AC 自动机。正文统计随写入更新，关键词变更后也可由首次查询按需编译，无需每次修改都显式构建。构建失败会向 Rust、Python 和 Node.js 调用方返回错误；索引内容来自显式登记的正文与关键词。
 
 **Python：**
 ```python
@@ -1563,6 +1639,8 @@ db.build_text_index()
 `load_text_index=True` 会在打开时加载持久化的全文索引。默认 `False` 省略加载，后续纯向量写入、`flush()` 和 `close()` 保留已有文本文件；显式文本登记或预热会先加载原索引并合并修改。延期加载与清理受内核内存预算约束，超限会先返回错误。
 
 文本登记通过 `flush()` 或可写句柄的 `close()` 持久化，尚不属于 `Transaction` 的 WAL 操作。应用需保留权威正文与别名来源，以便重新登记。
+
+正文和关键词在分词、转换及索引增长前检查保守峰值，并向共享运行时预留临时工作区。预算拒绝保留原正文、关键词与 WAL。维护入口核对 WAL 可写性，已关闭的 writer 返回 `TDB_WAL_CLOSED`；权限和生命周期拒绝提供 `admission/not_committed`，输入及构建拒绝提供 `validation/not_committed`。
 
 历史 `.text`（TIDX v2）快照缺少 `.text.meta` 时，完整格式校验通过后可恢复正文与关键词，并在保存时补齐长度和 CRC。已有元数据中的文本长度和 CRC 用于校验内容；主文件长度随存储布局和节点变化更新。加载异常时保留原文本文件，错误消息区分长度、CRC、元数据格式与快照格式。
 
@@ -1606,7 +1684,7 @@ let ids = db.all_node_ids()?;    // Vec<NodeId>
 QuIVer 是自研 ANN 图索引，常规查询自动选择与维护索引。从 `0.8.9` 起默认采用 BQ 构图、无训练 SM-L2 导航和原始向量余弦精排，无需调用 `enable_quiver_sm_l2()`：
 
 | 条件 | 检索引擎 | 召回行为 |
-|------|----------|----------|
+| ------ | ---------- | ---------- |
 | 低于当前维度的动态阈值 或 QuIVer 未就绪 | **BruteForce** | 100% 精确召回，零误差 |
 | 达到动态阈值 + 索引就绪 | **QuIVer (BQ 构图 + SM-L2 导航)** | 原始向量余弦精排；Recall 取决于数据、搜索宽度与预算 |
 
@@ -1618,15 +1696,15 @@ QuIVer 是自研 ANN 图索引，常规查询自动选择与维护索引。从 `
 
 QuIVer 支持增量 Insert/Delete/Update，并保护入口导航树，入口升层时连接旧树。旧索引通过重建应用 `0.8.10` 的签名多样性和连通性规则；查询召回率由数据、搜索参数与精排预算共同决定。索引以 `.tdb.quiver` 持久化，并通过 `.tdb.quiver.meta` 的主数据代际、文件尺寸、节点数、维度与 CRC 校验后 mmap 加载。有效图按保存的邻接表加载，默认 SM 状态从原始向量池流式恢复，启动时读取相应冷向量；断连图按缺失索引策略重建或返回错误。显式评分模式由宿主重新配置。TextIndex 对应 `.tdb.text` 和 `.tdb.text.meta`。
 
-批量导入可在构造时设置 `auto_build_quiver=False`，或运行时调用 `set_auto_build_quiver(False)`，避免导入中途因查询触发索引构建；导入完成后重新开启并执行一次查询，或显式调用 Rust `build_quiver_index()`。`flush()` 只负责持久化，不会隐式构建 QuIVer。无状态评测或独立查询之间可调用 `clear_search_state()` 清空疲劳状态。
+批量导入可在构造时设置 `auto_build_quiver=False`，或运行时调用 `set_auto_build_quiver(False)`，避免导入中途因查询触发索引构建；导入完成后重新开启并执行一次查询，或显式调用 Rust `build_quiver_index()`。`flush()` 负责持久化；QuIVer 由查询准备或显式构建入口生成。无状态评测或独立查询之间可调用 `clear_search_state()` 清空疲劳状态。
 
-> 💡 如果你的业务对 100% 召回率有强需求（如金融/医疗），可以通过 `force_brute_force: true` 强制使用 BruteForce。
+> **检索配置**：需要精确检索时，可设置 `force_brute_force: true` 使用 BruteForce。
 
 ---
 
 ## 维度迁移
 
-> 文件格式兼容边界：当前 `.tdb` 为 v10，可读取 v5–v10；可写句柄在后续持久化时按当前格式发布。Mmap v9 的 raw Payload 位于 generation 绑定的 `.pld`，详见[持久化布局](features.md)。ReadOnly/Immutable 不升级、不写制品。早于 v5 的主文件必须通过旧内核导出迁移；未来版本明确拒绝。sidecar 独立版本化：`.pidx v8`、`.gidx v3`、`.text v2`、`.quiver v1`。
+> **格式提醒**　当前开发 `.tdb` 为 v11，支持读取 v5–v11，可写句柄在后续持久化时发布当前格式。Mmap raw Payload 位于 generation 绑定的 `.pld`，详见[持久化布局](features.md)。ReadOnly/Immutable 按物理零写契约打开，早于 v5 的文件通过旧内核导出迁移。旧内核环境使用升级前的完整文件组备份。sidecar 分别采用 `.pidx v8`、`.gidx v3`、`.text v2` 和 `.quiver v1`。
 
 复合索引字段列表按 JSON 数组保存，支持 NUL 和 Unicode 字段名；字段名总长度上限为 1 MiB，字段数量上限为 65,535。旧复合 posting 通过事实扫描保持结果，唯一约束从主文件恢复；普通复合索引可按原字段列表重新创建。唯一约束创建或删除在发布失败后返回原始错误，并将实例标为待恢复，后续读写返回 `TDB_WAL_CLOSED`。释放实例后可写重开，由发布提交点决定恢复旧定义或采用新定义。
 
@@ -1638,16 +1716,18 @@ Mmap 只读打开在采用 `.gidx` 前校验所有边块、派生目录与主文
 
 将当前数据库的所有节点 Payload、图谱边复制到一个全新的数据库文件中，向量以零向量占位（因为维度变了，旧向量无法直接复用）。
 
-目标主文件或同名前缀的数据制品已经存在时，迁移在写入前返回 `TDB_IO`，`details.io_kind` 为 `AlreadyExists`。预检按实际卷与目录的路径解析规则识别大小写别名，不会对所有平台统一转小写；已有文件组在创建目标租约、暂存库或发布日志前即被拒绝。迁移在目标同盘的独占暂存目录完成构建与同步，持有目标写锁发布文件组并交接给返回实例；发布使用不覆盖既有目标的原子重命名，要求平台及文件系统支持排他原子重命名，不支持时返回 I/O 错误。源、目标目录均在提交标记前后同步；暂存库不会保留目标主文件的硬链接别名。提交前失败只回收本次移动的文件，目标可重试；提交后错误保留完整新库，可按新维度重新打开检查。进程被强杀后，可写打开按发布日志恢复，完整源库仍然保留。实际空闲 `.lock` 协调文件及其大小写别名可复用，支持失败后重试；符号链接和目录不作为空闲锁放行。
+目标主文件或同名前缀的数据制品已经存在时，迁移在写入前返回 `TDB_IO`，`details.io_kind` 为 `AlreadyExists`。预检按实际卷与目录的路径解析规则识别大小写别名；已有文件组在创建目标租约、暂存库或发布日志前即被拒绝。迁移在目标同盘的独占暂存目录完成构建与同步，持有目标写锁发布文件组并交接给返回实例；发布使用不覆盖既有目标的原子重命名，要求平台及文件系统支持排他原子重命名，不支持时返回 I/O 错误。源、目标目录均在提交标记前后同步；暂存主文件在目标发布后按所有权交接流程释放。提交前失败只回收本次移动的文件，目标可重试；提交后错误保留完整新库，可按新维度重新打开检查。进程被强杀后，可写打开按发布日志恢复，完整源库仍然保留。实际空闲 `.lock` 协调文件及其大小写别名可复用，支持失败后重试；符号链接和目录不作为空闲锁放行。
 
 **参数：**
 
 | 参数 | 类型 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `new_path` | `str` | 新数据库文件路径 |
 | `new_dim` | `int` | 新的向量维度 |
 
 **返回值：** 所有已迁移节点的 ID 列表（`list[int]`）
+
+迁移在公开目标前预留最终实例配额。错误中的最外层 `write` 描述目标发布结果，提交前回滚清理完成为 `publish/not_committed`，标记重命名后的同步失败为 `publish/unknown`，耐久提交后的清理失败为 `publish/committed`。原始类别和错误链继续保留，Rust 使用 `underlying()` 匹配原始变体。完整边界见[公共错误契约](error-contracts.md)。
 
 **Python：**
 ```python
@@ -1676,15 +1756,18 @@ for &nid in &node_ids {
 new_db.flush()?;
 ```
 
-> ⚠️ 迁移不修改原数据库，原库仍可正常使用。新库创建完毕后，需要手动更新所有向量后才能进行有效的向量检索。
+> **提醒**：迁移不修改原数据库，原库仍可正常使用。新库创建完毕后，需要手动更新所有向量后才能进行有效的向量检索。
 
-> 💡 如果希望同时切换 dtype（例如从 f32 换 f16），需在创建新库时指定 `dtype` 参数：`TriviumDB("new.tdb", dim=1536, dtype="f16")`。
+> **提醒**：如果希望同时切换 dtype（例如从 f32 换 f16），需在创建新库时指定 `dtype` 参数：`TriviumDB("new.tdb", dim=1536, dtype="f16")`。
+
+---
 
 ## 事务支持
 
 TriviumDB 提供轻量级事务，采用**验证前置（Dry-Run）架构**：操作先缓冲在内存中，`commit()` 按操作顺序检查节点存在状态、维度、ID 冲突、唯一约束和 JSON 可恢复性，完成容量预留后提交 WAL，再按同一顺序应用数据。
 
 **特性：**
+
 - 预检失败保持原节点、索引、ID 分配状态与 WAL；WAL 写入失败时内存数据保持原样，并向调用方返回原始错误
 - 同一事务内，新插入或删除后重建的节点可立即参与 Payload 更新、向量更新、连边和再次删除；当前仍存在的 ID 再次插入时返回 `NodeAlreadyExists`
 - 返回的 ID 按插入操作排序。`delete(10) → insert_with_id(10) → delete(10) → insert_with_id(10)` 成功时返回 `[10, 10]`，最终节点内容来自最后一次插入
@@ -1703,18 +1786,30 @@ let ids = tx.commit()?;
 // tx.rollback();
 ```
 
-> Python 通过 `db.transaction()` 暴露同一套缓冲提交语义；Node.js 当前未公开事务构建器。
+Python 通过 `db.transaction()` 暴露缓冲提交语义，Node.js 通过 `commitTransaction(operations)` 一次性提交操作列表。
+
+当前开发版本的 Python 事务对象采用独立请求借用：方法内的转换回调重入返回 `TDB_REENTRANT_ACCESS`，跨线程争用返回 `TDB_BUSY`。借用或数据库准入拒绝时，待提交操作保留；`with tx:` 的提交退出路径使用同一规则。上下文内发生宿主异常时，退出丢弃操作并继续传播该异常。
+
+提交完成、进入内核后的提交失败或回滚会消费 Python 事务；后续缓冲、提交、回滚和 `__enter__` 返回 `TDB_TRANSACTION_FINISHED`，`pending_count()` 返回 0。该异常属于 `TriviumDBError`，保留 `RuntimeError` 继承关系。已结束事务的 `__exit__` 保持返回 `False`。引用环通过 GC 遍历回收，事务仍被调用方持有时继续持有数据库；显式数据库关闭按生命周期契约释放文件资源。
+
+> **重试提醒**：根据拒绝阶段和事务状态决定是否重试。内核已经消费的事务使用新对象准备；数据库持久化结果继续依据实际错误和回执确认。参数自动提取及普通类型转换错误按后续统一契约补齐。
+
+当前开发版本的事务提交错误增加可选 `write`，包含 `phase`、`outcome` 与适用的 `transaction_consumed`。SDK 准入拒绝保留操作并返回 `not_committed`，Core 预检拒绝消费操作并返回 `not_committed`，WAL 或应用失败返回 `unknown`。分组提交以组尾同步结果确认，内核已知的已提交响应失败返回 `committed`。各入口覆盖范围及处理依据见[写入结果契约](error-contracts.md#写入结果字段)。
+
+节点及边的直接 CRUD、Payload 补丁与 CAS 同样提供 `write`。直接入口省略 `transaction_consumed`，准入与校验拒绝分别使用 `admission` 和 `validation`。TQL 写入在解析、计划和预算准入失败时提供 `validation/not_committed`，进入事务提交后保留内层阶段。Rust 调用方使用 `underlying()` 匹配带上下文的原始错误变体。
+
+文本、属性索引和 Rust 显式 QuIVer 构建的已覆盖维护错误沿用该结构。`flush`／`compact` 及唯一约束发布使用 `phase=publish`，提交标记完成后的清理失败提供 `outcome=committed`，此前的发布失败提供 `unknown`。唯一约束发布失败后释放相关句柄并重新打开核对定义与事实。创建唯一索引时，重复值的节点身份按活跃 NodeId 升序确定。
 
 ---
 
 ## Pythonic 魔术方法
 
 | 语法 | 等价调用 | 说明 |
-|------|----------|------|
+| ------ | ---------- | ------ |
 | `len(db)` | `db.node_count()` | 当前活跃节点数 |
 | `42 in db` | `db.contains(42)` | 节点是否存在 |
 | `print(db)` | `db.__repr__()` | 输出如 `TriviumDB(dtype=f32, nodes=100, dim=1536)` |
-| `with db:` | `__enter__` / `__exit__` | 退出时自动 `flush()` |
+| `with db:` | `__enter__` / `__exit__` | 退出时执行 `close()`，完成持久化与资源释放 |
 
 ---
 
@@ -1725,7 +1820,7 @@ let ids = tx.commit()?;
 节点的完整视图，通过 `get()` 或 `filter_where()` 返回。
 
 | 属性 (Python) | 属性 (Rust) | 类型 | 说明 |
-|---------------|-------------|------|------|
+| --------------- | ------------- | ------ | ------ |
 | `id` | `id` | `u64` | 全局唯一节点 ID |
 | `vector` | `vector` | `list[float]` / `Vec<T>` | 节点的特征向量 |
 | `payload` | `payload` | `dict` / `serde_json::Value` | JSON 元数据 |
@@ -1737,7 +1832,7 @@ let ids = tx.commit()?;
 向量检索命中结果，通过 `search()` 返回。
 
 | 属性 | 类型 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `id` | `u64` | 命中节点 ID |
 | `score` | `f32` | 相似度得分 |
 | `payload` | `dict` | 节点元数据 |
@@ -1747,7 +1842,7 @@ let ids = tx.commit()?;
 Cypher 查询结果行，通过 `query()` 返回。
 
 | 属性 | 类型 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `row` | `dict[str, dict]` | 变量名 → 节点摘要字典 |
 
 ### Edge (Rust)
@@ -1755,7 +1850,7 @@ Cypher 查询结果行，通过 `query()` 返回。
 图谱边的内部结构。
 
 | 字段 | 类型 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `target_id` | `NodeId (u64)` | 目标节点 ID |
 | `label` | `String` | 关系类型标签 |
 | `weight` | `f32` | 权重（支持负值） |
@@ -1765,11 +1860,12 @@ Cypher 查询结果行，通过 `query()` 返回。
 Hook 管线执行上下文，通过 `search_with_context()` 返回。
 
 | 属性 (Python) | 属性 (Node.js) | 属性 (Rust) | 类型 | 说明 |
-|---------------|----------------|-------------|------|------|
+| --------------- | ---------------- | ------------- | ------ | ------ |
 | `timings` | `timings` | `stage_timings` | `dict` / `Object` / `Vec<(String, Duration)>` | 各管线阶段的耗时（Python/JS 单位毫秒） |
 | `custom_data` | `customData` | `custom_data` | `dict` / `Object` / `serde_json::Value` | Hook 注入的自定义数据 |
 | `aborted` | `aborted` | `abort` | `bool` | 管线是否被 Hook 提前终止 |
 
+---
 
 ## 写入与数值边界
 
@@ -1791,11 +1887,12 @@ WAL 追加、flush 或同步失败时返回原始错误并隔离该 writer。后
 
 事务 WAL 完整提交后，若内存应用阶段发生错误或异常展开，实例及其共享搜索句柄进入恢复等待状态，数据操作返回 `WalClosed`。释放全部相关句柄并重新打开，恢复端应用完整提交事务。事务编号使用进程内单调计数，达到编号上限时返回参数错误。
 
+---
 
 ## 持久化类型、解析与打开准入
 
 - 文件头保存 dtype、元素宽度与 CRC32。ReadWrite/ReadOnly 使用其他 dtype 打开返回 `TDB_DTYPE_MISMATCH`，详情包含 `stored` 和 `requested`，取值为 `f32`、`f16`、`u64`。Rom 与 Mmap 共用此契约。
-- v5–v9 非空检查点通过完整向量块几何验证类型；无类型基础检查点的历史 WAL，以及空的无类型检查点附带非空 WAL，使用原版本、原 dtype 恢复并完成检查点或导出后再升级。v10 检查点需要支持 v10 的内核；回退使用升级前备份。
+- v5–v9 非空检查点通过完整向量块几何验证类型。无类型基础检查点的历史 WAL，以及空的无类型检查点附带非空 WAL，使用原版本、原 dtype 恢复并完成检查点或导出后再升级。当前 v11 检查点及 v4 WAL 由支持对应版本的内核处理，回退使用升级前的完整备份。
 - 发生向量文件替换或重映射失败时，原调用保留 I/O 错误。映射已经失效的实例及其共享句柄随后返回 `TDB_WAL_CLOSED`；释放这些实例后，重新以可写模式打开，恢复发布基础并回放 WAL。
 - TQL 字符串入口完整消费输入，语句尾部非法内容在生成写操作前返回 `TDB_QUERY_PARSE`。输入上限为 4 MiB、262,144 个 token、128 层括号嵌套和 128 个表达式运算符；已有递归预算共同约束表达式与谓词。向量及 JSON 字面量中的负号按字面量处理。
 - `memory_limit` 覆盖打开时的节点与图目录、Rom 向量堆副本、Payload 解码、派生索引恢复和 WAL 暂存。各阶段在分配前进行保守峰值准入，打开完成前核对总估算占用；预算不足返回 `TDB_CAPACITY_RESERVATION_REJECTED`，本次共享资源预留释放。原始 mmap 向量和 Payload 映射按文件映射管理，堆目录及解码工作区参与准入。

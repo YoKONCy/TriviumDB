@@ -121,7 +121,11 @@ module.exports = async function numericBoundaries(root, TriviumDB) {
       assert.deepEqual(fs.readFileSync(file + '.wal'), before)
       assert.equal(db.nodeCount(), 1)
       assert.equal(db.insert([1, 0], {}), Number.MAX_SAFE_INTEGER)
-      assert.throws(() => db.insert([1, 0], {}), Error)
+      assert.throws(() => db.insert([1, 0], {}), error => {
+        assert.equal(error.code, 'TDB_INVALID_INPUT')
+        assert.deepEqual(error.write, { phase: 'validation', outcome: 'not_committed' })
+        return true
+      })
       assert.deepEqual(db.allNodeIds().sort((a, b) => a - b), [Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER])
     } finally { db.close() }
   }

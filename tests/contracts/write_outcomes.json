@@ -1,0 +1,15 @@
+{
+  "admission": {"phase":"admission","outcome":"not_committed","transaction_consumed":false},
+  "core_admission": {"phase":"admission","outcome":"not_committed","transaction_consumed":true},
+  "validation": {"phase":"validation","outcome":"not_committed","transaction_consumed":true},
+  "binding_validation": {"phase":"validation","outcome":"not_committed","transaction_consumed":false},
+  "wal": {"phase":"wal","outcome":"unknown","transaction_consumed":true},
+  "apply": {"phase":"apply","outcome":"unknown","transaction_consumed":true},
+  "group_admission": {"phase":"admission","outcome":"not_committed"},
+  "group_sync": {"phase":"group_sync","outcome":"unknown"},
+  "response": {"phase":"response","outcome":"committed"},
+  "direct_admission": {"phase":"admission","outcome":"not_committed"},
+  "direct_validation": {"phase":"validation","outcome":"not_committed"},
+  "direct_wal": {"phase":"wal","outcome":"unknown"},
+  "direct_apply": {"phase":"apply","outcome":"unknown"}
+}

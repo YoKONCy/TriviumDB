@@ -1,0 +1,19 @@
+{
+  "extra_edges": [
+    {"source_id": 7, "target_id": 11, "label": "", "weight": 1.0, "metadata": {"part": "空标签"}},
+    {"source_id": 7, "target_id": 11, "label": "证据\u0000尾", "weight": 0.25, "metadata": {"part": "Unicode 与 NUL"}}
+  ],
+  "source": {
+    "id": 7, "vector": [1, 0], "payload": {"name": "源"}, "num_edges": 3,
+    "edges": [
+      {"target_id": 11, "label": "", "weight": 1.0, "metadata": {"part": "空标签"}},
+      {"target_id": 11, "label": "route", "weight": 0.5, "metadata": {"part": "前段"}},
+      {"target_id": 11, "label": "证据\u0000尾", "weight": 0.25, "metadata": {"part": "Unicode 与 NUL"}}
+    ]
+  },
+  "incoming": [
+    {"source_id": 7, "target_id": 11, "label": "", "weight": 1.0, "metadata": {"part": "空标签"}},
+    {"source_id": 7, "target_id": 11, "label": "route", "weight": 0.5, "metadata": {"part": "前段"}},
+    {"source_id": 7, "target_id": 11, "label": "证据\u0000尾", "weight": 0.25, "metadata": {"part": "Unicode 与 NUL"}}
+  ]
+}

@@ -5,10 +5,75 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 const { TriviumDB, ConsoleSession } = require('../../index.js')
 const fixture = require('../contracts/console_cases.json')
+const editing = require('../contracts/console_editing_cases.json')
+const admission = require('../contracts/error_cases.json').admission
+
+function runEditingContract(root, Database, Session) {
+  const wire = (command, requestId = '编辑请求') => JSON.stringify({ version: 1, requestId, command })
+  for (const dtype of ['f32', 'f16', 'u64']) {
+    const file = path.join(root, `editing-${dtype}.tdb`)
+    const db = new Database(file, { dim: editing.dimension, dtype, autoBuildQuiver: false })
+    const session = new Session('{"readOnly":false}')
+    const call = (database, current, command) => JSON.parse(database.consoleRequest(current, wire(command))).data
+    const read = (database, current) => call(database, current, { operation: 'getNodes', ids: ['1'], withRevision: true })
+    let command, committed
+    try {
+      db.insertWithId(1, editing.vector, editing.basePayload)
+      const old = read(db, session)
+      assert.deepEqual(old.nodes, [{ id: '1', vector: dtype === 'u64' ? ['1', '0'] : editing.vector, payload: editing.basePayload, edges: [] }])
+      assert.deepEqual(old.missingIds, [])
+      const info = call(db, session, { operation: 'info' })
+      assert.equal(info.transport.occ, true)
+      assert.equal(info.transport.idempotency.maxReceipts, editing.receiptCapacity)
+      assert.equal(info.transport.idempotency.durable, editing.receiptDurable)
+      assert.equal(info.transport.idempotency.persistence, editing.receiptPersistence)
+      db.updatePayload(1, editing.hostPayload)
+      command = { operation: 'guardedTransaction', expectedRevision: old.revision, idempotencyKey: 'edit-1', operations: [
+        { op: 'insert', vector: editing.vector, payload: editing.createdPayload },
+        { op: 'updatePayload', id: '1', payload: editing.draftPayload },
+      ] }
+      assert.throws(() => db.consoleRequest(session, wire(command)), error => error.code === editing.conflictCode)
+      assert.equal(db.nodeCount(), 1)
+      assert.deepEqual(db.getPayload(1), editing.hostPayload)
+      command.expectedRevision = read(db, session).revision
+      committed = call(db, session, command)
+      assert.deepEqual(committed.createdIds, [editing.createdId])
+      assert.equal(committed.replayed, false)
+      assert.notEqual(committed.revision, command.expectedRevision)
+      const other = new Session('{"readOnly":false}')
+      const replay = JSON.parse(db.consoleRequest(other, wire(command, '重新确认')))
+      assert.equal(replay.requestId, '重新确认')
+      assert.deepEqual(replay.data, { ...committed, replayed: true })
+      assert.deepEqual(call(db, other, { ...command, operation: 'transactionStatus' }), {
+        outcome: 'committed', revision: committed.revision, createdIds: [editing.createdId],
+      })
+      const changed = JSON.parse(JSON.stringify(command))
+      changed.operations[1].payload = { owner: '换内容' }
+      assert.throws(() => db.consoleRequest(other, wire(changed)), error => error.code === editing.keyConflictCode)
+      assert.throws(() => db.consoleRequest(other, wire({ ...changed, operation: 'transactionStatus' })), error => error.code === editing.keyConflictCode)
+      db.flush()
+      assert.equal(read(db, other).revision, committed.revision)
+    } finally { db.close() }
+    const reopened = new Database(file, { dim: editing.dimension, dtype, autoBuildQuiver: false })
+    try {
+      const fresh = new Session('{"readOnly":false}')
+      assert.deepEqual(call(reopened, fresh, command), { ...committed, replayed: true })
+      assert.deepEqual(call(reopened, fresh, { ...command, operation: 'transactionStatus' }), { outcome: 'committed', revision: committed.revision, createdIds: committed.createdIds })
+      assert.equal(reopened.nodeCount(), 2)
+      for (const [id, payload] of [[1, editing.draftPayload], [2, editing.createdPayload]]) {
+        const node = reopened.get(id)
+        assert.deepEqual(node.payload, payload)
+        assert.deepEqual(node.vector, editing.vector)
+        assert.deepEqual(node.edges, [])
+      }
+    } finally { reopened.close() }
+  }
+}
 
 function runConsoleContract(root, api = { TriviumDB, ConsoleSession }) {
   const { TriviumDB: Database, ConsoleSession: Session } = api
   const wire = command => JSON.stringify({ version: 1, requestId: '验收请求', command })
+  runEditingContract(root, Database, Session)
   for (const [index, test] of fixture.cases.entries()) {
     const file = path.join(root, `console-${index}.tdb`)
     const db = new Database(file, { dim: 2, autoBuildQuiver: false })
@@ -75,7 +140,7 @@ function runConsoleContract(root, api = { TriviumDB, ConsoleSession }) {
     db.setHook({ onPreSearch(query) {
       callbacks++
       for (const reenter of [() => db.nodeCount(), () => db.dtype, () => db.close(), () => db.consoleRequest(session, wire({ operation: 'info' }))]) {
-        assert.throws(reenter, error => error.code === 'TDB_IO' && error.details.io_kind === 'WouldBlock')
+        assert.throws(reenter, { code: admission.reentrant_code, schema_version: 1, details: { operation: admission.node_operation } })
       }
       return query
     } })
@@ -86,7 +151,7 @@ function runConsoleContract(root, api = { TriviumDB, ConsoleSession }) {
     db.setHook({ onPreSearch(query) {
       reverseCallbacks++
       assert.throws(() => db.consoleRequest(session, wire({ operation: 'info' })),
-        error => error.code === 'TDB_IO' && error.details.io_kind === 'WouldBlock')
+        { code: admission.reentrant_code, schema_version: 1, details: { operation: admission.node_operation } })
       return query
     } })
     assert.deepEqual(db.search([1, 0], 1), [{ id: 1, score: 1, payload: { owner: 'host' } }])
@@ -99,10 +164,30 @@ function runConsoleContract(root, api = { TriviumDB, ConsoleSession }) {
       return query
     } })
     assert.throws(() => db.consoleRequest(session, wire({ operation: 'search', vector: [1, 0], topK: 1 })),
-      error => error.code === 'TDB_QUERY_CANCELLED')
+      error => {
+        assert.equal(error.schema_version, 1)
+        assert.equal(error.code, 'TDB_QUERY_CANCELLED')
+        assert.deepEqual(error.details, {})
+        assert.equal(error.write, undefined)
+        return true
+      })
     assert.equal(cancelCallbacks, 1)
     assert.equal(session.cancel('验收请求'), false)
+    db.clearHook()
+    const resumed = JSON.parse(db.consoleRequest(session, wire({ operation: 'getNodes', ids: ['1'] })))
+    assert.deepEqual(resumed.data, { nodes: [{ id: '1', vector: [1, 0], payload: { owner: 'host' }, edges: [] }], missingIds: [] })
     assert.deepEqual(db.getPayload(1), { owner: 'host' })
+    const draining = new Session()
+    assert.equal(draining.isDrained(), false)
+    db.setHook({ onPreSearch(query) {
+      draining.detach()
+      assert.equal(draining.isDrained(), false)
+      return query
+    } })
+    assert.throws(() => db.consoleRequest(draining, wire({ operation: 'search', vector: [1, 0], topK: 1 })),
+      { code: 'TDB_QUERY_CANCELLED' })
+    assert.equal(draining.isDrained(), true)
+    db.clearHook()
   } finally { db.close() }
 }
 

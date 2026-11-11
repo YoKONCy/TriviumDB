@@ -4,6 +4,74 @@ use serde_json::json;
 use triviumdb::database::{BatchSearchConfig, Config, SearchConfig, StorageMode};
 use triviumdb::{Database, TriviumError, VectorType};
 
+#[test]
+fn 检索配置在空批次和正常查询中保留准确字段() {
+    let root = TestDir::new("retrieval_config_fields");
+    let path = root.file("data.tdb");
+    let mut db = Database::<f32>::open(&path, 2).unwrap();
+    db.insert_with_id(7, &[1., 0.], json!({"saved": "完整事实"}))
+        .unwrap();
+    let wal_path = format!("{path}.wal");
+    let wal = std::fs::read(&wal_path).unwrap();
+    for (field, setter) in [
+        (
+            "min_score",
+            (|config: &mut SearchConfig, value| config.min_score = value)
+                as fn(&mut SearchConfig, f32),
+        ),
+        ("teleport_alpha", |config: &mut SearchConfig, value| {
+            config.teleport_alpha = value
+        }),
+        ("fista_lambda", |config: &mut SearchConfig, value| {
+            config.fista_lambda = value
+        }),
+        ("fista_threshold", |config: &mut SearchConfig, value| {
+            config.fista_threshold = value
+        }),
+        ("dpp_quality_weight", |config: &mut SearchConfig, value| {
+            config.dpp_quality_weight = value
+        }),
+        ("text_boost", |config: &mut SearchConfig, value| {
+            config.text_boost = value
+        }),
+        ("min_edge_weight", |config: &mut SearchConfig, value| {
+            config.min_edge_weight = value
+        }),
+    ] {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut config = SearchConfig::default();
+            setter(&mut config, value);
+            for result in [
+                db.search_advanced(&[1., 0.], &config),
+                db.search_batch(&[], &config, &BatchSearchConfig::default())
+                    .map(|rows| rows.into_iter().flatten().collect()),
+            ] {
+                let error = result.unwrap_err();
+                assert!(matches!(error.underlying(), TriviumError::InvalidInput(_)));
+                assert_eq!(
+                    serde_json::to_value(error.info().target).unwrap(),
+                    json!({"field": field})
+                );
+            }
+            assert_eq!(std::fs::read(&wal_path).unwrap(), wal);
+        }
+    }
+    assert_eq!(
+        db.search_exact(&[1., 0.], 1)
+            .unwrap()
+            .into_iter()
+            .map(|hit| (hit.id, hit.score, hit.payload))
+            .collect::<Vec<_>>(),
+        vec![(7, 1., json!({"saved": "完整事实"}))]
+    );
+    db.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, 2).unwrap();
+    let node = reopened.get(7).unwrap().unwrap();
+    assert_eq!(node.vector, vec![1., 0.]);
+    assert_eq!(node.payload, json!({"saved": "完整事实"}));
+    reopened.close().unwrap();
+}
+
 fn invalid_vectors<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>() {
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
         let root = TestDir::new("invalid_query_vectors");

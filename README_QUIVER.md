@@ -1,18 +1,20 @@
 # QuIVer — Reviewer and Reproducibility Guide
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/YoKONCy/TriviumDB)
+
 > **Artifact version**: `0.9.0-beta.4`. SM-L2 navigation was introduced in `0.8.9`; `0.8.10` adds graph connectivity protection. Record the evaluated Git revision and build identity. `0.8.11` reduces vector storage overhead and hardens text index lifecycle. `0.9.0-beta.1` adds shared instance resources, lifecycle diagnostics, controlled shutdown, and directory snapshots. `0.9.0-beta.2` advances automatic construction to approximately one twelfth of the earlier threshold and reclaims clean vector mapping pages after loading. The QuIVer navigation algorithm retains the `0.8.11` implementation. `0.9.0-beta.3` adds deterministic external-NodeId tie-breaking in public BQ retrieval, bounded exact Top-K merging, input validation, and incremental hot-memory accounting. `0.9.0-beta.4` binds persisted ANN metadata to fact checksums and active ID/slot mappings, adds checked low-level BQ APIs, and applies shared workspace admission before graph-constrained result materialization. See the bilingual [version changes](docs/changes/0.9.0-beta.4.md).
 >
-> **Submission target**: **ICDE** for the rebuilt version. This is not an acceptance, proceedings, or publication claim.
+> **Research plan**: the rebuilt version is being prepared for submission to **ICDE**.
 >
 > **Historical preprint**: [QuIVer: Rethinking ANN Graph Topology via Training-Free Binary Quantization](https://arxiv.org/abs/2605.02171). Its method, table numbers, dataset protocol, and performance figures describe the earlier research version.
 >
-> **Dimension limit**: QuIVer supports `1..=3072`, including partial tail blocks. Higher-dimensional databases use exact BruteForce. Dimension compatibility does not imply metric or distribution-independent recall.
+> **Dimension limit**: QuIVer supports `1..=3072`, including partial tail blocks. Higher-dimensional databases use exact BruteForce. Evaluate recall separately for each metric and data distribution.
 
 ## Current implementation
 
-The database defaults to **fast BQ graph construction → signature diversity and directed connectivity protection → training-free SM-L2 navigation → budgeted original-vector cosine reranking**. Navigation combines sign/strong bits with per-vector magnitudes and reconstruction norms; it is not pure Hamming search. Default preparation is automatic, including after database reload. The graph format remains v1; loading a valid graph restores runtime navigation metadata and streams original vectors to restore SM state, with measurable startup cost. Rebuild older indexes to apply the new construction rules. Disconnected indexes require rebuilding through the existing invalid-index policy; loading does not add topology repair edges.
+The database defaults to **fast BQ graph construction → signature diversity and directed connectivity protection → training-free SM-L2 navigation → budgeted original-vector cosine reranking**. Navigation combines sign/strong bits with per-vector magnitudes and reconstruction norms to score reconstructed-vector distances. Default preparation is automatic, including after database reload. The graph format remains v1; loading a valid graph restores runtime navigation metadata and streams original vectors to restore SM state, with measurable startup cost. Rebuild older indexes to apply the new construction rules. Disconnected indexes follow the invalid-index policy and require a rebuild to repair topology.
 
-Default SM-L2 does not use query-sample fitting or a calibration anchor. Explicit corrected SM, explicit native L2, custom navigation scorers, and standalone legacy BQ loading have separate semantics. Native L2 retains original magnitudes and zero vectors and returns negative squared distance; ordinary database searches remain cosine. See [current architecture, lifecycle, memory, and mode boundaries](docs/quiver.md).
+Default SM-L2 derives its representation from each vector, with training-free preparation. Explicit corrected SM, explicit native L2, custom navigation scorers, and standalone legacy BQ loading have separate semantics. Native L2 retains original magnitudes and zero vectors and returns negative squared distance; ordinary database searches remain cosine. See [current architecture, lifecycle, memory, and mode boundaries](docs/quiver.md).
 
 Current-code checks without an external dataset:
 
@@ -23,22 +25,24 @@ cargo test --lib index::quiver::tests::test_quiver_中等规模搜索 -- --exact
 cargo test --lib index::quiver::connectivity_tests
 ```
 
-These checks establish implementation contracts, not million-scale performance. Entry reachability does not guarantee exact recall under bounded search budgets. The [synthetic connectivity benchmark](benches/bench_quiver_connectivity.rs) covers seven datasets and four search widths, and records recall, timing and hot-memory costs; it is not the frozen ICDE evaluation.
+These checks verify implementation contracts. The [synthetic connectivity benchmark](benches/bench_quiver_connectivity.rs) covers seven datasets and four search widths, recording recall, timing, and hot-memory costs.
+
+> **Evaluation scope**: million-scale performance and the ICDE evaluation require their own frozen datasets and protocols. Measure recall at each search budget, including when all graph nodes are reachable.
 
 ## ICDE evaluation protocol and evidence
 
-- The current evaluation scope contains 19 cosine tasks and two native-L2 boundary controls, SIFT and GIST. Preserve their metric and data identities; normalized-cosine historical results are not substitutes for native-L2 results.
-- The main protocol uses separate tuning/evaluation queries, frozen graph and query parameters, top-10 results, an explicit FP32 budget, independent throughput and request-latency measurements, and thread/result consistency checks. Record actual effective budgets, not only requested values.
-- Some earlier low-`ef` positions ran BQ after SM installation rejected the requested budget. Keep those points labeled BQ and retain their original records. Later fixed-position SM measurements need their own source/binary/data hashes and overlay identity; they do not retroactively change the original tuning method.
-- Current source clamps the default effective reranking budget to candidate width, raises it to cover `top_k` when necessary, and keeps default SM active at low widths. Older frozen executables do not acquire this behavior automatically.
-- Bind Recall/QPS/latency and memory to the same graph, mode, parameters, revision, hardware, and input manifest. Include retained BQ, SM metadata, graph/mappings, thread workspace, cold-vector dependencies, preparation/load cost, and temporary peaks. Do not reuse the old preprint's fixed memory or speedup claims.
-- Local `research/QuIVer/` protocols and archives are ignored by Git and are not automatically included in a public clone. A publishable ICDE artifact must deliver its frozen manifests, executable entry points, raw measurements, and independent verification records together.
+- The current evaluation scope contains 19 cosine tasks and two native-L2 boundary controls, SIFT and GIST. Preserve the metric and data identities of each task, and report normalized-cosine and native-L2 results separately.
+- The main protocol uses separate tuning/evaluation queries, frozen graph and query parameters, top-10 results, an explicit FP32 budget, independent throughput and request-latency measurements, and thread/result consistency checks. Record both requested and effective budgets.
+- Some earlier low-`ef` positions ran BQ after SM installation rejected the requested budget. Keep those points labeled BQ and retain their original records. Later fixed-position SM measurements need their own source, binary, and data hashes, plus an overlay identity; preserve the original tuning method in its historical record.
+- Current source clamps the default effective reranking budget to candidate width, raises it to cover `top_k` when necessary, and keeps default SM active at low widths. This behavior applies to executables built from the corresponding updated source.
+- Bind Recall/QPS/latency and memory to the same graph, mode, parameters, revision, hardware, and input manifest. Include retained BQ, SM metadata, graph/mappings, thread workspace, cold-vector dependencies, preparation/load cost, and temporary peaks. Report memory and speedup from measurements of the evaluated version.
+- Local `research/QuIVer/` protocols and archives remain in the Git-ignored research workspace. A publishable ICDE artifact must deliver its frozen manifests, executable entry points, raw measurements, and independent verification records together.
 
 ## Historical benchmark recipes
 
-The remaining sections retain the earlier preprint's dataset and benchmark recipes. All paper section/table references below are **historical**. To reproduce that version, pin its corresponding source snapshot; the public `v0.8.8` snapshot `f4bdfe35e9a3b7c0587da798886ce29380976cfe` is an old BQ reference, not proof that it matches the submitted-paper artifact. Running these entry points on current source can exercise new SM defaults and requires a new result identity.
+The remaining sections retain the earlier preprint's dataset and benchmark recipes. All paper section/table references below are **historical**. To reproduce that version, pin its corresponding source snapshot; the public `v0.8.8` snapshot `f4bdfe35e9a3b7c0587da798886ce29380976cfe` provides a historical BQ reference. Match paper artifacts against their recorded source and binary identities. Running these entry points on current source can exercise new SM defaults and requires a new result identity.
 
-The dataset recipes below are not a complete frozen ICDE pipeline. In particular, RedCaps base selection, query set, self-match policy, and exact GT definition must come from a verified manifest; output file dimensions alone are insufficient.
+> **Reproduction requirements**: the ICDE pipeline needs a frozen manifest in addition to the recipes below. For RedCaps, record base selection, query set, self-match policy, and exact ground-truth definition.
 
 ---
 
@@ -379,7 +383,7 @@ cargo bench --bench bench_ssd_cold_hot --features ablation
 > ⚠️ **Windows**: Run as Administrator for `NtSetSystemInformation` page cache clearing.
 > **Linux**: Run as root for `/proc/sys/vm/drop_caches`.
 > The benchmark exits with a non-zero status instead of reporting invalid SSD-cold measurements when page-cache clearing fails.
-> This experiment measures first-touch cold reads on Cohere-1M. It is not evidence of stable throughput under sustained reclaim when the random-access working set exceeds RAM. The observational memory-pressure CI benchmark reports this separately and intentionally has no pass/fail performance threshold.
+> **Measurement scope**: this experiment measures first-touch cold reads on Cohere-1M. Sustained reclaim with a random-access working set larger than RAM is measured separately by the observational memory-pressure CI benchmark, which reports results without a performance pass/fail threshold.
 
 ---
 

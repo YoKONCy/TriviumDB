@@ -370,7 +370,10 @@ fn last_valid_node_id_recovers_without_wrapping_allocator() {
         let before = std::fs::read(format!("{path}.wal")).unwrap();
         let mut tx = db.begin_tx();
         tx.insert(&[1., 0., 0., 0.], serde_json::Value::Null);
-        assert!(matches!(tx.commit(), Err(TriviumError::InvalidInput(_))));
+        assert!(matches!(
+            tx.commit().unwrap_err().underlying(),
+            TriviumError::InvalidInput(_)
+        ));
         assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
         assert_eq!(db.node_count().unwrap(), 1);
         let node = db.get(u64::MAX - 1).unwrap().unwrap();

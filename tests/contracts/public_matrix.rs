@@ -81,12 +81,15 @@ fn 结构化错误契约覆盖维度_节点_只读_查询预算和API迁移() {
     cleanup(&path);
     let mut database = Database::<f32>::open(&path, 2).unwrap();
     assert!(matches!(
-        database.insert(&[1.0], json!({})),
-        Err(TriviumError::DimensionMismatch { .. })
+        database.insert(&[1.0], json!({})).unwrap_err().underlying(),
+        TriviumError::DimensionMismatch { .. }
     ));
     assert!(matches!(
-        database.update_payload(999, json!({})),
-        Err(TriviumError::NodeNotFound(999))
+        database
+            .update_payload(999, json!({}))
+            .unwrap_err()
+            .underlying(),
+        TriviumError::NodeNotFound(999)
     ));
     database.insert(&[1.0, 0.0], json!({})).unwrap();
     database.flush().unwrap();
@@ -103,13 +106,20 @@ fn 结构化错误契约覆盖维度_节点_只读_查询预算和API迁移() {
     )
     .unwrap();
     assert!(matches!(
-        readonly.insert(&[0.0, 1.0], json!({})),
-        Err(TriviumError::ReadOnlyViolation { .. })
+        readonly
+            .insert(&[0.0, 1.0], json!({}))
+            .unwrap_err()
+            .underlying(),
+        TriviumError::ReadOnlyViolation { .. }
     ));
+    let budget_error = readonly
+        .tql_nodes("MATCH (n) RETURN n LIMIT 10 OFFSET 1")
+        .unwrap_err();
     assert!(matches!(
-        readonly.tql_nodes("MATCH (n) RETURN n LIMIT 10 OFFSET 1"),
-        Err(TriviumError::QueryRowBudgetExceeded { .. })
+        budget_error.underlying(),
+        TriviumError::QueryRowBudgetExceeded { .. }
     ));
+    assert_eq!(budget_error.code(), "TDB_QUERY_BUDGET");
     drop(readonly);
     cleanup(&path);
 }

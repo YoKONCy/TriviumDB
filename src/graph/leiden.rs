@@ -57,27 +57,52 @@ pub struct AdjacencySnapshot {
 
 /// 执行确定性标准 Leiden 社区发现。
 pub fn run_leiden(adj: &AdjacencySnapshot, config: &LeidenConfig) -> LeidenResult {
+    run_leiden_checked(adj, config, &|| Ok::<(), std::convert::Infallible>(()))
+        .unwrap_or_else(|never| match never {})
+}
+
+pub(crate) fn run_leiden_controlled(
+    adj: &AdjacencySnapshot,
+    config: &LeidenConfig,
+    control: &crate::query::tql_executor::QueryControl,
+) -> crate::Result<LeidenResult> {
+    run_leiden_checked(adj, config, &|| {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::GraphAlgorithmStep);
+        control.check()
+    })
+}
+
+fn run_leiden_checked<E>(
+    adj: &AdjacencySnapshot,
+    config: &LeidenConfig,
+    check: &impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<LeidenResult, E> {
+    check()?;
     let mut nodes = adj.node_ids.clone();
     nodes.sort_unstable();
     nodes.dedup();
     if nodes.is_empty() {
-        return empty_result();
+        return Ok(empty_result());
     }
 
-    let mut graph = WeightedGraph::from_snapshot(adj, &nodes);
+    let mut graph = WeightedGraph::from_snapshot(adj, &nodes, check)?;
     let mut members = nodes.iter().map(|&node| vec![node]).collect::<Vec<_>>();
     let mut total_iterations = 0usize;
     for _level in 0..config.max_iterations.max(1) {
-        let (mut communities, iterations) = local_moving(&graph, config.max_iterations.max(1));
+        check()?;
+        let (mut communities, iterations) =
+            local_moving(&graph, config.max_iterations.max(1), check)?;
         total_iterations = total_iterations.saturating_add(iterations);
-        communities = refine_connected(&graph, &communities);
+        communities = refine_connected(&graph, &communities, check)?;
         let community_count = communities.iter().copied().collect::<BTreeSet<_>>().len();
         if community_count == graph.len() {
             break;
         }
-        let (next_graph, remap) = aggregate(&graph, &communities);
+        let (next_graph, remap) = aggregate(&graph, &communities, check)?;
         let mut next_members = vec![Vec::new(); next_graph.len()];
         for (node, &community) in remap.iter().enumerate() {
+            check()?;
             next_members[community].append(&mut members[node]);
         }
         graph = next_graph;
@@ -92,25 +117,28 @@ pub fn run_leiden(adj: &AdjacencySnapshot, config: &LeidenConfig) -> LeidenResul
         .filter(|community| community.len() >= config.min_community_size)
         .collect::<Vec<_>>();
     for community in &mut final_groups {
+        check()?;
         community.sort_unstable();
     }
     final_groups.sort_by_key(|community| community[0]);
     let mut node_to_cluster = HashMap::new();
     let mut cluster_sizes = HashMap::new();
     for (index, community) in final_groups.iter().enumerate() {
+        check()?;
         let cluster = index as u32 + 1;
         cluster_sizes.insert(cluster, community.len());
         for &node in community {
+            check()?;
             node_to_cluster.insert(node, cluster);
         }
     }
     let _ = total_iterations;
-    LeidenResult {
+    Ok(LeidenResult {
         num_clusters: cluster_sizes.len() as u32,
         node_to_cluster,
         cluster_sizes,
         centroids: HashMap::new(),
-    }
+    })
 }
 
 fn empty_result() -> LeidenResult {
@@ -134,7 +162,11 @@ impl WeightedGraph {
         self.adjacency.len()
     }
 
-    fn from_snapshot(snapshot: &AdjacencySnapshot, nodes: &[NodeId]) -> Self {
+    fn from_snapshot<E>(
+        snapshot: &AdjacencySnapshot,
+        nodes: &[NodeId],
+        check: &impl Fn() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Self, E> {
         let positions = nodes
             .iter()
             .enumerate()
@@ -142,10 +174,12 @@ impl WeightedGraph {
             .collect::<HashMap<_, _>>();
         let mut undirected = BTreeMap::<(usize, usize), f64>::new();
         for (&source, edges) in &snapshot.edges {
+            check()?;
             let Some(&left) = positions.get(&source) else {
                 continue;
             };
             for &(target, weight) in edges {
+                check()?;
                 let Some(&right) = positions.get(&target) else {
                     continue;
                 };
@@ -165,6 +199,7 @@ impl WeightedGraph {
         }
         let mut adjacency = vec![Vec::new(); nodes.len()];
         for ((left, right), weight) in undirected {
+            check()?;
             adjacency[left].push((right, weight));
             if left != right {
                 adjacency[right].push((left, weight));
@@ -173,9 +208,10 @@ impl WeightedGraph {
             }
         }
         for neighbors in &mut adjacency {
+            check()?;
             neighbors.sort_by_key(|(target, _)| *target);
         }
-        Self::new(adjacency)
+        Ok(Self::new(adjacency))
     }
 
     fn new(adjacency: Vec<Vec<(usize, f64)>>) -> Self {
@@ -192,19 +228,28 @@ impl WeightedGraph {
     }
 }
 
-fn local_moving(graph: &WeightedGraph, max_iterations: usize) -> (Vec<usize>, usize) {
+fn local_moving<E>(
+    graph: &WeightedGraph,
+    max_iterations: usize,
+    check: &impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<(Vec<usize>, usize), E> {
     let mut communities = (0..graph.len()).collect::<Vec<_>>();
     let mut totals = graph.degree.clone();
     if graph.total_weight_twice <= f64::EPSILON {
-        return (communities, 0);
+        return Ok((communities, 0));
     }
     for iteration in 0..max_iterations {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::GraphAlgorithmIteration);
+        check()?;
         let mut changed = false;
         for node in 0..graph.len() {
+            check()?;
             let current = communities[node];
             let degree = graph.degree[node];
             let mut weights = BTreeMap::<usize, f64>::new();
             for &(neighbor, weight) in &graph.adjacency[node] {
+                check()?;
                 *weights.entry(communities[neighbor]).or_default() += weight;
             }
             totals[current] -= degree;
@@ -213,6 +258,7 @@ fn local_moving(graph: &WeightedGraph, max_iterations: usize) -> (Vec<usize>, us
             let mut best = current;
             let mut best_gain = current_gain;
             for (community, internal_weight) in weights {
+                check()?;
                 let gain = internal_weight - degree * totals[community] / graph.total_weight_twice;
                 if gain > best_gain + 1e-12 || (gain - best_gain).abs() <= 1e-12 && community < best
                 {
@@ -225,16 +271,21 @@ fn local_moving(graph: &WeightedGraph, max_iterations: usize) -> (Vec<usize>, us
             changed |= best != current;
         }
         if !changed {
-            return (communities, iteration + 1);
+            return Ok((communities, iteration + 1));
         }
     }
-    (communities, max_iterations)
+    Ok((communities, max_iterations))
 }
 
-fn refine_connected(graph: &WeightedGraph, communities: &[usize]) -> Vec<usize> {
+fn refine_connected<E>(
+    graph: &WeightedGraph,
+    communities: &[usize],
+    check: &impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<Vec<usize>, E> {
     let mut refined = vec![usize::MAX; graph.len()];
     let mut next = 0usize;
     for start in 0..graph.len() {
+        check()?;
         if refined[start] != usize::MAX {
             continue;
         }
@@ -242,7 +293,9 @@ fn refine_connected(graph: &WeightedGraph, communities: &[usize]) -> Vec<usize> 
         refined[start] = next;
         let mut stack = vec![start];
         while let Some(node) = stack.pop() {
+            check()?;
             for &(neighbor, weight) in &graph.adjacency[node] {
+                check()?;
                 if weight > 0.0
                     && communities[neighbor] == target_community
                     && refined[neighbor] == usize::MAX
@@ -254,10 +307,14 @@ fn refine_connected(graph: &WeightedGraph, communities: &[usize]) -> Vec<usize> 
         }
         next += 1;
     }
-    refined
+    Ok(refined)
 }
 
-fn aggregate(graph: &WeightedGraph, communities: &[usize]) -> (WeightedGraph, Vec<usize>) {
+fn aggregate<E>(
+    graph: &WeightedGraph,
+    communities: &[usize],
+    check: &impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<(WeightedGraph, Vec<usize>), E> {
     let labels = communities.iter().copied().collect::<BTreeSet<_>>();
     let dense = labels
         .into_iter()
@@ -270,7 +327,9 @@ fn aggregate(graph: &WeightedGraph, communities: &[usize]) -> (WeightedGraph, Ve
         .collect::<Vec<_>>();
     let mut edges = BTreeMap::<(usize, usize), f64>::new();
     for source in 0..graph.len() {
+        check()?;
         for &(target, weight) in &graph.adjacency[source] {
+            check()?;
             if source > target {
                 continue;
             }
@@ -286,6 +345,7 @@ fn aggregate(graph: &WeightedGraph, communities: &[usize]) -> (WeightedGraph, Ve
     }
     let mut adjacency = vec![Vec::new(); dense.len()];
     for ((left, right), weight) in edges {
+        check()?;
         adjacency[left].push((right, weight));
         if left != right {
             adjacency[right].push((left, weight));
@@ -294,9 +354,10 @@ fn aggregate(graph: &WeightedGraph, communities: &[usize]) -> (WeightedGraph, Ve
         }
     }
     for neighbors in &mut adjacency {
+        check()?;
         neighbors.sort_by_key(|(target, _)| *target);
     }
-    (WeightedGraph::new(adjacency), remap)
+    Ok((WeightedGraph::new(adjacency), remap))
 }
 
 /// 使用向量数据为聚类结果补充质心 (无锁, 纯计算)

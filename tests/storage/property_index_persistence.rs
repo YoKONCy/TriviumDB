@@ -327,8 +327,11 @@ fn 唯一约束由主文件恢复且_sidecar_缺失时仍然生效() {
         vec![vec!["email".to_owned()]]
     );
     assert!(matches!(
-        reopened.insert(&[0.0, 1.0, 0.0, 0.0], json!({"email": "a@example.com"})),
-        Err(TriviumError::UniqueConstraintViolation { .. })
+        reopened
+            .insert(&[0.0, 1.0, 0.0, 0.0], json!({"email": "a@example.com"}))
+            .unwrap_err()
+            .underlying(),
+        TriviumError::UniqueConstraintViolation { .. }
     ));
     cleanup(&path);
 }
@@ -349,8 +352,10 @@ fn 复合唯一约束拒绝重复与非标量并允许字段缺失() {
         db.insert(
             &[0.0, 1.0, 0.0, 0.0],
             json!({"tenant": "a", "slug": "home"})
-        ),
-        Err(TriviumError::UniqueConstraintViolation { .. })
+        )
+        .unwrap_err()
+        .underlying(),
+        TriviumError::UniqueConstraintViolation { .. }
     ));
     db.insert(&[0.0, 0.0, 1.0, 0.0], json!({"tenant": "a"}))
         .unwrap();
@@ -358,8 +363,10 @@ fn 复合唯一约束拒绝重复与非标量并允许字段缺失() {
         db.insert(
             &[0.0, 0.0, 0.0, 1.0],
             json!({"tenant": "a", "slug": ["invalid"]})
-        ),
-        Err(TriviumError::InvalidInput(_))
+        )
+        .unwrap_err()
+        .underlying(),
+        TriviumError::InvalidInput(_)
     ));
     cleanup(&path);
 }

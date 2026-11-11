@@ -66,8 +66,8 @@ fn 不可变模式拒绝写入且关闭不产生文件() {
     std::fs::remove_file(format!("{path}.wal")).unwrap();
     let mut db = Database::<f32>::open_immutable(&path, 2).unwrap();
     assert!(matches!(
-        db.insert(&[0.0, 1.0], json!({})),
-        Err(TriviumError::ReadOnlyViolation { .. })
+        db.insert(&[0.0, 1.0], json!({})).unwrap_err().underlying(),
+        TriviumError::ReadOnlyViolation { .. }
     ));
     db.close().unwrap();
     assert!(!Path::new(&format!("{path}.wal")).exists());

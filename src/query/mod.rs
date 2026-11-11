@@ -12,3 +12,4 @@ pub mod tql_executor;
 pub mod tql_lexer;
 pub mod tql_parser;
 pub mod tql_prepared;
+pub mod tql_source;

@@ -4,8 +4,10 @@
 //! DatabaseWriter 保留完整可写接口。该分离在 Rust 编译期表达 ReadOnly/Immutable
 //! 零写边界，动态语言则由运行时 AccessMode 和稳定错误码提供同等约束。
 
-use super::{AccessMode, BatchSearchConfig, Config, Database, SearchConfig};
 use crate::VectorType;
+use crate::database::{
+    AccessMode, BatchSearchConfig, Config, Database, InstanceStats, SearchConfig, ShutdownStatus,
+};
 use crate::error::{Result, TriviumError};
 use crate::graph::reachability::{
     ReachabilityConfig, ReachabilityOutput, ReachabilityResult, SubgraphResult,
@@ -21,6 +23,14 @@ pub struct DatabaseReader<T: VectorType> {
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseReader<T> {
+    pub fn with_request_context<R>(
+        &self,
+        context: &super::RequestContext,
+        operation: impl FnOnce(&Self) -> Result<R>,
+    ) -> Result<R> {
+        context.run(|| operation(self))
+    }
+
     pub fn open_read_only(path: &str, dim: usize) -> Result<Self> {
         Database::open_read_only(path, dim).map(|inner| Self { inner })
     }
@@ -119,7 +129,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
         self.inner.resource_stats()
     }
 
-    pub fn instance_stats(&self) -> super::InstanceStats {
+    pub fn instance_stats(&self) -> InstanceStats {
         self.inner.instance_stats()
     }
 
@@ -295,10 +305,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
         self.inner.estimated_memory()
     }
 
-    pub fn request_shutdown(&mut self) -> Result<super::ShutdownStatus> {
+    pub fn request_shutdown(&mut self) -> Result<ShutdownStatus> {
         self.inner.request_shutdown()
     }
-    pub fn shutdown_status(&self) -> super::ShutdownStatus {
+    pub fn shutdown_status(&self) -> ShutdownStatus {
         self.inner.shutdown_status()
     }
     pub fn close_timeout(&mut self, timeout: std::time::Duration) -> Result<bool> {
@@ -315,6 +325,14 @@ pub struct DatabaseWriter<T: VectorType> {
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseWriter<T> {
+    pub fn with_request_context<R>(
+        &mut self,
+        context: &super::RequestContext,
+        operation: impl FnOnce(&mut Self) -> Result<R>,
+    ) -> Result<R> {
+        context.run(|| operation(self))
+    }
+
     pub fn open(path: &str, dim: usize) -> Result<Self> {
         Database::open(path, dim).map(|inner| Self { inner })
     }

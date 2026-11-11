@@ -39,6 +39,264 @@ fn tdb() -> Command {
 }
 
 #[test]
+fn json模式统一命令解析与输入文件错误() {
+    let (directory, path) = seed_db();
+    let malformed = directory.path().join("malformed.jsonl");
+    std::fs::write(&malformed, "{\n").unwrap();
+    for (arguments, code) in [
+        (vec!["--format", "json", "info"], "TDB_CLI_ARGUMENT"),
+        (
+            vec!["--format=json", "info", &path, "--unknown"],
+            "TDB_CLI_ARGUMENT",
+        ),
+        (
+            vec![
+                "--format",
+                "json",
+                "import",
+                &path,
+                "missing-input-file.jsonl",
+            ],
+            "TDB_IO",
+        ),
+        (
+            vec![
+                "--format=json",
+                "import",
+                &path,
+                malformed.to_str().unwrap(),
+            ],
+            "TDB_CLI_COMMAND",
+        ),
+    ] {
+        let output = tdb().args(arguments).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(if code == "TDB_CLI_ARGUMENT" { 2 } else { 1 })
+        );
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["schema_version"], 1);
+        assert_eq!(error["code"], code);
+        assert!(error.get("write").is_none());
+        assert!(output.stdout.is_empty());
+    }
+    let mut reopened = triviumdb::Database::<f32>::open_read_only(&path, 4).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), vec![1, 2]);
+    for (id, vector, name) in [
+        (1, vec![1., 0., 0., 0.], "Alice"),
+        (2, vec![0., 1., 0., 0.], "Bob"),
+    ] {
+        let node = reopened.get(id).unwrap().unwrap();
+        assert_eq!(node.vector, vector);
+        assert_eq!(node.payload, json!({"name":name,"type":"person"}));
+        let expected = if id == 1 {
+            json!([{"target_id":2,"label":"knows","weight":1.,"metadata":null}])
+        } else {
+            json!([])
+        };
+        assert_eq!(serde_json::to_value(node.edges).unwrap(), expected);
+    }
+    reopened.close().unwrap();
+}
+
+#[test]
+fn json_error_retains_core_lock_code_and_owner_data() {
+    let (_dir, path) = seed_db();
+    let mut owner = triviumdb::Database::<f32>::open(&path, 4).unwrap();
+    let output = tdb()
+        .args(["--format", "json", "info", &path])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["schema_version"], 1);
+    assert_eq!(error["code"], "TDB_DATABASE_LOCKED");
+    assert!(error["details"]["reason"].is_string());
+    assert!(output.stdout.is_empty());
+    owner
+        .update_payload(1, json!({"after":"rejected_open"}))
+        .unwrap();
+    owner.close().unwrap();
+    let mut reopened = triviumdb::Database::<f32>::open(&path, 4).unwrap();
+    assert_eq!(
+        reopened.get_payload(1).unwrap(),
+        Some(json!({"after":"rejected_open"}))
+    );
+    assert_eq!(
+        reopened.get(2).unwrap().unwrap().vector,
+        vec![0., 1., 0., 0.]
+    );
+    reopened.close().unwrap();
+}
+
+#[test]
+fn json配置警告保持结构且继续输出真实元数据() {
+    let (directory, path) = seed_db();
+    std::fs::write(directory.path().join(".triviumdb.toml"), "[invalid\n").unwrap();
+    let output = tdb()
+        .env("HOME", directory.path())
+        .env("USERPROFILE", directory.path())
+        .args(["--format=json", "info", &path])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let warning: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(warning["schema_version"], 1);
+    assert_eq!(warning["code"], "TDB_CLI_CONFIG");
+    assert_eq!(warning["level"], "warning");
+    assert_eq!(
+        warning["details"]["path"],
+        directory.path().join(".triviumdb.toml").to_str().unwrap()
+    );
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(info["path"], path);
+    assert_eq!(info["node_count"], 2);
+    assert_eq!(info["dimension"], 4);
+    assert_eq!(info["dtype"], "f32");
+}
+
+#[test]
+fn json_tql_parse_error_uses_core_error_envelope() {
+    let (_dir, path) = seed_db();
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/contracts/query_diagnostics.json"
+    ))
+    .unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let mut command = tdb();
+        command.args([
+            "--format",
+            "json",
+            "exec",
+            &path,
+            case["query"].as_str().unwrap(),
+        ]);
+        if case["mutation"] == true {
+            command.arg("--mutate");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{case}");
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["schema_version"], 1);
+        assert_eq!(error["code"], "TDB_QUERY_PARSE");
+        assert_eq!(error["stage"], case["stage"], "{case}");
+        assert_eq!(error["target"]["query_span"], case["span"], "{case}");
+        if case["mutation"] == true {
+            assert_eq!(
+                error["write"],
+                serde_json::json!({"phase":"validation","outcome":"not_committed"})
+            );
+        }
+        if case["span"].is_null() {
+            assert!(error.get("target").is_none());
+        }
+        assert!(error["details"]["reason"].is_string());
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn json_transaction_error_preserves_write_outcome_and_database_facts() {
+    let (_directory, path) = seed_db();
+    let mut database = triviumdb::Database::<f32>::open(&path, 4).unwrap();
+    database.create_unique_index("name").unwrap();
+    database.close().unwrap();
+    let output = tdb()
+        .args([
+            "--format",
+            "json",
+            "exec",
+            &path,
+            "MATCH (n) CREATE (m {name: \"duplicate\"})",
+            "--mutate",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["code"], "TDB_UNIQUE_CONSTRAINT");
+    assert_eq!(error["stage"], "execute");
+    assert_eq!(
+        error["target"],
+        json!({"query_span":{"start_byte":10,"end_byte":40,"line":1,"column":11}})
+    );
+    assert_eq!(
+        error["details"],
+        json!({"fields":["name"],"existing_id":3,"conflicting_id":4})
+    );
+    assert_eq!(
+        error["write"],
+        json!({"phase":"validation","outcome":"not_committed","transaction_consumed":true})
+    );
+    let mut reopened = triviumdb::Database::<f32>::open(&path, 4).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), vec![1, 2]);
+    for (id, vector, name) in [
+        (1, vec![1., 0., 0., 0.], "Alice"),
+        (2, vec![0., 1., 0., 0.], "Bob"),
+    ] {
+        let node = reopened.get(id).unwrap().unwrap();
+        assert_eq!(node.vector, vector);
+        assert_eq!(node.payload, json!({"name":name,"type":"person"}));
+    }
+    let edges = reopened.get_edges(1).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(
+        (edges[0].target_id, edges[0].label.as_str(), edges[0].weight),
+        (2, "knows", 1.)
+    );
+    reopened.close().unwrap();
+}
+
+#[test]
+fn json_tql_planning_rejection_has_uncommitted_outcome() {
+    let (_directory, path) = seed_db();
+    let output = tdb()
+        .args([
+            "--format",
+            "json",
+            "exec",
+            &path,
+            "MATCH (n) SET VECTOR(n) == [1]",
+            "--mutate",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["code"], "TDB_DIMENSION_MISMATCH");
+    assert_eq!(error["stage"], "plan");
+    assert_eq!(
+        error["target"],
+        json!({"query_span":{"start_byte":10,"end_byte":30,"line":1,"column":11}})
+    );
+    assert_eq!(error["details"], json!({"expected":4,"got":1}));
+    assert_eq!(
+        error["write"],
+        json!({"phase":"validation","outcome":"not_committed"})
+    );
+    let mut database = triviumdb::Database::<f32>::open(&path, 4).unwrap();
+    assert_eq!(database.all_node_ids().unwrap(), vec![1, 2]);
+    for (id, vector, name) in [
+        (1, vec![1., 0., 0., 0.], "Alice"),
+        (2, vec![0., 1., 0., 0.], "Bob"),
+    ] {
+        let node = database.get(id).unwrap().unwrap();
+        assert_eq!(node.vector, vector);
+        assert_eq!(node.payload, json!({"name":name,"type":"person"}));
+    }
+    let edges = database.get_edges(1).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(
+        (edges[0].target_id, edges[0].label.as_str(), edges[0].weight),
+        (2, "knows", 1.)
+    );
+    assert!(database.get_edges(2).unwrap().is_empty());
+    database.close().unwrap();
+}
+
+#[test]
 fn help_uses_tdb_command_name() {
     tdb()
         .arg("--help")

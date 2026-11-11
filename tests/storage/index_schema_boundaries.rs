@@ -156,8 +156,11 @@ fn 历史复合字段边界不明确时查询扫描事实且唯一约束从主�
                     .unwrap();
             if unique {
                 assert!(matches!(
-                    writer.insert_with_id(2, &[0., 1.], case["payload"].clone()),
-                    Err(TriviumError::UniqueConstraintViolation { .. })
+                    writer
+                        .insert_with_id(2, &[0., 1.], case["payload"].clone())
+                        .unwrap_err()
+                        .underlying(),
+                    TriviumError::UniqueConstraintViolation { .. }
                 ));
             } else {
                 writer.create_composite_index(&fields).unwrap();
@@ -189,12 +192,14 @@ fn 复合字段磁盘边界在构建与写日志前拒绝() {
     let before = std::fs::read(format!("{path}.wal")).unwrap();
     for fields in cases {
         assert!(matches!(
-            db.create_composite_index(&fields),
-            Err(TriviumError::InvalidInput(_))
+            db.create_composite_index(&fields).unwrap_err().underlying(),
+            TriviumError::InvalidInput(_)
         ));
         assert!(matches!(
-            db.create_unique_composite_index(&fields),
-            Err(TriviumError::InvalidInput(_))
+            db.create_unique_composite_index(&fields)
+                .unwrap_err()
+                .underlying(),
+            TriviumError::InvalidInput(_)
         ));
         assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
         assert_eq!(db.get_payload(1).unwrap(), Some(json!({"a":1})));

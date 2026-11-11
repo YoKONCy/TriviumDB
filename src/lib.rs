@@ -19,7 +19,9 @@ pub mod index;
 pub mod node;
 pub mod observability;
 pub mod query;
+mod request;
 pub mod resources;
+pub mod sdk;
 pub mod storage;
 pub mod tsng;
 
@@ -37,7 +39,7 @@ pub use database::{
     Database, DatabaseReader, DatabaseWriter, InstanceMemoryStats, InstanceStats, ShutdownPhase,
     ShutdownStatus,
 };
-pub use error::{Result, TriviumError};
+pub use error::{ErrorInfo, Result, TriviumError};
 pub use filter::Filter;
 pub use graph::reachability::{
     ReachabilityConfig, ReachabilityDirection, ReachabilityOutput, ReachabilityResult,
@@ -48,6 +50,7 @@ pub use node::{Edge, GroupedSearchResult, NodeId, NodeView, SearchHit};
 pub use resources::{
     ResourceBudgetDetails, ResourceFailure, ResourceLimits, ResourceRuntime, ResourceStats,
 };
+pub use sdk::{SharedDatabase, WeakDatabase};
 pub use storage::compaction::{MaintenanceDeferReason, MaintenancePhase, MaintenanceStatus};
 pub use storage::generation::{CurrentGeneration, GenerationReader, GenerationStore};
 pub use storage::memtable::{GraphIntegrityReport, GraphRepairReport, GraphStats};

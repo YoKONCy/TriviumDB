@@ -15,8 +15,8 @@ use crate::storage::wal::WalEntry;
 use super::{lock_or_recover, write_or_recover};
 
 /// 应用过程异常时保留 WAL，并让共享句柄统一等待重新打开恢复。
-struct ApplicationGuard<'a, T: VectorType> {
-    mt: &'a mut MemTable<T>,
+pub(super) struct ApplicationGuard<'a, T: VectorType> {
+    pub(super) mt: &'a mut MemTable<T>,
     wal: &'a std::sync::Mutex<crate::storage::wal::Wal>,
     lifecycle: &'a std::sync::Mutex<super::LifecycleState>,
     previous_pause: bool,
@@ -29,10 +29,20 @@ impl<'a, T: VectorType> ApplicationGuard<'a, T> {
         wal: &'a std::sync::Mutex<crate::storage::wal::Wal>,
         lifecycle: &'a std::sync::Mutex<super::LifecycleState>,
     ) -> Self {
+        let guard = Self::direct(mt, wal, lifecycle);
+        guard.mt.set_unique_updates_paused(true);
+        guard.mt.set_quiver_sync_paused(true);
+        guard
+    }
+
+    /// 单条应用保持当前索引同步方式，失败时复用统一恢复保护。
+    pub(super) fn direct(
+        mt: &'a mut MemTable<T>,
+        wal: &'a std::sync::Mutex<crate::storage::wal::Wal>,
+        lifecycle: &'a std::sync::Mutex<super::LifecycleState>,
+    ) -> Self {
         let previous_unique_pause = mt.unique_updates_paused();
-        mt.set_unique_updates_paused(true);
         let previous_pause = mt.quiver_sync_paused();
-        mt.set_quiver_sync_paused(true);
         Self {
             mt,
             wal,
@@ -41,6 +51,10 @@ impl<'a, T: VectorType> ApplicationGuard<'a, T> {
             previous_unique_pause,
             complete: false,
         }
+    }
+
+    pub(super) fn finish(mut self) {
+        self.complete = true;
     }
 }
 impl<T: VectorType> Drop for ApplicationGuard<'_, T> {
@@ -80,6 +94,10 @@ fn next_transaction_id(counter: &std::sync::atomic::AtomicU64) -> Result<u64> {
 /// - 无论是否跳过插入，都推进 `next_id` 防止 ID 复用
 pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<T>) -> Result<()> {
     let extra = match &entry {
+        WalEntry::EditReceipt { bytes } => bytes
+            .len()
+            .saturating_mul(4)
+            .saturating_add(mt.editing.queue_bytes()),
         WalEntry::Insert { payload, .. } => mt
             .estimate_reserve_bytes(1)?
             .saturating_add(payload.len().saturating_mul(64)),
@@ -176,6 +194,10 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
         }
         WalEntry::TxBegin { .. } | WalEntry::TxCommit { .. } => {
             // 已在 wal.rs 内的回放过滤环节处理，这里不应再收到，直接忽略
+        }
+        WalEntry::EditReceipt { bytes } => {
+            mt.editing.restore(&bytes)?;
+            mt.mark_checkpoint_dirty();
         }
     }
     Ok(())
@@ -486,14 +508,51 @@ impl<T: VectorType> Default for TxBuilder<T> {
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T> {
     /// 原子提交一组事务操作（供 Transaction::commit 和 commit_tx 共用）
-    pub(crate) fn commit_ops(&mut self, mut ops: Vec<TxOp<T>>) -> Result<Vec<NodeId>> {
+    pub(crate) fn commit_ops(&mut self, ops: Vec<TxOp<T>>) -> Result<Vec<NodeId>> {
+        self.commit_ops_guarded(ops, None, None)
+    }
+
+    pub(crate) fn commit_ops_guarded(
+        &mut self,
+        ops: Vec<TxOp<T>>,
+        receipt: Option<super::editing::EditReceipt>,
+        control: Option<&crate::query::tql_executor::QueryControl>,
+    ) -> Result<Vec<NodeId>> {
+        let mut write = crate::error::WriteErrorInfo {
+            transaction_consumed: Some(true),
+            ..crate::error::WriteErrorInfo::TRANSACTION_ADMISSION
+        };
+        self.commit_ops_guarded_inner(ops, receipt, control, &mut write)
+            .map_err(|error| error.with_write_info(write))
+    }
+
+    fn commit_ops_guarded_inner(
+        &mut self,
+        mut ops: Vec<TxOp<T>>,
+        receipt: Option<super::editing::EditReceipt>,
+        control: Option<&crate::query::tql_executor::QueryControl>,
+        write: &mut crate::error::WriteErrorInfo,
+    ) -> Result<Vec<NodeId>> {
+        let inherited = crate::request::control();
+        let control = match (control, inherited) {
+            (Some(control), Some(parent)) => Some(control.combined_with(&parent)),
+            (Some(control), None) => Some(control.clone()),
+            (None, parent) => parent,
+        };
         let _operation = self.enter_operation()?;
-        self.require_write_access("transaction commit")?;
-        if ops.is_empty() {
+        self.check_transaction_admission()?;
+        if let Some(control) = &control {
+            control.check()?;
+        }
+        if ops.is_empty() && receipt.is_none() {
             return Ok(Vec::new());
         }
 
+        write.phase = crate::error::WritePhase::Validation;
         let mut mt = write_or_recover(&self.memtable);
+        if let Some(receipt) = &receipt {
+            mt.editing.check(&receipt.expected)?;
+        }
 
         // ════════ 第一阶段：预检前置 (Dry-Run) + 预分配 ID ════════
         let mut sim_next_id = mt.next_id_value();
@@ -695,6 +754,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     .saturating_add(crate::storage::payload_store::estimate_json_memory(value));
             }
         }
+        if let Some(receipt) = &receipt {
+            estimated_bytes = estimated_bytes
+                .saturating_add(mt.editing.additional_bytes(receipt).saturating_mul(3));
+        }
         let current_bytes = mt.estimated_memory_bytes();
         if self.memory_limit > 0
             && current_bytes.saturating_add(estimated_bytes) > self.memory_limit
@@ -721,7 +784,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         mt.try_reserve_for_insert(insert_count)?;
 
         // ════════ 第二阶段：构建 WAL 条目（不触碰 memtable） ════════
-        let mut wal_entries: Vec<WalEntry<T>> = Vec::with_capacity(ops.len());
+        let mut wal_entries: Vec<WalEntry<T>> =
+            Vec::with_capacity(ops.len() + usize::from(receipt.is_some()));
         let mut generated_ids: Vec<NodeId> = Vec::new();
 
         for op in &ops {
@@ -808,12 +872,42 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
         }
 
-        // ════════ 第三阶段：先写 WAL（若失败则 memtable 完全未变） ════════
+        // ════════ 第三阶段：先写 WAL（失败时不应用事实，编辑版本与待确认回执可已消耗） ════════
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeTransactionWal);
+        if let Some(control) = &control {
+            control.check()?;
+        }
+        let receipt_key = receipt.as_ref().map(|receipt| receipt.key.clone());
+        if let Some(receipt) = &receipt {
+            wal_entries.push(WalEntry::EditReceipt {
+                bytes: receipt.encode(&generated_ids, mt.editing.next_revision()?)?,
+            });
+        }
         {
             let mut w = lock_or_recover(&self.wal);
             let tx_id = next_transaction_id(&NEXT_TX_ID)?;
+            w.ensure_writable()?;
+            if let Some(receipt) = &receipt {
+                mt.ensure_additional_memory(
+                    self.memory_limit,
+                    mt.editing.additional_bytes(receipt),
+                )?;
+            }
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::TransactionWalLockAcquired);
+            if let Some(control) = &control {
+                control.check()?;
+            }
+            if let Some(receipt) = receipt {
+                mt.editing
+                    .begin(receipt, &generated_ids, &self.resource_runtime)?;
+            }
+            write.phase = crate::error::WritePhase::Wal;
+            write.outcome = crate::error::WriteOutcome::Unknown;
             w.append_batch(tx_id, &wal_entries)?;
         }
+        write.phase = crate::error::WritePhase::Apply;
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::AfterWalAppend);
 
@@ -889,6 +983,20 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         application.complete = true;
         drop(application);
 
+        write.phase = crate::error::WritePhase::Response;
+        write.outcome = if lock_or_recover(&self.lifecycle.0)
+            .group_commit_owner
+            .is_some()
+        {
+            crate::error::WriteOutcome::Unknown
+        } else {
+            crate::error::WriteOutcome::Committed
+        };
+        if let Some(key) = receipt_key {
+            mt.editing.complete(&key)?;
+            mt.mark_checkpoint_dirty();
+        }
+
         drop(mt);
 
         Ok(generated_ids)
@@ -945,7 +1053,10 @@ mod guard_tests {
             drop(failure);
             barrier.release();
             let result_query = query.join().unwrap();
-            assert!(matches!(result, Err(TriviumError::Io(_))));
+            assert!(matches!(
+                result.unwrap_err().underlying(),
+                TriviumError::Io(_)
+            ));
             assert!(matches!(result_query, Err(TriviumError::WalClosed)));
             drop(db);
             let mut reopened = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
