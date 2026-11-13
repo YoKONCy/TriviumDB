@@ -118,6 +118,47 @@ pub struct QuerySpan {
     pub column: usize,
 }
 
+struct TextCoordinates {
+    line: usize,
+    column: usize,
+    previous_cr: bool,
+}
+
+impl TextCoordinates {
+    fn new() -> Self {
+        Self {
+            line: 1,
+            column: 1,
+            previous_cr: false,
+        }
+    }
+
+    fn advance(&mut self, ch: char) {
+        match ch {
+            '\r' => {
+                self.line = self.line.saturating_add(1);
+                self.column = 1;
+            }
+            '\n' if self.previous_cr => {}
+            '\n' => {
+                self.line = self.line.saturating_add(1);
+                self.column = 1;
+            }
+            _ => self.column = self.column.saturating_add(1),
+        }
+        self.previous_cr = ch == '\r';
+    }
+
+    fn span(&self, byte: usize) -> QuerySpan {
+        QuerySpan {
+            start_byte: byte,
+            end_byte: byte,
+            line: self.line,
+            column: self.column,
+        }
+    }
+}
+
 impl QuerySpan {
     /// 范围两端必须落在真实字符边界上，起点的行列沿用统一计数规则。
     pub fn range(input: &str, start: usize, end: usize) -> Option<Self> {
@@ -130,28 +171,45 @@ impl QuerySpan {
     /// 只接受真实字符边界；列按 Unicode 标量计数，CRLF 合并，Tab 计一列。
     pub fn at(input: &str, byte: usize) -> Option<Self> {
         let prefix = input.get(..byte)?;
-        let (mut line, mut column, mut previous_cr) = (1, 1, false);
+        let mut coordinates = TextCoordinates::new();
         for ch in prefix.chars() {
-            match ch {
-                '\r' => {
-                    line += 1;
-                    column = 1;
-                }
-                '\n' if previous_cr => {}
-                '\n' => {
-                    line += 1;
-                    column = 1;
-                }
-                _ => column += 1,
-            }
-            previous_cr = ch == '\r';
+            coordinates.advance(ch);
         }
-        Some(Self {
-            start_byte: byte,
-            end_byte: byte,
-            line,
-            column,
-        })
+        Some(coordinates.span(byte))
+    }
+
+    /// 对排序后的原文边界一次扫描，批量证据沿用相同行列与CRLF规则。
+    pub(crate) fn at_many(input: &str, positions: &[usize]) -> Result<Vec<Self>> {
+        let mut result = Vec::new();
+        result.try_reserve_exact(positions.len()).map_err(|error| {
+            TriviumError::CapacityAllocationFailed {
+                reason: format!(
+                    "原文位置工作区分配失败 (Source position workspace allocation failed): {error}"
+                ),
+            }
+        })?;
+        let mut coordinates = TextCoordinates::new();
+        let mut characters = input.char_indices().peekable();
+        let mut previous = 0usize;
+        let mut visited = 0usize;
+        for &byte in positions {
+            crate::request::check_current()?;
+            if byte < previous || byte > input.len() || !input.is_char_boundary(byte) {
+                return Err(TriviumError::InvalidInput("原文边界须排序且位于UTF-8字符边界 (Source boundaries must be sorted UTF-8 character boundaries)".into()).at_field("reference"));
+            }
+            while characters.peek().is_some_and(|(offset, _)| *offset < byte) {
+                if let Some((_, ch)) = characters.next() {
+                    coordinates.advance(ch);
+                }
+                visited = visited.saturating_add(1);
+                if visited.is_multiple_of(1024) {
+                    crate::request::check_current()?;
+                }
+            }
+            result.push(coordinates.span(byte));
+            previous = byte;
+        }
+        Ok(result)
     }
 }
 
@@ -429,6 +487,28 @@ pub enum TriviumError {
     #[error("编辑版本冲突，请重新读取并合并 (Edit revision conflict; reload and merge)")]
     WriteConflict { expected: String, actual: String },
 
+    #[error("图修订冲突，请重新读取并合并 (Graph revision conflict, reload and merge)")]
+    GraphRevisionMismatch {
+        graph_id: String,
+        expected: String,
+        actual: String,
+    },
+
+    #[error("图身份不存在 (Graph identity does not exist): {graph_id}")]
+    GraphNotFound { graph_id: String },
+
+    #[error("文档上传不存在 (Document upload does not exist): {upload_id}")]
+    DocumentUploadNotFound { upload_id: String },
+    #[error("文档上传身份、顺序或状态冲突 (Document upload identity, sequence or state conflict)")]
+    DocumentUploadConflict { field: String },
+
+    #[error("文档修订不匹配，请读取当前来源 (Document revision mismatch; read the current source)")]
+    DocumentRevisionMismatch {
+        document_id: u64,
+        expected: String,
+        actual: String,
+    },
+
     #[error("幂等键已用于其他事务内容 (Idempotency key was used for a different transaction)")]
     IdempotencyConflict,
 
@@ -696,6 +776,11 @@ impl TriviumError {
             Self::ConsoleSessionClosed => "TDB_CONSOLE_SESSION_CLOSED",
             Self::ConsoleResponseTooLarge { .. } => "TDB_CONSOLE_RESPONSE_TOO_LARGE",
             Self::WriteConflict { .. } => "TDB_WRITE_CONFLICT",
+            Self::GraphNotFound { .. } => "TDB_GRAPH_NOT_FOUND",
+            Self::GraphRevisionMismatch { .. } => "TDB_GRAPH_REVISION_MISMATCH",
+            Self::DocumentRevisionMismatch { .. } => "TDB_DOCUMENT_REVISION_MISMATCH",
+            Self::DocumentUploadNotFound { .. } => "TDB_DOCUMENT_UPLOAD_NOT_FOUND",
+            Self::DocumentUploadConflict { .. } => "TDB_DOCUMENT_UPLOAD_CONFLICT",
             Self::IdempotencyConflict => "TDB_IDEMPOTENCY_CONFLICT",
             Self::WriteOutcomeUnknown => "TDB_WRITE_OUTCOME_UNKNOWN",
             Self::UnsupportedWalVersion { .. } => "TDB_UNSUPPORTED_WAL_VERSION",
@@ -726,6 +811,21 @@ impl TriviumError {
             Self::Serialization(error) => json!({"reason": error.to_string()}),
             Self::WriteConflict { expected, actual } => {
                 json!({"expected":expected,"actual":actual})
+            }
+            Self::GraphNotFound { graph_id } => json!({"graph_id":graph_id}),
+            Self::DocumentUploadNotFound { upload_id } => json!({"upload_id":upload_id}),
+            Self::DocumentUploadConflict { field } => json!({"field":field}),
+            Self::GraphRevisionMismatch {
+                graph_id,
+                expected,
+                actual,
+            } => json!({"graph_id":graph_id,"expected":expected,"actual":actual}),
+            Self::DocumentRevisionMismatch {
+                document_id,
+                expected,
+                actual,
+            } => {
+                json!({"document_id":document_id.to_string(),"expected":expected,"actual":actual})
             }
             Self::IdempotencyConflict | Self::WriteOutcomeUnknown => json!({}),
             Self::DimensionMismatch { expected, got } => json!({"expected": expected, "got": got}),

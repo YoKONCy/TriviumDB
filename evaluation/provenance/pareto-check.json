@@ -1,0 +1,149 @@
+{
+  "criteria": "maximize achieved recall and QPS; minimize recorded preparation and memory",
+  "checks": [
+    {
+      "dataset": "D03",
+      "threads": 1,
+      "memory": "navigation",
+      "eligible_points": 98,
+      "selected_curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D03",
+      "threads": 1,
+      "memory": "total_logical",
+      "eligible_points": 98,
+      "selected_curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D03",
+      "threads": 1,
+      "memory": "rss",
+      "eligible_points": 84,
+      "selected_curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D03",
+      "threads": 32,
+      "memory": "navigation",
+      "eligible_points": 58,
+      "selected_curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D03",
+      "threads": 32,
+      "memory": "total_logical",
+      "eligible_points": 58,
+      "selected_curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D03",
+      "threads": 32,
+      "memory": "rss",
+      "eligible_points": 44,
+      "selected_curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D05",
+      "threads": 1,
+      "memory": "navigation",
+      "eligible_points": 90,
+      "selected_curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D05",
+      "threads": 1,
+      "memory": "total_logical",
+      "eligible_points": 90,
+      "selected_curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D05",
+      "threads": 1,
+      "memory": "rss",
+      "eligible_points": 77,
+      "selected_curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D05",
+      "threads": 32,
+      "memory": "navigation",
+      "eligible_points": 58,
+      "selected_curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D05",
+      "threads": 32,
+      "memory": "total_logical",
+      "eligible_points": 58,
+      "selected_curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D05",
+      "threads": 32,
+      "memory": "rss",
+      "eligible_points": 44,
+      "selected_curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D14",
+      "threads": 1,
+      "memory": "navigation",
+      "eligible_points": 111,
+      "selected_curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D14",
+      "threads": 1,
+      "memory": "total_logical",
+      "eligible_points": 111,
+      "selected_curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D14",
+      "threads": 1,
+      "memory": "rss",
+      "eligible_points": 98,
+      "selected_curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D14",
+      "threads": 32,
+      "memory": "navigation",
+      "eligible_points": 57,
+      "selected_curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D14",
+      "threads": 32,
+      "memory": "total_logical",
+      "eligible_points": 57,
+      "selected_curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+      "dominating_points": []
+    },
+    {
+      "dataset": "D14",
+      "threads": 32,
+      "memory": "rss",
+      "eligible_points": 43,
+      "selected_curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+      "dominating_points": []
+    }
+  ]
+}

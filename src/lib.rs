@@ -11,11 +11,13 @@
 #![allow(clippy::unnecessary_sort_by)]
 
 pub mod database;
+pub mod document;
 pub mod error;
 pub mod filter;
 pub mod graph;
 pub mod hook;
 pub mod index;
+pub mod named_graph;
 pub mod node;
 pub mod observability;
 pub mod query;
@@ -27,6 +29,10 @@ pub mod tsng;
 
 #[cfg(feature = "test-hooks")]
 pub mod test_hooks;
+
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
 
 pub mod cognitive;
 

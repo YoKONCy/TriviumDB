@@ -366,6 +366,9 @@ function runSearchBoundaries(root) {
 
 async function main() {
   try {
+    require('./quiver_ssd').runQuiverSsd(root)
+    require('./documents').runDocuments(root)
+    require('./named_graphs').runNamedGraphs(root)
     runSearchBoundaries(root)
     runLifecycleContract(root)
     runResourceContract(root)
@@ -448,7 +451,7 @@ async function main() {
     assert.deepEqual(indexes.find(item => item.kind === 'composite').fields, ['tenant', 'region'])
 
     const storage = db.storageInfo()
-    assert.equal(storage.database_format_current, 11)
+    assert.equal(storage.database_format_current, 13)
     assert.equal(storage.property_index_format, 8)
     assert.equal(storage.node_count, 2)
 

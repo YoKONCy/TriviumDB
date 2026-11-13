@@ -46,9 +46,8 @@ impl CorrectedSmIndex {
         if !first.is_finite() || !anchor.is_finite() {
             return Err(invalid("SM查询分数溢出"));
         }
-        SCRATCH.with(|cell| {
-            let mut scratch = cell.borrow_mut();
-            let Scratch { visited, storage } = &mut *scratch;
+        with_scratch(source.owns_workspace(), |scratch| {
+            let Scratch { visited, storage } = scratch;
             if visited.len < self.len() {
                 visited.grow(self.len());
             }
@@ -67,6 +66,7 @@ impl CorrectedSmIndex {
             st.queue.push(Reverse((NonNanF32(first), self.entry)));
             st.results.push((NonNanF32(first), self.entry));
             while let Some(&Reverse((distance, u))) = st.queue.peek() {
+                source.checkpoint()?;
                 if st.results.len() >= ef && distance > st.results.peek().unwrap().0 {
                     break;
                 }
@@ -205,6 +205,7 @@ impl CorrectedSmIndex {
             let mut j = 0;
             let count = st.exact_ids.len();
             while j < count && st.exact.len() < budget {
+                source.checkpoint()?;
                 if optimized
                     && j + 4 <= count
                     && budget - st.exact.len() >= 4

@@ -3791,6 +3791,34 @@ pub mod nodejs {
             .map_err(|error| to_napi_error(env, error))
         }
 
+        /// 文档JSON适配复用Core的解析、来源映射、分批发布、修订、检索与证据上下文。
+        #[napi]
+        pub fn document_request(
+            &mut self,
+            env: Env,
+            request_json: JsUnknown,
+        ) -> napi::Result<String> {
+            let request_json = read_string(env, request_json, "requestJson")?;
+            dispatch!(self, mut db => crate::sdk::documents::request(db, &request_json))
+                .map_err(|error| to_napi_error(env, error))
+        }
+
+        /// SSD运行时JSON适配复用Core的事实绑定、驻留、缓存与I/O生命周期。
+        #[napi]
+        pub fn quiver_request(&self, env: Env, request_json: JsUnknown) -> napi::Result<String> {
+            let request_json = read_string(env, request_json, "requestJson")?;
+            dispatch!(self, db => crate::sdk::quiver::request(db, &request_json))
+                .map_err(|error| to_napi_error(env, error))
+        }
+
+        /// 命名图JSON适配复用Core的成员、独立边、修订及作用域契约。
+        #[napi]
+        pub fn graph_request(&mut self, env: Env, request_json: JsUnknown) -> napi::Result<String> {
+            let request_json = read_string(env, request_json, "requestJson")?;
+            dispatch!(self, mut db => crate::sdk::named_graphs::request(db, &request_json))
+                .map_err(|error| to_napi_error(env, error))
+        }
+
         /// 同步执行宿主控制台请求。
         #[napi]
         pub fn console_request(

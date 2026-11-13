@@ -1,0 +1,174 @@
+{
+  "description": "由命名图实装前已验收的原生wheel生成，检查点格式11及WAL4，f32/f16/u64均含已确认的未检查点节点33。",
+  "source_head": "46778a8d7b8a8ab656d7f1d4c8d4078b2051e638",
+  "baseline_artifacts": {
+    "captured_at": "2026-11-12T02:52:09.263951+00:00",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "python": "3.12.12",
+    "node": "v22.23.4",
+    "profile": "dev",
+    "cargo_target_dir": "target/webui-tests",
+    "cargo_incremental": 0,
+    "dev_debug": 0,
+    "test_debug": 0,
+    "artifacts": [
+      {
+        "path": ".tmp/document-vectors/wheels/triviumdb-0.9.0-cp39-abi3-win_amd64.whl",
+        "bytes": 7460731,
+        "sha256": "349ACD709E9214BB3AE9E7A191CE8C2B448CDBD2F839BB4AB82D822F09623A47"
+      },
+      {
+        "path": "triviumdb.win32-x64-msvc.node",
+        "bytes": 29736448,
+        "sha256": "B4F90BE4AF84EB73F02D8AD50E28D16A2326D52CFB5B68B5CB756CA8DED669D4"
+      },
+      {
+        "path": "index.js",
+        "bytes": 11848,
+        "sha256": "8BE1BF69A904B259AE98A88712CC1BB08B6358524C9919F8114159CE0CE5B82E"
+      },
+      {
+        "path": "triviumdb.d.ts",
+        "bytes": 38314,
+        "sha256": "67E0BFA29A4254E68BF0F261956D4C3D1351D137106547781539A478990C1CA0"
+      },
+      {
+        "path": "package.json",
+        "bytes": 1409,
+        "sha256": "D2A7F273FA469096143B03329E98507668B9FB6C68A9AF9BA1752BEFC268E8ED"
+      },
+      {
+        "path": "python/triviumdb/__init__.pyi",
+        "bytes": 15842,
+        "sha256": "99E3A4891273584ACE268C91491D4A3FB9FDC9749789F8FDEBD0871941E7AC8E"
+      }
+    ],
+    "installed_native_sha256": "4C9D874AD12C690C22AD22C45C890EEB8DBB11D6E3821A9EA55058CCCFE4BE1E",
+    "installed_stub_sha256": "99E3A4891273584ACE268C91491D4A3FB9FDC9749789F8FDEBD0871941E7AC8E",
+    "source_file_count": 76
+  },
+  "files": [
+    {
+      "path": "f16/sample.tdb",
+      "sha256": "4d5f7b0440119c1abf480ef730882fdd4da7f9ca5fefe385a630b0e9987bb000",
+      "bytes": 180
+    },
+    {
+      "path": "f16/sample.tdb.flush_ok",
+      "sha256": "d8f8a1b0a294aa219d04d1f6dfc56e16ff68ba363c2966babdbeae431309ccc8",
+      "bytes": 53
+    },
+    {
+      "path": "f16/sample.tdb.gidx",
+      "sha256": "33fd40c039b6b1b5488fc071bf37658eeaa34d41fc84ef12964f01fc1a7af284",
+      "bytes": 176
+    },
+    {
+      "path": "f16/sample.tdb.pld.1",
+      "sha256": "fb27e151d0f669b1ef9598231c5fdf225b856e9a529c470dd955985de149d164",
+      "bytes": 148
+    },
+    {
+      "path": "f16/sample.tdb.vec",
+      "sha256": "314751446dcce24e540f85fef0e101b1a75bfc90b95e9c09283e0c8ad87f234f",
+      "bytes": 8
+    },
+    {
+      "path": "f16/sample.tdb.wal",
+      "sha256": "d90320c49fdbdf03b5619a4def59cb672cfd66eaf86da6525a5033187170e6f7",
+      "bytes": 68
+    },
+    {
+      "path": "f32/sample.tdb",
+      "sha256": "76d3caa7f91323641b71a9c941ca6374e329b7a601c156b7b583821f73390fdc",
+      "bytes": 180
+    },
+    {
+      "path": "f32/sample.tdb.flush_ok",
+      "sha256": "8d4ad390656cc70a29d94a5597b613fc98538c434530e64c4c64fdad6f4b5b42",
+      "bytes": 53
+    },
+    {
+      "path": "f32/sample.tdb.gidx",
+      "sha256": "33fd40c039b6b1b5488fc071bf37658eeaa34d41fc84ef12964f01fc1a7af284",
+      "bytes": 176
+    },
+    {
+      "path": "f32/sample.tdb.pld.1",
+      "sha256": "fb27e151d0f669b1ef9598231c5fdf225b856e9a529c470dd955985de149d164",
+      "bytes": 148
+    },
+    {
+      "path": "f32/sample.tdb.vec",
+      "sha256": "a666c95f0822c64e01580063e9bb27c629d4d0534e3163a9611738599f97df2a",
+      "bytes": 16
+    },
+    {
+      "path": "f32/sample.tdb.wal",
+      "sha256": "58e1b9d868611e60a0b4fbd5e79312c7bd4f6890226d479f5ca8b42a585b291b",
+      "bytes": 72
+    },
+    {
+      "path": "receipts/case.json",
+      "sha256": "1c09dd3b3384ec4ea6b4afbd0f0367f200fb35d9e6888f1a7a904bf03434a694",
+      "bytes": 877
+    },
+    {
+      "path": "receipts/sample.tdb",
+      "sha256": "22f79b1b4687a94d64ab1177d4526e58f6952dd4665d3410066e0ebfd21fdc12",
+      "bytes": 134
+    },
+    {
+      "path": "receipts/sample.tdb.flush_ok",
+      "sha256": "98d097f843d402d2ad8256528439ed4943dc6fc638514e652c4080e0d2bbe6be",
+      "bytes": 53
+    },
+    {
+      "path": "receipts/sample.tdb.pld.1",
+      "sha256": "09e9b10ba6ccf8a469287a45bae282307c7e3fa2fc3acb0c09a8e2a6e4cf8ff8",
+      "bytes": 94
+    },
+    {
+      "path": "receipts/sample.tdb.vec",
+      "sha256": "434b26042aff3fb844a4c4c6be0d81a079b0ce84cfb8190679024404e5dc4822",
+      "bytes": 8
+    },
+    {
+      "path": "receipts/sample.tdb.wal",
+      "sha256": "993028fb93560068497cf0f2a2fe3f02164c6af0064eae1b4a161d51a6d98ac7",
+      "bytes": 661
+    },
+    {
+      "path": "u64/sample.tdb",
+      "sha256": "cb9e098aaf76864c932c3bf73f258696f142ebe1c059c10290996c6a1b47632e",
+      "bytes": 180
+    },
+    {
+      "path": "u64/sample.tdb.flush_ok",
+      "sha256": "f850402d6cf73ce70782d45c4acea8b6def578af324f59494f609d16b062ae70",
+      "bytes": 53
+    },
+    {
+      "path": "u64/sample.tdb.gidx",
+      "sha256": "33fd40c039b6b1b5488fc071bf37658eeaa34d41fc84ef12964f01fc1a7af284",
+      "bytes": 176
+    },
+    {
+      "path": "u64/sample.tdb.pld.1",
+      "sha256": "fb27e151d0f669b1ef9598231c5fdf225b856e9a529c470dd955985de149d164",
+      "bytes": 148
+    },
+    {
+      "path": "u64/sample.tdb.vec",
+      "sha256": "33679eedd86f9637ab73892a064cdab3d82365cf5063b145affb2272327a6ddc",
+      "bytes": 32
+    },
+    {
+      "path": "u64/sample.tdb.wal",
+      "sha256": "b9ebce35dc38ecb9417d1005964507c2e9804a6181bc0405a6f83c6ce9e94207",
+      "bytes": 80
+    }
+  ],
+  "receipt_fixture": "receipts使用同一旧wheel生成受保护事务，包含WAL4的EditReceipt记录及原始确认令牌。"
+}

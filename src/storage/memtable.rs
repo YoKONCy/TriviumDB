@@ -558,6 +558,10 @@ pub struct MemTable<T: VectorType> {
     /// 最近一次完整检查点之后是否发生了需要持久化的变更。
     checkpoint_dirty: bool,
     pub(crate) editing: crate::database::editing::EditState,
+    pub(crate) document_publications: crate::storage::document_publications::PublicationStore,
+    pub(crate) document_updates_paused: bool,
+    pub(crate) named_graphs: crate::storage::named_graphs::NamedGraphStore,
+    pub(crate) named_graph_updates_paused: bool,
     recovery_required: Arc<AtomicBool>,
     load_memory_limit: usize,
     vector_generation: u64,
@@ -576,6 +580,8 @@ pub struct MemTable<T: VectorType> {
 
     // 附设文本倒排引擎 (完全可选，纯碎占用独立内存不干扰底座)
     text_index: TextIndex,
+    pub(crate) document_index: std::sync::Mutex<Option<crate::index::document::DocumentTextIndex>>,
+    pub(crate) document_index_bytes: std::sync::atomic::AtomicUsize,
     resource_runtime: crate::resources::ResourceRuntime,
     resource_reservation: Option<crate::resources::DatabaseReservation>,
     // 未加载的 sidecar 与待合并操作分开保存，避免把“未加载”解释为“空索引”。
@@ -640,6 +646,7 @@ pub struct MemTable<T: VectorType> {
     //    冷热分离：QuIVer 内部 BQ sigs + 图拓扑 = hot，f32 向量 = cold
     //    事务安全：事务 commit 期间暂停 QuIVer 同步，commit 后由事务层统一同步
     quiver_index: Option<QuIVer>,
+    pub(crate) quiver_ssd: Option<crate::database::quiver_ssd::DatabaseSsd>,
     auto_build_quiver: bool,
     /// 事务同步暂停标记：为 true 时 insert/delete/update_vector 不触发 QuIVer 增量操作
     quiver_sync_paused: bool,
@@ -674,6 +681,10 @@ impl<T: VectorType> MemTable<T> {
             generation: 0,
             checkpoint_dirty: true,
             editing: Default::default(),
+            named_graphs: Default::default(),
+            document_publications: Default::default(),
+            document_updates_paused: false,
+            named_graph_updates_paused: false,
             recovery_required: Arc::new(AtomicBool::new(false)),
             load_memory_limit: 0,
             vector_generation: 0,
@@ -682,6 +693,8 @@ impl<T: VectorType> MemTable<T> {
             vec_pool: VecPool::new(dim),
             bq_signatures: std::sync::OnceLock::new(),
             text_index: TextIndex::new(),
+            document_index: std::sync::Mutex::new(None),
+            document_index_bytes: std::sync::atomic::AtomicUsize::new(0),
             resource_runtime: crate::resources::ResourceRuntime::shared_default(),
             resource_reservation: None,
             deferred_text_path: None,
@@ -711,6 +724,7 @@ impl<T: VectorType> MemTable<T> {
             fast_tags: Vec::new(),
             free_slots: Vec::new(),
             quiver_index: None,
+            quiver_ssd: None,
             auto_build_quiver: true,
             quiver_sync_paused: false,
         }
@@ -731,6 +745,10 @@ impl<T: VectorType> MemTable<T> {
             generation: 0,
             checkpoint_dirty: true,
             editing: Default::default(),
+            named_graphs: Default::default(),
+            document_publications: Default::default(),
+            document_updates_paused: false,
+            named_graph_updates_paused: false,
             recovery_required: Arc::new(AtomicBool::new(false)),
             load_memory_limit: 0,
             vector_generation: 0,
@@ -739,6 +757,8 @@ impl<T: VectorType> MemTable<T> {
             vec_pool,
             bq_signatures: std::sync::OnceLock::new(),
             text_index: TextIndex::new(),
+            document_index: std::sync::Mutex::new(None),
+            document_index_bytes: std::sync::atomic::AtomicUsize::new(0),
             resource_runtime: crate::resources::ResourceRuntime::shared_default(),
             resource_reservation: None,
             deferred_text_path: None,
@@ -768,6 +788,7 @@ impl<T: VectorType> MemTable<T> {
             fast_tags: Vec::new(),
             free_slots: Vec::new(),
             quiver_index: None,
+            quiver_ssd: None,
             auto_build_quiver: true,
             quiver_sync_paused: false,
         }
@@ -823,7 +844,12 @@ impl<T: VectorType> MemTable<T> {
     }
 
     #[inline]
-    fn mark_changed(&mut self, vectors_changed: bool) {
+    pub(crate) fn mark_changed(&mut self, vectors_changed: bool) {
+        *self
+            .document_index
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.document_index_bytes.store(0, Ordering::Release);
         self.checkpoint_dirty = true;
         self.editing.changed();
         self.generation = self.generation.wrapping_add(1);
@@ -1845,6 +1871,16 @@ impl<T: VectorType> MemTable<T> {
                 return;
             }
             self.quiver_index = Some(quiver);
+        }
+    }
+
+    /// 文件加载器在CRC与活跃ID/slot均绑定当前事实后，安装已验证的默认路由缓存。
+    pub(crate) fn set_fact_bound_quiver_index(&mut self, quiver: QuIVer) {
+        if quiver.default_sm_ready() && !crate::vector::is_binary_vector::<T>() {
+            self.checkpoint_dirty = true;
+            self.quiver_index = Some(quiver);
+        } else {
+            self.set_quiver_index(quiver);
         }
     }
 
@@ -2893,7 +2929,9 @@ impl<T: VectorType> MemTable<T> {
             .as_ref()
             .map(|index| index.hot_memory_bytes())
             .unwrap_or_default();
-        let hot_bytes = property_bytes.saturating_add(quiver_bytes);
+        let hot_bytes = property_bytes
+            .saturating_add(quiver_bytes)
+            .saturating_add(self.document_index_bytes.load(Ordering::Acquire));
         crate::observability::IndexMemoryStats {
             resident_heap_bytes: hot_bytes as u64,
             mapped_bytes: self
@@ -2969,7 +3007,29 @@ impl<T: VectorType> MemTable<T> {
         if !self.payloads.contains_key(&id) {
             return Err(TriviumError::NodeNotFound(id));
         }
+        let document_bytes = if self.document_updates_paused {
+            0
+        } else {
+            self.document_publications.deletion_workspace(id)
+        };
+        let _document_workspace = if document_bytes == 0 {
+            None
+        } else {
+            self.check_load_allocation(document_bytes)?;
+            Some(self.resource_runtime().reserve_workspace(document_bytes)?)
+        };
+        let named = if !self.named_graph_updates_paused && !self.named_graphs.graphs.is_empty() {
+            self.check_load_allocation(self.named_graphs.projection_bytes())?;
+            let mut named = self.named_graphs.clone();
+            named.delete_node(id)?;
+            Some(named)
+        } else {
+            None
+        };
         self.reserve_text_deletes(1)?;
+        if let Some(named) = named {
+            self.named_graphs = named;
+        }
 
         // 1. 向量层：通过 VecPool 逻辑删除（置零），并回收物理卡槽
         if let Some(idx) = self.ids_to_indices.remove(&id) {
@@ -3081,6 +3141,9 @@ impl<T: VectorType> MemTable<T> {
 
         if !self.quiver_sync_paused {
             self.invalidate_quiver_for_delete(id);
+        }
+        if !self.document_updates_paused {
+            self.document_publications.delete_node(id);
         }
         self.mark_changed(true);
 
@@ -3377,6 +3440,10 @@ impl<T: VectorType> MemTable<T> {
         self.indices_to_ids.len()
     }
 
+    pub(crate) fn active_vector_count(&self) -> usize {
+        self.ids_to_indices.len()
+    }
+
     pub(crate) fn active_vector_at_slot(&self, slot: usize) -> Result<Option<(NodeId, &[T])>> {
         let Some(&id) = self.indices_to_ids.get(slot) else {
             return Ok(None);
@@ -3453,6 +3520,14 @@ impl<T: VectorType> MemTable<T> {
     /// v0.4 改进：VecPool 的 mmap 部分不计入堆内存（由 OS PageCache 管理），
     /// 只计算增量层和合并缓存的实际堆分配。
     pub fn estimated_memory_bytes(&self) -> usize {
+        self.base_memory_bytes().saturating_add(
+            self.quiver_ssd
+                .as_ref()
+                .map_or(0, |active| active.reader.reserved_bytes()),
+        )
+    }
+
+    pub(crate) fn base_memory_bytes(&self) -> usize {
         let vec_bytes = self.vec_pool.heap_memory_bytes();
         let payload_bytes = self.payloads.heap_memory_bytes();
         let edge_bytes = self.edge_heap_bytes
@@ -3480,11 +3555,14 @@ impl<T: VectorType> MemTable<T> {
             .map(|index| index.hot_memory_bytes())
             .unwrap_or_default();
         let text_bytes = self.text_index.estimated_memory_bytes()
+            + self.document_index_bytes.load(Ordering::Acquire)
             + self.pending_text_mutations.capacity() * std::mem::size_of::<PendingTextMutation>()
             + self.pending_text_bytes;
         let property_index_bytes = self.property_indexes.estimated_memory_bytes();
         vec_bytes
             + self.editing.memory_bytes()
+            + self.named_graphs.memory_bytes()
+            + self.document_publications.memory_bytes()
             + self.bq_cache_bytes()
             + payload_bytes
             + edge_bytes

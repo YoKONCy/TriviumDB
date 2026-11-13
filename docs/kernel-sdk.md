@@ -19,6 +19,10 @@
 
 ## 职责与依赖
 
+QuIVer 冷向量编码位于 Core 的 `index::quiver::cold`，维护版本化行布局、浮点量化、完整字节校验及标量评分。`index::quiver::ssd` 维护 SM 导航、INT8 行租约、LRU/Pending 缓存及驻留转换，`storage::quiver_cold` 与 `storage::quiver_io` 管理流式发布、来源绑定、代际句柄、异步 Direct I/O、排空和暂存回收。`database::quiver_ssd` 计算数据库来源身份，并在 checkpoint 后刷新启用的派生代际。SDK 的 `quiver` 模块转换 JSON 与字符串 ID，Python／Node 复用请求借用和结构化错误。数据库关闭复用现有操作排空和存储释放路径，Reader 缓冲及 I/O 线程分别在内核与共享 Runtime 中准入。当前接口及使用条件见 [QuIVer SSD Reader](quiver.md#ssd-索引制品与-reader)。
+
+命名图的身份、成员、独立边、修订比较、节点删除级联和作用域由Core及存储层维护。`sdk::named_graphs`负责共享JSON协议，Python／Node沿现有请求借用和错误适配接入。Reader暴露图读取、列举、显式联合及遍历，Writer调用Core事务入口。持久事实位于主文件版本化图块和WAL，详细接口见[命名图](named-graphs.md)。
+
 | 层 | 职责 | 主要实现 |
 | --- | --- | --- |
 | 宿主与传输适配 | 认证、HTTP/IPC、请求队列、取消传递、应用调度 | Server、CLI、宿主程序 |
@@ -72,6 +76,10 @@ Node 外层配置在已知属性读取前检查对象形状，拒绝数组、函
 ---
 
 ## 共享访问与事务提交
+
+文档来源的公共类型位于 `document`，Core 的文档读取、修订检查、结构边及原子更新位于 `database::documents`。`sdk::documents` 适配跨语言 JSON、字符串 ID 和响应预算。Python／Node 的文档请求调用同一适配器，Rust Reader 直接委托 Core 读取方法。字段、所有权和当前接入范围见[文档来源与结构](documents.md)。
+
+解析与来源映射位于 `document::parsing` 及文档公共类型，`database::document_ingestion` 管理候选接入和最终发布。`storage::document_publications` 维护版本化批次事实，复用 Core 的事务、WAL、预算及文件组恢复。SDK 转换命令和语言表示，事实校验、摘要、CAS、幂等序号及回收由 Core 执行。Reader 暴露解析、状态与列表，Writer 调用相同内核写入口。PDF／Office／OCR 由宿主生成统一解析结果。协议见[文档解析与分批发布](document-ingestion.md)。
 
 `SharedDatabase<T>` 接收已有 `Database<T>`，也提供 `open` 和 `open_with_config`。克隆句柄共享一个内核实例。`try_read` 提供共享借用，`try_write` 提供独占借用；争用直接返回 `TDB_BUSY`。同线程再次进入同一共享实例返回 `TDB_REENTRANT_ACCESS`。
 
@@ -247,3 +255,11 @@ Core 会话通过 `is_drained()` 提供 detach 后的执行完成确认。Server
 当前管理入口、事务缓冲、关闭与目标发布的语言转换使用同一字段规则。精确扫描、图算法、遍历和结构分析在可失败路径观察取消。数据库与事务借用、TQL 来源、WAL、发布和恢复继续沿表中职责执行，整批交付按最终源码及平台补齐验收记录。
 
 后续按真实文档编辑负载评估冲突检测和写锁范围，相关模型变更沿长期规划推进。
+
+文档 `search`、`context` 和 `clear_index` 复用共享 JSON 适配。SDK 解码和编码请求，Core 在同一事实读视图中核对修订、构建派生语料、分组评分及展开证据。可重建文档缓存由内核维护并计入索引内存估算，文档写入沿既有事务使缓存失效。Rust Reader 委托相同读取实现，Python／Node 保留各自请求借用和错误映射。字段与默认值见[文档检索契约](documents.md#分组文本检索)。
+
+分析器、原文字节映射、位置posting、短语与有序邻近条件均由 Core 维护。SDK 传递 `match_mode`、`max_gap`、`include_matches` 和分析器身份，三端使用相同候选过滤、最短窗口及预算。精确命中的修订引用直接衔接原文解析和上下文入口。
+
+字段语料统计与权重、文档／片段元数据作用域、成员倒排交并及完整事实谓词复核由 Core 执行。SDK 将 `fields`、`document_filter`、`block_filter` 与 `members` 转换到同一类型化请求，沿用内核的参数定位、预算、取消及修订错误。字段语料和成员倒排复用可重建文档缓存，事实仍由现有节点、Payload 和 WAL 管理。
+
+文档 `search_vector` 与 `search_hybrid` 由 Core 在同一事实读视图中执行原生向量评分、QuIVer 候选扩展和既有 RRF 融合。Core 负责统一候选约束、组覆盖目标、近似范围、停止原因和工作预算。SDK 校验 JSON 数值表示，保留 f16 有限范围与完整 u64 位模式，传递原始请求及结构化结果。Python／Node 继续复用现有字符串请求与借用完成点。QuIVer 的查询控制检查点在请求侧保留取消或额度失败，内核返回完整错误并归还工作区。

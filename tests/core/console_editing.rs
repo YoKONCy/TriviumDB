@@ -69,7 +69,7 @@ fn 完整WAL封条同时恢复事实与回执且未封条事务全部不可见()
     let acknowledged = call(&mut db, &session, command.clone());
     assert_eq!(acknowledged["createdIds"], json!(["2"]));
     let wal = std::fs::read(source.with_extension("tdb.wal")).unwrap();
-    assert_eq!(&wal[..6], b"TVWL\x04\0");
+    assert_eq!(&wal[..6], b"TVWL\x06\0");
     let mut cursor = 6;
     let mut commit_start = 6;
     while cursor < wal.len() {

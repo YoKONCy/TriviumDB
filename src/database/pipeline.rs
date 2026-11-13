@@ -575,7 +575,7 @@ fn recall_vector<T: VectorType>(
     seed_map.extend(ranking);
 }
 
-fn fuse_rankings_rrf(
+pub(super) fn fuse_rankings_rrf(
     output: &mut std::collections::HashMap<NodeId, f32>,
     dense: &[(NodeId, f32)],
     sparse: &[(NodeId, f32)],
@@ -590,7 +590,7 @@ fn fuse_rankings_rrf(
     if dense.is_empty() {
         let weight = sparse_weight.max(0.0);
         for (rank, &(id, _)) in sparse.iter().enumerate() {
-            output.insert(id, weight * RRF_K / (RRF_K + rank as f32 + 1.0));
+            output.insert(id, weight * (RRF_K / (RRF_K + rank as f32 + 1.0)));
         }
         return;
     }
@@ -599,7 +599,7 @@ fn fuse_rankings_rrf(
     }
     let weight = sparse_weight.max(0.0);
     for (rank, &(id, _)) in sparse.iter().enumerate() {
-        *output.entry(id).or_insert(0.0) += weight * RRF_K / (RRF_K + rank as f32 + 1.0);
+        *output.entry(id).or_insert(0.0) += weight * (RRF_K / (RRF_K + rank as f32 + 1.0));
     }
 }
 

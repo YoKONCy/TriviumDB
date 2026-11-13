@@ -3,7 +3,7 @@
 //! 每条记录采用 `len + bincode + CRC32`，事务通过 Begin/Commit 封条过滤未提交操作。
 //! 物理未写完的尾帧只恢复完整前缀；完整帧的 CRC、长度或解码损坏返回错误并保留日志。
 //! 恢复不跨过损坏边界猜测后续字节。旧版本头只允许持有 Writer 排他锁的打开流程升级；
-//! WAL v2/v3 通过独立历史布局校验并原子转写为 v4，未知非空版本始终 fail-closed。
+//! WAL v2/v3/v4 通过独立历史布局校验并原子转写为 v5，未知非空版本始终 fail-closed。
 
 use crate::error::{Result, TriviumError};
 use crate::node::NodeId;
@@ -14,7 +14,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 const WAL_MAGIC: &[u8; 4] = b"TVWL";
-pub const WAL_VERSION: u16 = 4;
+pub const WAL_VERSION: u16 = 6;
 const LEGACY_WAL_VERSION_V2: u16 = 2;
 
 /// WAL v3 的独立历史布局，保留带 Metadata 的边记录。
@@ -102,6 +102,190 @@ const MAX_WAL_ENTRY_SIZE: usize = 256 * 1024 * 1024;
 ///
 /// 注意：payload 使用 String（JSON 字符串）而非 serde_json::Value，
 /// 因为 bincode 不支持 serde_json::Value 的 deserialize_any 方法。
+/// WAL v4的独立历史布局，保留编辑回执。
+#[derive(Debug, Deserialize)]
+enum WalEntryV4<T> {
+    TxBegin {
+        tx_id: u64,
+    },
+    TxCommit {
+        tx_id: u64,
+    },
+    Insert {
+        id: NodeId,
+        vector: Vec<T>,
+        payload: String, // JSON 字符串
+    },
+    Link {
+        src: NodeId,
+        dst: NodeId,
+        label: String,
+        weight: f32,
+        #[serde(default)]
+        metadata: String,
+    },
+    Delete {
+        id: NodeId,
+    },
+    Unlink {
+        src: NodeId,
+        dst: NodeId,
+    },
+    UpdatePayload {
+        id: NodeId,
+        payload: String, // JSON 字符串
+    },
+    UpdateVector {
+        id: NodeId,
+        vector: Vec<T>,
+    },
+    /// 仅删除指定标签边；追加在旧变体之后，保持历史 discriminant。
+    UnlinkLabel {
+        src: NodeId,
+        dst: NodeId,
+        label: String,
+    },
+    /// 与事实操作共用事务封条的持久回执。
+    EditReceipt {
+        bytes: Vec<u8>,
+    },
+}
+
+impl<T> From<WalEntryV4<T>> for WalEntry<T> {
+    fn from(entry: WalEntryV4<T>) -> Self {
+        match entry {
+            WalEntryV4::TxBegin { tx_id } => Self::TxBegin { tx_id },
+            WalEntryV4::TxCommit { tx_id } => Self::TxCommit { tx_id },
+            WalEntryV4::Insert {
+                id,
+                vector,
+                payload,
+            } => Self::Insert {
+                id,
+                vector,
+                payload,
+            },
+            WalEntryV4::Link {
+                src,
+                dst,
+                label,
+                weight,
+                metadata,
+            } => Self::Link {
+                src,
+                dst,
+                label,
+                weight,
+                metadata,
+            },
+            WalEntryV4::Delete { id } => Self::Delete { id },
+            WalEntryV4::Unlink { src, dst } => Self::Unlink { src, dst },
+            WalEntryV4::UpdatePayload { id, payload } => Self::UpdatePayload { id, payload },
+            WalEntryV4::UpdateVector { id, vector } => Self::UpdateVector { id, vector },
+            WalEntryV4::UnlinkLabel { src, dst, label } => Self::UnlinkLabel { src, dst, label },
+            WalEntryV4::EditReceipt { bytes } => Self::EditReceipt { bytes },
+        }
+    }
+}
+#[derive(Debug, Deserialize)]
+enum WalEntryV5<T> {
+    TxBegin {
+        tx_id: u64,
+    },
+    TxCommit {
+        tx_id: u64,
+    },
+    Insert {
+        id: NodeId,
+        vector: Vec<T>,
+        payload: String, // JSON 字符串
+    },
+    Link {
+        src: NodeId,
+        dst: NodeId,
+        label: String,
+        weight: f32,
+        #[serde(default)]
+        metadata: String,
+    },
+    Delete {
+        id: NodeId,
+    },
+    Unlink {
+        src: NodeId,
+        dst: NodeId,
+    },
+    UpdatePayload {
+        id: NodeId,
+        payload: String, // JSON 字符串
+    },
+    UpdateVector {
+        id: NodeId,
+        vector: Vec<T>,
+    },
+    /// 仅删除指定标签边；追加在旧变体之后，保持历史 discriminant。
+    UnlinkLabel {
+        src: NodeId,
+        dst: NodeId,
+        label: String,
+    },
+    /// 与事实操作共用事务封条的持久回执。
+    EditReceipt {
+        bytes: Vec<u8>,
+    },
+    /// 命名图替换与节点事务共享封条。
+    NamedGraph {
+        graph_id: String,
+        expected_revision: Option<String>,
+        snapshot: Option<String>,
+    },
+}
+
+impl<T> From<WalEntryV5<T>> for WalEntry<T> {
+    fn from(entry: WalEntryV5<T>) -> Self {
+        match entry {
+            WalEntryV5::TxBegin { tx_id } => Self::TxBegin { tx_id },
+            WalEntryV5::TxCommit { tx_id } => Self::TxCommit { tx_id },
+            WalEntryV5::Insert {
+                id,
+                vector,
+                payload,
+            } => Self::Insert {
+                id,
+                vector,
+                payload,
+            },
+            WalEntryV5::Link {
+                src,
+                dst,
+                label,
+                weight,
+                metadata,
+            } => Self::Link {
+                src,
+                dst,
+                label,
+                weight,
+                metadata,
+            },
+            WalEntryV5::Delete { id } => Self::Delete { id },
+            WalEntryV5::Unlink { src, dst } => Self::Unlink { src, dst },
+            WalEntryV5::UpdatePayload { id, payload } => Self::UpdatePayload { id, payload },
+            WalEntryV5::UpdateVector { id, vector } => Self::UpdateVector { id, vector },
+            WalEntryV5::UnlinkLabel { src, dst, label } => Self::UnlinkLabel { src, dst, label },
+            WalEntryV5::EditReceipt { bytes } => Self::EditReceipt { bytes },
+            WalEntryV5::NamedGraph {
+                graph_id,
+                expected_revision,
+                snapshot,
+            } => Self::NamedGraph {
+                graph_id,
+                expected_revision,
+                snapshot,
+            },
+        }
+    }
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub enum WalEntry<T> {
     TxBegin {
@@ -147,6 +331,16 @@ pub enum WalEntry<T> {
     /// 与事实操作共用事务封条的持久回执。
     EditReceipt {
         bytes: Vec<u8>,
+    },
+    /// 命名图替换与节点事务共享封条。
+    NamedGraph {
+        graph_id: String,
+        expected_revision: Option<String>,
+        snapshot: Option<String>,
+    },
+    /// 文档候选批次与发布标记共享事务封条。
+    DocumentPublication {
+        bytes: String,
     },
 }
 
@@ -394,8 +588,8 @@ impl Wal {
     }
     /// 将受支持的旧 WAL 原子迁移到当前版本。
     ///
-    /// v2 按独立布局完整校验并转换边 Metadata。v3 按原帧流式校验，
-    /// 保留完整提交前缀并丢弃不完整尾部。两者通过同步临时文件原子发布 v4，
+    /// v2 按独立布局完整校验并转换边 Metadata。v3/v4 按原帧流式校验，
+    /// 保留完整提交前缀并丢弃不完整尾部，通过同步临时文件原子发布 v5，
     /// 完整帧 CRC 或解码失败时保留原文件。
     pub fn upgrade_legacy_wal<T>(db_path: &str) -> Result<bool>
     where
@@ -421,11 +615,11 @@ impl Wal {
         if found == WAL_VERSION {
             return Ok(false);
         }
-        if !matches!(found, LEGACY_WAL_VERSION_V2 | 3) {
+        if !matches!(found, LEGACY_WAL_VERSION_V2 | 3 | 4 | 5) {
             return Ok(false);
         }
         let mut entry_count = 0usize;
-        let (entries, prefix, mut source) = if found == 3 {
+        let (entries, prefix, mut source) = if matches!(found, 3..=5) {
             let prefix = Self::replay_entries_from_reader_limited::<T>(
                 BufReader::new(&mut file),
                 |_| {
@@ -434,7 +628,7 @@ impl Wal {
                 },
                 0,
                 &std::cell::Cell::new(0),
-                3,
+                found,
             )?;
             file.seek(SeekFrom::Start(WAL_HEADER_SIZE))?;
             (Vec::new(), Some(prefix), Some(file))
@@ -778,7 +972,7 @@ impl Wal {
             && &header[..4] == WAL_MAGIC
             && matches!(
                 u16::from_le_bytes([header[4], header[5]]),
-                LEGACY_WAL_VERSION_V2 | 3
+                LEGACY_WAL_VERSION_V2 | 3 | 4 | 5
             )
         {
             if u16::from_le_bytes([header[4], header[5]]) == 3 {
@@ -836,7 +1030,7 @@ impl Wal {
             }
             let version = u16::from_le_bytes([prefix[4], prefix[5]]);
             // v2 继续由持有写锁的显式迁移路径处理，普通读取保留原拒绝契约。
-            if !matches!(version, 3 | WAL_VERSION) {
+            if !matches!(version, 3 | 4 | 5 | WAL_VERSION) {
                 return Err(TriviumError::UnsupportedWalVersion {
                     found: version,
                     supported: WAL_VERSION,
@@ -991,6 +1185,8 @@ impl Wal {
             let entry: WalEntry<T> = match version {
                 2 => options.deserialize::<WalEntryV2<T>>(&data).map(Into::into),
                 3 => options.deserialize::<WalEntryV3<T>>(&data).map(Into::into),
+                4 => options.deserialize::<WalEntryV4<T>>(&data).map(Into::into),
+                5 => options.deserialize::<WalEntryV5<T>>(&data).map(Into::into),
                 _ => options.deserialize::<WalEntry<T>>(&data),
             }
                 .map_err(|error| TriviumError::CorruptedFile(format!(
@@ -1121,7 +1317,10 @@ impl Wal {
         };
         bytes.len() != WAL_HEADER_SIZE as usize
             || &bytes[0..4] != WAL_MAGIC
-            || !matches!(u16::from_le_bytes([bytes[4], bytes[5]]), 3 | WAL_VERSION)
+            || !matches!(
+                u16::from_le_bytes([bytes[4], bytes[5]]),
+                3 | 4 | 5 | WAL_VERSION
+            )
     }
 }
 

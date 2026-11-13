@@ -6,6 +6,7 @@
 pub(crate) mod art;
 pub mod bq;
 pub mod brute_force;
+pub(crate) mod document;
 pub mod exact;
 pub mod property;
 pub mod quiver;

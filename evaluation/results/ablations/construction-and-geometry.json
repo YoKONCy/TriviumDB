@@ -1,0 +1,1967 @@
+{
+  "status": "passed",
+  "datasets": 4,
+  "positions": 120,
+  "results": [
+    {
+      "status": "passed",
+      "dataset": "D03",
+      "n": 200000,
+      "queries": 744,
+      "points": [
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 128,
+          "recall_at_10": 0.9768817204301076,
+          "recall_query_ci": [
+            0.9719086021505379,
+            0.9814516129032259
+          ],
+          "visited_oracle": 0.9795698924731182,
+          "pool_oracle": 0.9795698924731182,
+          "rerank_oracle": 0.9768817204301076,
+          "expanded_mean": 132.55510752688173,
+          "scores_mean": 3732.217741935484
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 256,
+          "recall_at_10": 0.985752688172043,
+          "recall_query_ci": [
+            0.981989247311828,
+            0.989247311827957
+          ],
+          "visited_oracle": 0.9896505376344086,
+          "pool_oracle": 0.9896505376344086,
+          "rerank_oracle": 0.985752688172043,
+          "expanded_mean": 259.75940860215053,
+          "scores_mean": 6341.614247311828
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 64,
+          "recall_at_10": 0.949731182795699,
+          "recall_query_ci": [
+            0.9407258064516129,
+            0.9587365591397851
+          ],
+          "visited_oracle": 0.9516129032258064,
+          "pool_oracle": 0.949731182795699,
+          "rerank_oracle": 0.949731182795699,
+          "expanded_mean": 69.55376344086021,
+          "scores_mean": 2256.4596774193546
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 128,
+          "recall_at_10": 0.9858870967741936,
+          "recall_query_ci": [
+            0.981989247311828,
+            0.9893817204301074
+          ],
+          "visited_oracle": 0.9858870967741936,
+          "pool_oracle": 0.9858870967741936,
+          "rerank_oracle": 0.9858870967741936,
+          "expanded_mean": 132.83602150537635,
+          "scores_mean": 3594.6209677419356
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 256,
+          "recall_at_10": 0.994758064516129,
+          "recall_query_ci": [
+            0.9926075268817204,
+            0.9966397849462365
+          ],
+          "visited_oracle": 0.994758064516129,
+          "pool_oracle": 0.994758064516129,
+          "rerank_oracle": 0.994758064516129,
+          "expanded_mean": 260.0793010752688,
+          "scores_mean": 6061.4112903225805
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 64,
+          "recall_at_10": 0.9684139784946236,
+          "recall_query_ci": [
+            0.9616935483870968,
+            0.9744623655913979
+          ],
+          "visited_oracle": 0.9684139784946236,
+          "pool_oracle": 0.9684139784946236,
+          "rerank_oracle": 0.9684139784946236,
+          "expanded_mean": 69.77553763440861,
+          "scores_mean": 2192.543010752688
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 128,
+          "recall_at_10": 0.980510752688172,
+          "recall_query_ci": [
+            0.9762063172043011,
+            0.9848118279569893
+          ],
+          "visited_oracle": 0.987768817204301,
+          "pool_oracle": 0.9866935483870968,
+          "rerank_oracle": 0.980510752688172,
+          "expanded_mean": 133.13575268817203,
+          "scores_mean": 3600.7620967741937
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 256,
+          "recall_at_10": 0.985483870967742,
+          "recall_query_ci": [
+            0.9821236559139785,
+            0.9887096774193549
+          ],
+          "visited_oracle": 0.9943548387096774,
+          "pool_oracle": 0.9943548387096774,
+          "rerank_oracle": 0.985483870967742,
+          "expanded_mean": 260.4220430107527,
+          "scores_mean": 6054.884408602151
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 64,
+          "recall_at_10": 0.965994623655914,
+          "recall_query_ci": [
+            0.9594086021505377,
+            0.9723118279569893
+          ],
+          "visited_oracle": 0.9719086021505376,
+          "pool_oracle": 0.965994623655914,
+          "rerank_oracle": 0.965994623655914,
+          "expanded_mean": 70.11021505376344,
+          "scores_mean": 2202.319892473118
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.976747311827957,
+          "recall_query_ci": [
+            0.9717741935483871,
+            0.9814516129032259
+          ],
+          "visited_oracle": 0.9809139784946236,
+          "pool_oracle": 0.980510752688172,
+          "rerank_oracle": 0.976747311827957,
+          "expanded_mean": 132.71639784946237,
+          "scores_mean": 3701.4610215053763
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.9861559139784946,
+          "recall_query_ci": [
+            0.9827923387096775,
+            0.9895161290322582
+          ],
+          "visited_oracle": 0.9918010752688172,
+          "pool_oracle": 0.9918010752688172,
+          "rerank_oracle": 0.9861559139784946,
+          "expanded_mean": 259.9005376344086,
+          "scores_mean": 6283.563172043011
+        },
+        {
+          "dataset": "D03",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.959274193548387,
+          "recall_query_ci": [
+            0.9514751344086021,
+            0.9669354838709678
+          ],
+          "visited_oracle": 0.9619623655913978,
+          "pool_oracle": 0.959274193548387,
+          "rerank_oracle": 0.959274193548387,
+          "expanded_mean": 69.71370967741936,
+          "scores_mean": 2242.3346774193546
+        },
+        {
+          "dataset": "D03",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 128,
+          "recall_at_10": 0.9813172043010752,
+          "recall_query_ci": [
+            0.9755376344086022,
+            0.9860215053763441
+          ],
+          "visited_oracle": 0.984274193548387,
+          "pool_oracle": 0.984005376344086,
+          "rerank_oracle": 0.9813172043010752,
+          "expanded_mean": 135.05645161290323,
+          "scores_mean": 4242.404569892473
+        },
+        {
+          "dataset": "D03",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 256,
+          "recall_at_10": 0.9928763440860215,
+          "recall_query_ci": [
+            0.9905913978494624,
+            0.9950268817204301
+          ],
+          "visited_oracle": 0.9966397849462366,
+          "pool_oracle": 0.9966397849462366,
+          "rerank_oracle": 0.9928763440860215,
+          "expanded_mean": 261.8010752688172,
+          "scores_mean": 7337.192204301075
+        },
+        {
+          "dataset": "D03",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 64,
+          "recall_at_10": 0.9638440860215054,
+          "recall_query_ci": [
+            0.956179435483871,
+            0.9711021505376344
+          ],
+          "visited_oracle": 0.9658602150537634,
+          "pool_oracle": 0.9638440860215054,
+          "rerank_oracle": 0.9638440860215054,
+          "expanded_mean": 72.19220430107526,
+          "scores_mean": 2544.3064516129034
+        },
+        {
+          "dataset": "D03",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.9803763440860216,
+          "recall_query_ci": [
+            0.9745967741935483,
+            0.985483870967742
+          ],
+          "visited_oracle": 0.9852150537634408,
+          "pool_oracle": 0.9846774193548388,
+          "rerank_oracle": 0.9803763440860216,
+          "expanded_mean": 135.3991935483871,
+          "scores_mean": 4199.635752688172
+        },
+        {
+          "dataset": "D03",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.988978494623656,
+          "recall_query_ci": [
+            0.984942876344086,
+            0.9923387096774193
+          ],
+          "visited_oracle": 0.9950268817204302,
+          "pool_oracle": 0.9948924731182796,
+          "rerank_oracle": 0.988978494623656,
+          "expanded_mean": 262.34274193548384,
+          "scores_mean": 7242.14247311828
+        },
+        {
+          "dataset": "D03",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.964247311827957,
+          "recall_query_ci": [
+            0.9560483870967743,
+            0.9717741935483871
+          ],
+          "visited_oracle": 0.9672043010752688,
+          "pool_oracle": 0.964247311827957,
+          "rerank_oracle": 0.964247311827957,
+          "expanded_mean": 72.53091397849462,
+          "scores_mean": 2524.8763440860216
+        },
+        {
+          "dataset": "D03",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 128,
+          "recall_at_10": 0.9952956989247312,
+          "recall_query_ci": [
+            0.9932795698924731,
+            0.9970430107526881
+          ],
+          "visited_oracle": 0.9952956989247312,
+          "pool_oracle": 0.9952956989247312,
+          "rerank_oracle": 0.9952956989247312,
+          "expanded_mean": 131.0752688172043,
+          "scores_mean": 3937.6370967741937
+        },
+        {
+          "dataset": "D03",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 256,
+          "recall_at_10": 0.9986559139784946,
+          "recall_query_ci": [
+            0.9977150537634408,
+            0.9994623655913979
+          ],
+          "visited_oracle": 0.9986559139784946,
+          "pool_oracle": 0.9986559139784946,
+          "rerank_oracle": 0.9986559139784946,
+          "expanded_mean": 258.6989247311828,
+          "scores_mean": 6680.095430107527
+        },
+        {
+          "dataset": "D03",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 64,
+          "recall_at_10": 0.9841397849462366,
+          "recall_query_ci": [
+            0.9794354838709678,
+            0.9881720430107528
+          ],
+          "visited_oracle": 0.9841397849462366,
+          "pool_oracle": 0.9841397849462366,
+          "rerank_oracle": 0.9841397849462366,
+          "expanded_mean": 67.63037634408602,
+          "scores_mean": 2348.1922043010754
+        },
+        {
+          "dataset": "D03",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.9850806451612903,
+          "recall_query_ci": [
+            0.9811827956989247,
+            0.9887096774193549
+          ],
+          "visited_oracle": 0.9904569892473118,
+          "pool_oracle": 0.9897849462365592,
+          "rerank_oracle": 0.9850806451612903,
+          "expanded_mean": 131.0040322580645,
+          "scores_mean": 4030.8185483870966
+        },
+        {
+          "dataset": "D03",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.991263440860215,
+          "recall_query_ci": [
+            0.9888440860215054,
+            0.9936827956989247
+          ],
+          "visited_oracle": 0.9978494623655914,
+          "pool_oracle": 0.9977150537634408,
+          "rerank_oracle": 0.991263440860215,
+          "expanded_mean": 258.60752688172045,
+          "scores_mean": 6887.404569892473
+        },
+        {
+          "dataset": "D03",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.9719086021505376,
+          "recall_query_ci": [
+            0.9650504032258065,
+            0.9782258064516128
+          ],
+          "visited_oracle": 0.975268817204301,
+          "pool_oracle": 0.9719086021505376,
+          "rerank_oracle": 0.9719086021505376,
+          "expanded_mean": 67.64650537634408,
+          "scores_mean": 2392.3306451612902
+        },
+        {
+          "dataset": "D03",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 128,
+          "recall_at_10": 0.9809139784946236,
+          "recall_query_ci": [
+            0.9768817204301075,
+            0.9845430107526881
+          ],
+          "visited_oracle": 0.9888440860215054,
+          "pool_oracle": 0.9873655913978494,
+          "rerank_oracle": 0.9809139784946236,
+          "expanded_mean": 134.40322580645162,
+          "scores_mean": 3867.8548387096776
+        },
+        {
+          "dataset": "D03",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 256,
+          "recall_at_10": 0.985483870967742,
+          "recall_query_ci": [
+            0.981989247311828,
+            0.9887096774193549
+          ],
+          "visited_oracle": 0.9950268817204302,
+          "pool_oracle": 0.9950268817204302,
+          "rerank_oracle": 0.985483870967742,
+          "expanded_mean": 261.61290322580646,
+          "scores_mean": 6564.779569892473
+        },
+        {
+          "dataset": "D03",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 64,
+          "recall_at_10": 0.9661290322580646,
+          "recall_query_ci": [
+            0.9594086021505376,
+            0.9723151881720431
+          ],
+          "visited_oracle": 0.971774193548387,
+          "pool_oracle": 0.9661290322580646,
+          "rerank_oracle": 0.9661290322580646,
+          "expanded_mean": 71.31317204301075,
+          "scores_mean": 2349.4489247311826
+        },
+        {
+          "dataset": "D03",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.9788978494623656,
+          "recall_query_ci": [
+            0.9740557795698925,
+            0.983198924731183
+          ],
+          "visited_oracle": 0.9833333333333334,
+          "pool_oracle": 0.9830645161290322,
+          "rerank_oracle": 0.9788978494623656,
+          "expanded_mean": 134.6021505376344,
+          "scores_mean": 4040.6989247311826
+        },
+        {
+          "dataset": "D03",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.9888440860215054,
+          "recall_query_ci": [
+            0.9858870967741935,
+            0.9916666666666666
+          ],
+          "visited_oracle": 0.9946236559139784,
+          "pool_oracle": 0.9946236559139784,
+          "rerank_oracle": 0.9888440860215054,
+          "expanded_mean": 261.66129032258067,
+          "scores_mean": 6912.541666666667
+        },
+        {
+          "dataset": "D03",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.9606182795698924,
+          "recall_query_ci": [
+            0.9522849462365591,
+            0.9678763440860215
+          ],
+          "visited_oracle": 0.9634408602150538,
+          "pool_oracle": 0.9606182795698924,
+          "rerank_oracle": 0.9606182795698924,
+          "expanded_mean": 71.60752688172043,
+          "scores_mean": 2435.853494623656
+        }
+      ],
+      "full_gt_boundary_checked": true,
+      "full_rerank_labels_checked": true
+    },
+    {
+      "status": "passed",
+      "dataset": "D02",
+      "n": 200000,
+      "queries": 744,
+      "points": [
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 128,
+          "recall_at_10": 0.9528225806451612,
+          "recall_query_ci": [
+            0.9400504032258066,
+            0.9637130376344086
+          ],
+          "visited_oracle": 0.9564516129032258,
+          "pool_oracle": 0.9563172043010753,
+          "rerank_oracle": 0.9528225806451612,
+          "expanded_mean": 140.73521505376345,
+          "scores_mean": 2238.0
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 256,
+          "recall_at_10": 0.9672043010752688,
+          "recall_query_ci": [
+            0.9564516129032259,
+            0.977019489247312
+          ],
+          "visited_oracle": 0.971505376344086,
+          "pool_oracle": 0.971505376344086,
+          "rerank_oracle": 0.9672043010752688,
+          "expanded_mean": 269.48924731182797,
+          "scores_mean": 3401.4032258064517
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 64,
+          "recall_at_10": 0.9163978494623656,
+          "recall_query_ci": [
+            0.8998655913978495,
+            0.9326646505376345
+          ],
+          "visited_oracle": 0.9188172043010752,
+          "pool_oracle": 0.9163978494623656,
+          "rerank_oracle": 0.9163978494623656,
+          "expanded_mean": 75.70295698924731,
+          "scores_mean": 1512.6478494623657
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 128,
+          "recall_at_10": 0.9666666666666666,
+          "recall_query_ci": [
+            0.9555073924731182,
+            0.9764784946236559
+          ],
+          "visited_oracle": 0.9666666666666666,
+          "pool_oracle": 0.9666666666666666,
+          "rerank_oracle": 0.9666666666666666,
+          "expanded_mean": 139.73655913978496,
+          "scores_mean": 2192.9435483870966
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 256,
+          "recall_at_10": 0.9806451612903226,
+          "recall_query_ci": [
+            0.9720430107526883,
+            0.9883064516129032
+          ],
+          "visited_oracle": 0.9806451612903226,
+          "pool_oracle": 0.9806451612903226,
+          "rerank_oracle": 0.9806451612903226,
+          "expanded_mean": 268.0940860215054,
+          "scores_mean": 3339.5806451612902
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 64,
+          "recall_at_10": 0.9420698924731182,
+          "recall_query_ci": [
+            0.9278158602150537,
+            0.9553763440860215
+          ],
+          "visited_oracle": 0.9420698924731182,
+          "pool_oracle": 0.9420698924731182,
+          "rerank_oracle": 0.9420698924731182,
+          "expanded_mean": 75.11693548387096,
+          "scores_mean": 1498.6908602150538
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 128,
+          "recall_at_10": 0.9494623655913978,
+          "recall_query_ci": [
+            0.9381653225806452,
+            0.9602150537634409
+          ],
+          "visited_oracle": 0.960483870967742,
+          "pool_oracle": 0.958736559139785,
+          "rerank_oracle": 0.9494623655913978,
+          "expanded_mean": 138.32930107526883,
+          "scores_mean": 2109.9099462365593
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 256,
+          "recall_at_10": 0.964516129032258,
+          "recall_query_ci": [
+            0.9555073924731182,
+            0.9733904569892474
+          ],
+          "visited_oracle": 0.977016129032258,
+          "pool_oracle": 0.9766129032258064,
+          "rerank_oracle": 0.964516129032258,
+          "expanded_mean": 267.22849462365593,
+          "scores_mean": 3215.9314516129034
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 64,
+          "recall_at_10": 0.9309139784946237,
+          "recall_query_ci": [
+            0.9174697580645161,
+            0.9438172043010753
+          ],
+          "visited_oracle": 0.9399193548387096,
+          "pool_oracle": 0.9309139784946237,
+          "rerank_oracle": 0.9309139784946237,
+          "expanded_mean": 74.35215053763442,
+          "scores_mean": 1444.725806451613
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.9436827956989248,
+          "recall_query_ci": [
+            0.9309139784946237,
+            0.955241935483871
+          ],
+          "visited_oracle": 0.9548387096774194,
+          "pool_oracle": 0.9533602150537634,
+          "rerank_oracle": 0.9436827956989248,
+          "expanded_mean": 140.58602150537635,
+          "scores_mean": 2169.07123655914
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.9676075268817204,
+          "recall_query_ci": [
+            0.9587331989247311,
+            0.9754032258064517
+          ],
+          "visited_oracle": 0.9795698924731182,
+          "pool_oracle": 0.9794354838709678,
+          "rerank_oracle": 0.9676075268817204,
+          "expanded_mean": 271.26881720430106,
+          "scores_mean": 3304.0913978494623
+        },
+        {
+          "dataset": "D02",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.9088709677419354,
+          "recall_query_ci": [
+            0.8921975806451612,
+            0.9248655913978493
+          ],
+          "visited_oracle": 0.9188172043010752,
+          "pool_oracle": 0.9088709677419354,
+          "rerank_oracle": 0.9088709677419354,
+          "expanded_mean": 75.08602150537635,
+          "scores_mean": 1474.4274193548388
+        },
+        {
+          "dataset": "D02",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 128,
+          "recall_at_10": 0.9809139784946236,
+          "recall_query_ci": [
+            0.9735215053763441,
+            0.9872311827956989
+          ],
+          "visited_oracle": 0.985483870967742,
+          "pool_oracle": 0.9849462365591398,
+          "rerank_oracle": 0.9809139784946236,
+          "expanded_mean": 137.5241935483871,
+          "scores_mean": 2244.4059139784945
+        },
+        {
+          "dataset": "D02",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 256,
+          "recall_at_10": 0.9865591397849462,
+          "recall_query_ci": [
+            0.980241935483871,
+            0.9918010752688172
+          ],
+          "visited_oracle": 0.9913978494623656,
+          "pool_oracle": 0.9913978494623656,
+          "rerank_oracle": 0.9865591397849462,
+          "expanded_mean": 265.5013440860215,
+          "scores_mean": 3471.0887096774195
+        },
+        {
+          "dataset": "D02",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 64,
+          "recall_at_10": 0.955241935483871,
+          "recall_query_ci": [
+            0.9430073924731182,
+            0.9660013440860216
+          ],
+          "visited_oracle": 0.958736559139785,
+          "pool_oracle": 0.955241935483871,
+          "rerank_oracle": 0.955241935483871,
+          "expanded_mean": 72.49731182795699,
+          "scores_mean": 1497.356182795699
+        },
+        {
+          "dataset": "D02",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.9702956989247312,
+          "recall_query_ci": [
+            0.9628998655913978,
+            0.9770161290322582
+          ],
+          "visited_oracle": 0.9829301075268818,
+          "pool_oracle": 0.9813172043010752,
+          "rerank_oracle": 0.9702956989247312,
+          "expanded_mean": 137.78494623655914,
+          "scores_mean": 2211.8669354838707
+        },
+        {
+          "dataset": "D02",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.9772849462365591,
+          "recall_query_ci": [
+            0.9704301075268817,
+            0.9827956989247313
+          ],
+          "visited_oracle": 0.9904569892473118,
+          "pool_oracle": 0.9903225806451612,
+          "rerank_oracle": 0.9772849462365591,
+          "expanded_mean": 265.7540322580645,
+          "scores_mean": 3405.060483870968
+        },
+        {
+          "dataset": "D02",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.946774193548387,
+          "recall_query_ci": [
+            0.9348118279569892,
+            0.9579334677419356
+          ],
+          "visited_oracle": 0.9567204301075268,
+          "pool_oracle": 0.946774193548387,
+          "rerank_oracle": 0.946774193548387,
+          "expanded_mean": 72.87903225806451,
+          "scores_mean": 1487.635752688172
+        },
+        {
+          "dataset": "D02",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 128,
+          "recall_at_10": 0.999731182795699,
+          "recall_query_ci": [
+            0.9993279569892473,
+            1.0
+          ],
+          "visited_oracle": 0.999731182795699,
+          "pool_oracle": 0.999731182795699,
+          "rerank_oracle": 0.999731182795699,
+          "expanded_mean": 132.2311827956989,
+          "scores_mean": 2615.1478494623657
+        },
+        {
+          "dataset": "D02",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 256,
+          "recall_at_10": 1.0,
+          "recall_query_ci": [
+            1.0,
+            1.0
+          ],
+          "visited_oracle": 1.0,
+          "pool_oracle": 1.0,
+          "rerank_oracle": 1.0,
+          "expanded_mean": 259.99059139784947,
+          "scores_mean": 4151.5053763440865
+        },
+        {
+          "dataset": "D02",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 64,
+          "recall_at_10": 0.9955645161290322,
+          "recall_query_ci": [
+            0.9911290322580645,
+            0.9986559139784946
+          ],
+          "visited_oracle": 0.9955645161290322,
+          "pool_oracle": 0.9955645161290322,
+          "rerank_oracle": 0.9955645161290322,
+          "expanded_mean": 68.28091397849462,
+          "scores_mean": 1671.4435483870968
+        },
+        {
+          "dataset": "D02",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.9862903225806452,
+          "recall_query_ci": [
+            0.9831989247311828,
+            0.989247311827957
+          ],
+          "visited_oracle": 0.9991935483870968,
+          "pool_oracle": 0.9974462365591398,
+          "rerank_oracle": 0.9862903225806452,
+          "expanded_mean": 132.5255376344086,
+          "scores_mean": 2681.8897849462364
+        },
+        {
+          "dataset": "D02",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.9864247311827956,
+          "recall_query_ci": [
+            0.9833333333333334,
+            0.9893817204301075
+          ],
+          "visited_oracle": 1.0,
+          "pool_oracle": 0.999731182795699,
+          "rerank_oracle": 0.9864247311827956,
+          "expanded_mean": 260.2016129032258,
+          "scores_mean": 4251.466397849463
+        },
+        {
+          "dataset": "D02",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.9826612903225806,
+          "recall_query_ci": [
+            0.9775537634408603,
+            0.9870967741935484
+          ],
+          "visited_oracle": 0.9948924731182796,
+          "pool_oracle": 0.9826612903225806,
+          "rerank_oracle": 0.9826612903225806,
+          "expanded_mean": 68.78897849462365,
+          "scores_mean": 1719.590053763441
+        },
+        {
+          "dataset": "D02",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 128,
+          "recall_at_10": 0.9529569892473118,
+          "recall_query_ci": [
+            0.9419354838709677,
+            0.9631720430107528
+          ],
+          "visited_oracle": 0.9638440860215054,
+          "pool_oracle": 0.962231182795699,
+          "rerank_oracle": 0.9529569892473118,
+          "expanded_mean": 138.36559139784947,
+          "scores_mean": 2111.315860215054
+        },
+        {
+          "dataset": "D02",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 256,
+          "recall_at_10": 0.967741935483871,
+          "recall_query_ci": [
+            0.9598118279569893,
+            0.9755376344086021
+          ],
+          "visited_oracle": 0.9799731182795698,
+          "pool_oracle": 0.9795698924731182,
+          "rerank_oracle": 0.967741935483871,
+          "expanded_mean": 266.8467741935484,
+          "scores_mean": 3209.8561827956987
+        },
+        {
+          "dataset": "D02",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 64,
+          "recall_at_10": 0.9243279569892474,
+          "recall_query_ci": [
+            0.9098084677419356,
+            0.9377688172043012
+          ],
+          "visited_oracle": 0.9325268817204302,
+          "pool_oracle": 0.9243279569892474,
+          "rerank_oracle": 0.9243279569892474,
+          "expanded_mean": 73.52016129032258,
+          "scores_mean": 1434.4354838709678
+        },
+        {
+          "dataset": "D02",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.9475806451612904,
+          "recall_query_ci": [
+            0.9352150537634409,
+            0.9584677419354839
+          ],
+          "visited_oracle": 0.9586021505376344,
+          "pool_oracle": 0.9571236559139784,
+          "rerank_oracle": 0.9475806451612904,
+          "expanded_mean": 139.71774193548387,
+          "scores_mean": 2163.65188172043
+        },
+        {
+          "dataset": "D02",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.9678763440860216,
+          "recall_query_ci": [
+            0.9599462365591398,
+            0.9748655913978495
+          ],
+          "visited_oracle": 0.9798387096774194,
+          "pool_oracle": 0.9797043010752688,
+          "rerank_oracle": 0.9678763440860216,
+          "expanded_mean": 269.21639784946234,
+          "scores_mean": 3303.668010752688
+        },
+        {
+          "dataset": "D02",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.9130376344086022,
+          "recall_query_ci": [
+            0.8963709677419356,
+            0.9289012096774194
+          ],
+          "visited_oracle": 0.921774193548387,
+          "pool_oracle": 0.9130376344086022,
+          "rerank_oracle": 0.9130376344086022,
+          "expanded_mean": 74.70295698924731,
+          "scores_mean": 1470.5577956989248
+        }
+      ],
+      "full_gt_boundary_checked": true,
+      "full_rerank_labels_checked": true
+    },
+    {
+      "status": "passed",
+      "dataset": "D11",
+      "n": 200000,
+      "queries": 744,
+      "points": [
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 128,
+          "recall_at_10": 0.11209677419354838,
+          "recall_query_ci": [
+            0.10510416666666665,
+            0.11908602150537634
+          ],
+          "visited_oracle": 0.11774193548387098,
+          "pool_oracle": 0.1157258064516129,
+          "rerank_oracle": 0.11209677419354838,
+          "expanded_mean": 148.07930107526883,
+          "scores_mean": 9034.751344086022
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 256,
+          "recall_at_10": 0.18588709677419354,
+          "recall_query_ci": [
+            0.1772815860215054,
+            0.19448924731182793
+          ],
+          "visited_oracle": 0.20416666666666666,
+          "pool_oracle": 0.2014784946236559,
+          "rerank_oracle": 0.18588709677419354,
+          "expanded_mean": 278.7970430107527,
+          "scores_mean": 16636.940860215054
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 64,
+          "recall_at_10": 0.06384408602150538,
+          "recall_query_ci": [
+            0.05833333333333334,
+            0.06935483870967742
+          ],
+          "visited_oracle": 0.06518817204301075,
+          "pool_oracle": 0.06384408602150538,
+          "rerank_oracle": 0.06384408602150538,
+          "expanded_mean": 79.09408602150538,
+          "scores_mean": 4884.412634408603
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 128,
+          "recall_at_10": 0.12096774193548387,
+          "recall_query_ci": [
+            0.11370967741935485,
+            0.1282258064516129
+          ],
+          "visited_oracle": 0.12096774193548387,
+          "pool_oracle": 0.12096774193548387,
+          "rerank_oracle": 0.12096774193548387,
+          "expanded_mean": 149.33736559139786,
+          "scores_mean": 9112.334677419354
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 256,
+          "recall_at_10": 0.2149193548387097,
+          "recall_query_ci": [
+            0.20551075268817204,
+            0.22459677419354843
+          ],
+          "visited_oracle": 0.2149193548387097,
+          "pool_oracle": 0.2149193548387097,
+          "rerank_oracle": 0.2149193548387097,
+          "expanded_mean": 279.6236559139785,
+          "scores_mean": 16690.895161290322
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 64,
+          "recall_at_10": 0.06841397849462365,
+          "recall_query_ci": [
+            0.0625,
+            0.07473118279569892
+          ],
+          "visited_oracle": 0.06841397849462365,
+          "pool_oracle": 0.06841397849462365,
+          "rerank_oracle": 0.06841397849462365,
+          "expanded_mean": 79.09946236559139,
+          "scores_mean": 4885.813172043011
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 128,
+          "recall_at_10": 0.11518817204301075,
+          "recall_query_ci": [
+            0.1081989247311828,
+            0.122315188172043
+          ],
+          "visited_oracle": 0.12083333333333332,
+          "pool_oracle": 0.1189516129032258,
+          "rerank_oracle": 0.11518817204301075,
+          "expanded_mean": 148.00806451612902,
+          "scores_mean": 9030.520161290322
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 256,
+          "recall_at_10": 0.19422043010752688,
+          "recall_query_ci": [
+            0.18534946236559144,
+            0.20322580645161292
+          ],
+          "visited_oracle": 0.21478494623655914,
+          "pool_oracle": 0.2122311827956989,
+          "rerank_oracle": 0.19422043010752688,
+          "expanded_mean": 278.3212365591398,
+          "scores_mean": 16608.41935483871
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 64,
+          "recall_at_10": 0.06344086021505377,
+          "recall_query_ci": [
+            0.057661290322580654,
+            0.06895161290322581
+          ],
+          "visited_oracle": 0.0646505376344086,
+          "pool_oracle": 0.06344086021505377,
+          "rerank_oracle": 0.06344086021505377,
+          "expanded_mean": 78.51478494623656,
+          "scores_mean": 4849.134408602151
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.1146505376344086,
+          "recall_query_ci": [
+            0.10752688172043012,
+            0.12217741935483872
+          ],
+          "visited_oracle": 0.11935483870967742,
+          "pool_oracle": 0.1174731182795699,
+          "rerank_oracle": 0.1146505376344086,
+          "expanded_mean": 148.625,
+          "scores_mean": 9066.849462365592
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.1961021505376344,
+          "recall_query_ci": [
+            0.1873655913978495,
+            0.20483870967741932
+          ],
+          "visited_oracle": 0.21559139784946235,
+          "pool_oracle": 0.21330645161290324,
+          "rerank_oracle": 0.1961021505376344,
+          "expanded_mean": 279.0067204301075,
+          "scores_mean": 16647.708333333332
+        },
+        {
+          "dataset": "D11",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.0657258064516129,
+          "recall_query_ci": [
+            0.060215053763440864,
+            0.07123655913978495
+          ],
+          "visited_oracle": 0.06666666666666667,
+          "pool_oracle": 0.0657258064516129,
+          "rerank_oracle": 0.0657258064516129,
+          "expanded_mean": 78.41532258064517,
+          "scores_mean": 4842.610215053764
+        },
+        {
+          "dataset": "D11",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 128,
+          "recall_at_10": 0.11438172043010753,
+          "recall_query_ci": [
+            0.10698924731182795,
+            0.12177419354838709
+          ],
+          "visited_oracle": 0.1200268817204301,
+          "pool_oracle": 0.11774193548387098,
+          "rerank_oracle": 0.11438172043010753,
+          "expanded_mean": 148.45564516129033,
+          "scores_mean": 9056.489247311827
+        },
+        {
+          "dataset": "D11",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 256,
+          "recall_at_10": 0.19059139784946239,
+          "recall_query_ci": [
+            0.18131384408602155,
+            0.19919690860215053
+          ],
+          "visited_oracle": 0.20954301075268816,
+          "pool_oracle": 0.2071236559139785,
+          "rerank_oracle": 0.19059139784946239,
+          "expanded_mean": 279.69220430107526,
+          "scores_mean": 16683.604838709678
+        },
+        {
+          "dataset": "D11",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 64,
+          "recall_at_10": 0.06532258064516129,
+          "recall_query_ci": [
+            0.05967741935483871,
+            0.07083333333333333
+          ],
+          "visited_oracle": 0.0668010752688172,
+          "pool_oracle": 0.06532258064516129,
+          "rerank_oracle": 0.06532258064516129,
+          "expanded_mean": 79.64381720430107,
+          "scores_mean": 4917.806451612903
+        },
+        {
+          "dataset": "D11",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.11559139784946237,
+          "recall_query_ci": [
+            0.10793010752688173,
+            0.12298387096774194
+          ],
+          "visited_oracle": 0.12096774193548387,
+          "pool_oracle": 0.11922043010752688,
+          "rerank_oracle": 0.11559139784946237,
+          "expanded_mean": 149.24193548387098,
+          "scores_mean": 9103.165322580646
+        },
+        {
+          "dataset": "D11",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.19341397849462366,
+          "recall_query_ci": [
+            0.18400201612903228,
+            0.20268817204301076
+          ],
+          "visited_oracle": 0.21129032258064515,
+          "pool_oracle": 0.20981182795698924,
+          "rerank_oracle": 0.19341397849462366,
+          "expanded_mean": 279.08870967741933,
+          "scores_mean": 16649.504032258064
+        },
+        {
+          "dataset": "D11",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.0657258064516129,
+          "recall_query_ci": [
+            0.06021505376344086,
+            0.07110551075268816
+          ],
+          "visited_oracle": 0.06626344086021504,
+          "pool_oracle": 0.0657258064516129,
+          "rerank_oracle": 0.0657258064516129,
+          "expanded_mean": 78.85349462365592,
+          "scores_mean": 4869.17876344086
+        },
+        {
+          "dataset": "D11",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 128,
+          "recall_at_10": 0.1375,
+          "recall_query_ci": [
+            0.1295698924731183,
+            0.14529569892473118
+          ],
+          "visited_oracle": 0.1375,
+          "pool_oracle": 0.1375,
+          "rerank_oracle": 0.1375,
+          "expanded_mean": 147.1438172043011,
+          "scores_mean": 8976.858870967742
+        },
+        {
+          "dataset": "D11",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 256,
+          "recall_at_10": 0.2400537634408602,
+          "recall_query_ci": [
+            0.23050739247311827,
+            0.24946236559139787
+          ],
+          "visited_oracle": 0.2400537634408602,
+          "pool_oracle": 0.2400537634408602,
+          "rerank_oracle": 0.2400537634408602,
+          "expanded_mean": 279.27016129032256,
+          "scores_mean": 16661.06317204301
+        },
+        {
+          "dataset": "D11",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 64,
+          "recall_at_10": 0.075,
+          "recall_query_ci": [
+            0.06922043010752688,
+            0.08024529569892472
+          ],
+          "visited_oracle": 0.075,
+          "pool_oracle": 0.075,
+          "rerank_oracle": 0.075,
+          "expanded_mean": 78.80645161290323,
+          "scores_mean": 4865.415322580645
+        },
+        {
+          "dataset": "D11",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.11693548387096775,
+          "recall_query_ci": [
+            0.10954301075268819,
+            0.12419690860215053
+          ],
+          "visited_oracle": 0.12365591397849462,
+          "pool_oracle": 0.12096774193548387,
+          "rerank_oracle": 0.11693548387096775,
+          "expanded_mean": 148.77822580645162,
+          "scores_mean": 9076.952956989247
+        },
+        {
+          "dataset": "D11",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.19489247311827956,
+          "recall_query_ci": [
+            0.185752688172043,
+            0.2034979838709677
+          ],
+          "visited_oracle": 0.21411290322580645,
+          "pool_oracle": 0.2110215053763441,
+          "rerank_oracle": 0.19489247311827956,
+          "expanded_mean": 280.48118279569894,
+          "scores_mean": 16739.129032258064
+        },
+        {
+          "dataset": "D11",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.0668010752688172,
+          "recall_query_ci": [
+            0.06128696236559139,
+            0.0721774193548387
+          ],
+          "visited_oracle": 0.06801075268817204,
+          "pool_oracle": 0.0668010752688172,
+          "rerank_oracle": 0.0668010752688172,
+          "expanded_mean": 79.54435483870968,
+          "scores_mean": 4910.876344086021
+        },
+        {
+          "dataset": "D11",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 128,
+          "recall_at_10": 0.11061827956989248,
+          "recall_query_ci": [
+            0.1037600806451613,
+            0.11747647849462364
+          ],
+          "visited_oracle": 0.11666666666666667,
+          "pool_oracle": 0.11491935483870967,
+          "rerank_oracle": 0.11061827956989248,
+          "expanded_mean": 148.45564516129033,
+          "scores_mean": 9055.52822580645
+        },
+        {
+          "dataset": "D11",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 256,
+          "recall_at_10": 0.18991935483870967,
+          "recall_query_ci": [
+            0.18158266129032258,
+            0.19892809139784942
+          ],
+          "visited_oracle": 0.2120967741935484,
+          "pool_oracle": 0.2099462365591398,
+          "rerank_oracle": 0.18991935483870967,
+          "expanded_mean": 279.46639784946234,
+          "scores_mean": 16668.58870967742
+        },
+        {
+          "dataset": "D11",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 64,
+          "recall_at_10": 0.0635752688172043,
+          "recall_query_ci": [
+            0.05779569892473118,
+            0.0696236559139785
+          ],
+          "visited_oracle": 0.06491935483870967,
+          "pool_oracle": 0.0635752688172043,
+          "rerank_oracle": 0.0635752688172043,
+          "expanded_mean": 79.06451612903226,
+          "scores_mean": 4881.637096774193
+        },
+        {
+          "dataset": "D11",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.11102150537634407,
+          "recall_query_ci": [
+            0.10416330645161291,
+            0.11801075268817206
+          ],
+          "visited_oracle": 0.1163978494623656,
+          "pool_oracle": 0.11451612903225808,
+          "rerank_oracle": 0.11102150537634407,
+          "expanded_mean": 148.38306451612902,
+          "scores_mean": 9050.918010752688
+        },
+        {
+          "dataset": "D11",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.19381720430107527,
+          "recall_query_ci": [
+            0.18574932795698929,
+            0.20268817204301076
+          ],
+          "visited_oracle": 0.2131720430107527,
+          "pool_oracle": 0.21048387096774196,
+          "rerank_oracle": 0.19381720430107527,
+          "expanded_mean": 278.2876344086022,
+          "scores_mean": 16601.977150537634
+        },
+        {
+          "dataset": "D11",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.06290322580645161,
+          "recall_query_ci": [
+            0.057657930107526886,
+            0.06814852150537633
+          ],
+          "visited_oracle": 0.06397849462365592,
+          "pool_oracle": 0.06290322580645161,
+          "rerank_oracle": 0.06290322580645161,
+          "expanded_mean": 79.10618279569893,
+          "scores_mean": 4883.779569892473
+        }
+      ],
+      "full_gt_boundary_checked": true,
+      "full_rerank_labels_checked": true
+    },
+    {
+      "status": "passed",
+      "dataset": "D09",
+      "n": 200000,
+      "queries": 744,
+      "points": [
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 128,
+          "recall_at_10": 0.5329301075268817,
+          "recall_query_ci": [
+            0.5163978494623657,
+            0.5487903225806452
+          ],
+          "visited_oracle": 0.5998655913978495,
+          "pool_oracle": 0.5760752688172043,
+          "rerank_oracle": 0.5329301075268817,
+          "expanded_mean": 172.74193548387098,
+          "scores_mean": 3977.0806451612902
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 256,
+          "recall_at_10": 0.6079301075268817,
+          "recall_query_ci": [
+            0.5922009408602151,
+            0.6233904569892473
+          ],
+          "visited_oracle": 0.7099462365591398,
+          "pool_oracle": 0.6993279569892473,
+          "rerank_oracle": 0.6079301075268817,
+          "expanded_mean": 294.94086021505376,
+          "scores_mean": 5951.830645161291
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "centered",
+          "ef": 64,
+          "recall_at_10": 0.417741935483871,
+          "recall_query_ci": [
+            0.39838709677419354,
+            0.4360248655913978
+          ],
+          "visited_oracle": 0.4486559139784946,
+          "pool_oracle": 0.417741935483871,
+          "rerank_oracle": 0.417741935483871,
+          "expanded_mean": 105.08870967741936,
+          "scores_mean": 2630.1330645161293
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 128,
+          "recall_at_10": 0.6162634408602151,
+          "recall_query_ci": [
+            0.598921370967742,
+            0.6345463709677419
+          ],
+          "visited_oracle": 0.6162634408602151,
+          "pool_oracle": 0.6162634408602151,
+          "rerank_oracle": 0.6162634408602151,
+          "expanded_mean": 176.18279569892474,
+          "scores_mean": 4002.5793010752686
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 256,
+          "recall_at_10": 0.7306451612903226,
+          "recall_query_ci": [
+            0.7157224462365591,
+            0.7444892473118281
+          ],
+          "visited_oracle": 0.7306451612903226,
+          "pool_oracle": 0.7306451612903226,
+          "rerank_oracle": 0.7306451612903226,
+          "expanded_mean": 299.80913978494624,
+          "scores_mean": 6046.611559139785
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "exact",
+          "ef": 64,
+          "recall_at_10": 0.456989247311828,
+          "recall_query_ci": [
+            0.43628696236559145,
+            0.477557123655914
+          ],
+          "visited_oracle": 0.456989247311828,
+          "pool_oracle": 0.456989247311828,
+          "rerank_oracle": 0.456989247311828,
+          "expanded_mean": 106.34946236559139,
+          "scores_mean": 2582.6814516129034
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 128,
+          "recall_at_10": 0.278494623655914,
+          "recall_query_ci": [
+            0.2635719086021505,
+            0.29489583333333336
+          ],
+          "visited_oracle": 0.4358870967741935,
+          "pool_oracle": 0.3385752688172043,
+          "rerank_oracle": 0.278494623655914,
+          "expanded_mean": 161.8508064516129,
+          "scores_mean": 3414.342741935484
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 256,
+          "recall_at_10": 0.32056451612903225,
+          "recall_query_ci": [
+            0.3051041666666667,
+            0.3369657258064516
+          ],
+          "visited_oracle": 0.5631720430107527,
+          "pool_oracle": 0.4701612903225806,
+          "rerank_oracle": 0.32056451612903225,
+          "expanded_mean": 286.7876344086022,
+          "scores_mean": 5225.877688172043
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "perdim",
+          "ef": 64,
+          "recall_at_10": 0.2211021505376344,
+          "recall_query_ci": [
+            0.20510080645161294,
+            0.2368279569892473
+          ],
+          "visited_oracle": 0.3036290322580645,
+          "pool_oracle": 0.2211021505376344,
+          "rerank_oracle": 0.2211021505376344,
+          "expanded_mean": 94.66129032258064,
+          "scores_mean": 2212.391129032258
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.3170698924731183,
+          "recall_query_ci": [
+            0.30107190860215055,
+            0.33306451612903226
+          ],
+          "visited_oracle": 0.5016129032258065,
+          "pool_oracle": 0.3913978494623656,
+          "rerank_oracle": 0.3170698924731183,
+          "expanded_mean": 167.4731182795699,
+          "scores_mean": 3739.9475806451615
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.3545698924731183,
+          "recall_query_ci": [
+            0.3385752688172043,
+            0.37056451612903224
+          ],
+          "visited_oracle": 0.6326612903225806,
+          "pool_oracle": 0.5325268817204301,
+          "rerank_oracle": 0.3545698924731183,
+          "expanded_mean": 291.31586021505376,
+          "scores_mean": 5691.80376344086
+        },
+        {
+          "dataset": "D09",
+          "graph": "bq",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.2521505376344086,
+          "recall_query_ci": [
+            0.2361559139784946,
+            0.26761088709677416
+          ],
+          "visited_oracle": 0.35766129032258065,
+          "pool_oracle": 0.2521505376344086,
+          "rerank_oracle": 0.2521505376344086,
+          "expanded_mean": 99.65188172043011,
+          "scores_mean": 2413.82123655914
+        },
+        {
+          "dataset": "D09",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 128,
+          "recall_at_10": 0.7321236559139785,
+          "recall_query_ci": [
+            0.718679435483871,
+            0.7448958333333334
+          ],
+          "visited_oracle": 0.9077956989247312,
+          "pool_oracle": 0.8280913978494624,
+          "rerank_oracle": 0.7321236559139785,
+          "expanded_mean": 138.9798387096774,
+          "scores_mean": 3222.5967741935483
+        },
+        {
+          "dataset": "D09",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 256,
+          "recall_at_10": 0.742741935483871,
+          "recall_query_ci": [
+            0.7298319892473119,
+            0.7555141129032258
+          ],
+          "visited_oracle": 0.9469086021505376,
+          "pool_oracle": 0.9103494623655914,
+          "rerank_oracle": 0.742741935483871,
+          "expanded_mean": 266.61559139784947,
+          "scores_mean": 4858.698924731183
+        },
+        {
+          "dataset": "D09",
+          "graph": "centered",
+          "nav": "centered",
+          "ef": 64,
+          "recall_at_10": 0.7028225806451613,
+          "recall_query_ci": [
+            0.6880342741935485,
+            0.7172043010752687
+          ],
+          "visited_oracle": 0.8431451612903226,
+          "pool_oracle": 0.7028225806451613,
+          "rerank_oracle": 0.7028225806451613,
+          "expanded_mean": 75.93682795698925,
+          "scores_mean": 2190.42876344086
+        },
+        {
+          "dataset": "D09",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.4225806451612903,
+          "recall_query_ci": [
+            0.4071236559139785,
+            0.43911290322580643
+          ],
+          "visited_oracle": 0.8491935483870968,
+          "pool_oracle": 0.5448924731182796,
+          "rerank_oracle": 0.4225806451612903,
+          "expanded_mean": 146.84139784946237,
+          "scores_mean": 3836.3561827956987
+        },
+        {
+          "dataset": "D09",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.4255376344086022,
+          "recall_query_ci": [
+            0.4100772849462365,
+            0.44126680107526883
+          ],
+          "visited_oracle": 0.915725806451613,
+          "pool_oracle": 0.6795698924731183,
+          "rerank_oracle": 0.4255376344086022,
+          "expanded_mean": 274.34005376344084,
+          "scores_mean": 5808.014784946236
+        },
+        {
+          "dataset": "D09",
+          "graph": "centered",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.4056451612903226,
+          "recall_query_ci": [
+            0.38964045698924726,
+            0.42218077956989253
+          ],
+          "visited_oracle": 0.7478494623655914,
+          "pool_oracle": 0.4056451612903226,
+          "rerank_oracle": 0.4056451612903226,
+          "expanded_mean": 82.79032258064517,
+          "scores_mean": 2586.364247311828
+        },
+        {
+          "dataset": "D09",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 128,
+          "recall_at_10": 0.9998655913978494,
+          "recall_query_ci": [
+            0.9995967741935484,
+            1.0
+          ],
+          "visited_oracle": 0.9998655913978494,
+          "pool_oracle": 0.9998655913978494,
+          "rerank_oracle": 0.9998655913978494,
+          "expanded_mean": 131.78629032258064,
+          "scores_mean": 3650.462365591398
+        },
+        {
+          "dataset": "D09",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 256,
+          "recall_at_10": 1.0,
+          "recall_query_ci": [
+            1.0,
+            1.0
+          ],
+          "visited_oracle": 1.0,
+          "pool_oracle": 1.0,
+          "rerank_oracle": 1.0,
+          "expanded_mean": 259.4986559139785,
+          "scores_mean": 5826.806451612903
+        },
+        {
+          "dataset": "D09",
+          "graph": "fp32",
+          "nav": "exact",
+          "ef": 64,
+          "recall_at_10": 0.9989247311827956,
+          "recall_query_ci": [
+            0.9981182795698923,
+            0.9995967741935484
+          ],
+          "visited_oracle": 0.9989247311827956,
+          "pool_oracle": 0.9989247311827956,
+          "rerank_oracle": 0.9989247311827956,
+          "expanded_mean": 68.0497311827957,
+          "scores_mean": 2278.2150537634407
+        },
+        {
+          "dataset": "D09",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.4333333333333333,
+          "recall_query_ci": [
+            0.4174731182795699,
+            0.4487903225806451
+          ],
+          "visited_oracle": 0.9754032258064516,
+          "pool_oracle": 0.5713709677419355,
+          "rerank_oracle": 0.4333333333333333,
+          "expanded_mean": 132.86021505376345,
+          "scores_mean": 4598.954301075269
+        },
+        {
+          "dataset": "D09",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.4272849462365591,
+          "recall_query_ci": [
+            0.4118279569892473,
+            0.44314516129032255
+          ],
+          "visited_oracle": 0.9919354838709677,
+          "pool_oracle": 0.6934139784946237,
+          "rerank_oracle": 0.4272849462365591,
+          "expanded_mean": 260.3037634408602,
+          "scores_mean": 7572.379032258064
+        },
+        {
+          "dataset": "D09",
+          "graph": "fp32",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.4462365591397849,
+          "recall_query_ci": [
+            0.4306418010752688,
+            0.4620967741935484
+          ],
+          "visited_oracle": 0.925268817204301,
+          "pool_oracle": 0.4462365591397849,
+          "rerank_oracle": 0.4462365591397849,
+          "expanded_mean": 69.63709677419355,
+          "scores_mean": 2784.7809139784945
+        },
+        {
+          "dataset": "D09",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 128,
+          "recall_at_10": 0.3181451612903226,
+          "recall_query_ci": [
+            0.30241263440860217,
+            0.33454301075268816
+          ],
+          "visited_oracle": 0.5452956989247312,
+          "pool_oracle": 0.39798387096774196,
+          "rerank_oracle": 0.3181451612903226,
+          "expanded_mean": 138.03629032258064,
+          "scores_mean": 3827.1881720430106
+        },
+        {
+          "dataset": "D09",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 256,
+          "recall_at_10": 0.3495967741935484,
+          "recall_query_ci": [
+            0.334005376344086,
+            0.36518817204301074
+          ],
+          "visited_oracle": 0.6723118279569892,
+          "pool_oracle": 0.528494623655914,
+          "rerank_oracle": 0.3495967741935484,
+          "expanded_mean": 263.7997311827957,
+          "scores_mean": 6103.309139784947
+        },
+        {
+          "dataset": "D09",
+          "graph": "perdim",
+          "nav": "perdim",
+          "ef": 64,
+          "recall_at_10": 0.28548387096774197,
+          "recall_query_ci": [
+            0.2700268817204301,
+            0.3014818548387097
+          ],
+          "visited_oracle": 0.4198924731182796,
+          "pool_oracle": 0.28548387096774197,
+          "rerank_oracle": 0.28548387096774197,
+          "expanded_mean": 76.48387096774194,
+          "scores_mean": 2454.7096774193546
+        },
+        {
+          "dataset": "D09",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 128,
+          "recall_at_10": 0.34381720430107526,
+          "recall_query_ci": [
+            0.32836021505376345,
+            0.3587399193548387
+          ],
+          "visited_oracle": 0.5696236559139785,
+          "pool_oracle": 0.4291666666666667,
+          "rerank_oracle": 0.34381720430107526,
+          "expanded_mean": 140.56048387096774,
+          "scores_mean": 3999.5577956989246
+        },
+        {
+          "dataset": "D09",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 256,
+          "recall_at_10": 0.3793010752688172,
+          "recall_query_ci": [
+            0.36397849462365595,
+            0.39422379032258065
+          ],
+          "visited_oracle": 0.698252688172043,
+          "pool_oracle": 0.573252688172043,
+          "rerank_oracle": 0.3793010752688172,
+          "expanded_mean": 265.81854838709677,
+          "scores_mean": 6360.697580645161
+        },
+        {
+          "dataset": "D09",
+          "graph": "perdim",
+          "nav": "sm",
+          "ef": 64,
+          "recall_at_10": 0.3032258064516129,
+          "recall_query_ci": [
+            0.2872311827956989,
+            0.31827956989247314
+          ],
+          "visited_oracle": 0.4471774193548387,
+          "pool_oracle": 0.3032258064516129,
+          "rerank_oracle": 0.3032258064516129,
+          "expanded_mean": 79.68145161290323,
+          "scores_mean": 2587.4220430107525
+        }
+      ],
+      "full_gt_boundary_checked": true,
+      "full_rerank_labels_checked": true
+    }
+  ]
+}

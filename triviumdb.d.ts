@@ -417,6 +417,11 @@ export interface ErrorDetailsByCode {
   TDB_CONSOLE_SESSION_CLOSED: Record<string, never>;
   TDB_CONSOLE_RESPONSE_TOO_LARGE: { max_bytes: ErrorInteger; committed: boolean };
   TDB_WRITE_CONFLICT: { expected: string; actual: string };
+  TDB_GRAPH_NOT_FOUND: { graph_id: string };
+  TDB_GRAPH_REVISION_MISMATCH: { graph_id: string; expected: string; actual: string };
+  TDB_DOCUMENT_REVISION_MISMATCH: { document_id: string; expected: string; actual: string };
+  TDB_DOCUMENT_UPLOAD_NOT_FOUND: { upload_id: string };
+  TDB_DOCUMENT_UPLOAD_CONFLICT: { field: string };
   TDB_IDEMPOTENCY_CONFLICT: Record<string, never>;
   TDB_WRITE_OUTCOME_UNKNOWN: Record<string, never>;
   TDB_UNSUPPORTED_WAL_VERSION: { found: number; supported: number };
@@ -944,6 +949,18 @@ export class TriviumDB {
 
   /** 同步执行 Console v1 JSON 请求；节点 ID 与 u64 向量分量使用十进制字符串。 */
   consoleRequest(session: ConsoleSession, requestJson: string): string;
+  /**
+   * 文档put/get/resolve/delete/search/search_vector/search_hybrid/context/clear_index协议。
+   * parse/ingest/put_parsed及begin_upload/append_upload/upload_status/list_uploads/publish_upload/abort_upload提供解析、原文映射与持久化候选发布。
+   * NodeId使用十进制字符串，向量分量采用当前dtype的JSON数值表示。
+   * search支持字段权重、document_filter/block_filter、members、位置查询及analyzer_id。
+   * 字段复用块kind，元数据过滤作用于调用方data，完整协议见docs/documents.md与docs/document-ingestion.md。
+   */
+  documentRequest(requestJson: string): string;
+  /** INT8 QuIVer运行时协议，支持configure、search、stats、close、collect_temporary。 */
+  quiverRequest(requestJson: string): string;
+  /** 命名图、共享成员、独立边及显式联合查询的Core JSON入口。 */
+  graphRequest(requestJson: string): string;
   prepareTql(query: string): PreparedTql;
   executePreparedTql(prepared: PreparedTql, parameters: Record<string, string | number | boolean | null>): any[];
 

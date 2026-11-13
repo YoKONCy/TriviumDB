@@ -1,0 +1,5 @@
+# 冻结资料按原始字节存储，保持跨平台内容哈希一致。
+* -text
+*.png binary
+*.pdf binary
+

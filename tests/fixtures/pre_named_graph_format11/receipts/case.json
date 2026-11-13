@@ -1,0 +1,43 @@
+{
+  "command": {
+    "operation": "guardedTransaction",
+    "expectedRevision": "d6f0ddd38f2f457ba81d067e69f5dcc5:0000000000000001",
+    "idempotencyKey": "historical-v4",
+    "operations": [
+      {
+        "op": "updatePayload",
+        "id": "1",
+        "payload": {
+          "state": "after"
+        }
+      },
+      {
+        "op": "insert",
+        "vector": [
+          0,
+          1
+        ],
+        "payload": {
+          "state": "created"
+        }
+      },
+      {
+        "op": "link",
+        "source": "1",
+        "target": "2",
+        "label": "rel",
+        "weight": 0.5,
+        "metadata": {
+          "source": "旧回执"
+        }
+      }
+    ]
+  },
+  "acknowledged": {
+    "createdIds": [
+      "2"
+    ],
+    "revision": "d6f0ddd38f2f457ba81d067e69f5dcc5:0000000000000002",
+    "replayed": false
+  }
+}

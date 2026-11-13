@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use triviumdb::database::{Config, StorageMode};
 use triviumdb::query::tql_executor::QueryControl;
-use triviumdb::{ConsoleHost, ConsoleOptions, Database, TriviumError, VectorType};
+use triviumdb::{ConsoleHost, ConsoleOptions, Database, ResourceRuntime, TriviumError, VectorType};
 
 fn controls() -> [(QueryControl, &'static str); 3] {
     let cancelled = QueryControl::default();
@@ -59,7 +59,8 @@ fn matrix<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(dtype:
             auto_build_quiver: false,
             ..Default::default()
         };
-        let mut db = Database::<T>::open_with_config(&path, config).unwrap();
+        let runtime = ResourceRuntime::new(Default::default()).unwrap();
+        let mut db = Database::<T>::open_with_runtime(&path, config, runtime.clone()).unwrap();
         maintenance::seed(&mut db);
         let before = std::fs::read(format!("{path}.wal")).unwrap();
         let prepared = db.prepare_tql("MATCH (n) RETURN n").unwrap();
@@ -134,7 +135,7 @@ fn matrix<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(dtype:
         }
         assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
         database.lock().unwrap().close().unwrap();
-        let mut reopened = Database::<T>::open_with_config(&path, config).unwrap();
+        let mut reopened = Database::<T>::open_with_runtime(&path, config, runtime).unwrap();
         assert_eq!(
             maintenance::facts(&reopened),
             maintenance::expected(false, json!([]))

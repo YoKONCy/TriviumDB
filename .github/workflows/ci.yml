@@ -162,6 +162,12 @@ jobs:
             cargo test --target ${{ matrix.target }} --features test-hooks --test fault_io --test fault_power -- --test-threads=1
           fi
 
+      - name: 验证 QuIVer SSD 缓存、原生读取与关闭排空
+        run: |
+          cargo test --locked --target ${{ matrix.target }} --features test-hooks --lib index::quiver::ssd -- --test-threads=1
+          cargo test --locked --target ${{ matrix.target }} --features test-hooks --lib storage::quiver_io -- --test-threads=1
+          cargo test --locked --target ${{ matrix.target }} --features test-hooks --test core quiver_ssd -- --test-threads=1
+
       - name: 运行文档测试
         run: cargo test --target ${{ matrix.target }} --doc
 
@@ -437,6 +443,7 @@ jobs:
           cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --features test-hooks --lib database::lifecycle::tests -- --test-threads=1
           cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --features test-hooks --lib database::transaction::guard_tests -- --test-threads=1
           cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --lib storage::compaction::tests -- --test-threads=1
+          cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --features test-hooks --lib index::quiver::ssd::tests::runtime_tests -- --test-threads=1
 
   # Miri 只运行无文件映射、无外部调用的小规模内存安全子集。
   # 保留默认别名、数据竞争与泄漏检查，使用多个随机种子探索交错。

@@ -400,7 +400,7 @@ fn wal非空v2可安全迁移并补齐link元数据() {
 
     assert!(Wal::upgrade_legacy_wal::<f32>(&path).unwrap());
     let migrated = std::fs::read(format!("{}.wal", path)).unwrap();
-    assert_eq!(u16::from_le_bytes([migrated[4], migrated[5]]), 4);
+    assert_eq!(u16::from_le_bytes([migrated[4], migrated[5]]), 6);
     let (entries, _) = Wal::read_entries::<f32>(&path).unwrap();
     assert_eq!(entries.len(), 3);
     assert!(matches!(

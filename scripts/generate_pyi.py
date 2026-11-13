@@ -163,7 +163,7 @@ for _ret, _quals in {
     "Any | None": "TriviumDB.get_payload",
     "Transaction": "TriviumDB.transaction",
     "Any": "TriviumDB.publish_generation_manifest",
-    "str": "TriviumDB.console_request TriviumDB.__repr__ Transaction.__repr__ QueryRow.__repr__ HookContext.__repr__",
+    "str": "TriviumDB.console_request TriviumDB.document_request TriviumDB.graph_request TriviumDB.quiver_request TriviumDB.__repr__ Transaction.__repr__ QueryRow.__repr__ HookContext.__repr__",
     "bool": "ConsoleSession.cancel ConsoleSession.is_detached ConsoleSession.is_drained TriviumDB.close_timeout TriviumDB.__contains__ TriviumDB.__exit__ Transaction.__exit__",
     '"ConsoleSession"': "ConsoleSession.__new__",
     '"ResourceRuntime"': "ResourceRuntime.__new__",

@@ -88,6 +88,10 @@ where
 pub struct PropertyKey(Vec<u8>);
 
 impl PropertyKey {
+    pub(crate) fn encoded_len(&self) -> usize {
+        self.0.len()
+    }
+
     pub fn from_json(value: &Value) -> Option<Self> {
         let mut bytes = Vec::new();
         match value {

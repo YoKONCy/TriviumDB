@@ -10,7 +10,12 @@ pub(crate) mod fs;
 pub mod generation;
 pub mod graph_blocks;
 pub mod memtable;
+pub(crate) mod named_graphs;
 pub(crate) mod payload_store;
+pub(crate) mod quiver_cold;
+pub(crate) mod quiver_io;
 pub mod snapshot;
 pub mod vec_pool;
 pub mod wal;
+
+pub(crate) mod document_publications;

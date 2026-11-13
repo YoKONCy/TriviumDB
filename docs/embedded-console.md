@@ -257,7 +257,7 @@ const status = rpc('confirm-1', { ...original, operation: 'transactionStatus' })
 
 重新打开会生成新的编辑版本身份。保留的原事务回执继续确认历史提交，后续编辑从当前快照取得版本令牌。回执缺失或已淘汰时返回 unknown，旧版本条件按当前实例校验。无事实变化的受保护事务也消耗一个版本并保存回执，进入 WAL 后的未知结果通过恢复完成后再确认。
 
-> **恢复提醒**　回执受容量和淘汰约束，unknown 的事务按业务身份核对完整事实。当前开发格式为主文件 v11、WAL v4，切换内核前保留完整文件组备份，旧内核环境通过升级前备份恢复。
+> **恢复提醒**　回执受容量和淘汰约束，unknown 的事务按业务身份核对完整事实。当前开发格式为主文件 v13、WAL v6，切换内核前保留完整文件组备份，旧内核环境通过升级前备份恢复。
 
 `info.transport` 与 console-contract.json 公布这些能力及上限。旧的 transaction、mutate、importNodes/importEdges 保持无版本前置条件的原语义；这些写入会使旧编辑令牌失效。版本条件和幂等处理由 guardedTransaction 提供。
 

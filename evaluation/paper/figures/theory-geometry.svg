@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="650" viewBox="0 0 1800 650" role="img">
+<title>Two-bit representation and pairwise score geometry</title><desc>Three conceptual panels: a four-level sign-magnitude reconstruction, a concrete norm-induced ranking reversal, and error intervals relative to an exact score margin. No experimental measurements are plotted.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 Z" fill="context-stroke"/></marker></defs>
+<rect width="1800" height="650" fill="white"/>
+<line x1="600.00" y1="24.00" x2="600.00" y2="623.00" stroke="#ccd5dc" stroke-width="1"/>
+<line x1="1200.00" y1="24.00" x2="1200.00" y2="623.00" stroke="#ccd5dc" stroke-width="1"/>
+<text x="28.00" y="43.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="31" fill="#20303a" text-anchor="start" font-weight="700">(a) Four reconstruction levels</text>
+<text x="28.00" y="80.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#617380" text-anchor="start" font-weight="400">Sign and magnitude define four regions</text>
+<text x="628.00" y="43.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="31" fill="#20303a" text-anchor="start" font-weight="700">(b) Norms change the ordering</text>
+<text x="628.00" y="80.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#617380" text-anchor="start" font-weight="400">Illustrative reconstructed vectors</text>
+<text x="1228.00" y="43.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="31" fill="#20303a" text-anchor="start" font-weight="700">(c) Error relative to the margin</text>
+<text x="1228.00" y="80.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#617380" text-anchor="start" font-weight="400">Lower scores are better</text>
+<rect x="95" y="125" width="120.86666666666667" height="340" fill="#edf2fa" stroke="none" stroke-width="1"/>
+<line x1="95.00" y1="420.58" x2="215.87" y2="420.58" stroke="#3665a8" stroke-width="4"/>
+<text x="155.43" y="116.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#3665a8" text-anchor="middle" font-weight="700">01</text>
+<rect x="215.86666666666667" y="125" width="103.13333333333333" height="340" fill="#f5f7fb" stroke="none" stroke-width="1"/>
+<line x1="215.87" y1="332.43" x2="319.00" y2="332.43" stroke="#3665a8" stroke-width="4"/>
+<text x="267.43" y="116.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#3665a8" text-anchor="middle" font-weight="700">00</text>
+<rect x="319" y="125" width="103.13333333333333" height="340" fill="#f2f8f7" stroke="none" stroke-width="1"/>
+<line x1="319.00" y1="269.57" x2="422.13" y2="269.57" stroke="#087f8c" stroke-width="4"/>
+<text x="370.57" y="116.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#087f8c" text-anchor="middle" font-weight="700">10</text>
+<rect x="422.1333333333333" y="125" width="120.86666666666667" height="340" fill="#e8f4f2" stroke="none" stroke-width="1"/>
+<line x1="422.13" y1="181.42" x2="543.00" y2="181.42" stroke="#087f8c" stroke-width="4"/>
+<text x="482.57" y="116.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#087f8c" text-anchor="middle" font-weight="700">11</text>
+<line x1="95.00" y1="465.00" x2="561.00" y2="465.00" stroke="#20303a" stroke-width="2" marker-end="url(#arrow)"/>
+<line x1="95.00" y1="465.00" x2="95.00" y2="125.00" stroke="#20303a" stroke-width="2" marker-end="url(#arrow)"/>
+<line x1="95.00" y1="465.00" x2="543.00" y2="137.00" stroke="#adb8c0" stroke-width="1.8" stroke-dasharray="6 6"/>
+<line x1="215.87" y1="125.00" x2="215.87" y2="465.00" stroke="#ccd5dc" stroke-width="1.5" stroke-dasharray="5 5"/>
+<line x1="215.87" y1="465.00" x2="215.87" y2="473.00" stroke="#20303a" stroke-width="1.5"/>
+<text x="215.87" y="504.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="28" fill="#20303a" text-anchor="middle" font-weight="400">−τ</text>
+<line x1="319.00" y1="125.00" x2="319.00" y2="465.00" stroke="#ccd5dc" stroke-width="1.5" stroke-dasharray="5 5"/>
+<line x1="319.00" y1="465.00" x2="319.00" y2="473.00" stroke="#20303a" stroke-width="1.5"/>
+<text x="319.00" y="504.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="28" fill="#20303a" text-anchor="middle" font-weight="400">0</text>
+<line x1="422.13" y1="125.00" x2="422.13" y2="465.00" stroke="#ccd5dc" stroke-width="1.5" stroke-dasharray="5 5"/>
+<line x1="422.13" y1="465.00" x2="422.13" y2="473.00" stroke="#20303a" stroke-width="1.5"/>
+<text x="422.13" y="504.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="28" fill="#20303a" text-anchor="middle" font-weight="400">+τ</text>
+<line x1="89.00" y1="420.58" x2="95.00" y2="420.58" stroke="#20303a" stroke-width="1.5"/>
+<text x="81.00" y="429.58" font-family="Arial, DejaVu Sans, sans-serif" font-size="27" fill="#20303a" text-anchor="end" font-weight="400">−b</text>
+<line x1="89.00" y1="332.43" x2="95.00" y2="332.43" stroke="#20303a" stroke-width="1.5"/>
+<text x="81.00" y="341.43" font-family="Arial, DejaVu Sans, sans-serif" font-size="27" fill="#20303a" text-anchor="end" font-weight="400">−a</text>
+<line x1="89.00" y1="269.57" x2="95.00" y2="269.57" stroke="#20303a" stroke-width="1.5"/>
+<text x="81.00" y="278.57" font-family="Arial, DejaVu Sans, sans-serif" font-size="27" fill="#20303a" text-anchor="end" font-weight="400">+a</text>
+<line x1="89.00" y1="181.42" x2="95.00" y2="181.42" stroke="#20303a" stroke-width="1.5"/>
+<text x="81.00" y="190.42" font-family="Arial, DejaVu Sans, sans-serif" font-size="27" fill="#20303a" text-anchor="end" font-weight="400">+b</text>
+<text x="96.00" y="106.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="29" fill="#20303a" text-anchor="middle" font-weight="400" font-style="italic">x̂ⱼ</text>
+<text x="558.00" y="500.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="29" fill="#20303a" text-anchor="end" font-weight="400" font-style="italic">xⱼ</text>
+<line x1="128.60" y1="440.40" x2="128.60" y2="420.58" stroke="#3665a8" stroke-width="1.8" marker-end="url(#arrow)"/>
+<circle cx="128.60" cy="440.40" r="5.5" fill="white" stroke="#7e8d97" stroke-width="1.6"/>
+<circle cx="128.60" cy="420.58" r="5.5" fill="#3665a8" stroke="none" stroke-width="2"/>
+<line x1="184.60" y1="399.40" x2="184.60" y2="420.58" stroke="#3665a8" stroke-width="1.8" marker-end="url(#arrow)"/>
+<circle cx="184.60" cy="399.40" r="5.5" fill="white" stroke="#7e8d97" stroke-width="1.6"/>
+<circle cx="184.60" cy="420.58" r="5.5" fill="#3665a8" stroke="none" stroke-width="2"/>
+<line x1="246.20" y1="354.30" x2="246.20" y2="332.43" stroke="#3665a8" stroke-width="1.8" marker-end="url(#arrow)"/>
+<circle cx="246.20" cy="354.30" r="5.5" fill="white" stroke="#7e8d97" stroke-width="1.6"/>
+<circle cx="246.20" cy="332.43" r="5.5" fill="#3665a8" stroke="none" stroke-width="2"/>
+<line x1="296.60" y1="317.40" x2="296.60" y2="332.43" stroke="#3665a8" stroke-width="1.8" marker-end="url(#arrow)"/>
+<circle cx="296.60" cy="317.40" r="5.5" fill="white" stroke="#7e8d97" stroke-width="1.6"/>
+<circle cx="296.60" cy="332.43" r="5.5" fill="#3665a8" stroke="none" stroke-width="2"/>
+<line x1="358.20" y1="272.30" x2="358.20" y2="269.57" stroke="#087f8c" stroke-width="1.8" marker-end="url(#arrow)"/>
+<circle cx="358.20" cy="272.30" r="5.5" fill="white" stroke="#7e8d97" stroke-width="1.6"/>
+<circle cx="358.20" cy="269.57" r="5.5" fill="#087f8c" stroke="none" stroke-width="2"/>
+<line x1="380.60" y1="255.90" x2="380.60" y2="269.57" stroke="#087f8c" stroke-width="1.8" marker-end="url(#arrow)"/>
+<circle cx="380.60" cy="255.90" r="5.5" fill="white" stroke="#7e8d97" stroke-width="1.6"/>
+<circle cx="380.60" cy="269.57" r="5.5" fill="#087f8c" stroke="none" stroke-width="2"/>
+<line x1="447.80" y1="206.70" x2="447.80" y2="181.42" stroke="#087f8c" stroke-width="1.8" marker-end="url(#arrow)"/>
+<circle cx="447.80" cy="206.70" r="5.5" fill="white" stroke="#7e8d97" stroke-width="1.6"/>
+<circle cx="447.80" cy="181.42" r="5.5" fill="#087f8c" stroke="none" stroke-width="2"/>
+<line x1="526.20" y1="149.30" x2="526.20" y2="181.42" stroke="#087f8c" stroke-width="1.8" marker-end="url(#arrow)"/>
+<circle cx="526.20" cy="149.30" r="5.5" fill="white" stroke="#7e8d97" stroke-width="1.6"/>
+<circle cx="526.20" cy="181.42" r="5.5" fill="#087f8c" stroke="none" stroke-width="2"/>
+<text x="315.00" y="554.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="30" fill="#20303a" text-anchor="middle" font-weight="400">x̂ⱼ ∈ {−b, −a, +a, +b}</text>
+<text x="315.00" y="600.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#617380" text-anchor="middle" font-weight="400">τ, a and b are per-vector statistics</text>
+<defs><clipPath id="vector-clip"><rect x="642" y="104" width="535" height="350"/></clipPath></defs>
+<g clip-path="url(#vector-clip)">
+<ellipse cx="964.0" cy="425.0" rx="228.1720841820927" ry="228.1720841820927" fill="none" stroke="#ead8c4" stroke-width="1.8" stroke-dasharray="5 6"/>
+<ellipse cx="964.0" cy="425.0" rx="87.5" ry="87.5" fill="none" stroke="#b6d8d7" stroke-width="1.8" stroke-dasharray="5 6"/>
+</g>
+<line x1="684.00" y1="425.00" x2="1155.00" y2="425.00" stroke="#8f9ca6" stroke-width="1.7" marker-end="url(#arrow)"/>
+<line x1="684.00" y1="425.00" x2="684.00" y2="121.00" stroke="#8f9ca6" stroke-width="1.7" marker-end="url(#arrow)"/>
+<text x="673.00" y="449.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#617380" text-anchor="end" font-weight="400">0</text>
+<line x1="684.00" y1="425.00" x2="946.50" y2="197.50" stroke="#bd742c" stroke-width="3.3" marker-end="url(#arrow)"/>
+<line x1="684.00" y1="425.00" x2="911.50" y2="355.00" stroke="#087f8c" stroke-width="3.3" marker-end="url(#arrow)"/>
+<line x1="684.00" y1="425.00" x2="964.00" y2="425.00" stroke="#20303a" stroke-width="2.6" marker-end="url(#arrow)"/>
+<line x1="946.50" y1="197.50" x2="946.50" y2="425.00" stroke="#bd742c" stroke-width="1.7" stroke-dasharray="5 5"/>
+<line x1="911.50" y1="355.00" x2="911.50" y2="425.00" stroke="#087f8c" stroke-width="1.7" stroke-dasharray="5 5"/>
+<line x1="964.00" y1="425.00" x2="946.50" y2="197.50" stroke="#bd742c" stroke-width="1.9" stroke-dasharray="6 5"/>
+<line x1="964.00" y1="425.00" x2="911.50" y2="355.00" stroke="#087f8c" stroke-width="1.9" stroke-dasharray="6 5"/>
+<circle cx="964.00" cy="425.00" r="7" fill="#20303a" stroke="none" stroke-width="2"/>
+<circle cx="946.50" cy="197.50" r="8" fill="#bd742c" stroke="none" stroke-width="2"/>
+<circle cx="911.50" cy="355.00" r="8" fill="#087f8c" stroke="none" stroke-width="2"/>
+<circle cx="946.50" cy="425.00" r="4.5" fill="#bd742c" stroke="none" stroke-width="2"/>
+<circle cx="911.50" cy="425.00" r="4.5" fill="#087f8c" stroke="none" stroke-width="2"/>
+<text x="961.50" y="187.50" font-family="Arial, DejaVu Sans, sans-serif" font-size="31" fill="#bd742c" text-anchor="start" font-weight="400" font-style="italic">x̂</text>
+<text x="888.50" y="343.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="31" fill="#087f8c" text-anchor="start" font-weight="400" font-style="italic">ŷ</text>
+<text x="979.00" y="458.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="31" fill="#20303a" text-anchor="start" font-weight="400" font-style="italic">q̂</text>
+<text x="925.00" y="493.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="28" fill="#bd742c" text-anchor="middle" font-weight="700">IP prefers x̂: 0.60 &gt; 0.52</text>
+<text x="925.00" y="542.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="28" fill="#087f8c" text-anchor="middle" font-weight="700">L2 prefers ŷ: 0.0625 &lt; 0.425</text>
+<text x="925.00" y="600.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="24" fill="#617380" text-anchor="middle" font-weight="400">The candidate-norm term reverses the choice</text>
+<line x1="1260.00" y1="218.00" x2="1755.00" y2="218.00" stroke="#8f9ca6" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="1390.25" y="195" width="77.5" height="46" fill="#f6e9da" stroke="none" stroke-width="1"/>
+<rect x="1545.25" y="195" width="77.5" height="46" fill="#e1f0ee" stroke="none" stroke-width="1"/>
+<line x1="1429.00" y1="190.00" x2="1429.00" y2="248.00" stroke="#bd742c" stroke-width="1.4" stroke-dasharray="3 4"/>
+<circle cx="1429.00" cy="218.00" r="7.5" fill="white" stroke="#bd742c" stroke-width="2"/>
+<line x1="1429.00" y1="218.00" x2="1460.00" y2="218.00" stroke="#bd742c" stroke-width="1.8" marker-end="url(#arrow)"/>
+<circle cx="1460.00" cy="218.00" r="7.5" fill="#bd742c" stroke="none" stroke-width="2"/>
+<line x1="1584.00" y1="190.00" x2="1584.00" y2="248.00" stroke="#087f8c" stroke-width="1.4" stroke-dasharray="3 4"/>
+<circle cx="1584.00" cy="218.00" r="7.5" fill="white" stroke="#087f8c" stroke-width="2"/>
+<line x1="1584.00" y1="218.00" x2="1553.00" y2="218.00" stroke="#087f8c" stroke-width="1.8" marker-end="url(#arrow)"/>
+<path d="M 1553.0 209.5 L 1561.5 218 L 1553.0 226.5 L 1544.5 218 Z" fill="#087f8c" stroke="#087f8c" stroke-width="2.3" stroke-linejoin="round"/>
+<text x="1510.00" y="283.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="28" fill="#087f8c" text-anchor="middle" font-weight="700">Order preserved</text>
+<line x1="1260.00" y1="418.00" x2="1755.00" y2="418.00" stroke="#8f9ca6" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="1312.75" y="395" width="232.5" height="46" fill="#f6e9da" stroke="none" stroke-width="1"/>
+<rect x="1467.75" y="395" width="232.5" height="46" fill="#e1f0ee" stroke="none" stroke-width="1"/>
+<line x1="1429.00" y1="390.00" x2="1429.00" y2="448.00" stroke="#bd742c" stroke-width="1.4" stroke-dasharray="3 4"/>
+<circle cx="1429.00" cy="418.00" r="7.5" fill="white" stroke="#bd742c" stroke-width="2"/>
+<line x1="1429.00" y1="418.00" x2="1537.50" y2="418.00" stroke="#bd742c" stroke-width="1.8" marker-end="url(#arrow)"/>
+<circle cx="1537.50" cy="418.00" r="7.5" fill="#bd742c" stroke="none" stroke-width="2"/>
+<line x1="1584.00" y1="390.00" x2="1584.00" y2="448.00" stroke="#087f8c" stroke-width="1.4" stroke-dasharray="3 4"/>
+<circle cx="1584.00" cy="418.00" r="7.5" fill="white" stroke="#087f8c" stroke-width="2"/>
+<line x1="1584.00" y1="418.00" x2="1475.50" y2="418.00" stroke="#087f8c" stroke-width="1.8" marker-end="url(#arrow)"/>
+<path d="M 1475.5 409.5 L 1484.0 418 L 1475.5 426.5 L 1467.0 418 Z" fill="#087f8c" stroke="#087f8c" stroke-width="2.3" stroke-linejoin="round"/>
+<text x="1510.00" y="483.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="28" fill="#bd742c" text-anchor="middle" font-weight="700">Order reversed</text>
+<line x1="1429.00" y1="142.00" x2="1584.00" y2="142.00" stroke="#20303a" stroke-width="1.5"/>
+<line x1="1429.00" y1="135.00" x2="1429.00" y2="152.00" stroke="#20303a" stroke-width="1.5"/>
+<line x1="1584.00" y1="135.00" x2="1584.00" y2="152.00" stroke="#20303a" stroke-width="1.5"/>
+<text x="1506.50" y="130.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="29" fill="#20303a" text-anchor="middle" font-weight="400" font-style="italic">Δ</text>
+<text x="1429.00" y="183.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#bd742c" text-anchor="middle" font-weight="400" font-style="italic">sₓ</text>
+<text x="1584.00" y="183.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#087f8c" text-anchor="middle" font-weight="400" font-style="italic">sᵧ</text>
+<text x="1510.00" y="325.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="28" fill="#087f8c" text-anchor="middle" font-weight="400">|εᵧ − εₓ| &lt; Δ is sufficient</text>
+<circle cx="1285.00" cy="536.00" r="7.5" fill="white" stroke="#617380" stroke-width="2"/>
+<text x="1302.00" y="545.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#617380" text-anchor="start" font-weight="400">exact</text>
+<circle cx="1415.00" cy="536.00" r="7.5" fill="#617380" stroke="none" stroke-width="2"/>
+<text x="1432.00" y="545.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#617380" text-anchor="start" font-weight="400">approximate</text>
+<rect x="1630" y="524" width="31" height="23" fill="#e6edf8" stroke="none" stroke-width="1"/>
+<text x="1670.00" y="545.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="25" fill="#617380" text-anchor="start" font-weight="400">bound</text>
+<text x="1510.00" y="600.00" font-family="Arial, DejaVu Sans, sans-serif" font-size="28" fill="#20303a" text-anchor="middle" font-weight="400">New score gap: Δ + εᵧ − εₓ</text>
+</svg>

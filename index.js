@@ -68,7 +68,7 @@ const requiredArguments = {
   createUniqueCompositeIndex: ['fields'], dropIndex: ['field'], dropOrderedIndex: ['field'],
   dropCompositeIndex: ['fields'], dropBitmapIndex: ['field'], dropNgramIndex: ['field'],
   tql: ['query'], prepareTql: ['query'], executePreparedTql: ['prepared', 'parameters'],
-  consoleRequest: ['session', 'requestJson'], tqlMut: ['query'],
+  consoleRequest: ['session', 'requestJson'], documentRequest: ['requestJson'], graphRequest: ['requestJson'], quiverRequest: ['requestJson'], tqlMut: ['query'],
   publishGenerationManifest: ['generationId'], setSyncMode: ['mode'],
   setAutoBuildQuiver: ['enabled'], reserveNodes: ['additional'], setMemoryLimit: ['mb'],
   migrate: ['newPath', 'newDim'], closeTimeout: ['timeoutMs'],

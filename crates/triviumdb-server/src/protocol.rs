@@ -330,9 +330,11 @@ impl ApiError {
     pub(crate) fn metric(&self) -> Option<ErrorMetric> {
         match self.code {
             "REQUEST_TIMEOUT" | "TDB_QUERY_DEADLINE_EXCEEDED" => Some(ErrorMetric::Timeout),
-            "WRITE_CONFLICT" | "TDB_WRITE_CONFLICT" | "TDB_HTTP_PRECONDITION_FAILED" => {
-                Some(ErrorMetric::OccConflict)
-            }
+            "WRITE_CONFLICT"
+            | "TDB_WRITE_CONFLICT"
+            | "TDB_DOCUMENT_REVISION_MISMATCH"
+            | "TDB_DOCUMENT_UPLOAD_CONFLICT"
+            | "TDB_HTTP_PRECONDITION_FAILED" => Some(ErrorMetric::OccConflict),
             _ => None,
         }
     }
@@ -496,6 +498,13 @@ impl From<TriviumError> for ApiError {
                     error.to_string(),
                     false,
                 ),
+                TriviumError::DocumentUploadNotFound { .. } => Self::new(
+                    StatusCode::NOT_FOUND,
+                    info.code,
+                    "文档上传不存在 (Document upload does not exist)",
+                    error.to_string(),
+                    false,
+                ),
                 TriviumError::ReadOnlyViolation { .. } => Self::new(
                     StatusCode::FORBIDDEN,
                     "READ_ONLY_VIOLATION",
@@ -537,6 +546,8 @@ impl From<TriviumError> for ApiError {
                     false,
                 ),
                 TriviumError::WriteConflict { .. }
+                | TriviumError::DocumentRevisionMismatch { .. }
+                | TriviumError::DocumentUploadConflict { .. }
                 | TriviumError::IdempotencyConflict
                 | TriviumError::WriteOutcomeUnknown => Self::new(
                     StatusCode::CONFLICT,
@@ -821,6 +832,24 @@ mod structured_error_tests {
                 "TDB_NODE_NOT_FOUND",
                 StatusCode::NOT_FOUND,
                 serde_json::json!({"id":"18446744073709551615"}),
+                false,
+            ),
+            (
+                TriviumError::DocumentUploadNotFound {
+                    upload_id: "upload-identity".into(),
+                },
+                "TDB_DOCUMENT_UPLOAD_NOT_FOUND",
+                StatusCode::NOT_FOUND,
+                serde_json::json!({"upload_id":"upload-identity"}),
+                false,
+            ),
+            (
+                TriviumError::DocumentUploadConflict {
+                    field: "sequence".into(),
+                },
+                "TDB_DOCUMENT_UPLOAD_CONFLICT",
+                StatusCode::CONFLICT,
+                serde_json::json!({"field":"sequence"}),
                 false,
             ),
             (

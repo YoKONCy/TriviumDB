@@ -136,7 +136,7 @@ fn open_非空v2_wal自动迁移并恢复已提交事务() {
     let mut db = Database::<f32>::open(&path, 3).unwrap();
     assert_recovered(&db);
     let wal = std::fs::read(format!("{}.wal", path)).unwrap();
-    assert_eq!(u16::from_le_bytes([wal[4], wal[5]]), 4);
+    assert_eq!(u16::from_le_bytes([wal[4], wal[5]]), 6);
     db.flush().unwrap();
     db.close().unwrap();
     let mut reopened = Database::<f32>::open(&path, 3).unwrap();

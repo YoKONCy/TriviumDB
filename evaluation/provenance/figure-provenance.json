@@ -1,0 +1,3590 @@
+{
+  "data_sha256": "c01fb445eb79fa51a19a8eba9f6ca818b417d90a50d668457e1c989de47505a5",
+  "numeric_transforms": [
+    "召回乘100显示百分比",
+    "多线程QPS除以同图同参数1T QPS",
+    "准备时间为记录的build加install；缺省install不额外添加阶段"
+  ],
+  "recall_focus_percent": [
+    88,
+    100.2
+  ],
+  "smoothing": false,
+  "curve_identity": "仅连接同一config；其他已测模式用灰色保留",
+  "selection": "复用原先冻结的95%调参选择，不按评估结果重新选点",
+  "uncertainty": "图中为原记录的五轮平均吞吐，不由CV构造置信区间",
+  "font": "Arial，与现有理论图保持一致",
+  "figures": {
+    "recall-throughput": {
+      "width_inches": 7.125,
+      "height_inches": 3.15,
+      "source_records": [
+        {
+          "curve": "D03__D03-recheck-diskann-rust-g1|{\"ef\":64}",
+          "config": "D03__D03-recheck-diskann-rust-g1",
+          "threads": 1,
+          "recall": 0.9708333333333333,
+          "qps": 1454.7842295821235
+        },
+        {
+          "curve": "D03__D03-recheck-diskann-rust-g1|{\"ef\":96}",
+          "config": "D03__D03-recheck-diskann-rust-g1",
+          "threads": 1,
+          "recall": 0.9803763440860215,
+          "qps": 1028.8353092309508
+        },
+        {
+          "curve": "D03__D03-recheck-diskann-pq-only-g0|{\"ef\":128}",
+          "config": "D03__D03-recheck-diskann-pq-only-g0",
+          "threads": 1,
+          "recall": 0.9536290322580645,
+          "qps": 1096.5714845972032
+        },
+        {
+          "curve": "D03__D03-recheck-diskann-pq-only-g0|{\"ef\":192}",
+          "config": "D03__D03-recheck-diskann-pq-only-g0",
+          "threads": 1,
+          "recall": 0.9705645161290323,
+          "qps": 797.1248583479022
+        },
+        {
+          "curve": "D03__D03-recheck-diskann-pq-only-g0|{\"ef\":256}",
+          "config": "D03__D03-recheck-diskann-pq-only-g0",
+          "threads": 1,
+          "recall": 0.9783602150537635,
+          "qps": 602.3229641256679
+        },
+        {
+          "curve": "D03__diskann-pq-fp32-g1|{\"ef\":32}",
+          "config": "D03__diskann-pq-fp32-g1",
+          "threads": 1,
+          "recall": 0.914247311827957,
+          "qps": 2496.4141712726423
+        },
+        {
+          "curve": "D03__diskann-pq-fp32-g1|{\"ef\":64}",
+          "config": "D03__diskann-pq-fp32-g1",
+          "threads": 1,
+          "recall": 0.9564516129032258,
+          "qps": 1509.744502393394
+        },
+        {
+          "curve": "D03__diskann-pq-fp32-g1|{\"ef\":96}",
+          "config": "D03__diskann-pq-fp32-g1",
+          "threads": 1,
+          "recall": 0.9706989247311828,
+          "qps": 1090.2836275217471
+        },
+        {
+          "curve": "D03__diskann-pq-fp32-g1|{\"ef\":128}",
+          "config": "D03__diskann-pq-fp32-g1",
+          "threads": 1,
+          "recall": 0.9751344086021505,
+          "qps": 846.5589552432344
+        },
+        {
+          "curve": "D03__diskann-pq-fp32-g1|{\"ef\":192}",
+          "config": "D03__diskann-pq-fp32-g1",
+          "threads": 1,
+          "recall": 0.9850806451612903,
+          "qps": 595.6441091240338
+        },
+        {
+          "curve": "D03__diskann-pq-fp32-g0|{\"ef\":32}",
+          "config": "D03__diskann-pq-fp32-g0",
+          "threads": 1,
+          "recall": 0.9541666666666667,
+          "qps": 1655.37371045498
+        },
+        {
+          "curve": "D03__diskann-pq-fp32-g0|{\"ef\":64}",
+          "config": "D03__diskann-pq-fp32-g0",
+          "threads": 1,
+          "recall": 0.9763440860215054,
+          "qps": 971.0488797009568
+        },
+        {
+          "curve": "D03__diskann-pq-fp32-g0|{\"ef\":96}",
+          "config": "D03__diskann-pq-fp32-g0",
+          "threads": 1,
+          "recall": 0.9861559139784947,
+          "qps": 683.485156903035
+        },
+        {
+          "curve": "D03__binary-centered-fp32-g1|{\"candidates\":96,\"ef\":192}",
+          "config": "D03__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9198924731182796,
+          "qps": 1795.6476100348239
+        },
+        {
+          "curve": "D03__binary-centered-fp32-g1|{\"candidates\":128,\"ef\":256}",
+          "config": "D03__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9361559139784946,
+          "qps": 1380.1337890654481
+        },
+        {
+          "curve": "D03__binary-centered-fp32-g1|{\"candidates\":192,\"ef\":384}",
+          "config": "D03__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9522849462365591,
+          "qps": 938.3198961868143
+        },
+        {
+          "curve": "D03__binary-centered-fp32-g1|{\"candidates\":384,\"ef\":768}",
+          "config": "D03__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9701612903225807,
+          "qps": 483.55126717366596
+        },
+        {
+          "curve": "D03__binary-centered-fp32-g1|{\"candidates\":512,\"ef\":1024}",
+          "config": "D03__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9790322580645161,
+          "qps": 362.8930358674825
+        },
+        {
+          "curve": "D03__binary-sign-fp32-g1|{\"candidates\":96,\"ef\":192}",
+          "config": "D03__binary-sign-fp32-g1",
+          "threads": 1,
+          "recall": 0.917741935483871,
+          "qps": 1822.016883693193
+        },
+        {
+          "curve": "D03__binary-sign-fp32-g1|{\"candidates\":128,\"ef\":256}",
+          "config": "D03__binary-sign-fp32-g1",
+          "threads": 1,
+          "recall": 0.9337365591397849,
+          "qps": 1396.827954684204
+        },
+        {
+          "curve": "D03__binary-sign-fp32-g1|{\"candidates\":192,\"ef\":384}",
+          "config": "D03__binary-sign-fp32-g1",
+          "threads": 1,
+          "recall": 0.9541666666666667,
+          "qps": 939.0757301461472
+        },
+        {
+          "curve": "D03__binary-sign-fp32-g1|{\"candidates\":256,\"ef\":512}",
+          "config": "D03__binary-sign-fp32-g1",
+          "threads": 1,
+          "recall": 0.9643817204301075,
+          "qps": 719.8366472633105
+        },
+        {
+          "curve": "D03__binary-sign-fp32-g1|{\"candidates\":384,\"ef\":768}",
+          "config": "D03__binary-sign-fp32-g1",
+          "threads": 1,
+          "recall": 0.975,
+          "qps": 486.97734016525953
+        },
+        {
+          "curve": "D03__D03-recheck-faiss-hnsw-g0|{\"ef\":32}",
+          "config": "D03__D03-recheck-faiss-hnsw-g0",
+          "threads": 1,
+          "recall": 0.9444892473118279,
+          "qps": 2637.37509992129
+        },
+        {
+          "curve": "D03__D03-recheck-faiss-hnsw-g0|{\"ef\":48}",
+          "config": "D03__D03-recheck-faiss-hnsw-g0",
+          "threads": 1,
+          "recall": 0.9654569892473118,
+          "qps": 1920.9666937831357
+        },
+        {
+          "curve": "D03__faiss-ivfflat-g1|{\"nprobe\":128}",
+          "config": "D03__faiss-ivfflat-g1",
+          "threads": 1,
+          "recall": 0.9768817204301076,
+          "qps": 76.05580900303956
+        },
+        {
+          "curve": "D03__faiss-ivfflat-g1|{\"nprobe\":256}",
+          "config": "D03__faiss-ivfflat-g1",
+          "threads": 1,
+          "recall": 0.9893817204301075,
+          "qps": 39.33872454858905
+        },
+        {
+          "curve": "D03__pq96-refine|{\"k_factor\":16,\"nprobe\":128}",
+          "config": "D03__pq96-refine",
+          "threads": 1,
+          "recall": 0.9662634408602151,
+          "qps": 211.64642475060387
+        },
+        {
+          "curve": "D03__pq96-refine|{\"k_factor\":64,\"nprobe\":256}",
+          "config": "D03__pq96-refine",
+          "threads": 1,
+          "recall": 0.9875,
+          "qps": 111.78380148911002
+        },
+        {
+          "curve": "D03__faiss-opq-ivfpq-refine-g1|{\"k_factor\":16,\"nprobe\":64}",
+          "config": "D03__faiss-opq-ivfpq-refine-g1",
+          "threads": 1,
+          "recall": 0.9524193548387097,
+          "qps": 335.6543413152357
+        },
+        {
+          "curve": "D03__faiss-opq-ivfpq-refine-g1|{\"k_factor\":16,\"nprobe\":256}",
+          "config": "D03__faiss-opq-ivfpq-refine-g1",
+          "threads": 1,
+          "recall": 0.9897849462365591,
+          "qps": 115.5144844247637
+        },
+        {
+          "curve": "D03__opq96-fastscan-refine|{\"k_factor\":64,\"nprobe\":128}",
+          "config": "D03__opq96-fastscan-refine",
+          "threads": 1,
+          "recall": 0.9690860215053764,
+          "qps": 655.1485491273155
+        },
+        {
+          "curve": "D03__opq96-fastscan-refine|{\"k_factor\":64,\"nprobe\":256}",
+          "config": "D03__opq96-fastscan-refine",
+          "threads": 1,
+          "recall": 0.9806451612903225,
+          "qps": 531.8829359963914
+        },
+        {
+          "curve": "D03__faiss-rabitq-fp32-g0|{\"k_factor\":4,\"nprobe\":64}",
+          "config": "D03__faiss-rabitq-fp32-g0",
+          "threads": 1,
+          "recall": 0.9704301075268817,
+          "qps": 329.2864193367673
+        },
+        {
+          "curve": "D03__faiss-rabitq-fp32-g0|{\"k_factor\":16,\"nprobe\":64}",
+          "config": "D03__faiss-rabitq-fp32-g0",
+          "threads": 1,
+          "recall": 0.9783602150537635,
+          "qps": 311.1276811262901
+        },
+        {
+          "curve": "D03__faiss-rabitq-sq8-g0|{\"k_factor\":4,\"nprobe\":64}",
+          "config": "D03__faiss-rabitq-sq8-g0",
+          "threads": 1,
+          "recall": 0.9629032258064516,
+          "qps": 332.6991808117239
+        },
+        {
+          "curve": "D03__faiss-rabitq-sq8-g0|{\"k_factor\":16,\"nprobe\":128}",
+          "config": "D03__faiss-rabitq-sq8-g0",
+          "threads": 1,
+          "recall": 0.9841397849462366,
+          "qps": 163.1669687410575
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.948521505376344,
+          "qps": 2532.4764129998825
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":128}",
+          "config": "D03__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.975268817204301,
+          "qps": 1399.2407511312524
+        },
+        {
+          "curve": "D03__hscg-g0|{\"ef\":32}",
+          "config": "D03__hscg-g0",
+          "threads": 1,
+          "recall": 0.9579301075268817,
+          "qps": 694.2050026892208
+        },
+        {
+          "curve": "D03__hscg-g0|{\"ef\":64}",
+          "config": "D03__hscg-g0",
+          "threads": 1,
+          "recall": 0.9854838709677419,
+          "qps": 400.20793190307774
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 1,
+          "recall": 0.9616935483870968,
+          "qps": 1502.9650305895545
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":96}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 1,
+          "recall": 0.9743279569892473,
+          "qps": 1148.3702263103846
+        },
+        {
+          "curve": "D03__mirage-anns-g0|{\"ef\":32}",
+          "config": "D03__mirage-anns-g0",
+          "threads": 1,
+          "recall": 0.916263440860215,
+          "qps": 3022.1443858268017
+        },
+        {
+          "curve": "D03__mirage-anns-g0|{\"ef\":64}",
+          "config": "D03__mirage-anns-g0",
+          "threads": 1,
+          "recall": 0.9603494623655914,
+          "qps": 1757.2369753199612
+        },
+        {
+          "curve": "D03__mirage-anns-g0|{\"ef\":96}",
+          "config": "D03__mirage-anns-g0",
+          "threads": 1,
+          "recall": 0.975268817204301,
+          "qps": 1256.9661567953895
+        },
+        {
+          "curve": "D03__mirage-anns-g0|{\"ef\":128}",
+          "config": "D03__mirage-anns-g0",
+          "threads": 1,
+          "recall": 0.9842741935483871,
+          "qps": 972.7705035308418
+        },
+        {
+          "curve": "D03__ngt-g1|{\"epsilon\":0.1,\"expansion\":4}",
+          "config": "D03__ngt-g1",
+          "threads": 1,
+          "recall": 0.968010752688172,
+          "qps": 13296.410937620487
+        },
+        {
+          "curve": "D03__ngt-g1|{\"epsilon\":0.2,\"expansion\":4}",
+          "config": "D03__ngt-g1",
+          "threads": 1,
+          "recall": 0.9926075268817204,
+          "qps": 3333.3150376187145
+        },
+        {
+          "curve": "D03__rabitq-32bit-standard|{\"nprobe\":64}",
+          "config": "D03__rabitq-32bit-standard",
+          "threads": 1,
+          "recall": 0.9455645161290323,
+          "qps": 900.3919966541173
+        },
+        {
+          "curve": "D03__rabitq-32bit-standard|{\"nprobe\":128}",
+          "config": "D03__rabitq-32bit-standard",
+          "threads": 1,
+          "recall": 0.9723118279569892,
+          "qps": 656.9461188813888
+        },
+        {
+          "curve": "D03__rabitq-32bit-standard|{\"nprobe\":256}",
+          "config": "D03__rabitq-32bit-standard",
+          "threads": 1,
+          "recall": 0.988978494623656,
+          "qps": 430.0668535313088
+        },
+        {
+          "curve": "D03__rabitq-official-g1|{\"nprobe\":64}",
+          "config": "D03__rabitq-official-g1",
+          "threads": 1,
+          "recall": 0.9233870967741935,
+          "qps": 748.0082780095631
+        },
+        {
+          "curve": "D03__rabitq-official-g1|{\"nprobe\":128}",
+          "config": "D03__rabitq-official-g1",
+          "threads": 1,
+          "recall": 0.9487903225806451,
+          "qps": 498.3170617880149
+        },
+        {
+          "curve": "D03__rabitq-official-g1|{\"nprobe\":256}",
+          "config": "D03__rabitq-official-g1",
+          "threads": 1,
+          "recall": 0.964247311827957,
+          "qps": 300.52827680110187
+        },
+        {
+          "curve": "D03__rabitq-7bit-standard|{\"nprobe\":64}",
+          "config": "D03__rabitq-7bit-standard",
+          "threads": 1,
+          "recall": 0.939247311827957,
+          "qps": 738.8036866754909
+        },
+        {
+          "curve": "D03__rabitq-7bit-standard|{\"nprobe\":128}",
+          "config": "D03__rabitq-7bit-standard",
+          "threads": 1,
+          "recall": 0.9665322580645161,
+          "qps": 492.22272494865643
+        },
+        {
+          "curve": "D03__rabitq-7bit-standard|{\"nprobe\":256}",
+          "config": "D03__rabitq-7bit-standard",
+          "threads": 1,
+          "recall": 0.9856182795698925,
+          "qps": 299.86733947160485
+        },
+        {
+          "curve": "D03__svs-lvq4-g1|{\"ef\":128}",
+          "config": "D03__svs-lvq4-g1",
+          "threads": 1,
+          "recall": 0.8998655913978495,
+          "qps": 2832.460328971419
+        },
+        {
+          "curve": "D03__svs-lvq4-g1|{\"ef\":768}",
+          "config": "D03__svs-lvq4-g1",
+          "threads": 1,
+          "recall": 0.9092741935483871,
+          "qps": 470.412773371534
+        },
+        {
+          "curve": "D03__svs-lvq4x4-g0|{\"ef\":32}",
+          "config": "D03__svs-lvq4x4-g0",
+          "threads": 1,
+          "recall": 0.9650537634408602,
+          "qps": 5101.8818975231325
+        },
+        {
+          "curve": "D03__svs-lvq4x4-g0|{\"ef\":64}",
+          "config": "D03__svs-lvq4x4-g0",
+          "threads": 1,
+          "recall": 0.9815860215053763,
+          "qps": 2681.610447360826
+        },
+        {
+          "curve": "D03__svs-lvq4x8-pad64-g1|{\"ef\":32}",
+          "config": "D03__svs-lvq4x8-pad64-g1",
+          "threads": 1,
+          "recall": 0.9317204301075269,
+          "qps": 8745.385356682522
+        },
+        {
+          "curve": "D03__svs-lvq4x8-pad64-g1|{\"ef\":64}",
+          "config": "D03__svs-lvq4x8-pad64-g1",
+          "threads": 1,
+          "recall": 0.9626344086021505,
+          "qps": 4624.84179075357
+        },
+        {
+          "curve": "D03__svs-lvq4x8-pad64-g1|{\"ef\":96}",
+          "config": "D03__svs-lvq4x8-pad64-g1",
+          "threads": 1,
+          "recall": 0.9754032258064517,
+          "qps": 3146.872832309565
+        },
+        {
+          "curve": "D03__svs-lvq4x8-pad64-g1|{\"calibration_target\":0.98,\"ef\":121,\"prefetch_lookahead\":3,\"prefetch_step\":4,\"search_buffer_visited_set\":false,\"svs_capacity\":121}",
+          "config": "D03__svs-lvq4x8-pad64-g1",
+          "threads": 1,
+          "recall": 0.980241935483871,
+          "qps": 2563.864414464828
+        },
+        {
+          "curve": "D03__svs-lvq4x8-g0|{\"ef\":32}",
+          "config": "D03__svs-lvq4x8-g0",
+          "threads": 1,
+          "recall": 0.9706989247311828,
+          "qps": 5149.3693644410905
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"ef\":32}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 1,
+          "recall": 0.9216397849462366,
+          "qps": 6438.985170342801
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 1,
+          "recall": 0.9629032258064516,
+          "qps": 3813.8540866505023
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"ef\":128}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 1,
+          "recall": 0.9790322580645161,
+          "qps": 1945.948422185542
+        },
+        {
+          "curve": "D03__svs-lvq8-g0|{\"ef\":32}",
+          "config": "D03__svs-lvq8-g0",
+          "threads": 1,
+          "recall": 0.9674731182795699,
+          "qps": 3526.6038219488164
+        },
+        {
+          "curve": "D03__svs-lvq8-g0|{\"ef\":64}",
+          "config": "D03__svs-lvq8-g0",
+          "threads": 1,
+          "recall": 0.9829301075268817,
+          "qps": 1942.7703490433173
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 1,
+          "recall": 0.9435483870967742,
+          "qps": 14671.5426126187
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":64}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 1,
+          "recall": 0.9754032258064517,
+          "qps": 9379.397207504475
+        },
+        {
+          "curve": "D03__usearch-g1|{\"ef\":64}",
+          "config": "D03__usearch-g1",
+          "threads": 1,
+          "recall": 0.947983870967742,
+          "qps": 1150.8905472738877
+        },
+        {
+          "curve": "D03__usearch-g1|{\"ef\":96}",
+          "config": "D03__usearch-g1",
+          "threads": 1,
+          "recall": 0.9637096774193549,
+          "qps": 816.3618477048706
+        },
+        {
+          "curve": "D03__usearch-g1|{\"ef\":128}",
+          "config": "D03__usearch-g1",
+          "threads": 1,
+          "recall": 0.9704301075268817,
+          "qps": 629.0434606768451
+        },
+        {
+          "curve": "D03__usearch-g1|{\"ef\":192}",
+          "config": "D03__usearch-g1",
+          "threads": 1,
+          "recall": 0.9778225806451613,
+          "qps": 440.6622985404409
+        },
+        {
+          "curve": "D03__usearch-g0|{\"ef\":32}",
+          "config": "D03__usearch-g0",
+          "threads": 1,
+          "recall": 0.9461021505376344,
+          "qps": 1221.3335820639559
+        },
+        {
+          "curve": "D03__usearch-g0|{\"ef\":64}",
+          "config": "D03__usearch-g0",
+          "threads": 1,
+          "recall": 0.9758064516129032,
+          "qps": 694.1687877502474
+        },
+        {
+          "curve": "D03__usearch-g0|{\"ef\":96}",
+          "config": "D03__usearch-g0",
+          "threads": 1,
+          "recall": 0.9858870967741935,
+          "qps": 493.63820207412857
+        },
+        {
+          "curve": "D03__vsag-fp32-g0|{\"ef\":32}",
+          "config": "D03__vsag-fp32-g0",
+          "threads": 1,
+          "recall": 0.947983870967742,
+          "qps": 2230.7000372470766
+        },
+        {
+          "curve": "D03__vsag-fp32-g0|{\"ef\":64}",
+          "config": "D03__vsag-fp32-g0",
+          "threads": 1,
+          "recall": 0.978225806451613,
+          "qps": 1325.1440975348357
+        },
+        {
+          "curve": "D03__vsag-sq8-g1|{\"ef\":32}",
+          "config": "D03__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.9086021505376344,
+          "qps": 3343.680511559488
+        },
+        {
+          "curve": "D03__vsag-sq8-g1|{\"ef\":64}",
+          "config": "D03__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.95,
+          "qps": 2009.9633892612908
+        },
+        {
+          "curve": "D03__vsag-sq8-g1|{\"ef\":128}",
+          "config": "D03__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.9727150537634408,
+          "qps": 1101.9364091115917
+        },
+        {
+          "curve": "D03__vsag-sq8-g1|{\"ef\":192}",
+          "config": "D03__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.9809139784946237,
+          "qps": 753.9665532599107
+        },
+        {
+          "curve": "D03__vsag-sq8-g0|{\"ef\":32}",
+          "config": "D03__vsag-sq8-g0",
+          "threads": 1,
+          "recall": 0.9477150537634409,
+          "qps": 2979.899529610907
+        },
+        {
+          "curve": "D03__vsag-sq8-g0|{\"ef\":64}",
+          "config": "D03__vsag-sq8-g0",
+          "threads": 1,
+          "recall": 0.9783602150537635,
+          "qps": 1776.0054667655422
+        },
+        {
+          "curve": "D03__alpha-cng-g0|{\"ef\":64}",
+          "config": "D03__alpha-cng-g0",
+          "threads": 1,
+          "recall": 0.9330645161290323,
+          "qps": 1452.5363688465643
+        },
+        {
+          "curve": "D03__alpha-cng-g0|{\"ef\":96}",
+          "config": "D03__alpha-cng-g0",
+          "threads": 1,
+          "recall": 0.9557795698924731,
+          "qps": 1090.4072636840822
+        },
+        {
+          "curve": "D03__alpha-cng-g0|{\"ef\":192}",
+          "config": "D03__alpha-cng-g0",
+          "threads": 1,
+          "recall": 0.975268817204301,
+          "qps": 622.6957339968858
+        },
+        {
+          "curve": "D03__alpha-cng-g0|{\"ef\":384}",
+          "config": "D03__alpha-cng-g0",
+          "threads": 1,
+          "recall": 0.9869623655913978,
+          "qps": 346.89281129380566
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":48}",
+          "config": "D03__quiver-main",
+          "threads": 1,
+          "recall": 0.9393817204301076,
+          "qps": 6790.895290896169
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 1,
+          "recall": 0.9633064516129032,
+          "qps": 4396.037467043312
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":192}",
+          "config": "D03__quiver-main",
+          "threads": 1,
+          "recall": 0.9793010752688172,
+          "qps": 2476.4478174636306
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":384}",
+          "config": "D03__quiver-main",
+          "threads": 1,
+          "recall": 0.9875,
+          "qps": 1440.6725288605835
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":1024}",
+          "config": "D03__quiver-main",
+          "threads": 1,
+          "recall": 0.9919354838709677,
+          "qps": 634.8484126872843
+        },
+        {
+          "curve": "D05__diskann-rust-g1|{\"ef\":32}",
+          "config": "D05__diskann-rust-g1",
+          "threads": 1,
+          "recall": 0.9461822660098522,
+          "qps": 1346.0544468320825
+        },
+        {
+          "curve": "D05__diskann-rust-g1|{\"ef\":64}",
+          "config": "D05__diskann-rust-g1",
+          "threads": 1,
+          "recall": 0.9759133825944171,
+          "qps": 827.6996002690603
+        },
+        {
+          "curve": "D05__diskann-rust-g1|{\"ef\":96}",
+          "config": "D05__diskann-rust-g1",
+          "threads": 1,
+          "recall": 0.9846366995073892,
+          "qps": 598.8032836840081
+        },
+        {
+          "curve": "D05__diskann-pq-only-g1|{\"ef\":64}",
+          "config": "D05__diskann-pq-only-g1",
+          "threads": 1,
+          "recall": 0.9361042692939244,
+          "qps": 1208.7440341741565
+        },
+        {
+          "curve": "D05__diskann-pq-only-g1|{\"ef\":96}",
+          "config": "D05__diskann-pq-only-g1",
+          "threads": 1,
+          "recall": 0.9554392446633826,
+          "qps": 940.9772842708701
+        },
+        {
+          "curve": "D05__diskann-pq-only-g1|{\"ef\":384}",
+          "config": "D05__diskann-pq-only-g1",
+          "threads": 1,
+          "recall": 0.9848522167487684,
+          "qps": 352.26650265099676
+        },
+        {
+          "curve": "D05__diskann-pq-fp32-g1|{\"ef\":32}",
+          "config": "D05__diskann-pq-fp32-g1",
+          "threads": 1,
+          "recall": 0.9103550903119869,
+          "qps": 1445.3423406104946
+        },
+        {
+          "curve": "D05__diskann-pq-fp32-g1|{\"ef\":64}",
+          "config": "D05__diskann-pq-fp32-g1",
+          "threads": 1,
+          "recall": 0.9495587027914614,
+          "qps": 909.2429352827578
+        },
+        {
+          "curve": "D05__diskann-pq-fp32-g1|{\"ef\":96}",
+          "config": "D05__diskann-pq-fp32-g1",
+          "threads": 1,
+          "recall": 0.9638649425287357,
+          "qps": 671.7809285070286
+        },
+        {
+          "curve": "D05__diskann-pq-fp32-g1|{\"ef\":384}",
+          "config": "D05__diskann-pq-fp32-g1",
+          "threads": 1,
+          "recall": 0.9882183908045977,
+          "qps": 216.2534044283442
+        },
+        {
+          "curve": "D05__binary-centered-fp32-g1|{\"candidates\":32,\"ef\":64}",
+          "config": "D05__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9261083743842364,
+          "qps": 3109.342325436928
+        },
+        {
+          "curve": "D05__binary-centered-fp32-g1|{\"candidates\":64,\"ef\":128}",
+          "config": "D05__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9701046798029557,
+          "qps": 1721.981563888191
+        },
+        {
+          "curve": "D05__binary-centered-fp32-g1|{\"candidates\":96,\"ef\":192}",
+          "config": "D05__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9818247126436782,
+          "qps": 1169.2632062877808
+        },
+        {
+          "curve": "D05__binary-sign-fp32-g1|{\"candidates\":32,\"ef\":64}",
+          "config": "D05__binary-sign-fp32-g1",
+          "threads": 1,
+          "recall": 0.9220135467980296,
+          "qps": 3208.1411697636945
+        },
+        {
+          "curve": "D05__binary-sign-fp32-g1|{\"candidates\":64,\"ef\":128}",
+          "config": "D05__binary-sign-fp32-g1",
+          "threads": 1,
+          "recall": 0.9692220853858785,
+          "qps": 1733.8423641975342
+        },
+        {
+          "curve": "D05__binary-sign-fp32-g1|{\"candidates\":96,\"ef\":192}",
+          "config": "D05__binary-sign-fp32-g1",
+          "threads": 1,
+          "recall": 0.9813423645320197,
+          "qps": 1205.2386501443766
+        },
+        {
+          "curve": "D05__binary-sign-fp32-g1|{\"candidates\":128,\"ef\":256}",
+          "config": "D05__binary-sign-fp32-g1",
+          "threads": 1,
+          "recall": 0.9866379310344827,
+          "qps": 922.0653804747251
+        },
+        {
+          "curve": "D05__faiss-hnsw-g1|{\"ef\":64}",
+          "config": "D05__faiss-hnsw-g1",
+          "threads": 1,
+          "recall": 0.9637623152709359,
+          "qps": 1128.6142528557978
+        },
+        {
+          "curve": "D05__faiss-hnsw-g1|{\"ef\":192}",
+          "config": "D05__faiss-hnsw-g1",
+          "threads": 1,
+          "recall": 0.9888752052545156,
+          "qps": 458.7656942604069
+        },
+        {
+          "curve": "D05__faiss-ivfflat-g1|{\"nprobe\":128}",
+          "config": "D05__faiss-ivfflat-g1",
+          "threads": 1,
+          "recall": 0.954361658456486,
+          "qps": 53.57081965863676
+        },
+        {
+          "curve": "D05__pq-refine-g1|{\"k_factor\":64,\"nprobe\":128}",
+          "config": "D05__pq-refine-g1",
+          "threads": 1,
+          "recall": 0.9542385057471264,
+          "qps": 131.72826015692885
+        },
+        {
+          "curve": "D05__pq-refine-g1|{\"k_factor\":64,\"nprobe\":512}",
+          "config": "D05__pq-refine-g1",
+          "threads": 1,
+          "recall": 0.9887725779967159,
+          "qps": 42.0767156595422
+        },
+        {
+          "curve": "D05__faiss-opq-ivfpq-refine-g1|{\"k_factor\":16,\"nprobe\":128}",
+          "config": "D05__faiss-opq-ivfpq-refine-g1",
+          "threads": 1,
+          "recall": 0.953438013136289,
+          "qps": 197.926093447972
+        },
+        {
+          "curve": "D05__faiss-opq-ivfpq-refine-g1|{\"k_factor\":16,\"nprobe\":512}",
+          "config": "D05__faiss-opq-ivfpq-refine-g1",
+          "threads": 1,
+          "recall": 0.9878797208538588,
+          "qps": 72.51785996839097
+        },
+        {
+          "curve": "D05__opq-fastscan-refine-g1|{\"k_factor\":16,\"nprobe\":128}",
+          "config": "D05__opq-fastscan-refine-g1",
+          "threads": 1,
+          "recall": 0.9540948275862069,
+          "qps": 385.6670356931425
+        },
+        {
+          "curve": "D05__opq-fastscan-refine-g1|{\"k_factor\":16,\"nprobe\":512}",
+          "config": "D05__opq-fastscan-refine-g1",
+          "threads": 1,
+          "recall": 0.9893986042692939,
+          "qps": 208.50800870066865
+        },
+        {
+          "curve": "D05__faiss-rabitq-fp32-g1|{\"k_factor\":16,\"nprobe\":128}",
+          "config": "D05__faiss-rabitq-fp32-g1",
+          "threads": 1,
+          "recall": 0.954361658456486,
+          "qps": 219.56494794358673
+        },
+        {
+          "curve": "D05__faiss-rabitq-fp32-g1|{\"k_factor\":4,\"nprobe\":512}",
+          "config": "D05__faiss-rabitq-fp32-g1",
+          "threads": 1,
+          "recall": 0.9876231527093596,
+          "qps": 69.30895411905577
+        },
+        {
+          "curve": "D05__faiss-rabitq-sq8-g1|{\"k_factor\":4,\"nprobe\":256}",
+          "config": "D05__faiss-rabitq-sq8-g1",
+          "threads": 1,
+          "recall": 0.9706178160919541,
+          "qps": 130.54564827321158
+        },
+        {
+          "curve": "D05__faiss-rabitq-sq8-g1|{\"k_factor\":4,\"nprobe\":512}",
+          "config": "D05__faiss-rabitq-sq8-g1",
+          "threads": 1,
+          "recall": 0.9837233169129721,
+          "qps": 70.44664410528114
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":32}",
+          "config": "D05__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.9108784893267652,
+          "qps": 2232.220807145374
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.954690065681445,
+          "qps": 1344.5794717542733
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":128}",
+          "config": "D05__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.9780172413793103,
+          "qps": 776.01934644385
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":192}",
+          "config": "D05__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.9855398193760263,
+          "qps": 550.3230354036264
+        },
+        {
+          "curve": "D05__hscg-g1|{\"ef\":64}",
+          "config": "D05__hscg-g1",
+          "threads": 1,
+          "recall": 0.9861453201970444,
+          "qps": 173.00184088792426
+        },
+        {
+          "curve": "D05__hscg-g1|{\"ef\":96}",
+          "config": "D05__hscg-g1",
+          "threads": 1,
+          "recall": 0.9919232348111658,
+          "qps": 124.64852339892512
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":32}",
+          "config": "D05__bbq-g1",
+          "threads": 1,
+          "recall": 0.9198994252873564,
+          "qps": 2052.1279801533806
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 1,
+          "recall": 0.9614737274220033,
+          "qps": 1303.1527229299213
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":96}",
+          "config": "D05__bbq-g1",
+          "threads": 1,
+          "recall": 0.9743431855500821,
+          "qps": 955.3966448178995
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":192}",
+          "config": "D05__bbq-g1",
+          "threads": 1,
+          "recall": 0.9879823481116584,
+          "qps": 556.2730945249509
+        },
+        {
+          "curve": "D05__mirage-anns-g1|{\"ef\":32}",
+          "config": "D05__mirage-anns-g1",
+          "threads": 1,
+          "recall": 0.923450328407225,
+          "qps": 1467.6018833056166
+        },
+        {
+          "curve": "D05__mirage-anns-g1|{\"ef\":64}",
+          "config": "D05__mirage-anns-g1",
+          "threads": 1,
+          "recall": 0.9664922003284072,
+          "qps": 887.5773339577668
+        },
+        {
+          "curve": "D05__mirage-anns-g1|{\"ef\":96}",
+          "config": "D05__mirage-anns-g1",
+          "threads": 1,
+          "recall": 0.9807881773399014,
+          "qps": 639.6677137541587
+        },
+        {
+          "curve": "D05__mirage-anns-g1|{\"ef\":128}",
+          "config": "D05__mirage-anns-g1",
+          "threads": 1,
+          "recall": 0.9876026272577997,
+          "qps": 500.1508057455194
+        },
+        {
+          "curve": "D05__ngt-g1|{\"epsilon\":0.05,\"expansion\":4}",
+          "config": "D05__ngt-g1",
+          "threads": 1,
+          "recall": 0.9005644499178982,
+          "qps": 11761.136669295674
+        },
+        {
+          "curve": "D05__ngt-g1|{\"epsilon\":0.1,\"expansion\":4}",
+          "config": "D05__ngt-g1",
+          "threads": 1,
+          "recall": 0.9575533661740558,
+          "qps": 8229.236807221114
+        },
+        {
+          "curve": "D05__ngt-g1|{\"epsilon\":0.2,\"expansion\":4}",
+          "config": "D05__ngt-g1",
+          "threads": 1,
+          "recall": 0.9911227422003284,
+          "qps": 2215.677691695548
+        },
+        {
+          "curve": "D05__rabitq-32bit-g1|{\"nprobe\":128}",
+          "config": "D05__rabitq-32bit-g1",
+          "threads": 1,
+          "recall": 0.9542282430213465,
+          "qps": 357.1467652460684
+        },
+        {
+          "curve": "D05__rabitq-32bit-g1|{\"nprobe\":512}",
+          "config": "D05__rabitq-32bit-g1",
+          "threads": 1,
+          "recall": 0.9892651888341544,
+          "qps": 134.11919678286122
+        },
+        {
+          "curve": "D05__rabitq-4bit-g1|{\"nprobe\":256}",
+          "config": "D05__rabitq-4bit-g1",
+          "threads": 1,
+          "recall": 0.953745894909688,
+          "qps": 165.9681475285039
+        },
+        {
+          "curve": "D05__rabitq-7bit-g1|{\"nprobe\":128}",
+          "config": "D05__rabitq-7bit-g1",
+          "threads": 1,
+          "recall": 0.9507799671592775,
+          "qps": 278.1273441018361
+        },
+        {
+          "curve": "D05__rabitq-7bit-g1|{\"nprobe\":512}",
+          "config": "D05__rabitq-7bit-g1",
+          "threads": 1,
+          "recall": 0.9846982758620689,
+          "qps": 92.3664056913166
+        },
+        {
+          "curve": "D05__svs-lvq4-g1|{\"ef\":64}",
+          "config": "D05__svs-lvq4-g1",
+          "threads": 1,
+          "recall": 0.9324096880131363,
+          "qps": 2729.5030477060327
+        },
+        {
+          "curve": "D05__svs-lvq4-g1|{\"calibration_target\":0.95,\"ef\":405,\"prefetch_lookahead\":27,\"prefetch_step\":4,\"search_buffer_visited_set\":false,\"svs_capacity\":405}",
+          "config": "D05__svs-lvq4-g1",
+          "threads": 1,
+          "recall": 0.9519293924466338,
+          "qps": 499.3112128336002
+        },
+        {
+          "curve": "D05__svs-lvq4x4-g1|{\"ef\":32}",
+          "config": "D05__svs-lvq4x4-g1",
+          "threads": 1,
+          "recall": 0.9307573891625616,
+          "qps": 3389.7217770450898
+        },
+        {
+          "curve": "D05__svs-lvq4x4-g1|{\"calibration_target\":0.95,\"ef\":45,\"prefetch_lookahead\":3,\"prefetch_step\":4,\"search_buffer_visited_set\":false,\"svs_capacity\":45}",
+          "config": "D05__svs-lvq4x4-g1",
+          "threads": 1,
+          "recall": 0.9516215106732349,
+          "qps": 3086.1612111899585
+        },
+        {
+          "curve": "D05__svs-lvq4x4-g1|{\"ef\":96}",
+          "config": "D05__svs-lvq4x4-g1",
+          "threads": 1,
+          "recall": 0.9794437602627257,
+          "qps": 1289.6135148029464
+        },
+        {
+          "curve": "D05__svs-lvq4x4-g1|{\"calibration_target\":0.98,\"ef\":135,\"prefetch_lookahead\":22,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":135}",
+          "config": "D05__svs-lvq4x4-g1",
+          "threads": 1,
+          "recall": 0.9847290640394089,
+          "qps": 1197.062704568649
+        },
+        {
+          "curve": "D05__svs-lvq4x8-g1|{\"ef\":32}",
+          "config": "D05__svs-lvq4x8-g1",
+          "threads": 1,
+          "recall": 0.9327380952380953,
+          "qps": 4463.655289535645
+        },
+        {
+          "curve": "D05__svs-lvq4x8-g1|{\"calibration_target\":0.95,\"ef\":46,\"prefetch_lookahead\":25,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":46}",
+          "config": "D05__svs-lvq4x8-g1",
+          "threads": 1,
+          "recall": 0.9551108374384236,
+          "qps": 3312.103630588872
+        },
+        {
+          "curve": "D05__svs-lvq4x8-g1|{\"ef\":96}",
+          "config": "D05__svs-lvq4x8-g1",
+          "threads": 1,
+          "recall": 0.9828509852216749,
+          "qps": 1724.242283770888
+        },
+        {
+          "curve": "D05__svs-lvq4x8-g1|{\"calibration_target\":0.98,\"ef\":102,\"prefetch_lookahead\":27,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D05__svs-lvq4x8-g1",
+          "threads": 1,
+          "recall": 0.9839285714285714,
+          "qps": 1629.2103292306879
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"ef\":32}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 1,
+          "recall": 0.9314244663382595,
+          "qps": 3818.2471305608788
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 1,
+          "recall": 0.9555418719211822,
+          "qps": 2692.2459102629396
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"ef\":96}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 1,
+          "recall": 0.9796079638752052,
+          "qps": 1420.069175744279
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.98,\"ef\":131,\"prefetch_lookahead\":1,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":131}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 1,
+          "recall": 0.9846982758620689,
+          "qps": 1072.6457747195782
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":32}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 1,
+          "recall": 0.9035714285714286,
+          "qps": 9735.080512627923
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":64}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 1,
+          "recall": 0.9485734811165846,
+          "qps": 6329.458267048236
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 1,
+          "recall": 0.9645012315270935,
+          "qps": 4803.465344701657
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":192}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 1,
+          "recall": 0.9807368637110017,
+          "qps": 2860.757452531982
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 1,
+          "recall": 0.9855706075533662,
+          "qps": 2264.6291255404403
+        },
+        {
+          "curve": "D05__usearch-g1|{\"ef\":64}",
+          "config": "D05__usearch-g1",
+          "threads": 1,
+          "recall": 0.9552750410509031,
+          "qps": 673.9832598849264
+        },
+        {
+          "curve": "D05__usearch-g1|{\"ef\":96}",
+          "config": "D05__usearch-g1",
+          "threads": 1,
+          "recall": 0.9695607553366175,
+          "qps": 491.4001038959935
+        },
+        {
+          "curve": "D05__usearch-g1|{\"ef\":256}",
+          "config": "D05__usearch-g1",
+          "threads": 1,
+          "recall": 0.988721264367816,
+          "qps": 216.51898563063864
+        },
+        {
+          "curve": "D05__vsag-fp32-g1|{\"ef\":32}",
+          "config": "D05__vsag-fp32-g1",
+          "threads": 1,
+          "recall": 0.9263136288998358,
+          "qps": 1699.5196440202108
+        },
+        {
+          "curve": "D05__vsag-fp32-g1|{\"ef\":64}",
+          "config": "D05__vsag-fp32-g1",
+          "threads": 1,
+          "recall": 0.9678981937602628,
+          "qps": 1012.6554803705139
+        },
+        {
+          "curve": "D05__vsag-fp32-g1|{\"ef\":96}",
+          "config": "D05__vsag-fp32-g1",
+          "threads": 1,
+          "recall": 0.9799158456486042,
+          "qps": 733.7560062285122
+        },
+        {
+          "curve": "D05__vsag-fp32-g1|{\"ef\":128}",
+          "config": "D05__vsag-fp32-g1",
+          "threads": 1,
+          "recall": 0.9851087848932677,
+          "qps": 584.875557294132
+        },
+        {
+          "curve": "D05__vsag-sq8-g1|{\"ef\":32}",
+          "config": "D05__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.9260057471264368,
+          "qps": 2542.7068619734587
+        },
+        {
+          "curve": "D05__vsag-sq8-g1|{\"ef\":64}",
+          "config": "D05__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.9679495073891625,
+          "qps": 1426.5659091074049
+        },
+        {
+          "curve": "D05__vsag-sq8-g1|{\"ef\":96}",
+          "config": "D05__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.9798029556650246,
+          "qps": 1033.9242448864065
+        },
+        {
+          "curve": "D05__vsag-sq8-g1|{\"ef\":128}",
+          "config": "D05__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.984975369458128,
+          "qps": 806.2951621958288
+        },
+        {
+          "curve": "D05__alpha-cng-g1|{\"ef\":64}",
+          "config": "D05__alpha-cng-g1",
+          "threads": 1,
+          "recall": 0.9310960591133005,
+          "qps": 1087.2268484038975
+        },
+        {
+          "curve": "D05__alpha-cng-g1|{\"ef\":96}",
+          "config": "D05__alpha-cng-g1",
+          "threads": 1,
+          "recall": 0.9544027093596059,
+          "qps": 816.7242001096678
+        },
+        {
+          "curve": "D05__alpha-cng-g1|{\"ef\":256}",
+          "config": "D05__alpha-cng-g1",
+          "threads": 1,
+          "recall": 0.9830972906403941,
+          "qps": 379.10681539295615
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":32}",
+          "config": "D05__quiver-main",
+          "threads": 1,
+          "recall": 0.8945197044334975,
+          "qps": 4755.803456225468
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 1,
+          "recall": 0.9628899835796387,
+          "qps": 2987.3810071102157
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D05__quiver-main",
+          "threads": 1,
+          "recall": 0.9843185550082103,
+          "qps": 1996.698470503741
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":384}",
+          "config": "D05__quiver-main",
+          "threads": 1,
+          "recall": 0.9946428571428572,
+          "qps": 919.1445530917716
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":1024}",
+          "config": "D05__quiver-main",
+          "threads": 1,
+          "recall": 0.9979987684729064,
+          "qps": 417.62650453768396
+        },
+        {
+          "curve": "D14__D14-diskann-rust-strong-r64-l400|{\"ef\":64}",
+          "config": "D14__D14-diskann-rust-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9248655913978494,
+          "qps": 649.5586108249707
+        },
+        {
+          "curve": "D14__D14-diskann-rust-strong-r64-l400|{\"ef\":96}",
+          "config": "D14__D14-diskann-rust-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9448924731182796,
+          "qps": 467.02437819114317
+        },
+        {
+          "curve": "D14__D14-diskann-rust-strong-r64-l400|{\"ef\":128}",
+          "config": "D14__D14-diskann-rust-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9547043010752688,
+          "qps": 362.1595022978448
+        },
+        {
+          "curve": "D14__D14-diskann-rust-strong-r64-l400|{\"ef\":256}",
+          "config": "D14__D14-diskann-rust-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9725806451612903,
+          "qps": 196.5518488819772
+        },
+        {
+          "curve": "D14__D14-diskann-rust-strong-r64-l400|{\"ef\":512}",
+          "config": "D14__D14-diskann-rust-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9836021505376344,
+          "qps": 106.37186336302882
+        },
+        {
+          "curve": "D14__D14-diskann-pq-only-strong-r64-l400|{\"ef\":128}",
+          "config": "D14__D14-diskann-pq-only-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9100806451612903,
+          "qps": 696.9712002402773
+        },
+        {
+          "curve": "D14__D14-diskann-pq-only-strong-r64-l400|{\"ef\":192}",
+          "config": "D14__D14-diskann-pq-only-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9353494623655914,
+          "qps": 517.1672644113248
+        },
+        {
+          "curve": "D14__D14-diskann-pq-only-strong-r64-l400|{\"ef\":384}",
+          "config": "D14__D14-diskann-pq-only-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9657258064516129,
+          "qps": 288.36715135436475
+        },
+        {
+          "curve": "D14__D14-diskann-pq-only-strong-r64-l400|{\"ef\":512}",
+          "config": "D14__D14-diskann-pq-only-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9737903225806451,
+          "qps": 227.31060395507419
+        },
+        {
+          "curve": "D14__D14-diskann-pq-only-strong-r64-l400|{\"ef\":768}",
+          "config": "D14__D14-diskann-pq-only-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9825268817204301,
+          "qps": 160.41153881370377
+        },
+        {
+          "curve": "D14__D14-diskann-pq-fp32-strong-r64-l400|{\"ef\":64}",
+          "config": "D14__D14-diskann-pq-fp32-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9141129032258064,
+          "qps": 651.2493741538253
+        },
+        {
+          "curve": "D14__D14-diskann-pq-fp32-strong-r64-l400|{\"ef\":96}",
+          "config": "D14__D14-diskann-pq-fp32-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9426075268817204,
+          "qps": 468.2834496317686
+        },
+        {
+          "curve": "D14__D14-diskann-pq-fp32-strong-r64-l400|{\"ef\":192}",
+          "config": "D14__D14-diskann-pq-fp32-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9696236559139785,
+          "qps": 258.22292104406165
+        },
+        {
+          "curve": "D14__D14-diskann-pq-fp32-strong-r64-l400|{\"ef\":256}",
+          "config": "D14__D14-diskann-pq-fp32-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9762096774193548,
+          "qps": 202.06650430519304
+        },
+        {
+          "curve": "D14__D14-diskann-pq-fp32-strong-r64-l400|{\"ef\":384}",
+          "config": "D14__D14-diskann-pq-fp32-strong-r64-l400",
+          "threads": 1,
+          "recall": 0.9817204301075269,
+          "qps": 144.0208238125393
+        },
+        {
+          "curve": "D14__binary-centered-fp32-g1|{\"candidates\":96,\"ef\":192}",
+          "config": "D14__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9010752688172043,
+          "qps": 1641.3719524178348
+        },
+        {
+          "curve": "D14__binary-centered-fp32-g1|{\"candidates\":192,\"ef\":384}",
+          "config": "D14__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9404569892473118,
+          "qps": 837.2524358532144
+        },
+        {
+          "curve": "D14__binary-centered-fp32-g1|{\"candidates\":384,\"ef\":768}",
+          "config": "D14__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9650537634408602,
+          "qps": 429.4616011914421
+        },
+        {
+          "curve": "D14__binary-centered-fp32-g1|{\"candidates\":512,\"ef\":1024}",
+          "config": "D14__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9711021505376344,
+          "qps": 320.733605951302
+        },
+        {
+          "curve": "D14__binary-centered-fp32-g1|{\"candidates\":1024,\"ef\":2048}",
+          "config": "D14__binary-centered-fp32-g1",
+          "threads": 1,
+          "recall": 0.9827956989247312,
+          "qps": 153.64659747129397
+        },
+        {
+          "curve": "D14__D14-binary-sign-high-recall|{\"candidates\":1024,\"ef\":2048}",
+          "config": "D14__D14-binary-sign-high-recall",
+          "threads": 1,
+          "recall": 0.9813172043010753,
+          "qps": 152.22362142445638
+        },
+        {
+          "curve": "D14__D14-binary-sign-high-recall|{\"candidates\":2048,\"ef\":4096}",
+          "config": "D14__D14-binary-sign-high-recall",
+          "threads": 1,
+          "recall": 0.9893817204301075,
+          "qps": 70.09426015734299
+        },
+        {
+          "curve": "D14__faiss-hnsw-g1|{\"ef\":192}",
+          "config": "D14__faiss-hnsw-g1",
+          "threads": 1,
+          "recall": 0.9563172043010753,
+          "qps": 859.8554313238923
+        },
+        {
+          "curve": "D14__faiss-hnsw-g1|{\"ef\":768}",
+          "config": "D14__faiss-hnsw-g1",
+          "threads": 1,
+          "recall": 0.9772849462365591,
+          "qps": 231.80521462090178
+        },
+        {
+          "curve": "D14__faiss-ivfflat-g1|{\"nprobe\":128}",
+          "config": "D14__faiss-ivfflat-g1",
+          "threads": 1,
+          "recall": 0.9799731182795699,
+          "qps": 15.22258734037993
+        },
+        {
+          "curve": "D14__faiss-ivfflat-g1|{\"nprobe\":256}",
+          "config": "D14__faiss-ivfflat-g1",
+          "threads": 1,
+          "recall": 0.9928763440860215,
+          "qps": 7.613556699880101
+        },
+        {
+          "curve": "D14__pq-refine-g1|{\"k_factor\":64,\"nprobe\":128}",
+          "config": "D14__pq-refine-g1",
+          "threads": 1,
+          "recall": 0.9768817204301076,
+          "qps": 44.2164521766432
+        },
+        {
+          "curve": "D14__pq-refine-g1|{\"k_factor\":64,\"nprobe\":256}",
+          "config": "D14__pq-refine-g1",
+          "threads": 1,
+          "recall": 0.9888440860215054,
+          "qps": 22.93989024731829
+        },
+        {
+          "curve": "D14__faiss-opq-ivfpq-refine-g1|{\"k_factor\":64,\"nprobe\":128}",
+          "config": "D14__faiss-opq-ivfpq-refine-g1",
+          "threads": 1,
+          "recall": 0.9745967741935484,
+          "qps": 79.61382012441133
+        },
+        {
+          "curve": "D14__faiss-opq-ivfpq-refine-g1|{\"k_factor\":64,\"nprobe\":256}",
+          "config": "D14__faiss-opq-ivfpq-refine-g1",
+          "threads": 1,
+          "recall": 0.9861559139784947,
+          "qps": 41.9782349204821
+        },
+        {
+          "curve": "D14__opq-fastscan-refine-g1|{\"k_factor\":64,\"nprobe\":128}",
+          "config": "D14__opq-fastscan-refine-g1",
+          "threads": 1,
+          "recall": 0.9575268817204301,
+          "qps": 287.2409329374136
+        },
+        {
+          "curve": "D14__opq-fastscan-refine-g1|{\"k_factor\":256,\"nprobe\":256}",
+          "config": "D14__opq-fastscan-refine-g1",
+          "threads": 1,
+          "recall": 0.9900537634408603,
+          "qps": 143.5515628040818
+        },
+        {
+          "curve": "D14__D14-recheck-faiss-rabitq-fp32-g1|{\"k_factor\":4,\"nprobe\":256}",
+          "config": "D14__D14-recheck-faiss-rabitq-fp32-g1",
+          "threads": 1,
+          "recall": 0.9799731182795699,
+          "qps": 53.0703009441787
+        },
+        {
+          "curve": "D14__faiss-rabitq-sq8-g1|{\"k_factor\":4,\"nprobe\":128}",
+          "config": "D14__faiss-rabitq-sq8-g1",
+          "threads": 1,
+          "recall": 0.9599462365591398,
+          "qps": 98.41394790310927
+        },
+        {
+          "curve": "D14__faiss-rabitq-sq8-g1|{\"k_factor\":16,\"nprobe\":256}",
+          "config": "D14__faiss-rabitq-sq8-g1",
+          "threads": 1,
+          "recall": 0.9809139784946237,
+          "qps": 52.140671572038556
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":96}",
+          "config": "D14__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.9174731182795699,
+          "qps": 1612.6256857653477
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":128}",
+          "config": "D14__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.9327956989247311,
+          "qps": 1257.4587033027153
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.9501344086021506,
+          "qps": 866.0262683410375
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":384}",
+          "config": "D14__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.9731182795698925,
+          "qps": 461.71500350983325
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":1024}",
+          "config": "D14__hnswlib-g1",
+          "threads": 1,
+          "recall": 0.984005376344086,
+          "qps": 184.2164300945264
+        },
+        {
+          "curve": "D14__hscg-g1|{\"ef\":32}",
+          "config": "D14__hscg-g1",
+          "threads": 1,
+          "recall": 0.9278225806451613,
+          "qps": 531.7528660880718
+        },
+        {
+          "curve": "D14__hscg-g1|{\"ef\":64}",
+          "config": "D14__hscg-g1",
+          "threads": 1,
+          "recall": 0.9600806451612903,
+          "qps": 328.9828921891542
+        },
+        {
+          "curve": "D14__hscg-g1|{\"ef\":96}",
+          "config": "D14__hscg-g1",
+          "threads": 1,
+          "recall": 0.9760752688172043,
+          "qps": 235.6572123748329
+        },
+        {
+          "curve": "D14__hscg-g1|{\"ef\":128}",
+          "config": "D14__hscg-g1",
+          "threads": 1,
+          "recall": 0.9825268817204301,
+          "qps": 182.6715156035837
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":192}",
+          "config": "D14__bbq-g1",
+          "threads": 1,
+          "recall": 0.9260752688172043,
+          "qps": 848.1859439290168
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":384}",
+          "config": "D14__bbq-g1",
+          "threads": 1,
+          "recall": 0.9458333333333333,
+          "qps": 475.30886331730585
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 1,
+          "recall": 0.9583333333333334,
+          "qps": 261.86895462892085
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":3072}",
+          "config": "D14__bbq-g1",
+          "threads": 1,
+          "recall": 0.9775537634408602,
+          "qps": 73.73901076369746
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":8192}",
+          "config": "D14__bbq-g1",
+          "threads": 1,
+          "recall": 0.983736559139785,
+          "qps": 28.265909230614383
+        },
+        {
+          "curve": "D14__mirage-anns-g1|{\"ef\":64}",
+          "config": "D14__mirage-anns-g1",
+          "threads": 1,
+          "recall": 0.9387096774193548,
+          "qps": 1547.7563003443
+        },
+        {
+          "curve": "D14__mirage-anns-g1|{\"ef\":96}",
+          "config": "D14__mirage-anns-g1",
+          "threads": 1,
+          "recall": 0.9567204301075268,
+          "qps": 1116.0582298205534
+        },
+        {
+          "curve": "D14__mirage-anns-g1|{\"ef\":192}",
+          "config": "D14__mirage-anns-g1",
+          "threads": 1,
+          "recall": 0.9768817204301076,
+          "qps": 592.319339657652
+        },
+        {
+          "curve": "D14__mirage-anns-g1|{\"ef\":256}",
+          "config": "D14__mirage-anns-g1",
+          "threads": 1,
+          "recall": 0.9830645161290322,
+          "qps": 448.99854467691165
+        },
+        {
+          "curve": "D14__D14-ngt-dense-epsilon|{\"epsilon\":0.1,\"expansion\":4}",
+          "config": "D14__D14-ngt-dense-epsilon",
+          "threads": 1,
+          "recall": 0.9463709677419355,
+          "qps": 11464.910884219978
+        },
+        {
+          "curve": "D14__D14-ngt-dense-epsilon|{\"epsilon\":0.11,\"expansion\":4}",
+          "config": "D14__D14-ngt-dense-epsilon",
+          "threads": 1,
+          "recall": 0.9567204301075268,
+          "qps": 10751.00831868162
+        },
+        {
+          "curve": "D14__D14-ngt-dense-epsilon|{\"epsilon\":0.14,\"expansion\":4}",
+          "config": "D14__D14-ngt-dense-epsilon",
+          "threads": 1,
+          "recall": 0.9768817204301076,
+          "qps": 7174.895912913134
+        },
+        {
+          "curve": "D14__D14-ngt-dense-epsilon|{\"epsilon\":0.16,\"expansion\":4}",
+          "config": "D14__D14-ngt-dense-epsilon",
+          "threads": 1,
+          "recall": 0.9825268817204301,
+          "qps": 5071.670396710017
+        },
+        {
+          "curve": "D14__rabitq-32bit-g1|{\"nprobe\":32}",
+          "config": "D14__rabitq-32bit-g1",
+          "threads": 1,
+          "recall": 0.894758064516129,
+          "qps": 616.184718873951
+        },
+        {
+          "curve": "D14__rabitq-32bit-g1|{\"nprobe\":64}",
+          "config": "D14__rabitq-32bit-g1",
+          "threads": 1,
+          "recall": 0.9384408602150538,
+          "qps": 385.11661093012924
+        },
+        {
+          "curve": "D14__rabitq-32bit-g1|{\"nprobe\":128}",
+          "config": "D14__rabitq-32bit-g1",
+          "threads": 1,
+          "recall": 0.969758064516129,
+          "qps": 218.36353267764162
+        },
+        {
+          "curve": "D14__rabitq-32bit-g1|{\"nprobe\":256}",
+          "config": "D14__rabitq-32bit-g1",
+          "threads": 1,
+          "recall": 0.9883064516129032,
+          "qps": 116.75022056207969
+        },
+        {
+          "curve": "D14__rabitq-4bit-g1|{\"nprobe\":64}",
+          "config": "D14__rabitq-4bit-g1",
+          "threads": 1,
+          "recall": 0.9139784946236559,
+          "qps": 261.2111124622802
+        },
+        {
+          "curve": "D14__rabitq-4bit-g1|{\"nprobe\":128}",
+          "config": "D14__rabitq-4bit-g1",
+          "threads": 1,
+          "recall": 0.9400537634408602,
+          "qps": 142.88869651878227
+        },
+        {
+          "curve": "D14__rabitq-4bit-g1|{\"nprobe\":256}",
+          "config": "D14__rabitq-4bit-g1",
+          "threads": 1,
+          "recall": 0.9544354838709678,
+          "qps": 74.7299811271484
+        },
+        {
+          "curve": "D14__rabitq-7bit-g1|{\"nprobe\":32}",
+          "config": "D14__rabitq-7bit-g1",
+          "threads": 1,
+          "recall": 0.8907258064516129,
+          "qps": 443.50185942707407
+        },
+        {
+          "curve": "D14__rabitq-7bit-g1|{\"nprobe\":64}",
+          "config": "D14__rabitq-7bit-g1",
+          "threads": 1,
+          "recall": 0.9348118279569892,
+          "qps": 257.4476173093249
+        },
+        {
+          "curve": "D14__rabitq-7bit-g1|{\"nprobe\":128}",
+          "config": "D14__rabitq-7bit-g1",
+          "threads": 1,
+          "recall": 0.9658602150537634,
+          "qps": 142.6997199099937
+        },
+        {
+          "curve": "D14__rabitq-7bit-g1|{\"nprobe\":256}",
+          "config": "D14__rabitq-7bit-g1",
+          "threads": 1,
+          "recall": 0.9829301075268817,
+          "qps": 77.98789859575824
+        },
+        {
+          "curve": "D14__svs-lvq4-g1|{\"ef\":1024}",
+          "config": "D14__svs-lvq4-g1",
+          "threads": 1,
+          "recall": 0.8952956989247312,
+          "qps": 315.89201528072493
+        },
+        {
+          "curve": "D14__svs-lvq4x4-g1|{\"ef\":64}",
+          "config": "D14__svs-lvq4x4-g1",
+          "threads": 1,
+          "recall": 0.9229838709677419,
+          "qps": 4305.017345593839
+        },
+        {
+          "curve": "D14__svs-lvq4x4-g1|{\"ef\":96}",
+          "config": "D14__svs-lvq4x4-g1",
+          "threads": 1,
+          "recall": 0.9451612903225807,
+          "qps": 3016.9625991321013
+        },
+        {
+          "curve": "D14__svs-lvq4x4-g1|{\"calibration_target\":0.95,\"ef\":119,\"prefetch_lookahead\":5,\"prefetch_step\":4,\"search_buffer_visited_set\":false,\"svs_capacity\":119}",
+          "config": "D14__svs-lvq4x4-g1",
+          "threads": 1,
+          "recall": 0.951747311827957,
+          "qps": 2470.748578696931
+        },
+        {
+          "curve": "D14__svs-lvq4x4-g1|{\"ef\":256}",
+          "config": "D14__svs-lvq4x4-g1",
+          "threads": 1,
+          "recall": 0.9700268817204301,
+          "qps": 1165.200847438493
+        },
+        {
+          "curve": "D14__svs-lvq4x4-g1|{\"calibration_target\":0.98,\"ef\":316,\"prefetch_lookahead\":4,\"prefetch_step\":4,\"search_buffer_visited_set\":false,\"svs_capacity\":316}",
+          "config": "D14__svs-lvq4x4-g1",
+          "threads": 1,
+          "recall": 0.9733870967741935,
+          "qps": 939.1495429486891
+        },
+        {
+          "curve": "D14__svs-lvq4x8-g1|{\"ef\":64}",
+          "config": "D14__svs-lvq4x8-g1",
+          "threads": 1,
+          "recall": 0.9262096774193549,
+          "qps": 4347.477977258687
+        },
+        {
+          "curve": "D14__svs-lvq4x8-g1|{\"ef\":96}",
+          "config": "D14__svs-lvq4x8-g1",
+          "threads": 1,
+          "recall": 0.9509408602150538,
+          "qps": 3047.4515138256106
+        },
+        {
+          "curve": "D14__svs-lvq4x8-g1|{\"calibration_target\":0.95,\"ef\":103,\"prefetch_lookahead\":5,\"prefetch_step\":4,\"search_buffer_visited_set\":false,\"svs_capacity\":103}",
+          "config": "D14__svs-lvq4x8-g1",
+          "threads": 1,
+          "recall": 0.953494623655914,
+          "qps": 2879.2780119635804
+        },
+        {
+          "curve": "D14__svs-lvq4x8-g1|{\"ef\":192}",
+          "config": "D14__svs-lvq4x8-g1",
+          "threads": 1,
+          "recall": 0.9716397849462366,
+          "qps": 1556.4383238760256
+        },
+        {
+          "curve": "D14__svs-lvq4x8-g1|{\"calibration_target\":0.98,\"ef\":237,\"prefetch_lookahead\":9,\"prefetch_step\":4,\"search_buffer_visited_set\":false,\"svs_capacity\":237}",
+          "config": "D14__svs-lvq4x8-g1",
+          "threads": 1,
+          "recall": 0.9774193548387097,
+          "qps": 1262.9782540746398
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"ef\":64}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 1,
+          "recall": 0.923252688172043,
+          "qps": 3045.673919337732
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 1,
+          "recall": 0.9424731182795699,
+          "qps": 2405.5848315384883
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"ef\":256}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 1,
+          "recall": 0.9702956989247312,
+          "qps": 846.4330896138863
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.98,\"ef\":322,\"prefetch_lookahead\":25,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":322}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 1,
+          "recall": 0.9731182795698925,
+          "qps": 823.471984760465
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 1,
+          "recall": 0.9251344086021506,
+          "qps": 8426.782919393923
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":128}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 1,
+          "recall": 0.937231182795699,
+          "qps": 6709.147175516115
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 1,
+          "recall": 0.958736559139785,
+          "qps": 3801.4690237790746
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":384}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 1,
+          "recall": 0.9689516129032258,
+          "qps": 2567.3954603883635
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":768}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 1,
+          "recall": 0.978763440860215,
+          "qps": 1322.8950802506051
+        },
+        {
+          "curve": "D14__usearch-g1|{\"ef\":64}",
+          "config": "D14__usearch-g1",
+          "threads": 1,
+          "recall": 0.9173387096774194,
+          "qps": 955.0029111499811
+        },
+        {
+          "curve": "D14__usearch-g1|{\"ef\":96}",
+          "config": "D14__usearch-g1",
+          "threads": 1,
+          "recall": 0.9416666666666667,
+          "qps": 698.212277558711
+        },
+        {
+          "curve": "D14__usearch-g1|{\"ef\":128}",
+          "config": "D14__usearch-g1",
+          "threads": 1,
+          "recall": 0.9559139784946237,
+          "qps": 545.8469483230241
+        },
+        {
+          "curve": "D14__usearch-g1|{\"ef\":256}",
+          "config": "D14__usearch-g1",
+          "threads": 1,
+          "recall": 0.9735215053763441,
+          "qps": 289.2951820467446
+        },
+        {
+          "curve": "D14__usearch-g1|{\"ef\":384}",
+          "config": "D14__usearch-g1",
+          "threads": 1,
+          "recall": 0.9801075268817204,
+          "qps": 198.93121469688788
+        },
+        {
+          "curve": "D14__vsag-fp32-g1|{\"ef\":64}",
+          "config": "D14__vsag-fp32-g1",
+          "threads": 1,
+          "recall": 0.9036290322580646,
+          "qps": 1606.2821182530633
+        },
+        {
+          "curve": "D14__vsag-fp32-g1|{\"ef\":128}",
+          "config": "D14__vsag-fp32-g1",
+          "threads": 1,
+          "recall": 0.9391129032258064,
+          "qps": 891.3168251106852
+        },
+        {
+          "curve": "D14__vsag-fp32-g1|{\"ef\":256}",
+          "config": "D14__vsag-fp32-g1",
+          "threads": 1,
+          "recall": 0.9626344086021505,
+          "qps": 474.0378445742588
+        },
+        {
+          "curve": "D14__vsag-fp32-g1|{\"ef\":512}",
+          "config": "D14__vsag-fp32-g1",
+          "threads": 1,
+          "recall": 0.975268817204301,
+          "qps": 251.12786087449427
+        },
+        {
+          "curve": "D14__vsag-fp32-g1|{\"ef\":1000}",
+          "config": "D14__vsag-fp32-g1",
+          "threads": 1,
+          "recall": 0.9813172043010753,
+          "qps": 137.24327886002453
+        },
+        {
+          "curve": "D14__vsag-sq8-g1|{\"ef\":64}",
+          "config": "D14__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.905510752688172,
+          "qps": 2169.1786771260126
+        },
+        {
+          "curve": "D14__vsag-sq8-g1|{\"ef\":128}",
+          "config": "D14__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.9424731182795699,
+          "qps": 1202.1718384816902
+        },
+        {
+          "curve": "D14__vsag-sq8-g1|{\"ef\":192}",
+          "config": "D14__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.9595430107526882,
+          "qps": 868.6355030151501
+        },
+        {
+          "curve": "D14__vsag-sq8-g1|{\"ef\":384}",
+          "config": "D14__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.972983870967742,
+          "qps": 444.09525736725067
+        },
+        {
+          "curve": "D14__vsag-sq8-g1|{\"ef\":1000}",
+          "config": "D14__vsag-sq8-g1",
+          "threads": 1,
+          "recall": 0.9806451612903225,
+          "qps": 183.20606507379483
+        },
+        {
+          "curve": "D14__D14-alpha-cng-high-recall|{\"ef\":1024}",
+          "config": "D14__D14-alpha-cng-high-recall",
+          "threads": 1,
+          "recall": 0.9658602150537634,
+          "qps": 193.58331734982488
+        },
+        {
+          "curve": "D14__D14-alpha-cng-high-recall|{\"ef\":1536}",
+          "config": "D14__D14-alpha-cng-high-recall",
+          "threads": 1,
+          "recall": 0.9744623655913979,
+          "qps": 131.83892035215084
+        },
+        {
+          "curve": "D14__D14-alpha-cng-high-recall|{\"ef\":3072}",
+          "config": "D14__D14-alpha-cng-high-recall",
+          "threads": 1,
+          "recall": 0.9830645161290322,
+          "qps": 68.56609785590109
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":32}",
+          "config": "D14__quiver-main",
+          "threads": 1,
+          "recall": 0.867741935483871,
+          "qps": 7881.348254198704
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D14__quiver-main",
+          "threads": 1,
+          "recall": 0.930241935483871,
+          "qps": 4772.228336673165
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 1,
+          "recall": 0.959005376344086,
+          "qps": 3074.75709368249
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":384}",
+          "config": "D14__quiver-main",
+          "threads": 1,
+          "recall": 0.9811827956989247,
+          "qps": 1269.2666504369956
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":1024}",
+          "config": "D14__quiver-main",
+          "threads": 1,
+          "recall": 0.9883064516129032,
+          "qps": 535.3163734298759
+        }
+      ],
+      "outside_canvas": []
+    },
+    "memory-throughput": {
+      "width_inches": 7.125,
+      "height_inches": 4.15,
+      "source_records": [
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 3.7811696529388428,
+          "qps": 4396.037467043312,
+          "recall": 0.9633064516129032
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 11.444095611572266,
+          "qps": 14671.5426126187,
+          "recall": 0.9435483870967742
+        },
+        {
+          "curve": "D03__ngt-g1|{\"epsilon\":0.1,\"expansion\":4}",
+          "config": "D03__ngt-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 8.881922986358404,
+          "qps": 13296.410937620487,
+          "recall": 0.968010752688172
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 3.031941126100719,
+          "qps": 1502.9650305895545,
+          "recall": 0.9616935483870968
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 0.8679955005645752,
+          "qps": 3813.8540866505023,
+          "recall": 0.9629032258064516
+        },
+        {
+          "curve": "D03__vsag-sq8-g1|{\"ef\":64}",
+          "config": "D03__vsag-sq8-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 3.7652587890625,
+          "qps": 2009.9633892612908,
+          "recall": 0.95
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 3.006835635751486,
+          "qps": 2532.4764129998825,
+          "recall": 0.948521505376344
+        },
+        {
+          "curve": "D03__D03-recheck-diskann-rust-g1|{\"ef\":64}",
+          "config": "D03__D03-recheck-diskann-rust-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 3.0398400351405144,
+          "qps": 1454.7842295821235,
+          "recall": 0.9708333333333333
+        },
+        {
+          "curve": "D03__rabitq-32bit-standard|{\"nprobe\":128}",
+          "config": "D03__rabitq-32bit-standard",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 2.9836771488189697,
+          "qps": 656.9461188813888,
+          "recall": 0.9723118279569892
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 100.560463191,
+          "qps": 4396.037467043312,
+          "recall": 0.9633064516129032
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 585.3092323690653,
+          "qps": 14671.5426126187,
+          "recall": 0.9435483870967742
+        },
+        {
+          "curve": "D03__ngt-g1|{\"epsilon\":0.1,\"expansion\":4}",
+          "config": "D03__ngt-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 1703.5899608582258,
+          "qps": 13296.410937620487,
+          "recall": 0.968010752688172
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 3886.1011820350004,
+          "qps": 1502.9650305895545,
+          "recall": 0.9616935483870968
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 260.7986218780279,
+          "qps": 3813.8540866505023,
+          "recall": 0.9629032258064516
+        },
+        {
+          "curve": "D03__vsag-sq8-g1|{\"ef\":64}",
+          "config": "D03__vsag-sq8-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 352.3960295319557,
+          "qps": 2009.9633892612908,
+          "recall": 0.95
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 261.2401856184006,
+          "qps": 2532.4764129998825,
+          "recall": 0.948521505376344
+        },
+        {
+          "curve": "D03__D03-recheck-diskann-rust-g1|{\"ef\":64}",
+          "config": "D03__D03-recheck-diskann-rust-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 370.960887,
+          "qps": 1454.7842295821235,
+          "recall": 0.9708333333333333
+        },
+        {
+          "curve": "D03__rabitq-32bit-standard|{\"nprobe\":128}",
+          "config": "D03__rabitq-32bit-standard",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 58.19495905935764,
+          "qps": 656.9461188813888,
+          "recall": 0.9723118279569892
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 6.929822266101837,
+          "qps": 2987.3810071102157,
+          "recall": 0.9628899835796387
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 13.69000244140625,
+          "qps": 4803.465344701657,
+          "recall": 0.9645012315270935
+        },
+        {
+          "curve": "D05__ngt-g1|{\"epsilon\":0.1,\"expansion\":4}",
+          "config": "D05__ngt-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 17.438872169703245,
+          "qps": 8229.236807221114,
+          "recall": 0.9575533661740558
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 5.931124654598534,
+          "qps": 1303.1527229299213,
+          "recall": 0.9614737274220033
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 1.5674216151237488,
+          "qps": 2692.2459102629396,
+          "recall": 0.9555418719211822
+        },
+        {
+          "curve": "D05__vsag-sq8-g1|{\"ef\":64}",
+          "config": "D05__vsag-sq8-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 7.27874755859375,
+          "qps": 1426.5659091074049,
+          "recall": 0.9679495073891625
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 5.809181414544582,
+          "qps": 1344.5794717542733,
+          "recall": 0.954690065681445
+        },
+        {
+          "curve": "D05__diskann-rust-g1|{\"ef\":64}",
+          "config": "D05__diskann-rust-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 5.841857247054577,
+          "qps": 827.6996002690603,
+          "recall": 0.9759133825944171
+        },
+        {
+          "curve": "D05__rabitq-32bit-g1|{\"nprobe\":128}",
+          "config": "D05__rabitq-32bit-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 5.892070710659027,
+          "qps": 357.1467652460684,
+          "recall": 0.9542282430213465
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 149.27941391500002,
+          "qps": 2987.3810071102157,
+          "recall": 0.9628899835796387
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 521.6557254642248,
+          "qps": 4803.465344701657,
+          "recall": 0.9645012315270935
+        },
+        {
+          "curve": "D05__ngt-g1|{\"epsilon\":0.1,\"expansion\":4}",
+          "config": "D05__ngt-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 3991.5114968270063,
+          "qps": 8229.236807221114,
+          "recall": 0.9575533661740558
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 3765.341530486,
+          "qps": 1303.1527229299213,
+          "recall": 0.9614737274220033
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 512.9219255447388,
+          "qps": 2692.2459102629396,
+          "recall": 0.9555418719211822
+        },
+        {
+          "curve": "D05__vsag-sq8-g1|{\"ef\":64}",
+          "config": "D05__vsag-sq8-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 704.5113508552313,
+          "qps": 1426.5659091074049,
+          "recall": 0.9679495073891625
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 531.1514561325312,
+          "qps": 1344.5794717542733,
+          "recall": 0.954690065681445
+        },
+        {
+          "curve": "D05__diskann-rust-g1|{\"ef\":64}",
+          "config": "D05__diskann-rust-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 754.669993,
+          "qps": 827.6996002690603,
+          "recall": 0.9759133825944171
+        },
+        {
+          "curve": "D05__rabitq-32bit-g1|{\"nprobe\":128}",
+          "config": "D05__rabitq-32bit-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 93.18674808740616,
+          "qps": 357.1467652460684,
+          "recall": 0.9542282430213465
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 18.905848264694214,
+          "qps": 3074.75709368249,
+          "recall": 0.959005376344086
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 35.76279067993164,
+          "qps": 3801.4690237790746,
+          "recall": 0.958736559139785
+        },
+        {
+          "curve": "D14__D14-ngt-dense-epsilon|{\"epsilon\":0.11,\"expansion\":4}",
+          "config": "D14__D14-ngt-dense-epsilon",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 44.440568778663874,
+          "qps": 10751.00831868162,
+          "recall": 0.9567204301075268
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 15.062282372266054,
+          "qps": 261.86895462892085,
+          "recall": 0.9583333333333334
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 4.339966058731079,
+          "qps": 2405.5848315384883,
+          "recall": 0.9424731182795699
+        },
+        {
+          "curve": "D14__vsag-sq8-g1|{\"ef\":192}",
+          "config": "D14__vsag-sq8-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 18.5833740234375,
+          "qps": 868.6355030151501,
+          "recall": 0.9595430107526882
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 15.034033469855785,
+          "qps": 866.0262683410375,
+          "recall": 0.9501344086021506
+        },
+        {
+          "curve": "D14__D14-diskann-rust-strong-r64-l400|{\"ef\":128}",
+          "config": "D14__D14-diskann-rust-strong-r64-l400",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 16.093257419764996,
+          "qps": 362.1595022978448,
+          "recall": 0.9547043010752688
+        },
+        {
+          "curve": "D14__rabitq-32bit-g1|{\"nprobe\":128}",
+          "config": "D14__rabitq-32bit-g1",
+          "threads": 1,
+          "metric": "total_logical_gib",
+          "x": 14.844933867454529,
+          "qps": 218.36353267764162,
+          "recall": 0.969758064516129
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 524.590976417,
+          "qps": 3074.75709368249,
+          "recall": 0.959005376344086
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 1130.1536596268415,
+          "qps": 3801.4690237790746,
+          "recall": 0.958736559139785
+        },
+        {
+          "curve": "D14__D14-ngt-dense-epsilon|{\"epsilon\":0.11,\"expansion\":4}",
+          "config": "D14__D14-ngt-dense-epsilon",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 15774.090685248375,
+          "qps": 10751.00831868162,
+          "recall": 0.9567204301075268
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 7601.2276859230005,
+          "qps": 261.86895462892085,
+          "recall": 0.9583333333333334
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 1357.6654780507088,
+          "qps": 2405.5848315384883,
+          "recall": 0.9424731182795699
+        },
+        {
+          "curve": "D14__vsag-sq8-g1|{\"ef\":192}",
+          "config": "D14__vsag-sq8-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 1141.8272824287415,
+          "qps": 868.6355030151501,
+          "recall": 0.9595430107526882
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 1007.1630979925394,
+          "qps": 866.0262683410375,
+          "recall": 0.9501344086021506
+        },
+        {
+          "curve": "D14__D14-diskann-rust-strong-r64-l400|{\"ef\":128}",
+          "config": "D14__D14-diskann-rust-strong-r64-l400",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 5640.256666,
+          "qps": 362.1595022978448,
+          "recall": 0.9547043010752688
+        },
+        {
+          "curve": "D14__rabitq-32bit-g1|{\"nprobe\":128}",
+          "config": "D14__rabitq-32bit-g1",
+          "threads": 1,
+          "metric": "preparation_s",
+          "x": 257.3127762377262,
+          "qps": 218.36353267764162,
+          "recall": 0.969758064516129
+        }
+      ],
+      "outside_canvas": []
+    },
+    "thread-scaling": {
+      "width_inches": 7.125,
+      "height_inches": 3.8,
+      "source_records": [
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 1,
+          "metric": "qps",
+          "value": 4396.037467043312,
+          "qps": 4396.037467043312
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 8,
+          "metric": "qps",
+          "value": 31060.54593806774,
+          "qps": 31060.54593806774
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 16,
+          "metric": "qps",
+          "value": 48357.40719916441,
+          "qps": 48357.40719916441
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 32,
+          "metric": "qps",
+          "value": 63103.388113783876,
+          "qps": 63103.388113783876
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 1,
+          "metric": "qps",
+          "value": 14671.5426126187,
+          "qps": 14671.5426126187
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 8,
+          "metric": "qps",
+          "value": 90242.86701296028,
+          "qps": 90242.86701296028
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 16,
+          "metric": "qps",
+          "value": 138780.6390900949,
+          "qps": 138780.6390900949
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 32,
+          "metric": "qps",
+          "value": 168841.68399904072,
+          "qps": 168841.68399904072
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 1,
+          "metric": "qps",
+          "value": 1502.9650305895545,
+          "qps": 1502.9650305895545
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 8,
+          "metric": "qps",
+          "value": 12863.682198979097,
+          "qps": 12863.682198979097
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 16,
+          "metric": "qps",
+          "value": 22518.548255190475,
+          "qps": 22518.548255190475
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 32,
+          "metric": "qps",
+          "value": 30436.75060981696,
+          "qps": 30436.75060981696
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 1,
+          "metric": "qps",
+          "value": 3813.8540866505023,
+          "qps": 3813.8540866505023
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 8,
+          "metric": "qps",
+          "value": 25526.80421629296,
+          "qps": 25526.80421629296
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 16,
+          "metric": "qps",
+          "value": 39183.25313968113,
+          "qps": 39183.25313968113
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 32,
+          "metric": "qps",
+          "value": 45320.10644813421,
+          "qps": 45320.10644813421
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 1,
+          "metric": "qps",
+          "value": 2532.4764129998825,
+          "qps": 2532.4764129998825
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 8,
+          "metric": "qps",
+          "value": 10148.990236039219,
+          "qps": 10148.990236039219
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 16,
+          "metric": "qps",
+          "value": 10438.762756996652,
+          "qps": 10438.762756996652
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 32,
+          "metric": "qps",
+          "value": 10538.94537294661,
+          "qps": 10538.94537294661
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 4396.037467043312
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 7.065578073646049,
+          "qps": 31060.54593806774
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 11.000226354232746,
+          "qps": 48357.40719916441
+        },
+        {
+          "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+          "config": "D03__quiver-main",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 14.354606526187315,
+          "qps": 63103.388113783876
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 14671.5426126187
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 6.15087788623837,
+          "qps": 90242.86701296028
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 9.459171591863315,
+          "qps": 138780.6390900949
+        },
+        {
+          "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+          "config": "D03__D03-sqg-integer-fixed-g0",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 11.508107119821426,
+          "qps": 168841.68399904072
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 1502.9650305895545
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 8.558869925225856,
+          "qps": 12863.682198979097
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 14.982749296806544,
+          "qps": 22518.548255190475
+        },
+        {
+          "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+          "config": "D03__D03-recheck-bbq-g0",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 20.25113691293124,
+          "qps": 30436.75060981696
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 3813.8540866505023
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 6.693177986447758,
+          "qps": 25526.80421629296
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 10.273925601095458,
+          "qps": 39183.25313968113
+        },
+        {
+          "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+          "config": "D03__svs-lvq8-pad32-g1",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 11.883020539974659,
+          "qps": 45320.10644813421
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 2532.4764129998825
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 4.007535937528075,
+          "qps": 10148.990236039219
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 4.1219585317405825,
+          "qps": 10438.762756996652
+        },
+        {
+          "curve": "D03__hnswlib-g1|{\"ef\":64}",
+          "config": "D03__hnswlib-g1",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 4.161517682394738,
+          "qps": 10538.94537294661
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 1,
+          "metric": "qps",
+          "value": 2987.3810071102157,
+          "qps": 2987.3810071102157
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 8,
+          "metric": "qps",
+          "value": 20271.936150240774,
+          "qps": 20271.936150240774
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 16,
+          "metric": "qps",
+          "value": 28925.580623640995,
+          "qps": 28925.580623640995
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 32,
+          "metric": "qps",
+          "value": 31138.226396864924,
+          "qps": 31138.226396864924
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 1,
+          "metric": "qps",
+          "value": 4803.465344701657,
+          "qps": 4803.465344701657
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 8,
+          "metric": "qps",
+          "value": 28436.662279453132,
+          "qps": 28436.662279453132
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 16,
+          "metric": "qps",
+          "value": 38906.47668215031,
+          "qps": 38906.47668215031
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 32,
+          "metric": "qps",
+          "value": 40845.59866803921,
+          "qps": 40845.59866803921
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 1,
+          "metric": "qps",
+          "value": 1303.1527229299213,
+          "qps": 1303.1527229299213
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 8,
+          "metric": "qps",
+          "value": 8420.769129807954,
+          "qps": 8420.769129807954
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 16,
+          "metric": "qps",
+          "value": 18518.84226742339,
+          "qps": 18518.84226742339
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 32,
+          "metric": "qps",
+          "value": 28581.024501903154,
+          "qps": 28581.024501903154
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 1,
+          "metric": "qps",
+          "value": 2692.2459102629396,
+          "qps": 2692.2459102629396
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 8,
+          "metric": "qps",
+          "value": 16502.34894025347,
+          "qps": 16502.34894025347
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 16,
+          "metric": "qps",
+          "value": 20867.60834667426,
+          "qps": 20867.60834667426
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 32,
+          "metric": "qps",
+          "value": 21546.745020534094,
+          "qps": 21546.745020534094
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 1,
+          "metric": "qps",
+          "value": 1344.5794717542733,
+          "qps": 1344.5794717542733
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 8,
+          "metric": "qps",
+          "value": 4872.297436339665,
+          "qps": 4872.297436339665
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 16,
+          "metric": "qps",
+          "value": 4948.7101550546595,
+          "qps": 4948.7101550546595
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 32,
+          "metric": "qps",
+          "value": 4933.988191732979,
+          "qps": 4933.988191732979
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 2987.3810071102157
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 6.785855604622202,
+          "qps": 20271.936150240774
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 9.68258837918421,
+          "qps": 28925.580623640995
+        },
+        {
+          "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+          "config": "D05__quiver-main",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 10.423252448466851,
+          "qps": 31138.226396864924
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 4803.465344701657
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 5.920030694261068,
+          "qps": 28436.662279453132
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 8.099668445628556,
+          "qps": 38906.47668215031
+        },
+        {
+          "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+          "config": "D05__D05-sqg-integer-fixed-g1",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 8.503360748317448,
+          "qps": 40845.59866803921
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 1303.1527229299213
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 6.46184363631245,
+          "qps": 8420.769129807954
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 14.21079965653363,
+          "qps": 18518.84226742339
+        },
+        {
+          "curve": "D05__bbq-g1|{\"ef\":64}",
+          "config": "D05__bbq-g1",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 21.93221408281563,
+          "qps": 28581.024501903154
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 2692.2459102629396
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 6.129584551450487,
+          "qps": 16502.34894025347
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 7.751003824400355,
+          "qps": 20867.60834667426
+        },
+        {
+          "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+          "config": "D05__svs-lvq8-g1",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 8.00326037766354,
+          "qps": 21546.745020534094
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 1344.5794717542733
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 3.6236589496512073,
+          "qps": 4872.297436339665
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 3.6804891484756017,
+          "qps": 4948.7101550546595
+        },
+        {
+          "curve": "D05__hnswlib-g1|{\"ef\":64}",
+          "config": "D05__hnswlib-g1",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 3.669540027482052,
+          "qps": 4933.988191732979
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 1,
+          "metric": "qps",
+          "value": 3074.75709368249,
+          "qps": 3074.75709368249
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 8,
+          "metric": "qps",
+          "value": 21167.240362319226,
+          "qps": 21167.240362319226
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 16,
+          "metric": "qps",
+          "value": 31557.490103704993,
+          "qps": 31557.490103704993
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 32,
+          "metric": "qps",
+          "value": 34108.830945417365,
+          "qps": 34108.830945417365
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 1,
+          "metric": "qps",
+          "value": 3801.4690237790746,
+          "qps": 3801.4690237790746
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 8,
+          "metric": "qps",
+          "value": 21592.853859925137,
+          "qps": 21592.853859925137
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 16,
+          "metric": "qps",
+          "value": 31700.555309855517,
+          "qps": 31700.555309855517
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 32,
+          "metric": "qps",
+          "value": 35276.385913758124,
+          "qps": 35276.385913758124
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 1,
+          "metric": "qps",
+          "value": 261.86895462892085,
+          "qps": 261.86895462892085
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 8,
+          "metric": "qps",
+          "value": 1945.3546370238448,
+          "qps": 1945.3546370238448
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 16,
+          "metric": "qps",
+          "value": 3469.328267839686,
+          "qps": 3469.328267839686
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 32,
+          "metric": "qps",
+          "value": 5010.067774209376,
+          "qps": 5010.067774209376
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 1,
+          "metric": "qps",
+          "value": 2405.5848315384883,
+          "qps": 2405.5848315384883
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 8,
+          "metric": "qps",
+          "value": 16046.404203350741,
+          "qps": 16046.404203350741
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 16,
+          "metric": "qps",
+          "value": 21182.208857983016,
+          "qps": 21182.208857983016
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 32,
+          "metric": "qps",
+          "value": 21030.606029030358,
+          "qps": 21030.606029030358
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 1,
+          "metric": "qps",
+          "value": 866.0262683410375,
+          "qps": 866.0262683410375
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 8,
+          "metric": "qps",
+          "value": 3223.969168540008,
+          "qps": 3223.969168540008
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 16,
+          "metric": "qps",
+          "value": 3325.346483813675,
+          "qps": 3325.346483813675
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 32,
+          "metric": "qps",
+          "value": 3322.9187344070942,
+          "qps": 3322.9187344070942
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 3074.75709368249
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 6.884199212292321,
+          "qps": 21167.240362319226
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 10.263409154675724,
+          "qps": 31557.490103704993
+        },
+        {
+          "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+          "config": "D14__quiver-main",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 11.093179040223578,
+          "qps": 34108.830945417365
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 3801.4690237790746
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 5.680134107329772,
+          "qps": 21592.853859925137
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 8.339027652615648,
+          "qps": 31700.555309855517
+        },
+        {
+          "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+          "config": "D14__D14-sqg-integer-fixed-g1",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 9.279672067060421,
+          "qps": 35276.385913758124
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 261.86895462892085
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 7.428733351689179,
+          "qps": 1945.3546370238448
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 13.248337408899301,
+          "qps": 3469.328267839686
+        },
+        {
+          "curve": "D14__bbq-g1|{\"ef\":768}",
+          "config": "D14__bbq-g1",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 19.131965380580716,
+          "qps": 5010.067774209376
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 2405.5848315384883
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 6.670479458040266,
+          "qps": 16046.404203350741
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 8.805430006156119,
+          "qps": 21182.208857983016
+        },
+        {
+          "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+          "config": "D14__svs-lvq8-g1",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 8.74240881190636,
+          "qps": 21030.606029030358
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 1,
+          "metric": "speedup",
+          "value": 1.0,
+          "qps": 866.0262683410375
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 8,
+          "metric": "speedup",
+          "value": 3.722715218229873,
+          "qps": 3223.969168540008
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 16,
+          "metric": "speedup",
+          "value": 3.8397755418940336,
+          "qps": 3325.346483813675
+        },
+        {
+          "curve": "D14__hnswlib-g1|{\"ef\":192}",
+          "config": "D14__hnswlib-g1",
+          "threads": 32,
+          "metric": "speedup",
+          "value": 3.836972221145771,
+          "qps": 3322.9187344070942
+        }
+      ],
+      "outside_canvas": []
+    },
+    "pipeline": {
+      "width_inches": 7.125,
+      "height_inches": 3.32,
+      "source_records": [
+        {
+          "source": "sections/design.tex",
+          "content": "编码、整数构建、SM-L2导航、有限候选和FP32精排；比特矩阵与图节点是机制示意。"
+        }
+      ],
+      "outside_canvas": []
+    }
+  }
+}
