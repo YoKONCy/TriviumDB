@@ -5,6 +5,65 @@ use std::collections::BTreeMap;
 use triviumdb::database::{Config, StorageMode};
 use triviumdb::{Database, TriviumError, VectorType};
 
+#[test]
+fn 历史四版日志的真实编辑回执恢复后保持原确认令牌与完整内容() {
+    let root = TestDir::new("historical-v4-receipt");
+    let path = root.file("sample.tdb");
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pre_named_graph_format11/receipts");
+    let case: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(source.join("case.json")).unwrap()).unwrap();
+    for entry in std::fs::read_dir(&source).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("sample.tdb")
+        {
+            std::fs::copy(entry.path(), root.0.join(entry.file_name())).unwrap();
+        }
+    }
+    let mut db = Database::<f32>::open(&path, 2).unwrap();
+    let session = triviumdb::ConsoleSession::from_json(r#"{"readOnly":false}"#).unwrap();
+    let mut command = case["command"].clone();
+    command["operation"] = json!("transactionStatus");
+    let wire = json!({"version":1,"requestId":"history","command":command}).to_string();
+    let response: serde_json::Value =
+        serde_json::from_str(&db.console_request(&session, &wire).unwrap()).unwrap();
+    assert_eq!(
+        response["data"],
+        json!({"outcome":"committed","createdIds":["2"],"revision":case["acknowledged"]["revision"]})
+    );
+    assert_eq!(db.all_node_ids().unwrap(), [1, 2]);
+    assert_eq!(db.get_payload(1).unwrap(), Some(json!({"state":"after"})));
+    let created = db.get(2).unwrap().unwrap();
+    assert_eq!(created.vector, [0., 1.]);
+    assert_eq!(created.payload, json!({"state":"created"}));
+    let edges = db.get_edges(1).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(
+        (edges[0].target_id, edges[0].label.as_str(), edges[0].weight),
+        (2, "rel", 0.5)
+    );
+    assert_eq!(edges[0].metadata, json!({"source":"旧回执"}));
+    db.close().unwrap();
+    let mut db = Database::<f32>::open(&path, 2).unwrap();
+    let session = triviumdb::ConsoleSession::from_json(r#"{"readOnly":false}"#).unwrap();
+    let response: serde_json::Value =
+        serde_json::from_str(&db.console_request(&session, &wire).unwrap()).unwrap();
+    assert_eq!(
+        response["data"],
+        json!({"outcome":"committed","createdIds":["2"],"revision":case["acknowledged"]["revision"]})
+    );
+    assert_eq!(db.all_node_ids().unwrap(), [1, 2]);
+    assert_eq!(db.get_payload(1).unwrap(), Some(json!({"state":"after"})));
+    let created = db.get(2).unwrap().unwrap();
+    assert_eq!(created.vector, [0., 1.]);
+    assert_eq!(created.payload, json!({"state":"created"}));
+    assert_eq!(db.get_edges(1).unwrap(), edges);
+    db.close().unwrap();
+}
+
 fn files(path: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
     std::fs::read_dir(path)
         .unwrap()
@@ -85,10 +144,10 @@ fn matrix<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(dtype:
         .unwrap();
         facts(&database);
         database.close().unwrap();
-        assert_eq!(&std::fs::read(&path).unwrap()[4..6], &11u16.to_le_bytes());
+        assert_eq!(&std::fs::read(&path).unwrap()[4..6], &13u16.to_le_bytes());
         assert_eq!(
             &std::fs::read(format!("{path}.wal")).unwrap()[4..6],
-            &4u16.to_le_bytes()
+            &6u16.to_le_bytes()
         );
         let before = files(&root.0);
         let mut reopened = Database::<T>::open_read_only(&path, 2).unwrap();

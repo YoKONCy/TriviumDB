@@ -21,6 +21,8 @@ pub(super) struct ApplicationGuard<'a, T: VectorType> {
     lifecycle: &'a std::sync::Mutex<super::LifecycleState>,
     previous_pause: bool,
     previous_unique_pause: bool,
+    previous_named_pause: bool,
+    previous_document_pause: bool,
     complete: bool,
 }
 impl<'a, T: VectorType> ApplicationGuard<'a, T> {
@@ -43,12 +45,18 @@ impl<'a, T: VectorType> ApplicationGuard<'a, T> {
     ) -> Self {
         let previous_unique_pause = mt.unique_updates_paused();
         let previous_pause = mt.quiver_sync_paused();
+        let previous_named_pause = mt.named_graph_updates_paused;
+        mt.named_graph_updates_paused = true;
+        let previous_document_pause = mt.document_updates_paused;
+        mt.document_updates_paused = true;
         Self {
             mt,
             wal,
             lifecycle,
             previous_pause,
             previous_unique_pause,
+            previous_named_pause,
+            previous_document_pause,
             complete: false,
         }
     }
@@ -60,6 +68,8 @@ impl<'a, T: VectorType> ApplicationGuard<'a, T> {
 impl<T: VectorType> Drop for ApplicationGuard<'_, T> {
     fn drop(&mut self) {
         self.mt.set_quiver_sync_paused(self.previous_pause);
+        self.mt.named_graph_updates_paused = self.previous_named_pause;
+        self.mt.document_updates_paused = self.previous_document_pause;
         self.mt
             .set_unique_updates_paused(self.previous_unique_pause);
         if !self.complete {
@@ -94,6 +104,27 @@ fn next_transaction_id(counter: &std::sync::atomic::AtomicU64) -> Result<u64> {
 /// - 无论是否跳过插入，都推进 `next_id` 防止 ID 复用
 pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<T>) -> Result<()> {
     let extra = match &entry {
+        WalEntry::Delete { id } => mt
+            .named_graphs
+            .projection_bytes()
+            .saturating_add(mt.document_publications.deletion_workspace(*id)),
+        WalEntry::DocumentPublication { bytes } => {
+            if bytes.len() > crate::storage::document_publications::MAX_RECORD_BYTES {
+                return Err(crate::storage::document_publications::corrupt(
+                    "record length",
+                ));
+            }
+            bytes.len().saturating_mul(64)
+        }
+        WalEntry::NamedGraph { snapshot, .. } => {
+            let bytes = snapshot.as_ref().map_or(0, String::len);
+            if bytes > crate::named_graph::MAX_GRAPH_BYTES + 1024 {
+                return Err(crate::storage::named_graphs::corrupt(
+                    "图日志记录超过格式上限 (Graph WAL record exceeds the format limit)",
+                ));
+            }
+            bytes.saturating_mul(64)
+        }
         WalEntry::EditReceipt { bytes } => bytes
             .len()
             .saturating_mul(4)
@@ -164,6 +195,10 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
         WalEntry::Delete { id } => {
             if mt.contains(id) {
                 mt.delete(id)?;
+            } else {
+                // 已发布检查点可能已删除节点，较早图快照回放后仍需清理其引用。
+                mt.named_graphs.delete_node(id)?;
+                mt.document_publications.delete_node(id);
             }
         }
         WalEntry::Unlink { src, dst } => {
@@ -194,6 +229,42 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
         }
         WalEntry::TxBegin { .. } | WalEntry::TxCommit { .. } => {
             // 已在 wal.rs 内的回放过滤环节处理，这里不应再收到，直接忽略
+        }
+        WalEntry::NamedGraph {
+            graph_id,
+            expected_revision,
+            snapshot,
+        } => {
+            let snapshot = snapshot
+                .map(|raw| {
+                    serde_json::from_str::<crate::named_graph::NamedGraphSnapshot>(&raw)
+                        .map_err(crate::storage::named_graphs::corrupt)
+                })
+                .transpose()?;
+            mt.named_graphs
+                .replay_change(&graph_id, expected_revision.as_deref(), snapshot)?;
+            mt.mark_checkpoint_dirty();
+        }
+        WalEntry::DocumentPublication { bytes } => {
+            let record: crate::storage::document_publications::Record =
+                serde_json::from_str(&bytes)
+                    .map_err(crate::storage::document_publications::corrupt)?;
+            let extra = mt.document_publications.change_workspace(&record.change);
+            mt.check_load_allocation(extra)?;
+            let _workspace = mt.resource_runtime().reserve_workspace(extra)?;
+            mt.document_publications
+                .apply_record::<T>(&record, mt.dim(), true)
+                .map_err(|error| {
+                    if matches!(
+                        error.underlying(),
+                        TriviumError::QueryCancelled | TriviumError::QueryDeadlineExceeded
+                    ) {
+                        error
+                    } else {
+                        crate::storage::document_publications::corrupt(error)
+                    }
+                })?;
+            mt.mark_checkpoint_dirty();
         }
         WalEntry::EditReceipt { bytes } => {
             mt.editing.restore(&bytes)?;
@@ -229,6 +300,15 @@ fn validate_transaction_json(raw: &str) -> Result<()> {
 
 /// 事务操作类型
 pub enum TxOp<T> {
+    DocumentPublication {
+        bytes: String,
+    },
+    /// 命名图事实和普通节点操作按同一事务顺序提交。
+    NamedGraph {
+        graph_id: String,
+        expected_revision: Option<String>,
+        snapshot: Option<crate::named_graph::NamedGraphSnapshot>,
+    },
     Insert {
         vector: Vec<T>,
         payload: serde_json::Value,
@@ -419,6 +499,29 @@ pub struct TxBuilder<T> {
 }
 
 impl<T: VectorType> TxBuilder<T> {
+    /// 在同一节点事务中比较并交换命名图快照，提交时验证修订及成员引用。
+    pub fn put_named_graph(
+        &mut self,
+        graph: crate::named_graph::NamedGraphWrite,
+        expected_revision: Option<&str>,
+    ) -> Result<crate::named_graph::NamedGraphSnapshot> {
+        let snapshot =
+            crate::named_graph::NamedGraphSnapshot::from_write(graph, expected_revision)?;
+        self.ops.push(TxOp::NamedGraph {
+            graph_id: snapshot.graph.graph_id.clone(),
+            expected_revision: expected_revision.map(str::to_owned),
+            snapshot: Some(snapshot.clone()),
+        });
+        Ok(snapshot)
+    }
+
+    pub fn delete_named_graph(&mut self, graph_id: &str, expected_revision: &str) {
+        self.ops.push(TxOp::NamedGraph {
+            graph_id: graph_id.into(),
+            expected_revision: Some(expected_revision.into()),
+            snapshot: None,
+        });
+    }
     pub fn new() -> Self {
         Self { ops: Vec::new() }
     }
@@ -559,6 +662,66 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let dim = mt.dim();
         // 只投影本批触及的 ID；每个操作覆盖前一状态，支持同一 ID 多次删除和重建。
         let mut node_states = std::collections::HashMap::<NodeId, bool>::new();
+        let changes_documents = ops
+            .iter()
+            .any(|op| matches!(op, TxOp::DocumentPublication { .. }))
+            || ops.iter().any(|op| matches!(op,TxOp::Delete {id} if mt.document_publications.document_upload_ids(*id).is_some()));
+        let document_index_changes = ops
+            .iter()
+            .map(|op| match op {
+                TxOp::DocumentPublication { .. } => 1,
+                TxOp::Delete { id } => mt
+                    .document_publications
+                    .document_upload_ids(*id)
+                    .map_or(0, |ids| ids.size().saturating_add(1)),
+                _ => 0,
+            })
+            .fold(0usize, usize::saturating_add);
+        let mut document_bytes = if changes_documents {
+            mt.document_publications
+                .projection_for_changes(document_index_changes)
+                .saturating_add(
+                    ops.iter()
+                        .filter_map(|op| match op {
+                            TxOp::DocumentPublication { bytes } => {
+                                Some(bytes.len().saturating_mul(64))
+                            }
+                            _ => None,
+                        })
+                        .sum::<usize>(),
+                )
+        } else {
+            0
+        };
+        mt.ensure_additional_memory(self.memory_limit, document_bytes)?;
+        let _document_workspace = self.resource_runtime.reserve_workspace(document_bytes)?;
+        let mut documents = changes_documents.then(|| mt.document_publications.clone());
+        let mut publication_workspaces = Vec::new();
+        let changes_named = ops.iter().any(|op| matches!(op, TxOp::NamedGraph { .. }))
+            || (!mt.named_graphs.graphs.is_empty()
+                && ops.iter().any(|op| matches!(op, TxOp::Delete { .. })));
+        let mut graph_bytes = if changes_named {
+            mt.named_graphs.projection_bytes()
+        } else {
+            0
+        };
+        for op in &ops {
+            if let TxOp::NamedGraph {
+                snapshot: Some(snapshot),
+                ..
+            } = op
+            {
+                graph_bytes = graph_bytes
+                    .saturating_add(snapshot.graph.memory_bytes().saturating_mul(6))
+                    .saturating_add(
+                        crate::storage::payload_store::serialized_json_len(snapshot)?
+                            .saturating_mul(4),
+                    );
+            }
+        }
+        mt.ensure_additional_memory(self.memory_limit, graph_bytes)?;
+        let _graph_workspace = self.resource_runtime.reserve_workspace(graph_bytes)?;
+        let mut named = changes_named.then(|| mt.named_graphs.clone());
 
         macro_rules! check_exists {
             ($id:expr) => {
@@ -571,6 +734,43 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         for op in &mut ops {
             match op {
+                TxOp::DocumentPublication { bytes } => {
+                    crate::document::budget(
+                        "document_record_bytes",
+                        bytes.len(),
+                        crate::storage::document_publications::MAX_RECORD_BYTES,
+                    )?;
+                    let record: crate::storage::document_publications::Record =
+                        serde_json::from_str(bytes)
+                            .map_err(crate::storage::document_publications::corrupt)?;
+                    if let Some(documents) = &mut documents {
+                        let extra = documents.change_workspace(&record.change);
+                        document_bytes = document_bytes.saturating_add(extra);
+                        mt.ensure_additional_memory(self.memory_limit, document_bytes)?;
+                        if extra > 0 {
+                            publication_workspaces
+                                .push(self.resource_runtime.reserve_workspace(extra)?);
+                        }
+                        documents.apply_record::<T>(&record, dim, false)?;
+                    }
+                }
+
+                TxOp::NamedGraph {
+                    graph_id,
+                    expected_revision,
+                    snapshot,
+                } => {
+                    if let Some(snapshot) = snapshot {
+                        for id in &snapshot.graph.members {
+                            if !check_exists!(id) {
+                                return Err(TriviumError::NodeNotFound(*id).at_field("members"));
+                            }
+                        }
+                    }
+                    if let Some(named) = &mut named {
+                        named.change(graph_id, expected_revision.as_deref(), snapshot.as_ref())?;
+                    }
+                }
                 TxOp::Insert { vector, payload } => {
                     if vector.len() != dim {
                         return Err(crate::error::TriviumError::DimensionMismatch {
@@ -651,6 +851,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     if !check_exists!(id) {
                         return Err(crate::error::TriviumError::NodeNotFound(*id));
                     }
+                    if let Some(named) = &mut named {
+                        named.delete_node(*id)?;
+                    }
+                    if let Some(documents) = &mut documents {
+                        documents.delete_node(*id);
+                    }
                     node_states.insert(*id, false);
                 }
                 TxOp::Unlink { src, .. } | TxOp::UnlinkLabel { src, .. } => {
@@ -712,7 +918,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             .iter()
             .filter(|op| matches!(op, TxOp::InsertWithId { .. }))
             .count();
-        let mut estimated_bytes = mt.estimate_reserve_bytes(insert_count)?;
+        let mut estimated_bytes = mt
+            .estimate_reserve_bytes(insert_count)?
+            .saturating_add(graph_bytes)
+            .saturating_add(document_bytes);
         for op in &ops {
             if let TxOp::Link {
                 src,
@@ -790,6 +999,31 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         for op in &ops {
             match op {
+                TxOp::DocumentPublication { bytes } => {
+                    wal_entries.push(WalEntry::DocumentPublication {
+                        bytes: bytes.clone(),
+                    })
+                }
+
+                TxOp::NamedGraph {
+                    graph_id,
+                    expected_revision,
+                    snapshot,
+                } => {
+                    let snapshot = snapshot
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|error| TriviumError::InvalidInput(error.to_string()))?;
+                    if let Some(raw) = &snapshot {
+                        validate_transaction_json(raw)?;
+                    }
+                    wal_entries.push(WalEntry::NamedGraph {
+                        graph_id: graph_id.clone(),
+                        expected_revision: expected_revision.clone(),
+                        snapshot,
+                    });
+                }
                 TxOp::Insert { .. } => {
                     return Err(TriviumError::InvalidInput(
                         "事务插入缺少预分配 ID (Transaction insert is missing a pre-assigned ID)"
@@ -920,6 +1154,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let apply_result = (|| -> Result<()> {
             for op in ops {
                 match op {
+                    TxOp::NamedGraph { .. } | TxOp::DocumentPublication { .. } => {}
                     TxOp::InsertWithId {
                         id,
                         vector,
@@ -972,6 +1207,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             .set_quiver_sync_paused(application.previous_pause);
         apply_result?;
         application.mt.apply_unique_delta(unique_delta)?;
+        if let Some(documents) = documents {
+            application.mt.document_publications = documents;
+            application.mt.mark_changed(false);
+        }
+        if let Some(named) = named {
+            application.mt.named_graphs = named;
+            application.mt.mark_changed(false);
+        }
         application
             .mt
             .set_unique_updates_paused(application.previous_unique_pause);
@@ -984,14 +1227,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         drop(application);
 
         write.phase = crate::error::WritePhase::Response;
-        write.outcome = if lock_or_recover(&self.lifecycle.0)
-            .group_commit_owner
-            .is_some()
-        {
-            crate::error::WriteOutcome::Unknown
-        } else {
-            crate::error::WriteOutcome::Committed
-        };
+        write.outcome = self.response_write_info().outcome;
         if let Some(key) = receipt_key {
             mt.editing.complete(&key)?;
             mt.mark_checkpoint_dirty();
@@ -1018,6 +1254,108 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 mod guard_tests {
     use super::*;
     use std::sync::{Mutex, atomic::AtomicU64};
+
+    #[test]
+    fn 候选追加在复制大来源身份前准入且拒绝后可重试() {
+        use crate::document::{DocumentNode, DocumentUploadBatch, DocumentUploadBegin};
+        let root =
+            std::env::temp_dir().join(format!("tdb-document-metadata-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("sample.tdb");
+        let runtime = crate::resources::ResourceRuntime::new(crate::resources::ResourceLimits {
+            memory_limit: 2 * 1024 * 1024 * 1024,
+            ..Default::default()
+        })
+        .unwrap();
+        let config = super::super::Config {
+            dim: 2,
+            auto_build_quiver: false,
+            memory_limit: 256 * 1024 * 1024,
+            ..Default::default()
+        };
+        let mut db =
+            Database::<f32>::open_with_runtime(path.to_str().unwrap(), config, runtime.clone())
+                .unwrap();
+        // 三MiB身份超过投影索引的固定预留，额外余额通过记账保护，不实际分配大内存。
+        let source_id = "x".repeat(3 * 1024 * 1024);
+        let upload_id = uuid::Uuid::new_v4().to_string();
+        db.begin_document_upload(DocumentUploadBegin {
+            upload_id: upload_id.clone(),
+            source_id: source_id.clone(),
+            source_revision: "1".into(),
+            parser_id: "plain".into(),
+            content_hash: crate::document::content_hash("new"),
+            root: DocumentNode {
+                id: 1,
+                vector: vec![1., 0.],
+                payload: serde_json::Value::Null,
+            },
+            source: None,
+            expected_revision: None,
+        })
+        .unwrap();
+        let before = std::fs::read(path.with_extension("tdb.wal")).unwrap();
+        let stats = runtime.stats();
+        let available =
+            stats.memory_limit - stats.maintenance_memory_limit - stats.reserved_database_bytes;
+        let pinned = runtime
+            .reserve_workspace(available - 10 * 1024 * 1024)
+            .unwrap();
+        let batch = DocumentUploadBatch {
+            sequence: 0,
+            content: "new".into(),
+            original_text: String::new(),
+            mappings: Vec::new(),
+            blocks: Vec::new(),
+        };
+        let error = db
+            .append_document_upload(&upload_id, batch.clone())
+            .unwrap_err();
+        assert_eq!(error.code(), "QueueFull");
+        assert_eq!(
+            error.info().write.unwrap().outcome,
+            crate::error::WriteOutcome::NotCommitted
+        );
+        assert_eq!(
+            db.document_upload_status(&upload_id).unwrap().next_sequence,
+            0
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("tdb.wal")).unwrap(),
+            before
+        );
+        drop(pinned);
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+        db.append_document_upload(&upload_id, batch).unwrap();
+        let expected = db.publish_document_upload(&upload_id).unwrap();
+        assert_eq!(expected.content, "new");
+        assert_eq!(expected.source_id, source_id);
+        db.close().unwrap();
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+        let mut db =
+            Database::<f32>::open_with_runtime(path.to_str().unwrap(), config, runtime).unwrap();
+        assert_eq!(db.get_document(1).unwrap(), Some(expected));
+        db.close().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 图日志的固定格式上限在恢复内存预算和json解析之前拒绝() {
+        let mut mt = MemTable::<f32>::new(2);
+        mt.begin_loading(4096);
+        // 64MiB图体加1024字节版本包络是格式上限，仅分配一份有界拒绝样本。
+        let entry = WalEntry::NamedGraph {
+            graph_id: "bounded".into(),
+            expected_revision: None,
+            snapshot: Some(" ".repeat(64 * 1024 * 1024 + 1025)),
+        };
+        assert_eq!(
+            replay_entry(&mut mt, entry).unwrap_err().code(),
+            "TDB_CORRUPTED_FILE"
+        );
+        assert!(mt.named_graphs.graphs.is_empty());
+        assert_eq!(mt.node_count(), 0);
+    }
 
     #[cfg(feature = "test-hooks")]
     #[test]

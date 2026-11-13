@@ -34,6 +34,42 @@ export function inspectConstructorDefaults(): void {
   new TriviumDB('defaults.tdb', { runtime: null });
 }
 
+export function inspectDocuments(database: TriviumDB, error: TriviumDBError): void {
+  const quiverResponse: string = database.quiverRequest('{"operation":"stats"}');
+  // @ts-expect-error SSD请求使用JSON字符串。
+  database.quiverRequest({ operation: 'stats' });
+  void quiverResponse;
+  const graphResponse: string = database.graphRequest('{"operation":"list"}');
+  // @ts-expect-error 图请求使用JSON字符串。
+  database.graphRequest({ operation: 'list' });
+  if (error.code === 'TDB_GRAPH_REVISION_MISMATCH') {
+    const graphId: string = error.details.graph_id;
+    void graphId;
+  }
+  void graphResponse;
+  const response: string = database.documentRequest('{"operation":"get","document_id":"7"}');
+  if (error.code === 'TDB_DOCUMENT_REVISION_MISMATCH') {
+    const documentId: string = error.details.document_id;
+    const revision: string = error.details.actual;
+    void [documentId, revision];
+  }
+  if (error.code === 'TDB_DOCUMENT_UPLOAD_NOT_FOUND') {
+    const uploadId: string = error.details.upload_id;
+    // @ts-expect-error 上传身份使用字符串。
+    const invalidUploadId: number = error.details.upload_id;
+    void [uploadId, invalidUploadId];
+  }
+  if (error.code === 'TDB_DOCUMENT_UPLOAD_CONFLICT') {
+    const field: string = error.details.field;
+    // @ts-expect-error 冲突详情按字段标识，上传身份由请求提供。
+    void error.details.upload_id;
+    void field;
+  }
+  // @ts-expect-error 文档请求使用JSON字符串。
+  database.documentRequest({ operation: 'get', document_id: '7' });
+  void response;
+}
+
 export function inspectConditionalWrites(database: TriviumDB): void {
   const deleted: number = database.deleteManyAtomic([11, 13]);
   const updated: void = database.compareAndSetPayloadField(7, 'name', '源', '已更新');

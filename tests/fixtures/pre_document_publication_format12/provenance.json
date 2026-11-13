@@ -1,0 +1,142 @@
+{
+  "description": "文档分批发布实装前的实际wheel生成，保留v12检查点与v5命名图WAL的独立样例。",
+  "baseline": {
+    "captured_at": "2026-11-12T05:09:50.284677+00:00",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "python": "3.12.12",
+    "node": "v22.23.4",
+    "profile": "dev",
+    "cargo_target_dir": "target/webui-tests",
+    "cargo_incremental": 0,
+    "dev_debug": 0,
+    "test_debug": 0,
+    "artifacts": [
+      {
+        "path": ".tmp/named-graphs/wheels/triviumdb-0.9.0-cp39-abi3-win_amd64.whl",
+        "bytes": 7723744,
+        "sha256": "61A534949471CE306254BC6FA813EA0B83E80886E82F20351FE4B42E37BD79BA"
+      },
+      {
+        "path": "triviumdb.win32-x64-msvc.node",
+        "bytes": 30886912,
+        "sha256": "66606B0F55C617B2FFCF9AABFF595C1FAD64BEF090EFF3156A5505BF95B04AC9"
+      },
+      {
+        "path": "index.js",
+        "bytes": 11879,
+        "sha256": "212842F99E2D3F907028E9D5A153FBBE7ACB6B5B184FB467ED185F411C8D6396"
+      },
+      {
+        "path": "triviumdb.d.ts",
+        "bytes": 38583,
+        "sha256": "E29682693784C712EC9CAA40C241B3AB528D09E228DC0119E99DF22AE7A6CC0D"
+      },
+      {
+        "path": "package.json",
+        "bytes": 1409,
+        "sha256": "D2A7F273FA469096143B03329E98507668B9FB6C68A9AF9BA1752BEFC268E8ED"
+      },
+      {
+        "path": "python/triviumdb/__init__.pyi",
+        "bytes": 15902,
+        "sha256": "43B89A8BE53EA98F1187CA92CE8F0A70A4AE8213B73964E5075D282287FAF450"
+      }
+    ],
+    "installed_native_sha256": "130514377E0B3B86FDBC3991937BA5E8DD690DC07C691251F74CE9675126847B",
+    "installed_stub_sha256": "43B89A8BE53EA98F1187CA92CE8F0A70A4AE8213B73964E5075D282287FAF450",
+    "source_file_count": 124
+  },
+  "files": [
+    {
+      "path": "f16/case.json",
+      "bytes": 905,
+      "sha256": "450b63514e3e7ddcc5de1ee91a965bc5e8edd75bb06e12e7e02b4403ee0880a4"
+    },
+    {
+      "path": "f16/sample.tdb",
+      "bytes": 425,
+      "sha256": "5e46700568eebbe6098956d6a6b7e0f45f3c3eac9aa1b9e1ab5d9b50ec79f614"
+    },
+    {
+      "path": "f16/sample.tdb.flush_ok",
+      "bytes": 53,
+      "sha256": "4f9ee6a2c6b2ad15e09770e6ca1c8ec898d5804714b3b1ae3a448e193ff992c3"
+    },
+    {
+      "path": "f16/sample.tdb.pld.1",
+      "bytes": 126,
+      "sha256": "a4c5bacf868f6eac2592b335cf42b5433023bbc34202a33ea25ba422374854ad"
+    },
+    {
+      "path": "f16/sample.tdb.vec",
+      "bytes": 8,
+      "sha256": "314751446dcce24e540f85fef0e101b1a75bfc90b95e9c09283e0c8ad87f234f"
+    },
+    {
+      "path": "f16/sample.tdb.wal",
+      "bytes": 451,
+      "sha256": "df154e4767ad48155717257fd577ffbabb56a457698dac6f03c4f9f427efa98d"
+    },
+    {
+      "path": "f32/case.json",
+      "bytes": 905,
+      "sha256": "7c8dec236e0fc8fa7ffbe5781fa877579060322f24b567b8765e4b9d685e01d7"
+    },
+    {
+      "path": "f32/sample.tdb",
+      "bytes": 425,
+      "sha256": "d5f826e8a546f7b5efd65cebb54c4ee6af1c74b8ed0573c352846d57293ba004"
+    },
+    {
+      "path": "f32/sample.tdb.flush_ok",
+      "bytes": 53,
+      "sha256": "2204e72a84bb27483c936c0cfcaf6914d0b02360c79d7610e526a7b9c2c6cf0e"
+    },
+    {
+      "path": "f32/sample.tdb.pld.1",
+      "bytes": 126,
+      "sha256": "a4c5bacf868f6eac2592b335cf42b5433023bbc34202a33ea25ba422374854ad"
+    },
+    {
+      "path": "f32/sample.tdb.vec",
+      "bytes": 16,
+      "sha256": "a666c95f0822c64e01580063e9bb27c629d4d0534e3163a9611738599f97df2a"
+    },
+    {
+      "path": "f32/sample.tdb.wal",
+      "bytes": 455,
+      "sha256": "b289de5db95512432f215008ddd666feb74b8bf111dc7d1a830bf71a0dfc521d"
+    },
+    {
+      "path": "u64/case.json",
+      "bytes": 905,
+      "sha256": "b9268af9e57c5b0147349bbaaba0d1aa38d77d0c093a9a6263f0722d25454a19"
+    },
+    {
+      "path": "u64/sample.tdb",
+      "bytes": 425,
+      "sha256": "c8b12b941ddc144aadeb7818d4bef33112816d1dcb561a3ea0c9d8c1cde10603"
+    },
+    {
+      "path": "u64/sample.tdb.flush_ok",
+      "bytes": 53,
+      "sha256": "a38ed7325d8e947ba5e2af185799b9199ab82e2ef78b5e3f80853974c74fa41c"
+    },
+    {
+      "path": "u64/sample.tdb.pld.1",
+      "bytes": 126,
+      "sha256": "a4c5bacf868f6eac2592b335cf42b5433023bbc34202a33ea25ba422374854ad"
+    },
+    {
+      "path": "u64/sample.tdb.vec",
+      "bytes": 32,
+      "sha256": "33679eedd86f9637ab73892a064cdab3d82365cf5063b145affb2272327a6ddc"
+    },
+    {
+      "path": "u64/sample.tdb.wal",
+      "bytes": 463,
+      "sha256": "8cc62ef79644d829e20d8ed991cf884bcf0b0dec489ee7dc41d9f61dc42d0bc1"
+    }
+  ]
+}

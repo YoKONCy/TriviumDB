@@ -188,6 +188,18 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
         ..Default::default()
     };
     let mt = read_or_recover(&source.memtable);
+    if mt
+        .document_publications
+        .uploads
+        .values()
+        .any(|upload| !upload.published)
+    {
+        return Err(crate::document::invalid(
+            "document_uploads",
+            "维度迁移前须发布或终止候选文档 (Publish or abort pending documents before dimension migration)",
+        ));
+    }
+
     mt.ensure_readable()?;
     let mut ids = mt.all_node_ids();
     ids.sort_unstable();
@@ -222,6 +234,19 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
                     edge.metadata.clone(),
                 )?;
             }
+        }
+        {
+            let mut target = super::write_or_recover(&stage.memtable);
+            let bytes = mt
+                .named_graphs
+                .projection_bytes()
+                .saturating_add(mt.document_publications.projection_bytes());
+            target.ensure_additional_memory(config.memory_limit, bytes)?;
+            let _workspace = source.resource_runtime.reserve_workspace(bytes)?;
+            // 暂存目标保留图身份、修订和共享引用，随目标检查点统一发布。
+            target.named_graphs = mt.named_graphs.clone();
+            target.document_publications = mt.document_publications.clone();
+            target.mark_changed(false);
         }
         stage.flush()?;
         stage.close()?;

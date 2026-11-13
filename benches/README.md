@@ -19,7 +19,24 @@
 | `bench_indexes_and_leiden` | 复合索引、Roaring Bitmap、标准 Leiden | 100K 索引；10K/50K Leiden |
 | `bench_index_graph_baseline` | 属性索引与图索引基线矩阵 | 可通过套件参数调整 |
 | `bench_memory_pressure` | 内存压力与容量变化 | 文件内固定配置 |
+| `bench_open` | 已持久化数据库的重开、首查与查询结果 | 128／384／768／1536维四组合成数据，各5000节点、三轮重开 |
+| `bench_quiver_ssd` | 生产 INT8 路径的缓存、驻留及系统读取成本 | 128／129／768维三组合成数据，各4096节点、64查询、三轮 |
 | `ci_report` | CI 可读的端到端能力报告 | CI 小规模配置 |
+
+`bench_open` 通过真实 `Database` 创建带 QuIVer 的检查点，以严格索引策略逐轮只读打开。打开和首查分别计时，后续三个候选宽度记录召回、QPS、完整 ID／分数位模式及内存组成。精确预期由独立标量余弦计算得到。连续重开使用可能已预热的 OS 文件缓存，RSS 包含基准进程的数据集和参考结果。
+
+```powershell
+$env:TDB_OPEN_ROOT = 'target/bench-reports/open-databases'
+$env:TDB_OPEN_NODES = '5000'
+$env:TDB_OPEN_REPORT = 'open-before.json'
+cargo bench --locked --profile release-contracts --bench bench_open
+# 使用新内核对同一组基准文件执行显式检查点，再测其重开。
+$env:TDB_OPEN_REWRITE = '1'
+$env:TDB_OPEN_REPORT = 'open-after.json'
+cargo bench --locked --profile release-contracts --bench bench_open
+```
+
+> **数据提醒**　`TDB_OPEN_REWRITE=1` 会打开并重写指定基准目录内的四个数据库检查点。为各批测量保留独立目录和报告，记录源码、工具链、线程数、文件缓存条件及索引版本。
 
 ## B. 三模管线与性能 Gate
 
@@ -89,3 +106,13 @@ cargo bench --features ablation --bench bench_variance
 5. 多计划或多线程对照必须校验结果集合、顺序或稳定哈希。
 6. 自定义报告通过 `benches/support/mod.rs` 写入统一目录。
 7. 临时探索代码不得注册为公开 benchmark；结论稳定后再整理进入对应套件。
+
+## 生产 QuIVer SSD 测量
+
+`cargo bench --bench bench_quiver_ssd` 使用生产 QVSSD v1／codec 1 和固定来源制品，比较缓冲零缓存、Direct I/O 零缓存、三档行缓存及全 Hot 驻留。适用平台为 Windows 和 Linux，严格 Direct I/O 失败时保留错误。数据采用固定种子 `20261113` 的均匀、聚簇及稀疏分布，默认图参数为 `m=16`、`ef_construction=96`、`alpha=1.2`，检索采用 `top_k=10` 和 `ef=rerank_limit=32／96`。
+
+环境变量 `TDB_SSD_NODES`、`TDB_SSD_QUERIES` 和 `TDB_SSD_ROUNDS` 调整规模，`TDB_SSD_ROOT` 指定制品目录。默认目录为 `target/bench-reports/quiver-ssd/`，相同输入复用已存在的制品，构图参数变化时使用新的目录。缓存候选为完整行缓存估算的 `0、1/16、1/4、1`，并逐轮轮换配置顺序。每个配置重新打开 Reader，使用前八条查询预热，再记录完整测量窗口。
+
+报告位于 `target/bench-reports/quiver-ssd.json`，包含来源摘要、图制品摘要、实际参数、QPS、P50／P95／P99、逻辑与系统读取、Runtime 账本及进程内存。精确余弦真值由独立 f64 扫描产生，所有配置逐条核对完整 ID、分数和顺序。查询在稳定事实及编码下比较工程实现，计时用于研究报告。
+
+> **测量提醒**　合成结果描述当前输入与平台。缓冲模式使用当时的 OS PageCache；运行器保持系统缓存状态。进程内存包含数据集、真值及此前阶段的分配，Runtime 账本独立记录每个 Reader 的工作区峰值。真实大规模数据、容器密度和设备流量按对应负载另行测量。

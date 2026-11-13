@@ -4,8 +4,11 @@
 //! 由存储内核执行。克隆句柄共享同一实例，事务准备可在准入之前完成。
 
 mod console;
+pub mod documents;
 mod errors;
 pub mod facade;
+pub mod named_graphs;
+pub mod quiver;
 mod shared;
 pub use crate::request::RequestContext;
 

@@ -22,7 +22,6 @@ pub(crate) fn hybrid_text_boost(alpha: f32) -> crate::Result<f32> {
 }
 
 /// 批量普通 API 的临时事务由绑定持有，公开结果只保留内核阶段和提交事实。
-#[cfg(any(feature = "python", feature = "nodejs"))]
 pub(crate) fn direct_write_error(mut error: crate::TriviumError) -> crate::TriviumError {
     let mut source = &mut error;
     loop {

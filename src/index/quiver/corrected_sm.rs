@@ -27,6 +27,9 @@ use dynamic::DynamicSm;
 #[path = "corrected_sm/production.rs"]
 mod production;
 
+#[path = "corrected_sm/routing_snapshot.rs"]
+mod routing_snapshot;
+
 #[cfg(test)]
 #[path = "corrected_sm/production_tests.rs"]
 mod production_tests;
@@ -132,17 +135,42 @@ struct Scratch {
     storage: Storage,
 }
 
+impl Scratch {
+    fn new() -> Self {
+        Self {
+            visited: Bitset::new(0),
+            storage: Storage::new(0),
+        }
+    }
+}
+
+/// 独立SSD请求在返回前释放导航工作区；已有评分源继续复用线程局部工作区。
+fn with_scratch<T>(
+    owned: bool,
+    operation: impl FnOnce(&mut Scratch) -> io::Result<T>,
+) -> io::Result<T> {
+    if owned {
+        operation(&mut Scratch::new())
+    } else {
+        SCRATCH.with(|cell| operation(&mut cell.borrow_mut()))
+    }
+}
+
 thread_local! {
-    static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch {
-        visited: Bitset::new(0), storage: Storage::new(0),
-    });
+    static SCRATCH: RefCell<Scratch> = RefCell::new(Scratch::new());
     // 与搜索工作区分开借用，复用四个冷向量缓冲，不物化整库FP32。
     static EXACT_BUFFERS: RefCell<[Vec<f32>; 4]> = RefCell::new(
         std::array::from_fn(|_| Vec::with_capacity(DIM))
     );
 }
 
-trait ExactSource {
+pub(super) trait ExactSource {
+    fn owns_workspace(&self) -> bool {
+        false
+    }
+    fn checkpoint(&mut self) -> io::Result<()> {
+        Ok(())
+    }
     fn one(&mut self, q: &[f32], id: usize) -> io::Result<Option<f32>>;
     fn four(&mut self, q: &[f32], ids: [usize; 4]) -> io::Result<[Option<f32>; 4]>;
 }
@@ -221,7 +249,7 @@ pub struct CorrectedSmIndex {
     entry: u32,
     anchor: u32,
     base_crc: u32,
-    // 仅运行期TDB路由需要：原冷向量非单位长度时的精算归一化，不写静态SM文件。
+    // TDB路由保存原冷向量的精算归一化比例；QuIVer默认路由快照包含该状态。
     exact_scales: Vec<f32>,
     scoring: SmScoring,
     dynamic: Option<DynamicSm>,
@@ -762,6 +790,22 @@ impl CorrectedSmIndex {
         self.search_callback(query, graph, config, SmSearchMode::Combined, fill)
     }
 
+    /// 独立冷评分源复用默认SM导航及候选顺序，错误沿可失败路径返回。
+    pub(super) fn search_routed_source<S: ExactSource>(
+        &self,
+        query: &[f32],
+        graph: &FlatAdj,
+        config: &QuIVerSearchConfig,
+        source: &mut S,
+    ) -> io::Result<SmSearchOutput> {
+        source.checkpoint()?;
+        if self.dynamic.is_some() {
+            self.search_dynamic::<false, true, _>(query, graph, source, config)
+        } else {
+            self.search_impl::<false, true, _>(query, graph, source, config)
+        }
+    }
+
     fn search_callback<F>(
         &self,
         query: &[f32],
@@ -837,9 +881,8 @@ impl CorrectedSmIndex {
         if !first.is_finite() || !anchor.is_finite() {
             return Err(invalid("SM查询分数溢出"));
         }
-        SCRATCH.with(|cell| {
-            let mut scratch = cell.borrow_mut();
-            let Scratch { visited, storage } = &mut *scratch;
+        with_scratch(source.owns_workspace(), |scratch| {
+            let Scratch { visited, storage } = scratch;
             if visited.len < self.len() {
                 visited.grow(self.len());
             }
@@ -858,6 +901,7 @@ impl CorrectedSmIndex {
             st.queue.push(Reverse((NonNanF32(first), self.entry)));
             st.results.push((NonNanF32(first), self.entry));
             while let Some(&Reverse((distance, u))) = st.queue.peek() {
+                source.checkpoint()?;
                 if st.results.len() >= ef && distance > st.results.peek().unwrap().0 {
                     break;
                 }
@@ -996,6 +1040,7 @@ impl CorrectedSmIndex {
             let mut j = 0;
             let count = st.exact_ids.len();
             while j < count && st.exact.len() < budget {
+                source.checkpoint()?;
                 if optimized
                     && j + 4 <= count
                     && budget - st.exact.len() >= 4

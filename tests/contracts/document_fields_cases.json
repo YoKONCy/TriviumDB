@@ -1,0 +1,56 @@
+{
+  "documents": [
+    {"source_id":"notes://one","source_revision":"v1","parser_id":"ranges-v1","content":"alpha\nbeta alpha","root":{"id":"10","vector":[1,0],"payload":{"vault":"blue","tags":["cat","cat",null,1],"identity":[9007199254740993]}},"blocks":[
+      {"key":"title","kind":"title","start_byte":0,"end_byte":5,"node":{"id":"11","vector":[1,0],"payload":{"state":"ready","tags":["title"]}}},
+      {"key":"body","kind":"body","start_byte":6,"end_byte":16,"node":{"id":"12","vector":[0,1],"payload":{"state":"ready","tags":["cat","body"]}}}
+    ]},
+    {"source_id":"notes://two","source_revision":"v1","parser_id":"ranges-v1","content":"beta\nalpha alpha alpha","root":{"id":"20","vector":[1,0],"payload":{"vault":"red","tags":["dog"],"identity":[9007199254740992]}},"blocks":[
+      {"key":"title","kind":"title","start_byte":0,"end_byte":4,"node":{"id":"21","vector":[1,0],"payload":{"state":"ready","tags":null}}},
+      {"key":"body","kind":"body","start_byte":5,"end_byte":22,"node":{"id":"22","vector":[0,1],"payload":{"state":"draft","tags":["cat","review"]}}}
+    ]},
+    {"source_id":"notes://three","source_revision":"v1","parser_id":"ranges-v1","content":"alpha beta\ngamma","root":{"id":"30","vector":[1,0],"payload":{"vault":"blue","tags":[]}},"blocks":[
+      {"key":"title","kind":"title","start_byte":0,"end_byte":10,"node":{"id":"31","vector":[1,0],"payload":{"state":"ready"}}},
+      {"key":"body","kind":"body","start_byte":11,"end_byte":16,"node":{"id":"32","vector":[0,1],"payload":{"state":"ready","tags":"cat"}}}
+    ]},
+    {"source_id":"notes://four","source_revision":"v1","parser_id":"ranges-v1","content":"alpha","root":{"id":"40","vector":[1,0],"payload":{"vault":"blue","tags":null}},"blocks":[
+      {"key":"body","kind":"body","start_byte":0,"end_byte":5,"node":{"id":"41","vector":[0,1],"payload":{"state":"ready","tags":[]}}}
+    ]}
+  ],
+  "query":{"text":"alpha","fields":[{"kind":"title","weight":3},{"kind":"body","weight":1}],"hits_per_document":10},
+  "field_corpora":[
+    {"kind":"body","weight":1,"corpus_units":4,"average_length":1.75},
+    {"kind":"title","weight":3,"corpus_units":3,"average_length":1.3333333333333333}
+  ],
+  "scores":{"11":1.570645039505736,"31":1.170575076612021,"12":0.336981235377698,"22":0.486087976695721,"41":0.432503475327281},
+  "cases":[
+    {"name":"weighted-fields","query":{},"documents":["10","30","20","40"],"hits":[["11","12"],["31"],["22"],["41"]]},
+    {"name":"document-and-block-scope","query":{"document_filter":{"vault":"blue"},"block_filter":{"state":"ready"},"members":[{"scope":"block","field":"tags","mode":"any","values":["cat"]}]},"documents":["10"],"hits":[["12"]]},
+    {"name":"root-any-deduplicated","query":{"members":[{"scope":"document","field":"tags","mode":"any","values":["cat","cat"]}]},"documents":["10"],"hits":[["11","12"]]},
+    {"name":"root-all-null-number","query":{"members":[{"scope":"document","field":"tags","mode":"all","values":["cat",null,1,1]}]},"documents":["10"],"hits":[["11","12"]]},
+    {"name":"number-type-is-exact","query_json":"{\"members\":[{\"scope\":\"document\",\"field\":\"tags\",\"mode\":\"any\",\"values\":[1.0]}]}","documents":[],"hits":[]},
+    {"name":"u64-member-identity","query_json":"{\"members\":[{\"scope\":\"document\",\"field\":\"identity\",\"mode\":\"any\",\"values\":[9007199254740993]}]}","documents":["10"],"hits":[["11","12"]]},
+    {"name":"all-empty-requires-array","query":{"members":[{"scope":"document","field":"tags","mode":"all","values":[]}]},"documents":["10","30","20"],"hits":[["11","12"],["31"],["22"]]},
+    {"name":"any-empty","query":{"members":[{"scope":"document","field":"tags","mode":"any","values":[]}]},"documents":[],"hits":[]},
+    {"name":"block-all-empty-rejects-missing-null-scalar","query":{"members":[{"scope":"block","field":"tags","mode":"all","values":[]}]},"documents":["10","20","40"],"hits":[["11","12"],["22"],["41"]]},
+    {"name":"scalar-in-keeps-equality","query":{"document_filter":{"tags":{"$in":["cat"]}}},"documents":[],"hits":[]},
+    {"name":"existing-all-predicate","query":{"document_filter":{"tags":{"$all":["cat"]}}},"documents":["10"],"hits":[["11","12"]]},
+    {"name":"scope-intersection","query":{"members":[{"scope":"document","field":"tags","mode":"all","values":["cat"]},{"scope":"block","field":"tags","mode":"all","values":["body","cat"]}]},"documents":["10"],"hits":[["12"]]},
+    {"name":"filter-before-top-one","query":{"max_documents":1,"hits_per_document":1,"block_filter":{"state":"draft"}},"documents":["20"],"hits":[["22"]]},
+    {"name":"phrase-stays-within-field","query":{"text":"alpha beta","match_mode":"phrase","include_matches":true},"documents":["30"],"hits":[["31"]]},
+    {"name":"unknown-field","query":{"fields":[{"kind":"absent"}]},"documents":[],"hits":[]},
+    {"name":"kind-and-field-intersection","query":{"kinds":["body"],"document_ids":["10"]},"documents":["10"],"hits":[["12"]]}
+  ],
+  "invalid":[
+    {"query":{"fields":[{"kind":"title","weight":0}]},"field":"query.fields.0.weight"},
+    {"query":{"fields":[{"kind":"title","weight":-1}]},"field":"query.fields.0.weight"},
+    {"query":{"fields":[{"kind":""}]},"field":"query.fields.0.kind"},
+    {"query":{"fields":[{"kind":"title"},{"kind":"title"}]},"field":"query.fields.1.kind"},
+    {"query":{"level":"document"},"field":"query.fields"},
+    {"query":{"level":"document","fields":[],"block_filter":{}},"field":"query.block_filter"},
+    {"query":{"level":"document","fields":[],"members":[{"scope":"block","field":"tags","mode":"all","values":[]}]},"field":"query.members.0.scope"},
+    {"query":{"members":[{"scope":"block","field":"","mode":"all","values":[]}]},"field":"query.members.0.field"},
+    {"query":{"members":[{"scope":"block","field":"tags","mode":"any","values":[{}]}]},"field":"query.members.0.values.0"},
+    {"query":{"document_filter":{"tags":{"$unknown":1}}},"field":"query.document_filter"},
+    {"query":{"block_filter":[]},"field":"query.block_filter"}
+  ]
+}

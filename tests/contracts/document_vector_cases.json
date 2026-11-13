@@ -1,0 +1,29 @@
+{
+  "documents_fixture":"document_fields_cases.json",
+  "vector":[1,0],
+  "cases":[
+    {"name":"vector-block","operation":"search_vector","query":{},"documents":["10","20","30","40"],"hits":[["11","12"],["21","22"],["31","32"],["41"]],"eligible":7},
+    {"name":"vector-document","operation":"search_vector","query":{"level":"document"},"documents":["10","20","30","40"],"hits":[["10"],["20"],["30"],["40"]],"eligible":4},
+    {"name":"vector-scoped-members","operation":"search_vector","query":{"document_filter":{"vault":"blue"},"block_filter":{"state":"ready"},"members":[{"scope":"block","field":"tags","mode":"any","values":["body"]}]},"documents":["10"],"hits":[["12"]],"eligible":1},
+    {"name":"vector-source","operation":"search_vector","query":{"source_ids":["notes://three"]},"documents":["30"],"hits":[["31","32"]],"eligible":2},
+    {"name":"empty-vector-scope","operation":"search_vector","query":{"kinds":["absent"]},"documents":[],"hits":[],"eligible":0},
+    {"name":"hybrid-fields","operation":"search_hybrid","query":{"text":"alpha","fields":[{"kind":"title","weight":3},{"kind":"body"}]},"documents":["10","30","20","40"],"hits":[["11","12"],["31","32"],["22","21"],["41"]],"eligible":7},
+    {"name":"hybrid-phrase-constraint","operation":"search_hybrid","query":{"text":"alpha beta","match_mode":"phrase","include_matches":true,"fields":[{"kind":"title","weight":3},{"kind":"body"}]},"documents":["30"],"hits":[["31"]],"eligible":1},
+    {"name":"hybrid-dense-only","operation":"search_hybrid","query":{"text":"absent","fields":[{"kind":"title","weight":3},{"kind":"body"}]},"documents":["10","20","30","40"],"hits":[["11","12"],["21","22"],["31","32"],["41"]],"eligible":7},
+    {"name":"hybrid-scoped-before-top","operation":"search_hybrid","query":{"text":"alpha","block_filter":{"state":"draft"},"max_documents":1,"hits_per_document":1,"fields":[{"kind":"body"}]},"documents":["20"],"hits":[["22"]],"eligible":1},
+    {"name":"hybrid-sparse-only","operation":"search_hybrid","query":{"text":"alpha","fields":[{"kind":"title","weight":3},{"kind":"body"}]},"options":{"vector":{"strategy":"exact","min_score":129},"text_weight":2},"documents":["10","30","20","40"],"hits":[["11","12"],["31"],["22"],["41"]],"eligible":7,"vector_candidates":0}
+  ],
+  "dense_block_order":["11","21","31","12","22","32","41"],
+  "text_field_order":["11","31","22","41","12"],
+  "fused_scores":{"11":1.9672131147540983,"31":1.9201228878648233,"22":1.8754578754578755,"12":1.8605769230769231,"41":1.8330223880597014,"21":0.967741935483871,"32":0.9090909090909091},
+  "invalid":[
+    {"operation":"search_vector","query":{"text":"alpha"},"field":"query.text"},
+    {"operation":"search_vector","query":{"include_matches":true},"field":"query.include_matches"},
+    {"operation":"search_vector","query":{"fields":[{"kind":"body"}]},"field":"query.fields"},
+    {"operation":"search_vector","query":{},"options":{"initial_candidates":0},"field":"options.initial_candidates"},
+    {"operation":"search_vector","query":{},"options":{"initial_candidates":2,"candidate_limit":1},"field":"options.initial_candidates"},
+    {"operation":"search_vector","query":{},"options":{"ef_search":0},"field":"options.ef_search"},
+    {"operation":"search_hybrid","query":{"text":"alpha"},"options":{"text_weight":0},"field":"options.text_weight"},
+    {"operation":"search_hybrid","query":{"text":"alpha"},"options":{"vector":{"candidate_limit":0}},"field":"options.vector.candidate_limit"}
+  ]
+}

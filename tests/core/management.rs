@@ -107,7 +107,12 @@ fn 配额拒绝保留配置并允许只读实例调整运行时额度() {
 fn 既有构建句柄在配额变更后使用当前预算并支持重试() {
     let root = super::support::TestDir::new("build-current-quota");
     let path = root.file("db.tdb");
-    let mut db = Database::<f32>::open(&path, 3).unwrap();
+    let runtime = ResourceRuntime::new(Default::default()).unwrap();
+    let config = Config {
+        dim: 3,
+        ..Default::default()
+    };
+    let mut db = Database::<f32>::open_with_runtime(&path, config, runtime.clone()).unwrap();
     // 834 个节点满足低维自动构建门槛；一字节预算明确低于实际构建工作区。
     for id in 1..=834 {
         db.insert_with_id(id, &[1., 0., 0.], json!({"id":id}))
@@ -134,7 +139,7 @@ fn 既有构建句柄在配额变更后使用当前预算并支持重试() {
     );
     assert_eq!(db.resource_stats().reserved_workspace_bytes, 0);
     db.close().unwrap();
-    let mut reopened = Database::<f32>::open(&path, 3).unwrap();
+    let mut reopened = Database::<f32>::open_with_runtime(&path, config, runtime).unwrap();
     assert_eq!(
         reopened.all_node_ids().unwrap(),
         (1..=834).collect::<Vec<_>>()

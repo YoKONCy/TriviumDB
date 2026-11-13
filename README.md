@@ -13,6 +13,8 @@
 
 # TriviumDB
 
+当前预发布版本为 **0.9.1-beta.1**，包含文档证据检索、命名图、解析与分批发布、QuIVer INT8 SSD 运行时及工程加固。完整内容见 [中英文版本说明](docs/changes/0.9.1-beta.1.md)，研究测量见 [ICDE 复现归档](evaluation/README.md)。
+
 **向量 × 图谱 × 文档 —— 三位一体的 AI 原生嵌入式数据库**
 
 **Battle-tested in mission-critical, air-gapped environments.**
@@ -654,6 +656,9 @@ TriviumDB/
 | **[最佳实践](docs/best-practices.md)**        | 数据建模范式、性能调优、Hook 使用指南、避坑指南        |
 | **[共享资源与实例诊断](docs/resource-runtime.md)** | 配额、维护保护额度、线程池、预算余额与结构化错误 |
 | **[关闭、快照与恢复](docs/lifecycle-snapshots.md)** | 关闭请求、限时等待、一致快照、校验与目录恢复 |
+| **[文档来源与结构](docs/documents.md)** | 来源修订、原子更新、分组 BM25、短语／邻近和原文证据 |
+| **[文档解析与分批发布](docs/document-ingestion.md)** | 自动解析、来源回映射、外部解析接入与持久化候选 |
+| **[命名图](docs/named-graphs.md)** | 共享成员、跨图独立边、条件编辑、显式联合和遍历 |
 | **[TQL 查询语言参考](docs/tql-reference.md)** | MATCH / FIND / SEARCH 语法、DML 写操作、属性索引       |
 | **[Hook 开发指南](docs/hook-guide.md)**       | C/C++ FFI 插件编写、Rust Hook 实现、管线诊断实战       |
 | **[测试实践](docs/testing.md)**               | 四层测试体系、属性测试、变异测试、覆盖率度量与 CI 建议 |

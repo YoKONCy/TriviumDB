@@ -243,6 +243,7 @@ async fn request_inner<T: VectorType + Serialize + DeserializeOwned>(
                 }
                 TriviumError::ReadOnlyViolation { .. } => StatusCode::FORBIDDEN,
                 TriviumError::WriteConflict { .. }
+                | TriviumError::DocumentRevisionMismatch { .. }
                 | TriviumError::IdempotencyConflict
                 | TriviumError::TransactionFinished
                 | TriviumError::WriteOutcomeUnknown => StatusCode::CONFLICT,

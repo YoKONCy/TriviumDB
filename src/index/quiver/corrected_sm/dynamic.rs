@@ -97,7 +97,7 @@ impl DynamicSm {
         self.write_metadata(id, weak, delta, 0., norm, counts[1] as u32);
         Ok(())
     }
-    fn row(&self, id: usize) -> &[u64] {
+    pub(super) fn row(&self, id: usize) -> &[u64] {
         assert!(id < self.n);
         // Block连续且恰有八个u64，行起点保持64字节对齐。
         unsafe {
@@ -107,7 +107,7 @@ impl DynamicSm {
             )
         }
     }
-    fn row_mut(&mut self, id: usize) -> &mut [u64] {
+    pub(super) fn row_mut(&mut self, id: usize) -> &mut [u64] {
         assert!(id < self.n);
         unsafe {
             std::slice::from_raw_parts_mut(
@@ -116,7 +116,7 @@ impl DynamicSm {
             )
         }
     }
-    fn metadata(&self, id: usize) -> (f32, f32, f32, f32, u32) {
+    pub(super) fn metadata(&self, id: usize) -> (f32, f32, f32, f32, u32) {
         let row = self.row(id);
         let p = self.words * 2;
         (
@@ -127,7 +127,7 @@ impl DynamicSm {
             row[p + 2] as u32,
         )
     }
-    fn write_metadata(
+    pub(super) fn write_metadata(
         &mut self,
         id: usize,
         weak: f32,
@@ -729,7 +729,7 @@ impl CorrectedSmIndex {
             }
         })
     }
-    fn search_dynamic<const TRACE: bool, const OPTIMIZED: bool, S: ExactSource>(
+    pub(super) fn search_dynamic<const TRACE: bool, const OPTIMIZED: bool, S: ExactSource>(
         &self,
         q: &[f32],
         graph: &FlatAdj,
@@ -738,6 +738,11 @@ impl CorrectedSmIndex {
     ) -> io::Result<SmSearchOutput> {
         if q.len() != self.dimension() || q.iter().any(|x| !x.is_finite()) {
             return Err(invalid("SM查询维度或数值无效"));
+        }
+        if source.owns_workspace() {
+            let mut query = DynamicQuery::default();
+            query.encode(q, OPTIMIZED);
+            return self.dynamic_encoded::<TRACE, OPTIMIZED, _>(q, graph, source, cfg, &query);
         }
         QUERY.with(|cell| {
             let mut query = cell.borrow_mut();

@@ -9,6 +9,9 @@ import shutil
 import tempfile
 
 import triviumdb
+from documents import run_documents
+from quiver_ssd import run_quiver_ssd
+from named_graphs import run_named_graphs
 from write_boundaries import run_write_boundaries
 from index_graph_boundaries import run_index_graph_boundaries
 from query_numeric_indexes import run_query_numeric_indexes
@@ -409,6 +412,9 @@ def run_search_boundaries(root: str) -> None:
 
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="triviumdb-python-public-api-") as root:
+        run_quiver_ssd(root)
+        run_documents(root)
+        run_named_graphs(root)
         run_search_boundaries(root)
         run_lifecycle_contract(root)
         run_resource_contract(root)
@@ -489,7 +495,7 @@ def main() -> None:
         ]
 
         storage = db.storage_info()
-        assert storage["database_format_current"] == 11
+        assert storage["database_format_current"] == 13
         assert storage["property_index_format"] == 8
         assert storage["node_count"] == 2
 

@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> 本文列出 `0.9.0` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本记录见[变更说明](changes/0.9.0.md)，开发中的接口扩展见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
+> 本文列出以 `0.9.0` 为基线的当前开发版本Rust、Python（PyO3）和Node.js（napi-rs）公共API。版本记录见[变更说明](changes/0.9.0.md)，开发中的接口扩展见[未发布变更](changes/unreleased.md)。许可为Apache-2.0。
 
 ---
 
@@ -8,9 +8,12 @@
 
 - [嵌入式 Console 与共享资源](#嵌入式-console-与共享资源)
 - [数据库生命周期](#数据库生命周期)
+- [文档来源与结构](#文档来源与结构)
+- [命名图](#命名图)
 - [节点 CRUD](#节点-crud)
 - [图谱操作](#图谱操作)
 - [搜索与召回](#搜索与召回)
+- [QuIVer INT8 运行时](#quiver-int8-运行时)
 - [Hook 扩展系统](#hook-扩展系统)
 - [元数据过滤](#元数据过滤)
 - [TQL、Prepared 与一等值](#tqlprepared-与一等值)
@@ -286,7 +289,7 @@ db.set_sync_mode(SyncMode::Off)?;
 
 数据访问统一执行生命周期检查：Rust 的 `get`、`get_payload`、`get_edge`、`get_edges`、`get_incoming_edges`、`get_all_ids`、`all_node_ids`、`node_count`、`contains`、`neighbors`、`neighbors_with_labels`、`shortest_path`、`graph_stats`、`validate_graph`、`list_indexes`、`list_unique_indexes`、`index_info` 与 `clear_search_state` 返回 `Result`；`set_hook` 也返回 `Result<()>`。调用方使用 `?` 或显式处理错误。Python/Node 的打开状态返回类型保持一致，关闭后抛错。状态、资源统计和配置诊断继续可读。
 
-`flush()` 通过 `.publish` 撤销日志管理主数据、向量、QuIVer、文本、属性与图索引文件组。Mmap 在各文件同步后提交 marker，Rom 在同步后提交日志状态。ReadWrite `open()` 先完成中断恢复，再流式回放 WAL。备份使用有界缓冲，额外磁盘空间与纳入发布的旧文件组大小对应。当前开发主文件为 v11，marker 为 v3，发布日志为 v2，并支持读取历史 v1 日志。有界编辑回执随主文件一同发布，协议见[恢复说明](security.md#8-mmap-三文件一致性标记flush_ok-v3)。
+`flush()` 通过 `.publish` 撤销日志管理主数据、向量、QuIVer、文本、属性与图索引文件组。Mmap 在各文件同步后提交 marker，Rom 在同步后提交日志状态。ReadWrite `open()` 先完成中断恢复，再流式回放 WAL。备份使用有界缓冲，额外磁盘空间与纳入发布的旧文件组大小对应。当前开发主文件为 v13，marker 为 v3，发布日志为 v2，并支持读取历史 v1 日志。命名图、文档候选／归档和有界编辑回执随主文件一同发布，协议见[恢复说明](security.md#8-mmap-三文件一致性标记flush_ok-v3)。
 
 WAL 的完整帧发生 CRC、解码或超长字段损坏时，`open()` 返回 `CorruptedFile` 并保留完整日志；物理未写完的尾帧继续按提交边界恢复。QuIVer 元数据 v2 将索引绑定到主文件、向量内容及活跃 ID/slot；失配按 `missing_index_policy` 回退或报错。底层 BQ Rust 距离、签名读取和原始存储解码接口返回 `Result`，详见 [QuIVer 边界](quiver.md#索引事实绑定与-bq-边界)。
 
@@ -325,6 +328,10 @@ if not db.close_timeout(5000):
 
 Python 关闭等待释放 GIL。Node `closeTimeout()` 同步等待；需要继续处理事件循环时，可结合 `requestShutdown()`、`closeTimeout(0)` 和宿主定时器轮询。阶段转换、失败重试与关闭完成语义见[关闭协议](lifecycle-snapshots.md#关闭协议)。
 
+### 文档解析与分批发布
+
+文档接入在 Core、Reader／Writer 和共享 `document_request`／`documentRequest` 提供自动解析、原文映射及持久化候选发布。新增 JSON 操作为 `parse`、`ingest`、`put_parsed`、`begin_upload`、`append_upload`、`upload_status`、`list_uploads`、`publish_upload` 和 `abort_upload`。节点 ID 使用十进制字符串，解析正文范围采用 UTF-8 字节，来源证据包含映射精度及可选页码／区域。候选通过批次序号重试，最终根修订 CAS 与表示更新位于同一事务。完整参数和配额见[文档解析与分批发布](document-ingestion.md)。
+
 ### 一致快照与恢复
 
 | Rust | Python | Node.js | 返回值 |
@@ -336,6 +343,30 @@ Python 关闭等待释放 GIL。Node `closeTimeout()` 同步等待；需要继�
 Rust 独立校验与恢复提供接收 `&ResourceRuntime` 的 `_with_runtime` 版本。创建快照使用可写实例；目标采用已存在的父目录和全新的子目录。恢复目录中的数据库文件固定为 `database.tdb`，宿主按 manifest 中的维度和原数据库 dtype 显式打开。
 
 manifest 包含 generation ID、dtype、维度、节点数、制品长度和 CRC。已有目标、发布后目录同步失败及校验失败的错误映射见[一致快照](lifecycle-snapshots.md#一致快照)。
+
+---
+
+## 文档来源与结构
+
+当前开发版新增 `document::DocumentWrite<T>`、`DocumentSnapshot`、`DocumentReference` 和 `DocumentEvidence`。Rust Core 提供 `put_document`、`get_document`、`resolve_document_reference`、`delete_document`，以及 `search_documents`、`search_documents_vector`、`search_documents_hybrid`、`document_context`、`clear_document_index`。`DatabaseReader` 提供对应读取和内存缓存回收入口。Python 的 `document_request(request_json)`、Node 的 `documentRequest(requestJson)` 和 Rust 的 `sdk::documents::request` 共享 `put/get/resolve/delete/search/search_vector/search_hybrid/context/clear_index` JSON 协议。
+
+文档根节点及可选片段表示复用现有节点，纯目录块保存在版本化 Payload 结构清单中。来源修订、SHA-256、UTF-8 范围、父子层级及原子替换／删除的字段和示例见[文档来源与结构](documents.md)。JSON NodeId 采用十进制字符串，文档修订保护使用 `TDB_DOCUMENT_REVISION_MISMATCH`。
+
+`DocumentSearchQuery` 分别检索整篇或片段 BM25 语料，支持来源、文档、粒度过滤与预期修订。完整命中集合先按文档分组，组和命中按分数降序及 ID 升序稳定截断。`DocumentContextQuery` 接受检索引用，按逻辑父级扩展邻居和祖先，并合并同修订的证据窗口。派生缓存随事实更新失效，在首次检索时构建。预算、默认值和完整返回字段见[分组检索与上下文](documents.md#分组文本检索)。
+
+`match_mode` 提供 `any`、`phrase`、`ordered_near`，`max_gap` 指有序邻近的累计跳过词项数。`include_matches=true` 返回 `DocumentTextMatch` 和 `DocumentTokenMatch`，包括实际窗口证据、归一化词项、单位内词序与来源字节范围。搜索提供并可核对 `analyzer_id`。位置条件在来源分组前验证，明细按每个起点的最短完整窗口返回。默认值、中文双字重叠语义及新增额度见[位置查询与词项证据](documents.md#位置查询与词项证据)。
+
+`fields` 按块 `kind` 选择独立 BM25 字段语料并设置权重，响应的 `field_corpora` 提供对应统计。`document_filter` 与 `block_filter` 分别对根和候选块的 `data` 求值，`members` 提供明确作用域的数组任意／全部成员过滤。候选交集与事实复核在来源分组及截断前完成。字段和块条件使用 `block` 层级，完整边界见[字段检索](documents.md#字段检索与评分)及[元数据与成员过滤](documents.md#元数据与集合成员过滤)。
+
+`search_vector` 接受原生 dtype 的 `vector` 与 `DocumentVectorOptions`，按整篇或片段候选进行精确或 QuIVer ANN 召回。`search_hybrid` 使用 `DocumentHybridOptions`，复用既有 RRF 融合规则。来源、成员、元数据及位置约束在分组前统一生效。结果增加每个命中的两路原始分数和排名，以及整体实际路由、候选规模、访问计数与停止原因，完整协议见[文档向量与混合召回](documents.md#文档向量与混合召回)。
+
+Rust 的查询和额度结构可使用 `..Default::default()` 补全默认字段。解析较早结果 JSON 时，缺省 `matches` 与 `field_corpora` 使用空集合，缺省 `scores` 与 `retrieval` 使用 `None`，缺省 `analyzer_id` 使用空字符串；当前内核生成的结果携带明确的分析器身份。
+
+---
+
+## 命名图
+
+Rust Core与Reader提供 `get_named_graph`、`list_named_graphs`、`named_graph_scope`、`traverse_named_graph`。Core写入通过 `put_named_graph`、`edit_named_graph`、`delete_named_graph` 和 `TxBuilder` 条件图操作提交。Python使用 `graph_request(str) -> str`，Node使用 `graphRequest(string): string`。共享JSON协议提供 `put/edit/get/list/scope/traverse/delete`，ID采用规范十进制字符串，已有图写入核对预期修订。成员、独立边、删除、预算与格式详情见[命名图契约](named-graphs.md)。
 
 ---
 
@@ -537,6 +568,8 @@ if (db.contains(42)) console.log('节点存在')
 ---
 
 ## 图谱操作
+
+本节方法访问默认图。按命名图保存共享成员与独立边时，使用[命名图入口](#命名图)和显式图作用域。
 
 ### link — 建立有向边
 
@@ -956,6 +989,16 @@ let results = db.search_advanced(&query_vec, &config)?;
 > 所有参数均执行安全钳位：`teleport_alpha` 被约束在 [0, 1]，`fista_lambda` 在 [1e-5, 100]，`dpp_quality_weight` 在 [0, 10]。
 
 > **提醒**：当 `enable_advanced_pipeline = false` 时，`search_advanced` 的行为与 `search` 完全一致。
+
+---
+
+## QuIVer INT8 运行时
+
+Rust 的 `Database` 与 `DatabaseReader` 通过 `configure_quiver_int8(SsdRuntimeOptions)`、`search_quiver_int8(query, config)`、`quiver_int8_stats()` 和 `close_quiver_int8()` 使用显式 INT8 检索。可写数据库另提供 `collect_quiver_temporary()`。
+
+Python 的 `quiver_request(request_json: str) -> str` 与 Node 的 `quiverRequest(requestJson: string): string` 共享 JSON 命令。`configure` 接收 `options`，字段为 `residency`、`cache_bytes`、`io_mode`、`io_depth`。`search` 接收 `vector`、`top_k`、`ef_search` 和可选 `rerank_limit`，结果中的 NodeId 使用十进制字符串。`stats` 返回活动 Reader 统计或 `null`，`close` 释放当前运行时，`collect_temporary` 返回 `removed` 数量。
+
+数据库负责来源摘要、checkpoint 后的派生代际刷新和关闭排空。缓存、Hot／SSD 切换、真实 Direct I/O 后端、预算与备份条件见 [QuIVer 运行时](quiver.md#数据库与-sdk-入口)。
 
 ---
 
@@ -1475,7 +1518,7 @@ print(info["property_index_format"])    # 8
 print(info["sidecars"])
 ```
 
-`tql_mut` 读查询、patch 普通对象简写、Node 数字构造参数分别返回迁移错误。Rust 同步配置通过 `Config.sync_mode` 提供。当前 WAL 为 v4，ReadWrite 按历史布局校验并原子升级 v2/v3，流式恢复完整提交前缀。ReadOnly/Immutable 采用物理零写契约，旧格式升级由 Writer 完成。无头、未知版本及非法迁移输入返回结构化错误。
+`tql_mut` 读查询、patch 普通对象简写、Node 数字构造参数分别返回迁移错误。Rust 同步配置通过 `Config.sync_mode` 提供。当前 WAL 为 v6，ReadWrite 按独立历史布局校验并原子升级 v2/v3/v4/v5，流式恢复完整提交前缀。ReadOnly/Immutable 采用物理零写契约，旧格式升级由 Writer 完成。无头、未知版本及非法迁移输入返回结构化错误。
 
 ---
 
@@ -1704,7 +1747,7 @@ QuIVer 支持增量 Insert/Delete/Update，并保护入口导航树，入口升�
 
 ## 维度迁移
 
-> **格式提醒**　当前开发 `.tdb` 为 v11，支持读取 v5–v11，可写句柄在后续持久化时发布当前格式。Mmap raw Payload 位于 generation 绑定的 `.pld`，详见[持久化布局](features.md)。ReadOnly/Immutable 按物理零写契约打开，早于 v5 的文件通过旧内核导出迁移。旧内核环境使用升级前的完整文件组备份。sidecar 分别采用 `.pidx v8`、`.gidx v3`、`.text v2` 和 `.quiver v1`。
+> **格式提醒**　当前开发 `.tdb` 为 v13，支持读取 v5–v13，可写句柄在后续持久化时发布当前格式。Mmap raw Payload 位于 generation 绑定的 `.pld`，详见[持久化布局](features.md)。ReadOnly/Immutable 按物理零写契约打开，早于 v5 的文件通过旧内核导出迁移。旧内核环境使用升级前的完整文件组备份。sidecar 分别采用 `.pidx v8`、`.gidx v3`、`.text v2` 和 `.quiver v2`；QuIVer v1 读取和默认路由恢复见[重载说明](quiver.md#增量维护重载与内存)。
 
 复合索引字段列表按 JSON 数组保存，支持 NUL 和 Unicode 字段名；字段名总长度上限为 1 MiB，字段数量上限为 65,535。旧复合 posting 通过事实扫描保持结果，唯一约束从主文件恢复；普通复合索引可按原字段列表重新创建。唯一约束创建或删除在发布失败后返回原始错误，并将实例标为待恢复，后续读写返回 `TDB_WAL_CLOSED`。释放实例后可写重开，由发布提交点决定恢复旧定义或采用新定义。
 
@@ -1892,7 +1935,7 @@ WAL 追加、flush 或同步失败时返回原始错误并隔离该 writer。后
 ## 持久化类型、解析与打开准入
 
 - 文件头保存 dtype、元素宽度与 CRC32。ReadWrite/ReadOnly 使用其他 dtype 打开返回 `TDB_DTYPE_MISMATCH`，详情包含 `stored` 和 `requested`，取值为 `f32`、`f16`、`u64`。Rom 与 Mmap 共用此契约。
-- v5–v9 非空检查点通过完整向量块几何验证类型。无类型基础检查点的历史 WAL，以及空的无类型检查点附带非空 WAL，使用原版本、原 dtype 恢复并完成检查点或导出后再升级。当前 v11 检查点及 v4 WAL 由支持对应版本的内核处理，回退使用升级前的完整备份。
+- v5–v9 非空检查点通过完整向量块几何验证类型。无类型基础检查点的历史 WAL，以及空的无类型检查点附带非空 WAL，使用原版本、原 dtype 恢复并完成检查点或导出后再升级。当前 v13 检查点及 v6 WAL 由支持对应版本的内核处理，回退使用升级前的完整备份。
 - 发生向量文件替换或重映射失败时，原调用保留 I/O 错误。映射已经失效的实例及其共享句柄随后返回 `TDB_WAL_CLOSED`；释放这些实例后，重新以可写模式打开，恢复发布基础并回放 WAL。
 - TQL 字符串入口完整消费输入，语句尾部非法内容在生成写操作前返回 `TDB_QUERY_PARSE`。输入上限为 4 MiB、262,144 个 token、128 层括号嵌套和 128 个表达式运算符；已有递归预算共同约束表达式与谓词。向量及 JSON 字面量中的负号按字面量处理。
 - `memory_limit` 覆盖打开时的节点与图目录、Rom 向量堆副本、Payload 解码、派生索引恢复和 WAL 暂存。各阶段在分配前进行保守峰值准入，打开完成前核对总估算占用；预算不足返回 `TDB_CAPACITY_RESERVATION_REJECTED`，本次共享资源预留释放。原始 mmap 向量和 Payload 映射按文件映射管理，堆目录及解码工作区参与准入。

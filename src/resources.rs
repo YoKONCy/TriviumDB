@@ -119,6 +119,7 @@ impl ResourceFailure {
 
 #[derive(Default)]
 struct State {
+    io_threads: usize,
     database_bytes: usize,
     workspace_bytes: usize,
     maintenance_bytes: usize,
@@ -251,7 +252,8 @@ impl ResourceRuntime {
             peak_reserved_bytes: state.peak_bytes,
             attached_databases: state.databases,
             max_threads: self.0.limits.max_threads,
-            allocated_worker_threads: state.pools.iter().map(|entry| entry.threads).sum(),
+            allocated_worker_threads: state.pools.iter().map(|entry| entry.threads).sum::<usize>()
+                + state.io_threads,
             live_worker_threads: self.0.workers.live.load(Ordering::SeqCst),
             peak_worker_threads: self.0.workers.peak.load(Ordering::SeqCst),
             max_active_tasks: self.0.limits.max_active_tasks,
@@ -534,8 +536,18 @@ impl ResourceRuntime {
 
     /// 仅回收没有调用方持有的池；资源不足立即返回，不在数据库锁内等待其他任务。
     pub(crate) fn pool(&self, requested: usize) -> Result<ResourcePool> {
-        let threads = requested.clamp(1, self.max_threads());
         let mut state = lock(&self.0.state);
+        let available = self.max_threads().saturating_sub(state.io_threads);
+        if available == 0 {
+            state.rejected_threads += 1;
+            return Err(TriviumError::ResourceBudgetExceeded {
+                resource: "worker_threads",
+                requested: 1,
+                used: state.io_threads,
+                limit: self.max_threads(),
+            });
+        }
+        let threads = requested.clamp(1, available);
         // 同一运行时的嵌套工作可以复用更小的当前池，保证不会扩张其线程上限。
         if let Some(entry) = state
             .pools
@@ -548,7 +560,8 @@ impl ResourceRuntime {
                 pool: Arc::clone(&entry.pool),
             });
         }
-        let mut allocated: usize = state.pools.iter().map(|entry| entry.threads).sum();
+        let mut allocated: usize =
+            state.pools.iter().map(|entry| entry.threads).sum::<usize>() + state.io_threads;
         while allocated.saturating_add(threads) > self.max_threads() {
             let Some(index) = state
                 .pools
@@ -613,6 +626,63 @@ impl ResourceRuntime {
             runtime: self.clone(),
             pool,
         })
+    }
+}
+
+impl ResourceRuntime {
+    pub(crate) fn reserve_io_threads(&self, count: usize) -> Result<IoThreadReservation> {
+        let mut state = lock(&self.0.state);
+        let count = count.min(
+            self.max_threads()
+                .saturating_sub(1)
+                .saturating_sub(state.io_threads),
+        );
+        let mut allocated =
+            state.pools.iter().map(|pool| pool.threads).sum::<usize>() + state.io_threads;
+        while allocated.saturating_add(count) > self.max_threads() {
+            let Some(index) = state
+                .pools
+                .iter()
+                .position(|pool| Arc::strong_count(&pool.pool) == 1)
+            else {
+                state.rejected_threads += 1;
+                return Err(TriviumError::ResourceBudgetExceeded {
+                    resource: "worker_threads",
+                    requested: count,
+                    used: allocated,
+                    limit: self.max_threads(),
+                });
+            };
+            let pool = state.pools.remove(index);
+            allocated -= pool.threads;
+            pool.retire();
+        }
+        state.io_threads += count;
+        Ok(IoThreadReservation {
+            runtime: self.clone(),
+            count,
+        })
+    }
+
+    pub(crate) fn enter_io_worker(&self) -> impl Drop + use<> {
+        let live = self.0.workers.live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.0.workers.peak.fetch_max(live, Ordering::SeqCst);
+        WorkerExit(self.0.workers.clone())
+    }
+}
+
+pub(crate) struct IoThreadReservation {
+    runtime: ResourceRuntime,
+    count: usize,
+}
+impl IoThreadReservation {
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+}
+impl Drop for IoThreadReservation {
+    fn drop(&mut self) {
+        lock(&self.runtime.0.state).io_threads -= self.count;
     }
 }
 

@@ -3,8 +3,65 @@
 use super::TriviumError as E;
 use serde_json::{Value, json};
 
+#[test]
+fn 批量原文位置覆盖回车换行中间边界和非法排序() {
+    let source = "猫\r\n\tA";
+    let spans = super::QuerySpan::at_many(source, &[0, 3, 4, 5, 6, 7]).unwrap();
+    let expected = [
+        (0, 1, 1),
+        (3, 1, 2),
+        (4, 2, 1),
+        (5, 2, 1),
+        (6, 2, 2),
+        (7, 2, 3),
+    ];
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| (span.start_byte, span.line, span.column))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    for ((byte, line, column), span) in expected.into_iter().zip(spans) {
+        assert_eq!(
+            super::QuerySpan::at(source, byte),
+            Some(super::QuerySpan {
+                start_byte: byte,
+                end_byte: byte,
+                line,
+                column
+            })
+        );
+        assert_eq!(span.end_byte, byte);
+    }
+    for invalid in [vec![3, 0], vec![1], vec![8]] {
+        assert_eq!(
+            super::QuerySpan::at_many(source, &invalid)
+                .unwrap_err()
+                .code(),
+            "TDB_INVALID_INPUT"
+        );
+    }
+}
+
 pub(crate) fn cases() -> Vec<(E, &'static str, Value)> {
     vec![
+        (
+            E::GraphNotFound {
+                graph_id: "terms".into(),
+            },
+            "TDB_GRAPH_NOT_FOUND",
+            json!({"graph_id":"terms"}),
+        ),
+        (
+            E::GraphRevisionMismatch {
+                graph_id: "terms".into(),
+                expected: "old".into(),
+                actual: "new".into(),
+            },
+            "TDB_GRAPH_REVISION_MISMATCH",
+            json!({"graph_id":"terms","expected":"old","actual":"new"}),
+        ),
         (
             E::TransactionFinished,
             "TDB_TRANSACTION_FINISHED",

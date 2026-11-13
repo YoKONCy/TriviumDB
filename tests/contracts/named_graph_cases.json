@@ -1,0 +1,29 @@
+{
+  "nodes": ["9007199254740993", "9007199254740995", "9007199254740997"],
+  "graphs": [
+    {
+      "graph_id": "词级图",
+      "metadata": {"kind": "terms"},
+      "members": ["9007199254740995", "9007199254740993"],
+      "edges": [{"source_id": "9007199254740993", "target_id": "9007199254740995", "label": "same", "weight": 0.5, "metadata": {"owner": "terms"}}]
+    },
+    {
+      "graph_id": "事件图",
+      "metadata": {"kind": "events"},
+      "members": ["9007199254740997", "9007199254740993", "9007199254740995"],
+      "edges": [
+        {"source_id": "9007199254740995", "target_id": "9007199254740997", "label": "next", "weight": 1.0, "metadata": {"step": 2}},
+        {"source_id": "9007199254740993", "target_id": "9007199254740995", "label": "same", "weight": 2.0, "metadata": {"owner": "events"}}
+      ]
+    }
+  ],
+  "expected": {
+    "single_members": ["9007199254740993", "9007199254740995"],
+    "union_members": ["9007199254740993", "9007199254740995", "9007199254740997"],
+    "union_edges": [
+      {"graph_id": "事件图", "source_id": "9007199254740993", "target_id": "9007199254740995", "label": "same", "weight": 2.0, "metadata": {"owner": "events"}},
+      {"graph_id": "词级图", "source_id": "9007199254740993", "target_id": "9007199254740995", "label": "same", "weight": 0.5, "metadata": {"owner": "terms"}},
+      {"graph_id": "事件图", "source_id": "9007199254740995", "target_id": "9007199254740997", "label": "next", "weight": 1.0, "metadata": {"step": 2}}
+    ]
+  }
+}

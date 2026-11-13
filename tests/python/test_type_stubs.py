@@ -29,6 +29,15 @@ import triviumdb
 from triviumdb import Edge, EdgeDirection, NodeView, SearchHit, Transaction, TriviumDB
 
 
+def document_types(database: triviumdb.TriviumDB) -> None:
+    assert_type(database.quiver_request('{"operation":"stats"}'), str)
+    database.quiver_request({"operation": "stats"})  # type: ignore[arg-type]
+    assert_type(database.graph_request('{"operation":"list"}'), str)
+    database.graph_request({"operation": "list"})  # type: ignore[arg-type]
+    assert_type(database.document_request('{"operation":"get","document_id":"7"}'), str)
+    database.document_request({"operation": "get"})  # type: ignore[arg-type]
+
+
 def request_context_types(database: TriviumDB) -> None:
     context = triviumdb.RequestContext("typed-request", timeout_ms=0)
     assert_type(context.request_id, str)

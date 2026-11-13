@@ -644,6 +644,12 @@ pub(crate) fn json_encoded_len(value: &serde_json::Value) -> Result<usize> {
         }
         Ok(())
     }
+    validate_depth(value, 0)?;
+    serialized_json_len(value)
+}
+
+/// 对类型化SDK表示计数，在分配输出缓冲区前完成预算准入。
+pub(crate) fn serialized_json_len(value: &impl serde::Serialize) -> Result<usize> {
     struct Counter(usize);
     impl Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -654,7 +660,6 @@ pub(crate) fn json_encoded_len(value: &serde_json::Value) -> Result<usize> {
             Ok(())
         }
     }
-    validate_depth(value, 0)?;
     let mut counter = Counter(0);
     serde_json::to_writer(&mut counter, value).map_err(|error| {
         TriviumError::InvalidInput(format!("JSON 编码失败 (JSON encoding failed): {error}"))

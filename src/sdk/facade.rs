@@ -23,6 +23,29 @@ pub struct DatabaseReader<T: VectorType> {
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseReader<T> {
+    pub fn configure_quiver_int8(
+        &self,
+        options: crate::index::quiver::ssd::SsdRuntimeOptions,
+    ) -> Result<crate::index::quiver::ssd::SsdStats> {
+        self.inner.configure_quiver_int8(options)
+    }
+
+    pub fn search_quiver_int8(
+        &self,
+        query: &[f32],
+        config: &crate::index::quiver::QuIVerSearchConfig,
+    ) -> Result<Vec<(u64, f32)>> {
+        self.inner.search_quiver_int8(query, config)
+    }
+
+    pub fn quiver_int8_stats(&self) -> Result<Option<crate::index::quiver::ssd::SsdStats>> {
+        self.inner.quiver_int8_stats()
+    }
+
+    pub fn close_quiver_int8(&self) -> Result<()> {
+        self.inner.close_quiver_int8()
+    }
+
     pub fn with_request_context<R>(
         &self,
         context: &super::RequestContext,
@@ -195,6 +218,103 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
 
     pub fn get(&self, id: NodeId) -> Result<Option<NodeView<T>>> {
         self.inner.get(id)
+    }
+
+    pub fn get_named_graph(
+        &self,
+        graph_id: &str,
+        limits: &crate::named_graph::NamedGraphLimits,
+    ) -> Result<Option<crate::named_graph::NamedGraphSnapshot>> {
+        self.inner.get_named_graph(graph_id, limits)
+    }
+    pub fn list_named_graphs(
+        &self,
+        limits: &crate::named_graph::NamedGraphLimits,
+    ) -> Result<Vec<crate::named_graph::NamedGraphInfo>> {
+        self.inner.list_named_graphs(limits)
+    }
+    pub fn named_graph_scope(
+        &self,
+        scope: &crate::named_graph::NamedGraphScope,
+        limits: &crate::named_graph::NamedGraphLimits,
+    ) -> Result<crate::named_graph::ScopedGraphSnapshot> {
+        self.inner.named_graph_scope(scope, limits)
+    }
+    pub fn traverse_named_graph(
+        &self,
+        scope: &crate::named_graph::NamedGraphScope,
+        start: NodeId,
+        max_depth: usize,
+        limits: &crate::named_graph::NamedGraphLimits,
+    ) -> Result<crate::named_graph::ScopedGraphSnapshot> {
+        self.inner
+            .traverse_named_graph(scope, start, max_depth, limits)
+    }
+
+    pub fn parse_document(
+        &self,
+        input: &crate::document::parsing::DocumentParseInput,
+    ) -> Result<crate::document::parsing::ParsedDocument> {
+        self.inner.parse_document(input)
+    }
+    pub fn document_upload_status(
+        &self,
+        upload_id: &str,
+    ) -> Result<crate::document::DocumentUploadStatus> {
+        self.inner.document_upload_status(upload_id)
+    }
+    pub fn list_document_uploads(
+        &self,
+        document_id: Option<NodeId>,
+    ) -> Result<Vec<crate::document::DocumentUploadStatus>> {
+        self.inner.list_document_uploads(document_id)
+    }
+
+    pub fn get_document(&self, id: NodeId) -> Result<Option<crate::document::DocumentSnapshot>> {
+        self.inner.get_document(id)
+    }
+
+    pub fn search_documents(
+        &self,
+        query: &crate::document::DocumentSearchQuery,
+    ) -> Result<crate::document::DocumentSearchResult> {
+        self.inner.search_documents(query)
+    }
+
+    pub fn document_context(
+        &self,
+        query: &crate::document::DocumentContextQuery,
+    ) -> Result<Vec<crate::document::DocumentContext>> {
+        self.inner.document_context(query)
+    }
+
+    pub fn search_documents_vector(
+        &self,
+        query: &crate::document::DocumentSearchQuery,
+        vector: &[T],
+        options: &crate::document::DocumentVectorOptions,
+    ) -> Result<crate::document::DocumentSearchResult> {
+        self.inner.search_documents_vector(query, vector, options)
+    }
+
+    pub fn search_documents_hybrid(
+        &self,
+        query: &crate::document::DocumentSearchQuery,
+        vector: &[T],
+        options: &crate::document::DocumentHybridOptions,
+    ) -> Result<crate::document::DocumentSearchResult> {
+        self.inner.search_documents_hybrid(query, vector, options)
+    }
+
+    pub fn clear_document_index(&self) -> Result<()> {
+        self.inner.clear_document_index()
+    }
+
+    pub fn resolve_document_reference(
+        &self,
+        reference: crate::document::DocumentReference,
+    ) -> Result<crate::document::DocumentEvidence> {
+        self.inner.resolve_document_reference(reference)
     }
 
     pub fn get_payload(&self, id: NodeId) -> Result<Option<serde_json::Value>> {

@@ -29,6 +29,14 @@ use std::time::Instant;
 #[path = "quiver/corrected_sm.rs"]
 pub mod corrected_sm;
 
+/// SSD 冷向量的通用维度编码、布局校验与标量评分基底。
+#[path = "quiver/cold.rs"]
+pub mod cold;
+
+/// 单文件SSD索引的流式发布、代际Reader与显式量化检索。
+#[path = "quiver/ssd.rs"]
+pub mod ssd;
+
 mod connectivity;
 
 #[cfg(test)]
@@ -36,6 +44,10 @@ mod connectivity_tests;
 
 #[cfg(test)]
 mod memory_safety_tests;
+
+#[cfg(test)]
+#[path = "quiver/persistence_tests.rs"]
+mod persistence_tests;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct NonNanF32(pub f32);
@@ -57,6 +69,11 @@ impl Ord for NonNanF32 {
 /// 查询时导航评分器。评分越小，候选越优先；该抽象不参与 QuIVer 建图或裁边。
 pub trait NavigationScorer {
     fn score(&mut self, node_id: u64, bq_distance: u32) -> u32;
+
+    /// search_with_scorer控制检查点；返回false时结束候选生成，调用方保留并传播原因。
+    fn checkpoint(&mut self) -> bool {
+        true
+    }
 
     fn accept_result(&mut self, _node_id: u64) -> bool {
         true
@@ -1386,6 +1403,9 @@ impl QuIVer {
         use std::collections::BinaryHeap;
 
         visited.begin();
+        if !scorer.checkpoint() {
+            return Vec::new();
+        }
 
         let mut candidates: BinaryHeap<Reverse<(NonNanF32, u32)>> =
             BinaryHeap::with_capacity(ef * 2);
@@ -1407,6 +1427,9 @@ impl QuIVer {
         results.push((d, entry));
 
         while let Some(Reverse((cd, cur))) = candidates.pop() {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
             if results.len() >= ef && cd > results.peek().unwrap().0 {
                 break;
             }
@@ -1420,6 +1443,9 @@ impl QuIVer {
             }
 
             for &nb in nbs {
+                if !scorer.checkpoint() {
+                    return Vec::new();
+                }
                 if visited.test(nb as usize) {
                     continue;
                 }
@@ -1438,6 +1464,9 @@ impl QuIVer {
 
         let mut res: Vec<(NonNanF32, u32)> = results.into_vec();
         for item in &mut res {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
             item.0 = NonNanF32(self.bq_store.distance_to_sig_in_bounds(
                 item.1 as usize,
                 q_sig,
@@ -1627,6 +1656,9 @@ impl QuIVer {
         scratch: &mut SearchScratch384,
         scorer: &mut S,
     ) -> Vec<(NonNanF32, u32)> {
+        if !scorer.checkpoint() {
+            return Vec::new();
+        }
         scratch.visited.begin();
         scratch.candidates.clear();
         scratch.results.clear();
@@ -1645,6 +1677,9 @@ impl QuIVer {
         scratch.results.push((initial_distance, entry));
 
         while let Some(Reverse((candidate_distance, current))) = scratch.candidates.pop() {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
             if scratch.results.len() >= ef && candidate_distance > scratch.results.peek().unwrap().0
             {
                 break;
@@ -1656,6 +1691,9 @@ impl QuIVer {
                 }
             }
             for &neighbor in neighbors {
+                if !scorer.checkpoint() {
+                    return Vec::new();
+                }
                 if scratch.visited.test(neighbor as usize) {
                     continue;
                 }
@@ -1677,6 +1715,9 @@ impl QuIVer {
 
         let mut candidates = scratch.results.drain().collect::<Vec<_>>();
         for candidate in &mut candidates {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
             candidate.0 = NonNanF32(self.bq_store.distance_to_sig_in_bounds(
                 candidate.1 as usize,
                 q_sig,
@@ -2141,6 +2182,35 @@ impl QuIVer {
     pub fn search_with_scorer<F, S>(
         &self,
         query: &[f32],
+        get_vec_f32: F,
+        config: &QuIVerSearchConfig,
+        scorer: &mut S,
+    ) -> Vec<(u64, f32)>
+    where
+        F: FnMut(usize, &mut Vec<f32>) -> bool,
+        S: NavigationScorer,
+    {
+        self.search_with_scorer_impl::<false, _, _>(query, get_vec_f32, config, scorer)
+    }
+
+    /// 文档请求使用拥有型工作区，每轮结束归还访问位图、候选堆和精排缓冲。
+    pub(crate) fn search_with_scorer_local<F, S>(
+        &self,
+        query: &[f32],
+        get_vec_f32: F,
+        config: &QuIVerSearchConfig,
+        scorer: &mut S,
+    ) -> Vec<(u64, f32)>
+    where
+        F: FnMut(usize, &mut Vec<f32>) -> bool,
+        S: NavigationScorer,
+    {
+        self.search_with_scorer_impl::<true, _, _>(query, get_vec_f32, config, scorer)
+    }
+
+    fn search_with_scorer_impl<const LOCAL: bool, F, S>(
+        &self,
+        query: &[f32],
         mut get_vec_f32: F,
         config: &QuIVerSearchConfig,
         scorer: &mut S,
@@ -2172,12 +2242,18 @@ impl QuIVer {
             let ul = l - 1;
             if ul < self.upper_layers.len() {
                 loop {
+                    if !scorer.checkpoint() {
+                        return Vec::new();
+                    }
                     let mut changed = false;
                     let cur_d =
                         self.bq_store
                             .distance_to_sig_in_bounds(cur_node as usize, &q_sig, dim);
                     let mut best_d = cur_d;
                     for &nb in &self.upper_layers[ul][cur_node as usize] {
+                        if !scorer.checkpoint() {
+                            return Vec::new();
+                        }
                         let nd = self
                             .bq_store
                             .distance_to_sig_in_bounds(nb as usize, &q_sig, dim);
@@ -2203,14 +2279,13 @@ impl QuIVer {
         let use_384 =
             dim == 384 && !*crate::index::bq::FORCE_NO_384_KERNEL && cfg!(target_arch = "x86_64");
         if use_384 {
-            return SCRATCH_384.with(|cell| {
-                let mut scratch = cell.borrow_mut();
+            let mut search = |scratch: &mut SearchScratch384| {
                 scratch.visited.grow(self.n);
                 let mut bq_candidates = self.beam_search_l0_384_with_scorer(
                     &q_sig,
                     cur_node,
                     config.ef_search,
-                    &mut scratch,
+                    scratch,
                     scorer,
                 );
                 self.sort_rerank_candidates(&mut bq_candidates);
@@ -2225,24 +2300,27 @@ impl QuIVer {
                     &bq_candidates,
                     config,
                     &mut get_vec_f32,
-                    &mut scratch,
+                    scratch,
                     scorer,
                 )
-            });
+            };
+            return if LOCAL {
+                search(&mut SearchScratch384::new())
+            } else {
+                SCRATCH_384.with(|cell| search(&mut cell.borrow_mut()))
+            };
         }
-        let mut bq_candidates = VISITED.with(|cell| {
-            let mut visited = cell.borrow_mut();
+        let mut navigate = |visited: &mut Bitset| {
             if visited.len < self.n {
                 visited.grow(self.n);
             }
-            self.beam_search_l0_with_scorer(
-                &q_sig,
-                cur_node,
-                config.ef_search,
-                &mut *visited,
-                scorer,
-            )
-        });
+            self.beam_search_l0_with_scorer(&q_sig, cur_node, config.ef_search, visited, scorer)
+        };
+        let mut bq_candidates = if LOCAL {
+            navigate(&mut Bitset::new(self.n))
+        } else {
+            VISITED.with(|cell| navigate(&mut cell.borrow_mut()))
+        };
         self.sort_rerank_candidates(&mut bq_candidates);
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::QuiverCandidateProduced);
@@ -2255,6 +2333,9 @@ impl QuIVer {
         let mut buf: Vec<f32> = Vec::with_capacity(dim);
         let mut scored: Vec<(f32, u32)> = Vec::with_capacity(rerank_limit);
         for &(_, nid) in &bq_candidates {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
             if scored.len() >= rerank_limit {
                 break;
             }
@@ -2309,6 +2390,9 @@ impl QuIVer {
         }
         let query_norm = cosine_query_norm_f32_384(query).unwrap_or_default();
         for &(_, nid) in bq_candidates {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
             if scratch.scored.len() >= rerank_limit {
                 break;
             }
@@ -3172,7 +3256,7 @@ impl QuIVer {
     // ── 持久化 ──
 
     const QUIVER_MAGIC: &'static [u8; 4] = b"QUIV";
-    pub const QUIVER_VERSION: u32 = 1;
+    pub const QUIVER_VERSION: u32 = 2;
 
     /// 将 QuIVer 索引保存到文件（POD memcpy 格式）
     ///
@@ -3186,6 +3270,7 @@ impl QuIVer {
     /// [SlotIndices: n × 8B]
     /// [NodeMaxLayer: n × 1B]
     /// [Upper Layers: 变长编码]
+    /// [Default SM: u64长度 + QDSM版本化路由行及CRC，长度0表示按原始向量恢复]
     /// ```
     pub fn save_to_file(&self, path: &std::path::Path) -> std::io::Result<()> {
         use std::io::{BufWriter, Write};
@@ -3194,6 +3279,24 @@ impl QuIVer {
         let file = std::fs::File::create(&tmp_path)?;
         let mut w = BufWriter::new(file);
 
+        self.write_snapshot(&mut w)?;
+        w.flush()?;
+        let file = w.into_inner().map_err(|e| e.into_error())?;
+        file.sync_all()?;
+        drop(file);
+        crate::storage::fs::robust_rename_and_sync(&tmp_path, path)?;
+
+        tracing::info!(
+            "QuIVer 索引已持久化 (QuIVer index persisted)：{} 个节点，dim={}，max_level={}",
+            self.n,
+            self.dim,
+            self.max_level
+        );
+        Ok(())
+    }
+
+    /// 将既有热索引格式流式写入容器，冷行区由存储层另行发布。
+    pub(crate) fn write_snapshot(&self, mut w: impl std::io::Write) -> std::io::Result<()> {
         // Magic + Version
         w.write_all(Self::QUIVER_MAGIC)?;
         w.write_all(&Self::QUIVER_VERSION.to_le_bytes())?;
@@ -3220,12 +3323,13 @@ impl QuIVer {
         w.write_all(bytemuck::cast_slice(&self.layer0.data))?;
 
         // Tombstones
-        let tomb_bytes: Vec<u8> = self
-            .tombstones
-            .iter()
-            .map(|&t| if t { 1 } else { 0 })
-            .collect();
-        w.write_all(&tomb_bytes)?;
+        let mut tomb_bytes = [0u8; 4096];
+        for chunk in self.tombstones.chunks(tomb_bytes.len()) {
+            for (byte, &deleted) in tomb_bytes.iter_mut().zip(chunk) {
+                *byte = u8::from(deleted);
+            }
+            w.write_all(&tomb_bytes[..chunk.len()])?;
+        }
 
         // IDs
         for &id in &self.ids {
@@ -3252,27 +3356,19 @@ impl QuIVer {
             }
         }
 
-        w.flush()?;
-        let file = w.into_inner().map_err(|e| e.into_error())?;
-        file.sync_all()?;
-        drop(file);
-
-        // 原子替换
-        #[cfg(windows)]
-        {
-            // Windows: 需要先删除目标文件
-            if path.exists() {
-                std::fs::remove_file(path)?;
+        if let Some(model) = &self.default_sm {
+            if model.dimension() != self.dim || model.len() != self.n {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "QuIVer默认SM身份不一致 (QuIVer default SM identity mismatch)",
+                ));
             }
+            w.write_all(&(model.routing_snapshot_len()? as u64).to_le_bytes())?;
+            model.write_routing_snapshot(&mut w, &self.ids, &self.tombstones)?;
+        } else {
+            w.write_all(&0u64.to_le_bytes())?;
         }
-        std::fs::rename(&tmp_path, path)?;
 
-        tracing::info!(
-            "QuIVer 索引已持久化 (QuIVer index persisted)：{} 个节点，dim={}，max_level={}",
-            self.n,
-            self.dim,
-            self.max_level
-        );
         Ok(())
     }
 
@@ -3320,7 +3416,7 @@ impl QuIVer {
 
         // Version
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        if version != Self::QUIVER_VERSION {
+        if !(1..=Self::QUIVER_VERSION).contains(&version) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -3451,6 +3547,11 @@ impl QuIVer {
                 "Tombstone 数据不完整 (Tombstone data incomplete)",
             ));
         }
+        if bytes[off..tomb_end].iter().any(|&byte| byte > 1) {
+            return Err(invalid(
+                "QuIVer墓碑编码无效 (Invalid QuIVer tombstone encoding)",
+            ));
+        }
         let tombstones: Vec<bool> = bytes[off..tomb_end].iter().map(|&b| b != 0).collect();
         off = tomb_end;
 
@@ -3559,8 +3660,19 @@ impl QuIVer {
         // 构建反向映射
         let mut id_to_internal = std::collections::HashMap::with_capacity(n);
         for (i, &id) in ids.iter().enumerate() {
-            if id == 0 || id_to_internal.contains_key(&id) {
-                return Err(invalid("QuIVer 节点 ID 为 0 或重复"));
+            if id == 0 {
+                return Err(invalid("QuIVer 节点 ID 为 0 (QuIVer node ID is zero)"));
+            }
+            if let Some(&previous) = id_to_internal.get(&id) {
+                // 向量更新保留旧墓碑行；同一业务ID仅允许一个活跃表示。
+                if !tombstones[previous as usize] && !tombstones[i] {
+                    return Err(invalid(
+                        "QuIVer 活跃节点 ID 重复 (Duplicate active QuIVer node ID)",
+                    ));
+                }
+                if !tombstones[previous as usize] {
+                    continue;
+                }
             }
             id_to_internal.insert(id, i as u32);
         }
@@ -3611,6 +3723,31 @@ impl QuIVer {
             visited: Bitset::new(n),
             connectivity_parents: Vec::new(),
         };
+        if version >= 2 {
+            let length_end = off
+                .checked_add(8)
+                .ok_or_else(|| invalid("SM长度偏移溢出 (SM length offset overflow)"))?;
+            let length_bytes = bytes
+                .get(off..length_end)
+                .ok_or_else(|| invalid("SM长度字段截断 (Truncated SM length field)"))?;
+            let length = u64::from_le_bytes(length_bytes.as_chunks::<8>().0[0]);
+            let length = usize::try_from(length)
+                .map_err(|_| invalid("SM长度超出平台范围 (SM length exceeds platform range)"))?;
+            let end = length_end
+                .checked_add(length)
+                .ok_or_else(|| invalid("SM快照长度溢出 (SM snapshot length overflow)"))?;
+            if end != bytes.len() {
+                return Err(invalid("SM快照范围不匹配 (SM snapshot range mismatch)"));
+            }
+            if length > 0 {
+                index.default_sm = Some(corrected_sm::CorrectedSmIndex::from_routing_snapshot(
+                    &bytes[length_end..end],
+                    dim,
+                    &index.ids,
+                    entry_point,
+                )?);
+            }
+        }
         index.restore_navigation_tree()?;
         tracing::info!(
             "QuIVer 索引从磁盘加载完成：{} 个节点，dim={}，max_level={}，tombstone={}",

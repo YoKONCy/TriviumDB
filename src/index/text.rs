@@ -12,6 +12,11 @@ use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use std::sync::OnceLock;
 
+pub(crate) mod analyzer;
+pub(crate) mod positions;
+pub use analyzer::TEXT_ANALYZER_ID;
+use analyzer::tokenize;
+
 const TEXT_INDEX_MAGIC: &[u8; 4] = b"TIDX";
 pub const TEXT_INDEX_VERSION: u32 = 2;
 
@@ -71,46 +76,6 @@ pub struct TextIndex {
     bm25_bytes: usize,
 }
 
-fn tokenize(text: &str) -> Vec<String> {
-    let lowered = text.to_lowercase();
-    let mut tokens = Vec::new();
-    let mut word = String::new();
-    let mut cjk_run = Vec::new();
-
-    let flush_word = |word: &mut String, tokens: &mut Vec<String>| {
-        if !word.is_empty() {
-            tokens.push(std::mem::take(word));
-        }
-    };
-    let flush_cjk = |run: &mut Vec<char>, tokens: &mut Vec<String>| {
-        match run.len() {
-            0 => {}
-            1 => tokens.push(run[0].to_string()),
-            _ => tokens.extend(run.windows(2).map(|pair| pair.iter().collect())),
-        }
-        run.clear();
-    };
-
-    for ch in lowered.chars() {
-        if ch.is_ascii_alphanumeric() {
-            flush_cjk(&mut cjk_run, &mut tokens);
-            word.push(ch);
-        } else if ('\u{3400}'..='\u{9fff}').contains(&ch)
-            || ('\u{3040}'..='\u{30ff}').contains(&ch)
-            || ('\u{ac00}'..='\u{d7af}').contains(&ch)
-        {
-            flush_word(&mut word, &mut tokens);
-            cjk_run.push(ch);
-        } else {
-            flush_word(&mut word, &mut tokens);
-            flush_cjk(&mut cjk_run, &mut tokens);
-        }
-    }
-    flush_word(&mut word, &mut tokens);
-    flush_cjk(&mut cjk_run, &mut tokens);
-    tokens
-}
-
 impl TextIndex {
     pub fn new() -> Self {
         Self::default()
@@ -159,20 +124,26 @@ impl TextIndex {
         }
     }
 
-    /// 注册一段长文本：拉丁字母/数字按词切分，CJK文本使用字符2-Gram。
+    /// 注册一段长文本：ASCII字母和数字按词切分，CJK文本使用字符2-Gram。
     pub fn add_text(&mut self, id: NodeId, text: &str) {
         let tokens = tokenize(text);
-        self.remove_document(id);
-        if tokens.is_empty() {
-            return;
-        }
-
         let mut local_tf = HashMap::new();
         for token in &tokens {
             *local_tf.entry(token.clone()).or_insert(0) += 1;
         }
+        self.add_term_frequencies(id, local_tf, tokens.len());
+    }
 
-        let dl = tokens.len();
+    pub(crate) fn add_term_frequencies(
+        &mut self,
+        id: NodeId,
+        local_tf: HashMap<String, usize>,
+        dl: usize,
+    ) {
+        self.remove_document(id);
+        if dl == 0 {
+            return;
+        }
         self.doc_lengths.insert(id, dl);
         self.total_tokens += dl as u128;
 
@@ -442,16 +413,57 @@ impl TextIndex {
         Ok(index)
     }
 
+    pub(crate) fn document_count(&self) -> usize {
+        self.total_docs
+    }
+
+    pub(crate) fn average_length(&self) -> f32 {
+        self.avg_dl
+    }
+
     /// 执行 BM25 检索，返回命中节点的原始相似度得分
     pub fn search_bm25(&self, query: &str, k1: f32, b: f32) -> HashMap<NodeId, f32> {
         let mut results = HashMap::new();
+        let outcome = self.visit_bm25(query, k1, b, |id, score| {
+            *results.entry(id).or_insert(0.) += score;
+            Ok::<(), std::convert::Infallible>(())
+        });
+        match outcome {
+            Ok(()) => results,
+            Err(never) => match never {},
+        }
+    }
+
+    /// 调用方可在每个posting累加前检查预算、取消与范围，评分顺序复用原实现。
+    pub(crate) fn visit_bm25<E>(
+        &self,
+        query: &str,
+        k1: f32,
+        b: f32,
+        emit: impl FnMut(NodeId, f32) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
         if self.total_docs == 0 {
-            return results;
+            return Ok(());
         }
 
-        let mut tokens = tokenize(query);
+        let tokens = tokenize(query);
+        self.visit_bm25_terms(tokens.iter().map(String::as_str), k1, b, emit)
+    }
+
+    /// 已分析词项复用相同评分，调用方可以在自身预算内完成一次分词。
+    pub(crate) fn visit_bm25_terms<'a, E>(
+        &self,
+        terms: impl Iterator<Item = &'a str>,
+        k1: f32,
+        b: f32,
+        mut emit: impl FnMut(NodeId, f32) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        if self.total_docs == 0 {
+            return Ok(());
+        }
+        let mut tokens = terms.collect::<Vec<_>>();
         if tokens.is_empty() {
-            return results;
+            return Ok(());
         }
 
         tokens.sort_unstable();
@@ -461,7 +473,7 @@ impl TextIndex {
         let avg_dl = self.avg_dl;
 
         for token in tokens {
-            if let Some(docs) = self.bm25_tf.get(&token) {
+            if let Some(docs) = self.bm25_tf.get(token) {
                 let df = docs.len() as f32;
                 // IDF 平滑 (BM25 标准)
                 let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
@@ -472,11 +484,11 @@ impl TextIndex {
                     // Okapi BM25 打分公式
                     let tf_norm =
                         (tf_f32 * (k1 + 1.0)) / (tf_f32 + k1 * (1.0 - b + b * dl / avg_dl));
-                    *results.entry(id).or_insert(0.0) += idf * tf_norm;
+                    emit(id, idf * tf_norm)?;
                 }
             }
         }
-        results
+        Ok(())
     }
 
     /// 执行 AC 自动机精准锚点激发

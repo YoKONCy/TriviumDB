@@ -1,5 +1,9 @@
 # TriviumDB
 
+Current prerelease: 0.9.1-beta.1. Python metadata: 0.9.1b1. Full release notes: https://github.com/YoKONCy/TriviumDB/blob/master/docs/changes/0.9.1-beta.1.md . Frozen ICDE measurements and source identities: https://github.com/YoKONCy/TriviumDB/tree/master/evaluation .
+
+Document APIs provide source revisions, logical blocks, grouped text/vector/hybrid retrieval, phrase and proximity evidence, parser mappings, and staged publication. Named graphs share global NodeIds while retaining graph-local edges. Explicit QuIVer INT8 APIs offer SSD/Hot residency, bounded row caches, native I/O, and reusable aligned windows. Rust, Python, and Node share Core semantics.
+
 > TriviumDB is a native tri-model embedded database engine written in Rust. Vector search, property graphs, and JSON documents share one storage kernel and NodeId space. A unified Cascades optimizer plans cross-model TQL query pipelines. Native APIs are available for Rust, Python, and Node.js. License: Apache-2.0.
 
 TriviumDB runs inside the host application. Applications use it for AI agent memory, AI companion memory, retrieval-augmented generation (RAG), local knowledge bases, and knowledge graphs. Independent database instances support per-agent, per-session, and per-tenant data organization in desktop applications and containers.

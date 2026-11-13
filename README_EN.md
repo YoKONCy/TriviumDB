@@ -13,6 +13,8 @@
 
 # TriviumDB
 
+The current prerelease is **0.9.1-beta.1**, with document evidence retrieval, named graphs, parsing and staged publication, the QuIVer INT8 SSD runtime, and engineering hardening. See the [bilingual release notes](docs/changes/0.9.1-beta.1.md) and the [ICDE evaluation archive](evaluation/README.md).
+
 **Vector × Graph × Document — A Trinity AI-Native Embedded Database**
 
 **Battle-tested in mission-critical, air-gapped environments.**
@@ -654,6 +656,9 @@ TriviumDB/
 | **[Best Practices](docs/best-practices.md)** | Data modeling, performance tuning, Hook usage guide              |
 | **[Shared Resources and Diagnostics](docs/resource-runtime.md)** | Quotas, maintenance memory, worker pools, available budgets, and structured errors |
 | **[Shutdown, Snapshots, and Restore](docs/lifecycle-snapshots.md)** | Shutdown requests, bounded waits, consistent snapshots, verification, and directory restore |
+| **[Document Sources and Structure](docs/documents.md)** | Source revisions, atomic updates, grouped BM25, phrases, proximity, and source evidence (Chinese) |
+| **[Document Parsing and Staged Publication](docs/document-ingestion.md)** | Built-in parsing, source mapping, external parser input, and durable candidates (Chinese) |
+| **[Named Graphs](docs/named-graphs.md)** | Shared membership, graph-local edges, conditional editing, explicit unions, and traversal (Chinese) |
 | **[TQL Reference](docs/tql-reference.md)**   | MATCH / FIND / SEARCH syntax, DML operations, property index     |
 | **[Hook Guide](docs/hook-guide.md)**         | C/C++ FFI plugin development, Rust Hook implementation           |
 | **[Testing Practices](docs/testing.md)**     | 4-layer testing, property testing, mutation testing, coverage    |

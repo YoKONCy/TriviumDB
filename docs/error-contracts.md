@@ -19,6 +19,7 @@
 - [请求与传输完成点](#请求与传输完成点)
 - [语言及传输边界](#语言及传输边界)
 - [重试与兼容目录](#重试与兼容目录)
+- [文档接入错误](#文档接入错误)
 - [后续收敛](#后续收敛)
 
 ---
@@ -144,6 +145,14 @@ indexed_lookup／substring_lookup 的数量、对象、字段和文本类型使�
 ---
 
 ## 入口与字段目录
+
+命名图JSON入口 `graph_request`／`graphRequest`与Core图方法共享错误类别。`TDB_GRAPH_NOT_FOUND`包含 `graph_id`，`TDB_GRAPH_REVISION_MISMATCH`包含 `graph_id`、`expected`、`actual`，条件写入冲突定位 `expected_revision`。预算资源以 `named_graph_*`命名，JSON结构拒绝定位 `request_json`。Core保留节点缺失、只读、取消、恢复及实际写入完成点，字段与用法见[命名图契约](named-graphs.md)。
+
+文档入口新增 `put_document`、`get_document`、`resolve_document_reference` 和 `delete_document`，SDK JSON 入口提供相同语义。修订拒绝使用 `TDB_DOCUMENT_REVISION_MISMATCH`，`details` 包含字符串 `document_id`、`expected` 和 `actual`。已知来源、范围、父级和向量拒绝定位到 `target.field`；JSON 结构拒绝定位到 `request_json`。写入遵守本表的阶段及结果字段，完整字段、节点归属和重试说明见[文档来源与结构](documents.md)。
+
+文档分组检索与上下文使用同一修订错误，预期修订表定位到 `query.expected_revisions`，上下文旧引用定位到 `query.seeds.reference.revision`。查询预算采用现有 `QueueFull` 和结构化额度字段，`resource` 区分 `document_scan_nodes`、`document_payload_bytes`、`document_text_bytes`、`document_edges`、`document_postings`、`document_candidates`、`document_return_bytes`。读取拒绝保留查询类别，完整性失配返回 `TDB_CORRUPTED_FILE`。
+
+文档位置查询增加 `document_positions`、`document_query_terms`、`document_position_visits`、`document_matches` 预算资源。分析器身份失配、适用模式之外的正 `max_gap`、位置请求分词后为空分别返回 `TDB_INVALID_INPUT`，定位到 `query.analyzer_id`、`query.max_gap`、`query.text`。JSON 的未知模式、类型与字段拒绝定位到 `request_json`。取消、内存准入、修订和完整性错误沿原公共类别传递。
 
 下表登记当前维护的公共入口及参数族。Rust 使用类型系统表达语言类型，语义校验和执行错误由 Core 提供。Python 使用 snake_case，Node 使用 camelCase。普通字段使用公开参数名，集合成员使用 JSON Pointer。调用形状、默认值和精确类型分别由原生签名、Python 存根及 npm 公共声明维护。
 
@@ -406,6 +415,12 @@ HTTP 状态与旧分类遵守各适配器当前协议，规范 `code`、`details
 Server 的 retryable 是适配器提示。带 write 的错误统一为 false，调用方依据上表的结果事实决定重新准入、重建或确认。读取的期限、锁忙及服务暂不可用继续按其实际映射提供提示。Core 与 SDK 保留结构化事实，重试调度归宿主管理。
 
 精确扫描和已接入的图算法按候选、节点、边或迭代检查控制器，Rayon 任务携带同一信号，错误返回时归还工作区。不可中断的有限库调用结束后继续检查。WAL 开始后的事务继续依照原子协议完成。原有直接返回集合的低层图辅助函数保持自身同步返回契约，数据库和 TQL 调用使用可失败的受控路径。
+
+---
+
+## 文档接入错误
+
+文档分批接入使用 `TDB_DOCUMENT_UPLOAD_NOT_FOUND` 和 `TDB_DOCUMENT_UPLOAD_CONFLICT`。前者的 `details.upload_id` 标识缺失候选，后者的 `details.field` 与 `target.field` 标识创建内容、批次序号、摘要或状态冲突。发布时的根修订竞争继续采用 `TDB_DOCUMENT_REVISION_MISMATCH`。候选状态通过原上传身份及 `next_sequence` 核对，读取命令省略写入结果，写命令沿 Core 的实际阶段返回。完整协议见[文档解析与分批发布](document-ingestion.md)。
 
 ---
 

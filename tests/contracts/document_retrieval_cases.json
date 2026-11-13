@@ -1,0 +1,43 @@
+{
+  "documents": [
+    {
+      "source_id": "notes://a", "source_revision": "v1", "parser_id": "plain-v1",
+      "content": "alpha alpha\nalpha alpha\n",
+      "root": {"id": "100", "vector": [1, 0]},
+      "blocks": [
+        {"key": "section", "kind": "section", "start_byte": 0, "end_byte": 24},
+        {"key": "second", "parent": "section", "kind": "line", "start_byte": 12, "end_byte": 23, "node": {"id": "102", "vector": [1, 0]}},
+        {"key": "first", "parent": "section", "kind": "paragraph", "start_byte": 0, "end_byte": 11, "node": {"id": "101", "vector": [1, 0]}}
+      ]
+    },
+    {
+      "source_id": "notes://b", "source_revision": "v1", "parser_id": "plain-v1",
+      "content": "alpha beta\n",
+      "root": {"id": "200", "vector": [0, 1]},
+      "blocks": [
+        {"key": "first", "kind": "line", "start_byte": 0, "end_byte": 10, "node": {"id": "201", "vector": [0, 1]}}
+      ]
+    },
+    {
+      "source_id": "notes://c", "source_revision": "v1", "parser_id": "plain-v1",
+      "content": "gamma\n",
+      "root": {"id": "300", "vector": [1, 1]},
+      "blocks": [
+        {"key": "empty", "kind": "line", "start_byte": 0, "end_byte": 0, "node": {"id": "301", "vector": [1, 1]}},
+        {"key": "first", "kind": "line", "start_byte": 0, "end_byte": 5, "node": {"id": "302", "vector": [1, 1]}}
+      ]
+    }
+  ],
+  "query": {"text": "alpha", "max_documents": 2, "hits_per_document": 1},
+  "expected": {
+    "content_hashes": [
+      "sha256:f2f2667871e72f7863f85144a6f9a1fdd7e0bf5617386efbeb79cc9739693392",
+      "sha256:87de0dca21b2429312a4b9a9150097c67d3eb2dc2167e862e1055a531b52d248",
+      "sha256:ae9a6306a205417afddd14316cc1d0d5e04a98f1be10865dce643925ee070ce2"
+    ],
+    "document_ids": ["100", "200"],
+    "node_ids": ["101", "201"],
+    "texts": ["alpha alpha", "alpha beta"],
+    "corpus_documents": 3, "corpus_units": 4, "matched_units": 3
+  }
+}

@@ -88,6 +88,15 @@ pub trait VectorType:
     /// 从 f32 构造单元素（用于产生数学计算后的残差向量等机制）
     fn from_f32(v: f32) -> Self;
 
+    /// 文档SDK的JSON数值表示；整数类型覆盖以保留完整位模式。
+    fn to_json_number(self) -> crate::Result<serde_json::Number> {
+        serde_json::Number::from_f64(f64::from(self.to_f32())).ok_or_else(|| {
+            crate::TriviumError::InvalidVector {
+                reason: "向量分量必须为有限数值 (Vector components must be finite)".into(),
+            }
+        })
+    }
+
     /// 按目标 dtype 校验并转换 JSON 数值；整数类型覆盖此方法以保留完整位模式。
     fn from_json_number(value: &serde_json::Number) -> crate::Result<Self> {
         let number = value
@@ -560,6 +569,10 @@ impl VectorType for u64 {
     #[inline]
     fn from_f32(v: f32) -> Self {
         v as u64
+    }
+
+    fn to_json_number(self) -> crate::Result<serde_json::Number> {
+        Ok(self.into())
     }
 
     fn from_json_number(value: &serde_json::Number) -> crate::Result<Self> {

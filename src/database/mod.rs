@@ -10,7 +10,12 @@
 
 pub mod config;
 pub mod console;
+mod document_ingestion;
+mod document_query;
+mod documents;
 pub(crate) mod editing;
+mod named_graphs;
+pub(crate) mod quiver_ssd;
 pub use crate::sdk::facade;
 mod lifecycle;
 mod migration;
@@ -955,6 +960,21 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 })?;
 
             // 回放按完整提交后的事实重建唯一所有者，验证通过后再修改 WAL。
+            for record in memtable.named_graphs.graphs.values() {
+                for id in &record.graph.members {
+                    if !memtable.contains(*id) {
+                        return Err(crate::storage::named_graphs::corrupt(
+                            "missing member after recovery",
+                        ));
+                    }
+                }
+            }
+            crate::named_graph::bound(
+                "named_graph_count",
+                memtable.named_graphs.graphs.len(),
+                10_000,
+            )?;
+            memtable.document_publications.finish_restore()?;
             let unique_definitions = memtable.unique_index_definitions();
             memtable.restore_unique_index_definitions(&unique_definitions)?;
 
@@ -1126,6 +1146,22 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let result = operation();
         _operation.check_recovery()?;
         Ok(result)
+    }
+
+    /// 响应阶段沿内核同步组状态判定写入结果。
+    pub(crate) fn response_write_info(&self) -> WriteErrorInfo {
+        WriteErrorInfo {
+            phase: WritePhase::Response,
+            outcome: if lock_or_recover(&self.lifecycle.0)
+                .group_commit_owner
+                .is_some()
+            {
+                WriteOutcome::Unknown
+            } else {
+                WriteOutcome::Committed
+            },
+            transaction_consumed: None,
+        }
     }
 
     /// 返回当前进程内累计的 WAL 写入与物理同步计数。
@@ -1484,6 +1520,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             mt.resize_resource_reservation(bytes)
                 .map_err(|error| error.at_field("bytes"))?;
             self.memory_limit = bytes;
+            if let Some(active) = &mut mt.quiver_ssd {
+                active.database_memory_limit = bytes;
+            }
             self.tql_limits.memory_limit = bytes;
             mt.set_text_memory_limit(bytes);
             Ok(())
@@ -1543,7 +1582,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         self.read_operation(|| read_or_recover(&self.memtable).next_id_value())
     }
 
-    fn ensure_incremental_memory_budget(&self, additional_bytes: usize) -> Result<()> {
+    pub(crate) fn ensure_incremental_memory_budget(&self, additional_bytes: usize) -> Result<()> {
         if self.memory_limit == 0 {
             return Ok(());
         }
@@ -2160,8 +2199,21 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 let mut mt = write_or_recover(&self.memtable);
                 mt.validate_delete(id)?;
                 mt.reserve_text_deletes(1)?;
+                let bytes = mt
+                    .named_graphs
+                    .projection_bytes()
+                    .saturating_add(mt.document_publications.deletion_workspace(id));
+                mt.ensure_additional_memory(self.memory_limit, bytes)?;
+                let _workspace = self.resource_runtime.reserve_workspace(bytes)?;
+                let mut named = mt.named_graphs.clone();
+                named.delete_node(id)?;
+                let mut documents = mt.document_publications.clone();
+                documents.delete_node(id);
                 self.apply_wal_entry(&mut mt, WalEntry::Delete::<T> { id }, write, |mt| {
-                    mt.delete(id)
+                    mt.delete(id)?;
+                    mt.named_graphs = named;
+                    mt.document_publications = documents;
+                    Ok(())
                 })?;
             }
 
@@ -3887,6 +3939,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Database::open(&dir.join("test.tdb").to_string_lossy(), 3).unwrap()
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn 文档缓存清理持续持锁直至内存账本归零并允许再次检索() {
+        use super::read_or_recover;
+        use crate::document::{
+            DocumentNode, DocumentSearchLevel, DocumentSearchQuery, DocumentWrite,
+        };
+        use std::sync::atomic::Ordering;
+        let mut db = open_db(&format!("document_cache_reset_{}", std::process::id()));
+        let path = db.db_path.clone();
+        db.put_document(
+            DocumentWrite {
+                source_id: "notes://cache".into(),
+                source_revision: "v1".into(),
+                parser_id: "plain-v1".into(),
+                content: "alpha".into(),
+                root: DocumentNode {
+                    id: 1,
+                    vector: vec![1., 0., 0.],
+                    payload: json!({}),
+                },
+                blocks: vec![],
+            },
+            None,
+        )
+        .unwrap();
+        let query = DocumentSearchQuery {
+            text: "alpha".into(),
+            level: DocumentSearchLevel::Document,
+            ..Default::default()
+        };
+        let expected = db.search_documents(&query).unwrap();
+        assert_eq!(expected.groups[0].hits[0].evidence.text, "alpha");
+        let db = std::sync::Arc::new(db);
+        let gate = crate::test_hooks::pause_at_path(
+            crate::test_hooks::ConcurrencyPoint::BeforeDocumentIndexAccountingReset,
+            &path,
+        );
+        let worker_db = db.clone();
+        let worker = std::thread::spawn(move || worker_db.clear_document_index());
+        gate.wait_until_arrived();
+        let mt = read_or_recover(&db.memtable);
+        // 清理与账本重置处于同一临界区，其他查询只能在归零后重建并登记新缓存。
+        assert!(matches!(
+            mt.document_index.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        drop(mt);
+        drop(gate);
+        worker.join().unwrap().unwrap();
+        assert_eq!(
+            read_or_recover(&db.memtable)
+                .document_index_bytes
+                .load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(db.search_documents(&query).unwrap(), expected);
+        assert!(
+            read_or_recover(&db.memtable)
+                .document_index_bytes
+                .load(Ordering::Acquire)
+                > 0
+        );
+        let mut db = std::sync::Arc::into_inner(db).unwrap();
+        db.close().unwrap();
+        drop(db);
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
     }
 
     #[cfg(feature = "test-hooks")]
