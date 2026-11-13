@@ -40,18 +40,21 @@ def run_quiver_ssd(root: str) -> None:
         assert cached["physical_read_calls"] == first["physical_read_calls"]
         assert cached["physical_read_bytes"] == first["physical_read_bytes"]
         request({"operation": "configure", "options": dict(fixture["options"], cache_bytes=0)})
+        assert request(search) == {"hits": fixture["expected_hits"]}
+        window_search = dict(fixture["window_search"], vector=vector(-1))
+        assert request(window_search) == {"hits": fixture["expected_window_hits"]}
         before_window = request({"operation": "stats"})
-        assert request(search) == {"hits": fixture["expected_hits"]}
-        assert request(search) == {"hits": fixture["expected_hits"]}
+        assert request(window_search) == {"hits": fixture["expected_window_hits"]}
+        assert request(window_search) == {"hits": fixture["expected_window_hits"]}
         reused = request({"operation": "stats"})
         assert reused["cache_limit_bytes"] == 0
         assert reused["cache_used_bytes"] == 0
-        assert reused["cold_read_calls"] == before_window["cold_read_calls"] + 8
+        assert reused["cold_read_calls"] == before_window["cold_read_calls"] + 2
         if reused["io_mode"] == "direct":
             assert reused["physical_read_calls"] == before_window["physical_read_calls"]
             assert reused["physical_read_bytes"] == before_window["physical_read_bytes"]
             assert reused["window_reuse_hits"] == before_window["window_reuse_hits"] + 2
-            assert reused["window_reuse_bytes"] == before_window["window_reuse_bytes"] + 8 * reused["metadata"]["record_bytes"]
+            assert reused["window_reuse_bytes"] == before_window["window_reuse_bytes"] + 2 * reused["metadata"]["record_bytes"]
         request({"operation": "configure", "options": dict(fixture["options"], residency="hot")})
         hot = request({"operation": "stats"})
         assert hot["io_active"] is False

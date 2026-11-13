@@ -8,6 +8,8 @@
   ],
   "options": {"cache_bytes": 8192, "io_depth": 1, "io_mode": "auto", "residency": "ssd"},
   "search": {"operation": "search", "top_k": 4, "ef_search": 4, "rerank_limit": 4},
+  "window_search": {"operation": "search", "top_k": 1, "ef_search": 4, "rerank_limit": 1},
+  "expected_window_hits": [{"id": "77", "score": 1.0}],
   "expected_hits": [
     {"id": "9", "score": 1.0},
     {"id": "9007199254740993", "score": 1.0},

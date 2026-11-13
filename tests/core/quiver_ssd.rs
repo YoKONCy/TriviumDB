@@ -209,8 +209,10 @@ fn sdk_protocol_preserves_ids_unknown_fields_and_closed_admission() {
         request(&db, r#"{"operation":"stats"}"#).unwrap_err().code(),
         "TDB_DATABASE_CLOSED"
     );
-    assert_eq!(runtime.stats().live_worker_threads, 0);
+    assert_eq!(runtime.stats().attached_databases, 0);
+    assert_eq!(runtime.stats().reserved_database_bytes, 0);
     assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+    assert_eq!(runtime.stats().active_tasks, 0);
     std::fs::remove_dir_all(root).unwrap();
 }
 
