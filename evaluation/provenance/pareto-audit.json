@@ -1,0 +1,73 @@
+{
+  "source": "data/benchmark-snapshot.json",
+  "definition": "召回与QPS最大化，索引准备时间与导航组件存储最小化；逐点核对，无插值、无评估集重新选参。",
+  "scope": "同数据集、同线程数、符合原记录资格且四项指标齐全的全部已测配置；原FP32依赖另列。",
+  "checks": [
+    {
+      "dataset": "D03",
+      "threads": 1,
+      "selected_curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+      "achieved_recall": 0.9633064516129032,
+      "qps": 4396.037467043312,
+      "navigation_gib": 0.9201467037200928,
+      "preparation_seconds": 100.560463191,
+      "compared_points": 98,
+      "dominating_curves": []
+    },
+    {
+      "dataset": "D03",
+      "threads": 32,
+      "selected_curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+      "achieved_recall": 0.9633064516129032,
+      "qps": 63103.388113783876,
+      "navigation_gib": 0.9201467037200928,
+      "preparation_seconds": 100.560463191,
+      "compared_points": 58,
+      "dominating_curves": []
+    },
+    {
+      "dataset": "D05",
+      "threads": 1,
+      "selected_curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+      "achieved_recall": 0.9628899835796387,
+      "qps": 2987.3810071102157,
+      "navigation_gib": 1.2649968266487122,
+      "preparation_seconds": 149.27941391500002,
+      "compared_points": 90,
+      "dominating_curves": []
+    },
+    {
+      "dataset": "D05",
+      "threads": 32,
+      "selected_curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+      "achieved_recall": 0.9628899835796387,
+      "qps": 31138.226396864924,
+      "navigation_gib": 1.2649968266487122,
+      "preparation_seconds": 149.27941391500002,
+      "compared_points": 58,
+      "dominating_curves": []
+    },
+    {
+      "dataset": "D14",
+      "threads": 1,
+      "selected_curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+      "achieved_recall": 0.959005376344086,
+      "qps": 3074.75709368249,
+      "navigation_gib": 4.600733518600464,
+      "preparation_seconds": 524.590976417,
+      "compared_points": 111,
+      "dominating_curves": []
+    },
+    {
+      "dataset": "D14",
+      "threads": 32,
+      "selected_curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+      "achieved_recall": 0.959005376344086,
+      "qps": 34108.830945417365,
+      "navigation_gib": 4.600733518600464,
+      "preparation_seconds": 524.590976417,
+      "compared_points": 57,
+      "dominating_curves": []
+    }
+  ]
+}

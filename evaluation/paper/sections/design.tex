@@ -1,0 +1,142 @@
+\section{Two-Bit Graph Indexing}
+\label{sec:design}
+
+\subsection{Problem and Precision Budget}
+Let $X=\{x_1,\ldots,x_n\}\subset\R^d$ be the database and $q\in\R^d$ a query. We return $k$ approximate nearest neighbors under the task metric. The primary task is cosine search: database and query vectors are normalized, and exact ranking uses their original FP32 values. We also evaluate native squared Euclidean distance on SIFT and GIST, retaining their original magnitudes. A graph $G$ stores bounded outgoing neighbor lists. Search maintains a candidate beam of capacity $e$, denoted by \texttt{ef} in the implementation, and reranks at most $B$ candidates.
+
+The main configuration uses $k=10$ and
+\begin{equation}
+    B_{\mathrm{eff}}=\min(B,e),\qquad B=64,\quad e\ge k.
+    \label{eq:budget}
+\end{equation}
+Increasing $e$ spends more navigation work; increasing $B$ spends more original-vector work. The two parameters control different failure modes and are evaluated separately in Section~\ref{sec:ablation}.
+
+\subsection{Sign--Magnitude Representation}
+For a vector $x$, define its mean absolute coordinate value and two binary planes:
+\begin{equation}
+\begin{split}
+    \tau_x&=\frac{1}{d}\sum_{j=1}^d |x_j|,\\
+    p_{xj}&=\mathbf{1}[x_j\ge0],\qquad
+    h_{xj}=\mathbf{1}[|x_j|\ge\tau_x].
+\end{split}
+\label{eq:bits}
+\end{equation}
+Write $\sigma_{xj}=2p_{xj}-1$. The sign plane distinguishes positive and negative coordinates; the magnitude plane distinguishes weak and strong coordinates relative to the vector's own scale. Each plane is packed into machine words. The two planes require $2d$ bits before word-alignment padding.
+
+To recover scale information for query scoring, compute the mean absolute value within each group:
+\begin{equation}
+\begin{split}
+ a_x&=\operatorname{mean}_{h_{xj}=0}|x_j|,
+ \quad b_x=\operatorname{mean}_{h_{xj}=1}|x_j|,\\
+ \delta_x&=b_x-a_x.
+\end{split}
+\end{equation}
+An empty group contributes zero. The reconstructed coordinate is
+\begin{equation}
+    \widehat{x}_j=\sigma_{xj}(a_x+\delta_x h_{xj}).
+    \label{eq:reconstruction}
+\end{equation}
+The scalar metadata are derived independently for each vector. Figure~\ref{fig:theory-geometry}(a) illustrates the resulting four-level reconstruction and its coordinate residuals. No codebook, rotation, training queries, or ground-truth neighbors are needed. The query is encoded by the same rule. For a zero vector, both reconstruction amplitudes are zero, so its native-L2 reconstruction remains well defined.
+
+\subsection{Low-Cost Construction}
+\label{sec:build}
+Construction uses a fixed-amplitude version of the code,
+$u_{xj}=\sigma_{xj}(1+h_{xj})\in\{-2,-1,1,2\}$. Its integer score is
+\begin{equation}
+    D_{\mathrm{BQ}}(x,y)=4d-\sum_j u_{xj}u_{yj}.
+    \label{eq:bq}
+\end{equation}
+Positive and negative contributions have weights 1, 2, or 4, according to the two magnitude bits. Let $M=p_x\oplus p_y$, $G_1=\neg(h_x\lor h_y)$, $G_2=h_x\oplus h_y$, and $G_4=h_x\land h_y$, with complements restricted to valid coordinates. Six population-count reductions compute the signed sum as $\sum_{w\in\{1,2,4\}}w[\pc(G_w\land\neg M)-\pc(G_w\land M)]$. Equation~\eqref{eq:bq} includes the offset and same-sign contributions. Its self-score depends on the magnitude pattern, so we use it as an ordering and pruning proxy.
+
+All database codes and graph slots are allocated before insertion. The builder processes batches of 256 vertices with a fixed-size worker pool. A construction beam starts from vertex zero and uses the inexpensive two-plane Hamming score
+\begin{equation}
+ H(x,y)=\pc(p_x\oplus p_y)+\pc(h_x\oplus h_y)
+\end{equation}
+to discover candidates. The candidate set is augmented by deterministic pseudorandom samples from all $n$ pre-encoded vectors, including vertices awaiting insertion, deduplicated, and sorted with $D_{\mathrm{BQ}}$. The sample count is
+$\max(\min(e_c,128),2R)$, where $e_c$ is the construction beam width and $R$ is the final degree bound. The evaluated setting has $e_c=128$ and $R=2m=64$, where $m=32$ is the builder's base connectivity parameter.
+
+Neighbor selection combines a pairwise rejection test with ordered backfill. A candidate $y$ for source $x$ is rejected during the first pass if an already selected neighbor $z$ satisfies
+\begin{equation}
+    D_{\mathrm{BQ}}(y,z)<\alpha D_{\mathrm{BQ}}(x,y),
+    \qquad \alpha=1.2.
+    \label{eq:prune}
+\end{equation}
+Remaining slots are filled from the unselected candidates in $D_{\mathrm{BQ}}$ order. With $S(x,y)=\sum_j u_{xj}u_{yj}$, the test rejects $y$ whenever $S(y,z)>1.2S(x,y)-0.8d$, so the offset makes it reject almost every candidate after the nearest one. In a traced production build of Cohere-1M, 98.44\% of the final edges come from backfill, and each vertex keeps one or two diversity-selected edges. Each list therefore holds essentially the $R$ candidates nearest under $D_{\mathrm{BQ}}$ in its pool, which includes reverse edges. Section~\ref{sec:mechanism} measures rules that admit more diverse edges.
+
+The builder adds reverse edges under striped locks. Repruning on every reverse insertion repeatedly scores almost the same neighbor list. We instead reserve capacity for $2R$ neighbors, append new reverse edges while capacity remains, and prune when a list fills. A final parallel pass removes self-loops and duplicates from every oversized list, sorts it by $D_{\mathrm{BQ}}$, and applies the same selection and backfill to keep $R$ neighbors. The query representation shares this adjacency allocation, including its reserved capacity. Section~\ref{sec:system} measures the effect of deferred pruning against an eager variant.
+
+Parallel scheduling affects which intermediate edges are visible to construction beams. Each query comparison reuses its constructed graph; repeated builds are reported separately.
+
+\subsection{Norm-Aware Navigation with Bitwise Scores}
+\label{sec:score}
+The query path evaluates reconstructed squared distance,
+\begin{equation}
+    D_{\mathrm{SM}}(q,x)=
+    \|\widehat q\|^2+\|\widehat x\|^2
+    -2\langle\widehat q,\widehat x\rangle .
+    \label{eq:l2}
+\end{equation}
+For cosine tasks, the original vectors are normalized before encoding, but their reconstructions generally do \emph{not} have identical norms. Keeping the norm term prevents changes in reconstruction magnitude from acting as an unintended ranking preference.
+
+The inner product in Equation~\eqref{eq:l2} does not require decoding all coordinates. Let $M=p_q\oplus p_x$, and define
+\begin{align}
+ c_0&=d-2\pc(M),\\
+ c_x&=\pc(h_x)-2\pc(M\land h_x),\\
+ c_q&=\pc(h_q)-2\pc(M\land h_q),\\
+ c_{qx}&=\pc(h_q\land h_x)-2\pc(M\land h_q\land h_x).
+\end{align}
+Then
+\begin{equation}
+\begin{split}
+\langle\widehat q,\widehat x\rangle
+={}&a_q a_x c_0+a_q\delta_x c_x\\
+&+\delta_q a_x c_q+\delta_q\delta_x c_{qx}.
+\end{split}
+\label{eq:bitdot}
+\end{equation}
+The counts of strong coordinates are stored or computed once. Five masked population-count reductions provide the remaining terms. The squared reconstruction norm is
+\begin{equation}
+    \|\widehat x\|^2=(d-s_x)a_x^2+s_xb_x^2,
+    \quad s_x=\pc(h_x),
+\end{equation}
+and is cached in the SM row. The score therefore combines bitwise reductions with a constant amount of scalar floating-point arithmetic.
+
+\begin{algorithm}[t]
+\caption{QuIVer query with bounded exact reranking}
+\label{alg:query}
+\begin{algorithmic}[1]
+\Require Query $q$, shared graph $G$, entry $v_0$, width $e$, budget $B$
+\State Encode $q$ and compute its reconstruction norm
+\State Reset the reusable frontier, beam, and visited state
+\State Score and insert $v_0$ into the frontier and beam
+\While{an eligible unexpanded frontier candidate remains}
+    \State Extract the best frontier vertex $v$
+    \If{the beam is full and $v$ is worse than its worst entry}
+        \State \textbf{break}
+    \EndIf
+    \For{each unvisited $x$ in $G[v]$}
+        \State Mark $x$ visited and evaluate $D_{\mathrm{SM}}(q,x)$
+        \If{$x$ improves the beam or the beam has space}
+            \State Insert $x$ into the frontier and beam
+            \State Retain the best $e$ beam entries
+        \EndIf
+    \EndFor
+\EndWhile
+\State Select the best $\min(B,e)$ surviving candidates by $D_{\mathrm{SM}}$
+\State Fetch their original vectors and evaluate the exact task metric
+\State \Return the exact top $k$ among the selected candidates
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:query} uses $D_{\mathrm{SM}}$ for both frontier order and candidate retention. All evaluated production graphs use the fixed entry $v_0=0$. Beam evictions do not truncate the frontier; the loop stops once the best frontier vertex is worse than the worst entry of a full beam. The final SM ordering selects the candidates that consume the FP32 budget. A callback maps their graph identifiers to slots in the original-vector store during final reranking.
+
+\subsection{Layout and Execution}
+Packed rows contain the two bit planes, reconstruction amplitudes, strong-bit count, and cached norm. For $d=768$, a 256-byte row holds two 96-byte planes, four FP32 scalars (two amplitudes, the norm, and a correction coefficient unused by SM-L2), and the count, padded to a 64-byte boundary. A dimension-aware path handles the other evaluated dimensions, including dimensions that are not multiples of 64. Tail masks exclude padded coordinates. Runtime dispatch selects available vector population-count kernels, with scalar fallback.
+
+Scoring neighboring candidates in small interleaved groups exposes independent memory operations. Prefetching brings upcoming rows into cache. Per-thread workspaces reuse the frontier, candidate storage, and visited bitset instead of allocating them for every query. The graph is shared by construction and SM search; the database's original BQ codes remain allocated alongside the SM representation. We include both code stores in the memory measurements.
+
+SM metadata installation is a separate pass over the input. It is required before the evaluated query path is ready, and the measured reload path reinstalls this state. We report this cost next to graph construction and distinguish both from database import, serialization, and loading. The evaluation uses the October 17--18 implementation snapshot with native-L2 and low-width query support.
+
+\subsection{SSD-Resident Reranking}
+\label{sec:ssd}
+Navigation reads only the graph and SM rows, so the original vectors can leave memory. An SSD mode, implemented in a TriviumDB research branch, stores each vector as a 1 KiB row of INT8 codes with min--max scales per 128-coordinate group and a norm correction. Once navigation fixes its at most $B$ candidates, the query submits all of their reads together through four independent io\_uring shards with \texttt{O\_DIRECT}, and scores the rows with integer dot products against a query quantized once with a global scale. Per-shard FIFO caches totaling 128 MiB and a 32 MiB in-flight buffer bound the memory used for rows. Disk-resident graph indices read neighborhoods from SSD during traversal~\cite{jayaram2019diskann,wang2024starling,guo2025pipeann}; this mode keeps traversal in memory and issues one batch of at most $B$ independent reads per query.

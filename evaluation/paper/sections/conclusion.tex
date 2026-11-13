@@ -1,0 +1,10 @@
+\section{Conclusion}
+QuIVer combines fast graph construction, compact navigation state, and accurate retrieval through a shared two-bit representation. Integer scores rank construction candidates at low cost, while reconstruction-aware navigation preserves candidates for bounded reranking. Parallel construction and reusable bitwise kernels make this precision split effective in TriviumDB. The evaluated configurations occupy measured Pareto-frontier positions on all three core workloads, whether memory counts navigation state alone or also the original vectors. On Cohere-5M, QuIVer retains 97\% of SymphonyQG's 32-thread throughput with 54\% less index preparation time and 47\% less total logical memory, and its INT8-reranking SSD mode serves the same collection at about 5 GiB of steady-state process RSS. The 21-dataset study, held-out queries, and controlled crossovers show high recall on most text and image embeddings, place non-negative descriptors and cross-modal queries outside this range, and identify selection rules that trade construction time for graph quality.
+
+% 排空正文浮动体后另起页，正文页数不混入AI说明和参考文献。
+\clearpage
+\ifnum\numexpr\value{page}-1\relax>12
+  \xdef\quiverLayoutIssues{\quiverLayoutIssues\space 正文页数=\number\numexpr\value{page}-1\relax\space（上限12）；}
+\fi
+\section*{AI-Assisted Preparation}
+OpenAI Codex was used to assist with drafting and editing the manuscript text and with generating plotting and table-conversion code from the recorded experimental results. The use covers the abstract, Sections I--VI, and the associated figures and tables. OpenAI's image-generation tool supplied visual concept references for Figures~\ref{fig:pipeline} and~\ref{fig:theory-geometry}; their final illustrations retain editable vector geometry and text. The numerical-figure workflow also used the scientific-visualization skill from Scientific Agent Skills~\cite{kassis2026skills}. Experimental values were extracted from the archived measurements; the theoretical illustrations use explicitly identified conceptual examples.

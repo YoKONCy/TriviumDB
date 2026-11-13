@@ -1,0 +1,34 @@
+{
+  "status": "passed",
+  "original_inputs": {
+    "train": {
+      "path": "recorded/stage-c-results/quiver-main-21-20261017-v1/incoming/D15/train.f32",
+      "bytes": 3072000000,
+      "sha256": "57e2b74e1573bbf8cf8f8ecb8569ae506205f0efbc9d6d920c3f6e7a31a6abe7"
+    },
+    "test": {
+      "path": "recorded/stage-c-results/quiver-main-21-20261017-v1/incoming/D15/test.f32",
+      "bytes": 3072000,
+      "sha256": "279501cb6beb174f03a0cb3688fb1ed2f80d6e64af60adbca18ce92002d04bea"
+    },
+    "groundtruth": {
+      "path": "recorded/stage-c-results/quiver-main-21-20261017-v1/incoming/D15/groundtruth.i32",
+      "bytes": 40000,
+      "sha256": "1a32eedd06740f676a3dad1a3ef584384f94945d65b422dff1212d5ea45721ec"
+    }
+  },
+  "corrected_groundtruth": {
+    "path": "recorded/stage-c-results/quiver-main-21-20261017-v1/D15/truth-repair-v1/groundtruth-f64-cosine.i32",
+    "bytes": 40000,
+    "sha256": "a19c6ca26b601383726cbad57a497be33345fa60de7dcb693c134e7f5c1c1114"
+  },
+  "method": "固定前缀训练库、全部查询、FP64逐块穷举归一化余弦top10；保留第11名检查边界",
+  "rows": 1000000,
+  "queries": 1000,
+  "code_sha256": "75234443855917939fa06570d56badd5067c2b1c79b3bd506f6da7f9cab61bb8",
+  "invalid_original_entries": 2523,
+  "maximum_independent_score_error": 1.6653345369377348e-15,
+  "minimum_top10_top11_gap": 2.4385520025482776e-07,
+  "time_seconds": 35.289978981018066,
+  "completed_at": 1792270041.5971882
+}

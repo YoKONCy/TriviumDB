@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title data-i18n="QuIVer · 实验数据浏览器">QuIVer · 实验数据浏览器</title>
+    <link rel="stylesheet" href="assets/css/tokens.css" />
+    <link rel="stylesheet" href="assets/css/layout.css" />
+    <link rel="stylesheet" href="assets/css/components.css" />
+    <!-- 数据分片开始 -->
+    <script defer src="data/catalog.js"></script>
+    <script defer src="data/annotations/D03.js"></script>
+    <script defer src="data/configurations/D03.js"></script>
+    <script defer src="data/observations/D03/D03__vsag-fp32-g0.js"></script>
+    <script defer src="data/observations/D03/D03__vsag-sq8-g0.js"></script>
+    <script defer src="data/observations/D03/D03__vsag-sq8-g1.js"></script>
+    <script defer src="data/observations/D03/D03__D03-recheck-faiss-hnsw-g0.js"></script>
+    <script defer src="data/observations/D03/D03__faiss-ivfflat-g1.js"></script>
+    <script defer src="data/observations/D03/D03__faiss-ivfpq-g1.js"></script>
+    <script defer src="data/observations/D03/D03__faiss-opq-ivfpq-refine-g1.js"></script>
+    <script defer src="data/observations/D03/D03__faiss-rabitq-fp32-g0.js"></script>
+    <script defer src="data/observations/D03/D03__faiss-rabitq-sq8-g0.js"></script>
+    <script defer src="data/observations/D03/D03__opq96-fastscan-refine.js"></script>
+    <script defer src="data/observations/D03/D03__pq96-refine.js"></script>
+    <script defer src="data/observations/D03/D03__diskann-pq-fp32-g1.js"></script>
+    <script defer src="data/observations/D03/D03__D03-recheck-bbq-g0.js"></script>
+    <script defer src="data/observations/D03/D03__D03-recheck-diskann-pq-only-g0.js"></script>
+    <script defer src="data/observations/D03/D03__D03-recheck-diskann-rust-g1.js"></script>
+    <script defer src="data/observations/D03/D03__D03-sqg-integer-fixed-g0.js"></script>
+    <script defer src="data/observations/D03/D03__alpha-cng-g0.js"></script>
+    <script defer src="data/observations/D03/D03__binary-centered-fp32-g1.js"></script>
+    <script defer src="data/observations/D03/D03__binary-sign-fp32-g1.js"></script>
+    <script defer src="data/observations/D03/D03__diskann-pq-fp32-g0.js"></script>
+    <script defer src="data/observations/D03/D03__hnswlib-g1.js"></script>
+    <script defer src="data/observations/D03/D03__hscg-g0.js"></script>
+    <script defer src="data/observations/D03/D03__mirage-anns-g0.js"></script>
+    <script defer src="data/observations/D03/D03__ngt-g1.js"></script>
+    <script defer src="data/observations/D03/D03__rabitq-32bit-standard.js"></script>
+    <script defer src="data/observations/D03/D03__rabitq-7bit-standard.js"></script>
+    <script defer src="data/observations/D03/D03__rabitq-official-g1.js"></script>
+    <script defer src="data/observations/D03/D03__svs-lvq4x4-g0.js"></script>
+    <script defer src="data/observations/D03/D03__svs-lvq4x8-g0.js"></script>
+    <script defer src="data/observations/D03/D03__svs-lvq4x8-pad64-g1.js"></script>
+    <script defer src="data/observations/D03/D03__svs-lvq8-g0.js"></script>
+    <script defer src="data/observations/D03/D03__svs-lvq8-pad32-g1.js"></script>
+    <script defer src="data/observations/D03/D03__usearch-g0.js"></script>
+    <script defer src="data/observations/D03/D03__usearch-g1.js"></script>
+    <script defer src="data/observations/D03/D03__svs-lvq4-g1.js"></script>
+    <script defer src="data/observations/D03/D03__quiver-main.js"></script>
+    <script defer src="data/annotations/D05.js"></script>
+    <script defer src="data/configurations/D05.js"></script>
+    <script defer src="data/observations/D05/D05__bbq-g1.js"></script>
+    <script defer src="data/observations/D05/D05__vsag-fp32-g1.js"></script>
+    <script defer src="data/observations/D05/D05__vsag-sq8-g1.js"></script>
+    <script defer src="data/observations/D05/D05__faiss-hnsw-g1.js"></script>
+    <script defer src="data/observations/D05/D05__faiss-ivfflat-g1.js"></script>
+    <script defer src="data/observations/D05/D05__faiss-ivfpq-g1.js"></script>
+    <script defer src="data/observations/D05/D05__faiss-opq-ivfpq-refine-g1.js"></script>
+    <script defer src="data/observations/D05/D05__faiss-rabitq-fp32-g1.js"></script>
+    <script defer src="data/observations/D05/D05__faiss-rabitq-sq8-g1.js"></script>
+    <script defer src="data/observations/D05/D05__opq-fastscan-refine-g1.js"></script>
+    <script defer src="data/observations/D05/D05__pq-refine-g1.js"></script>
+    <script defer src="data/observations/D05/D05__D05-sqg-integer-fixed-g1.js"></script>
+    <script defer src="data/observations/D05/D05__alpha-cng-g1.js"></script>
+    <script defer src="data/observations/D05/D05__binary-centered-fp32-g1.js"></script>
+    <script defer src="data/observations/D05/D05__diskann-pq-fp32-g1.js"></script>
+    <script defer src="data/observations/D05/D05__diskann-pq-only-g1.js"></script>
+    <script defer src="data/observations/D05/D05__diskann-rust-g1.js"></script>
+    <script defer src="data/observations/D05/D05__hnswlib-g1.js"></script>
+    <script defer src="data/observations/D05/D05__hscg-g1.js"></script>
+    <script defer src="data/observations/D05/D05__mirage-anns-g1.js"></script>
+    <script defer src="data/observations/D05/D05__ngt-g1.js"></script>
+    <script defer src="data/observations/D05/D05__rabitq-32bit-g1.js"></script>
+    <script defer src="data/observations/D05/D05__rabitq-4bit-g1.js"></script>
+    <script defer src="data/observations/D05/D05__rabitq-7bit-g1.js"></script>
+    <script defer src="data/observations/D05/D05__svs-lvq4-g1.js"></script>
+    <script defer src="data/observations/D05/D05__svs-lvq4x4-g1.js"></script>
+    <script defer src="data/observations/D05/D05__svs-lvq4x8-g1.js"></script>
+    <script defer src="data/observations/D05/D05__svs-lvq8-g1.js"></script>
+    <script defer src="data/observations/D05/D05__binary-sign-fp32-g1.js"></script>
+    <script defer src="data/observations/D05/D05__usearch-g1.js"></script>
+    <script defer src="data/observations/D05/D05__quiver-main.js"></script>
+    <script defer src="data/annotations/D14.js"></script>
+    <script defer src="data/configurations/D14.js"></script>
+    <script defer src="data/observations/D14/D14__bbq-g1.js"></script>
+    <script defer src="data/observations/D14/D14__vsag-fp32-g1.js"></script>
+    <script defer src="data/observations/D14/D14__vsag-sq8-g1.js"></script>
+    <script defer src="data/observations/D14/D14__D14-recheck-faiss-rabitq-fp32-g1.js"></script>
+    <script defer src="data/observations/D14/D14__faiss-hnsw-g1.js"></script>
+    <script defer src="data/observations/D14/D14__faiss-ivfflat-g1.js"></script>
+    <script defer src="data/observations/D14/D14__faiss-ivfpq-g1.js"></script>
+    <script defer src="data/observations/D14/D14__faiss-opq-ivfpq-refine-g1.js"></script>
+    <script defer src="data/observations/D14/D14__faiss-rabitq-sq8-g1.js"></script>
+    <script defer src="data/observations/D14/D14__opq-fastscan-refine-g1.js"></script>
+    <script defer src="data/observations/D14/D14__pq-refine-g1.js"></script>
+    <script defer src="data/observations/D14/D14__D14-diskann-pq-fp32-strong-r64-l400.js"></script>
+    <script defer src="data/observations/D14/D14__D14-diskann-pq-only-strong-r64-l400.js"></script>
+    <script defer src="data/observations/D14/D14__D14-diskann-rust-strong-r64-l400.js"></script>
+    <script defer src="data/observations/D14/D14__D14-sqg-integer-fixed-g1.js"></script>
+    <script defer src="data/observations/D14/D14__binary-centered-fp32-g1.js"></script>
+    <script defer src="data/observations/D14/D14__hnswlib-g1.js"></script>
+    <script defer src="data/observations/D14/D14__mirage-anns-g1.js"></script>
+    <script defer src="data/observations/D14/D14__rabitq-32bit-g1.js"></script>
+    <script defer src="data/observations/D14/D14__rabitq-4bit-g1.js"></script>
+    <script defer src="data/observations/D14/D14__rabitq-7bit-g1.js"></script>
+    <script defer src="data/observations/D14/D14__svs-lvq4x4-g1.js"></script>
+    <script defer src="data/observations/D14/D14__svs-lvq4x8-g1.js"></script>
+    <script defer src="data/observations/D14/D14__svs-lvq8-g1.js"></script>
+    <script defer src="data/observations/D14/D14__usearch-g1.js"></script>
+    <script defer src="data/observations/D14/D14__D14-ngt-dense-epsilon.js"></script>
+    <script defer src="data/observations/D14/D14__D14-binary-sign-high-recall.js"></script>
+    <script defer src="data/observations/D14/D14__svs-lvq4-g1.js"></script>
+    <script defer src="data/observations/D14/D14__D14-alpha-cng-high-recall.js"></script>
+    <script defer src="data/observations/D14/D14__hscg-g1.js"></script>
+    <script defer src="data/observations/D14/D14__quiver-main.js"></script>
+    <script defer src="data/annotations/D01.js"></script>
+    <script defer src="data/configurations/D01.js"></script>
+    <script defer src="data/observations/D01/D01__quiver-main.js"></script>
+    <script defer src="data/annotations/D02.js"></script>
+    <script defer src="data/configurations/D02.js"></script>
+    <script defer src="data/observations/D02/D02__quiver-main.js"></script>
+    <script defer src="data/annotations/D04.js"></script>
+    <script defer src="data/configurations/D04.js"></script>
+    <script defer src="data/observations/D04/D04__quiver-main.js"></script>
+    <script defer src="data/annotations/D06.js"></script>
+    <script defer src="data/configurations/D06.js"></script>
+    <script defer src="data/observations/D06/D06__quiver-main.js"></script>
+    <script defer src="data/annotations/D07.js"></script>
+    <script defer src="data/configurations/D07.js"></script>
+    <script defer src="data/observations/D07/D07__quiver-main.js"></script>
+    <script defer src="data/annotations/D08.js"></script>
+    <script defer src="data/configurations/D08.js"></script>
+    <script defer src="data/observations/D08/D08__quiver-main.js"></script>
+    <script defer src="data/annotations/D09.js"></script>
+    <script defer src="data/configurations/D09.js"></script>
+    <script defer src="data/observations/D09/D09__quiver-main.js"></script>
+    <script defer src="data/annotations/D10.js"></script>
+    <script defer src="data/configurations/D10.js"></script>
+    <script defer src="data/observations/D10/D10__quiver-main.js"></script>
+    <script defer src="data/annotations/D11.js"></script>
+    <script defer src="data/configurations/D11.js"></script>
+    <script defer src="data/observations/D11/D11__quiver-main.js"></script>
+    <script defer src="data/annotations/D12.js"></script>
+    <script defer src="data/configurations/D12.js"></script>
+    <script defer src="data/observations/D12/D12__quiver-main.js"></script>
+    <script defer src="data/annotations/D13.js"></script>
+    <script defer src="data/configurations/D13.js"></script>
+    <script defer src="data/observations/D13/D13__quiver-main.js"></script>
+    <script defer src="data/annotations/D15.js"></script>
+    <script defer src="data/configurations/D15.js"></script>
+    <script defer src="data/observations/D15/D15__quiver-main.js"></script>
+    <script defer src="data/annotations/D16.js"></script>
+    <script defer src="data/configurations/D16.js"></script>
+    <script defer src="data/observations/D16/D16__quiver-main.js"></script>
+    <script defer src="data/annotations/D17.js"></script>
+    <script defer src="data/configurations/D17.js"></script>
+    <script defer src="data/observations/D17/D17__quiver-main.js"></script>
+    <script defer src="data/annotations/D18.js"></script>
+    <script defer src="data/configurations/D18.js"></script>
+    <script defer src="data/observations/D18/D18__quiver-main.js"></script>
+    <script defer src="data/annotations/D19.js"></script>
+    <script defer src="data/configurations/D19.js"></script>
+    <script defer src="data/observations/D19/D19__quiver-main.js"></script>
+    <script defer src="data/annotations/D20.js"></script>
+    <script defer src="data/configurations/D20.js"></script>
+    <script defer src="data/observations/D20/D20__quiver-main.js"></script>
+    <script defer src="data/annotations/D21.js"></script>
+    <script defer src="data/configurations/D21.js"></script>
+    <script defer src="data/observations/D21/D21__quiver-main.js"></script>
+    <script defer src="data/reference-notes.js"></script>
+    <script defer src="data/historical-bq.js"></script>
+    <script defer src="data/assemble.js"></script>
+    <!-- 数据分片结束 -->
+    <script defer src="locales/en/record-labels.js"></script>
+    <script defer src="locales/en/measurement-notes.js"></script>
+    <script defer src="locales/en/archive-notes.js"></script>
+    <script defer src="locales/en/ui.js"></script>
+    <script defer src="assets/js/i18n.js"></script>
+    <script defer src="assets/js/core.js"></script>
+    <script defer src="assets/js/model.js"></script>
+    <script defer src="assets/js/tables.js"></script>
+    <script defer src="assets/js/battle.js"></script>
+    <script defer src="assets/js/coverage.js"></script>
+    <script defer src="assets/js/charts.js"></script>
+    <script defer src="assets/js/notes.js"></script>
+    <script defer src="assets/js/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#mainContent"><span data-i18n="跳到数据区">跳到数据区</span></a>
+    <aside class="sidebar">
+      <a class="brand" href="#">
+        <span class="brand-mark">Q</span>
+        <span>
+          QuIVer
+          <small><span data-i18n="实验数据浏览器">实验数据浏览器</span></small>
+        </span>
+      </a>
+      <nav id="navigation" aria-label="数据视图" data-i18n-aria-label="数据视图">
+        <button class="active" data-view="battle">
+          <span class="nav-symbol" aria-hidden="true">⇄</span>
+          <span data-i18n="方法对比">方法对比</span>
+          <span class="nav-arrow">↗</span>
+        </button>
+        <button data-view="explore">
+          <span class="nav-symbol" aria-hidden="true">▤</span>
+          <span data-i18n="全量记录">全量记录</span>
+        </button>
+        <button data-view="quiver">
+          <span class="nav-symbol" aria-hidden="true">◈</span>
+          <span data-i18n="QuIVer 全库">QuIVer 全库</span>
+        </button>
+        <button data-view="health">
+          <span class="nav-symbol" aria-hidden="true">◷</span>
+          <span data-i18n="覆盖与来源">覆盖与来源</span>
+        </button>
+      </nav>
+      <div class="sidebar-links">
+        <span class="nav-caption"><span data-i18n="资料">资料</span></span>
+        <a href="../paper/main.pdf" target="_blank" rel="noopener">
+          <span data-i18n="论文 PDF">论文 PDF</span>
+          <span>↗</span>
+        </a>
+        <a href="../results/all-operating-points.csv" download>
+          <span data-i18n="完整数据 CSV">完整数据 CSV</span>
+          <span>↓</span>
+        </a>
+        <a href="../METRICS.md" target="_blank" rel="noopener">
+          <span data-i18n="指标定义">指标定义</span>
+          <span>↗</span>
+        </a>
+      </div>
+      <div class="sidebar-bottom">
+        <div class="snapshot-status">
+          <i></i>
+          <span data-i18n="离线数据快照">离线数据快照</span>
+        </div>
+        <span id="buildStamp"></span>
+        <button class="text-button" id="footerNotes">
+          <span data-i18n="数据与使用说明 ↗">数据与使用说明 ↗</span>
+        </button>
+      </div>
+    </aside>
+    <main id="mainContent" class="workspace">
+      <header class="topbar">
+        <div class="breadcrumb">
+          Evaluation
+          <span>/</span>
+          <span id="pageTitle"><span data-i18n="方法对比">方法对比</span></span>
+        </div>
+        <div class="topbar-actions">
+          <label class="language-picker">
+            <select id="language" aria-label="语言" data-i18n-aria-label="语言">
+              <option value="zh-CN" data-i18n="简体中文">简体中文</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <span class="snapshot-count">
+            <b id="totalPoints">1,056</b>
+            <span data-i18n="条观测">条观测</span>
+          </span>
+          <button
+            class="icon-button"
+            id="themeButton"
+            aria-label="切换明暗主题"
+            data-i18n-aria-label="切换明暗主题"
+            title="切换明暗主题"
+            data-i18n-title="切换明暗主题"
+          >
+            ◐
+          </button>
+          <button class="button" id="globalNotes">
+            <span data-i18n="使用说明">使用说明</span>
+          </button>
+        </div>
+      </header>
+      <div class="page-content">
+        <header class="page-heading">
+          <h1 id="viewTitle"><span data-i18n="方法对比">方法对比</span></h1>
+          <div class="heading-actions">
+            <button class="text-button" id="snapshotButton">
+              <span id="snapshotTime"><span data-i18n="数据快照">数据快照</span></span>
+              ↗
+            </button>
+            <a class="button" href="../results/all-operating-points.csv" download>
+              <span data-i18n="下载全量 CSV ↓">下载全量 CSV ↓</span>
+            </a>
+          </div>
+        </header>
+        <section
+          class="scene-panel"
+          id="scenePanel"
+          aria-label="选择比较场景"
+          data-i18n-aria-label="选择比较场景"
+        >
+          <label class="field dataset-field">
+            <span><span data-i18n="数据集">数据集</span></span>
+            <select id="dataset"></select>
+            <small id="datasetMeta"></small>
+          </label>
+          <div class="field" id="threadField">
+            <span><span data-i18n="查询线程">查询线程</span></span>
+            <div class="segments" id="threads">
+              <button data-thread="1" class="active">1T</button>
+              <button data-thread="8">8T</button>
+              <button data-thread="16">16T</button>
+              <button data-thread="32">32T</button>
+            </div>
+          </div>
+          <label class="field" id="targetField">
+            <span><span data-i18n="召回预选档">召回预选档</span></span>
+            <select id="target">
+              <option value="0.9">90%</option>
+              <option value="0.95" selected>95%</option>
+              <option value="0.98">98%</option>
+            </select>
+          </label>
+          <label class="field domain-field">
+            <span><span data-i18n="吞吐口径">吞吐口径</span></span>
+            <select id="domain">
+              <option value="request" data-i18n="请求 / 库接口">请求 / 库接口</option>
+              <option value="batch" data-i18n="FAISS 官方批量">FAISS 官方批量</option>
+            </select>
+          </label>
+          <button
+            class="icon-button reset-button"
+            id="reset"
+            title="重置场景"
+            data-i18n-title="重置场景"
+            aria-label="重置场景"
+            data-i18n-aria-label="重置场景"
+          >
+            ↺
+          </button>
+        </section>
+        <section id="battleView">
+          <div class="section-heading">
+            <h2>
+              <span data-i18n="比较方法">比较方法</span>
+              <span class="count" id="battleCount">2 / 4</span>
+            </h2>
+            <div class="actions">
+              <button class="button" id="swapMethods">
+                <span data-i18n="交换 A / B">交换 A / B</span>
+              </button>
+              <button class="button" id="addMethod">
+                <span data-i18n="＋ 添加方法">＋ 添加方法</span>
+              </button>
+              <button class="text-button" id="shareView">
+                <span data-i18n="复制视图链接 ↗">复制视图链接 ↗</span>
+              </button>
+            </div>
+          </div>
+          <div class="competitors" id="competitors"></div>
+          <div class="alignment-bar" id="alignmentBar">
+            <div id="alignmentStatus"></div>
+            <div class="alignment-actions">
+              <div id="alignmentChecks"></div>
+              <button class="text-button" id="alignmentNotes">
+                <span data-i18n="配对备注 ↗">配对备注 ↗</span>
+              </button>
+            </div>
+          </div>
+          <h2 class="metric-heading"><span data-i18n="A / B 指标对比">A / B 指标对比</span></h2>
+          <div class="delta-grid" id="deltaGrid"></div>
+          <section class="panel chart-panel" id="chartPanel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="chartHeading"><span data-i18n="召回与吞吐">召回与吞吐</span></h2>
+                <span class="panel-meta" id="plotScope"></span>
+              </div>
+              <div class="actions">
+                <button class="text-button" id="chartHelp">
+                  <span data-i18n="图表说明">图表说明</span>
+                </button>
+                <button class="button" id="chartReset">
+                  <span data-i18n="还原视域">还原视域</span>
+                </button>
+                <button class="button" id="chartExport">
+                  <span data-i18n="导出 PNG ↓">导出 PNG ↓</span>
+                </button>
+                <button
+                  class="icon-button"
+                  id="chartExpand"
+                  title="展开图表"
+                  data-i18n-title="展开图表"
+                  aria-label="展开图表"
+                  data-i18n-aria-label="展开图表"
+                >
+                  ⛶
+                </button>
+              </div>
+            </div>
+            <div class="chart-toolbar">
+              <div
+                class="chart-tabs"
+                id="chartTabs"
+                aria-label="图表类型"
+                data-i18n-aria-label="图表类型"
+              >
+                <button data-chart="recall" class="active">
+                  <span data-i18n="召回 · 吞吐">召回 · 吞吐</span>
+                </button>
+                <button data-chart="memory">
+                  <span data-i18n="内存 · 吞吐">内存 · 吞吐</span>
+                </button>
+                <button data-chart="scaling"><span data-i18n="线程扩展">线程扩展</span></button>
+                <button data-chart="latency"><span data-i18n="尾延迟">尾延迟</span></button>
+                <button data-chart="build"><span data-i18n="构建时间">构建时间</span></button>
+                <button data-chart="footprint"><span data-i18n="内存构成">内存构成</span></button>
+              </div>
+              <label class="check-label">
+                <input type="checkbox" id="logAxis" checked />
+                <span data-i18n="QPS 对数轴">QPS 对数轴</span>
+              </label>
+            </div>
+            <div class="chart-content">
+              <div class="plot-column">
+                <div class="canvas-wrap">
+                  <canvas
+                    id="battleCanvas"
+                    aria-label="当前方法的实测性能图"
+                    data-i18n-aria-label="当前方法的实测性能图"
+                  ></canvas>
+                  <div class="empty-overlay" id="chartEmpty" hidden>
+                    <span data-i18n="当前条件下没有可绘制的数据">当前条件下没有可绘制的数据</span>
+                  </div>
+                </div>
+                <div class="chart-legend" id="chartLegend"></div>
+                <div class="chart-caption">
+                  <span id="chartGuidance"></span>
+                  <span id="plottedCount"></span>
+                </div>
+              </div>
+              <aside class="point-panel">
+                <div class="point-panel-heading">
+                  <span id="pointState"><span data-i18n="当前观测">当前观测</span></span>
+                  <div class="point-navigation">
+                    <button
+                      class="icon-button"
+                      id="previousPoint"
+                      aria-label="上一个观测"
+                      data-i18n-aria-label="上一个观测"
+                    >
+                      ‹
+                    </button>
+                    <button
+                      class="icon-button"
+                      id="nextPoint"
+                      aria-label="下一个观测"
+                      data-i18n-aria-label="下一个观测"
+                    >
+                      ›
+                    </button>
+                  </div>
+                </div>
+                <div id="pointInspector"></div>
+                <button class="button wide" id="pointNotes">
+                  <span data-i18n="记录与备注 ↗">记录与备注 ↗</span>
+                </button>
+              </aside>
+            </div>
+          </section>
+          <section class="panel selected-panel">
+            <div class="panel-heading">
+              <h2><span data-i18n="当前选点明细">当前选点明细</span></h2>
+              <div class="actions">
+                <div class="segments" id="battleColumns">
+                  <button data-columns="core" class="active">
+                    <span data-i18n="核心指标">核心指标</span>
+                  </button>
+                  <button data-columns="full"><span data-i18n="全部指标">全部指标</span></button>
+                </div>
+                <button class="button" id="exportBattle">
+                  <span data-i18n="导出 CSV ↓">导出 CSV ↓</span>
+                </button>
+              </div>
+            </div>
+            <div class="table-scroll"><table id="battleTable"></table></div>
+          </section>
+        </section>
+        <section id="exploreView" hidden>
+          <div class="record-stats" id="recordStats"></div>
+          <section class="panel">
+            <div class="panel-heading">
+              <h2 id="recordsTitle"><span data-i18n="全部观测">全部观测</span></h2>
+              <button class="button" id="exportRecords">
+                <span data-i18n="导出筛选结果 ↓">导出筛选结果 ↓</span>
+              </button>
+            </div>
+            <div class="record-filters">
+              <label class="field search-field">
+                <span><span data-i18n="搜索">搜索</span></span>
+                <input
+                  type="search"
+                  id="recordSearch"
+                  placeholder="方法、数据集或参数"
+                  data-i18n-placeholder="方法、数据集或参数"
+                />
+              </label>
+              <label class="field">
+                <span><span data-i18n="方法">方法</span></span>
+                <select id="recordMethod"></select>
+              </label>
+              <label class="field">
+                <span><span data-i18n="方法类别">方法类别</span></span>
+                <select id="recordFamily">
+                  <option value="all" data-i18n="全部类别">全部类别</option>
+                </select>
+              </label>
+              <label class="field">
+                <span><span data-i18n="线程">线程</span></span>
+                <select id="recordThread">
+                  <option value="all" data-i18n="全部线程">全部线程</option>
+                  <option value="1">1T</option>
+                  <option value="8">8T</option>
+                  <option value="16">16T</option>
+                  <option value="32">32T</option>
+                </select>
+              </label>
+              <label class="field">
+                <span><span data-i18n="最低召回 / %">最低召回 / %</span></span>
+                <input id="recordRecall" type="number" min="0" max="100" step="1" value="0" />
+              </label>
+            </div>
+            <div class="records-toolbar">
+              <div class="segments" id="recordColumns">
+                <button data-columns="performance" class="active">
+                  <span data-i18n="吞吐与召回">吞吐与召回</span>
+                </button>
+                <button data-columns="latency"><span data-i18n="延迟">延迟</span></button>
+                <button data-columns="resources">
+                  <span data-i18n="构建与内存">构建与内存</span>
+                </button>
+                <button data-columns="full"><span data-i18n="全部指标">全部指标</span></button>
+              </div>
+              <div class="actions">
+                <span id="filterResult"></span>
+                <button class="text-button" id="clearRecords">
+                  <span data-i18n="清空筛选">清空筛选</span>
+                </button>
+              </div>
+            </div>
+            <div class="table-scroll record-table">
+              <table id="recordsTable"></table>
+              <div class="empty-state" id="recordsEmpty" hidden>
+                <span data-i18n="没有符合条件的记录">没有符合条件的记录</span>
+              </div>
+            </div>
+            <footer class="pagination">
+              <span id="recordRange"></span>
+              <div class="actions">
+                <label>
+                  <span data-i18n="每页">每页</span>
+                  <select id="pageSize">
+                    <option value="25">25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="all" data-i18n="全部">全部</option>
+                  </select>
+                </label>
+                <button
+                  class="icon-button"
+                  id="previousPage"
+                  aria-label="上一页"
+                  data-i18n-aria-label="上一页"
+                >
+                  ‹
+                </button>
+                <span id="pageLabel"></span>
+                <button
+                  class="icon-button"
+                  id="nextPage"
+                  aria-label="下一页"
+                  data-i18n-aria-label="下一页"
+                >
+                  ›
+                </button>
+              </div>
+            </footer>
+          </section>
+        </section>
+        <section id="healthView" hidden>
+          <div class="record-stats" id="healthHero"></div>
+          <div class="coverage-grid">
+            <section class="panel">
+              <div class="panel-heading">
+                <h2><span data-i18n="指标覆盖">指标覆盖</span></h2>
+                <button class="text-button" id="availabilityNotes">
+                  <span data-i18n="口径备注 ↗">口径备注 ↗</span>
+                </button>
+              </div>
+              <div class="panel-body" id="availability"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading">
+                <h2><span data-i18n="数据来源">数据来源</span></h2>
+                <a
+                  class="text-button"
+                  href="../provenance/manifest.json"
+                  target="_blank"
+                  rel="noopener"
+                >
+                  <span data-i18n="文件清单 ↗">文件清单 ↗</span>
+                </a>
+              </div>
+              <div class="panel-body" id="sourceStatus"></div>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="panel-heading">
+              <h2><span data-i18n="方法 × 数据集覆盖">方法 × 数据集覆盖</span></h2>
+              <span class="panel-meta">
+                <span data-i18n="点击数量查看对应记录">点击数量查看对应记录</span>
+              </span>
+            </div>
+            <div class="table-scroll coverage-table"><table id="coverageTable"></table></div>
+          </section>
+        </section>
+        <footer class="page-footer">
+          <span>QuIVer · Evaluation archive</span>
+          <a href="../README.md"><span data-i18n="资料目录 ↗">资料目录 ↗</span></a>
+        </footer>
+      </div>
+    </main>
+    <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+    <aside
+      class="notes-drawer"
+      id="notesDrawer"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="drawerTitle"
+      hidden
+    >
+      <header>
+        <h2 id="drawerTitle"></h2>
+        <button
+          class="icon-button"
+          id="closeDrawer"
+          aria-label="关闭备注"
+          data-i18n-aria-label="关闭备注"
+        >
+          ×
+        </button>
+      </header>
+      <div class="drawer-body" id="drawerBody"></div>
+    </aside>
+    <div class="toast" id="toast" role="status" hidden></div>
+    <noscript>
+      <span data-i18n="启用 JavaScript 后可浏览交互看板。完整记录可通过上方 CSV 链接下载。">
+        启用 JavaScript 后可浏览交互看板。完整记录可通过上方 CSV 链接下载。
+      </span>
+    </noscript>
+  </body>
+</html>

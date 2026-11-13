@@ -1,0 +1,73 @@
+% 在XeLaTeX类文件初始化前确定编码，防止Times被临时替换为Latin Modern。
+\RequirePackage[T1]{fontenc}
+\documentclass[10pt,conference,letterpaper]{IEEEtran}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs,array,multirow}
+\usepackage{graphicx}
+\usepackage[table]{xcolor}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\newcommand{\quiver}{QuIVer}
+\newcommand{\sm}{SM-L2}
+\newcommand{\bq}{BQ}
+\newcommand{\pc}{\operatorname{popcnt}}
+\newcommand{\rank}{\operatorname{rank}}
+\newcommand{\Top}{\operatorname{Top}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\missing}{\textemdash}
+\makeatletter
+\newcommand{\tabularinput}[1]{\@@input #1 }
+% 在同一编辑器编译中检查表格实际宽度，避免内容伸入页边距。
+\newsavebox{\quiverTableBox}
+\def\quiverLayoutIssues{}
+\newenvironment{quivercheckedtable}[1]{%
+  \def\quiverTableName{#1}%
+  \begin{lrbox}{\quiverTableBox}%
+}{%
+  \end{lrbox}%
+  \ifdim\wd\quiverTableBox>\linewidth
+    \xdef\quiverLayoutIssues{\quiverLayoutIssues\space 表格\quiverTableName=\the\wd\quiverTableBox\space（上限\the\linewidth）；}%
+  \fi
+  \usebox{\quiverTableBox}%
+}
+\AtEndDocument{%
+  % 新引用尚未完成BibTeX首轮时先允许编辑器建立引用，再检查最终排版。
+  \@ifundefined{b@lewis2020rag}{}{%
+    \ifx\quiverLayoutIssues\@empty\else
+      \PackageError{QuIVerFormat}{IEEE排版检查未通过：\quiverLayoutIssues}{请重新安排内容，保留IEEE正文字号、行距和页边距。}%
+    \fi
+  }%
+}
+\makeatother
+\newtheorem{proposition}{Proposition}
+\newtheorem{observation}{Observation}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\emergencystretch=1em
+\graphicspath{{figures/}}
+% 理论图的SVG保留编辑能力，正文显式使用高分辨率PNG。
+\newcommand{\theoryfigure}[1]{\includegraphics[width=\textwidth]{#1.png}}
+\title{QuIVer: Efficient Graph Indexing with Two-Bit Construction and Navigation}
+\author{
+\IEEEauthorblockN{Wenxuan Xiao\IEEEauthorrefmark{1}, Peidong Zhu\IEEEauthorrefmark{1}, Chengcheng Li\IEEEauthorrefmark{1}, Xu Cao\IEEEauthorrefmark{2}}
+\IEEEauthorblockA{\IEEEauthorrefmark{1}Changsha University, Changsha, China\\
+daflyflowers@gmail.com, zpd@ccsu.edu.cn, qq1330494624@outlook.com}
+\IEEEauthorblockA{\IEEEauthorrefmark{2}Astrmira Tech.\quad x.cao@astrmira.com}}
+\begin{document}
+\maketitle
+\input{sections/abstract}
+\begin{IEEEkeywords}
+Approximate nearest neighbor search, vector indexing, binary quantization, graph search.
+\end{IEEEkeywords}
+\input{sections/introduction}
+\input{sections/design}
+\input{sections/analysis}
+\input{sections/evaluation}
+\input{sections/related}
+\input{sections/conclusion}
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+\end{document}

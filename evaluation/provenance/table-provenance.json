@@ -1,0 +1,882 @@
+[
+  {
+    "dataset": "D03",
+    "method": "QuIVer",
+    "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":88}",
+    "config": "D03__quiver-main",
+    "parameters": {
+      "ef": 88,
+      "FP32": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "40b16a7e4be977f35be29639514ef29aee2e939631bd9ca616d3da82a5404fc6",
+      "protocol": "fef3af10a6b09130e585ae9073dad8c60b56b85ec3f8a53ff942dd04d044d8bf",
+      "index": "2a470875ef72f9dd3743021460b0bed8f77d90f11d4b55962858443d664b3b60",
+      "archive": "3bbfed1575946ffa1a24ccf0e6410b5886eb78d0640eebb4ae658b3e380457af"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "SymphonyQG",
+    "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":32}",
+    "config": "D03__D03-sqg-integer-fixed-g0",
+    "parameters": {
+      "ef": 32
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "ac0b798dd174d4942b5139c6c14ca9c5344277327546a2a1eb6aeede37164e05",
+      "protocol": "cbdf30edc6770041e7a1a5d08d3c0603d39d24d0a6e671f0334d1686c0d37a18",
+      "archive": "126e7ab06c08676444d0773a2904c023c47821f7946f034b913596787eb06a64"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "NGT-QG",
+    "curve": "D03__ngt-g1|{\"epsilon\":0.1,\"expansion\":4}",
+    "config": "D03__ngt-g1",
+    "parameters": {
+      "epsilon": 0.1,
+      "expansion": 4
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "52c3d4185aa6c761f5b1a33368c2f03cfd26d180b30dc9fbc561cb2497e7b5ab",
+      "protocol": "8af9c40f0f8ffac23146b73e446dac3e5d2f1f2a766a0ea7dcc176f22094a684",
+      "archive": "2300a6c59bf791cad1ed4b1a7390ae121ee9785a5f44e57554cd23fcb6926832"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "Lucene BBQ + FP32",
+    "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+    "config": "D03__D03-recheck-bbq-g0",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "edbdb116f0dff32776181490c378d5bae4177efbffbea1d824c29fb3bae15f27",
+      "protocol": "cdb55d650af48156e950fd000326dbd888798f7baeace5c4a20bb6144cd98e6c",
+      "archive": "3abd9ebfa5dd68efa36f1b152d3e36859d64bc7416eb79db2b7de97c577067e8"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "SVS LVQ8",
+    "curve": "D03__svs-lvq8-pad32-g1|{\"calibration_target\":0.95,\"ef\":62,\"prefetch_lookahead\":2,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":62}",
+    "config": "D03__svs-lvq8-pad32-g1",
+    "parameters": {
+      "ef": 62,
+      "svs_capacity": 62,
+      "prefetch_lookahead": 2,
+      "prefetch_step": 1,
+      "search_buffer_visited_set": false,
+      "calibration_target": 0.95
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "3b580a3721242be81796171394a961697b3e7cf344751812dcff29fc5a01fd99",
+      "protocol": "787fa41764378b6612dea0ac76b3787b01bbdafe74fdb710465e8cf63d1c9718",
+      "archive": "065487e26c62291f7d841c5836b3f98c2e33b9cb0c19cf0acf04a70cdda8840d"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "VSAG HGraph SQ8 + FP32",
+    "curve": "D03__vsag-sq8-g1|{\"ef\":64}",
+    "config": "D03__vsag-sq8-g1",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "a8b4b453cde4788600ea5ec009e1dd21944c7a83209fa08607bfe506b80d3c7c",
+      "protocol": "4014c77dfc7c1e74623241961212d7c3dcbed2f2d6f6213ccbdbece70d8c128e",
+      "archive": "8e495f76d7b81d30399f161201ae6847b0b8f745848aba0408f4d0532c27c41d"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "HNSWlib FP32",
+    "curve": "D03__hnswlib-g1|{\"ef\":64}",
+    "config": "D03__hnswlib-g1",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "e0eb9b843698dd1e883539f149306d81549b4728c477accd059be4b278c582f1",
+      "protocol": "6364abc5f9eb2caf4e4abd760fa57055581cc25c88870c230b8fb71d8661255a",
+      "archive": "f4fd997434a89f94e31e16c7b4d478053c6a3c5921f8f6ef07d95b0daecc01d9"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "DiskANN FP32",
+    "curve": "D03__D03-recheck-diskann-rust-g1|{\"ef\":64}",
+    "config": "D03__D03-recheck-diskann-rust-g1",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "12087e3233abd7908f48a9d606aa564a970c6afc5a8aa2698c2634b1205ab433",
+      "protocol": "959dba07ec9c3e7cef86582f53aabd77e9420029be80852761ddd9b2bbcc1aa0",
+      "archive": "4e1888ed34b8b7cfdd81a6bfb2c2db791c2235bc898dbcb91d03ace415196e43"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "RaBitQ 官方 IVF + FP32",
+    "curve": "D03__rabitq-32bit-standard|{\"nprobe\":128}",
+    "config": "D03__rabitq-32bit-standard",
+    "parameters": {
+      "nprobe": 128
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "5b0d10e6837945106392aa75a9402c15e01c269a10cb1beaf9a6219666b798fb",
+      "protocol": "cfbb456b44b0888f89668bacd349e5f91d8b08069351ba1e8fc13fb6fc08e5be",
+      "archive": "61d1708f1aa1d67250c7570ca6a6ce2414708067efac398e10cd87a5f2c4098c"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "QuIVer",
+    "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":64}",
+    "config": "D05__quiver-main",
+    "parameters": {
+      "ef": 64,
+      "FP32": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "de50d997ab119b75f2dd034dfd5e8eb94f666350e60801c929fb61418ca1d2d8",
+      "protocol": "934c751300cb11be902bdcfa558fee9f2ba4be9713dda8a24a61812b8702692b",
+      "index": "5112b9bbb5ae7dbde5e903c73d8f23a62c24100fc22fb55c30d12db881d3a561",
+      "archive": "420bbc09a9f826f1f5c557a467c20cf249d828546f122422c69f6087c68c95ac"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "SymphonyQG",
+    "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":96}",
+    "config": "D05__D05-sqg-integer-fixed-g1",
+    "parameters": {
+      "ef": 96
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "08939754eb4cc9965a23ebba2f72545f59a3b73de47af8ee4616c921d9585279",
+      "protocol": "98ee6c18fc709c8e8de954eeb033338dd116fb39c5e83b6a670fa10bbe85e873",
+      "archive": "5b016db97dfa07fdbb9799f430ce3c53f0a405e7173d082726ae2ecfac5760cb"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "NGT-QG",
+    "curve": "D05__ngt-g1|{\"epsilon\":0.1,\"expansion\":4}",
+    "config": "D05__ngt-g1",
+    "parameters": {
+      "epsilon": 0.1,
+      "expansion": 4
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "80637900de81220a1f8da6368d56d27b023e87ce4547c0b45cbb5e161dfad180",
+      "protocol": "a4bb8ac306df7b73d0920acbcc1ff3f793f5350ff3a4bbea42e2870c7a35aa4c",
+      "archive": "b80a66de7785423d5f3c7e6cef3529508a08e2eee1575c0a927a6e513e126375"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "Lucene BBQ + FP32",
+    "curve": "D05__bbq-g1|{\"ef\":64}",
+    "config": "D05__bbq-g1",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "783a22a08fa30bdaefecd03833da29d7dc9f983f087bb193f288b71fc37177a2",
+      "protocol": "18fd561d746c13a695c586f1bc78db98c9b36a3de831126a61a9823ffdf70d11",
+      "archive": "ceb79e2d5d4a00f515c5c14393c7416a54a3e34af6d198c90ff92079cbf1f05b"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "SVS LVQ8",
+    "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":47,\"prefetch_lookahead\":1,\"prefetch_step\":2,\"search_buffer_visited_set\":false,\"svs_capacity\":47}",
+    "config": "D05__svs-lvq8-g1",
+    "parameters": {
+      "ef": 47,
+      "svs_capacity": 47,
+      "prefetch_lookahead": 1,
+      "prefetch_step": 2,
+      "search_buffer_visited_set": false,
+      "calibration_target": 0.95
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "d800265bb71304119bbf499cec09595f325d790c75f791ca178ad53c88257233",
+      "protocol": "1f6ad509d16adf524736c7fe557537dbd42457b80e7958b2573b27bb203f55a8",
+      "archive": "c93ddfdb4925e25cee3a757f0874eb686be2ae08c4e2af360354083a32f34ad3"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "VSAG HGraph SQ8 + FP32",
+    "curve": "D05__vsag-sq8-g1|{\"ef\":64}",
+    "config": "D05__vsag-sq8-g1",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "e6b48dda310e4038d0b9c0baa9bba7c568099011ad9890f096df9b9b18105715",
+      "protocol": "a89a8e4ae103b5b3badae3cb47f51b136ecfd002d453e5fc2198f93e75e0f6bc",
+      "archive": "b83d14e2ec0d9c9d4e2bb095df0c9a5f09ded7467e37e76f9eb2513882083570"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "HNSWlib FP32",
+    "curve": "D05__hnswlib-g1|{\"ef\":64}",
+    "config": "D05__hnswlib-g1",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "260205e5ad2f56a27bba793ef633dadb2a44b6c58f3986ade6b1ee419e6e7a1f",
+      "protocol": "de3e2b148eb57487b1ad79aadf346c6a833318c1c54a83d0debde7e305bf348e",
+      "archive": "65469b96ac7bcd6813db547ad98d5260620416a9eaae922ad41a1e3c688c2e35"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "DiskANN FP32",
+    "curve": "D05__diskann-rust-g1|{\"ef\":64}",
+    "config": "D05__diskann-rust-g1",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "f906819d8c91107988da05af93eafc289072e1631dd65e8d01b4b04ecc352585",
+      "protocol": "808f498181fe8865fdb87b48ead7f1d1e70608c9351cb7082cd61b15ca5454d5",
+      "archive": "807ad2dd2e5159a22a526f40faadbf93659651c7e4bc78d5134950fc8daef66c"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "RaBitQ 官方 IVF + FP32",
+    "curve": "D05__rabitq-32bit-g1|{\"nprobe\":128}",
+    "config": "D05__rabitq-32bit-g1",
+    "parameters": {
+      "nprobe": 128
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "1b433549d36decece25d3cbc2733d1ae3527475b74cfa3188a56164fd89617e2",
+      "protocol": "aa9346a81fec2dcdc4dc8831a209f006d47400c01d0a125e05594dfd4798514d",
+      "archive": "592951dc90d7a62436f552262197bc6321c7a52a82c3a97fe7f12e71155c156f"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "QuIVer",
+    "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":128}",
+    "config": "D14__quiver-main",
+    "parameters": {
+      "ef": 128,
+      "FP32": 64
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "6058ae8e380838e4d982f31d4ce910827fdf5fa0880156eb7499fed5b62d790f",
+      "protocol": "987968fbc397ccb0d5342fea7557b9ddfa41215aeb40c896ce6991b73ed6fc07",
+      "index": "ad51d6c3cac39e25b53c900d816951785a5b816e9fc11ab2887220bcfec7b435",
+      "archive": "e84671bce736f5d56f6e904efa6389d2a55aa7c0191ed1c0899d2bf6302976e0"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "SymphonyQG",
+    "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":256}",
+    "config": "D14__D14-sqg-integer-fixed-g1",
+    "parameters": {
+      "ef": 256
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "1193fa0065b0e463db14415b961d06ae79234a17773fc4b43b82c2c7be4114dd",
+      "protocol": "559d90c02ec41368dc22062f331c60f81ebcb52cc8907a910f921cf057f3cd3a",
+      "archive": "e704efaf294263a43332db1a92f9dd03dd43fa076a5766da56bbf174c9f33c91"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "NGT-QG",
+    "curve": "D14__D14-ngt-dense-epsilon|{\"epsilon\":0.11,\"expansion\":4}",
+    "config": "D14__D14-ngt-dense-epsilon",
+    "parameters": {
+      "epsilon": 0.11,
+      "expansion": 4
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "64155ef5eefc44aa677e0ee049690ad435018a4e55f90157e2e5a861ced94271",
+      "protocol": "1efa26e44d9b87d878108a5d7d026bacc9427a36199cbb6ad8133be959715d6e",
+      "archive": null
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "Lucene BBQ + FP32",
+    "curve": "D14__bbq-g1|{\"ef\":768}",
+    "config": "D14__bbq-g1",
+    "parameters": {
+      "ef": 768
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "a90181e5fa5a94dba21f1351568b31c0558dd785407334d6f77e8a8f2fc04dc5",
+      "protocol": "e726057feb71f952def7124628b1318c5179b574ecee484c3f910a9c40f5d7e5",
+      "archive": "3e01ba892dc9a95f3ef7b3acfbaa9dc821fef13b3a6ac90f1329b1123401bf01"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "SVS LVQ8",
+    "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.95,\"ef\":102,\"prefetch_lookahead\":31,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":102}",
+    "config": "D14__svs-lvq8-g1",
+    "parameters": {
+      "ef": 102,
+      "svs_capacity": 102,
+      "prefetch_lookahead": 31,
+      "prefetch_step": 1,
+      "search_buffer_visited_set": false,
+      "calibration_target": 0.95
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "00a425203b80ceb19a9ba33f3d65b8c69fcce7127352fe55144d825236f9591c",
+      "protocol": "1417bbc91dbb0819df4178f0da3d5a4848f91f593dfe89b41ca6beff78a6534b",
+      "archive": "abdf853a45334452da02d5d56374608110f54cd33d0c13c2e3b45184db3a6ba9"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "VSAG HGraph SQ8 + FP32",
+    "curve": "D14__vsag-sq8-g1|{\"ef\":192}",
+    "config": "D14__vsag-sq8-g1",
+    "parameters": {
+      "ef": 192
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "371e9531d2df1daad0c06392de796d9eb6c01c3eede6a9042fa931a3c1fcc552",
+      "protocol": "093f0db1f1f7e805d419a92de569eebad6d7d7cab80c762a748c6cbbd7c0eba2",
+      "archive": "666d4717f1c51ae5bc8602dc1f09a5ec2e47ef6479a87156b0ce12f040a1874d"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "HNSWlib FP32",
+    "curve": "D14__hnswlib-g1|{\"ef\":192}",
+    "config": "D14__hnswlib-g1",
+    "parameters": {
+      "ef": 192
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "1cbbbe7347e891419fce28b4a6413a26e3af1a30056eb563f25e96264a615c83",
+      "protocol": "247177c9da16eadd73c6f4d89147484b51bd09155e510985d5af8dbc04a559d0",
+      "archive": "b4b25b71094c9d6589b47968ef67034879b5954704ce3f28771fa06265cf41f2"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "DiskANN FP32",
+    "curve": "D14__D14-diskann-rust-strong-r64-l400|{\"ef\":128}",
+    "config": "D14__D14-diskann-rust-strong-r64-l400",
+    "parameters": {
+      "ef": 128
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "4cf74fe47359f1dee3687c942c1f302d867958d8b7e410ada05d3f6c967e6cc4",
+      "protocol": "83a29d2da6f0f834918fc2123b367cd576a48bb49a8dafaf7142ac0d8042c918",
+      "archive": "c9a8fc433585cee274063c59723ba1935771a33d509b3396e78d9f0df0d4a5c5"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "RaBitQ 官方 IVF + FP32",
+    "curve": "D14__rabitq-32bit-g1|{\"nprobe\":128}",
+    "config": "D14__rabitq-32bit-g1",
+    "parameters": {
+      "nprobe": 128
+    },
+    "target": 0.95,
+    "threads": [
+      "1",
+      "8",
+      "16",
+      "32"
+    ],
+    "evidence": {
+      "result": "4c74e6b9595a021999af32302c4b6d2bba13f03d9e8df4c0b2050a0c3ac728e1",
+      "protocol": "a8875e4d1fd580caaa6c8cd2857e4e6df3a315a3de013192fe29b30046e7d27f",
+      "archive": "64adc07813973dda2343cf0f400e792531b2935b9651f711d7aabe1c8b1ed517"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "QuIVer",
+    "curve": "D03__quiver-main|{\"FP32\":64,\"ef\":384}",
+    "config": "D03__quiver-main",
+    "parameters": {
+      "ef": 384,
+      "FP32": 64
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "40b16a7e4be977f35be29639514ef29aee2e939631bd9ca616d3da82a5404fc6",
+      "protocol": "fef3af10a6b09130e585ae9073dad8c60b56b85ec3f8a53ff942dd04d044d8bf",
+      "index": "2a470875ef72f9dd3743021460b0bed8f77d90f11d4b55962858443d664b3b60",
+      "archive": "3bbfed1575946ffa1a24ccf0e6410b5886eb78d0640eebb4ae658b3e380457af"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "QuIVer",
+    "curve": "D05__quiver-main|{\"FP32\":64,\"ef\":128}",
+    "config": "D05__quiver-main",
+    "parameters": {
+      "ef": 128,
+      "FP32": 64
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "de50d997ab119b75f2dd034dfd5e8eb94f666350e60801c929fb61418ca1d2d8",
+      "protocol": "934c751300cb11be902bdcfa558fee9f2ba4be9713dda8a24a61812b8702692b",
+      "index": "5112b9bbb5ae7dbde5e903c73d8f23a62c24100fc22fb55c30d12db881d3a561",
+      "archive": "420bbc09a9f826f1f5c557a467c20cf249d828546f122422c69f6087c68c95ac"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "QuIVer",
+    "curve": "D14__quiver-main|{\"FP32\":64,\"ef\":384}",
+    "config": "D14__quiver-main",
+    "parameters": {
+      "ef": 384,
+      "FP32": 64
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "6058ae8e380838e4d982f31d4ce910827fdf5fa0880156eb7499fed5b62d790f",
+      "protocol": "987968fbc397ccb0d5342fea7557b9ddfa41215aeb40c896ce6991b73ed6fc07",
+      "index": "ad51d6c3cac39e25b53c900d816951785a5b816e9fc11ab2887220bcfec7b435",
+      "archive": "e84671bce736f5d56f6e904efa6389d2a55aa7c0191ed1c0899d2bf6302976e0"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "SymphonyQG",
+    "curve": "D03__D03-sqg-integer-fixed-g0|{\"ef\":64}",
+    "config": "D03__D03-sqg-integer-fixed-g0",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "ac0b798dd174d4942b5139c6c14ca9c5344277327546a2a1eb6aeede37164e05",
+      "protocol": "cbdf30edc6770041e7a1a5d08d3c0603d39d24d0a6e671f0334d1686c0d37a18",
+      "archive": "126e7ab06c08676444d0773a2904c023c47821f7946f034b913596787eb06a64"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "SymphonyQG",
+    "curve": "D05__D05-sqg-integer-fixed-g1|{\"ef\":256}",
+    "config": "D05__D05-sqg-integer-fixed-g1",
+    "parameters": {
+      "ef": 256
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "08939754eb4cc9965a23ebba2f72545f59a3b73de47af8ee4616c921d9585279",
+      "protocol": "98ee6c18fc709c8e8de954eeb033338dd116fb39c5e83b6a670fa10bbe85e873",
+      "archive": "5b016db97dfa07fdbb9799f430ce3c53f0a405e7173d082726ae2ecfac5760cb"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "SymphonyQG",
+    "curve": "D14__D14-sqg-integer-fixed-g1|{\"ef\":768}",
+    "config": "D14__D14-sqg-integer-fixed-g1",
+    "parameters": {
+      "ef": 768
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "1193fa0065b0e463db14415b961d06ae79234a17773fc4b43b82c2c7be4114dd",
+      "protocol": "559d90c02ec41368dc22062f331c60f81ebcb52cc8907a910f921cf057f3cd3a",
+      "archive": "e704efaf294263a43332db1a92f9dd03dd43fa076a5766da56bbf174c9f33c91"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "NGT-QG",
+    "curve": "D03__ngt-g1|{\"epsilon\":0.2,\"expansion\":4}",
+    "config": "D03__ngt-g1",
+    "parameters": {
+      "epsilon": 0.2,
+      "expansion": 4
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "52c3d4185aa6c761f5b1a33368c2f03cfd26d180b30dc9fbc561cb2497e7b5ab",
+      "protocol": "8af9c40f0f8ffac23146b73e446dac3e5d2f1f2a766a0ea7dcc176f22094a684",
+      "archive": "2300a6c59bf791cad1ed4b1a7390ae121ee9785a5f44e57554cd23fcb6926832"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "NGT-QG",
+    "curve": "D05__ngt-g1|{\"epsilon\":0.2,\"expansion\":4}",
+    "config": "D05__ngt-g1",
+    "parameters": {
+      "epsilon": 0.2,
+      "expansion": 4
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "80637900de81220a1f8da6368d56d27b023e87ce4547c0b45cbb5e161dfad180",
+      "protocol": "a4bb8ac306df7b73d0920acbcc1ff3f793f5350ff3a4bbea42e2870c7a35aa4c",
+      "archive": "b80a66de7785423d5f3c7e6cef3529508a08e2eee1575c0a927a6e513e126375"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "NGT-QG",
+    "curve": "D14__D14-ngt-dense-epsilon|{\"epsilon\":0.16,\"expansion\":4}",
+    "config": "D14__D14-ngt-dense-epsilon",
+    "parameters": {
+      "epsilon": 0.16,
+      "expansion": 4
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "64155ef5eefc44aa677e0ee049690ad435018a4e55f90157e2e5a861ced94271",
+      "protocol": "1efa26e44d9b87d878108a5d7d026bacc9427a36199cbb6ad8133be959715d6e",
+      "archive": null
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "Lucene BBQ + FP32",
+    "curve": "D03__D03-recheck-bbq-g0|{\"ef\":64}",
+    "config": "D03__D03-recheck-bbq-g0",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "edbdb116f0dff32776181490c378d5bae4177efbffbea1d824c29fb3bae15f27",
+      "protocol": "cdb55d650af48156e950fd000326dbd888798f7baeace5c4a20bb6144cd98e6c",
+      "archive": "3abd9ebfa5dd68efa36f1b152d3e36859d64bc7416eb79db2b7de97c577067e8"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "Lucene BBQ + FP32",
+    "curve": "D05__bbq-g1|{\"ef\":192}",
+    "config": "D05__bbq-g1",
+    "parameters": {
+      "ef": 192
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "783a22a08fa30bdaefecd03833da29d7dc9f983f087bb193f288b71fc37177a2",
+      "protocol": "18fd561d746c13a695c586f1bc78db98c9b36a3de831126a61a9823ffdf70d11",
+      "archive": "ceb79e2d5d4a00f515c5c14393c7416a54a3e34af6d198c90ff92079cbf1f05b"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "Lucene BBQ + FP32",
+    "curve": "D14__bbq-g1|{\"ef\":8192}",
+    "config": "D14__bbq-g1",
+    "parameters": {
+      "ef": 8192
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "a90181e5fa5a94dba21f1351568b31c0558dd785407334d6f77e8a8f2fc04dc5",
+      "protocol": "e726057feb71f952def7124628b1318c5179b574ecee484c3f910a9c40f5d7e5",
+      "archive": "3e01ba892dc9a95f3ef7b3acfbaa9dc821fef13b3a6ac90f1329b1123401bf01"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "SVS LVQ8",
+    "curve": "D03__svs-lvq8-g0|{\"ef\":64}",
+    "config": "D03__svs-lvq8-g0",
+    "parameters": {
+      "ef": 64
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "506e78afb2e832da91fbebcc9e1fc1fe3782b5246c014e2245b2f277e3dfc9b7",
+      "protocol": "a5d995837ad1e09dd632a7170619935e4b8eae89bcaf2ef89bec421283f69def",
+      "archive": "f53d57048ca21a5a3cd0bfa3094dfccb606f7d90539aa05e5121a706ee4084a7"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "SVS LVQ8",
+    "curve": "D05__svs-lvq8-g1|{\"calibration_target\":0.98,\"ef\":131,\"prefetch_lookahead\":1,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":131}",
+    "config": "D05__svs-lvq8-g1",
+    "parameters": {
+      "ef": 131,
+      "svs_capacity": 131,
+      "prefetch_lookahead": 1,
+      "prefetch_step": 1,
+      "search_buffer_visited_set": false,
+      "calibration_target": 0.98
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "d800265bb71304119bbf499cec09595f325d790c75f791ca178ad53c88257233",
+      "protocol": "1f6ad509d16adf524736c7fe557537dbd42457b80e7958b2573b27bb203f55a8",
+      "archive": "c93ddfdb4925e25cee3a757f0874eb686be2ae08c4e2af360354083a32f34ad3"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "SVS LVQ8",
+    "curve": "D14__svs-lvq8-g1|{\"calibration_target\":0.98,\"ef\":322,\"prefetch_lookahead\":25,\"prefetch_step\":1,\"search_buffer_visited_set\":false,\"svs_capacity\":322}",
+    "config": "D14__svs-lvq8-g1",
+    "parameters": {
+      "ef": 322,
+      "svs_capacity": 322,
+      "prefetch_lookahead": 25,
+      "prefetch_step": 1,
+      "search_buffer_visited_set": false,
+      "calibration_target": 0.98
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "00a425203b80ceb19a9ba33f3d65b8c69fcce7127352fe55144d825236f9591c",
+      "protocol": "1417bbc91dbb0819df4178f0da3d5a4848f91f593dfe89b41ca6beff78a6534b",
+      "archive": "abdf853a45334452da02d5d56374608110f54cd33d0c13c2e3b45184db3a6ba9"
+    }
+  },
+  {
+    "dataset": "D03",
+    "method": "HNSWlib FP32",
+    "curve": "D03__hnswlib-g1|{\"ef\":128}",
+    "config": "D03__hnswlib-g1",
+    "parameters": {
+      "ef": 128
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "e0eb9b843698dd1e883539f149306d81549b4728c477accd059be4b278c582f1",
+      "protocol": "6364abc5f9eb2caf4e4abd760fa57055581cc25c88870c230b8fb71d8661255a",
+      "archive": "f4fd997434a89f94e31e16c7b4d478053c6a3c5921f8f6ef07d95b0daecc01d9"
+    }
+  },
+  {
+    "dataset": "D05",
+    "method": "HNSWlib FP32",
+    "curve": "D05__hnswlib-g1|{\"ef\":192}",
+    "config": "D05__hnswlib-g1",
+    "parameters": {
+      "ef": 192
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "260205e5ad2f56a27bba793ef633dadb2a44b6c58f3986ade6b1ee419e6e7a1f",
+      "protocol": "de3e2b148eb57487b1ad79aadf346c6a833318c1c54a83d0debde7e305bf348e",
+      "archive": "65469b96ac7bcd6813db547ad98d5260620416a9eaae922ad41a1e3c688c2e35"
+    }
+  },
+  {
+    "dataset": "D14",
+    "method": "HNSWlib FP32",
+    "curve": "D14__hnswlib-g1|{\"ef\":1024}",
+    "config": "D14__hnswlib-g1",
+    "parameters": {
+      "ef": 1024
+    },
+    "target": 0.98,
+    "evidence": {
+      "result": "1cbbbe7347e891419fce28b4a6413a26e3af1a30056eb563f25e96264a615c83",
+      "protocol": "247177c9da16eadd73c6f4d89147484b51bd09155e510985d5af8dbc04a559d0",
+      "archive": "b4b25b71094c9d6589b47968ef67034879b5954704ce3f28771fa06265cf41f2"
+    }
+  }
+]

@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "state": "用户已授权原生L2适配及正式测量",
+  "dispatch_enabled": true,
+  "scope": "原二十一库计划的两个原生欧氏剩余任务",
+  "dataset_count": 2,
+  "supported_metric_preflight_count": 19,
+  "native_l2_gate_count": 2,
+  "execution_order": [
+    "D09",
+    "D10"
+  ],
+  "datasets": [
+    {
+      "id": "D09",
+      "name": "SIFT-native-L2",
+      "n": 1000000,
+      "queries": 10000,
+      "dimension": 128,
+      "metric": "euclidean",
+      "origin": "原VLDB数据清单",
+      "historical_data_files": {
+        "train": {
+          "path": "recorded/data/sift128-native-l2/sift128_train.f32",
+          "bytes": 512000000,
+          "sha256": "ac8e11ed111b09e882bcf0ef1a77ebdd36c89f495bce8fd596603f69c35148e6",
+          "finite": true,
+          "norm_min": 506.3171081542969,
+          "norm_max": 511.3531188964844
+        },
+        "test": {
+          "path": "recorded/data/sift128-native-l2/sift128_test.f32",
+          "bytes": 5120000,
+          "sha256": "bf4c4c9db385017e63e7b0a9ccd8e3aab3744a02e053c135e000fa0b1dea2d6f",
+          "finite": true,
+          "norm_min": 506.72674560546875,
+          "norm_max": 511.134033203125
+        },
+        "groundtruth": {
+          "path": "recorded/data/sift128-native-l2/sift128_groundtruth.i32",
+          "bytes": 400000,
+          "sha256": "733ce06f18ead9afdeaaa33325e6e79cf775585c928d5dae2bf55e3bedaed44a",
+          "valid_ids": true,
+          "fp64_exact_crosscheck": [
+            {
+              "query": 0,
+              "top10_set_overlap": 1.0,
+              "max_score_error": 0.0,
+              "score_equivalent": true
+            },
+            {
+              "query": 5000,
+              "top10_set_overlap": 1.0,
+              "max_score_error": 0.0,
+              "score_equivalent": true
+            },
+            {
+              "query": 9999,
+              "top10_set_overlap": 1.0,
+              "max_score_error": 0.0,
+              "score_equivalent": true
+            }
+          ],
+          "crosscheck_queries": 3,
+          "limitation": "抽查3条查询的全库FP64真值，未重新核算全部查询；等分边界允许集合不同"
+        }
+      },
+      "execution_order": 20,
+      "tune_queries": 256,
+      "evaluation_queries": 9744,
+      "scope_included": true,
+      "native_metric_gate": "须通过原生欧氏正确性准入",
+      "data_preflight": "尚未核验当前远端存在性及完整身份",
+      "evaluation_state": "等待准入，不依评估改参数",
+      "split_policy": "按数据集ID和查询行号SHA256排序，前256条调参，其余评估；保存实际编号及SHA",
+      "blindness": "历史数据与查询可能已曝光，不宣称新盲测",
+      "authoritative_external_baselines": false,
+      "max_positions": 14,
+      "deployment": "实际TDB QuIVer与VecPool回调；如使用独立快照诊断须另标"
+    },
+    {
+      "id": "D10",
+      "name": "GIST-native-L2",
+      "n": 1000000,
+      "queries": 1000,
+      "dimension": 960,
+      "metric": "euclidean",
+      "origin": "原VLDB数据清单",
+      "historical_data_files": {
+        "train": {
+          "path": "recorded/data/gist960-native-l2/gist960_train.f32",
+          "bytes": 3840000000,
+          "sha256": "1d9dfa933a86b1b78ef3de82eb286f85899866c428d373e42613783a13811038",
+          "finite": true,
+          "norm_min": 0.0,
+          "norm_max": 7.934343338012695,
+          "zero_vectors": 10,
+          "zero_vector_policy": "余弦任务拒绝零向量；原生L2任务保留官方零向量"
+        },
+        "test": {
+          "path": "recorded/data/gist960-native-l2/gist960_test.f32",
+          "bytes": 3840000,
+          "sha256": "5779751c3b63bee0a0c52a0017232ca2340af0527eb0f79270ae09c010423eea",
+          "finite": true,
+          "norm_min": 0.4388217628002167,
+          "norm_max": 4.937479496002197,
+          "zero_vectors": 0,
+          "zero_vector_policy": "余弦任务拒绝零向量；原生L2任务保留官方零向量"
+        },
+        "groundtruth": {
+          "path": "recorded/data/gist960-native-l2/gist960_groundtruth.i32",
+          "bytes": 40000,
+          "sha256": "77c2b0343cf88dc3e97f8f5fecece558f89ba3ddb16faf03e061541c316d7acb",
+          "valid_ids": true,
+          "fp64_exact_crosscheck": [
+            {
+              "query": 0,
+              "top10_set_overlap": 1.0,
+              "max_score_error": 2.4424906541753444e-15,
+              "score_equivalent": true
+            },
+            {
+              "query": 500,
+              "top10_set_overlap": 1.0,
+              "max_score_error": 1.6653345369377348e-16,
+              "score_equivalent": true
+            },
+            {
+              "query": 999,
+              "top10_set_overlap": 1.0,
+              "max_score_error": 4.718447854656915e-16,
+              "score_equivalent": true
+            }
+          ],
+          "crosscheck_queries": 3,
+          "limitation": "抽查3条查询的全库FP64真值，未重新核算全部查询；等分边界允许集合不同"
+        }
+      },
+      "execution_order": 21,
+      "tune_queries": 256,
+      "evaluation_queries": 744,
+      "scope_included": true,
+      "native_metric_gate": "须通过原生欧氏正确性准入",
+      "data_preflight": "尚未核验当前远端存在性及完整身份",
+      "evaluation_state": "等待准入，不依评估改参数",
+      "split_policy": "按数据集ID和查询行号SHA256排序，前256条调参，其余评估；保存实际编号及SHA",
+      "blindness": "历史数据与查询可能已曝光，不宣称新盲测",
+      "authoritative_external_baselines": false,
+      "max_positions": 14,
+      "deployment": "实际TDB QuIVer与VecPool回调；如使用独立快照诊断须另标"
+    }
+  ],
+  "frozen_inputs": {
+    "source_manifest": "research/QuIVer/integration/general_sm_l2_20261017/source-manifest-v2.json",
+    "source_manifest_sha256": "3bb1da829b076b671778ecf448aeaa80abe969ef1b9dd99b7c940774103386d7",
+    "source_files": 120,
+    "external_baseline_data": "research/QuIVer/adaptation/baseline_final_comparison_20261016/comparison-data.json",
+    "external_baseline_sha256": "a35b18dda6350edf70654d0f514ac41408197e48bc4d5e93f7913bbe80926d84",
+    "external_observations": 813,
+    "external_configurations": 95
+  },
+  "build": {
+    "route": "原生产BQ快速图，随后显式enable_quiver_sm_native_l2，保留原始幅值和零向量",
+    "threads": 8,
+    "m": 32,
+    "maximum_degree": 64,
+    "ef_construction": 128,
+    "alpha": 1.2,
+    "internal_level_lcg_seed": 12345,
+    "builds_per_dataset": 1,
+    "repeat_note": "查询五轮不代表构建五轮；单次构建时间如实标记",
+    "reuse": "旧图仅在输入顺序、构图源码、参数及完整构建证据符合最终协议时复用，不从旧查询结果选图"
+  },
+  "query": {
+    "method": "QuIVer原生欧氏SM-L2，原始幅值重建导航与负平方L2精排",
+    "top_k": 10,
+    "fp32_rerank_budget": 64,
+    "tuning_ef_grid": [
+      32,
+      48,
+      64,
+      88,
+      128,
+      192,
+      256,
+      384,
+      512,
+      768,
+      1024
+    ],
+    "recall_targets": [
+      0.9,
+      0.95,
+      0.98
+    ],
+    "threads": [
+      1,
+      8,
+      16,
+      32
+    ],
+    "curve_max_points": 5,
+    "anchor_multithreading": "三个目标档全部补8/16/32T，未达标则共用最高预算诊断点并去重",
+    "selection": "调参集为各目标选择满足召回的最小ef，余下曲线点依事前确定的预算跨度规则补齐，冻结后不据评估选参",
+    "curve_completion_rule": "目标锚点及最高预算诊断点去重；不足五点时从冻结ef网格中逐次选log(ef)到已选集合最小距离最大的点，平局取较小ef；不超过五点",
+    "repetitions": 5,
+    "minimum_throughput_seconds_per_round": 5,
+    "full_evaluation_pass_required": true,
+    "latency_repetitions": 5,
+    "maximum_positions_per_dataset": 14,
+    "maximum_positions_all_datasets": 294,
+    "maximum_throughput_rounds": 1470,
+    "maximum_latency_rounds": 1470,
+    "tail_definition": "原生单查询服务时长；与吞吐分开计时，不包含任务排队；全部正式查询五轮，查询簇区间",
+    "warmup": "各位置计时前预热至少三次完整查询且至少一秒；预热、吞吐、延迟分别记时，不混算"
+  },
+  "resources": {
+    "memory_family_rss_plus_hugetlb_gib": 56,
+    "disk_margin_gib": 20,
+    "disk_preflight": "下一数据传输、构建索引、转换、安装及临时文件的新增峰值加20GiB，按实际保留项计算",
+    "serial_measurement": true,
+    "disable_core": true,
+    "no_concurrent_compile_transfer_or_audit": true,
+    "exception": "只读轻量状态检查允许；资源异常停止相关任务并立即报告，普通错误保留现场后独立版本有限修复"
+  },
+  "required_artifacts": [
+    "完整执行协议及源码依赖哈希",
+    "数据与查询编号及真值身份",
+    "调参原始结果与冻结选择",
+    "完整标签与分数",
+    "每轮计数和墙钟",
+    "逐查询原生延迟及查询簇区间",
+    "实际CPU亲和性和线程记录",
+    "构建导入安装保存加载分段",
+    "构建峰值与加载预热查询驻留",
+    "原BQ及SM及图及ID及各线程工作区及FP32组件账",
+    "索引哈希和资源监督",
+    "归档回执与本地独立复算"
+  ],
+  "completion": "二十一项均有测量归档或明确的任务不兼容及资源失败证据，全部可测项独立复算并汇总；未通过度量门禁不称二十一库性能完成",
+  "out_of_scope": [
+    "外部基线全矩阵重跑",
+    "新算法与消融队列",
+    "全部搜索预算的线程全交叉",
+    "每个查询都驱逐缓存的冷盘矩阵",
+    "自动切换默认查询模式",
+    "未授权的历史结果覆盖"
+  ],
+  "current_remote_status": "本次未连接远端；沿用上次收尾无进程记录，不作为当前实时状态",
+  "user_order": "Cohere-1M、DBpedia-1536，然后其余常规库，然后VIBE七库，随后合成与五百万库，原生欧氏任务通过门禁后接续",
+  "parent_plan_sha256": "0807c22a6321217b3eb18e3785358e525ea38f4d5295db2c9406265944c71f16"
+}
