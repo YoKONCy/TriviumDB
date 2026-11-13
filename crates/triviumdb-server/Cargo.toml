@@ -1,12 +1,15 @@
 [package]
 name = "triviumdb-server"
-version = "0.9.0"
+version = "0.9.1-beta.1"
 edition = "2024"
 authors = ["YoKONCy <2752026184@qq.com>"]
 description = "HTTP server for TriviumDB"
 license = "Apache-2.0"
 repository = "https://github.com/YoKONCy/TriviumDB"
 publish = false
+
+[features]
+test-hooks = ["triviumdb/test-hooks"]
 
 [dependencies]
 axum = { version = "0.8", features = ["json"] }
@@ -22,7 +25,7 @@ tower = { version = "0.5", features = ["limit", "timeout", "util"] }
 tower-http = { version = "0.6", features = ["catch-panic", "compression-gzip", "limit", "request-id", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-triviumdb = { path = "../..", version = "0.9.0" }
+triviumdb = { path = "../..", version = "0.9.1-beta.1" }
 uuid = { version = "1.18", features = ["v4"] }
 
 [dev-dependencies]

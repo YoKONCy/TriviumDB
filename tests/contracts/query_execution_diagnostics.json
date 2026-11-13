@@ -1,0 +1,225 @@
+{
+  "cases": [
+    {
+      "name": "return_reference",
+      "query": "MATCH (n) RETURN coalesce(n.name, missing.value) AS value",
+      "fragment": "missing.value",
+      "code": "TDB_QUERY_PARSE",
+      "stage": "plan",
+      "prepare_error": true,
+      "mutation": false,
+      "http_status": 400,
+      "span": {
+        "start_byte": 34,
+        "end_byte": 47,
+        "line": 1,
+        "column": 35
+      }
+    },
+    {
+      "name": "predicate_reference",
+      "query": "MATCH (n) WHERE n.x == 1 AND missing.y == 2 RETURN n",
+      "fragment": "missing.y",
+      "code": "TDB_QUERY_PARSE",
+      "stage": "plan",
+      "prepare_error": true,
+      "mutation": false,
+      "http_status": 400,
+      "span": {
+        "start_byte": 29,
+        "end_byte": 38,
+        "line": 1,
+        "column": 30
+      }
+    },
+    {
+      "name": "order_reference",
+      "query": "MATCH (n) RETURN n ORDER BY coalesce(n.x, missing.y)",
+      "fragment": "missing.y",
+      "code": "TDB_QUERY_PARSE",
+      "stage": "plan",
+      "prepare_error": true,
+      "mutation": false,
+      "http_status": 400,
+      "span": {
+        "start_byte": 42,
+        "end_byte": 51,
+        "line": 1,
+        "column": 43
+      }
+    },
+    {
+      "name": "with_reference",
+      "query": "SEARCH VECTOR [1, 0] TOP 1 WITH _, coalesce(1, missing.x) AS x RETURN _",
+      "fragment": "missing.x",
+      "code": "TDB_QUERY_PARSE",
+      "stage": "plan",
+      "prepare_error": true,
+      "mutation": false,
+      "http_status": 400,
+      "span": {
+        "start_byte": 47,
+        "end_byte": 56,
+        "line": 1,
+        "column": 48
+      }
+    },
+    {
+      "name": "stage_reference",
+      "query": "SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed shortest_paths missing TO [8] AS route RETURN route",
+      "fragment": "shortest_paths missing TO [8] AS route",
+      "code": "TDB_QUERY_PARSE",
+      "stage": "plan",
+      "prepare_error": true,
+      "mutation": false,
+      "http_status": 400,
+      "span": {
+        "start_byte": 45,
+        "end_byte": 83,
+        "line": 1,
+        "column": 46
+      }
+    },
+    {
+      "name": "unicode_reference",
+      "query": "MATCH (n)\r\nRETURN '中🙂' AS text, coalesce(1, missing.x) AS value",
+      "fragment": "missing.x",
+      "code": "TDB_QUERY_PARSE",
+      "stage": "plan",
+      "prepare_error": true,
+      "mutation": false,
+      "http_status": 400,
+      "span": {
+        "start_byte": 49,
+        "end_byte": 58,
+        "line": 2,
+        "column": 34
+      }
+    },
+    {
+      "name": "lower_vector",
+      "query": "SEARCH VECTOR [1e300, 0] TOP 1 RETURN *",
+      "fragment": "SEARCH VECTOR [1e300, 0] TOP 1",
+      "code": "TDB_INVALID_VECTOR",
+      "stage": "plan",
+      "prepare_error": false,
+      "mutation": false,
+      "http_status": 400,
+      "span": {
+        "start_byte": 0,
+        "end_byte": 30,
+        "line": 1,
+        "column": 1
+      }
+    },
+    {
+      "name": "write_vector",
+      "query": "MATCH (n) SET VECTOR(n) == [1]",
+      "fragment": "SET VECTOR(n) == [1]",
+      "code": "TDB_DIMENSION_MISMATCH",
+      "stage": "plan",
+      "prepare_error": false,
+      "mutation": true,
+      "http_status": 400,
+      "span": {
+        "start_byte": 10,
+        "end_byte": 30,
+        "line": 1,
+        "column": 11
+      },
+      "write": {
+        "phase": "validation",
+        "outcome": "not_committed"
+      }
+    },
+    {
+      "name": "write_assignment",
+      "query": "MATCH (n) SET missing.x == 1",
+      "fragment": "missing.x == 1",
+      "code": "TDB_QUERY_EXECUTION",
+      "stage": "plan",
+      "prepare_error": false,
+      "mutation": true,
+      "http_status": 422,
+      "span": {
+        "start_byte": 14,
+        "end_byte": 28,
+        "line": 1,
+        "column": 15
+      },
+      "write": {
+        "phase": "validation",
+        "outcome": "not_committed"
+      }
+    },
+    {
+      "name": "execute_vector",
+      "query": "SEARCH VECTOR [1] TOP 1 RETURN *",
+      "fragment": "SEARCH VECTOR [1] TOP 1",
+      "code": "TDB_DIMENSION_MISMATCH",
+      "stage": "execute",
+      "prepare_error": false,
+      "mutation": false,
+      "http_status": 400,
+      "span": {
+        "start_byte": 0,
+        "end_byte": 23,
+        "line": 1,
+        "column": 1
+      }
+    },
+    {
+      "name": "execute_rank",
+      "query": "SEARCH VECTOR [1, 0] TOP 1 AS seed WITH seed RANK seed BY VECTOR [1] TOP 1 RETURN seed",
+      "fragment": "RANK seed BY VECTOR [1] TOP 1",
+      "code": "TDB_DIMENSION_MISMATCH",
+      "stage": "execute",
+      "prepare_error": false,
+      "mutation": false,
+      "http_status": 400,
+      "span": {
+        "start_byte": 45,
+        "end_byte": 74,
+        "line": 1,
+        "column": 46
+      }
+    },
+    {
+      "name": "execute_row_budget",
+      "query": "MATCH (n) RETURN n",
+      "fragment": "MATCH (n)",
+      "code": "TDB_QUERY_BUDGET",
+      "stage": "execute",
+      "prepare_error": false,
+      "mutation": false,
+      "http_status": 422,
+      "span": {
+        "start_byte": 0,
+        "end_byte": 9,
+        "line": 1,
+        "column": 1
+      }
+    },
+    {
+      "name": "execute_unique",
+      "query": "CREATE ({kind: 'alpha'})",
+      "fragment": "CREATE ({kind: 'alpha'})",
+      "code": "TDB_UNIQUE_CONSTRAINT",
+      "stage": "execute",
+      "prepare_error": false,
+      "mutation": true,
+      "http_status": 409,
+      "span": {
+        "start_byte": 0,
+        "end_byte": 24,
+        "line": 1,
+        "column": 1
+      },
+      "write": {
+        "phase": "validation",
+        "outcome": "not_committed",
+        "transaction_consumed": true
+      }
+    }
+  ]
+}

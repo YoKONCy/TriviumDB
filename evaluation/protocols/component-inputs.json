@@ -1,0 +1,176 @@
+{
+  "datasets": [
+    {
+      "id": "D03",
+      "files": [
+        {
+          "file": "base.f32",
+          "bytes": 614400000,
+          "sha256": "6fa054dbdef7932a89ff1adab84735d2c8fb7a3c91f56702a3696d5504d5e026"
+        },
+        {
+          "file": "queries.f32",
+          "bytes": 2285568,
+          "sha256": "cd9293cf868e5bb45846ccbf11ada0d099892e57cd3172b83cc66d3dafc26e0c"
+        },
+        {
+          "file": "centroid.f32",
+          "bytes": 3072,
+          "sha256": "9085ee8dc89cf173631d502492c85e86edc69790708cbb970695a31db2588657"
+        },
+        {
+          "file": "dim-threshold.f32",
+          "bytes": 3072,
+          "sha256": "e884736403e8fc998f7305fd08d0e3e50dba52ec848f5d4b5944efc849086216"
+        },
+        {
+          "file": "metric.u32",
+          "bytes": 4,
+          "sha256": "67abdd721024f0ff4e0b3f4c2fc13bc5bad42d0b7851d456d88d203d15aaa450"
+        },
+        {
+          "file": "query-ids.json",
+          "bytes": 5125,
+          "sha256": "cec26b41a35d7639d89ca360bdbb57dbe99af79372d9b54cd2c30e3960f7d1f1"
+        },
+        {
+          "file": "truth32.u32",
+          "bytes": 95232,
+          "sha256": "7d624d2cdb0e5c6831c649a90f76c1cc7188fa2463ead1d6b0e2884d2400a69c"
+        },
+        {
+          "file": "truth32-distance.f64",
+          "bytes": 190464,
+          "sha256": "33422e46f8ada5c6c3a19452a7f28f127584fcf61417216a66804dab96811ffd"
+        },
+        {
+          "file": "input-manifest.json",
+          "bytes": 11165,
+          "sha256": "aa687c4efb1b33a92f38d9c5b3cab2d9d413078540aa1f3b22cb6ea1682ef0f6"
+        }
+      ]
+    },
+    {
+      "id": "D02",
+      "files": [
+        {
+          "file": "base.f32",
+          "bytes": 409600000,
+          "sha256": "7d3d61ac1e0c776f72e7d454124408daf8cd5bebe9348351c3ac5f27882c5c37"
+        },
+        {
+          "file": "queries.f32",
+          "bytes": 1523712,
+          "sha256": "00b21c61d340c1a43e8f40c2ce6f2db40e3bbdc814a0118d5fe7fbf80fd61c08"
+        },
+        {
+          "file": "centroid.f32",
+          "bytes": 2048,
+          "sha256": "e711f5a0db70d92821c11a3e29360c46871e61109ad75ee91e13b4b7a3189efe"
+        },
+        {
+          "file": "dim-threshold.f32",
+          "bytes": 2048,
+          "sha256": "04932f1a7306dcf1f37e9fec9d6d9e44358cee7540b7f1e083c24634f0e727f4"
+        },
+        {
+          "file": "metric.u32",
+          "bytes": 4,
+          "sha256": "67abdd721024f0ff4e0b3f4c2fc13bc5bad42d0b7851d456d88d203d15aaa450"
+        },
+        {
+          "file": "query-ids.json",
+          "bytes": 5129,
+          "sha256": "6ef2724b21e015af60273ec9a8ce6f1856a7fcffaae363b1b5cdc722dd5f75c9"
+        },
+        {
+          "file": "truth32.u32",
+          "bytes": 95232,
+          "sha256": "b162cbd8d705335d3364264ba6c6120a4f67c3986cfad67c73cbb9881cac03d4"
+        },
+        {
+          "file": "truth32-distance.f64",
+          "bytes": 190464,
+          "sha256": "a668ad0ec3ae69d88042e99fe8d52b973cabecb7021af5f533dde38aeed6f6a8"
+        },
+        {
+          "file": "input-manifest.json",
+          "bytes": 11147,
+          "sha256": "bcc73f8a123cc44e12eb66724d649d2b7d95be65ea8d116c2da59afe9f2c8e7a"
+        }
+      ]
+    },
+    {
+      "id": "D09",
+      "files": [
+        {
+          "file": "base.f32",
+          "bytes": 102400000,
+          "sha256": "1a3d0b1dcce97d2b2e77f502d92be4781840df6955cc9c3c929667ae3223a524"
+        },
+        {
+          "file": "queries.f32",
+          "bytes": 380928,
+          "sha256": "cfe9a9de3dbe94c81b2fb25b3c2dd325c13baf9a027d3e4012641340a5b7b3e8"
+        },
+        {
+          "file": "centroid.f32",
+          "bytes": 512,
+          "sha256": "19cc4708631f29666ce07dff80de0f6283a6d57c6665a6d45b489f60e1326c0f"
+        },
+        {
+          "file": "dim-threshold.f32",
+          "bytes": 512,
+          "sha256": "19cc4708631f29666ce07dff80de0f6283a6d57c6665a6d45b489f60e1326c0f"
+        },
+        {
+          "file": "metric.u32",
+          "bytes": 4,
+          "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+        },
+        {
+          "file": "query-ids.json",
+          "bytes": 5852,
+          "sha256": "10a32f9c4620318afd6ff6cd297d595638f1ddf6a08043ef3f7c1436e32e053a"
+        },
+        {
+          "file": "truth32.u32",
+          "bytes": 95232,
+          "sha256": "0f6a2766f00b70782f4241fc35f456c2ec9424319d40a1f78c6496d762706d09"
+        },
+        {
+          "file": "truth32-distance.f64",
+          "bytes": 190464,
+          "sha256": "89deb04aee7beabfdb655a617f6309588a9b1eed585d914c097d6398a5cd3686"
+        },
+        {
+          "file": "input-manifest.json",
+          "bytes": 11828,
+          "sha256": "6562492a9abc7d1ca1222267ce42d339587543efe4251b2925c27ff2d94ce3c6"
+        }
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "dataset": "D03",
+      "archive": "recorded/research/QuIVer/integration/reviewer_mechanism_200k_20261018/completed-evidence/D03.zip",
+      "sha256": "cb14b16fed3a647c3db78832cd2bb7935ff1e5de096a204aee4db40ec3c07d4d"
+    },
+    {
+      "dataset": "D02",
+      "archive": "recorded/research/QuIVer/integration/reviewer_mechanism_200k_20261018/completed-evidence/D02.zip",
+      "sha256": "2bb706dd3cce1b1847cdd69ac83d6c0a8b7d711e9096f00c903d7be98da8b4f2"
+    },
+    {
+      "dataset": "D09",
+      "archive": "recorded/research/QuIVer/integration/reviewer_mechanism_200k_20261018/completed-evidence/D09.zip",
+      "sha256": "6e3de07be8545678a7ef0a6072607fe7ab9bbe88ba9cb3543ed80623aa4f823b"
+    }
+  ],
+  "package": {
+    "file": "inputs-200k.zip",
+    "bytes": 1134121661,
+    "sha256": "58e31da027b3412010ca3fa5f770f10be61ad1a95724c54cfec7d6133af8ef59"
+  }
+}

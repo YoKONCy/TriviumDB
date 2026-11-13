@@ -1,0 +1,23 @@
+{
+  "nodes": [
+    {"id": 7, "vector": [1, 0], "payload": {"name": "源"}},
+    {"id": 11, "vector": [0, 1], "payload": {"name": "中"}},
+    {"id": 13, "vector": [1, 1], "payload": {"name": "末"}}
+  ],
+  "edges": [
+    {"source_id": 7, "target_id": 11, "label": "route", "weight": 0.5, "metadata": {"part": "前段"}},
+    {"source_id": 11, "target_id": 13, "label": "route", "weight": 0.25, "metadata": {"part": "后段"}}
+  ],
+  "neighbors": [11, 13],
+  "paths": [
+    {"source_id": 7, "target_id": 11, "depth": 1, "path": [7, 11], "steps": [
+      {"from": 7, "to": 11, "edge_source": 7, "edge_target": 11, "label": "route", "weight": 0.5, "metadata": {"part": "前段"}}
+    ]},
+    {"source_id": 7, "target_id": 13, "depth": 2, "path": [7, 11, 13], "steps": [
+      {"from": 7, "to": 11, "edge_source": 7, "edge_target": 11, "label": "route", "weight": 0.5, "metadata": {"part": "前段"}},
+      {"from": 11, "to": 13, "edge_source": 11, "edge_target": 13, "label": "route", "weight": 0.25, "metadata": {"part": "后段"}}
+    ]}
+  ],
+  "stats": {"visited_nodes": 3, "traversed_edges": 2, "peak_frontier_size": 1, "depth_reached": 2, "truncated": false},
+  "stats_both": {"visited_nodes": 3, "traversed_edges": 3, "peak_frontier_size": 1, "depth_reached": 2, "truncated": false}
+}

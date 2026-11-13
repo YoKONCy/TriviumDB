@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "Please cite the QuIVer paper when using these materials."
+title: "QuIVer: Efficient Graph Indexing with Two-Bit Construction and Navigation"
+type: dataset
+authors:
+  - family-names: Xiao
+    given-names: Wenxuan
+  - family-names: Zhu
+    given-names: Peidong
+  - family-names: Li
+    given-names: Chengcheng
+  - family-names: Cao
+    given-names: Xu
+repository-code: "https://github.com/YoKONCy/TriviumDB"
+url: "https://arxiv.org/abs/2605.02171"
+

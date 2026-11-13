@@ -286,7 +286,11 @@ fn rebuilt_index_roundtrip_preserves_topology_and_incremental_insertion() {
     index.save_to_file(&path).unwrap();
     let saved = std::fs::read(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
-    assert_eq!(&saved[..8], b"QUIV\x01\x00\x00\x00", "磁盘格式保持 v1");
+    assert_eq!(
+        &saved[..8],
+        b"QUIV\x02\x00\x00\x00",
+        "默认路由快照采用v2布局"
+    );
     let mut restored = QuIVer::load_from_bytes(&saved).unwrap();
     assert_eq!(
         index.layer0.data, restored.layer0.data,

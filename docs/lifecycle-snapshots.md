@@ -1,16 +1,38 @@
 # 实例关闭、快照与恢复
 
-> 适用范围：0.9.0。单机和容器使用同一套嵌入式接口；版本内容见[变更说明](changes/0.9.0.md)。
+> 本文说明实例关闭、目录快照与恢复接口，适用于以 `0.9.0` 为基线的当前开发版本。已发布内容见[变更说明](changes/0.9.0.md)，后续加固见[未发布变更](changes/unreleased.md)。
+
+---
+
+## 目录
+
+- [维护额度](#维护额度)
+- [关闭协议](#关闭协议)
+- [一致快照](#一致快照)
+
+---
 
 ## 维护额度
+
+### 配置与单位
 
 `ResourceLimits.maintenance_memory_limit` 在总预算内保护维护工作区，零值在有限总预算下自动保护八分之一。Python 参数为 `maintenance_memory_limit_mb`，Node 参数为 `maintenanceMemoryLimitMb`，两端单位均为 MiB。
 
 刷盘、压实、关闭、快照使用维护保护额度，并可借用闲置的前台额度；总账受 `memory_limit` 约束。维护任务使用独立名额，最多同时准入 `max_threads` 个根任务，前台任务按 `max_active_tasks` 单独计数。
 
-保存按估算堆内存的两倍加 1 MiB 检查工作区，快照复制/校验另需 2 MiB 工作区。宿主按实例规模和并行维护量配置总额与保护额度。维护可用额度不足时，操作返回预算错误并保留重试条件。运行时预算用于资源准入，进程内存和 CPU 限额由操作系统或容器配置。
+### 工作区预算
+
+保存按估算堆内存的两倍加 1 MiB 检查工作区，快照复制和校验另需 2 MiB 工作区。宿主按实例规模和并行维护量配置总额与保护额度。
+
+> **预算提醒**：维护可用额度不足时，操作返回预算错误并保留重试条件。运行时预算用于资源准入；进程内存和 CPU 限额由操作系统或容器配置。
+
+---
 
 ## 关闭协议
+
+Rust 多个宿主组件可通过 `SharedDatabase<T>` 共享实例；接口与层次见[内核 SDK 与存储内核](kernel-sdk.md)。丢弃一个克隆只释放该句柄，显式关闭影响所有共享句柄。SDK 在外层借用忙时返回 `TDB_BUSY`，此时关闭请求尚未进入内核；已经准入的关闭由以下协议排空。`WeakDatabase` 和 Console 弱引用供回调、组件管理所有权。
+
+### 接口与完成条件
 
 | Rust | Python | Node.js | 行为 |
 | --- | --- | --- | --- |
@@ -19,9 +41,11 @@
 | `close_timeout(Duration)` | `close_timeout(timeout_ms)` | `closeTimeout(timeoutMs)` | 在给定期限内等待完成；成功返回 `true`，等待超时返回 `false`，操作失败返回错误 |
 | `close()` | `close()` | `close()` | 保留同步关闭入口，等待持久化和资源释放 |
 
-异步关闭阶段依次为 `open → draining → flushing → closed`。失败时为 `failed`，下一次等待返回保存的原始错误；消费错误后，可再次调用 `close_timeout` 重试。`last_error` 提供诊断文本，宿主通过结构化 `last_failure` 和调用返回的错误分类处理故障。
+### 阶段与诊断
 
-`shutdown_status()` 还返回结构化 `last_failure`（分类、消息及可选预算字段），以及当前关闭登记的 `maintenance` 状态。宿主可以区分排空等待、维护准入延期与已执行失败，详见[后台维护诊断](resource-runtime.md#后台维护诊断)。`active_operations` 统计本实例已进入的操作调用，内部嵌套调用可能计入多次，并非共享运行时的根任务数。一次新的关闭尝试清除上次故障诊断。
+异步关闭阶段依次为 `open → draining → flushing → closed`。持久化失败时为 `failed`，下一次等待返回保存的原始错误；消费错误后，可再次调用 `close_timeout` 重试。`last_error` 提供诊断文本，宿主通过结构化 `last_failure` 和调用返回的错误分类处理故障。
+
+`shutdown_status()` 还返回结构化 `last_failure`，包含分类、规范错误码、消息、详情、可选写入结果及预算字段，以及当前关闭登记的 `maintenance` 状态。宿主可以区分排空等待、维护准入延期与已执行失败，详见[后台维护诊断](resource-runtime.md#后台维护诊断)。`active_operations` 统计本实例已进入的操作调用，包括内部嵌套调用。共享运行时另行统计根任务数。一次新的关闭尝试清除上次故障诊断。
 
 等待超时返回 `false`，关闭任务继续持有内存、配额和文件锁。已有操作与 Hook 完成后，共享调度器继续执行关闭；已排空的关闭任务优先于周期压实。后续调用可继续等待或读取状态。返回 `true` 时，可写实例已完成持久化，数据库配额已归还、文件锁已释放；Reader 完成自身资源释放，并保持数据库制品原样。
 
@@ -29,7 +53,11 @@
 
 Rust 的同步 `close()` 保留重复关闭返回 `DatabaseClosed` 的行为；Python/Node 的同步 `close()` 保留幂等行为。三端 `close_timeout()` 在已经关闭后均返回 `true`。
 
-同步 `close()` 失败时也保留原有重试行为：阶段恢复为 `open`，`last_failure` 记录本次失败。再次同步关闭会清除上次诊断并重试。
+同步 `close()` 在准入或持久化失败时保留重试行为：阶段恢复为 `open`，`last_failure` 记录本次失败，原有周期压实登记及周期配置恢复。再次同步关闭会清除上次诊断并重试。异步关闭已经停止服务，持久化失败后保持拒绝新操作，不恢复周期压实。
+
+自定义 Rust Hook 的析构若在持久化完成后发生 panic，关闭仍释放存储和文件锁，阶段为 `closed`，首次等待返回 `ShutdownFailed`，`last_failure` 保留诊断。后续 `close_timeout()` 返回 `true`，同步 Rust `close()` 返回 `DatabaseClosed`，均按已关闭状态处理。
+
+> **故障处理**：持久化失败时资源仍由实例持有，应处理原因后重试。Hook 析构异常发生在持久化完成后，宿主应通过关闭阶段确认资源状态。
 
 ### 资源释放完成点
 
@@ -37,7 +65,11 @@ Rust 的同步 `close()` 保留重复关闭返回 `DatabaseClosed` 的行为；P
 
 没有其他占用时，关闭完成后可以立即移动或删除数据库文件组、移动目录，以及重新打开原路径。多个 Reader、外部程序或宿主持有的独立 Rust Hook `Arc` 有各自的资源生命周期。共享 `ResourceRuntime` 的线程池由运行时所有者管理。
 
-关闭失败会返回原始持久化错误，并保留数据库内存、Hook 和文件锁；宿主应先处理错误，再重试关闭。超时返回 `false` 时，后台任务仍在推进关闭，文件组继续受保护。
+未显式关闭就析构数据库时，已有独立查询或构建句柄立即失去新操作准入能力；已经准备或正在运行的工作可以完成。它们与所引用的存储共同持有文件租约，直到最后一个相关句柄/任务释放，避免旧 mmap 尚存时另一个 Writer 打开相同路径。尚未执行的 `PreparedQuiverBuild` 可以执行或丢弃；普通析构立即返回，调用方继续管理已持有的任务。需要明确的资源释放完成点时，应使用显式关闭，并先完成或丢弃已准备的任务。
+
+> **持久化提醒**：普通析构执行 WAL 缓冲刷新。需要检查点和最终同步完成点时，请显式关闭数据库。
+
+持久化失败会返回原始错误，并保留数据库内存、Hook 和文件锁；宿主应先处理错误，再重试关闭。超时返回 `false` 时，后台任务仍在推进关闭，文件组继续受保护。
 
 ### 关闭后的接口
 
@@ -57,7 +89,9 @@ Rust `group_commit()` 受操作准入与生命周期检查保护。闭包正常�
 
 同步组结束时发生 I/O 错误会关闭当前 WAL 的写入能力，后续写入返回 `WalClosed`。正常返回路径传播原始同步错误；panic 路径记录同步错误并继续原有异常展开。宿主需停止使用该写句柄、释放实例后重新打开数据库，按 WAL 恢复结果处理应用层重试。
 
-### Rust
+### 调用示例
+
+#### Rust
 
 ```rust
 use std::time::Duration;
@@ -70,7 +104,7 @@ if !db.close_timeout(Duration::from_secs(5))? {
 }
 ```
 
-### Python
+#### Python
 
 ```python
 db.request_shutdown()
@@ -80,7 +114,7 @@ if not db.close_timeout(5000):
 
 关闭等待和快照复制期间释放 GIL。宿主在自身的退出信号处理流程中调用关闭接口。
 
-### Node.js
+#### Node.js
 
 `closeTimeout` 是同步等待。事件循环需要继续工作时，可以发起关闭后轮询零等待接口：
 
@@ -91,9 +125,13 @@ while (!db.closeTimeout(0)) {
 }
 ```
 
-宿主应为轮询循环设置自身截止时间。超过截止时间后可以停止等待，数据库关闭任务仍然继续。
+> **等待提醒**：宿主应为轮询循环设置自身截止时间。超过截止时间后可以停止等待，数据库关闭任务仍然继续。
+
+---
 
 ## 一致快照
+
+### 接口与返回值
 
 快照的 `generation_id` 保存为 manifest 中的代际标识。`GenerationStore` 使用单一路径组件命名代际目录和数据库文件，并在生成路径及解析 current 记录时校验名称。
 
@@ -105,13 +143,25 @@ while (!db.closeTimeout(0)) {
 
 Rust 校验和恢复还有接收 `&ResourceRuntime` 的 `_with_runtime` 入口。三端返回同一份 manifest，包含 generation ID、dtype、维度、节点数和各文件长度/CRC。
 
+### 目录与文件范围
+
 创建快照需要可写句柄。内核持有源库写锁，完成 checkpoint 和 WAL 清理，再复制该代所需的主文件、向量、冷载荷及索引制品。目标使用独立目录，内部数据库名固定为 `database.tdb`。源库在快照完成后可继续更新，快照中的事实保持在捕获时刻。
+
+当前 v13 检查点包含命名图、文档候选／归档及捕获时保留的有界编辑回执，随主文件进入快照与恢复目标。打开目标时使用新的编辑版本身份，原回执按完整事务身份确认历史提交。文档候选按原上传身份及批次序号恢复。维度迁移前完成或终止候选，已发布归档保留正文、结构、来源映射和根引用，命名图保留身份、结构修订、成员和边。目标的编辑身份与回执从新实例开始。回执容量及恢复规则见[Console 回执协议](embedded-console.md#回执与结果确认)。
 
 创建和恢复使用已存在的父目录及全新的目标目录，恢复目标位于源快照目录之外。已有目标返回 `SnapshotDestinationExists`。快照目录由 manifest 和其中声明的普通文件组成；校验发现符号链接、管道、WAL、临时文件、额外制品或 manifest 错配时返回错误。
 
-复制采用有界缓冲，逐文件 fsync，在隐藏暂存目录中生成并验证 manifest，最后通过目录 rename 和父目录同步发布。目录 rename 是目标的可见发布点。发布前的普通错误清理本次暂存目录；强杀后可能留下隐藏暂存目录，正式快照由目标路径及有效 manifest 识别。目标父目录可能保留用于并发发布互斥的隐藏锁文件。
+### 发布过程与错误处理
+
+复制采用有界缓冲，逐文件 fsync，在隐藏暂存目录中生成并验证 manifest，最后通过目录 rename 和父目录同步发布。目录 rename 是目标的可见发布点。
+
+> **恢复提醒**：发布前的普通错误清理本次暂存目录；强杀后可能留下隐藏暂存目录。正式快照由目标路径及有效 manifest 识别，目标父目录可能保留用于并发发布互斥的隐藏锁文件。
 
 重命名完成后，若父目录同步失败，Rust 返回 `SnapshotPublicationUncertain`，Python 抛出 `SnapshotPublicationError`，Node 错误码为 `TDB_SNAPSHOT_PUBLICATION_UNCERTAIN`。此时保留已发布的完整目标，宿主通过校验目标决定后续操作。已有目标分别返回 Rust `SnapshotDestinationExists`、Python `FileExistsError`、Node `TDB_SNAPSHOT_EXISTS`。
+
+创建、恢复和 manifest 错误的最外层 `write` 描述目标的发布结果。目标校验、复制和源检查点失败在目标发布前提供 `validation/not_committed`；目录重命名后的同步失败提供 `publish/unknown`。`generation_id` 在源检查点之前校验。Rust 通过 `underlying()` 匹配原始错误变体，原始 cause 继续保留。
+
+维度迁移在独占暂存库中构建节点和边，并在公开目标之前预留最终实例配额。提交前失败且回滚清理完成时提供 `publish/not_committed`；提交标记重命名后同步失败为 `publish/unknown`；完成提交及目录同步后的清理失败为 `publish/committed`。根据结果校验目标，释放旧句柄后再重新打开。
 
 校验检查文件集合、长度、CRC 及主文件头的维度和节点数。打开数据库时继续执行内部格式校验。发布后的快照目录按不可变制品管理；创建和校验期间，宿主保持源文件与发布目录的内容稳定。
 
@@ -138,6 +188,8 @@ reader = triviumdb.TriviumDB(
 reader.close()
 ```
 
-恢复完成后，宿主选择以 Immutable、ReadOnly 或 ReadWrite 模式打开 `database.tdb`，并配置 dtype、维度与预算。以可写模式打开后，恢复目录作为活动数据库使用；后续状态通过再次创建快照捕获。
+恢复完成后，宿主选择以 Immutable、ReadOnly 或 ReadWrite 模式打开 `database.tdb`，并配置 dtype、维度与预算。以可写模式打开后，恢复目录作为活动数据库使用，后续状态通过再次创建快照捕获。
+
+> **打开提醒**　独立快照保存 manifest 声明的数据文件，Immutable 按 manifest 验证并打开。ReadOnly 使用预先存在的 `database.tdb.lock` 协调文件，该文件由宿主准备或由首次 ReadWrite 打开创建。
 
 独立快照接口复用现有 generation manifest 格式。`GenerationStore` 的 current 发布与 Reader 租约机制继续可用，适合需要原子切换多个不可变代际的宿主；新快照接口提供从活动实例到完整目录的统一捕获与恢复步骤。

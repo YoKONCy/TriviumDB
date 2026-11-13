@@ -7,7 +7,84 @@ from pathlib import Path
 import triviumdb
 
 
+def run_editing_contract(root: str) -> None:
+    fixture = json.loads((Path(__file__).parents[1] / "contracts/console_editing_cases.json").read_text(encoding="utf-8"))
+
+    def wire(command, request_id="编辑请求"):
+        return json.dumps({"version": 1, "requestId": request_id, "command": command})
+
+    def call(db, session, command):
+        return json.loads(db.console_request(session, wire(command)))["data"]
+
+    def snapshot(db, session):
+        return call(db, session, {"operation": "getNodes", "ids": ["1"], "withRevision": True})
+
+    def expect_error(db, session, command, code):
+        try:
+            db.console_request(session, wire(command))
+        except triviumdb.TriviumDBError as error:
+            assert error.code == code, error
+        else:
+            raise AssertionError(f"必须拒绝请求：{code}")
+
+    for dtype in ["f32", "f16", "u64"]:
+        path = str(Path(root) / f"editing-{dtype}.tdb")
+        db = triviumdb.TriviumDB(path, dim=fixture["dimension"], dtype=dtype, auto_build_quiver=False)
+        session = triviumdb.ConsoleSession('{"readOnly":false}')
+        try:
+            db.insert_with_id(1, fixture["vector"], fixture["basePayload"])
+            old = snapshot(db, session)
+            assert old["nodes"] == [{"id": "1", "vector": ["1", "0"] if dtype == "u64" else fixture["vector"], "payload": fixture["basePayload"], "edges": []}]
+            assert old["missingIds"] == []
+            info = call(db, session, {"operation": "info"})
+            assert info["transport"]["occ"] is True
+            assert info["transport"]["idempotency"]["maxReceipts"] == fixture["receiptCapacity"]
+            assert info["transport"]["idempotency"]["durable"] is fixture["receiptDurable"]
+            assert info["transport"]["idempotency"]["persistence"] == fixture["receiptPersistence"]
+            db.update_payload(1, fixture["hostPayload"])
+            command = {"operation": "guardedTransaction", "expectedRevision": old["revision"], "idempotencyKey": "edit-1", "operations": [
+                {"op": "insert", "vector": fixture["vector"], "payload": fixture["createdPayload"]},
+                {"op": "updatePayload", "id": "1", "payload": fixture["draftPayload"]},
+            ]}
+            expect_error(db, session, command, fixture["conflictCode"])
+            assert len(db) == 1
+            assert db.get_payload(1) == fixture["hostPayload"]
+            command["expectedRevision"] = snapshot(db, session)["revision"]
+            committed = call(db, session, command)
+            assert committed["createdIds"] == [fixture["createdId"]]
+            assert committed["replayed"] is False
+            assert committed["revision"] != command["expectedRevision"]
+            other = triviumdb.ConsoleSession('{"readOnly":false}')
+            replay = json.loads(db.console_request(other, wire(command, "重新确认")))
+            assert replay == {"version": 1, "requestId": "重新确认", "data": {**committed, "replayed": True}}
+            assert call(db, other, {**command, "operation": "transactionStatus"}) == {
+                "outcome": "committed", "revision": committed["revision"], "createdIds": [fixture["createdId"]],
+            }
+            changed = json.loads(json.dumps(command))
+            changed["operations"][1]["payload"] = {"owner": "换内容"}
+            expect_error(db, other, changed, fixture["keyConflictCode"])
+            expect_error(db, other, {**changed, "operation": "transactionStatus"}, fixture["keyConflictCode"])
+            db.flush()
+            assert snapshot(db, other)["revision"] == committed["revision"]
+        finally:
+            db.close()
+        reopened = triviumdb.TriviumDB(path, dim=fixture["dimension"], dtype=dtype, auto_build_quiver=False)
+        try:
+            fresh = triviumdb.ConsoleSession('{"readOnly":false}')
+            assert call(reopened, fresh, command) == {**committed, "replayed": True}
+            assert call(reopened, fresh, {**command, "operation": "transactionStatus"}) == {"outcome": "committed", "revision": committed["revision"], "createdIds": committed["createdIds"]}
+            assert len(reopened) == 2
+            for node_id, payload in [(1, fixture["draftPayload"]), (2, fixture["createdPayload"])]:
+                node = reopened.get(node_id)
+                assert node.payload == payload
+                assert node.vector == fixture["vector"]
+                assert node.edges == []
+        finally:
+            reopened.close()
+
+
 def run_console_contract(root: str) -> None:
+    run_editing_contract(root)
     fixture = json.loads((Path(__file__).parents[1] / "contracts/console_cases.json").read_text(encoding="utf-8"))
 
     def wire(command):
@@ -61,6 +138,7 @@ def run_console_contract(root: str) -> None:
                 reopened.close()
             session.detach()
             assert session.is_detached()
+            assert session.is_drained()
             assert not session.cancel("验收请求")
         finally:
             db.close()
@@ -104,13 +182,23 @@ def run_console_contract(root: str) -> None:
     worker.start()
     try:
         assert entered.wait(30), "真实原生请求必须进入 Hook"
+        assert not session.is_drained()
         session.detach()
+        assert not session.is_drained()
     finally:
         release.set()
         worker.join(30)
     assert not worker.is_alive(), "原生请求必须实际退出"
+    assert session.is_drained()
     assert len(failures) == 1
     assert failures[0].code == "TDB_QUERY_CANCELLED"
+    assert failures[0].schema_version == 1
+    assert failures[0].details == {} and failures[0].write is None
+    assert not session.cancel("验收请求")
+    db.clear_hook()
+    resumed = triviumdb.ConsoleSession()
+    body = json.loads(db.console_request(resumed, wire({"operation": "getNodes", "ids": ["1"]})))
+    assert body["data"] == {"nodes": [{"id": "1", "vector": [1, 0], "payload": {"owner": "host"}, "edges": []}], "missingIds": []}
     assert db.get_payload(1) == {"owner": "host"}
     db.close()
     reopened = triviumdb.TriviumDB(file, dim=2)

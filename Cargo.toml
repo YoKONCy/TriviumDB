@@ -8,7 +8,7 @@ resolver = "2"
 
 [package]
 name = "triviumdb"
-version = "0.9.0"
+version = "0.9.1-beta.1"
 edition = "2024"
 authors = ["YoKONCy <2752026184@qq.com>"]
 description = "A high-performance memory-mmap hybrid search engine built for AI, combining dense vector, sparse text, graph relations, and JSON metadata."
@@ -18,7 +18,7 @@ keywords = ["vector-database", "graph-database", "hybrid-search", "rag", "mmap"]
 categories = ["database", "data-structures", "algorithms"]
 readme = "README.md"
 autobenches = false
-exclude = ["docs/TEMP-TODO/**"]
+exclude = ["docs/TEMP-TODO/**", "evaluation/**"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -33,7 +33,7 @@ test-hooks = [] # 并发确定性交错测试专用，生产构建不得启用
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 thiserror = "1.0"
 bincode = "1.3"
 rayon = "1.10"
@@ -44,18 +44,26 @@ napi-derive = { version = "2", optional = true }
 half = { version = "2.7.1", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1.25.0", features = ["derive"] }
 crc32fast = "1.5.0"
+sha2 = "0.10"
 roaring = "0.11"
 fs2 = "0.4.3"
 same-file = "1.0"
+uuid = { version = "1", features = ["v4"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 aho-corasick = "1.1.4"
 libloading = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 usearch = { version = "2.25.1", default-features = false, optional = true }
+pulldown-cmark = { version = "0.13.4", default-features = false }
+html5gum = { version = "0.9.1", default-features = false }
+rpds = { version = "1.2.1", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading", "Win32_Security"] }
 
 [build-dependencies]
 napi-build = "2"
@@ -83,6 +91,14 @@ harness = false
 
 [[bench]]
 name = "bench_memory_pressure"
+harness = false
+
+[[bench]]
+name = "bench_open"
+harness = false
+
+[[bench]]
+name = "bench_quiver_ssd"
 harness = false
 
 [[bench]]
@@ -180,6 +196,11 @@ required-features = ["ablation"]
 [profile.release]
 lto = true
 codegen-units = 1
+
+# 优化故障契约采用独立配置，便于隔离 Windows 编译器的跨 crate LTO 路径。
+[profile.release-contracts]
+inherits = "release"
+lto = "off"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }

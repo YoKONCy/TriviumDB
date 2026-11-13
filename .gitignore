@@ -21,6 +21,12 @@ dist/
 *.tdb.wal
 !tests/fixtures/v0810_text_mmap/sample.tdb
 !tests/fixtures/v0810_text_mmap/sample.tdb.wal
+!tests/fixtures/v0900_format10/*/*/sample.tdb
+!tests/fixtures/v0900_format10/*/*/sample.tdb.wal
+!tests/fixtures/pre_named_graph_format11/*/sample.tdb
+!tests/fixtures/pre_named_graph_format11/*/sample.tdb.wal
+!tests/fixtures/pre_document_publication_format12/*/sample.tdb
+!tests/fixtures/pre_document_publication_format12/*/sample.tdb.wal
 
 # ══════ Node.js & napi-rs ══════
 node_modules/
@@ -41,6 +47,10 @@ package-lock.json
 # ══════ 构建日志 / 临时文件 ══════
 *.log
 *.tmp
+*.qssd
+*.qssd.publish-lock
+*.qssd-*.tmp.lease
+!tests/fixtures/quiver_ssd_v1/*.qssd
 
 # ══════ 本地规划文档 ══════
 /docs/TEMP-TODO/

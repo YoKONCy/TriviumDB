@@ -1,0 +1,40 @@
+{
+  "producer": "previous-validated-windows-node-artifact",
+  "baseCommit": "c97ec4243f03f48a700540c716fd4b7cd552313a",
+  "producerSha256": "c8066f315bf66b0c17765fa255cf2707002b55e7106366700a08fcfbcefb2830",
+  "sourceManifestSha256": "c450fb7b13464ae94dc014314b9af89573909db9cb997ce5dbd0465972663eb2",
+  "databaseFormat": 10,
+  "walFormat": 3,
+  "dimension": 2,
+  "records": [
+    {
+      "id": 7,
+      "vector": [
+        1,
+        0
+      ],
+      "payload": {
+        "kind": "历史甲"
+      }
+    },
+    {
+      "id": 8,
+      "vector": [
+        0,
+        1
+      ],
+      "payload": {
+        "kind": "历史乙"
+      }
+    }
+  ],
+  "edge": {
+    "source": 7,
+    "target": 8,
+    "label": "rel",
+    "weight": 0.5,
+    "metadata": {
+      "source": "历史"
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "status": "frozen-before-measurement",
+  "dataset_sizes": [
+    1000000,
+    5000000
+  ],
+  "dataset_5m_sha256": "4a56e7d8cf430694a3f686e715eb93d5a03728e7e5d40330b8dc74a2d6c733a2",
+  "dataset_relation": "恢复历史Cohere5M，1M与5M非严格嵌套，保留各自冻结身份",
+  "main_configuration": {
+    "io_shards": 4,
+    "query_pipeline": false,
+    "cache_bytes": 134217728,
+    "inflight_bytes": 33554432,
+    "total_active_io": 256,
+    "ef": 88,
+    "budget": 64,
+    "cpu_budget": 1
+  },
+  "secondary_control": "cache_bytes=0，允许在途合并，无长期缓存",
+  "queries": "同源保留文档五条20K流，同输入跨库复用，固定末10K，四格平衡交叉",
+  "quality": "原1000保留query，1M与完整5M分别FP64真值，固定参数不据评价调参",
+  "run_scale_sha256": "0b0d18c92fd5ae84b2593dbad2fb3478d193ad23253b9b54f5167b2655a91ea0",
+  "guards": {
+    "memory_family_rss_plus_hugetlb_bytes": 60129542144,
+    "disk_margin_bytes": 21474836480,
+    "core": 0
+  },
+  "source_scope": "仅新增研究目录与云端独立数据，冻结查询二进制复用",
+  "service_affinity": [
+    64
+  ],
+  "query_threads": 1,
+  "parent32_controller_sha256": "d97a158cd97d32e2c202fdac361bcf9e66cf9b5bd35575c57cb930e5ed157a2f",
+  "execution": "32CPU四格对照结束后，单CPU四格后继串行执行，复用同一5M图/冷编码/FP64真值，逐比特核对跨CPU结果",
+  "single_cpu_scope": "查询、四个I/O调度线程及内核I/O工作亲和性均限CPU64"
+}

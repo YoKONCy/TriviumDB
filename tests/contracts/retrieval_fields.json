@@ -1,0 +1,47 @@
+{
+  "floats": [
+    {"python": "min_score", "node": "minScore"},
+    {"python": "teleport_alpha", "node": "teleportAlpha"},
+    {"python": "fista_lambda", "node": "fistaLambda"},
+    {"python": "fista_threshold", "node": "fistaThreshold"},
+    {"python": "dpp_quality_weight", "node": "dppQualityWeight"},
+    {"python": "text_boost", "node": "textBoost"},
+    {"python": "min_edge_weight", "node": "minEdgeWeight"}
+  ],
+  "booleans": [
+    {"python": "enable_advanced_pipeline", "node": "enableAdvancedPipeline"},
+    {"python": "enable_sparse_residual", "node": "enableSparseResidual"},
+    {"python": "enable_dpp", "node": "enableDpp"},
+    {"python": "enable_refractory_fatigue", "node": "enableRefractoryFatigue"},
+    {"python": "enable_text_hybrid_search", "node": "enableTextHybridSearch"},
+    {"python": "force_brute_force", "node": "forceBruteForce"}
+  ],
+  "index_fields": [
+    {"python":"create_index","node":"createIndex"},
+    {"python":"drop_index","node":"dropIndex"},
+    {"python":"create_ordered_index","node":"createOrderedIndex"},
+    {"python":"drop_ordered_index","node":"dropOrderedIndex"},
+    {"python":"create_bitmap_index","node":"createBitmapIndex"},
+    {"python":"drop_bitmap_index","node":"dropBitmapIndex"},
+    {"python":"create_ngram_index","node":"createNgramIndex"},
+    {"python":"drop_ngram_index","node":"dropNgramIndex"},
+    {"python":"create_unique_index","node":"createUniqueIndex"}
+  ],
+  "composite_fields": [
+    {"python":"create_composite_index","node":"createCompositeIndex"},
+    {"python":"drop_composite_index","node":"dropCompositeIndex"},
+    {"python":"create_unique_composite_index","node":"createUniqueCompositeIndex"}
+  ],
+  "query_seed": {"id": 7, "vector": [1, 0], "payload": {"saved": "完整事实"}},
+  "bad_documents": [
+    {"value": [null], "field": "/documents/0"},
+    {"value": [{}], "field": "/documents/0/id"},
+    {"value": [{"id": 1}], "field": "/documents/0/text"},
+    {"value": [{"id": "1", "text": "x"}], "field": "/documents/0/id"},
+    {"value": [{"id": 1, "text": 1}], "field": "/documents/0/text"},
+    {"value": [{"id": 1, "text": "x", "keywords": 1}], "field": "/documents/0/keywords"},
+    {"value": [{"id": 1, "text": "x", "keywords": ["ok", 1]}], "field": "/documents/0/keywords/1"},
+    {"value": [{"id": 1, "text": "x", "a/b~c": "x"}], "field": "/documents/0/a~1b~0c"},
+    {"value": [{"id": 1, "text": "x"}, {"id": 2, "text": "x", "keywords": [1]}], "field": "/documents/1/keywords/0"}
+  ]
+}

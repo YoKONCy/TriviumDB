@@ -85,6 +85,151 @@ fn 三种后端关闭后保留对象仍释放完整文件组() {
     run_close::<u64>("u64");
 }
 
+#[test]
+fn 普通析构后独立构建句柄拒绝新任务并保护文件租约() {
+    for mode in [StorageMode::Mmap, StorageMode::Rom] {
+        let root = directory("drop-build-handle");
+        let path = root.join("sample.tdb").to_string_lossy().into_owned();
+        let mut db = Database::<f32>::open_with_config(
+            &path,
+            Config {
+                dim: 3,
+                storage_mode: mode,
+                auto_build_quiver: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.insert_with_id(1, &[1., 2., 3.], json!({"state":"original"}))
+            .unwrap();
+        db.flush().unwrap();
+        let handle = db.quiver_build_handle();
+        let clone = handle.clone();
+        drop(db);
+        assert!(matches!(
+            handle.prepare_auto_build().err().unwrap().underlying(),
+            TriviumError::DatabaseClosed
+        ));
+        assert!(matches!(
+            Database::<f32>::open(&path, 3),
+            Err(TriviumError::DatabaseLocked(_))
+        ));
+        drop(handle);
+        assert!(matches!(
+            Database::<f32>::open(&path, 3),
+            Err(TriviumError::DatabaseLocked(_))
+        ));
+        drop(clone);
+        assert_released(&root);
+        let mut reopened = Database::<f32>::open(&path, 3).unwrap();
+        let node = reopened.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, vec![1., 2., 3.]);
+        assert_eq!(node.payload, json!({"state":"original"}));
+        reopened.close().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn 原数据库析构后已准备任务执行或取消前保持独占且完成后释放映射() {
+    for execute in [false, true] {
+        let root = directory("drop-prepared-build");
+        let path = root.join("sample.tdb").to_string_lossy().into_owned();
+        let mut db = Database::<f32>::open(&path, 3).unwrap();
+        // 834 是低维默认配置的自动构建节点门槛，确保确实捕获任务。
+        for id in 1..=834 {
+            db.insert_with_id(id, &[1., 2., 3.], json!({"id":id}))
+                .unwrap();
+        }
+        db.flush().unwrap();
+        let prepared = db
+            .prepare_auto_quiver_build()
+            .unwrap()
+            .expect("必须捕获真实构建任务");
+        drop(db);
+        assert!(matches!(
+            Database::<f32>::open(&path, 3),
+            Err(TriviumError::DatabaseLocked(_))
+        ));
+        if execute {
+            assert!(prepared.execute().unwrap());
+        } else {
+            drop(prepared);
+        }
+        assert_released(&root);
+        let mut reopened = Database::<f32>::open_with_config(
+            &path,
+            Config {
+                dim: 3,
+                auto_build_quiver: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reopened.node_count().unwrap(), 834);
+        for id in 1..=834 {
+            let node = reopened.get(id).unwrap().unwrap();
+            assert_eq!(node.vector, vec![1., 2., 3.]);
+            assert_eq!(node.payload, json!({"id":id}));
+        }
+        reopened.close().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn Hook析构异常仍完成关闭并返回一次结构化错误() {
+    struct FailingDestructor;
+    impl triviumdb::SearchHook for FailingDestructor {}
+    impl Drop for FailingDestructor {
+        fn drop(&mut self) {
+            panic!("模拟宿主 Hook 析构异常");
+        }
+    }
+    for mode in [StorageMode::Mmap, StorageMode::Rom] {
+        for asynchronous in [false, true] {
+            let root = directory("hook-drop-panic");
+            let path = root.join("sample.tdb").to_string_lossy().into_owned();
+            let mut db = Database::<f32>::open_with_config(
+                &path,
+                Config {
+                    dim: 3,
+                    storage_mode: mode,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            db.insert_with_id(1, &[1., 2., 3.], json!({"state":"committed"}))
+                .unwrap();
+            db.set_hook(FailingDestructor).unwrap();
+            let result = if asynchronous {
+                db.close_timeout(Duration::from_secs(10)).map(|_| ())
+            } else {
+                db.close()
+            };
+            assert!(matches!(result, Err(TriviumError::ShutdownFailed { .. })));
+            assert_eq!(db.shutdown_status().phase, triviumdb::ShutdownPhase::Closed);
+            assert_eq!(db.shutdown_status().last_failure.unwrap().kind, "shutdown");
+            assert!(db.close_timeout(Duration::ZERO).unwrap());
+            assert_released(&root);
+            let mut reopened = Database::<f32>::open(&path, 3).unwrap();
+            assert_eq!(reopened.get(1).unwrap().unwrap().vector, vec![1., 2., 3.]);
+            assert_eq!(
+                reopened.get_payload(1).unwrap().unwrap(),
+                json!({"state":"committed"})
+            );
+            drop(db);
+            assert!(matches!(
+                Database::<f32>::open(&path, 3),
+                Err(TriviumError::DatabaseLocked(_))
+            ));
+            reopened.close().unwrap();
+            assert_released(&root);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+}
+
 fn retained_values<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(name: &str) {
     use triviumdb::resources::{ResourceLimits, ResourceRuntime};
     for mode in [StorageMode::Mmap, StorageMode::Rom] {
@@ -363,8 +508,10 @@ fn 已关闭数据库拒绝进入分组提交闭包() {
     assert!(matches!(
         db.group_commit(|_| {
             called = true;
-        }),
-        Err(TriviumError::DatabaseClosed)
+        })
+        .unwrap_err()
+        .underlying(),
+        TriviumError::DatabaseClosed
     ));
     assert!(!called);
     std::fs::remove_dir_all(root).unwrap();
@@ -410,8 +557,18 @@ fn 分组闭包内关闭立即报错且不阻塞原同步组() {
     let root = directory("group-close");
     let mut db = Database::<f32>::open(&root.join("sample.tdb").to_string_lossy(), 4).unwrap();
     db.group_commit(|db| {
-        assert!(db.close().is_err());
-        assert!(db.request_shutdown().is_err());
+        assert!(matches!(
+            db.close(),
+            Err(triviumdb::TriviumError::ReentrantAccess {
+                operation: "group_commit_shutdown"
+            })
+        ));
+        assert!(matches!(
+            db.request_shutdown(),
+            Err(triviumdb::TriviumError::ReentrantAccess {
+                operation: "group_commit_shutdown"
+            })
+        ));
         db.insert_with_id(1, &[1.0; 4], json!({})).unwrap();
     })
     .unwrap();

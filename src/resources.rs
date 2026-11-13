@@ -67,7 +67,7 @@ pub struct ResourceBudgetDetails {
 
 impl ResourceBudgetDetails {
     pub(crate) fn from_error(error: &TriviumError) -> Option<Self> {
-        match error {
+        match error.underlying() {
             TriviumError::ResourceBudgetExceeded {
                 resource,
                 requested,
@@ -88,13 +88,17 @@ impl ResourceBudgetDetails {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ResourceFailure {
     pub kind: &'static str,
+    pub code: &'static str,
     pub message: String,
+    pub details: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write: Option<crate::error::WriteErrorInfo>,
     pub budget: Option<ResourceBudgetDetails>,
 }
 
 impl ResourceFailure {
     pub(crate) fn from_error(error: &TriviumError) -> Self {
-        let kind = match error {
+        let kind = match error.underlying() {
             TriviumError::ResourceBudgetExceeded { .. } => "resource_budget",
             TriviumError::Io(_) => "io",
             TriviumError::CapacityAllocationFailed { .. } => "capacity",
@@ -104,7 +108,10 @@ impl ResourceFailure {
         };
         Self {
             kind,
+            code: error.code(),
             message: error.to_string(),
+            details: error.details(),
+            write: error.info().write,
             budget: ResourceBudgetDetails::from_error(error),
         }
     }
@@ -112,6 +119,7 @@ impl ResourceFailure {
 
 #[derive(Default)]
 struct State {
+    io_threads: usize,
     database_bytes: usize,
     workspace_bytes: usize,
     maintenance_bytes: usize,
@@ -183,8 +191,9 @@ impl ResourceRuntime {
     pub fn new(mut limits: ResourceLimits) -> Result<Self> {
         if limits.max_threads > 64 {
             return Err(TriviumError::InvalidInput(
-                "运行时工作线程上限不得超过 64".into(),
-            ));
+                "运行时工作线程上限不得超过 64 (Runtime worker limit must not exceed 64)".into(),
+            )
+            .at_field("max_threads"));
         }
         if limits.memory_limit > 0 {
             if limits.maintenance_memory_limit == 0 {
@@ -192,8 +201,8 @@ impl ResourceRuntime {
             }
             if limits.maintenance_memory_limit > limits.memory_limit {
                 return Err(TriviumError::InvalidInput(
-                    "维护保护额度不能超过运行时总内存额度".into(),
-                ));
+                    "维护保护额度不能超过运行时总内存额度 (Maintenance memory limit must not exceed the runtime memory limit)".into(),
+                ).at_field("maintenance_memory_limit"));
             }
         }
         if limits.max_threads == 0 {
@@ -243,7 +252,8 @@ impl ResourceRuntime {
             peak_reserved_bytes: state.peak_bytes,
             attached_databases: state.databases,
             max_threads: self.0.limits.max_threads,
-            allocated_worker_threads: state.pools.iter().map(|entry| entry.threads).sum(),
+            allocated_worker_threads: state.pools.iter().map(|entry| entry.threads).sum::<usize>()
+                + state.io_threads,
             live_worker_threads: self.0.workers.live.load(Ordering::SeqCst),
             peak_worker_threads: self.0.workers.peak.load(Ordering::SeqCst),
             max_active_tasks: self.0.limits.max_active_tasks,
@@ -526,8 +536,18 @@ impl ResourceRuntime {
 
     /// 仅回收没有调用方持有的池；资源不足立即返回，不在数据库锁内等待其他任务。
     pub(crate) fn pool(&self, requested: usize) -> Result<ResourcePool> {
-        let threads = requested.clamp(1, self.max_threads());
         let mut state = lock(&self.0.state);
+        let available = self.max_threads().saturating_sub(state.io_threads);
+        if available == 0 {
+            state.rejected_threads += 1;
+            return Err(TriviumError::ResourceBudgetExceeded {
+                resource: "worker_threads",
+                requested: 1,
+                used: state.io_threads,
+                limit: self.max_threads(),
+            });
+        }
+        let threads = requested.clamp(1, available);
         // 同一运行时的嵌套工作可以复用更小的当前池，保证不会扩张其线程上限。
         if let Some(entry) = state
             .pools
@@ -540,7 +560,8 @@ impl ResourceRuntime {
                 pool: Arc::clone(&entry.pool),
             });
         }
-        let mut allocated: usize = state.pools.iter().map(|entry| entry.threads).sum();
+        let mut allocated: usize =
+            state.pools.iter().map(|entry| entry.threads).sum::<usize>() + state.io_threads;
         while allocated.saturating_add(threads) > self.max_threads() {
             let Some(index) = state
                 .pools
@@ -605,6 +626,63 @@ impl ResourceRuntime {
             runtime: self.clone(),
             pool,
         })
+    }
+}
+
+impl ResourceRuntime {
+    pub(crate) fn reserve_io_threads(&self, count: usize) -> Result<IoThreadReservation> {
+        let mut state = lock(&self.0.state);
+        let count = count.min(
+            self.max_threads()
+                .saturating_sub(1)
+                .saturating_sub(state.io_threads),
+        );
+        let mut allocated =
+            state.pools.iter().map(|pool| pool.threads).sum::<usize>() + state.io_threads;
+        while allocated.saturating_add(count) > self.max_threads() {
+            let Some(index) = state
+                .pools
+                .iter()
+                .position(|pool| Arc::strong_count(&pool.pool) == 1)
+            else {
+                state.rejected_threads += 1;
+                return Err(TriviumError::ResourceBudgetExceeded {
+                    resource: "worker_threads",
+                    requested: count,
+                    used: allocated,
+                    limit: self.max_threads(),
+                });
+            };
+            let pool = state.pools.remove(index);
+            allocated -= pool.threads;
+            pool.retire();
+        }
+        state.io_threads += count;
+        Ok(IoThreadReservation {
+            runtime: self.clone(),
+            count,
+        })
+    }
+
+    pub(crate) fn enter_io_worker(&self) -> impl Drop + use<> {
+        let live = self.0.workers.live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.0.workers.peak.fetch_max(live, Ordering::SeqCst);
+        WorkerExit(self.0.workers.clone())
+    }
+}
+
+pub(crate) struct IoThreadReservation {
+    runtime: ResourceRuntime,
+    count: usize,
+}
+impl IoThreadReservation {
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+}
+impl Drop for IoThreadReservation {
+    fn drop(&mut self) {
+        lock(&self.runtime.0.state).io_threads -= self.count;
     }
 }
 
@@ -785,6 +863,33 @@ impl ResourcePool {
 mod tests {
     use super::*;
     use rayon::prelude::*;
+
+    #[test]
+    fn 写入上下文保留资源故障类别与预算字段() {
+        let budget = TriviumError::ResourceBudgetExceeded {
+            resource: "memory_bytes",
+            requested: 512,
+            used: 768,
+            limit: 1024,
+        }
+        .with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION);
+        let failure = ResourceFailure::from_error(&budget);
+        assert_eq!(failure.kind, "resource_budget");
+        assert_eq!(
+            failure.budget,
+            Some(ResourceBudgetDetails {
+                resource: "memory_bytes",
+                requested: 512,
+                used: 768,
+                limit: 1024,
+            })
+        );
+        let io = TriviumError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION);
+        let failure = ResourceFailure::from_error(&io);
+        assert_eq!(failure.kind, "io");
+        assert_eq!(failure.budget, None);
+    }
 
     #[test]
     fn 工作区扩缩容拒绝与释放准确维护两类账本() {

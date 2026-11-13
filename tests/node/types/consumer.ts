@@ -1,14 +1,221 @@
 import {
-  TriviumDB, ResourceRuntime, ConsoleSession, type TriviumDBOptions, type TransactionOperation,
+  TriviumDB, ResourceRuntime, ConsoleSession, RequestContext, verifySnapshot, restoreSnapshot, type TriviumDBOptions, type TransactionOperation,
   type JsSearchHit, type PreparedTql, type ShutdownStatus, type StorageInfo,
-  type TriviumDBError, type ErrorInteger, type DType,
+  type JsEdge, type JsIncomingEdge, type JsNodeView,
+  type TriviumDBError, type ResourceBudgetError, type ErrorInteger, type DType, type WriteErrorInfo, type ResourceFailure,
 } from 'triviumdb';
 
 function check(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
+export function inspectRequestContext(database: TriviumDB): void {
+  const context = new RequestContext('typed-request', 0);
+  const identity: string = context.requestId;
+  const node: JsNodeView | null = context.run(() => database.get(7));
+  const asynchronous: Promise<JsSearchHit[][]> = context.run(async () => database.searchBatch([[1, 0]]));
+  context.cancel();
+  // @ts-expect-error 请求 ID 使用字符串。
+  new RequestContext(1);
+  // @ts-expect-error run 接收函数。
+  context.run(1);
+  // @ts-expect-error 请求身份是只读属性。
+  context.requestId = 'changed';
+  void [identity, node, asynchronous];
+}
+
+export function inspectConstructorDefaults(): void {
+  const database: TriviumDB = new TriviumDB('defaults.tdb', null);
+  const runtime: ResourceRuntime = new ResourceRuntime(null);
+  const count: number = verifySnapshot('snapshot', null).node_count;
+  const generation: string = restoreSnapshot('snapshot', 'restored', null).generation_id;
+  void [database, runtime, count, generation];
+  // @ts-expect-error 配置成员 runtime 要求实际句柄。
+  new TriviumDB('defaults.tdb', { runtime: null });
+}
+
+export function inspectDocuments(database: TriviumDB, error: TriviumDBError): void {
+  const quiverResponse: string = database.quiverRequest('{"operation":"stats"}');
+  // @ts-expect-error SSD请求使用JSON字符串。
+  database.quiverRequest({ operation: 'stats' });
+  void quiverResponse;
+  const graphResponse: string = database.graphRequest('{"operation":"list"}');
+  // @ts-expect-error 图请求使用JSON字符串。
+  database.graphRequest({ operation: 'list' });
+  if (error.code === 'TDB_GRAPH_REVISION_MISMATCH') {
+    const graphId: string = error.details.graph_id;
+    void graphId;
+  }
+  void graphResponse;
+  const response: string = database.documentRequest('{"operation":"get","document_id":"7"}');
+  if (error.code === 'TDB_DOCUMENT_REVISION_MISMATCH') {
+    const documentId: string = error.details.document_id;
+    const revision: string = error.details.actual;
+    void [documentId, revision];
+  }
+  if (error.code === 'TDB_DOCUMENT_UPLOAD_NOT_FOUND') {
+    const uploadId: string = error.details.upload_id;
+    // @ts-expect-error 上传身份使用字符串。
+    const invalidUploadId: number = error.details.upload_id;
+    void [uploadId, invalidUploadId];
+  }
+  if (error.code === 'TDB_DOCUMENT_UPLOAD_CONFLICT') {
+    const field: string = error.details.field;
+    // @ts-expect-error 冲突详情按字段标识，上传身份由请求提供。
+    void error.details.upload_id;
+    void field;
+  }
+  // @ts-expect-error 文档请求使用JSON字符串。
+  database.documentRequest({ operation: 'get', document_id: '7' });
+  void response;
+}
+
+export function inspectConditionalWrites(database: TriviumDB): void {
+  const deleted: number = database.deleteManyAtomic([11, 13]);
+  const updated: void = database.compareAndSetPayloadField(7, 'name', '源', '已更新');
+  void [deleted, updated];
+  // @ts-expect-error 原子批量删除接收数值 ID 数组。
+  database.deleteManyAtomic(['11']);
+  // @ts-expect-error 条件更新字段名必须为字符串。
+  database.compareAndSetPayloadField(7, 1, '源', '已更新');
+}
+
+export function inspectBasicReads(database: TriviumDB): void {
+  const node: JsNodeView<{ name: string }> | null = database.get<{ name: string }>(7);
+  const edge: JsEdge | null = database.getEdge(7, 11, 'route');
+  const outgoing: JsEdge[] = database.getEdges(7);
+  const incoming: JsIncomingEdge[] = database.getIncomingEdges(11);
+  const present: boolean = database.contains(7);
+  void [node, edge, outgoing, incoming, present];
+  // @ts-expect-error 节点 ID 必须为数值。
+  database.get('7');
+  // @ts-expect-error Payload 读取 ID 必须为数值。
+  database.getPayload([]);
+  // @ts-expect-error 存在性检查 ID 必须为数值。
+  database.contains('7');
+  // @ts-expect-error 出边读取 ID 必须为数值。
+  database.getEdges(null);
+  // @ts-expect-error 入边标签必须为字符串。
+  database.getIncomingEdges(11, 1);
+  // @ts-expect-error 精确边目标 ID 必须为数值。
+  database.getEdge(7, '11', 'route');
+  // @ts-expect-error 精确边标签必须为字符串。
+  database.getEdge(7, 11, 1);
+  // @ts-expect-error 精确边返回边对象或 null。
+  const wrongReturn: boolean = database.getEdge(7, 11, 'route');
+  void wrongReturn;
+}
+
+export function inspectRetrievalFields(database: TriviumDB): void {
+  const hits: JsSearchHit[] = database.search([1, 0], null, null, null, null);
+  const advanced: JsSearchHit[] = database.searchAdvanced([1, 0], null);
+  const graph: number[] = database.neighbors(7, null, null);
+  const exact: number[] = database.indexedLookup({ tag: 'alpha' }, null);
+  const substring: number[] = database.substringLookup('tag', 'bet', null);
+  const pending: Promise<JsSearchHit[][]> = database.searchBatch([[1, 0]], null, null, null);
+  void [hits, advanced, graph, exact, substring, pending];
+  // @ts-expect-error 检索分数阈值必须为数值。
+  database.search([1, 0], 1, 0, '0');
+  // @ts-expect-error 配置成员的布尔值使用真实 boolean。
+  database.searchAdvanced([1, 0], { enableDpp: 1 });
+  // @ts-expect-error 可选配置本身要求对象。
+  database.searchWithContext([1, 0], []);
+  // @ts-expect-error 扩散偏置向量分量必须为数值。
+  database.searchAdvanced([1, 0], { diffusionBias: [1, '0'] });
+  // @ts-expect-error 标签成员必须为字符串。
+  database.neighbors(7, 1, [1]);
+  // @ts-expect-error 文本正文必须为字符串。
+  database.indexText(7, 1);
+  // @ts-expect-error 重建记录只接收公开字段。
+  database.rebuildTextIndex([{ id: 7, text: '正文', unknown: 1 }]);
+  // @ts-expect-error 查找数量必须为数值。
+  database.indexedLookup({ tag: 'alpha' }, '1');
+}
+
+export function inspectBudgetWriteError(error: ResourceBudgetError): void {
+  const publication: WriteErrorInfo = { phase: 'publish', outcome: 'committed' };
+  void publication;
+  const consumed: boolean | undefined = error.write?.transaction_consumed;
+  void consumed;
+}
+
+export function inspectMaintenanceFailure(failure: ResourceFailure): void {
+  const code: TriviumDBError['code'] = failure.code;
+  const write: WriteErrorInfo | undefined = failure.write;
+  void code;
+  void write;
+  // @ts-expect-error 规范错误码只能来自公共目录。
+  const invalid: ResourceFailure = { ...failure, code: 'MAINTENANCE_FAILED' };
+  void invalid;
+}
+
 export function inspectCoreError(error: TriviumDBError): void {
+  if (error.code === 'TDB_INVALID_INPUT') {
+    const kind: 'missing' | 'unknown_keyword' | 'multiple_values' | 'positional_only' |
+      'too_many_positional' | 'invalid_arguments' | undefined = error.details.argument_kind;
+    // @ts-expect-error 调用形状只接受公开的固定类别。
+    const invalid: TriviumDBError = { ...error, details: { reason: 'test', argument_kind: 'arity' } };
+    void [kind, invalid];
+  }
+  if (error.code === 'TDB_QUERY_DEADLINE_EXCEEDED') {
+    const details: Record<string, never> = error.details;
+    // @ts-expect-error 期限错误使用空详情，预算字段由预算错误提供。
+    const invalid: TriviumDBError = { ...error, details: { budget: 1 } };
+    void [details, invalid];
+  }
+  const stage: 'lex' | 'parse' | 'bind' | 'plan' | 'execute' | undefined = error.stage;
+  const start: number | undefined = error.target?.query_span?.start_byte;
+  const parameter: string | undefined = error.target?.parameter;
+  if (error.target?.parameter !== undefined) {
+    const reference: number | undefined = error.target.query_span?.end_byte;
+    void reference;
+  }
+  const field: string | undefined = error.target?.field;
+  if (error.target?.field !== undefined) {
+    const reference: number | undefined = error.target.query_span?.end_byte;
+    void reference;
+  }
+  // @ts-expect-error 普通 API 字段名为字符串。
+  const numericField: number | undefined = error.target?.field;
+  void [field, numericField];
+  const outcome: 'not_committed' | 'unknown' | 'committed' | undefined = error.write?.outcome;
+  const consumed: boolean | undefined = error.write?.transaction_consumed;
+  // @ts-expect-error 写入结果使用约定类别。
+  const invalidOutcome: 'success' | undefined = error.write?.outcome;
+  // @ts-expect-error 源码偏移为数值。
+  const invalidSpan: string | undefined = error.target?.query_span?.start_byte;
+  void [stage, start, parameter, invalidSpan, outcome, consumed, invalidOutcome];
+  const schemaVersion: 1 = error.schema_version;
+  void schemaVersion;
+  if (error.code === 'TDB_TRANSACTION_FINISHED') {
+    const details: Record<string, never> = error.details;
+    void details;
+    // @ts-expect-error 结束状态只提供空详情，不携带节点字段。
+    const node: { id: number } = error.details;
+    void node;
+  }
+  if (error.code === 'TDB_BUSY') {
+    const resource: string = error.details.resource;
+    void resource;
+    // @ts-expect-error 锁忙详情通过 resource 定位，不提供 I/O 类别。
+    error.details.io_kind;
+  }
+  if (error.code === 'TDB_REENTRANT_ACCESS') {
+    const operation: string = error.details.operation;
+    void operation;
+  }
+  if (error.code === 'TDB_WRITE_CONFLICT') {
+    const expected: string = error.details.expected;
+    const actual: string = error.details.actual;
+    void [expected, actual];
+    // @ts-expect-error 编辑版本是字符串令牌。
+    const invalid: number = error.details.actual;
+    void invalid;
+  }
+  if (error.code === 'TDB_IDEMPOTENCY_CONFLICT' || error.code === 'TDB_WRITE_OUTCOME_UNKNOWN') {
+    const details: Record<string, never> = error.details;
+    void details;
+  }
   if (error.code === 'TDB_DTYPE_MISMATCH') {
     const stored: DType = error.details.stored;
     const requested: DType = error.details.requested;
@@ -43,8 +250,9 @@ export async function exercise(file: string): Promise<void> {
   const console = new ConsoleSession();
   const response: string = db.consoleRequest(console, '{"version":1,"requestId":"q1","command":{"operation":"info"}}');
   const detached: boolean = console.isDetached();
+  const drained: boolean = console.isDrained();
   const cancelled: boolean = console.cancel('q1');
-  void [response, detached, cancelled];
+  void [response, detached, drained, cancelled];
   console.detach();
   try {
     const operations: TransactionOperation[] = [
@@ -96,6 +304,12 @@ export async function exercise(file: string): Promise<void> {
 
 // 此函数只参与编译；每个错误样例都必须被声明拒绝，缺少诊断会触发 TS2578。
 export function rejectedInputs(db: TriviumDB): void {
+  // @ts-expect-error 运行时配置使用对象。
+  new ResourceRuntime(1);
+  // @ts-expect-error 运行时配置使用具名字段。
+  new ResourceRuntime([]);
+  // @ts-expect-error 旧数字位置参数已迁移为 options。
+  new TriviumDB('sample.tdb', 2);
   // @ts-expect-error 配置通过 JSON 字符串传递。
   new ConsoleSession({ readOnly: true });
   // @ts-expect-error 请求必须是 JSON 字符串。
@@ -108,10 +322,68 @@ export function rejectedInputs(db: TriviumDB): void {
   new ResourceRuntime({ memoryLimitMb: '64' });
   // @ts-expect-error 节点 ID 必须为数值。
   db.insertWithId('11', [1, 0], {});
+  // @ts-expect-error 数据库构造必须提供路径。
+  new TriviumDB();
+  // @ts-expect-error 批次 ID 成员必须为数值。
+  db.batchInsertWithIds([11, '22'], [[1, 0], [0, 1]], [{}, {}]);
+  // @ts-expect-error 批次向量分量必须为数值。
+  db.batchInsert([[1, '0']], [{}]);
+  // @ts-expect-error 边标签必须为字符串。
+  db.link(11, 22, 1);
+  // @ts-expect-error upsertEdge 的权重为必需参数。
+  db.upsertEdge(11, 22, 'route');
+  // @ts-expect-error 可选权重的有效值为数值。
+  db.updateEdge(11, 22, 'route', '1');
   // @ts-expect-error 向量元素必须为数值。
   db.updateVector(11, ['1', '0']);
   // @ts-expect-error 关键词为字符串数组。
   db.rebuildTextIndex([{ id: 11, text: 'token', keywords: [42] }]);
+  // @ts-expect-error 预留数量必须为数值。
+  db.reserveNodes('1');
+  // @ts-expect-error 内存配额必须为数值。
+  db.setMemoryLimit(true);
+  // @ts-expect-error 后台构建开关必须为布尔值。
+  db.setAutoBuildQuiver(1);
+  // @ts-expect-error 整理间隔必须为数值。
+  db.enableAutoCompaction('1');
+  // @ts-expect-error 检索数量必须为数值。
+  db.search([1, 0], '1');
+  // @ts-expect-error 展开深度必须为数值。
+  db.searchGrouped([1, 0], 1, '1');
+  // @ts-expect-error 批查询并行度必须为数值。
+  db.searchBatch([[1, 0]], 1, '1');
+  // @ts-expect-error 精确检索数量必须为数值。
+  db.searchExact([1, 0], '1');
+  // @ts-expect-error 图读取 ID 必须为数值。
+  db.neighbors('7');
+  // @ts-expect-error 邻居深度必须为数值。
+  db.neighbors(7, '2');
+  // @ts-expect-error 图预算必须为数值。
+  db.reachable(7, { maxVisitedNodes: '3' });
+  // @ts-expect-error 图方向必须使用公开枚举。
+  db.reachableDetailed(7, { direction: 'sideways' });
+  // @ts-expect-error 图标签元素必须为字符串。
+  db.querySubgraph(7, { labels: [1] });
+  // @ts-expect-error 锚点上限必须为数值。
+  db.searchGraphFirst([1, 0], [1], 1, '1');
+  // @ts-expect-error 上下文检索配置中的数量必须为数值。
+  db.searchWithContext([1, 0], { recallK: '1' });
+  // @ts-expect-error 高级配置中的边数量必须为数值。
+  db.searchAdvanced([1, 0], { maxEdgesPerNode: '1' });
+  // @ts-expect-error 混合检索文本必须为字符串。
+  db.searchHybrid([1, 0], 1);
+  // @ts-expect-error 查询文本必须为字符串。
+  db.tql(1);
+  // @ts-expect-error Prepared 查询文本必须为字符串。
+  db.prepareTql(1);
+  // @ts-expect-error 写查询文本必须为字符串。
+  db.tqlMut(1);
+  // @ts-expect-error 同步模式采用公开字符串枚举。
+  db.setSyncMode(1);
+  // @ts-expect-error generation 标识必须为字符串。
+  db.publishGenerationManifest(1);
+  // @ts-expect-error Prepared 参数值仅包含公开标量。
+  db.executePreparedTql(db.prepareTql('MATCH (n) RETURN $x AS value'), { x: undefined });
   // @ts-expect-error Prepared 参数值为公开的标量集合。
   db.executePreparedTql(db.prepareTql('FIND {kind: "primary"} RETURN $label AS label'), { label: {} });
   // @ts-expect-error 事务操作必须提供对应的向量。

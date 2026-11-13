@@ -1,0 +1,2856 @@
+{
+  "title": "QuIVer evaluation materials",
+  "prepared_on": "2026-11-12",
+  "paper_arxiv": "2605.02171",
+  "observations": 1056,
+  "configurations": 116,
+  "curves": 423,
+  "methods": 31,
+  "datasets": 21,
+  "files": [
+    {
+      "path": ".gitattributes",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "3d2c924277eab114447322fe3a9f7efb795ddc88e64178183b5532ec136131ab",
+      "bytes": 110,
+      "transformations": []
+    },
+    {
+      "path": ".gitignore",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "fb16ccb33c2480d061dd3bec162c7373b9c137e1dcddc8245ea0c56b63fdcf54",
+      "bytes": 251,
+      "transformations": []
+    },
+    {
+      "path": "CITATION.cff",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "a546993dd0954a3c4514b7b49a99e8c551fce2567132dcf40200de09a3b447b1",
+      "bytes": 476,
+      "transformations": []
+    },
+    {
+      "path": "METRICS.md",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "2ae4c4a32eca77b3a5080203ddcfd24b9a59fb5343ae48b32f3e896d4ef6478a",
+      "bytes": 4119,
+      "transformations": []
+    },
+    {
+      "path": "README.md",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "4623fc3f3fc466844bca5861b89cd8689779640fddf34461e89cc851ec9bcdb9",
+      "bytes": 5461,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口",
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ]
+    },
+    {
+      "path": "dashboard/README.md",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "abde599892c0edb8cf4df8537e19091557d8e1fd3336b72b0712bdda7b7c724f",
+      "bytes": 4322
+    },
+    {
+      "path": "dashboard/assets/css/components.css",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "30bb383c6f83c58053a98d6b59e37524271059d581a334666cff9756fdf55945",
+      "bytes": 15705
+    },
+    {
+      "path": "dashboard/assets/css/layout.css",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [],
+      "sha256": "18bf04f60aac21fe888f60993b0a3bb5f45401f43d446d75ed9d46fc9f65c755",
+      "bytes": 8847
+    },
+    {
+      "path": "dashboard/assets/css/tokens.css",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [],
+      "sha256": "df8c936372931c96b67f3e00ff11a547515d05fe3314f580311f0e4ef463f2bd",
+      "bytes": 1805
+    },
+    {
+      "path": "dashboard/assets/js/app.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "d3db15563ad44616c1bafa8fa860107af4b906302ca47d591930618eb80fdfc9",
+      "bytes": 15637
+    },
+    {
+      "path": "dashboard/assets/js/battle.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "8231d1a5ddf86b990f7946d96e7ac5488099152b01eeed033db029d633c2bc6d",
+      "bytes": 11192
+    },
+    {
+      "path": "dashboard/assets/js/charts.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "502e4d886b7f0ae41cf1dd8de2bac1750e26524f54c4407a26f2f3129cc41434",
+      "bytes": 19231
+    },
+    {
+      "path": "dashboard/assets/js/core.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "b3139cccfa632d68b97a7c367e1ea1a751014ccd501a394112eb0bba35b82c5c",
+      "bytes": 3437
+    },
+    {
+      "path": "dashboard/assets/js/coverage.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "5d793d25af3c2a31827af906f719fc584fddb76efe5e4967701eaa4129648ee5",
+      "bytes": 4325
+    },
+    {
+      "path": "dashboard/assets/js/i18n.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [],
+      "sha256": "8f0b3d7307a0a093cb7f9d82ade52045d92e53b832f8334ba67150062174af19",
+      "bytes": 2401
+    },
+    {
+      "path": "dashboard/assets/js/model.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "0cdefe06dbac36ed41f19f79d373bfec0cfbae3fa6b26b1dc6f2eeab87657df9",
+      "bytes": 4365
+    },
+    {
+      "path": "dashboard/assets/js/notes.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "14ea5d451ed47208ac1a31cd5ee4638b01e757d6af9b435a8626e38a100dc81e",
+      "bytes": 10670
+    },
+    {
+      "path": "dashboard/assets/js/tables.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "64c5400de786d06b3854528b1446bdc2a91db121a5739782fc04ec986798e310",
+      "bytes": 9522
+    },
+    {
+      "path": "dashboard/data/annotations/D01.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "033965d4a0b7d78f7a3d77628fe1b47b0a0270bea99c725f0f4d3c8e20c2d268",
+      "bytes": 2335
+    },
+    {
+      "path": "dashboard/data/annotations/D02.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "dda43ceecf5c9a14c397da44621f67a3be4c0cd89d05d6d838dbd5eddef54cee",
+      "bytes": 2335
+    },
+    {
+      "path": "dashboard/data/annotations/D03.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "cc2304970c4bd2511bbaec68b28ca4b5e58bd4308ea8ea8f59d771163adaeb4b",
+      "bytes": 55450
+    },
+    {
+      "path": "dashboard/data/annotations/D04.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "5cb32ad20bdc5b8698c207469169fe914c114b3ade124b0e7a8cf6d1c36d1773",
+      "bytes": 3892
+    },
+    {
+      "path": "dashboard/data/annotations/D05.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "8e673ae15e601f8f71dc7b62f5ab61fcefef085eb74f844ab8edd8cdc3140352",
+      "bytes": 44328
+    },
+    {
+      "path": "dashboard/data/annotations/D06.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "c857ab18fe71031467ab6ac8857dcb0ee34cb185f52a20b94645121a252769ae",
+      "bytes": 3892
+    },
+    {
+      "path": "dashboard/data/annotations/D07.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "d433089603a3cd385c7f283cc75942f30bdd155250dc4c115d4e4d47fc35cbcc",
+      "bytes": 2335
+    },
+    {
+      "path": "dashboard/data/annotations/D08.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "1c751a31f275b8e90b4339a956867ff99fa27482ecb022a296ce5de19224e551",
+      "bytes": 2336
+    },
+    {
+      "path": "dashboard/data/annotations/D09.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "2b61b72004e9232dffe22e454755ebebb62f0b7839868dc47e736e955c26ee34",
+      "bytes": 1549
+    },
+    {
+      "path": "dashboard/data/annotations/D10.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7b88123890926f51cdfa323f9a207e9435b16cc66d27f5727f43b89c55cb41cd",
+      "bytes": 1549
+    },
+    {
+      "path": "dashboard/data/annotations/D11.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "0cd3b8e239a05f929c62b013687494369b799b9f20131afe8bd3903fb3c8e997",
+      "bytes": 2335
+    },
+    {
+      "path": "dashboard/data/annotations/D12.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "2c8de9e61f1fd8ba68545924b270fa36df9dcf41a4533cfe83d1b45164924ffb",
+      "bytes": 2335
+    },
+    {
+      "path": "dashboard/data/annotations/D13.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7a0201ea28cb58ac06c78eaec0bf6d829dd79f803991d65c3ed171e67bd41c59",
+      "bytes": 2335
+    },
+    {
+      "path": "dashboard/data/annotations/D14.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "8191212001302f90c92d99070d8a599e5855ca79ec6e8be62c9ee0be29184c76",
+      "bytes": 45182
+    },
+    {
+      "path": "dashboard/data/annotations/D15.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "cbd977584503270ffdb44ec61f5c9461caf784943b945b7a2dc505b88d62a559",
+      "bytes": 5968
+    },
+    {
+      "path": "dashboard/data/annotations/D16.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "03ef0190abda392493505dd69552331f168ee152d3ec73c614b78468739609f7",
+      "bytes": 2336
+    },
+    {
+      "path": "dashboard/data/annotations/D17.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "a6d3160d5c70f04a93714e868af29d6a60f3bab04ff83571ae89cd32aeed58c6",
+      "bytes": 2336
+    },
+    {
+      "path": "dashboard/data/annotations/D18.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7bda7e7ef5caa9332e0847c1f887597eb4a021f9d4482cbcfe9fd2e505e01fa8",
+      "bytes": 3892
+    },
+    {
+      "path": "dashboard/data/annotations/D19.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "f69a3980031742c906a46a4c8c6d79732ee55487b904676a6dd3e1e7b9929178",
+      "bytes": 3892
+    },
+    {
+      "path": "dashboard/data/annotations/D20.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "71b01ec5b4f5fb514b43cceac51aa91c51400c7d04360a3d4089f0cc2bbc95de",
+      "bytes": 3893
+    },
+    {
+      "path": "dashboard/data/annotations/D21.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "6037a386aa167f43384871f76f30a0d18730ac56f14629798a3744cea55fa477",
+      "bytes": 1479
+    },
+    {
+      "path": "dashboard/data/assemble.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [],
+      "sha256": "de290ccd5d84e893fe5145f25e62de3e617a9002f09b665901b7edfc4e48a6ce",
+      "bytes": 1460
+    },
+    {
+      "path": "dashboard/data/catalog.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "f42d8de8271e6fcdc731b2ad6a655b42c680c8f38a7be45a06038e4d875bc4d1",
+      "bytes": 31333
+    },
+    {
+      "path": "dashboard/data/configurations/D01.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "b3885ddfba13e9d102dfc5837212a34660fc2cdcb809f384504e38d8b8a92b98",
+      "bytes": 1125
+    },
+    {
+      "path": "dashboard/data/configurations/D02.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "1d9736721e71526b4d2ce6e04398f80bb1602d7d95e6bdba03d3135870626d0e",
+      "bytes": 1122
+    },
+    {
+      "path": "dashboard/data/configurations/D03.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7a8769bea44b50283097103f6d787de224af6186f80fb4d8bc94097274985773",
+      "bytes": 30219
+    },
+    {
+      "path": "dashboard/data/configurations/D04.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "1fd14d763dd3ea8140e8274cdd8748eb0bf7fe1bcd9bebf37fdead12eb4c35f0",
+      "bytes": 1122
+    },
+    {
+      "path": "dashboard/data/configurations/D05.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "aaa9724471f44e0f5c8a7d7445ecedfdddfd05f41c09f6e1ae3d54f0968ef784",
+      "bytes": 26005
+    },
+    {
+      "path": "dashboard/data/configurations/D06.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "e9a995b7430b686b7ebfa0b58859309de3d9b22470f66ee7becc1f5d5a51e2bf",
+      "bytes": 1128
+    },
+    {
+      "path": "dashboard/data/configurations/D07.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "eeb06693e5835bb44b20e58fb27751b6627c832c05e13a522f5698e7bf4d2649",
+      "bytes": 1123
+    },
+    {
+      "path": "dashboard/data/configurations/D08.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "69323f726dc125e320d68a53837114d95f6f3a6213586df253bc3507011263f8",
+      "bytes": 1120
+    },
+    {
+      "path": "dashboard/data/configurations/D09.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7c0aca563113b81a6bb5676b51f210ae30fb04b55e3d00bd0c662d5378cfdf1e",
+      "bytes": 1117
+    },
+    {
+      "path": "dashboard/data/configurations/D10.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "c7f94dc4aa08b0227ee8ef77c88a51035b47a298a45d181d147cf687cad561b1",
+      "bytes": 1136
+    },
+    {
+      "path": "dashboard/data/configurations/D11.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "1118bc226051878016bb6bf010663ff2d746bb8356c4e46f7f2779a15431fb89",
+      "bytes": 1124
+    },
+    {
+      "path": "dashboard/data/configurations/D12.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "bfd7801ea49ecf49ea326796fc71dde61c4ac55ddab2423667f364ba15cd0248",
+      "bytes": 1126
+    },
+    {
+      "path": "dashboard/data/configurations/D13.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "4386bc49a84f5445651768bb8a695aa381fc9efb7f59b2664ca0f4a0e402e6fa",
+      "bytes": 1127
+    },
+    {
+      "path": "dashboard/data/configurations/D14.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "88a7553806f3555d8d85b3bc3c428fce1358d8472cdd18e7b1878b80d2b36838",
+      "bytes": 26106
+    },
+    {
+      "path": "dashboard/data/configurations/D15.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "f1065e1a0ae3279c55410b9093791711f7a2ff46ae0f9dd5c51109baead7476a",
+      "bytes": 1128
+    },
+    {
+      "path": "dashboard/data/configurations/D16.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "9226b3e1a38388e294923c3c4f0b28dfd315704120694e0e17d239bf666736a0",
+      "bytes": 1123
+    },
+    {
+      "path": "dashboard/data/configurations/D17.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "86f2b8941a9a70d3673c865695272e74f0e4133caa10580ec1b96892cc7baf93",
+      "bytes": 1126
+    },
+    {
+      "path": "dashboard/data/configurations/D18.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "b0bf091fbcaeebd73c401f2ab4686eb3364e9add9db5266764f66f063e88adb9",
+      "bytes": 1130
+    },
+    {
+      "path": "dashboard/data/configurations/D19.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "d681ad10cf07c926dd141d562f5717381e9039a2fee2290d874154cdfe49e485",
+      "bytes": 1124
+    },
+    {
+      "path": "dashboard/data/configurations/D20.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "59bd0d8c7c1adb5ee5cab5e913e22e0432b65cd3ad70f1ed4053610bb1524d90",
+      "bytes": 1123
+    },
+    {
+      "path": "dashboard/data/configurations/D21.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "aab7e58c6a0a59fce44fbc4524985068375cb1111e278f16252d6329f9dce634",
+      "bytes": 1123
+    },
+    {
+      "path": "dashboard/data/historical-bq.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "d2136d435010dfad990a039f41670ba6420d060653af022eff03913fc73a6e24",
+      "bytes": 64112
+    },
+    {
+      "path": "dashboard/data/observations/D01/D01__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "ac071756caa9b328438fe87c742c22ba0f62292befc25db2de4c3384a77fcd10",
+      "bytes": 11757
+    },
+    {
+      "path": "dashboard/data/observations/D02/D02__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "afc32b1faa462cfb3944ebfaddabc06a706cf6c8181510896d8a3e81cdc6ae9c",
+      "bytes": 9227
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__D03-recheck-bbq-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "18952f18b319eaedb9c8b1cb012e5b253f5982e549e90217e4cfbee65ae821e6",
+      "bytes": 5268
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__D03-recheck-diskann-pq-only-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "b9fe528447d8db463a61106d15e862853e9df591d72baa14396a8b64e6eb9386",
+      "bytes": 8954
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__D03-recheck-diskann-rust-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "6dae35fa3cdb265a94287a48aa1ab3b22f5b98cf658e091b4aceb6dad647e724",
+      "bytes": 7844
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__D03-recheck-faiss-hnsw-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "214f388d5f4a7ba6d8cca4b69f5d52a6817d948edae020bdf431168761f8b257",
+      "bytes": 6431
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__D03-sqg-integer-fixed-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "d661d0f6f9dc4fdbecb89869edeaae23f7ff404649527a25b5d62abd04f57140",
+      "bytes": 8062
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__alpha-cng-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "e1575b363e48421d8f3896c1047f31a8d71724d7bb679a7acd440476ef9150ac",
+      "bytes": 10079
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__binary-centered-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "e17d89d4ae903bdb50a96c8a71fce0e32e0ac915ce7a658e426ad922f2226570",
+      "bytes": 11607
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__binary-sign-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "35ae08f625e12bb92b753b9effa20731f9298816bc9e70bc2a7e46ae5ca40781",
+      "bytes": 11525
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__diskann-pq-fp32-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "a5fccfdd29a2930204393ca174e579cd4a5de8bc3397dd26ea9dc2b9420853ae",
+      "bytes": 6087
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__diskann-pq-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "85b92733f32fef03786dc1f17115f1a0398e2bf13f009fed3a35e62734dc3d5a",
+      "bytes": 8775
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__faiss-ivfflat-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "57813b78e15bbc8611a4db59d2c9caa61da80c005fd12f5909e5e5a28091ef2a",
+      "bytes": 12146
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__faiss-ivfpq-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "35d8c00ffe1b93d901e8d75bf73c26e2c818a19a18ceaf7ce576240c267404e9",
+      "bytes": 4823
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__faiss-opq-ivfpq-refine-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7d4885e2b9b70692143175f3676b28b0c404a19a01ece780963aaf0dedae27ca",
+      "bytes": 13792
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__faiss-rabitq-fp32-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "53ce8a2cfa72869e80b95af2c521fe0b119e2bd077ff31e6ba211ae90d6a68ea",
+      "bytes": 11069
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__faiss-rabitq-sq8-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "527cb2807b56871908be78caa6f49b2a3d5f836939d320f5b21e6020b747295e",
+      "bytes": 12357
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__hnswlib-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "234364d11b9002cf048cb57f8232401545f3042f230a373d1ad0e5817ef1efc6",
+      "bytes": 7996
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__hscg-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "38b32af8bf183d53eaf28a808e47f173745a688e5ee84c25fba473f6dacb6d4b",
+      "bytes": 7862
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__mirage-anns-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "9b8939bd52a4a32daaaf078687d18bba515f19e17df0f83e8a7c977a560dcac1",
+      "bytes": 9189
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__ngt-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "25a17959e3ae62534677b51e477c9c0a81de3ef71883616b0fc127ae24bd4573",
+      "bytes": 8110
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__opq96-fastscan-refine.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "e7c75d849f59e51f8f5e726024bd7e184d4fde67977eee38b1d269af79f50409",
+      "bytes": 12478
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__pq96-refine.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "004430ee6f15071fdb03d555d66d5d4b27aaa68c995165ada6d07a1d8d96f862",
+      "bytes": 13558
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "39f9591bf28945d44c954e1c5d74ae37a4217a0e231e318babe61b64dbf740ec",
+      "bytes": 14447
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__rabitq-32bit-standard.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "3bf0c2b0d9decac43147fe3859520e3e74fc8e08613ffb4ad4668b3a9c63eee9",
+      "bytes": 9120
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__rabitq-7bit-standard.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "a043fc6109a39cf62c6e6970f6e69e95e44baa496a92cf46257a7f8d17a43f1f",
+      "bytes": 9074
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__rabitq-official-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "5f5d3a9802b270e19ad1c0c3b3b7376228b39e4aaf610df55355a05baeb9bf92",
+      "bytes": 6340
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__svs-lvq4-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7c834e71942b4ffb5444d83ce9829aa1ca3c4b4f918965de99f3bdb6c994fa4c",
+      "bytes": 4524
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__svs-lvq4x4-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7b83d6442b7a39d42c2f4d06b7c9e16e14166e93b6877dcffa04feb6c5aefb0f",
+      "bytes": 6804
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__svs-lvq4x8-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "c6fa058491f3bd0d3f46e892ae9f576e9f1389452b90e0d1601bd159c5421cc6",
+      "bytes": 3481
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__svs-lvq4x8-pad64-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "694d06234e4fb75b2d1cd723a7d4471ac7ea5739dd2a3268ede09a457599f5ff",
+      "bytes": 7092
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__svs-lvq8-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "55eb7b1052950ab644f8670a6b20c423c014a4dee9723d45381d284a5339f414",
+      "bytes": 4497
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__svs-lvq8-pad32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "10961fbae137bcded23c0c9555f50f703013ece61c7af3375cea723d01d48999",
+      "bytes": 5959
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__usearch-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "44c1901927dc22dcd13cff8bc45a10390ad0d34125b1300c4b28e8903b19cb3b",
+      "bytes": 6105
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__usearch-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "c1948070fdb0fa0d4d31f13f01fc26fd4f0db8e712b74c2fa41775e184316a89",
+      "bytes": 7211
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__vsag-fp32-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "c5f8effcf578c53c0fcb72dda3814034bac3513fb6a8b9e2054786ebde72bbc5",
+      "bytes": 7979
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__vsag-sq8-g0.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "b96ce7eedae554b21fd8118b467af7e4b494fcdba3e62b376b0d1388458cf078",
+      "bytes": 5287
+    },
+    {
+      "path": "dashboard/data/observations/D03/D03__vsag-sq8-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "5dca24dd8a080e15a0185b6e830d87e55c5f1867597b36912725e6564533d552",
+      "bytes": 7587
+    },
+    {
+      "path": "dashboard/data/observations/D04/D04__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "f69b3820006c121eddcc8be2eb5580b85341ee7c6e0306a5956df9d8b146b196",
+      "bytes": 14471
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__D05-sqg-integer-fixed-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "a2f7bd8be2b20282582d8ce88e5341dc78e5932a65ef4fe639b5a7767ce4ffcb",
+      "bytes": 11725
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__alpha-cng-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "5aa299e1d3f7d6522af8e704509206a1242b19b3a83ff5ccd8ea719e2e247704",
+      "bytes": 9040
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__bbq-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "1b27fbbf7951d1af9fc75bd80cf7c645125bc0c6653509aed8f2f4c9acc2b309",
+      "bytes": 10372
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__binary-centered-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "2207e7bedb9c5e0ebbdde622e119b1a81cd413289bcdea35c04f867223d55887",
+      "bytes": 9344
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__binary-sign-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "2772773d8bdb6f3cc119d2ebfc44d93d47d4fc157584fc78b543a5114a2758a7",
+      "bytes": 10456
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__diskann-pq-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "9c4465caed605925328d10c08eda6c6089aecde1a3bac4c45fec20195a654367",
+      "bytes": 10005
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__diskann-pq-only-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "211217d7693686aeef6135bf7b770c990bc8ccc874673c5a9df1eff3cd98dce6",
+      "bytes": 8814
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__diskann-rust-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "9102cf4e80cc0231216b7b4698ee36d7720d59cb9b7a669c1cf178714b19e07e",
+      "bytes": 8769
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__faiss-hnsw-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "60ebeff9e0164856a1ec669cbf676aabfe0a1da14a1b5856eacbea2d1761a72d",
+      "bytes": 12183
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__faiss-ivfflat-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "2b199677963fff6213daeffc022e103739d45a87bd6718584b6d0ac83a779b64",
+      "bytes": 5032
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__faiss-ivfpq-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "3f5ede293b737e5b800a29f2af36e740fbb61726fa14d7f551469e4dd00d23bf",
+      "bytes": 4835
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__faiss-opq-ivfpq-refine-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "8fc4444b72825eceecdb8b4fc7b7e89c5df8ee97e53cc016c1dec5ee25d6350d",
+      "bytes": 9879
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__faiss-rabitq-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "e8c35361c52b6e803f3d690affd61eac28884300c0c34337aa11fa7df7ee32e8",
+      "bytes": 9872
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__faiss-rabitq-sq8-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "b63ac10ab850a41e6c36c28e25f4babe5470de18f1da7b9cdb89367011a969f8",
+      "bytes": 11201
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__hnswlib-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "869d8d214a1d05bd31979c22f2164c2c9f406a7603b787b17968309304801bfd",
+      "bytes": 10125
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__hscg-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "15bddfa88e42d4b23c85bfb91dc21555c160efaa5c1fc3b656365be12b6c3b9d",
+      "bytes": 7957
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__mirage-anns-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "232c566d8546fa2f4be5082b8292e6147679d26fd0960e30797dea99d2d9f7ed",
+      "bytes": 9172
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__ngt-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "e9f3d18881e2b72c58a641b2ed6e7cec73afd205a129b7e59ec0791e2bd29b1e",
+      "bytes": 9256
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__opq-fastscan-refine-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "2a165f8c35bd690e4572c45ceccf83f75acccb42e3d899688908ab7f7f3c7dfb",
+      "bytes": 12560
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__pq-refine-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "aad967a41b1ff25efc45841e610528af4e7e69f8df71ab94897e7e9d45cf3974",
+      "bytes": 9838
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "b51bdf5327fe86afe0c9146e5988357140dd12b787949c95d148725cd0853942",
+      "bytes": 11808
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__rabitq-32bit-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "c308f1c4392d62af986f24a5d0c025eac884047cdaa06bde93b54143fd83462d",
+      "bytes": 8084
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__rabitq-4bit-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "cc705b0bb7578c8c4cf809ffd7a0b05ac0df161653b345a0855ba07d8de5bc0b",
+      "bytes": 4215
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__rabitq-7bit-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "cbc1bfffe6a5fe9fea8c462f761320390dc04ff15dd04d285b033a7b6bece439",
+      "bytes": 8068
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__svs-lvq4-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "73b294999f01edb0d6cfff801d0da53906c77d3e302f085f21545c7488edd1a9",
+      "bytes": 4992
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__svs-lvq4x4-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "cb22a4c4f3054e55b67bc275246f9d293740eaa81f92a8932e151ba25dd9af93",
+      "bytes": 9728
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__svs-lvq4x8-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "edf3dd5fad4ac9b5322a454ea8d6c51266ceea93d8a6aa73c6b14c582bfb9203",
+      "bytes": 9734
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__svs-lvq8-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "ff54a601c8e10708c6f6df5a615f036a7ddfa8881fadfc9f4c6ab1a9d989e447",
+      "bytes": 9636
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__usearch-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "ff87a91c310f6e37205ac5a42b804698c385a41dbff1a960cc128105c86adfb9",
+      "bytes": 9063
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__vsag-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "62e8481d680a7779f8f2672546ebbf152accf77e87e0e3ecc3b6bc810e096175",
+      "bytes": 10383
+    },
+    {
+      "path": "dashboard/data/observations/D05/D05__vsag-sq8-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "de237f6a233068233818e2243c71b2dc155bbf36b647eae67cd7db98f72f9e72",
+      "bytes": 10437
+    },
+    {
+      "path": "dashboard/data/observations/D06/D06__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "47859e6a0fede819e4c6d4c9b566926ca0d347141258e653fd5f08023f78fcaa",
+      "bytes": 14479
+    },
+    {
+      "path": "dashboard/data/observations/D07/D07__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "1175dda99d486e41f301a7ebd4a66191999bf3a916a1dd1e5a55b252c235a88e",
+      "bytes": 14375
+    },
+    {
+      "path": "dashboard/data/observations/D08/D08__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "3aaa7b65afe801aef376ec339508d4dc9bca4b6271978ce93a0aabbd9eaae971",
+      "bytes": 9282
+    },
+    {
+      "path": "dashboard/data/observations/D09/D09__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "c3a408f08df10f50fdf80340aa3e82b46654c80608fc2c597444be4d64dd0611",
+      "bytes": 9248
+    },
+    {
+      "path": "dashboard/data/observations/D10/D10__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "3cbbeaac79b10ba715f2f652a02e41e9c109f34cd3d103d8a7b90af42404c50b",
+      "bytes": 9259
+    },
+    {
+      "path": "dashboard/data/observations/D11/D11__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "fd5735c4183ba3026bd1a1ffd4e8b94a624b2f3f7aa177db966cdd471a842f93",
+      "bytes": 9193
+    },
+    {
+      "path": "dashboard/data/observations/D12/D12__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "22cfc38274bf8af7376563e835127b72a350861f35188f3178c8059894d829d4",
+      "bytes": 11752
+    },
+    {
+      "path": "dashboard/data/observations/D13/D13__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "212bad7e85fd3253507368ef8841815ffa66112212abd61a6db4b6d4ffa02481",
+      "bytes": 14407
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__D14-alpha-cng-high-recall.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "030496366d07c0afbdeb59d26490cb9404d94b520431051d3263d9d56e159548",
+      "bytes": 6333
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__D14-binary-sign-high-recall.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "559ea949aaaf3269b50e581a219c19851abb661f53ce4b6e6082f7b4a384ad6c",
+      "bytes": 5455
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__D14-diskann-pq-fp32-strong-r64-l400.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "1c4ec1400aafcd8c12905c9f9e69c2b38aa6a6a24387ad3dd88961b3e20c9534",
+      "bytes": 11267
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__D14-diskann-pq-only-strong-r64-l400.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "6844a81721d7025f7dd9b3c7e1643af0bb87560508c61c465c8574bdb020e851",
+      "bytes": 11222
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__D14-diskann-rust-strong-r64-l400.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "f1cea17ffcd4e12b3c3876ffc1be1d611bc6d0241b70c7fe0582904be07fa2d0",
+      "bytes": 11235
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__D14-ngt-dense-epsilon.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "057bcfdcc54906c1be65d1aa6e5c09c6bccca6910b064b62062b44ca291ff422",
+      "bytes": 10705
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__D14-recheck-faiss-rabitq-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "e771a479c9483814a149f63221dccd4635ec6ff35df188e7c25a8ae042303f20",
+      "bytes": 5128
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__D14-sqg-integer-fixed-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7c0577b015086b8cbf955f242b9406ff560a991bc97da1dd2d2a7715c015303c",
+      "bytes": 11175
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__bbq-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "009635aa9fd9a2745cc138c1c43fd2845705233e733e91ed8dcd907977dd1e4f",
+      "bytes": 11444
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__binary-centered-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "2a20c651eba886763523513e84741c102bd5e3f7adce603cab77e85b3138945e",
+      "bytes": 11651
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__faiss-hnsw-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "6a7b22286b6091ca23408956182a644f404939e2b1e8450fa5e8bb34b1be086e",
+      "bytes": 13317
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__faiss-ivfflat-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "999896ac47d9a682551dc043d39ec1b84650a6e94c37304e98c4a8f87fa10726",
+      "bytes": 11001
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__faiss-ivfpq-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "93a7b1e43b43a60ae4f459f175a6adfeb399e6e830e81fca74cde045e0cad252",
+      "bytes": 4884
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__faiss-opq-ivfpq-refine-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "36dfdcd3a84cdcffac7e3ac96af1e88e4d1693a4512de6498449f159e7ca9b32",
+      "bytes": 12481
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__faiss-rabitq-sq8-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "b75afba0d6f99b4f6bd1ba9176008774b2f03667d617770a16003e30fea991f5",
+      "bytes": 13645
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__hnswlib-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "f4cdd865db7b24a888f54b36428b58ab6ae231bf9fbe4fbc4150dd37a0f589cd",
+      "bytes": 11038
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__hscg-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "4e29c23968a06cdfefb8f15e67aff50d349074763e35f2f521214ec23cbcf0d6",
+      "bytes": 9967
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__mirage-anns-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "a8f31fa08b17f406b7b320e812600f22070607dc30834c54380c39aeb395fa17",
+      "bytes": 9130
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__opq-fastscan-refine-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7cf4d7eb24fdc6315fb30417d35af2ee97066fefbe636ac253277caa5ba4fcf5",
+      "bytes": 12520
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__pq-refine-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "41b2cb53e7f92b357c85be300d65c1434bce667d2656800a596481c377ab2783",
+      "bytes": 12286
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "6fc1d4811ca4752a7bd018869b75309d339b25f3dd2950c4af0409c14a6e7135",
+      "bytes": 14385
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__rabitq-32bit-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "ecfde5e42ba9bdbe631cbd4e35ae68e4efb65b8f192305194f8ff7c287761c5b",
+      "bytes": 10145
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__rabitq-4bit-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "cf331f60e1d23ff0613a2f0006baa5727622e3cb6834ceaf9d52d2e4e7221c49",
+      "bytes": 6302
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__rabitq-7bit-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "5dc5b3ac50b20d2d6ae92afa77362a0fefe9956587556041902d96cf4e0e849f",
+      "bytes": 10160
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__svs-lvq4-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "c2e062d66f4fec539b29fc83e66e5bb2be0e38d96b87e40314400aa29e2b18c1",
+      "bytes": 3489
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__svs-lvq4x4-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "ad7dac87a023438909a1a2477f9c5d413ff2d72adf49c573e161e6cdf12bfc36",
+      "bytes": 10737
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__svs-lvq4x8-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "e5eca18015a2ae2479452bc1d9e1c9f11e8b93bacd9d1480bd82c586766162bd",
+      "bytes": 10755
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__svs-lvq8-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "598092f30c5a15b530fac3925838aca856d7fe6cab584a8fef568d76900bad4a",
+      "bytes": 9599
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__usearch-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "f37dc182ff51b72bdb826497be2bac5e4faba0cb5c575cecf959ca1ad7175140",
+      "bytes": 11141
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__vsag-fp32-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "6bb56b396a97c0aa8b885589ead4598289e4feb34ba3b1930999667cd66aa2b9",
+      "bytes": 11594
+    },
+    {
+      "path": "dashboard/data/observations/D14/D14__vsag-sq8-g1.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "2c8ca35652cfc5a86c51877ce587936c558a16fc86b6600542df2d8ea8d201ca",
+      "bytes": 11564
+    },
+    {
+      "path": "dashboard/data/observations/D15/D15__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "a2cde911ee82f38c4221c6110b7572cc15e7e92efa6370cc2bff7d30a1fc812e",
+      "bytes": 14567
+    },
+    {
+      "path": "dashboard/data/observations/D16/D16__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "a2ba74411174cec53bd5d372e0e4bfa22a83415b745b58a8fcbcbebb647d25db",
+      "bytes": 11762
+    },
+    {
+      "path": "dashboard/data/observations/D17/D17__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "b487479638c623a541fdf49d1d3cf5781fbf036c8c9b0be550424873eb686b2a",
+      "bytes": 9238
+    },
+    {
+      "path": "dashboard/data/observations/D18/D18__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "46fc2c6e51147737b08c4d03f45927a4a1dc9f8fad4ab1b84b4029cef31ac898",
+      "bytes": 14461
+    },
+    {
+      "path": "dashboard/data/observations/D19/D19__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "a60dbf4db01520896a9ff97dc70964fd642f70ed30fc700c531721e6347f2a25",
+      "bytes": 11759
+    },
+    {
+      "path": "dashboard/data/observations/D20/D20__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "62aa4777aa70624fdc23c388f62c0d0c3caf513a063c1b082ea6ed74a71ce980",
+      "bytes": 14508
+    },
+    {
+      "path": "dashboard/data/observations/D21/D21__quiver-main.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "33a80b5000d84f5555e19b4f93a4f0ae51c8cdc7fc691e7c7ae032ba12658240",
+      "bytes": 14355
+    },
+    {
+      "path": "dashboard/data/reference-notes.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": "evaluation/results/benchmark-snapshot.json",
+      "source_sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "transformations": [
+        "按数据集和构建配置拆分，重复备注与证据单独存放，装配后完整恢复原始快照"
+      ],
+      "sha256": "7056f6aba596372d2d74c384bb199c893956f52cc651a8ac156c7a0e907e0bf7",
+      "bytes": 17699
+    },
+    {
+      "path": "dashboard/index.html",
+      "purpose": "离线筛选、表格和跨方法图表",
+      "source": "research/QuIVer/outputs/statistics-dashboard/QuIVer-全统计看板.html",
+      "source_sha256": "c2f415590debf9bf04a62caf57e6ae07c6a391889839b79ad53b8f8e07c07fec",
+      "sha256": "7ee1528ab240b83be0881fb19705e3d827fa86214c6171757d5110a43b13e9f6",
+      "bytes": 33221,
+      "transformations": [
+        "内嵌公开快照，保留现有交互代码",
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口",
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ]
+    },
+    {
+      "path": "dashboard/locales/en/archive-notes.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [],
+      "sha256": "0e91bb05f626dc139ee466f6d917d1767f0f62a9da78634782ca599689b4fda8",
+      "bytes": 24966
+    },
+    {
+      "path": "dashboard/locales/en/measurement-notes.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [],
+      "sha256": "704fe541cee35f6a453be531db40638578dd02ad5f0a675bafd5314b28163a3a",
+      "bytes": 41287
+    },
+    {
+      "path": "dashboard/locales/en/record-labels.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [],
+      "sha256": "6f001fb6525a4c9758b8f2c2a7d64ae45ee7de02a4cd256f6fb81488a0bc7fa4",
+      "bytes": 15845
+    },
+    {
+      "path": "dashboard/locales/en/ui.js",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [],
+      "sha256": "5923044bcd99c6831c21ba90f494bec8d33d84edc03c000ece35d64317c5d7f2",
+      "bytes": 18403
+    },
+    {
+      "path": "dashboard/tools/update_data.py",
+      "purpose": "离线看板的独立维护模块与同源数据副本",
+      "source": null,
+      "source_sha256": null,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ],
+      "sha256": "e48b7095ca3f3d7a87e4571b23e6de871137ef5139d8ecb753c511dae4f1a7ec",
+      "bytes": 4960
+    },
+    {
+      "path": "paper/IEEEtran.cls",
+      "purpose": "论文及数值图表生成入口",
+      "source": "research/QuIVer/paper/icde/IEEEtran.cls",
+      "source_sha256": "da751920a317ed318b7b5cd7fa585a6cc7d28502d457856382e9be24b10a3bd7",
+      "sha256": "da751920a317ed318b7b5cd7fa585a6cc7d28502d457856382e9be24b10a3bd7",
+      "bytes": 281957,
+      "transformations": []
+    },
+    {
+      "path": "paper/draw_paper_figures.py",
+      "purpose": "论文及数值图表生成入口",
+      "source": "research/QuIVer/paper/icde/draw_paper_figures.py",
+      "source_sha256": "47db159777def6793247ca34a205fb191faeb43b1ebfb07158817f358749e602",
+      "sha256": "4053fbce94743afef33b785aff55848e61cb35592f228ba8307b3af016959cdc",
+      "bytes": 22158,
+      "transformations": [
+        "发布副本增加数据入口或调整包内数据路径"
+      ]
+    },
+    {
+      "path": "paper/figures/memory-throughput.pdf",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/memory-throughput.pdf",
+      "source_sha256": "e602c0550aa550e9fdb12b10d7d334241f4abe0dcbd73793b48ad3301474b70f",
+      "sha256": "e602c0550aa550e9fdb12b10d7d334241f4abe0dcbd73793b48ad3301474b70f",
+      "bytes": 59733,
+      "transformations": []
+    },
+    {
+      "path": "paper/figures/memory-throughput.png",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/memory-throughput.png",
+      "source_sha256": "e2226cc1438ad25d5645916332588cc1840b8e273cc1624ffe2f4a051128073c",
+      "sha256": "e2226cc1438ad25d5645916332588cc1840b8e273cc1624ffe2f4a051128073c",
+      "bytes": 389613,
+      "transformations": []
+    },
+    {
+      "path": "paper/figures/memory-throughput.svg",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/memory-throughput.svg",
+      "source_sha256": "c42e8115507692d54a8e02aef3a8705b9cb6cd0beab0189dd00a70ce63b27ff4",
+      "sha256": "c42e8115507692d54a8e02aef3a8705b9cb6cd0beab0189dd00a70ce63b27ff4",
+      "bytes": 85361,
+      "transformations": []
+    },
+    {
+      "path": "paper/figures/pipeline.pdf",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/pipeline.pdf",
+      "source_sha256": "d4fe5dceda32fd07b4c9d1ac775c32d601d36e313bcca76b8ab5bc32d9fccb1a",
+      "sha256": "d4fe5dceda32fd07b4c9d1ac775c32d601d36e313bcca76b8ab5bc32d9fccb1a",
+      "bytes": 77279,
+      "transformations": []
+    },
+    {
+      "path": "paper/figures/pipeline.png",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/pipeline.png",
+      "source_sha256": "44b88f100df117ecf14dd56afaff7d9095b0e0993501aaeb4922bb1de7221f7b",
+      "sha256": "44b88f100df117ecf14dd56afaff7d9095b0e0993501aaeb4922bb1de7221f7b",
+      "bytes": 537962,
+      "transformations": []
+    },
+    {
+      "path": "paper/figures/pipeline.svg",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/pipeline.svg",
+      "source_sha256": "06491bc55d26a6e452a4f1aa8952346da32cf8b4f4f7f55c4437d5449c85c92f",
+      "sha256": "06491bc55d26a6e452a4f1aa8952346da32cf8b4f4f7f55c4437d5449c85c92f",
+      "bytes": 66247,
+      "transformations": []
+    },
+    {
+      "path": "paper/figures/recall-throughput.pdf",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/recall-throughput.pdf",
+      "source_sha256": "ece385b5094f9d502e1ecfbd802b2288d2642fc0255d3201d89e0e6d38a65c2e",
+      "sha256": "ece385b5094f9d502e1ecfbd802b2288d2642fc0255d3201d89e0e6d38a65c2e",
+      "bytes": 87633,
+      "transformations": []
+    },
+    {
+      "path": "paper/figures/recall-throughput.png",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/recall-throughput.png",
+      "source_sha256": "4758c8cca469fbcd6d2a4fe803a0d98b0f21349c81d374f8a95b00c533fd99ba",
+      "sha256": "4758c8cca469fbcd6d2a4fe803a0d98b0f21349c81d374f8a95b00c533fd99ba",
+      "bytes": 753113,
+      "transformations": []
+    },
+    {
+      "path": "paper/figures/recall-throughput.svg",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/recall-throughput.svg",
+      "source_sha256": "d657dc386943cef16a3e02a42e0fd6288c2c38c4f51d21236121d08be3d6f90a",
+      "sha256": "d657dc386943cef16a3e02a42e0fd6288c2c38c4f51d21236121d08be3d6f90a",
+      "bytes": 115281,
+      "transformations": []
+    },
+    {
+      "path": "paper/figures/theory-geometry.png",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/theory-geometry.png",
+      "source_sha256": "1a0edf45c95d91399b1efe39ff6c2c4c83a602abdb906abb404b877711ad12dd",
+      "sha256": "1a0edf45c95d91399b1efe39ff6c2c4c83a602abdb906abb404b877711ad12dd",
+      "bytes": 366710,
+      "transformations": []
+    },
+    {
+      "path": "paper/figures/theory-geometry.svg",
+      "purpose": "正文引用配图及其可编辑版本",
+      "source": "research/QuIVer/paper/icde/figures/theory-geometry.svg",
+      "source_sha256": "46cd1b1873ea187255c4ecdef0b2a169c6e6fd2221da22f9c4d11d4d8a520dbf",
+      "sha256": "46cd1b1873ea187255c4ecdef0b2a169c6e6fd2221da22f9c4d11d4d8a520dbf",
+      "bytes": 16701,
+      "transformations": []
+    },
+    {
+      "path": "paper/generate_results.py",
+      "purpose": "论文及数值图表生成入口",
+      "source": "research/QuIVer/paper/icde/generate_results.py",
+      "source_sha256": "5ec0ccc9794146e09ba011589e0428044b31782588fcc12ea530e1ed0ff47f3e",
+      "sha256": "61aa2ec7d5ae5892ace289e847015a0397064bb38156146423ca46a133e11d6c",
+      "bytes": 5380,
+      "transformations": [
+        "发布副本增加数据入口或调整包内数据路径"
+      ]
+    },
+    {
+      "path": "paper/main.bbl",
+      "purpose": "论文及数值图表生成入口",
+      "source": "research/QuIVer/paper/icde/main.bbl",
+      "source_sha256": "1216828ec3097c2e1a373d9b7d6ca08dbdc29b83072177ada13f9a7223d50975",
+      "sha256": "1216828ec3097c2e1a373d9b7d6ca08dbdc29b83072177ada13f9a7223d50975",
+      "bytes": 20028,
+      "transformations": []
+    },
+    {
+      "path": "paper/main.pdf",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": "research/QuIVer/paper/icde/main.pdf",
+      "source_sha256": "997e62245597c8f4e062f415ca15e7612a3eef395a6e3cc87c43688715252726",
+      "sha256": "f7d0a3c5fc702e79fdb4944aed64a9b5e91f7fb8aee7d3b419fcef1c1df669c4",
+      "bytes": 776490,
+      "transformations": [
+        "论文发布副本增加完整数据链接并重新编译"
+      ]
+    },
+    {
+      "path": "paper/main.tex",
+      "purpose": "论文及数值图表生成入口",
+      "source": "research/QuIVer/paper/icde/main.tex",
+      "source_sha256": "419a533d21d92e7254e89e178a9861a4180d1b39daddb425fd8358f8d8662ce8",
+      "sha256": "419a533d21d92e7254e89e178a9861a4180d1b39daddb425fd8358f8d8662ce8",
+      "bytes": 2799,
+      "transformations": []
+    },
+    {
+      "path": "paper/references.bib",
+      "purpose": "论文及数值图表生成入口",
+      "source": "research/QuIVer/paper/icde/references.bib",
+      "source_sha256": "bc2ec4bbb6072bf1eaf5c00e4847bb7707006bf129c1d632059d51324235d6bf",
+      "sha256": "bc2ec4bbb6072bf1eaf5c00e4847bb7707006bf129c1d632059d51324235d6bf",
+      "bytes": 22320,
+      "transformations": []
+    },
+    {
+      "path": "paper/sections/abstract.tex",
+      "purpose": "论文正文与表格",
+      "source": "research/QuIVer/paper/icde/sections/abstract.tex",
+      "source_sha256": "93802a71a08893904897296da673e006c59b2e5d08cb46c7aa5ef2d1074897cd",
+      "sha256": "93802a71a08893904897296da673e006c59b2e5d08cb46c7aa5ef2d1074897cd",
+      "bytes": 1857,
+      "transformations": []
+    },
+    {
+      "path": "paper/sections/analysis.tex",
+      "purpose": "论文正文与表格",
+      "source": "research/QuIVer/paper/icde/sections/analysis.tex",
+      "source_sha256": "b01c2fe3c23b1a932e131e5cba12ffa913af5f9ae8205a62350988a3fec5dff0",
+      "sha256": "b01c2fe3c23b1a932e131e5cba12ffa913af5f9ae8205a62350988a3fec5dff0",
+      "bytes": 6251,
+      "transformations": []
+    },
+    {
+      "path": "paper/sections/conclusion.tex",
+      "purpose": "论文正文与表格",
+      "source": "research/QuIVer/paper/icde/sections/conclusion.tex",
+      "source_sha256": "b7b466560d6b179f097096e356776b224934171aa7eef720218a15bb31e5909a",
+      "sha256": "b7b466560d6b179f097096e356776b224934171aa7eef720218a15bb31e5909a",
+      "bytes": 2112,
+      "transformations": []
+    },
+    {
+      "path": "paper/sections/design.tex",
+      "purpose": "论文正文与表格",
+      "source": "research/QuIVer/paper/icde/sections/design.tex",
+      "source_sha256": "1d22084152b0cd84273e8bb7f75899fad1d3b4574c79ef68a93ce7853e22c18f",
+      "sha256": "1d22084152b0cd84273e8bb7f75899fad1d3b4574c79ef68a93ce7853e22c18f",
+      "bytes": 11321,
+      "transformations": []
+    },
+    {
+      "path": "paper/sections/evaluation.tex",
+      "purpose": "论文正文与表格",
+      "source": "research/QuIVer/paper/icde/sections/evaluation.tex",
+      "source_sha256": "e2541d23a5b5c8b7a1a5ebd13b7c8799f004ac78dbe7b59c5fe24b64de56703e",
+      "sha256": "6519c03da85adb178616066e67e8ea21bd58743f1ef4f9794b4577aa71bb9187",
+      "bytes": 31943,
+      "transformations": [
+        "发布副本增加数据入口或调整包内数据路径"
+      ]
+    },
+    {
+      "path": "paper/sections/introduction.tex",
+      "purpose": "论文正文与表格",
+      "source": "research/QuIVer/paper/icde/sections/introduction.tex",
+      "source_sha256": "b28d98492b28cb9a31ef22c3b90036006dbb20533a369a4765ec6bcb827985df",
+      "sha256": "b28d98492b28cb9a31ef22c3b90036006dbb20533a369a4765ec6bcb827985df",
+      "bytes": 5463,
+      "transformations": []
+    },
+    {
+      "path": "paper/sections/related.tex",
+      "purpose": "论文正文与表格",
+      "source": "research/QuIVer/paper/icde/sections/related.tex",
+      "source_sha256": "ffeae345fadd5ea7d64b21add5c5e1227aa9dd9413d3dfadda5d27deb6c86834",
+      "sha256": "ffeae345fadd5ea7d64b21add5c5e1227aa9dd9413d3dfadda5d27deb6c86834",
+      "bytes": 3431,
+      "transformations": []
+    },
+    {
+      "path": "paper/tables/datasets.tex",
+      "purpose": "论文正文与表格",
+      "source": "research/QuIVer/paper/icde/tables/datasets.tex",
+      "source_sha256": "b7fa2c3fdca445b02faa1e81705d33577f00308b2a45eaace916c1314868d425",
+      "sha256": "b7fa2c3fdca445b02faa1e81705d33577f00308b2a45eaace916c1314868d425",
+      "bytes": 1624,
+      "transformations": []
+    },
+    {
+      "path": "paper/tables/high-recall.tex",
+      "purpose": "论文正文与表格",
+      "source": "research/QuIVer/paper/icde/tables/high-recall.tex",
+      "source_sha256": "c45191cb2b61f0088ae032e51f1e03ce0d7f30a1db42b591bbc9e76d0d44f800",
+      "sha256": "c45191cb2b61f0088ae032e51f1e03ce0d7f30a1db42b591bbc9e76d0d44f800",
+      "bytes": 364,
+      "transformations": []
+    },
+    {
+      "path": "paper/tables/main-comparison.tex",
+      "purpose": "论文正文与表格",
+      "source": "research/QuIVer/paper/icde/tables/main-comparison.tex",
+      "source_sha256": "d096b43e9a1530da41f75caac126d7d6a01299e4052709f68b26454fb945b687",
+      "sha256": "d096b43e9a1530da41f75caac126d7d6a01299e4052709f68b26454fb945b687",
+      "bytes": 2911,
+      "transformations": []
+    },
+    {
+      "path": "protocols/component-inputs.json",
+      "purpose": "冻结参数、划分与输入身份",
+      "source": "research/QuIVer/integration/review_completion_20261108/data-bundle-manifest.json",
+      "source_sha256": "6f2eed3a9b22cbe84407daa6d91a5ca76b5b38ae937fb18481e53f2e380ebab2",
+      "sha256": "9775c319bbb0af67eb6e9689e431b269ab87cbe8d0a632232cc0eb19c76403d3",
+      "bytes": 5829,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "protocols/construction-and-geometry.json",
+      "purpose": "冻结参数、划分与输入身份",
+      "source": "research/QuIVer/integration/reviewer_mechanism_200k_20261018/plan.json",
+      "source_sha256": "0498c6543b9a1f754305ad3004479c447ccf21ab49de483a313bfa6984fae5dd",
+      "sha256": "301a118a433e3be36011199a4e203823409acc670593828f720abdab7d7ea95a",
+      "bytes": 49610,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "protocols/ground-truth-repair.json",
+      "purpose": "冻结参数、划分与输入身份",
+      "source": "research/QuIVer/integration/main_evaluation_21_20261017/D15-truth-repair-v1-receipt.json",
+      "source_sha256": "695b7741b12c029b755be9eedc2d09c9b3d618290c33ead6d1ce4dbab75c7fce",
+      "sha256": "c711626498870a59ba65b9d4b47a98015f004be5ebdc0e28db36c3114812002b",
+      "bytes": 1478,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "protocols/low-width-measurements.json",
+      "purpose": "冻结参数、划分与输入身份",
+      "source": "research/QuIVer/integration/lowef_sm_repair_20261018/verified-overlay.json",
+      "source_sha256": "a253f0d1e762350835c5b933d1cc2aa322b5e72bb195f9d32f9975a83634ae43",
+      "sha256": "42aa8fdf420c3978f4b5af99b65cd518a634507e75f670939a89ba547e499d25",
+      "bytes": 488132,
+      "transformations": []
+    },
+    {
+      "path": "protocols/main-cosine.json",
+      "purpose": "冻结参数、划分与输入身份",
+      "source": "research/QuIVer/integration/main_evaluation_21_20261017/execution-plan.json",
+      "source_sha256": "0807c22a6321217b3eb18e3785358e525ea38f4d5295db2c9406265944c71f16",
+      "sha256": "06eb6e3188fea6a754ae9166a7609cb547d836ef23f57901696fd5da3dcf6d58",
+      "bytes": 255073,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "protocols/native-l2.json",
+      "purpose": "冻结参数、划分与输入身份",
+      "source": "research/QuIVer/integration/native_l2_main_20261018/plan.json",
+      "source_sha256": "f86d35a06f7c4b016828a6353c4df5efc92365d64161123b4a1e84e1d29ada78",
+      "sha256": "d7cc2686ab0251c4c4d4b88d6708892cafe69c60b8f5b79546d2bf4b0b614d28",
+      "bytes": 10506,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "protocols/selection-and-representation.json",
+      "purpose": "冻结参数、划分与输入身份",
+      "source": "research/QuIVer/integration/review_completion_20261108/component-plan.json",
+      "source_sha256": "2dac207849506623bf7ce93d1a933c4b1830fe570a4cf173ca505b120f88e2a7",
+      "sha256": "e42fd5e181ba1e080e09cd65b3b1b547add1d3a09b0fff2de319d882fa26ff1d",
+      "bytes": 64571,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "protocols/ssd-1-cpu.json",
+      "purpose": "冻结参数、划分与输入身份",
+      "source": "research/QuIVer/integration/ssd_scale_5m_20261109/protocol-cpu1-plan.json",
+      "source_sha256": "343845673159b1b6e091a8a88cc3fa7773bd280ae075ebe8f4e9eec7c009814b",
+      "sha256": "27d6b897480ba9f6a8e10b7da415975061fe3a3c00a44fe8b01d7fce9db6ffbd",
+      "bytes": 1541,
+      "transformations": []
+    },
+    {
+      "path": "protocols/ssd-32-cpu.json",
+      "purpose": "冻结参数、划分与输入身份",
+      "source": "research/QuIVer/integration/ssd_scale_5m_20261109/protocol-plan.json",
+      "source_sha256": "9e1642381893ff5d0efb6c05ddd26b25ae9af9ce8ef299b066b4d3816e3652c4",
+      "sha256": "9e1642381893ff5d0efb6c05ddd26b25ae9af9ce8ef299b066b4d3816e3652c4",
+      "bytes": 1134,
+      "transformations": []
+    },
+    {
+      "path": "protocols/ssd-inputs.json",
+      "purpose": "冻结参数、划分与输入身份",
+      "source": "research/QuIVer/integration/ssd_scale_5m_20261109/data-source-identity.json",
+      "source_sha256": "2de7f98d9aba1afe941166db4c9312b7b59fdb0643f0fb9729f85627e16524a2",
+      "sha256": "130ebda16c811815c827aeb0c571422c6f2896a2781a09dc84bb8e135657f811",
+      "bytes": 1603,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "provenance/figure-provenance.json",
+      "purpose": "论文图表与冻结配置的对应",
+      "source": "research/QuIVer/paper/icde/evidence/figure-provenance.json",
+      "source_sha256": "3f1a51711c95c5db614a3735a9694d370520ad67c4b70e67f10074d9099d41a3",
+      "sha256": "4c510635ab2c3bfdeccd7c9568db300c4972128727b41f2833d9ac000ce9e639",
+      "bytes": 124208,
+      "transformations": []
+    },
+    {
+      "path": "provenance/pareto-audit.json",
+      "purpose": "论文图表与冻结配置的对应",
+      "source": "research/QuIVer/paper/icde/evidence/pareto-audit.json",
+      "source_sha256": "e90f099658e8e3bf0d5216127bd0ed49c84906a16f0afdd40c1648d43d60f668",
+      "sha256": "c44defcffaba6778b8684f73b801efbcdb5b3b5c0876b569d740bcb786058f42",
+      "bytes": 2529,
+      "transformations": []
+    },
+    {
+      "path": "provenance/pareto-check.json",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "27c092d7ab84becf76f418b4b317765182bf4f29fb89938cfaa7a5b94e5b9158",
+      "bytes": 4107,
+      "transformations": []
+    },
+    {
+      "path": "provenance/table-provenance.json",
+      "purpose": "论文图表与冻结配置的对应",
+      "source": "research/QuIVer/paper/icde/evidence/table-provenance.json",
+      "source_sha256": "ad63be739555ee62f41de8337d8c7c055fc8429175c6c5a52ce564cf04472633",
+      "sha256": "fb142a840c27a910b1ac0dafb56414117f75e59b9984b95e7a04050d217d27b9",
+      "bytes": 26978,
+      "transformations": []
+    },
+    {
+      "path": "results/ablations/budget-and-calibration.json",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/ablation_closeout_200k_20261017/summary.json",
+      "source_sha256": "a8c2d5ef281b7d25d8c2430fad8f69af8f9080bec653c44e637198c084bf90c5",
+      "sha256": "1e9d24a6f78d5907c33909456852d7ebb8d28b801ba6c3a47cff47dd8b52dea6",
+      "bytes": 251072,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "results/ablations/construction-and-geometry.csv",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/reviewer_mechanism_200k_20261018/quality-comparison.csv",
+      "source_sha256": "cecda31d93a605598079b0f95599d569e842ab284fd4a2660e1608673003f9bb",
+      "sha256": "cecda31d93a605598079b0f95599d569e842ab284fd4a2660e1608673003f9bb",
+      "bytes": 20879,
+      "transformations": []
+    },
+    {
+      "path": "results/ablations/construction-and-geometry.json",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/reviewer_mechanism_200k_20261018/verified-summary.json",
+      "source_sha256": "591757b45b13c99f2837ddcb67916d75334642a4123443d39a143765f50a0957",
+      "sha256": "6ea2036bdcf80699b87d6ab5233ccb6b128edc82c28d2ddb72ae29fbd9e214cf",
+      "bytes": 63250,
+      "transformations": []
+    },
+    {
+      "path": "results/ablations/paired-effects.csv",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/review_completion_20261108/analysis/components/paired.csv",
+      "source_sha256": "56c096b7cb6a5130c425d88854e04758f5769d2247514deab9f4a3b68a099a84",
+      "sha256": "56c096b7cb6a5130c425d88854e04758f5769d2247514deab9f4a3b68a099a84",
+      "bytes": 100253,
+      "transformations": []
+    },
+    {
+      "path": "results/ablations/parallelism-and-storage.json",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/system_ablation_20261017/independent-audit-final.json",
+      "source_sha256": "30a38d128e2d60d62d0a4bb4a80268e1279c5d28165ef6e12bb22dc47d72bb73",
+      "sha256": "9eb3ef978d0e0fad3f68250395e29252b29fa37c2687f1d4528b599e14af4001",
+      "bytes": 517379,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "results/ablations/production-rebuilds.csv",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/review_completion_20261108/analysis/native/native-summary.csv",
+      "source_sha256": "9ac06d11af052ff4f76c831a3196cdc895d6b6a9e6f7f18b514d50e49e85253e",
+      "sha256": "9ac06d11af052ff4f76c831a3196cdc895d6b6a9e6f7f18b514d50e49e85253e",
+      "bytes": 21754,
+      "transformations": []
+    },
+    {
+      "path": "results/ablations/production-rebuilds.json",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/review_completion_20261108/analysis/native/native-summary.json",
+      "source_sha256": "5a2a6d4eb7fd730afaae426b8e1ec168653641bb40b199384fd008eb5a0fb7ec",
+      "sha256": "73a07bb02161364418af8df48c26f8b4585ae18ceb32eacd939f443c346081fc",
+      "bytes": 42898,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "results/ablations/scoring-and-retention.csv",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "58ac39cc54db38161c2629e4cfbc666279af9f7f110628a423b7c120057fa66e",
+      "bytes": 1432040,
+      "transformations": []
+    },
+    {
+      "path": "results/ablations/scoring-and-retention.json",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/full_ablation_200k_20261017/audited-points.json",
+      "source_sha256": "0176d07cafb224c0052a843f58bd1c8611eac597a38af70497ac7f5517e2d8e4",
+      "sha256": "9f40bdde257987f28d8173f6d9585ed81b5064a819012821f52b1ac150c5e10e",
+      "bytes": 5838192,
+      "transformations": []
+    },
+    {
+      "path": "results/ablations/selection-and-representation.csv",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/review_completion_20261108/analysis/components/results.csv",
+      "source_sha256": "1f7fd28d601ef80b55697bdcb5e9b6eac6d25b0203cb6b94e1a4ff33dd42984c",
+      "sha256": "3ae2988eee15b482ab81dc5b22dee3b6e52c724b6b52ec2e8da4be70bcb6abec",
+      "bytes": 664759,
+      "transformations": [
+        "将CSV中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "results/all-operating-points.csv",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "bfc41db3d77e57f2b3d069889679ed8adfaefbfe759c2cfbfa42112d7ec0f14a",
+      "bytes": 2316047,
+      "transformations": []
+    },
+    {
+      "path": "results/benchmark-snapshot.json",
+      "purpose": "全部主评估观测及配置",
+      "source": "research/QuIVer/paper/icde/data/benchmark-snapshot.json",
+      "source_sha256": "c01fb445eb79fa51a19a8eba9f6ca818b417d90a50d668457e1c989de47505a5",
+      "sha256": "b7f11094dd085d504d24a4936b0c5940341833bf5331cd76568bb70f068bfd29",
+      "bytes": 2216812,
+      "transformations": [
+        "移除过期队列运行状态，保留全部测量及路由历史，增加资料导出时间"
+      ]
+    },
+    {
+      "path": "results/configurations.csv",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "3190a161bbc086cf87abbc54c8e819d3a31d9567aead092cf38cd099d39a1221",
+      "bytes": 166479,
+      "transformations": []
+    },
+    {
+      "path": "results/datasets.csv",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "50519246ff0053498599a22b93d05aa56da33b31684edebdea20a8b9fcf30f34",
+      "bytes": 1004,
+      "transformations": []
+    },
+    {
+      "path": "results/methods.csv",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "831a46c4991fc1880d48aa0a1ae95787c5b4b04e9bfda8b2e3b35d6baa734a10",
+      "bytes": 2268,
+      "transformations": []
+    },
+    {
+      "path": "results/ssd/io-designs.json",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/ssd_four_directions_20261108/verified-four-summary.json",
+      "source_sha256": "6c4f6a15b549a24d1af2627f2d859d573db9347e22a0437d4f0bb3fd904122c9",
+      "sha256": "6c4f6a15b549a24d1af2627f2d859d573db9347e22a0437d4f0bb3fd904122c9",
+      "bytes": 4586254,
+      "transformations": []
+    },
+    {
+      "path": "results/ssd/local-quantization.csv",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/ssd_int8_local_20261108/results-summary/verified-summary.csv",
+      "source_sha256": "8d8b350d0868c4f5234ef31ad32cf78b274159e38c62775dbe541f4ffd8a7e6f",
+      "sha256": "8d8b350d0868c4f5234ef31ad32cf78b274159e38c62775dbe541f4ffd8a7e6f",
+      "bytes": 2285,
+      "transformations": []
+    },
+    {
+      "path": "results/ssd/local-quantization.json",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/ssd_int8_local_20261108/results-summary/verified-summary.json",
+      "source_sha256": "2de29127e85b3a0a4f2bd2a2a5a1a4e81414bb356a6d32e204f21bd79fd65628",
+      "sha256": "2de29127e85b3a0a4f2bd2a2a5a1a4e81414bb356a6d32e204f21bd79fd65628",
+      "bytes": 8395,
+      "transformations": []
+    },
+    {
+      "path": "results/ssd/reranking-quality.json",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/ssd_int8_refine_20261108/local-analysis/quality/quality-oracle.json",
+      "source_sha256": "cfa80679618b84cbc68515aefe3465e659435d18aef973835ece6699cf45da79",
+      "sha256": "cfa80679618b84cbc68515aefe3465e659435d18aef973835ece6699cf45da79",
+      "bytes": 12459,
+      "transformations": []
+    },
+    {
+      "path": "results/ssd/scale-1m-5m.json",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/ssd_scale_5m_20261109/verified-scale-summary.json",
+      "source_sha256": "c450b65a9b3e7fe645f70954864491101bc7787472b2c308928b4a13cf986c7c",
+      "sha256": "4a698173b5ba2cb9f037e4b7d859a790d75de22c95f445ea649bcf106b939152",
+      "bytes": 1436670,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "results/ssd/shards-and-pipeline.json",
+      "purpose": "消融与SSD测量的已复算结果",
+      "source": "research/QuIVer/integration/ssd_event_pipeline_20261109/verified-event-summary.json",
+      "source_sha256": "f1d372752005e582d6c40d5600069981df78d9a29fa2ab4dea20196773c901ac",
+      "sha256": "6a53ce6e41f6bcd8628767e6b150f40074f37e347c297d86b84bf44e32ffc741",
+      "bytes": 3183569,
+      "transformations": [
+        "将记录中的机器私有路径改为相对定位"
+      ]
+    },
+    {
+      "path": "sources/README.md",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "db96f4c9097f2045f9de5b2bf8eafcf9812067e951791c06d2d577830ef7de67",
+      "bytes": 1715,
+      "transformations": []
+    },
+    {
+      "path": "sources/components/analyze_native_results.py",
+      "purpose": "与记录身份绑定的实验入口及分析源码",
+      "source": "research/QuIVer/integration/review_completion_20261108/source/analyze_native_results.py",
+      "source_sha256": "3fd81049a4083d4411968a30b3e4475d306d0928f8b5225fe8804bf59e091040",
+      "sha256": "3fd81049a4083d4411968a30b3e4475d306d0928f8b5225fe8804bf59e091040",
+      "bytes": 33412,
+      "transformations": []
+    },
+    {
+      "path": "sources/components/analyze_results.py",
+      "purpose": "与记录身份绑定的实验入口及分析源码",
+      "source": "research/QuIVer/integration/review_completion_20261108/source/analyze_results.py",
+      "source_sha256": "19265776230ca8e70220ebd1a65b5e939952992d789221f379e58ea366d4ef60",
+      "sha256": "19265776230ca8e70220ebd1a65b5e939952992d789221f379e58ea366d4ef60",
+      "bytes": 38090,
+      "transformations": []
+    },
+    {
+      "path": "sources/geometry/common.py",
+      "purpose": "与记录身份绑定的实验入口及分析源码",
+      "source": "research/QuIVer/integration/reviewer_mechanism_200k_20261018/common.py",
+      "source_sha256": "d4a704f769684cf603c100a7c9380338869ee07eab0d6f261ae5e52b3f66644a",
+      "sha256": "62938de5b9d1a787c7a1b070ea343e0476854e946c3efc4661a6a668d77b1785",
+      "bytes": 3352,
+      "transformations": [
+        "发布副本完成包内路径适配或编译"
+      ]
+    },
+    {
+      "path": "sources/geometry/worker.py",
+      "purpose": "与记录身份绑定的实验入口及分析源码",
+      "source": "research/QuIVer/integration/reviewer_mechanism_200k_20261018/worker.py",
+      "source_sha256": "5c2a1fc4db7f9b47808adda38993e2ef414d1cee537ec41e99bc1c07dcfbebd8",
+      "sha256": "5c2a1fc4db7f9b47808adda38993e2ef414d1cee537ec41e99bc1c07dcfbebd8",
+      "bytes": 14528,
+      "transformations": []
+    },
+    {
+      "path": "sources/main-cosine/main.rs",
+      "purpose": "与记录身份绑定的实验入口及分析源码",
+      "source": "research/QuIVer/integration/main_evaluation_21_20261017/main.rs",
+      "source_sha256": "b9a24bfa9339132417121c15ec4ea0068da571876903a002c039145f0fe27d93",
+      "sha256": "b9a24bfa9339132417121c15ec4ea0068da571876903a002c039145f0fe27d93",
+      "bytes": 21354,
+      "transformations": []
+    },
+    {
+      "path": "sources/native-l2/main.rs",
+      "purpose": "与记录身份绑定的实验入口及分析源码",
+      "source": "research/QuIVer/integration/native_l2_main_20261018/main.rs",
+      "source_sha256": "d999ac170d90cfaeed4f490612e136ed12a0c5ef744f5f95ec534cfe04895f82",
+      "sha256": "d999ac170d90cfaeed4f490612e136ed12a0c5ef744f5f95ec534cfe04895f82",
+      "bytes": 21812,
+      "transformations": []
+    },
+    {
+      "path": "sources/scoring/ablation_header.rs",
+      "purpose": "与记录身份绑定的实验入口及分析源码",
+      "source": "research/QuIVer/integration/full_ablation_200k_20261017/ablation_header.rs",
+      "source_sha256": "2f3bc49ff01f21fe28df901c9dbc8aa69bf9c0d523645a52d926a2c56b55c1fa",
+      "sha256": "2f3bc49ff01f21fe28df901c9dbc8aa69bf9c0d523645a52d926a2c56b55c1fa",
+      "bytes": 10001,
+      "transformations": []
+    },
+    {
+      "path": "sources/scoring/main.rs",
+      "purpose": "与记录身份绑定的实验入口及分析源码",
+      "source": "research/QuIVer/integration/full_ablation_200k_20261017/main.rs",
+      "source_sha256": "933b79ce12da90da8c87732e7b9591ecb81d28868aa3fcefd76b43595b64b1e8",
+      "sha256": "6f777a18ea5a2ce4c586d40242910b7bd588805e28f8a9d104ca61fd5eb791bb",
+      "bytes": 10869,
+      "transformations": [
+        "将评分消融程序的数据根目录改为相对位置"
+      ]
+    },
+    {
+      "path": "sources/ssd/base/main.rs",
+      "purpose": "SSD量化、I/O分片及流水线源码",
+      "source": "research/QuIVer/integration/ssd_four_directions_20261108/reference/runner/main.rs",
+      "source_sha256": "7980f22c594ef958469380625f9b08ce0b134aec32a39bb9b2c95198cd1262ac",
+      "sha256": "7980f22c594ef958469380625f9b08ce0b134aec32a39bb9b2c95198cd1262ac",
+      "bytes": 21439,
+      "transformations": []
+    },
+    {
+      "path": "sources/ssd/base/ssd_io.rs",
+      "purpose": "SSD量化、I/O分片及流水线源码",
+      "source": "research/QuIVer/integration/ssd_four_directions_20261108/reference/runner/ssd_io.rs",
+      "source_sha256": "b3ff4e118d8c1e66f5f8d631b9c7d6eae1fa8481bac45789bcf1dd5de26fcc9e",
+      "sha256": "b3ff4e118d8c1e66f5f8d631b9c7d6eae1fa8481bac45789bcf1dd5de26fcc9e",
+      "bytes": 61015,
+      "transformations": []
+    },
+    {
+      "path": "sources/ssd/base/ssd_io/direct_int8.rs",
+      "purpose": "SSD量化、I/O分片及流水线源码",
+      "source": "research/QuIVer/integration/ssd_four_directions_20261108/reference/runner/ssd_io/direct_int8.rs",
+      "source_sha256": "65e3d41f18bec36173e28e9aecd5903b55f89ff0a813d97a7139ad26a1a24938",
+      "sha256": "65e3d41f18bec36173e28e9aecd5903b55f89ff0a813d97a7139ad26a1a24938",
+      "bytes": 11849,
+      "transformations": []
+    },
+    {
+      "path": "sources/ssd/base/ssd_io/int8_codec.rs",
+      "purpose": "SSD量化、I/O分片及流水线源码",
+      "source": "research/QuIVer/integration/ssd_four_directions_20261108/reference/runner/ssd_io/int8_codec.rs",
+      "source_sha256": "85a220700ef966dffcba741e7269f693a3fcb633fcd4a3968fd0d8676a59c3d3",
+      "sha256": "85a220700ef966dffcba741e7269f693a3fcb633fcd4a3968fd0d8676a59c3d3",
+      "bytes": 3816,
+      "transformations": []
+    },
+    {
+      "path": "sources/ssd/base/ssd_io/uring.rs",
+      "purpose": "SSD量化、I/O分片及流水线源码",
+      "source": "research/QuIVer/integration/ssd_four_directions_20261108/reference/runner/ssd_io/uring.rs",
+      "source_sha256": "032b23d87156262ab426733577e945b5bb0dd814cd32c41db6e1eef1eae2cace",
+      "sha256": "032b23d87156262ab426733577e945b5bb0dd814cd32c41db6e1eef1eae2cace",
+      "bytes": 11191,
+      "transformations": []
+    },
+    {
+      "path": "sources/ssd/pipeline/ssd_io.rs",
+      "purpose": "SSD量化、I/O分片及流水线源码",
+      "source": "research/QuIVer/integration/ssd_event_pipeline_20261109/reference/pipeline/runner/ssd_io.rs",
+      "source_sha256": "d51a2cd3a14b3116f606b26ed45d48831b172d68f27cb915f1a92dfdbfdfe81f",
+      "sha256": "d51a2cd3a14b3116f606b26ed45d48831b172d68f27cb915f1a92dfdbfdfe81f",
+      "bytes": 71216,
+      "transformations": []
+    },
+    {
+      "path": "sources/ssd/pipeline/ssd_io/uring.rs",
+      "purpose": "SSD量化、I/O分片及流水线源码",
+      "source": "research/QuIVer/integration/ssd_event_pipeline_20261109/reference/pipeline/runner/ssd_io/uring.rs",
+      "source_sha256": "032b23d87156262ab426733577e945b5bb0dd814cd32c41db6e1eef1eae2cace",
+      "sha256": "032b23d87156262ab426733577e945b5bb0dd814cd32c41db6e1eef1eae2cace",
+      "bytes": 11191,
+      "transformations": []
+    },
+    {
+      "path": "sources/ssd/runner-main.rs",
+      "purpose": "与记录身份绑定的实验入口及分析源码",
+      "source": "research/QuIVer/integration/ssd_scale_5m_20261109/reference/runner-main.rs",
+      "source_sha256": "7980f22c594ef958469380625f9b08ce0b134aec32a39bb9b2c95198cd1262ac",
+      "sha256": "7980f22c594ef958469380625f9b08ce0b134aec32a39bb9b2c95198cd1262ac",
+      "bytes": 21439,
+      "transformations": []
+    },
+    {
+      "path": "sources/ssd/sharded/ssd_io.rs",
+      "purpose": "SSD量化、I/O分片及流水线源码",
+      "source": "research/QuIVer/integration/ssd_event_pipeline_20261109/reference/sharded_io/runner/ssd_io.rs",
+      "source_sha256": "c028d7a99aa39269b9994e6bd42ef23829b260e67daafcb8f0e27039b5229fd8",
+      "sha256": "c028d7a99aa39269b9994e6bd42ef23829b260e67daafcb8f0e27039b5229fd8",
+      "bytes": 73538,
+      "transformations": []
+    },
+    {
+      "path": "sources/ssd/sharded/ssd_io/uring.rs",
+      "purpose": "SSD量化、I/O分片及流水线源码",
+      "source": "research/QuIVer/integration/ssd_event_pipeline_20261109/reference/sharded_io/runner/ssd_io/uring.rs",
+      "source_sha256": "6abef2ece7db75c39ac5a48c866326b2ef383ee009fa6e35eb281f12954d3602",
+      "sha256": "6abef2ece7db75c39ac5a48c866326b2ef383ee009fa6e35eb281f12954d3602",
+      "bytes": 11302,
+      "transformations": []
+    },
+    {
+      "path": "sources/system/main.rs",
+      "purpose": "与记录身份绑定的实验入口及分析源码",
+      "source": "research/QuIVer/integration/system_ablation_20261017/main.rs",
+      "source_sha256": "d90051474e0ccadb6ef4dca1b3c8147a69a84f3779df408011a8d2ce998a64d9",
+      "sha256": "d90051474e0ccadb6ef4dca1b3c8147a69a84f3779df408011a8d2ce998a64d9",
+      "bytes": 15565,
+      "transformations": []
+    },
+    {
+      "path": "tools/verify_data.py",
+      "purpose": "公开测量派生表、说明、校验入口或论文发布文件",
+      "source": null,
+      "source_sha256": null,
+      "sha256": "5cf4e8aa74fa14e4332fdd0aad945d439a6816636f68e8dd2495c124bd6a4ad9",
+      "bytes": 5208,
+      "transformations": [
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口",
+        "页面、样式、交互与数据按职责拆分，并同步维护说明和数据核验入口"
+      ]
+    }
+  ],
+  "checks": {
+    "observations": 1056,
+    "datasets": 21,
+    "methods": 31,
+    "configurations": 116,
+    "curves": 423,
+    "data_equal_to_frozen_snapshot": true,
+    "pareto_checks": 18,
+    "pdf_pages": 14,
+    "dashboard_javascript_syntax": "passed",
+    "dashboard_javascript_files": 175,
+    "dashboard_data_location": "dashboard/data/catalog.js; configurations; observations; annotations; assemble.js",
+    "dashboard_data_mapping_observations": 1056,
+    "dashboard_core_data_selection": "passed",
+    "dashboard_languages": [
+      "zh-CN",
+      "en"
+    ],
+    "dashboard_locale_catalog": "passed"
+  }
+}

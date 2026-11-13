@@ -1,0 +1,49 @@
+{
+  "before": [
+    {"id":1,"vector":[1.0,0.0],"payload":{"state":"seed","count":1},"edges":[{"target":2,"label":"related","weight":1.0,"metadata":null}]},
+    {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]}
+  ],
+  "cases": [
+    {"operation":"insert","after":[
+      {"id":1,"vector":[1.0,0.0],"payload":{"state":"seed","count":1},"edges":[{"target":2,"label":"related","weight":1.0,"metadata":null}]},
+      {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]},
+      {"id":3,"vector":[1.0,1.0],"payload":{"state":"inserted"},"edges":[]}
+    ]},
+    {"operation":"insert_with_id","after":[
+      {"id":1,"vector":[1.0,0.0],"payload":{"state":"seed","count":1},"edges":[{"target":2,"label":"related","weight":1.0,"metadata":null}]},
+      {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]},
+      {"id":3,"vector":[1.0,1.0],"payload":{"state":"inserted"},"edges":[]}
+    ]},
+    {"operation":"update_payload","after":[
+      {"id":1,"vector":[1.0,0.0],"payload":{"state":"changed","count":2},"edges":[{"target":2,"label":"related","weight":1.0,"metadata":null}]},
+      {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]}
+    ]},
+    {"operation":"patch_payload","after":[
+      {"id":1,"vector":[1.0,0.0],"payload":{"state":"changed","count":2},"edges":[{"target":2,"label":"related","weight":1.0,"metadata":null}]},
+      {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]}
+    ]},
+    {"operation":"cas","after":[
+      {"id":1,"vector":[1.0,0.0],"payload":{"state":"seed","count":2},"edges":[{"target":2,"label":"related","weight":1.0,"metadata":null}]},
+      {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]}
+    ]},
+    {"operation":"update_vector","after":[
+      {"id":1,"vector":[0.0,1.0],"payload":{"state":"seed","count":1},"edges":[{"target":2,"label":"related","weight":1.0,"metadata":null}]},
+      {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]}
+    ]},
+    {"operation":"link","after":[
+      {"id":1,"vector":[1.0,0.0],"payload":{"state":"seed","count":1},"edges":[{"target":2,"label":"new","weight":0.5,"metadata":null},{"target":2,"label":"related","weight":1.0,"metadata":null}]},
+      {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]}
+    ]},
+    {"operation":"delete","after":[
+      {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]}
+    ]},
+    {"operation":"unlink","after":[
+      {"id":1,"vector":[1.0,0.0],"payload":{"state":"seed","count":1},"edges":[]},
+      {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]}
+    ]},
+    {"operation":"unlink_label","after":[
+      {"id":1,"vector":[1.0,0.0],"payload":{"state":"seed","count":1},"edges":[]},
+      {"id":2,"vector":[0.0,1.0],"payload":{"state":"neighbor"},"edges":[]}
+    ]}
+  ]
+}

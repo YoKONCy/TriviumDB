@@ -126,11 +126,11 @@ fn sample(path: &str, mode: StorageMode) -> Database<f32> {
 fn rejected<T: std::fmt::Debug>(result: triviumdb::Result<T>) {
     assert!(
         matches!(
-            result,
-            Err(TriviumError::ResourceBudgetExceeded {
+            result.as_ref().unwrap_err().underlying(),
+            TriviumError::ResourceBudgetExceeded {
                 resource: "query_memory_bytes",
                 ..
-            })
+            }
         ),
         "{result:?}"
     );

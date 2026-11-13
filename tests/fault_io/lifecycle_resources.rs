@@ -27,6 +27,8 @@ fn 最后同步失败保留数据文件锁与Hook且可重试关闭() {
     for asynchronous in [false, true] {
         let (mut db, root) = open(if asynchronous { "async" } else { "sync" });
         db.flush().unwrap();
+        db.enable_auto_compaction(std::time::Duration::from_secs(3600))
+            .unwrap();
         let dropped = Arc::new(AtomicUsize::new(0));
         db.set_hook(OwnedHook(dropped.clone())).unwrap();
         let failure = fail_io_at(IoPoint::WalSync);
@@ -38,6 +40,14 @@ fn 最后同步失败保留数据文件锁与Hook且可重试关闭() {
         };
         assert!(matches!(result, Err(TriviumError::Io(_))));
         assert_ne!(db.shutdown_status().phase, ShutdownPhase::Closed);
+        if asynchronous {
+            assert!(db.instance_stats().compaction.is_none());
+        } else {
+            assert_eq!(
+                db.instance_stats().compaction.unwrap().phase,
+                triviumdb::MaintenancePhase::Scheduled
+            );
+        }
         assert_eq!(dropped.load(Ordering::SeqCst), 0);
         assert!(matches!(
             Database::<f32>::open(&root.join("sample.tdb").to_string_lossy(), 3),
@@ -48,7 +58,12 @@ fn 最后同步失败保留数据文件锁与Hook且可重试关闭() {
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
         let mut recovered =
             Database::<f32>::open(&root.join("sample.tdb").to_string_lossy(), 3).unwrap();
-        assert!(recovered.contains(1).unwrap());
+        assert_eq!(recovered.all_node_ids().unwrap(), vec![1]);
+        assert_eq!(recovered.get(1).unwrap().unwrap().vector, vec![1.0; 3]);
+        assert_eq!(
+            recovered.get_payload(1).unwrap().unwrap(),
+            serde_json::json!({})
+        );
         recovered.close().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -61,11 +76,18 @@ fn 分组正常返回路径同步失败传播原错误并拒绝后续写入() {
         .unwrap();
     let failure = fail_io_at(IoPoint::WalSync);
     let result = db.group_commit(|db| db.insert_with_id(2, &[2.0; 3], serde_json::json!({})));
-    assert!(matches!(result, Err(TriviumError::Io(_))));
+    let error = result.unwrap_err();
+    assert!(matches!(error.underlying(), TriviumError::Io(_)));
+    assert_eq!(
+        serde_json::to_value(error.info()).unwrap()["write"],
+        serde_json::json!({"phase":"group_sync","outcome":"unknown"})
+    );
     drop(failure);
     assert!(matches!(
-        db.insert(&[3.0; 3], serde_json::json!({})),
-        Err(TriviumError::WalClosed)
+        db.insert(&[3.0; 3], serde_json::json!({}))
+            .unwrap_err()
+            .underlying(),
+        TriviumError::WalClosed
     ));
     drop(db);
     let mut recovered =
@@ -91,12 +113,14 @@ fn 分组异常展开中同步失败关闭写入能力() {
     assert!(result.is_err());
     drop(failure);
     assert!(matches!(
-        db.insert(&[3.0; 3], serde_json::json!({})),
-        Err(TriviumError::WalClosed)
+        db.insert(&[3.0; 3], serde_json::json!({}))
+            .unwrap_err()
+            .underlying(),
+        TriviumError::WalClosed
     ));
     assert!(matches!(
-        db.group_commit(|_| ()),
-        Err(TriviumError::WalClosed)
+        db.group_commit(|_| ()).unwrap_err().underlying(),
+        TriviumError::WalClosed
     ));
     db.set_hook(NoopHook).unwrap();
     drop(db);

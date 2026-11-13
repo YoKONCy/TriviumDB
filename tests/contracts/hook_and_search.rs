@@ -224,24 +224,33 @@ fn Hook修改配置后_diffusion_bias边界必须重新校验() {
         .unwrap();
 
     db.set_hook(InvalidConfigHook { bias: Vec::new() }).unwrap();
-    let empty_error = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 1, 0.0);
+    let empty_error = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 1, 0.0).unwrap_err();
     assert!(matches!(
-        empty_error,
-        Err(triviumdb::TriviumError::DimensionMismatch {
+        empty_error.underlying(),
+        triviumdb::TriviumError::DimensionMismatch {
             expected: DIM,
             got: 0
-        })
+        }
     ));
+    assert_eq!(empty_error.code(), "TDB_DIMENSION_MISMATCH");
+    assert_eq!(
+        serde_json::to_value(empty_error.info().target).unwrap(),
+        serde_json::json!({"field":"diffusion_bias"})
+    );
 
     db.set_hook(InvalidConfigHook {
         bias: vec![0.0, f32::INFINITY, 0.0, 0.0],
     })
     .unwrap();
-    let finite_error = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 1, 0.0);
+    let finite_error = db.search(&[1.0, 0.0, 0.0, 0.0], 5, 1, 0.0).unwrap_err();
     assert!(matches!(
-        finite_error,
-        Err(triviumdb::TriviumError::InvalidVector { .. })
+        finite_error.underlying(),
+        triviumdb::TriviumError::InvalidVector { .. }
     ));
+    assert_eq!(
+        serde_json::to_value(finite_error.info().target).unwrap(),
+        serde_json::json!({"field":"diffusion_bias"})
+    );
 
     cleanup(&path);
 }

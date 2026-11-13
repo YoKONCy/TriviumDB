@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {"name":"missing_sorted", "query":"MATCH (n) RETURN $z AS z, $a AS a", "parameters":{}, "code":"TDB_MISSING_QUERY_PARAMETER", "parameter":"a", "details":{"parameter":"a"}, "span":{"start_byte":26,"end_byte":28,"line":1,"column":27}},
+    {"name":"unexpected_sorted", "query":"MATCH (n) RETURN $x AS x", "parameters":{"x":1,"z":2,"a":3}, "code":"TDB_UNEXPECTED_QUERY_PARAMETER", "parameter":"a", "details":{"parameter":"a"}},
+    {"name":"literal_key", "query":"MATCH (n) RETURN n", "parameters":{"extra.key[0]/中文":1}, "code":"TDB_UNEXPECTED_QUERY_PARAMETER", "parameter":"extra.key[0]/中文", "details":{"parameter":"extra.key[0]/中文"}},
+    {"name":"array_value", "query":"MATCH (n) RETURN $x AS x", "parameters":{"x":[1]}, "conversion":true, "code":"TDB_INVALID_INPUT", "parameter":"x", "span":{"start_byte":17,"end_byte":19,"line":1,"column":18}},
+    {"name":"object_value", "query":"MATCH (n) RETURN $x AS x", "parameters":{"x":{"nested":1}}, "conversion":true, "code":"TDB_INVALID_INPUT", "parameter":"x", "span":{"start_byte":17,"end_byte":19,"line":1,"column":18}},
+    {"name":"vector_type", "query":"SEARCH VECTOR [$x, 0] TOP 1 RETURN *", "parameters":{"x":true}, "code":"TDB_QUERY_EXECUTION", "parameter":"x", "span":{"start_byte":15,"end_byte":17,"line":1,"column":16}},
+    {"name":"comment_reference", "query":"-- $x\r\nMATCH (n) RETURN $x AS x", "parameters":{}, "code":"TDB_MISSING_QUERY_PARAMETER", "parameter":"x", "details":{"parameter":"x"}, "span":{"start_byte":24,"end_byte":26,"line":2,"column":18}},
+    {"name":"unicode_repeated_reference", "query":"MATCH (n)\r\nRETURN '中🙂$x' AS text,\t$x AS value, $x AS again", "parameters":{}, "code":"TDB_MISSING_QUERY_PARAMETER", "parameter":"x", "details":{"parameter":"x"}, "span":{"start_byte":39,"end_byte":41,"line":2,"column":24}},
+    {"name":"filter_operator_reference", "query":"FIND {age: {$eq: 1}} RETURN $eq AS value", "parameters":{}, "code":"TDB_MISSING_QUERY_PARAMETER", "parameter":"eq", "details":{"parameter":"eq"}, "span":{"start_byte":28,"end_byte":31,"line":1,"column":29}},
+    {"name":"with_reference", "query":"FIND {saved: true} AS n WITH n, $x AS score RETURN n, score", "parameters":{}, "code":"TDB_MISSING_QUERY_PARAMETER", "parameter":"x", "details":{"parameter":"x"}, "span":{"start_byte":32,"end_byte":34,"line":1,"column":33}},
+    {"name":"predicate_reference", "query":"MATCH (n) WHERE n.age >= $minimum RETURN n", "parameters":{}, "code":"TDB_MISSING_QUERY_PARAMETER", "parameter":"minimum", "details":{"parameter":"minimum"}, "span":{"start_byte":25,"end_byte":33,"line":1,"column":26}},
+    {"name":"order_reference", "query":"MATCH (n) RETURN n ORDER BY $sort", "parameters":{}, "code":"TDB_MISSING_QUERY_PARAMETER", "parameter":"sort", "details":{"parameter":"sort"}, "span":{"start_byte":28,"end_byte":33,"line":1,"column":29}},
+    {"name":"aggregate_reference", "query":"MATCH (n) RETURN sum($x) AS total", "parameters":{}, "code":"TDB_MISSING_QUERY_PARAMETER", "parameter":"x", "details":{"parameter":"x"}, "span":{"start_byte":21,"end_byte":23,"line":1,"column":22}},
+    {"name":"nested_reference", "query":"MATCH (n) RETURN coalesce($x, 1) AS value", "parameters":{}, "code":"TDB_MISSING_QUERY_PARAMETER", "parameter":"x", "details":{"parameter":"x"}, "span":{"start_byte":26,"end_byte":28,"line":1,"column":27}}
+  ]
+}

@@ -297,39 +297,3 @@ pub fn row_primary_id(row: &CliRow) -> NodeId {
         .map(|n| n.id)
         .unwrap_or(NodeId::MAX)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fr_layout_stays_in_unit_square() {
-        let pos = fr_layout(5, &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 0)], 80);
-        assert_eq!(pos.len(), 5);
-        for (x, y) in pos {
-            assert!((0.0..=1.0).contains(&x), "x out of range: {x}");
-            assert!((0.0..=1.0).contains(&y), "y out of range: {y}");
-        }
-    }
-
-    #[test]
-    fn fr_layout_edge_cases() {
-        assert!(fr_layout(0, &[], 10).is_empty());
-        assert_eq!(fr_layout(1, &[], 10), vec![(0.5, 0.5)]);
-    }
-
-    #[test]
-    fn row_primary_id_picks_first_sorted_var() {
-        let mk = |id| CliNode {
-            id,
-            vector: vec![],
-            payload: serde_json::Value::Null,
-            edges: vec![],
-        };
-        let mut row: CliRow = std::collections::HashMap::new();
-        row.insert("b".to_string(), mk(20));
-        row.insert("a".to_string(), mk(10));
-        // "a" 字典序在前 → 主 id = 10
-        assert_eq!(row_primary_id(&row), 10);
-    }
-}

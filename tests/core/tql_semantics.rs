@@ -303,8 +303,10 @@ fn with与普通入口遵守行预算偏移预算和取消() {
         ] {
             assert!(
                 matches!(
-                    db.tql(&format!("{source} RETURN n")),
-                    Err(TriviumError::QueryRowBudgetExceeded { budget: 2 })
+                    db.tql(&format!("{source} RETURN n"))
+                        .unwrap_err()
+                        .underlying(),
+                    TriviumError::QueryRowBudgetExceeded { budget: 2 }
                 ),
                 "{source}"
             );
@@ -315,16 +317,20 @@ fn with与普通入口遵守行预算偏移预算和取消() {
             );
             assert!(
                 matches!(
-                    db.tql(&format!("{source} RETURN n LIMIT 2 OFFSET 10000")),
-                    Err(TriviumError::QueryRowBudgetExceeded { .. })
+                    db.tql(&format!("{source} RETURN n LIMIT 2 OFFSET 10000"))
+                        .unwrap_err()
+                        .underlying(),
+                    TriviumError::QueryRowBudgetExceeded { .. }
                 ),
                 "{source}"
             );
             let cancelled = QueryControl::default();
             cancelled.cancel();
             assert!(matches!(
-                db.tql_with_control(&format!("{source} RETURN n LIMIT 3"), cancelled),
-                Err(TriviumError::QueryCancelled)
+                db.tql_with_control(&format!("{source} RETURN n LIMIT 3"), cancelled)
+                    .unwrap_err()
+                    .underlying(),
+                TriviumError::QueryCancelled
             ));
         }
         db.close().unwrap();
@@ -493,8 +499,10 @@ fn 多匹配create约束失败时整批拒绝() {
     db.create_unique_index("key").unwrap();
     let before = std::fs::read(format!("{path}.wal")).unwrap();
     assert!(matches!(
-        db.tql_mut("MATCH (n {kind: \"seed\"}) CREATE (m {key: \"duplicate\"})"),
-        Err(TriviumError::UniqueConstraintViolation { .. })
+        db.tql_mut("MATCH (n {kind: \"seed\"}) CREATE (m {key: \"duplicate\"})")
+            .unwrap_err()
+            .underlying(),
+        TriviumError::UniqueConstraintViolation { .. }
     ));
     assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
     assert_eq!(db.all_node_ids().unwrap(), [1, 2]);
@@ -535,8 +543,10 @@ fn 浮点向量转换在目标dtype溢出前拒绝且保留原值() {
         assert_eq!(db.get(1).unwrap().unwrap().vector[0].to_f32(), 2.5);
         let before = std::fs::read(format!("{path}.wal")).unwrap();
         assert!(matches!(
-            db.tql_mut(&format!("MATCH (n) SET VECTOR(n) == [{bad}]")),
-            Err(TriviumError::InvalidVector { .. })
+            db.tql_mut(&format!("MATCH (n) SET VECTOR(n) == [{bad}]"))
+                .unwrap_err()
+                .underlying(),
+            TriviumError::InvalidVector { .. }
         ));
         assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
         assert_eq!(db.get(1).unwrap().unwrap().vector[0].to_f32(), 2.5);
@@ -557,7 +567,7 @@ fn return别名仅进入排序作用域且节点别名可排序() {
         "MATCH (n) AS n WITH n RETURN n.x AS v ORDER BY absent",
     ] {
         assert!(
-            matches!(db.tql(query), Err(TriviumError::QueryParse(_))),
+            matches!(db.tql(query), Err(TriviumError::QuerySyntax { .. })),
             "{query}"
         );
     }
@@ -637,8 +647,10 @@ fn set遇到非对象目标时整批拒绝并保留wal() {
     db.insert_with_id(2, &[1.], json!([])).unwrap();
     let before = std::fs::read(format!("{path}.wal")).unwrap();
     assert!(matches!(
-        db.tql_mut("MATCH (n) SET n.a == 1"),
-        Err(TriviumError::InvalidInput(_))
+        db.tql_mut("MATCH (n) SET n.a == 1")
+            .unwrap_err()
+            .underlying(),
+        TriviumError::InvalidInput(_)
     ));
     assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
     assert_eq!(db.get_payload(1).unwrap(), Some(json!({"a":0})));

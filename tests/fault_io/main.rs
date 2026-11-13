@@ -1,6 +1,10 @@
 #![allow(non_snake_case)]
 //! 按领域聚合的集成测试入口。
 #[cfg(feature = "test-hooks")]
+mod direct_write_outcomes;
+#[cfg(feature = "test-hooks")]
+mod index_maintenance;
+#[cfg(feature = "test-hooks")]
 #[path = "../support/mod.rs"]
 mod support;
 

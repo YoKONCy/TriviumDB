@@ -1,0 +1,117 @@
+:root {
+  color-scheme: light;
+  --background: #f5f6f9;
+  --surface: #ffffff;
+  --surface-alt: #f8f9fc;
+  --ink: #202e40;
+  --muted: #728095;
+  --line: #e3e7ee;
+  --grid: #edf0f5;
+  --accent: #087f75;
+  --accent-soft: #e9f5f2;
+  --warning: #a76c18;
+  --warning-soft: #fcf4e6;
+  --shadow: 0 3px 14px #1f304305;
+  --radius: 12px;
+  --font: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+body.dark {
+  color-scheme: dark;
+  --background: #121a25;
+  --surface: #1a2533;
+  --surface-alt: #202d3d;
+  --ink: #e5ebf4;
+  --muted: #98a8bb;
+  --line: #304154;
+  --grid: #293a4c;
+  --accent: #62d4ba;
+  --accent-soft: #203b39;
+  --warning: #e5bb70;
+  --warning-soft: #3a3226;
+  --shadow: none;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--ink);
+  font: 14px/1.5 var(--font);
+}
+[hidden] {
+  display: none !important;
+}
+button,
+input,
+select {
+  font: inherit;
+}
+button,
+a,
+input,
+select,
+summary {
+  -webkit-tap-highlight-color: transparent;
+}
+button,
+summary {
+  cursor: pointer;
+}
+button {
+  color: inherit;
+}
+button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+h1 {
+  font-size: 28px;
+  font-weight: 650;
+  letter-spacing: -0.8px;
+  line-height: 1.3;
+}
+h2 {
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.2px;
+}
+small {
+  font-size: 12px;
+}
+.null,
+.subtle {
+  color: var(--muted);
+}
+.skip-link {
+  position: fixed;
+  left: 240px;
+  top: -60px;
+  background: var(--surface);
+  padding: 12px;
+  z-index: 50;
+}
+.skip-link:focus {
+  top: 10px;
+}

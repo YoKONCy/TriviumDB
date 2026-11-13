@@ -317,7 +317,7 @@ fn 测试_tql_mut_读查询明确拒绝() {
 
     let error = db.tql_mut(r#"FIND {name: "Alice"} RETURN *"#).unwrap_err();
     assert!(matches!(
-        error,
+        error.underlying(),
         triviumdb::TriviumError::ApiMigrationRequired { .. }
     ));
 

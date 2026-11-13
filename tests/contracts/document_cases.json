@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "document": {
+    "source_id": "vault://notes/cat.md",
+    "source_revision": "file-v1",
+    "parser_id": "plain-utf8-v1",
+    "content": "# 标题\r\n猫🐾 alpha\nbeta\n",
+    "root": {"id": "9007199254740993", "vector": [1, 0], "payload": {"title": "标题"}},
+    "blocks": [
+      {"key": "section", "kind": "section", "start_byte": 0, "end_byte": 29},
+      {"key": "a", "parent": "section", "kind": "paragraph", "start_byte": 10, "end_byte": 23,
+       "node": {"id": "9007199254740995", "vector": [0, 2], "payload": {"role": "evidence"}}},
+      {"key": "word", "parent": "a", "kind": "term", "start_byte": 18, "end_byte": 23,
+       "node": {"id": "9007199254740997", "vector": [1, 1], "payload": {"term": "alpha"}}},
+      {"key": "b", "parent": "section", "kind": "line", "start_byte": 24, "end_byte": 28,
+       "node": {"id": "9007199254740999", "vector": [2, 1], "payload": {"role": "context"}}}
+    ]
+  },
+  "expected": {
+    "content_hash": "sha256:6e9866572221cc397e5b2faa1ea0ada7d1313e807a7876167221cad7db7f7331",
+    "node_ids": ["9007199254740993", "9007199254740995", "9007199254740997", "9007199254740999"],
+    "edges": [["9007199254740993", "9007199254740995"], ["9007199254740995", "9007199254740997"], ["9007199254740993", "9007199254740999"]],
+    "evidence": {"text": "猫🐾 alpha", "line": 2, "column": 1, "end_line": 2, "end_column": 9}
+  }
+}

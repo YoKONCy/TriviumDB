@@ -107,13 +107,24 @@ function runLifecycleContract(root) {
     assert.equal(manifest.complete, true)
     db.updatePayload(test.node_id, test.later_payload)
     db.insertWithId(test.later_node_id, test.vector, {})
-    assert.throws(() => db.createSnapshot(snapshot, test.generation_id), error => error.code === 'TDB_SNAPSHOT_EXISTS')
+    assert.throws(() => db.createSnapshot(snapshot, test.generation_id), error => {
+      assert.equal(error.code, 'TDB_SNAPSHOT_EXISTS')
+      assert.deepEqual(error.write, { phase: 'validation', outcome: 'not_committed' })
+      return true
+    })
     assert.equal(verifySnapshot(snapshot, runtime).node_count, 1)
     assert.equal(restoreSnapshot(snapshot, restored, runtime).generation_id, test.generation_id)
-    assert.throws(() => restoreSnapshot(snapshot, restored, runtime), error => error.code === 'TDB_SNAPSHOT_EXISTS')
+    assert.throws(() => restoreSnapshot(snapshot, restored, runtime), error => {
+      assert.equal(error.code, 'TDB_SNAPSHOT_EXISTS')
+      assert.deepEqual(error.write, { phase: 'validation', outcome: 'not_committed' })
+      return true
+    })
     const reader = new TriviumDB(path.join(restored, test.database_file), { dim: test.dimension,
       dtype, accessMode: 'immutable', memoryLimitMb: test.database_memory_limit_mb, runtime })
     assert.deepEqual(reader.getPayload(test.node_id), test.original_payload)
+    assert.deepEqual(reader.allNodeIds(), [test.node_id])
+    assert.deepEqual(reader.get(test.node_id).vector, test.vector)
+    assert.deepEqual(reader.get(test.node_id).edges, [])
     assert.equal(reader.contains(test.later_node_id), false)
     assert.equal(reader.closeTimeout(test.close_timeout_ms), true)
     assert.equal(verifySnapshot(restored, runtime).node_count, 1)
@@ -355,12 +366,16 @@ function runSearchBoundaries(root) {
 
 async function main() {
   try {
+    require('./quiver_ssd').runQuiverSsd(root)
+    require('./documents').runDocuments(root)
+    require('./named_graphs').runNamedGraphs(root)
     runSearchBoundaries(root)
     runLifecycleContract(root)
     runResourceContract(root)
     runSharedContract(root)
     await runErrorContract(root)
     runConsoleContract(root)
+    await require('./request_contexts')(root)
     runKernelBoundaries(root)
     runTransactionContract(root)
     await require('./write_boundaries.js')(root, TriviumDB)
@@ -369,7 +384,7 @@ async function main() {
     await runAsyncResourceContract(root)
     assert.throws(
       () => new TriviumDB(file, 2),
-      /object|对象|options/i,
+      error => error.code === 'TDB_API_MIGRATION_REQUIRED' && error.target?.field === 'options',
       '旧位置参数构造器必须明确拒绝',
     )
 
@@ -436,7 +451,7 @@ async function main() {
     assert.deepEqual(indexes.find(item => item.kind === 'composite').fields, ['tenant', 'region'])
 
     const storage = db.storageInfo()
-    assert.equal(storage.database_format_current, 10)
+    assert.equal(storage.database_format_current, 13)
     assert.equal(storage.property_index_format, 8)
     assert.equal(storage.node_count, 2)
 

@@ -34,10 +34,10 @@ EXCEPTIONS = [
 CLASS_ORDER = [
     "SearchHit", "GroupedSearchResult", "Edge", "IncomingEdge", "NodeView",
     "ReachabilityStep", "ReachabilityResult", "QueryRow", "HookContext",
-    "PreparedTql", "Transaction", "ResourceRuntime", "ConsoleSession", "TriviumDB",
+    "PreparedTql", "Transaction", "ResourceRuntime", "ConsoleSession", "RequestContext", "TriviumDB",
 ]
 FUNCTIONS = ["init_logger", "verify_snapshot", "restore_snapshot"]
-CONSTRUCTIBLE = {"TriviumDB", "ResourceRuntime", "ConsoleSession"}  # 提供原生构造器的类
+CONSTRUCTIBLE = {"TriviumDB", "ResourceRuntime", "ConsoleSession", "RequestContext"}  # 提供原生构造器的类
 
 # Dunders emitted from the method loop (__new__ is handled by the ctor branch).
 KEEP_DUNDERS = ["__len__", "__contains__", "__repr__", "__enter__", "__exit__"]
@@ -63,6 +63,7 @@ ATTRS = {
 
 # Param type by name. A param whose default is None is auto-wrapped in Optional.
 PARAM_TYPES = {
+    "needle": "str", "equalities": "dict[str, Any]",
     "options_json": "str", "request_json": "str", "request_id": "str", "session": "ConsoleSession",
     "vector": "Vector", "query_vector": "Vector",
     "vectors": "Sequence[Vector]", "query_vectors": "Sequence[Vector]",
@@ -83,7 +84,7 @@ for _t, _names in {
     "int": "max_threads max_active_tasks id src dst key depth expand_depth min_depth max_depth max_visited_nodes "
            "max_anchor_nodes parallelism additional mb interval_secs min_community_size "
            "max_iterations dim new_dim memory_limit_mb expected_nodes max_query_rows top_k recall_k rerank_k "
-           "max_edges_per_node max_edges max_results seed",
+           "max_edges_per_node max_edges max_results seed payload_cache_mb payload_cache_entry_mb",
     "float": "weight min_score teleport_alpha fista_lambda fista_threshold "
              "dpp_quality_weight text_boost hybrid_alpha min_edge_weight resolution",
     "str": "text keyword field query query_text mode lib_path path new_path generation_id "
@@ -100,6 +101,10 @@ QUALIFIED_PARAM_TYPES = {
     "TriviumDB.__new__.access_mode": "AccessMode",
     "TriviumDB.__new__.missing_index_policy": "MissingIndexPolicy",
     "TriviumDB.__new__.row_overflow": "RowOverflowPolicy",
+    "TriviumDB.batch_insert.vectors": "list[Vector]",
+    "TriviumDB.batch_insert.payloads": "list[Any]",
+    "TriviumDB.batch_insert_with_ids.vectors": "list[Vector]",
+    "TriviumDB.batch_insert_with_ids.payloads": "list[Any]",
     "TriviumDB.set_sync_mode.mode": "SyncMode",
     "TriviumDB.search.edge_direction": "EdgeDirection",
     "TriviumDB.search_grouped.edge_direction": "EdgeDirection",
@@ -114,6 +119,8 @@ QUALIFIED_PARAM_TYPES = {
 RETURNS = {}
 for _ret, _quals in {
     "None": "init_logger ConsoleSession.detach "
+            "TriviumDB.compare_and_set_payload_field TriviumDB.create_ngram_index TriviumDB.drop_ngram_index "
+            "TriviumDB.create_unique_index TriviumDB.create_unique_composite_index "
             "TriviumDB.set_sync_mode TriviumDB.load_ffi_hook TriviumDB.clear_hook "
             "TriviumDB.set_hook TriviumDB.insert_with_id TriviumDB.upsert_with_id "
             "TriviumDB.batch_insert_with_ids "
@@ -130,8 +137,10 @@ for _ret, _quals in {
             "Transaction.delete Transaction.unlink Transaction.update_payload "
             "Transaction.update_vector Transaction.rollback",
     "int": "TriviumDB.insert TriviumDB.node_count TriviumDB.dim TriviumDB.estimated_memory "
+           "TriviumDB.delete_many_atomic "
            "TriviumDB.__len__ Transaction.pending_count",
     "list[int]": "TriviumDB.all_node_ids TriviumDB.batch_insert TriviumDB.migrate "
+                 "TriviumDB.indexed_lookup TriviumDB.substring_lookup "
                  "TriviumDB.neighbors Transaction.commit",
     "list[SearchHit]": "TriviumDB.search TriviumDB.search_advanced TriviumDB.search_hybrid "
                        "TriviumDB.search_graph_first TriviumDB.search_exact",
@@ -142,6 +151,7 @@ for _ret, _quals in {
     "list[ReachabilityResult]": "TriviumDB.reachable",
     "list[QueryRow]": "TriviumDB.tql TriviumDB.execute_prepared_tql",
     "list[str]": "PreparedTql.parameter_names",
+    "list[list[str]]": "TriviumDB.list_unique_indexes",
     "PreparedTql": "TriviumDB.prepare_tql",
     "dict[str, Any]": "verify_snapshot restore_snapshot TriviumDB.create_snapshot TriviumDB.request_shutdown TriviumDB.shutdown_status ResourceRuntime.stats TriviumDB.resource_stats TriviumDB.instance_stats TriviumDB.tql_mut TriviumDB.leiden_cluster TriviumDB.graph_stats "
                       "TriviumDB.index_info TriviumDB.storage_info "
@@ -153,14 +163,17 @@ for _ret, _quals in {
     "Any | None": "TriviumDB.get_payload",
     "Transaction": "TriviumDB.transaction",
     "Any": "TriviumDB.publish_generation_manifest",
-    "str": "TriviumDB.console_request TriviumDB.__repr__ Transaction.__repr__ QueryRow.__repr__ HookContext.__repr__",
-    "bool": "ConsoleSession.cancel ConsoleSession.is_detached TriviumDB.close_timeout TriviumDB.__contains__ TriviumDB.__exit__ Transaction.__exit__",
+    "str": "TriviumDB.console_request TriviumDB.document_request TriviumDB.graph_request TriviumDB.quiver_request TriviumDB.__repr__ Transaction.__repr__ QueryRow.__repr__ HookContext.__repr__",
+    "bool": "ConsoleSession.cancel ConsoleSession.is_detached ConsoleSession.is_drained TriviumDB.close_timeout TriviumDB.__contains__ TriviumDB.__exit__ Transaction.__exit__",
     '"ConsoleSession"': "ConsoleSession.__new__",
     '"ResourceRuntime"': "ResourceRuntime.__new__",
     '"TriviumDB"': "TriviumDB.__new__ TriviumDB.__enter__",
     '"Transaction"': "Transaction.__enter__",
+    '"RequestContext"': "RequestContext.__new__ RequestContext.__enter__",
 }.items():
     RETURNS.update(dict.fromkeys(_quals.split(), _ret))
+
+RETURNS.update({"RequestContext.cancel": "None", "RequestContext.check": "None", "RequestContext.__exit__": "bool"})
 
 HEADER = '''\
 # AUTO-GENERATED by scripts/generate_pyi.py — DO NOT EDIT BY HAND.
@@ -171,7 +184,8 @@ HEADER = '''\
 # PEP 561: maturin renames this to triviumdb/__init__.pyi and adds py.typed.
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, final
+from inspect import Signature
+from typing import Any, ClassVar, Literal, final
 
 Vector = Sequence[float | int]
 DType = Literal["f32", "f16", "u64"]
@@ -235,10 +249,16 @@ def class_methods(cls_obj) -> list[str]:
     return sorted(regular) + sorted(dunders, key=KEEP_DUNDERS.index)
 
 
+READONLY_ATTRS = {"RequestContext": {"request_id": "str"}}
+
+
 def render_class(mod, cls: str) -> str:
     obj = getattr(mod, cls)
     body = [f"    {attr}: {typ}" for attr, typ in ATTRS.get(cls, {}).items()]
+    for attr, typ in READONLY_ATTRS.get(cls, {}).items():
+        body.extend(["    @property", f"    def {attr}(self) -> {typ}: ..."])
     if cls in CONSTRUCTIBLE:
+        body.append("    __signature__: ClassVar[Signature]")
         body.append(render_def(f"{cls}.__new__", "__new__", obj, "cls"))
     for name in class_methods(obj):
         body.append(render_def(f"{cls}.{name}", name, obj.__dict__[name], "self"))
@@ -253,7 +273,8 @@ def build_stub(mod) -> str:
                                   for n in EXCEPTIONS + CLASS_ORDER + FUNCTIONS) + "]",
         "# Exceptions",
         *(f"class {e}({getattr(mod, e).__bases__[0].__name__}):"
-          + ("\n    code: str\n    details: dict[str, Any]"
+          + ("\n    schema_version: int\n    code: str\n    message: str\n    details: dict[str, Any]"
+             "\n    stage: Literal['lex', 'parse', 'bind', 'plan', 'execute'] | None\n    target: dict[str, str | dict[str, int]] | None\n    write: dict[str, str | bool] | None"
              if e in {"TriviumDBError", "InvalidInputError", "CapacityError", "SnapshotDestinationError"} else "")
           + ("\n    resource: str\n    requested: int\n    used: int\n    limit: int" if e == "ResourceBudgetError"
              else "" if e in {"TriviumDBError", "InvalidInputError", "CapacityError", "SnapshotDestinationError"} else " ...")

@@ -93,7 +93,8 @@ pub struct PropertyOrigin {
 pub struct Provenance {
     pub source_ids: Vec<NodeId>,
     pub min_depth: Option<usize>,
-    /// 仅在集合由单个等值属性谓词产生时保留，供后续成本估算与审计使用。
+    /// 记录当前物理计划保留的单个等值属性入口，供成本估算与执行审计使用。
+    /// 合并来源不同时清除；采用不同算子序列的等价计划可返回不同的该字段。
     pub property_origin: Option<PropertyOrigin>,
 }
 
@@ -454,7 +455,7 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
             memtable,
             budget,
             metrics: Vec::new(),
-            query_control: None,
+            query_control: crate::request::control(),
             workspace_limit: 0,
             profile,
             stages: 0,
@@ -473,6 +474,35 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
             self.workspace_bytes = bytes;
         }
         Ok(())
+    }
+
+    fn graph_request(&self) -> Result<crate::request::RequestContext> {
+        let inherited = crate::request::current();
+        let mut control = self.query_control.clone().unwrap_or_default();
+        if let Some(request) = &inherited {
+            control = control.combined_with(request.control());
+        }
+        crate::request::RequestContext::new(
+            inherited
+                .as_ref()
+                .map_or("pipeline", |request| request.request_id()),
+            control,
+            false,
+        )
+    }
+
+    fn run_graph<R: Send>(
+        &self,
+        threads: usize,
+        operation: impl FnOnce() -> Result<R> + Send,
+    ) -> Result<R> {
+        let request = self.graph_request()?;
+        if threads == 1 {
+            request.run(operation)
+        } else {
+            query_pool(self.memtable.resource_runtime(), threads)?
+                .install(|| request.run(operation))
+        }
     }
 
     fn begin_stage(&mut self) -> Result<()> {
@@ -552,6 +582,10 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
 pub trait PipelineOperator<T: VectorType> {
     fn name(&self) -> &'static str;
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet>;
+    /// 查询装配器附加实际算子来源；通用管线继续传递原始错误。
+    fn map_error(&self, error: TriviumError) -> TriviumError {
+        error
+    }
 }
 
 struct PipelineWorkspace<'query, 'data, T: VectorType>(&'query mut PipelineContext<'data, T>);
@@ -578,6 +612,24 @@ pub fn execute_pipeline<T: VectorType>(
     operators: &[Box<dyn PipelineOperator<T> + '_>],
 ) -> Result<NodeSet> {
     let mut workspace = PipelineWorkspace(context);
+    let inherited = crate::request::current();
+    let request = workspace
+        .query_control
+        .as_ref()
+        .map(|control| {
+            crate::request::RequestContext::new(
+                inherited
+                    .as_ref()
+                    .map_or("pipeline", |request| request.request_id()),
+                control.clone(),
+                false,
+            )
+        })
+        .transpose()?;
+    let _scope = request
+        .as_ref()
+        .map(|request| request.enter())
+        .transpose()?;
     let context = &mut *workspace;
     let rows = context.memtable.node_count().min(context.budget.max_nodes);
     let estimate = rows
@@ -595,17 +647,21 @@ pub fn execute_pipeline<T: VectorType>(
     context.reserve_row_workspace(estimate)?;
     let mut current = NodeSet::empty();
     for operator in operators {
-        context.begin_stage()?;
+        let locate = |error| operator.map_error(error);
+        context.begin_stage().map_err(locate)?;
         let input_rows = context.profile.then(|| current.len());
         let started = context.profile.then(Instant::now);
-        current = operator.apply(current, context)?;
+        current = operator.apply(current, context).map_err(locate)?;
         if let Some(control) = &context.query_control {
-            control.check()?;
+            control.check().map_err(locate)?;
         }
         current.normalize();
-        context.validate_output(&current)?;
-        context.reserve_row_workspace(current.estimated_bytes())?;
-        let (payload_lookups, payload_parsed_bytes) = context.validate_payload_budget()?;
+        context.validate_output(&current).map_err(locate)?;
+        context
+            .reserve_row_workspace(current.estimated_bytes())
+            .map_err(locate)?;
+        let (payload_lookups, payload_parsed_bytes) =
+            context.validate_payload_budget().map_err(locate)?;
         if let (Some(input_rows), Some(started)) = (input_rows, started) {
             context.metrics.push(PipelineStageMetrics {
                 operator: operator.name(),
@@ -1203,20 +1259,34 @@ impl<T: VectorType> PipelineOperator<T> for ExactRerank<T> {
         crate::vector::validate_query_vector(&self.query, context.memtable.dim())?;
         context.charge_vectors(input.len())?;
         let threads = context.budget.parallelism.threads(input.len());
-        let score_row = |mut row: NodeRow| {
-            let vector = context.memtable.get_vector(row.id)?;
-            row.similarity = Some(ScoreValue {
-                value: T::similarity(&self.query, vector),
-                kind: ScoreKind::Exact,
-            });
-            Some(row)
+        let control = context.graph_request()?.control().clone();
+        let score_row = |mut rows: Vec<NodeRow>, mut row: NodeRow| -> Result<Vec<NodeRow>> {
+            control.check()?;
+            if let Some(vector) = context.memtable.get_vector(row.id) {
+                row.similarity = Some(ScoreValue {
+                    value: T::similarity(&self.query, vector),
+                    kind: ScoreKind::Exact,
+                });
+                rows.push(row);
+            }
+            Ok(rows)
         };
         input.rows = if threads == 1 {
-            input.rows.into_iter().filter_map(score_row).collect()
+            input.rows.into_iter().try_fold(Vec::new(), score_row)?
         } else {
-            query_pool(context.memtable.resource_runtime(), threads)?
-                .install(|| input.rows.into_par_iter().filter_map(score_row).collect())
+            query_pool(context.memtable.resource_runtime(), threads)?.install(|| {
+                input
+                    .rows
+                    .into_par_iter()
+                    .try_fold(Vec::new, score_row)
+                    .try_reduce(Vec::new, |mut left, right| {
+                        control.check()?;
+                        left.extend(right);
+                        Ok(left)
+                    })
+            })?
         };
+        control.check()?;
         if let Some(top_k) = self.top_k {
             if top_k == 0 {
                 input.rows.clear();
@@ -1398,8 +1468,9 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
             max_frontier_size: traversal.max_frontier_size,
             exhaustion_policy: BudgetExhaustionPolicy::Error,
         };
+        let request = context.graph_request()?;
         let traverse_source = |&source_id: &NodeId| -> Result<ExpandSourceOutput> {
-            let reached = traverse_compact(context.memtable, source_id, &config)?;
+            let reached = request.run(|| traverse_compact(context.memtable, source_id, &config))?;
             Ok(ExpandSourceOutput {
                 hits: reached
                     .results
@@ -1429,25 +1500,23 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
             context.budget.parallelism.threads(estimated_reachable)
         };
         let outputs = if sources.len() == 1 && threads > 1 {
-            vec![
-                query_pool(context.memtable.resource_runtime(), threads)?.install(|| {
-                    let source_id = sources[0];
-                    let reached = traverse_compact_parallel(context.memtable, source_id, &config)?;
-                    Ok::<_, TriviumError>(ExpandSourceOutput {
-                        hits: reached
-                            .results
-                            .into_iter()
-                            .map(|target| ExpandHit {
-                                target_id: target.target_id,
-                                source_id,
-                                depth: target.depth,
-                            })
-                            .collect(),
-                        visited_nodes: reached.visited_nodes,
-                        examined_edges: reached.traversed_edges,
-                    })
-                })?,
-            ]
+            vec![context.run_graph(threads, || {
+                let source_id = sources[0];
+                let reached = traverse_compact_parallel(context.memtable, source_id, &config)?;
+                Ok::<_, TriviumError>(ExpandSourceOutput {
+                    hits: reached
+                        .results
+                        .into_iter()
+                        .map(|target| ExpandHit {
+                            target_id: target.target_id,
+                            source_id,
+                            depth: target.depth,
+                        })
+                        .collect(),
+                    visited_nodes: reached.visited_nodes,
+                    examined_edges: reached.traversed_edges,
+                })
+            })?]
         } else if threads == 1 {
             sources
                 .iter()
@@ -2048,16 +2117,16 @@ impl<T: VectorType> PipelineOperator<T> for PageRankOperator {
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
         let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
         let threads = context.budget.parallelism.threads(universe.len());
-        let result = if threads == 1 {
-            crate::graph::subset::subset_pagerank(
-                context.memtable,
-                &universe,
-                self.config,
-                self.label_filter.as_deref(),
-                context.budget.traversal.max_examined_edges,
-            )?
-        } else {
-            query_pool(context.memtable.resource_runtime(), threads)?.install(|| {
+        let result = context.run_graph(threads, || {
+            if threads == 1 {
+                crate::graph::subset::subset_pagerank(
+                    context.memtable,
+                    &universe,
+                    self.config,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            } else {
                 crate::graph::subset::subset_pagerank_parallel(
                     context.memtable,
                     &universe,
@@ -2065,8 +2134,8 @@ impl<T: VectorType> PipelineOperator<T> for PageRankOperator {
                     self.label_filter.as_deref(),
                     context.budget.traversal.max_examined_edges,
                 )
-            })?
-        };
+            }
+        })?;
         let mut rows = rows_by_id(&input)
             .into_iter()
             .map(|(id, row)| (id, row.clone()))
@@ -2104,23 +2173,23 @@ impl<T: VectorType> PipelineOperator<T> for DegreeCentralityOperator {
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
         let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
         let degree_threads = context.budget.parallelism.threads(universe.len());
-        let (scores, _) = if degree_threads == 1 {
-            crate::graph::subset::subset_degree_centrality(
-                context.memtable,
-                &universe,
-                self.label_filter.as_deref(),
-                context.budget.traversal.max_examined_edges,
-            )?
-        } else {
-            query_pool(context.memtable.resource_runtime(), degree_threads)?.install(|| {
+        let (scores, _) = context.run_graph(degree_threads, || {
+            if degree_threads == 1 {
+                crate::graph::subset::subset_degree_centrality(
+                    context.memtable,
+                    &universe,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            } else {
                 crate::graph::subset::subset_degree_centrality_parallel(
                     context.memtable,
                     &universe,
                     self.label_filter.as_deref(),
                     context.budget.traversal.max_examined_edges,
                 )
-            })?
-        };
+            }
+        })?;
         let old = rows_by_id(&input);
         let build_row = |score: &crate::graph::subset::SubsetDegreeCentrality| {
             if !output_ids.contains(&score.id) {
@@ -2159,16 +2228,16 @@ impl<T: VectorType> PipelineOperator<T> for BetweennessOperator {
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
         let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
         let threads = context.budget.parallelism.threads(universe.len());
-        let result = if threads == 1 {
-            crate::graph::subset::subset_betweenness(
-                context.memtable,
-                &universe,
-                self.label_filter.as_deref(),
-                self.sample_size,
-                context.budget.traversal.max_examined_edges,
-            )?
-        } else {
-            query_pool(context.memtable.resource_runtime(), threads)?.install(|| {
+        let result = context.run_graph(threads, || {
+            if threads == 1 {
+                crate::graph::subset::subset_betweenness(
+                    context.memtable,
+                    &universe,
+                    self.label_filter.as_deref(),
+                    self.sample_size,
+                    context.budget.traversal.max_examined_edges,
+                )
+            } else {
                 crate::graph::subset::subset_betweenness_parallel(
                     context.memtable,
                     &universe,
@@ -2176,8 +2245,8 @@ impl<T: VectorType> PipelineOperator<T> for BetweennessOperator {
                     self.sample_size,
                     context.budget.traversal.max_examined_edges,
                 )
-            })?
-        };
+            }
+        })?;
         let old = rows_by_id(&input);
         let kind = if result.exact {
             ScoreKind::Exact
@@ -2216,23 +2285,23 @@ impl<T: VectorType> PipelineOperator<T> for WccOperator {
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
         let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
         let threads = context.budget.parallelism.threads(universe.len());
-        let (components, _) = if threads == 1 {
-            crate::graph::subset::subset_wcc(
-                context.memtable,
-                &universe,
-                self.label_filter.as_deref(),
-                context.budget.traversal.max_examined_edges,
-            )?
-        } else {
-            query_pool(context.memtable.resource_runtime(), threads)?.install(|| {
+        let (components, _) = context.run_graph(threads, || {
+            if threads == 1 {
+                crate::graph::subset::subset_wcc(
+                    context.memtable,
+                    &universe,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            } else {
                 crate::graph::subset::subset_wcc_parallel(
                     context.memtable,
                     &universe,
                     self.label_filter.as_deref(),
                     context.budget.traversal.max_examined_edges,
                 )
-            })?
-        };
+            }
+        })?;
         let old = rows_by_id(&input);
         let mut memberships = BTreeMap::new();
         for (index, component) in components.into_iter().enumerate() {
@@ -2284,13 +2353,14 @@ impl<T: VectorType> PipelineOperator<T> for LeidenOperator {
             }
             edges.insert(source, neighbors);
         }
-        let result = crate::graph::leiden::run_leiden(
+        let result = crate::graph::leiden::run_leiden_controlled(
             &crate::graph::leiden::AdjacencySnapshot {
                 edges,
                 node_ids: universe.into_iter().collect(),
             },
             &self.config,
-        );
+            &context.query_control.clone().unwrap_or_default(),
+        )?;
         let old = rows_by_id(&input);
         let rows = output_ids
             .into_iter()
@@ -2322,16 +2392,16 @@ impl<T: VectorType> PipelineOperator<T> for LabelPropagationOperator {
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
         let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
         let threads = context.budget.parallelism.threads(universe.len());
-        let result = if threads == 1 {
-            crate::graph::subset::deterministic_label_propagation(
-                context.memtable,
-                &universe,
-                self.config,
-                self.label_filter.as_deref(),
-                context.budget.traversal.max_examined_edges,
-            )?
-        } else {
-            query_pool(context.memtable.resource_runtime(), threads)?.install(|| {
+        let result = context.run_graph(threads, || {
+            if threads == 1 {
+                crate::graph::subset::deterministic_label_propagation(
+                    context.memtable,
+                    &universe,
+                    self.config,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            } else {
                 crate::graph::subset::deterministic_label_propagation_parallel(
                     context.memtable,
                     &universe,
@@ -2339,8 +2409,8 @@ impl<T: VectorType> PipelineOperator<T> for LabelPropagationOperator {
                     self.label_filter.as_deref(),
                     context.budget.traversal.max_examined_edges,
                 )
-            })?
-        };
+            }
+        })?;
         let old = rows_by_id(&input);
         let rows = output_ids
             .into_iter()
@@ -2411,13 +2481,14 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
             .collect::<Vec<_>>();
         match self.algorithm {
             StructuralAlgorithm::Scc => {
-                let components = crate::graph::analytics::strongly_connected_components(&workspace);
+                let components =
+                    crate::graph::analytics::strongly_connected_components_controlled(&workspace)?;
                 for row in &mut rows {
                     row.community_id = components.get(&row.id).copied();
                 }
             }
             StructuralAlgorithm::KCore => {
-                let core = crate::graph::analytics::k_core(&workspace);
+                let core = crate::graph::analytics::k_core_controlled(&workspace)?;
                 for row in &mut rows {
                     row.set_graph_metric(
                         GraphMetric::CoreNumber,
@@ -2429,7 +2500,7 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
                 }
             }
             StructuralAlgorithm::ArticulationPoints => {
-                let points = crate::graph::analytics::articulation_points(&workspace);
+                let points = crate::graph::analytics::articulation_points_controlled(&workspace)?;
                 rows.retain(|row| points.contains(&row.id));
             }
             StructuralAlgorithm::TriangleCount => {

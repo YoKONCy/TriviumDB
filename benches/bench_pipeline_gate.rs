@@ -2,8 +2,9 @@
 //!
 //! ## 目的
 //! 在 384/768/1536/3072 四个产品维度上，对四类三阶段查询比较“先全量评分”与
-//! “先通过属性/图约束缩小候选再评分”两个合法物理计划。Gate 要求结果逐字段完全
-//! 相同，并且 P95 至少提升 1.5×，或实际评分候选至少减少 50%。
+//! “先通过属性/图约束缩小候选再评分”两个合法物理计划。逐行验证各计划的属性执行
+//! 来源后，按原始顺序比较其余完整字段；研究判定沿用 P95 至少提升 1.5×，
+//! 或实际评分候选至少减少 50%。
 //!
 //! ## 数据与计时协议
 //! - 默认每个维度 20K 节点，可用 `TDB_PIPELINE_GATE_NODES` 调整。
@@ -16,6 +17,9 @@
 #[path = "support/mod.rs"]
 mod support;
 
+#[path = "support/pipeline_results.rs"]
+mod pipeline_results;
+
 use serde::Serialize;
 use serde_json::json;
 use std::time::Instant;
@@ -23,7 +27,7 @@ use triviumdb::graph::budget::{BudgetExhaustionPolicy, TraversalBudget};
 use triviumdb::graph::reachability::ReachabilityDirection;
 use triviumdb::query::pipeline::{
     ExactRerank, Expand, NodeSet, PipelineBudget, PipelineContext, PipelineOperator,
-    PropertyLookup, SetOperation, combine_sets,
+    PropertyLookup, PropertyOrigin, SetOperation, combine_sets,
 };
 use triviumdb::storage::memtable::MemTable;
 
@@ -186,9 +190,15 @@ fn gate_family(
 ) -> GatePoint {
     let (baseline_p95_ms, baseline_output) = measure(baseline);
     let (optimized_p95_ms, optimized_output) = measure(optimized);
-    assert_eq!(
-        baseline_output, optimized_output,
-        "{family}/{dim} 结果不一致"
+    let optimized_origin = (family == "property_filter_rank").then(|| PropertyOrigin {
+        field: "active".into(),
+        value: json!(true),
+    });
+    pipeline_results::assert_matched_results(
+        &format!("{family}/{dim}"),
+        &baseline_output,
+        &optimized_output,
+        [None, optimized_origin],
     );
     let speedup = baseline_p95_ms / optimized_p95_ms.max(f64::EPSILON);
     let candidate_reduction = 1.0 - optimized_scored as f64 / baseline_scored.max(1) as f64;

@@ -143,12 +143,18 @@ fn ordered_model<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>
                         Some(duplicate) => {
                             if duplicate {
                                 assert!(
-                                    matches!(result, Err(TriviumError::NodeAlreadyExists(10))),
+                                    matches!(
+                                        result.as_ref().unwrap_err().underlying(),
+                                        TriviumError::NodeAlreadyExists(10)
+                                    ),
                                     "{context}: {result:?}"
                                 );
                             } else {
                                 assert!(
-                                    matches!(result, Err(TriviumError::NodeNotFound(10))),
+                                    matches!(
+                                        result.as_ref().unwrap_err().underlying(),
+                                        TriviumError::NodeNotFound(10)
+                                    ),
                                     "{context}: {result:?}"
                                 );
                             }
@@ -225,7 +231,10 @@ fn unrecoverable_json_is_rejected_before_wal() {
                 3 => tx.upsert_edge(10, 20, "deep", 1., deep),
                 _ => unreachable!(),
             }
-            assert!(matches!(tx.commit(), Err(TriviumError::InvalidInput(_))));
+            assert!(matches!(
+                tx.commit().unwrap_err().underlying(),
+                TriviumError::InvalidInput(_)
+            ));
             assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before_wal);
             assert_node(
                 &db,
@@ -297,10 +306,16 @@ fn shared_transaction_contract() {
                 let expected = &case["expected"];
                 match expected.get("error").and_then(Value::as_str) {
                     Some("NodeAlreadyExists") => {
-                        assert!(matches!(result, Err(TriviumError::NodeAlreadyExists(10))))
+                        assert!(matches!(
+                            result.as_ref().unwrap_err().underlying(),
+                            TriviumError::NodeAlreadyExists(10)
+                        ))
                     }
                     Some("NodeNotFound") => {
-                        assert!(matches!(result, Err(TriviumError::NodeNotFound(10))))
+                        assert!(matches!(
+                            result.as_ref().unwrap_err().underlying(),
+                            TriviumError::NodeNotFound(10)
+                        ))
                     }
                     Some(other) => panic!("未知事务契约错误：{other}"),
                     None => assert_eq!(
@@ -432,8 +447,10 @@ fn recreation_updates_graph_text_and_unique_indexes() {
                         .is_empty()
                 );
                 assert!(matches!(
-                    db.insert(&vector([1., 0., 0., 0.]), json!({"key":"final"})),
-                    Err(TriviumError::UniqueConstraintViolation { .. })
+                    db.insert(&vector([1., 0., 0., 0.]), json!({"key":"final"}))
+                        .unwrap_err()
+                        .underlying(),
+                    TriviumError::UniqueConstraintViolation { .. }
                 ));
             }
             db.close().unwrap();
@@ -468,8 +485,8 @@ fn rejected_batch_does_not_consume_automatic_ids() {
         tx.insert_with_id(10, &[0., 1., 0., 0.], json!({"state":"A"}));
         tx.insert_with_id(10, &[0., 0., 1., 0.], json!({"state":"B"}));
         assert!(matches!(
-            tx.commit(),
-            Err(TriviumError::NodeAlreadyExists(10))
+            tx.commit().unwrap_err().underlying(),
+            TriviumError::NodeAlreadyExists(10)
         ));
         assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
         assert_eq!(db.node_count().unwrap(), 1);

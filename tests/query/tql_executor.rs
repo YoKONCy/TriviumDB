@@ -261,13 +261,19 @@ fn cooperative_cancellation在全表扫描前和扫描中fail_closed() {
     let error = db
         .tql_with_control("MATCH (n) RETURN n", control)
         .unwrap_err();
-    assert!(matches!(error, triviumdb::TriviumError::QueryCancelled));
+    assert!(matches!(
+        error.underlying(),
+        triviumdb::TriviumError::QueryCancelled
+    ));
 
     let expired = QueryControl::with_deadline(std::time::Instant::now());
     let error = db
         .tql_with_control("FIND {missing: true} RETURN *", expired)
         .unwrap_err();
-    assert!(matches!(error, triviumdb::TriviumError::QueryCancelled));
+    assert!(matches!(
+        error.underlying(),
+        triviumdb::TriviumError::QueryDeadlineExceeded
+    ));
     cleanup(&path);
 }
 
@@ -542,7 +548,7 @@ fn 显式LIMIT可覆盖配置行上限但OFFSET仍受内存硬上限() {
 
     let overflow = db.tql_nodes("MATCH (n) RETURN n").unwrap_err();
     assert!(matches!(
-        overflow,
+        overflow.underlying(),
         triviumdb::TriviumError::QueryRowBudgetExceeded { budget: 2 }
     ));
     let rows = db.tql_nodes("MATCH (n) RETURN n LIMIT 3").unwrap();
@@ -554,7 +560,7 @@ fn 显式LIMIT可覆盖配置行上限但OFFSET仍受内存硬上限() {
         .tql_nodes("MATCH (n) RETURN n LIMIT 2 OFFSET 10000")
         .unwrap_err();
     assert!(matches!(
-        memory_error,
+        memory_error.underlying(),
         triviumdb::TriviumError::QueryRowBudgetExceeded { .. }
     ));
 
@@ -587,14 +593,14 @@ fn Break仅允许普通查询返回部分结果() {
         .tql_values("MATCH (n) RETURN count(*) AS total")
         .unwrap_err();
     assert!(matches!(
-        aggregate_error,
+        aggregate_error.underlying(),
         triviumdb::TriviumError::QueryRowBudgetExceeded { budget: 2 }
     ));
     let ordered_error = db
         .tql_nodes("MATCH (n) RETURN n ORDER BY n.kind")
         .unwrap_err();
     assert!(matches!(
-        ordered_error,
+        ordered_error.underlying(),
         triviumdb::TriviumError::QueryRowBudgetExceeded { budget: 2 }
     ));
 

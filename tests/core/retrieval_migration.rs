@@ -67,8 +67,8 @@ fn 汉明检索各入口保持完整整数位模式及固定分数() {
                     .unwrap();
                 assert_eq!(rows[0].values().next().unwrap().id, 1);
                 assert!(matches!(
-                    db.build_quiver_index(None),
-                    Err(TriviumError::InvalidInput(_))
+                    db.build_quiver_index(None).unwrap_err().underlying(),
+                    TriviumError::InvalidInput(_)
                 ));
                 assert!(db.prepare_auto_quiver_build().unwrap().is_none());
                 let (result, ctx) = db
@@ -241,7 +241,7 @@ fn 迁移拒绝已有或残留目标且完整保留原文件组() {
         drop(target_db);
         let before = files(&target_root.0);
         assert!(
-            matches!(source.migrate_to(&target,2),Err(TriviumError::Io(error)) if error.kind()==std::io::ErrorKind::AlreadyExists)
+            matches!(source.migrate_to(&target,2).err().unwrap().underlying(),TriviumError::Io(error) if error.kind()==std::io::ErrorKind::AlreadyExists)
         );
         assert_eq!(files(&target_root.0), before);
         let new_root = TestDir::new("migration_orphan");
@@ -249,7 +249,7 @@ fn 迁移拒绝已有或残留目标且完整保留原文件组() {
         std::fs::write(format!("{new_path}.wal"), b"existing recovery evidence").unwrap();
         let before = files(&new_root.0);
         assert!(
-            matches!(source.migrate_to(&new_path,2),Err(TriviumError::Io(error)) if error.kind()==std::io::ErrorKind::AlreadyExists)
+            matches!(source.migrate_to(&new_path,2).err().unwrap().underlying(),TriviumError::Io(error) if error.kind()==std::io::ErrorKind::AlreadyExists)
         );
         assert_eq!(files(&new_root.0), before);
         source.close().unwrap();
@@ -287,7 +287,7 @@ fn 迁移按文件系统规则拒绝已有目标别名并保持多代数据可�
         let result = source.migrate_to(&requested, 3);
         if aliases_existing {
             assert!(
-                matches!(result, Err(TriviumError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+                matches!(result.err().unwrap().underlying(), TriviumError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists)
             );
             assert_eq!(files(&target_root.0), before);
         } else {

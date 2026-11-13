@@ -1,0 +1,106 @@
+{
+  "analyzer_id": "tdb-text-ascii-cjk2-v1",
+  "documents": [
+    {
+      "source_id":"notes://latin", "source_revision":"v1", "parser_id":"plain-v1",
+      "content":"Alpha, beta alpha x beta\r\nalpha beta beta\n",
+      "root":{"id":"1000","vector":[1,0]},
+      "blocks":[
+        {"key":"first","kind":"first_line","start_byte":0,"end_byte":24,"node":{"id":"1001","vector":[1,0]}},
+        {"key":"second","kind":"second_line","start_byte":26,"end_byte":41,"node":{"id":"1002","vector":[0,1]}}
+      ]
+    },
+    {
+      "source_id":"notes://unicode", "source_revision":"v1", "parser_id":"plain-v1",
+      "content":"İX Kelvin\r\n甲乙丙 甲乙 乙丙\n",
+      "root":{"id":"2000","vector":[0,1]},
+      "blocks":[
+        {"key":"latin","kind":"first_line","start_byte":0,"end_byte":12,"node":{"id":"2001","vector":[1,0]}},
+        {"key":"cjk","kind":"second_line","start_byte":14,"end_byte":37,"node":{"id":"2002","vector":[0,1]}}
+      ]
+    }
+  ],
+  "hashes":["sha256:399bf66ae7ff3ef767b4c39889cac14e842909e13e28d63e2faf09fc039eb5f5","sha256:09303baea24ff48e2c3652cfcee3323f5aa026a9a13a48a7e335117c019c843f"],
+  "cases":[
+    {
+      "name":"phrase_punctuation",
+      "query":{"text":"alpha beta","match_mode":"phrase","document_ids":["1000"]},
+      "node_id":"1000",
+      "matches":[
+        {"start_byte":0,"end_byte":11,"text":"Alpha, beta","line":1,"column":1,"end_line":1,"end_column":12,"terms":[{"term":"alpha","position":0,"start_byte":0,"end_byte":5},{"term":"beta","position":1,"start_byte":7,"end_byte":11}]},
+        {"start_byte":26,"end_byte":36,"text":"alpha beta","line":2,"column":1,"end_line":2,"end_column":11,"terms":[{"term":"alpha","position":5,"start_byte":26,"end_byte":31},{"term":"beta","position":6,"start_byte":32,"end_byte":36}]}
+      ]
+    },
+    {
+      "name":"near_shortest_per_start",
+      "query":{"text":"alpha beta","match_mode":"ordered_near","max_gap":1,"document_ids":["1000"]},
+      "node_id":"1000",
+      "matches":[
+        {"start_byte":0,"end_byte":11,"text":"Alpha, beta","line":1,"column":1,"end_line":1,"end_column":12,"terms":[{"term":"alpha","position":0,"start_byte":0,"end_byte":5},{"term":"beta","position":1,"start_byte":7,"end_byte":11}]},
+        {"start_byte":12,"end_byte":24,"text":"alpha x beta","line":1,"column":13,"end_line":1,"end_column":25,"terms":[{"term":"alpha","position":2,"start_byte":12,"end_byte":17},{"term":"beta","position":4,"start_byte":20,"end_byte":24}]},
+        {"start_byte":26,"end_byte":36,"text":"alpha beta","line":2,"column":1,"end_line":2,"end_column":11,"terms":[{"term":"alpha","position":5,"start_byte":26,"end_byte":31},{"term":"beta","position":6,"start_byte":32,"end_byte":36}]}
+      ]
+    },
+    {
+      "name":"repeated_terms_distinct_occurrences",
+      "query":{"text":"beta beta","match_mode":"phrase","document_ids":["1000"]},
+      "node_id":"1000",
+      "matches":[{"start_byte":32,"end_byte":41,"text":"beta beta","line":2,"column":7,"end_line":2,"end_column":16,"terms":[{"term":"beta","position":6,"start_byte":32,"end_byte":36},{"term":"beta","position":7,"start_byte":37,"end_byte":41}]}]
+    },
+    {
+      "name":"document_crosses_newline",
+      "query":{"text":"beta alpha","match_mode":"phrase","document_ids":["1000"]},
+      "node_id":"1000",
+      "matches":[
+        {"start_byte":7,"end_byte":17,"text":"beta alpha","line":1,"column":8,"end_line":1,"end_column":18,"terms":[{"term":"beta","position":1,"start_byte":7,"end_byte":11},{"term":"alpha","position":2,"start_byte":12,"end_byte":17}]},
+        {"start_byte":20,"end_byte":31,"text":"beta\r\nalpha","line":1,"column":21,"end_line":2,"end_column":6,"terms":[{"term":"beta","position":4,"start_byte":20,"end_byte":24},{"term":"alpha","position":5,"start_byte":26,"end_byte":31}]}
+      ]
+    },
+    {
+      "name":"block_uses_source_bytes_and_local_positions",
+      "query":{"text":"alpha beta","level":"block","match_mode":"phrase","document_ids":["1000"],"kinds":["second_line"]},
+      "node_id":"1002",
+      "matches":[{"start_byte":26,"end_byte":36,"text":"alpha beta","line":2,"column":1,"end_line":2,"end_column":11,"terms":[{"term":"alpha","position":0,"start_byte":26,"end_byte":31},{"term":"beta","position":1,"start_byte":32,"end_byte":36}]}]
+    },
+    {
+      "name":"unicode_lowercase_source_mapping",
+      "query":{"text":"i x","match_mode":"phrase","document_ids":["2000"]},
+      "node_id":"2000",
+      "matches":[{"start_byte":0,"end_byte":3,"text":"İX","line":1,"column":1,"end_line":1,"end_column":3,"terms":[{"term":"i","position":0,"start_byte":0,"end_byte":2},{"term":"x","position":1,"start_byte":2,"end_byte":3}]}]
+    },
+    {
+      "name":"unicode_lowercase_width",
+      "query":{"text":"KELVIN","match_mode":"phrase","document_ids":["2000"]},
+      "node_id":"2000",
+      "matches":[{"start_byte":4,"end_byte":12,"text":"Kelvin","line":1,"column":4,"end_line":1,"end_column":10,"terms":[{"term":"kelvin","position":2,"start_byte":4,"end_byte":12}]}]
+    },
+    {
+      "name":"cjk_overlapping_chain",
+      "query":{"text":"甲乙丙","match_mode":"phrase","document_ids":["2000"]},
+      "node_id":"2000",
+      "matches":[{"start_byte":14,"end_byte":23,"text":"甲乙丙","line":2,"column":1,"end_line":2,"end_column":4,"terms":[{"term":"甲乙","position":3,"start_byte":14,"end_byte":20},{"term":"乙丙","position":4,"start_byte":17,"end_byte":23}]}]
+    },
+    {
+      "name":"cjk_separate_occurrences",
+      "query":{"text":"甲乙 乙丙","match_mode":"phrase","document_ids":["2000"]},
+      "node_id":"2000",
+      "matches":[{"start_byte":24,"end_byte":37,"text":"甲乙 乙丙","line":2,"column":5,"end_line":2,"end_column":10,"terms":[{"term":"甲乙","position":5,"start_byte":24,"end_byte":30},{"term":"乙丙","position":6,"start_byte":31,"end_byte":37}]}]
+    },
+    {
+      "name":"block_stops_at_its_own_boundary",
+      "query":{"text":"beta alpha","level":"block","match_mode":"phrase","document_ids":["1000"]},
+      "node_id":"1001",
+      "matches":[{"start_byte":7,"end_byte":17,"text":"beta alpha","line":1,"column":8,"end_line":1,"end_column":18,"terms":[{"term":"beta","position":1,"start_byte":7,"end_byte":11},{"term":"alpha","position":2,"start_byte":12,"end_byte":17}]}]
+    },
+    {
+      "name":"any_deduplicates_query_terms",
+      "query":{"text":"ALPHA alpha","match_mode":"any","document_ids":["1000"]},
+      "node_id":"1000",
+      "matches":[
+        {"start_byte":0,"end_byte":5,"text":"Alpha","line":1,"column":1,"end_line":1,"end_column":6,"terms":[{"term":"alpha","position":0,"start_byte":0,"end_byte":5}]},
+        {"start_byte":12,"end_byte":17,"text":"alpha","line":1,"column":13,"end_line":1,"end_column":18,"terms":[{"term":"alpha","position":2,"start_byte":12,"end_byte":17}]},
+        {"start_byte":26,"end_byte":31,"text":"alpha","line":2,"column":1,"end_line":2,"end_column":6,"terms":[{"term":"alpha","position":5,"start_byte":26,"end_byte":31}]}
+      ]
+    }
+  ]
+}

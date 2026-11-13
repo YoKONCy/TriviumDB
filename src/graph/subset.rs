@@ -58,6 +58,8 @@ pub fn subset_pagerank<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<SubsetPageRankResult> {
+    let control = crate::request::control().unwrap_or_default();
+    crate::graph::budget::check_control(&control)?;
     if !(0.0..1.0).contains(&config.damping)
         || !config.tolerance.is_finite()
         || config.tolerance <= 0.0
@@ -81,8 +83,10 @@ pub fn subset_pagerank<T: VectorType>(
     let mut outgoing = BTreeMap::<NodeId, Vec<NodeId>>::new();
     let mut examined_edges = 0usize;
     for &source in &ids {
+        crate::graph::budget::check_control(&control)?;
         let mut targets = Vec::new();
         for edge in mt.get_edges(source).unwrap_or_default() {
+            crate::graph::budget::check_control(&control)?;
             examined_edges = examined_edges.saturating_add(1);
             if examined_edges > max_examined_edges {
                 return Err(TriviumError::QueryExecution(
@@ -108,6 +112,9 @@ pub fn subset_pagerank<T: VectorType>(
     let mut iterations = 0usize;
     let mut converged = false;
     for iteration in 1..=config.max_iterations {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::GraphAlgorithmIteration);
+        crate::graph::budget::check_control(&control)?;
         let dangling = ids
             .iter()
             .filter(|id| outgoing[id].is_empty())
@@ -116,12 +123,14 @@ pub fn subset_pagerank<T: VectorType>(
         let base = teleport + config.damping * dangling / n as f64;
         let mut next = BTreeMap::from_iter(ids.iter().map(|&id| (id, base)));
         for &source in &ids {
+            crate::graph::budget::check_control(&control)?;
             let targets = &outgoing[&source];
             if targets.is_empty() {
                 continue;
             }
             let contribution = config.damping * scores[&source] / targets.len() as f64;
             for target in targets {
+                crate::graph::budget::check_control(&control)?;
                 let Some(score) = next.get_mut(target) else {
                     return Err(TriviumError::QueryExecution(
                         "PageRank 诱导子图目标映射不一致 (PageRank induced-subgraph target mapping is inconsistent)".into(),
@@ -161,6 +170,8 @@ pub fn subset_pagerank_parallel<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<SubsetPageRankResult> {
+    let control = crate::request::control().unwrap_or_default();
+    crate::graph::budget::check_control(&control)?;
     use rayon::prelude::*;
     if !(0.0..1.0).contains(&config.damping)
         || !config.tolerance.is_finite()
@@ -189,6 +200,7 @@ pub fn subset_pagerank_parallel<T: VectorType>(
     let scanned = ids
         .par_iter()
         .map(|&source| {
+            crate::graph::budget::check_control(&control)?;
             let edges = mt.get_edges(source).unwrap_or_default();
             let mut targets = edges
                 .iter()
@@ -202,9 +214,9 @@ pub fn subset_pagerank_parallel<T: VectorType>(
                 .collect::<Vec<_>>();
             targets.sort_unstable();
             targets.dedup();
-            (targets, edges.len())
+            Ok((targets, edges.len()))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let examined_edges = scanned.iter().map(|(_, n)| *n).sum::<usize>();
     if examined_edges > max_examined_edges {
         return Err(TriviumError::QueryExecution(
@@ -214,7 +226,9 @@ pub fn subset_pagerank_parallel<T: VectorType>(
     let n = ids.len();
     let mut incoming = vec![Vec::<usize>::new(); n];
     for (source, (targets, _)) in scanned.iter().enumerate() {
+        crate::graph::budget::check_control(&control)?;
         for &target in targets {
+            crate::graph::budget::check_control(&control)?;
             incoming[target].push(source);
         }
     }
@@ -225,6 +239,9 @@ pub fn subset_pagerank_parallel<T: VectorType>(
     let mut iterations = 0;
     let mut converged = false;
     for iteration in 1..=config.max_iterations {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::GraphAlgorithmIteration);
+        crate::graph::budget::check_control(&control)?;
         let dangling = (0..n)
             .filter(|&i| scanned[i].0.is_empty())
             .map(|i| scores[i])
@@ -233,11 +250,13 @@ pub fn subset_pagerank_parallel<T: VectorType>(
         let next = incoming
             .par_iter()
             .map(|sources| {
-                sources.iter().fold(base, |sum, &source| {
-                    sum + config.damping * scores[source] / scanned[source].0.len() as f64
+                crate::graph::budget::check_control(&control)?;
+                sources.iter().try_fold(base, |sum, &source| {
+                    control.check()?;
+                    Ok(sum + config.damping * scores[source] / scanned[source].0.len() as f64)
                 })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         residual_l1 = next
             .par_iter()
             .zip(&scores)
@@ -276,12 +295,16 @@ pub fn subset_degree_centrality<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<(Vec<SubsetDegreeCentrality>, usize)> {
+    let control = crate::request::control().unwrap_or_default();
+    crate::graph::budget::check_control(&control)?;
     let mut in_degrees = BTreeMap::from_iter(nodes.iter().map(|&id| (id, 0usize)));
     let mut out_degrees = BTreeMap::from_iter(nodes.iter().map(|&id| (id, 0usize)));
     let mut examined = 0usize;
     for &source in nodes {
+        crate::graph::budget::check_control(&control)?;
         let mut targets = BTreeSet::new();
         for edge in mt.get_edges(source).unwrap_or_default() {
+            crate::graph::budget::check_control(&control)?;
             examined = examined.saturating_add(1);
             if examined > max_examined_edges {
                 return Err(TriviumError::QueryExecution(
@@ -297,6 +320,7 @@ pub fn subset_degree_centrality<T: VectorType>(
         }
         out_degrees.insert(source, targets.len());
         for target in targets {
+            crate::graph::budget::check_control(&control)?;
             *in_degrees.get_mut(&target).expect("目标属于诱导子图") += 1;
         }
     }
@@ -331,6 +355,8 @@ pub fn subset_degree_centrality_parallel<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<(Vec<SubsetDegreeCentrality>, usize)> {
+    let control = crate::request::control().unwrap_or_default();
+    crate::graph::budget::check_control(&control)?;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -346,6 +372,7 @@ pub fn subset_degree_centrality_parallel<T: VectorType>(
     let scanned = ids
         .par_iter()
         .map(|&source| {
+            crate::graph::budget::check_control(&control)?;
             let edges = mt.get_edges(source).unwrap_or_default();
             let mut targets = edges
                 .iter()
@@ -358,11 +385,12 @@ pub fn subset_degree_centrality_parallel<T: VectorType>(
             targets.sort_unstable();
             targets.dedup();
             for target in &targets {
+                crate::graph::budget::check_control(&control)?;
                 in_degrees[slots[target]].fetch_add(1, Ordering::Relaxed);
             }
-            (targets.len(), edges.len())
+            Ok((targets.len(), edges.len()))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let examined = scanned
         .iter()
         .fold(0usize, |total, (_, count)| total.saturating_add(*count));
@@ -403,10 +431,14 @@ pub fn subset_wcc<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<(Vec<Vec<NodeId>>, usize)> {
+    let control = crate::request::control().unwrap_or_default();
+    crate::graph::budget::check_control(&control)?;
     let mut adjacency = BTreeMap::from_iter(nodes.iter().map(|&id| (id, BTreeSet::new())));
     let mut examined = 0usize;
     for &source in nodes {
+        crate::graph::budget::check_control(&control)?;
         for edge in mt.get_edges(source).unwrap_or_default() {
+            crate::graph::budget::check_control(&control)?;
             examined = examined.saturating_add(1);
             if examined > max_examined_edges {
                 return Err(TriviumError::QueryExecution(
@@ -430,12 +462,15 @@ pub fn subset_wcc<T: VectorType>(
     let mut unseen = nodes.clone();
     let mut components = Vec::new();
     while let Some(&start) = unseen.first() {
+        crate::graph::budget::check_control(&control)?;
         unseen.remove(&start);
         let mut queue = VecDeque::from([start]);
         let mut component = Vec::new();
         while let Some(current) = queue.pop_front() {
+            crate::graph::budget::check_control(&control)?;
             component.push(current);
             for &neighbor in &adjacency[&current] {
+                crate::graph::budget::check_control(&control)?;
                 if unseen.remove(&neighbor) {
                     queue.push_back(neighbor);
                 }
@@ -454,6 +489,8 @@ pub fn subset_wcc_parallel<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<(Vec<Vec<NodeId>>, usize)> {
+    let control = crate::request::control().unwrap_or_default();
+    crate::graph::budget::check_control(&control)?;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -466,6 +503,7 @@ pub fn subset_wcc_parallel<T: VectorType>(
     let scanned = ids
         .par_iter()
         .map(|&source| {
+            crate::graph::budget::check_control(&control)?;
             let edges = mt.get_edges(source).unwrap_or_default();
             let source_slot = slots[&source];
             let mut targets = edges
@@ -478,9 +516,9 @@ pub fn subset_wcc_parallel<T: VectorType>(
                 .collect::<Vec<_>>();
             targets.sort_unstable();
             targets.dedup();
-            (source_slot, targets, edges.len())
+            Ok((source_slot, targets, edges.len()))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let examined = scanned.iter().map(|(_, _, count)| *count).sum::<usize>();
     if examined > max_examined_edges {
         return Err(TriviumError::QueryExecution(
@@ -498,32 +536,37 @@ pub fn subset_wcc_parallel<T: VectorType>(
             slot = parent;
         }
     };
-    scanned.par_iter().for_each(|(source, targets, _)| {
-        for &target in targets {
-            loop {
-                let source_root = find_root(*source);
-                let target_root = find_root(target);
-                if source_root == target_root {
-                    break;
-                }
-                let (lower, higher) = if source_root < target_root {
-                    (source_root, target_root)
-                } else {
-                    (target_root, source_root)
-                };
-                if parents[higher]
-                    .compare_exchange(higher, lower, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    break;
+    scanned
+        .par_iter()
+        .try_for_each(|(source, targets, _)| -> Result<()> {
+            for &target in targets {
+                crate::graph::budget::check_control(&control)?;
+                loop {
+                    let source_root = find_root(*source);
+                    let target_root = find_root(target);
+                    if source_root == target_root {
+                        break;
+                    }
+                    let (lower, higher) = if source_root < target_root {
+                        (source_root, target_root)
+                    } else {
+                        (target_root, source_root)
+                    };
+                    if parents[higher]
+                        .compare_exchange(higher, lower, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        break;
+                    }
                 }
             }
-        }
-    });
+            Ok(())
+        })?;
 
     // 最小 slot 总是根，因而线程调度不会改变 component id 或输出顺序。
     let mut grouped = BTreeMap::<usize, Vec<NodeId>>::new();
     for (slot, id) in ids.into_iter().enumerate() {
+        crate::graph::budget::check_control(&control)?;
         grouped.entry(find_root(slot)).or_default().push(id);
     }
     let mut components = grouped.into_values().collect::<Vec<_>>();
@@ -546,6 +589,8 @@ pub fn subset_betweenness<T: VectorType>(
     sample_size: Option<usize>,
     max_examined_edges: usize,
 ) -> Result<SubsetBetweennessResult> {
+    let control = crate::request::control().unwrap_or_default();
+    crate::graph::budget::check_control(&control)?;
     let ids = nodes.iter().copied().collect::<Vec<_>>();
     let source_count = sample_size.unwrap_or(ids.len()).min(ids.len());
     if sample_size == Some(0) {
@@ -556,8 +601,10 @@ pub fn subset_betweenness<T: VectorType>(
     let mut adjacency = BTreeMap::<NodeId, Vec<NodeId>>::new();
     let mut scanned_edges = 0usize;
     for &source in &ids {
+        crate::graph::budget::check_control(&control)?;
         let mut targets = BTreeSet::new();
         for edge in mt.get_edges(source).unwrap_or_default() {
+            crate::graph::budget::check_control(&control)?;
             scanned_edges = scanned_edges.saturating_add(1);
             if nodes.contains(&edge.target_id)
                 && label_filter.is_none_or(|label| edge.label == label)
@@ -575,6 +622,7 @@ pub fn subset_betweenness<T: VectorType>(
     }
     let mut centrality = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
     for &source in ids.iter().take(source_count) {
+        crate::graph::budget::check_control(&control)?;
         let mut stack = Vec::new();
         let mut predecessors = BTreeMap::<NodeId, Vec<NodeId>>::new();
         let mut sigma = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
@@ -583,8 +631,10 @@ pub fn subset_betweenness<T: VectorType>(
         distance.insert(source, 0);
         let mut queue = VecDeque::from([source]);
         while let Some(current) = queue.pop_front() {
+            crate::graph::budget::check_control(&control)?;
             stack.push(current);
             for &target in &adjacency[&current] {
+                crate::graph::budget::check_control(&control)?;
                 examined = examined.saturating_add(1);
                 if examined > max_examined_edges {
                     return Err(TriviumError::QueryExecution(
@@ -604,8 +654,10 @@ pub fn subset_betweenness<T: VectorType>(
         }
         let mut delta = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
         while let Some(target) = stack.pop() {
+            crate::graph::budget::check_control(&control)?;
             if sigma[&target] > 0.0 {
                 for &predecessor in predecessors.get(&target).unwrap_or(&Vec::new()) {
+                    crate::graph::budget::check_control(&control)?;
                     let contribution =
                         sigma[&predecessor] / sigma[&target] * (1.0 + delta[&target]);
                     *delta.get_mut(&predecessor).expect("前驱属于子图") += contribution;
@@ -655,6 +707,8 @@ pub fn subset_betweenness_parallel<T: VectorType>(
     sample_size: Option<usize>,
     max_examined_edges: usize,
 ) -> Result<SubsetBetweennessResult> {
+    let control = crate::request::control().unwrap_or_default();
+    crate::graph::budget::check_control(&control)?;
     use rayon::prelude::*;
     let ids = nodes.iter().copied().collect::<Vec<_>>();
     let source_count = sample_size.unwrap_or(ids.len()).min(ids.len());
@@ -666,6 +720,7 @@ pub fn subset_betweenness_parallel<T: VectorType>(
     let scanned = ids
         .par_iter()
         .map(|&source| {
+            crate::graph::budget::check_control(&control)?;
             let edges = mt.get_edges(source).unwrap_or_default();
             let mut targets = edges
                 .iter()
@@ -677,9 +732,9 @@ pub fn subset_betweenness_parallel<T: VectorType>(
                 .collect::<Vec<_>>();
             targets.sort_unstable();
             targets.dedup();
-            (source, targets, edges.len())
+            Ok((source, targets, edges.len()))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let adjacency = scanned
         .iter()
         .map(|(id, targets, _)| (*id, targets.clone()))
@@ -703,8 +758,10 @@ pub fn subset_betweenness_parallel<T: VectorType>(
             distance.insert(source, 0);
             let mut queue = VecDeque::from([source]);
             while let Some(current) = queue.pop_front() {
+                crate::graph::budget::check_control(&control)?;
                 stack.push(current);
                 for &target in &adjacency[&current] {
+                    crate::graph::budget::check_control(&control)?;
                     if distance[&target] < 0 {
                         distance.insert(target, distance[&current] + 1);
                         queue.push_back(target);
@@ -717,6 +774,7 @@ pub fn subset_betweenness_parallel<T: VectorType>(
             }
             let mut delta = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
             while let Some(target) = stack.pop() {
+                crate::graph::budget::check_control(&control)?;
                 if sigma[&target] > 0.0 {
                     for &predecessor in predecessors.get(&target).map(Vec::as_slice).unwrap_or(&[])
                     {
@@ -727,12 +785,14 @@ pub fn subset_betweenness_parallel<T: VectorType>(
                 }
             }
             delta.insert(source, 0.0);
-            delta
+            Ok(delta)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let mut centrality = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
     for partial in partials {
+        crate::graph::budget::check_control(&control)?;
         for (&id, &value) in &partial {
+            crate::graph::budget::check_control(&control)?;
             *centrality.get_mut(&id).expect("节点属于子图") += value;
         }
     }
@@ -786,6 +846,8 @@ pub fn deterministic_label_propagation<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<LabelPropagationResult> {
+    let control = crate::request::control().unwrap_or_default();
+    crate::graph::budget::check_control(&control)?;
     if config.max_iterations == 0 || config.min_community_size == 0 {
         return Err(TriviumError::QueryExecution(
             "标签传播迭代次数和最小社区大小必须大于 0 (Label propagation limits must be positive)"
@@ -795,8 +857,10 @@ pub fn deterministic_label_propagation<T: VectorType>(
     let mut adjacency = BTreeMap::<NodeId, Vec<(NodeId, f64)>>::new();
     let mut examined = 0usize;
     for &source in nodes {
+        crate::graph::budget::check_control(&control)?;
         let mut targets = BTreeMap::<NodeId, f64>::new();
         for edge in mt.get_edges(source).unwrap_or_default() {
+            crate::graph::budget::check_control(&control)?;
             examined = examined.saturating_add(1);
             if examined > max_examined_edges {
                 return Err(TriviumError::QueryExecution(
@@ -817,7 +881,9 @@ pub fn deterministic_label_propagation<T: VectorType>(
     // 社区检测使用无向投影；有向边的两个端点互为邻居，相反方向的平行边权会累加。
     let directed = adjacency.clone();
     for (&source, targets) in &directed {
+        crate::graph::budget::check_control(&control)?;
         for &(target, weight) in targets {
+            crate::graph::budget::check_control(&control)?;
             let reverse = adjacency.entry(target).or_default();
             if let Some((_, existing)) =
                 reverse.iter_mut().find(|(neighbor, _)| *neighbor == source)
@@ -829,17 +895,23 @@ pub fn deterministic_label_propagation<T: VectorType>(
         }
     }
     for targets in adjacency.values_mut() {
+        crate::graph::budget::check_control(&control)?;
         targets.sort_by_key(|(target, _)| *target);
     }
     let mut labels = BTreeMap::from_iter(nodes.iter().map(|&id| (id, id)));
     let mut iterations = 0usize;
     let mut converged = false;
     for iteration in 1..=config.max_iterations {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::GraphAlgorithmIteration);
+        crate::graph::budget::check_control(&control)?;
         let mut next = labels.clone();
         let mut changed = false;
         for &node in nodes {
+            crate::graph::budget::check_control(&control)?;
             let mut votes = BTreeMap::<NodeId, f64>::new();
             for &(neighbor, weight) in &adjacency[&node] {
+                crate::graph::budget::check_control(&control)?;
                 *votes.entry(labels[&neighbor]).or_insert(0.0) += weight;
             }
             let best = votes.into_iter().max_by(|left, right| {
@@ -863,6 +935,7 @@ pub fn deterministic_label_propagation<T: VectorType>(
     }
     let mut sizes = BTreeMap::<NodeId, usize>::new();
     for &label in labels.values() {
+        crate::graph::budget::check_control(&control)?;
         *sizes.entry(label).or_insert(0) += 1;
     }
     labels.retain(|_, label| sizes[label] >= config.min_community_size);
@@ -891,6 +964,8 @@ pub fn deterministic_label_propagation_parallel<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<LabelPropagationResult> {
+    let control = crate::request::control().unwrap_or_default();
+    crate::graph::budget::check_control(&control)?;
     use rayon::prelude::*;
     if config.max_iterations == 0 || config.min_community_size == 0 {
         return Err(TriviumError::QueryExecution(
@@ -907,9 +982,11 @@ pub fn deterministic_label_propagation_parallel<T: VectorType>(
     let scanned = ids
         .par_iter()
         .map(|&source| {
+            crate::graph::budget::check_control(&control)?;
             let edges = mt.get_edges(source).unwrap_or_default();
             let mut targets = BTreeMap::<usize, f64>::new();
             for edge in edges {
+                crate::graph::budget::check_control(&control)?;
                 if let Some(&target) = slots.get(&edge.target_id)
                     && edge.weight.is_finite()
                     && edge.weight > 0.0
@@ -918,9 +995,9 @@ pub fn deterministic_label_propagation_parallel<T: VectorType>(
                     *targets.entry(target).or_insert(0.0) += edge.weight as f64;
                 }
             }
-            (targets, edges.len())
+            Ok((targets, edges.len()))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let examined = scanned.iter().map(|(_, n)| *n).sum::<usize>();
     if examined > max_examined_edges {
         return Err(TriviumError::QueryExecution(
@@ -932,7 +1009,9 @@ pub fn deterministic_label_propagation_parallel<T: VectorType>(
         .map(|(targets, _)| targets.clone())
         .collect::<Vec<_>>();
     for (source, (targets, _)) in scanned.iter().enumerate() {
+        crate::graph::budget::check_control(&control)?;
         for (&target, &weight) in targets {
+            crate::graph::budget::check_control(&control)?;
             *adjacency[target].entry(source).or_insert(0.0) += weight;
         }
     }
@@ -940,19 +1019,23 @@ pub fn deterministic_label_propagation_parallel<T: VectorType>(
     let mut iterations = 0;
     let mut converged = false;
     for iteration in 1..=config.max_iterations {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::GraphAlgorithmIteration);
+        crate::graph::budget::check_control(&control)?;
         let next = (0..ids.len())
             .into_par_iter()
             .map(|node| {
                 let mut votes = BTreeMap::<NodeId, f64>::new();
                 for (&neighbor, &weight) in &adjacency[node] {
+                    crate::graph::budget::check_control(&control)?;
                     *votes.entry(labels[neighbor]).or_insert(0.0) += weight;
                 }
-                votes
+                Ok(votes
                     .into_iter()
                     .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
-                    .map_or(labels[node], |(label, _)| label)
+                    .map_or(labels[node], |(label, _)| label))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let changed = next.par_iter().zip(&labels).any(|(a, b)| a != b);
         labels = next;
         iterations = iteration;
@@ -963,6 +1046,7 @@ pub fn deterministic_label_propagation_parallel<T: VectorType>(
     }
     let mut sizes = BTreeMap::<NodeId, usize>::new();
     for &label in &labels {
+        crate::graph::budget::check_control(&control)?;
         *sizes.entry(label).or_insert(0) += 1;
     }
     let valid = labels

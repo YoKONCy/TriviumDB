@@ -9,14 +9,20 @@ import shutil
 import tempfile
 
 import triviumdb
+from documents import run_documents
+from quiver_ssd import run_quiver_ssd
+from named_graphs import run_named_graphs
 from write_boundaries import run_write_boundaries
 from index_graph_boundaries import run_index_graph_boundaries
 from query_numeric_indexes import run_query_numeric_indexes
 from tql_semantics import run_tql_semantics
 from tql_boundaries import run_tql_boundaries
 from error_contracts import run_error_contract
+from request_admission import run_request_admission_contract
+from transaction_admission import run_transaction_admission_contract
 from console_contracts import run_console_contract
 from kernel_boundaries import run_kernel_boundaries
+from request_contexts import run_request_contexts
 
 
 def run_transaction_contract(root: str) -> None:
@@ -143,22 +149,27 @@ def run_lifecycle_contract(root: str) -> None:
         db.insert_with_id(case["later_node_id"], case["vector"], {})
         try:
             db.create_snapshot(snapshot, case["generation_id"])
-        except FileExistsError:
-            pass
+        except FileExistsError as error:
+            assert error.code == "TDB_SNAPSHOT_EXISTS"
+            assert error.write == {"phase": "validation", "outcome": "not_committed"}
         else:
             raise AssertionError("不得覆盖已有快照")
         assert triviumdb.verify_snapshot(snapshot, runtime)["node_count"] == 1
         assert triviumdb.restore_snapshot(snapshot, restored, runtime)["generation_id"] == case["generation_id"]
         try:
             triviumdb.restore_snapshot(snapshot, restored, runtime)
-        except FileExistsError:
-            pass
+        except FileExistsError as error:
+            assert error.code == "TDB_SNAPSHOT_EXISTS"
+            assert error.write == {"phase": "validation", "outcome": "not_committed"}
         else:
             raise AssertionError("不得覆盖已有恢复目标")
         reader = triviumdb.TriviumDB(os.path.join(restored, case["database_file"]),
             dim=case["dimension"], dtype=dtype, access_mode="immutable",
             memory_limit_mb=case["database_memory_limit_mb"], runtime=runtime)
         assert reader.get_payload(case["node_id"]) == case["original_payload"]
+        assert reader.all_node_ids() == [case["node_id"]]
+        assert reader.get(case["node_id"]).vector == case["vector"]
+        assert reader.get(case["node_id"]).edges == []
         assert case["later_node_id"] not in reader
         assert reader.close_timeout(case["close_timeout_ms"])
         assert triviumdb.verify_snapshot(restored, runtime)["node_count"] == 1
@@ -401,12 +412,18 @@ def run_search_boundaries(root: str) -> None:
 
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="triviumdb-python-public-api-") as root:
+        run_quiver_ssd(root)
+        run_documents(root)
+        run_named_graphs(root)
         run_search_boundaries(root)
         run_lifecycle_contract(root)
         run_resource_contract(root)
         run_shared_contract(root)
         run_error_contract(root)
+        run_request_admission_contract(root)
+        run_transaction_admission_contract(root)
         run_console_contract(root)
+        run_request_contexts(root)
         run_kernel_boundaries(root)
         run_transaction_contract(root)
         run_write_boundaries(root)
@@ -478,7 +495,7 @@ def main() -> None:
         ]
 
         storage = db.storage_info()
-        assert storage["database_format_current"] == 10
+        assert storage["database_format_current"] == 13
         assert storage["property_index_format"] == 8
         assert storage["node_count"] == 2
 

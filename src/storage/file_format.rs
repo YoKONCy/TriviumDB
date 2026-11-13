@@ -6,7 +6,7 @@
 
 use crate::VectorType;
 use crate::database::StorageMode;
-use crate::error::{Result, TriviumError};
+use crate::error::{Result, TriviumError, WriteErrorInfo, WriteOutcome, WritePhase};
 use crate::index::bq::BqSignature;
 use crate::node::{Edge, NodeId};
 use crate::storage::fs::robust_rename_and_sync;
@@ -18,11 +18,17 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
+#[cfg(test)]
+mod open_tests;
 mod publication;
 pub(crate) use publication::recover as recover_publication;
 
 /// 从已关闭的独占暂存库排他移动完整文件组；不产生硬链接，保留目标互斥锁。
-pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) -> Result<()> {
+pub(crate) fn publish_new_database<T: VectorType>(
+    source: &str,
+    target: &str,
+    write: &mut WriteErrorInfo,
+) -> Result<()> {
     validate_checkpoint_type::<T>(source, &vec_path_from_db(source), source)?;
     let generation = read_marker_generation(&flush_ok_path_from_db(source)).ok_or_else(|| {
         TriviumError::CorruptedFile(
@@ -37,6 +43,8 @@ pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) ->
     }
     let mut created = Vec::new();
     let mut committed = false;
+    write.phase = WritePhase::Publish;
+    write.outcome = WriteOutcome::Unknown;
     let result = (|| -> Result<()> {
         publication::begin(target, generation, StorageMode::Mmap, false)?;
         let suffixes = crate::storage::snapshot::generation_suffixes(source);
@@ -79,6 +87,9 @@ pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) ->
         crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationAfterCommit)?;
         crate::storage::fs::sync_parent_directory(Path::new(source))?;
         crate::storage::fs::sync_parent_directory(Path::new(target))?;
+        write.outcome = WriteOutcome::Committed;
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationCleanup)?;
         publication::cleanup(target)?;
         Ok(())
     })();
@@ -98,13 +109,14 @@ pub(crate) fn publish_new_database<T: VectorType>(source: &str, target: &str) ->
             publication::cleanup(target)?;
         }
         crate::storage::fs::sync_parent_directory(Path::new(target))?;
+        write.outcome = WriteOutcome::NotCommitted;
     }
     result
 }
 
 // ══════ 文件头常量 ══════
 const MAGIC: &[u8; 4] = b"TVDB";
-pub const CURRENT_VERSION: u16 = 10;
+pub const CURRENT_VERSION: u16 = 13;
 pub const MINIMUM_SUPPORTED_VERSION: u16 = 5;
 const LEGACY_HEADER_SIZE: u64 = 58;
 const HEADER_SIZE: u64 = 74;
@@ -114,7 +126,7 @@ const BQ_BLOCK_HEADER_SIZE: usize = 16;
 const UNIQUE_BLOCK_MAGIC: &[u8; 4] = b"TUQC";
 const UNIQUE_BLOCK_VERSION: u16 = 1;
 
-fn vector_dtype<T: VectorType>() -> Result<(u16, &'static str)> {
+pub(crate) fn vector_dtype<T: VectorType>() -> Result<(u16, &'static str)> {
     use std::any::TypeId;
     let id = TypeId::of::<T>();
     if id == TypeId::of::<f32>() {
@@ -408,33 +420,38 @@ fn validate_flush_marker(
     vec_path: &str,
     payload_path: &str,
 ) -> bool {
-    let marker_bytes = match std::fs::read(marker_path) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-    let marker = match decode_flush_marker(&marker_bytes) {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
+    validated_flush_marker(marker_path, tdb_path, vec_path, payload_path).is_some()
+}
+
+/// 返回本次打开已经完成完整校验的文件组身份，供后续索引绑定复用摘要。
+fn validated_flush_marker(
+    marker_path: &str,
+    tdb_path: &str,
+    vec_path: &str,
+    payload_path: &str,
+) -> Option<FlushMarker> {
+    let marker_bytes = std::fs::read(marker_path).ok()?;
+    let marker = decode_flush_marker(&marker_bytes).ok()?;
     let actual_tdb = std::fs::metadata(tdb_path).map(|m| m.len()).unwrap_or(0);
     let actual_vec = std::fs::metadata(vec_path).map(|m| m.len()).unwrap_or(0);
     if marker.tdb_size != actual_tdb || marker.vec_size != actual_vec {
-        return false;
+        return None;
     }
     if let Some(payload_size) = marker.payload_size
         && (std::fs::metadata(payload_path).map(|meta| meta.len()).ok() != Some(payload_size)
             || file_crc32(payload_path).ok() != marker.payload_crc32)
     {
-        return false;
+        return None;
     }
-    match (marker.tdb_crc32, marker.vec_crc32) {
+    let valid = match (marker.tdb_crc32, marker.vec_crc32) {
         (Some(tdb_crc), Some(vec_crc)) => {
             file_crc32(tdb_path).ok() == Some(tdb_crc)
                 && file_crc32_or_empty(vec_path).ok() == Some(vec_crc)
         }
         (None, None) => true,
         _ => false,
-    }
+    };
+    valid.then_some(marker)
 }
 
 /// 从字节切片中安全读取小端序整数（军工级：禁止裸 unwrap）
@@ -505,6 +522,8 @@ fn quiver_path_from_db(db_path: &str) -> String {
 
 pub(crate) fn file_crc32(path: impl AsRef<Path>) -> std::io::Result<u32> {
     use std::io::Read;
+    #[cfg(test)]
+    open_tests::record_checksum(path.as_ref());
     let mut reader = std::io::BufReader::new(File::open(path)?);
     let mut hasher = crc32fast::Hasher::new();
     let mut buffer = [0u8; 64 * 1024];
@@ -559,7 +578,11 @@ fn write_quiver_meta<T: VectorType>(memtable: &MemTable<T>, db_path: &str) -> st
     robust_rename_and_sync(Path::new(&tmp), Path::new(&path))
 }
 
-fn validate_quiver_meta<T: VectorType>(memtable: &MemTable<T>, db_path: &str) -> bool {
+fn validate_quiver_meta<T: VectorType>(
+    memtable: &MemTable<T>,
+    db_path: &str,
+    verified_checkpoint: Option<&FlushMarker>,
+) -> bool {
     use std::io::Read;
     let Ok(mut file) = File::open(quiver_meta_path_from_db(db_path)) else {
         return false;
@@ -576,15 +599,25 @@ fn validate_quiver_meta<T: VectorType>(memtable: &MemTable<T>, db_path: &str) ->
     let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4]));
     let dim = u32::from_le_bytes(bytes[40..44].try_into().unwrap_or([0; 4])) as usize;
     let quiver_crc = u32::from_le_bytes(bytes[44..48].try_into().unwrap_or([0; 4]));
-    let actual_quiver_crc = file_crc32(quiver_path_from_db(db_path)).unwrap_or(u32::MAX);
+    // 摘要只在同一次打开、文件租约保护的检查点加载中传递；旧标记与Rom各自完整校验。
+    let main_crc = || {
+        verified_checkpoint
+            .and_then(|marker| marker.tdb_crc32)
+            .or_else(|| file_crc32(db_path).ok())
+    };
+    let vector_crc = || {
+        verified_checkpoint
+            .and_then(|marker| marker.vec_crc32)
+            .or_else(|| file_crc32_or_empty(vec_path_from_db(db_path)).ok())
+    };
     version == 2
         && crc32fast::hash(&bytes[..56])
             == u32::from_le_bytes(bytes[56..60].try_into().unwrap_or([0; 4]))
-        && file_crc32(db_path).ok()
+        && main_crc()
             == Some(u32::from_le_bytes(
                 bytes[48..52].try_into().unwrap_or([0; 4]),
             ))
-        && file_crc32_or_empty(vec_path_from_db(db_path)).ok()
+        && vector_crc()
             == Some(u32::from_le_bytes(
                 bytes[52..56].try_into().unwrap_or([0; 4]),
             ))
@@ -602,7 +635,7 @@ fn validate_quiver_meta<T: VectorType>(memtable: &MemTable<T>, db_path: &str) ->
                 .unwrap_or(u64::MAX)
         && read_u64(32) == memtable.node_count() as u64
         && dim == memtable.dim()
-        && quiver_crc == actual_quiver_crc
+        && file_crc32(quiver_path_from_db(db_path)).ok() == Some(quiver_crc)
 }
 
 /// TextIndex 索引文件路径（.tdb → .tdb.text）
@@ -653,6 +686,19 @@ pub fn save<T: VectorType>(
     path: &str,
     mode: StorageMode,
 ) -> Result<()> {
+    let mut write = WriteErrorInfo {
+        transaction_consumed: None,
+        ..WriteErrorInfo::TRANSACTION_ADMISSION
+    };
+    save_with_write_info(memtable, path, mode, &mut write)
+}
+
+pub(crate) fn save_with_write_info<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    path: &str,
+    mode: StorageMode,
+    write: &mut WriteErrorInfo,
+) -> Result<()> {
     let runtime = memtable.resource_runtime().clone();
     let peak = memtable
         .estimated_memory_bytes()
@@ -667,7 +713,7 @@ pub fn save<T: VectorType>(
         runtime.reserve_workspace(peak)?
     };
     memtable.ensure_readable()?;
-    let result = save_inner(memtable, path, mode);
+    let result = save_inner(memtable, path, mode, write);
     if result.is_err() && memtable.vec_pool().recovery_required() {
         memtable.require_recovery();
     }
@@ -678,7 +724,22 @@ fn save_inner<T: VectorType>(
     memtable: &mut MemTable<T>,
     path: &str,
     mode: StorageMode,
+    write: &mut WriteErrorInfo,
 ) -> Result<()> {
+    if let Some(active) = &memtable.quiver_ssd
+        && memtable.quiver().is_none()
+        && memtable.active_vector_count() > 0
+    {
+        let limit = active.database_memory_limit;
+        let config = crate::index::quiver::QuIVerConfig::default();
+        let peak = memtable.quiver_build_peak_bytes(&config);
+        memtable.ensure_additional_memory(limit, peak)?;
+        let runtime = memtable.resource_runtime().clone();
+        let _workspace = runtime.reserve_workspace(peak)?;
+        runtime
+            .pool(runtime.parallelism())?
+            .install(|| memtable.build_quiver(&config));
+    }
     // 在主文件发布前处理延期操作；失败时保留原 sidecar 与所有待合并记录。
     let mut release_text_after_save =
         memtable.text_index_is_deferred() && memtable.text_index_has_pending_changes();
@@ -696,6 +757,8 @@ fn save_inner<T: VectorType>(
     }
     // 保留原 CRC，不以重新计算校验和的方式“认可”未加载文件中的损坏。
     let preserved_text_meta = memtable.deferred_text_metadata();
+    write.phase = WritePhase::Publish;
+    write.outcome = WriteOutcome::Unknown;
     if mode == StorageMode::Rom && publication::pending(path) {
         memtable.vec_pool_mut().detach_mmap();
         publication::recover::<T>(path, true)?;
@@ -791,6 +854,7 @@ fn save_inner<T: VectorType>(
     } else {
         publication::commit_rom(path)?;
     }
+    write.outcome = WriteOutcome::Committed;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::hit_for_path(
         crate::test_hooks::ConcurrencyPoint::AfterPublicationCommitted,
@@ -807,6 +871,7 @@ fn save_inner<T: VectorType>(
         memtable.defer_text_index(path);
     }
 
+    memtable.refresh_quiver_ssd_after_checkpoint(path)?;
     Ok(())
 }
 
@@ -1091,6 +1156,36 @@ fn save_tdb<T: VectorType>(
     unique_bytes.extend_from_slice(&unique_crc.to_le_bytes());
     w.write_all(&unique_bytes)?;
 
+    let graph_encoding_bytes =
+        memtable
+            .named_graphs
+            .graphs
+            .values()
+            .try_fold(0usize, |maximum, record| {
+                crate::storage::payload_store::serialized_json_len(record.as_ref())
+                    .map(|bytes| maximum.max(bytes.saturating_mul(2)))
+            })?;
+    let _graph_workspace = memtable
+        .resource_runtime()
+        .reserve_workspace(graph_encoding_bytes)?;
+    crate::storage::named_graphs::save(&memtable.named_graphs, &mut w)?;
+    let _document_workspace = memtable
+        .resource_runtime()
+        .reserve_workspace(memtable.document_publications.encoding_workspace()?)?;
+    crate::storage::document_publications::save(&memtable.document_publications, &mut w)?;
+    let _receipt_workspace = memtable.resource_runtime().reserve_workspace(
+        memtable
+            .editing
+            .memory_bytes()
+            .saturating_mul(3)
+            .saturating_add(128),
+    )?;
+    let receipts = memtable.editing.checkpoint()?;
+    w.write_all(&receipts)?;
+    w.write_all(&(receipts.len() as u64).to_le_bytes())?;
+    w.write_all(&crc32fast::hash(&receipts).to_le_bytes())?;
+    w.write_all(b"TREC")?;
+
     w.flush()?;
     let file = w
         .into_inner()
@@ -1171,10 +1266,25 @@ pub(crate) fn checkpoint<T: VectorType>(
     mode: StorageMode,
     skip_clean: bool,
 ) -> Result<()> {
+    let mut write = WriteErrorInfo {
+        transaction_consumed: None,
+        ..WriteErrorInfo::TRANSACTION_ADMISSION
+    };
+    checkpoint_with_write_info(memtable, wal, path, mode, skip_clean, &mut write)
+}
+
+pub(crate) fn checkpoint_with_write_info<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    wal: &mut crate::storage::wal::Wal,
+    path: &str,
+    mode: StorageMode,
+    skip_clean: bool,
+    write: &mut WriteErrorInfo,
+) -> Result<()> {
     memtable.ensure_readable()?;
     wal.ensure_writable()?;
     if !skip_clean || memtable.needs_checkpoint() {
-        if let Err(error) = save(memtable, path, mode) {
+        if let Err(error) = save_with_write_info(memtable, path, mode, write) {
             if memtable.ensure_readable().is_err() {
                 // 关闭 writer，拦住失效前已准入、仍在等待 MemTable 锁的写操作。
                 wal.release_writer();
@@ -1308,10 +1418,10 @@ fn load_inner<T: VectorType>(
             .as_ref()
             .map(|marker| payload_path_for_generation(path, marker.generation))
             .unwrap_or_default();
-        let flush_ok_valid =
-            validate_flush_marker(&marker_path, path, &vec_file_path, &payload_path);
+        let verified_checkpoint =
+            validated_flush_marker(&marker_path, path, &vec_file_path, &payload_path);
 
-        if flush_ok_valid {
+        if let Some(verified_checkpoint) = verified_checkpoint {
             // marker 有效：安全加载 .vec
             let mut mt = load_v2(
                 bytes,
@@ -1326,11 +1436,9 @@ fn load_inner<T: VectorType>(
                 &mmap,
                 memory_limit,
             )?;
-            let payload_generation = std::fs::read(&marker_path)
-                .ok()
-                .and_then(|bytes| decode_flush_marker(&bytes).ok())
-                .filter(|marker| marker.payload_size.is_some())
-                .map(|marker| marker.generation);
+            let payload_generation = verified_checkpoint
+                .payload_size
+                .map(|_| verified_checkpoint.generation);
             install_payload_sidecar_if_present(&mut mt, path, payload_generation)?;
             // 旧 BQ 块仅校验格式几何，不物化；Payload 就绪后恢复现用索引和约束。
             load_property_indexes(
@@ -1344,7 +1452,13 @@ fn load_inner<T: VectorType>(
             if mmap_property_postings {
                 load_mapped_graph(&mut mt, path)?;
             }
-            load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
+            load_quiver_index(
+                &mut mt,
+                path,
+                repair_sidecars,
+                missing_index_policy,
+                Some(&verified_checkpoint),
+            )?;
             if load_text_sidecar {
                 load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             } else if Path::new(&text_index_path_from_db(path)).exists() {
@@ -1381,7 +1495,7 @@ fn load_inner<T: VectorType>(
         )?;
         load_unique_constraints(&mut mt, bytes, version, bq_layout)?;
         // 尝试加载 QuIVer 索引
-        load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
+        load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy, None)?;
         if load_text_sidecar {
             load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
         } else if Path::new(&text_index_path_from_db(path)).exists() {
@@ -1846,6 +1960,24 @@ fn load_unique_constraints<T: VectorType>(
     if version < 8 {
         return Ok(());
     }
+    let (bytes, receipts) = if version >= 11 {
+        let (bytes, receipts) = crate::storage::edit_receipts::split_checkpoint(bytes)?;
+        (bytes, Some(receipts))
+    } else {
+        (bytes, None)
+    };
+    let (bytes, documents) = if version >= 13 {
+        let (bytes, documents) = crate::storage::document_publications::split_checkpoint(bytes)?;
+        (bytes, Some(documents))
+    } else {
+        (bytes, None)
+    };
+    let (bytes, named_graphs) = if version >= 12 {
+        let (bytes, graphs) = crate::storage::named_graphs::split_checkpoint(bytes)?;
+        (bytes, Some(graphs))
+    } else {
+        (bytes, None)
+    };
     let start = layout.map_or(bytes.len(), |layout| layout.end_offset);
     let block = bytes.get(start..).ok_or_else(|| {
         TriviumError::CorruptedFile(
@@ -1946,7 +2078,24 @@ fn load_unique_constraints<T: VectorType>(
             .saturating_mul(count)
             .saturating_mul(256),
     )?;
-    memtable.restore_unique_index_definitions(&definitions)
+    memtable.restore_unique_index_definitions(&definitions)?;
+    if let Some(graphs) = named_graphs {
+        crate::storage::named_graphs::restore(memtable, graphs)?;
+    }
+    if let Some(documents) = documents {
+        crate::storage::document_publications::restore(memtable, documents)?;
+    }
+    if let Some(receipts) = receipts {
+        for raw in crate::storage::edit_receipts::records(receipts)? {
+            memtable.check_load_allocation(
+                raw.len()
+                    .saturating_mul(4)
+                    .saturating_add(memtable.editing.queue_bytes()),
+            )?;
+            memtable.editing.restore(raw)?;
+        }
+    }
+    Ok(())
 }
 
 fn admit_sidecar<T: VectorType>(mt: &MemTable<T>, path: &str, expansion: usize) -> Result<()> {
@@ -2099,6 +2248,7 @@ fn load_quiver_index<T: VectorType>(
     db_path: &str,
     repair_sidecars: bool,
     policy: crate::database::MissingIndexPolicy,
+    verified_checkpoint: Option<&FlushMarker>,
 ) -> Result<()> {
     use crate::index::quiver::QuIVer;
 
@@ -2117,7 +2267,7 @@ fn load_quiver_index<T: VectorType>(
         return Ok(());
     }
 
-    if !validate_quiver_meta(memtable, db_path) {
+    if !validate_quiver_meta(memtable, db_path, verified_checkpoint) {
         tracing::warn!(
             repair = repair_sidecars,
             "QuIVer sidecar 元数据缺失或不匹配，已拒绝 (QuIVer sidecar metadata missing or mismatched, rejected)"
@@ -2137,7 +2287,7 @@ fn load_quiver_index<T: VectorType>(
     admit_sidecar(memtable, &quiver_path, 8)?;
     match QuIVer::load_from_file(qp) {
         Ok(quiver) if quiver.matches_fact_slots(memtable) => {
-            memtable.set_quiver_index(quiver);
+            memtable.set_fact_bound_quiver_index(quiver);
             memtable.vec_pool_mut().advise_random();
         }
         Ok(_) => {

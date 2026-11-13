@@ -1,0 +1,1243 @@
+{
+  "status": "passed",
+  "measurement_system": "TDB生产",
+  "controlled_component_engine": false,
+  "config_sha256": "fbfe981ffadc9fd5583efae0320a45cf53c4cc0b665ba346f0bf028f3d39dcf8",
+  "archive_verified": true,
+  "n": 1000000,
+  "dimension": 768,
+  "queries": 744,
+  "build_replicates": 3,
+  "query_positions": 15,
+  "rounds_per_position": 5,
+  "unique_index_sha_count": 3,
+  "resource_audits": [
+    {
+      "directory": "native\\build-r0\\attempt-001",
+      "peak_rss_plus_hugetlb_bytes": 8546287616,
+      "returncode": 0,
+      "monitor_error": null,
+      "historical_writer_incident_bound": false
+    },
+    {
+      "directory": "native\\service-r0\\session-001",
+      "peak_rss_plus_hugetlb_bytes": 7733125120,
+      "returncode": -15,
+      "monitor_error": "[Errno 2] No such file or directory: 'recorded/stage-c-results/review-completion-native-20261108/queue-state.json.tmp.3133' -> 'recorded/stage-c-results/review-completion-native-20261108/queue-state.json'",
+      "historical_writer_incident_bound": true
+    },
+    {
+      "directory": "native\\service-r0\\session-002",
+      "peak_rss_plus_hugetlb_bytes": 7732977664,
+      "returncode": 0,
+      "monitor_error": null,
+      "historical_writer_incident_bound": false
+    },
+    {
+      "directory": "native\\build-r1\\attempt-001",
+      "peak_rss_plus_hugetlb_bytes": 8546213888,
+      "returncode": 0,
+      "monitor_error": null,
+      "historical_writer_incident_bound": false
+    },
+    {
+      "directory": "native\\service-r1\\session-001",
+      "peak_rss_plus_hugetlb_bytes": 7733141504,
+      "returncode": 0,
+      "monitor_error": null,
+      "historical_writer_incident_bound": false
+    },
+    {
+      "directory": "native\\build-r2\\attempt-001",
+      "peak_rss_plus_hugetlb_bytes": 8546152448,
+      "returncode": 0,
+      "monitor_error": null,
+      "historical_writer_incident_bound": false
+    },
+    {
+      "directory": "native\\service-r2\\session-001",
+      "peak_rss_plus_hugetlb_bytes": 7733141504,
+      "returncode": 0,
+      "monitor_error": null,
+      "historical_writer_incident_bound": false
+    }
+  ],
+  "raw_request_response_pairs_checked": 390,
+  "bootstrap": {
+    "seed": 20261108,
+    "repetitions": 4000,
+    "unit": "原查询簇"
+  },
+  "supervision_repair": {
+    "status": "passed",
+    "config_sha256": "fbfe981ffadc9fd5583efae0320a45cf53c4cc0b665ba346f0bf028f3d39dcf8",
+    "original_source_sha256": "e24268bc0bb0ccec49b4e3cb10b31237e840fec268d1b289e3edffc859e00675",
+    "wrapper_sha256": "183e85cd0a23409e6b9586e811eb96f1c13c007ca538039fb69ca92479808494",
+    "writer_gate_sha256": "a9cca974c719e4660fa3fdf177f2cb01f0f7316b9cf99427e4713cea319ab392",
+    "writer_gate": {
+      "status": "passed",
+      "writers": 4,
+      "writes": 1000,
+      "reads": 1000,
+      "temporary_files_remaining": 0
+    },
+    "incident_sha256": "fc6837505c1583755f9f07ae079479433b86067dd4dd1e890f69511b88700e0d",
+    "completed_receipts": {
+      "build-r0": {
+        "path": "recorded/stage-c-results/review-completion-native-20261108/build-r0/attempt-001/receipt.json",
+        "sha256": "65cd2a2c96c1364e2943ed2b4d414d968fe7eca53058e195a760cbb753d719ec"
+      },
+      "r0-ef88-t1": {
+        "path": "recorded/stage-c-results/review-completion-native-20261108/r0-ef88-t1/attempt-001/receipt.json",
+        "sha256": "68a658f0734e156db49ac9371cb5fa93e8a7bcb728758d7e894aa178cc5c2c2f"
+      },
+      "r0-ef88-t8": {
+        "path": "recorded/stage-c-results/review-completion-native-20261108/r0-ef88-t8/attempt-001/receipt.json",
+        "sha256": "ab0537b37c6591be22d0e1f7b1cd3f26baf26c17acbd313e69072cad3d2f4c73"
+      },
+      "r0-ef88-t16": {
+        "path": "recorded/stage-c-results/review-completion-native-20261108/r0-ef88-t16/attempt-001/receipt.json",
+        "sha256": "b0af82edb31ca0b442e34cfc040a2a7900adee9cff8d2d4c9993c986455aa21b"
+      }
+    },
+    "repair": "仅串行化监督状态写入；生产二进制、测量函数、参数、配置及完成结果不变",
+    "free_gib": 535.4345779418945
+  },
+  "builds": [
+    {
+      "measurement_system": "TDB生产",
+      "kind": "build",
+      "repeat": 0,
+      "graph_sha256": "286e38de73aef034e8982d958204339b5af59dd7fb26de806529851e6ad0f127",
+      "build_diagnostic_ef128_recall": 0.9743279569892472,
+      "peak_rss_plus_hugetlb_bytes": 8546287616,
+      "sessions": [
+        {
+          "path": "native\\service-r0\\session-001\\ready.json",
+          "index_load_s": 0.595857022,
+          "install_s": 10.500457832
+        },
+        {
+          "path": "native\\service-r0\\session-002\\ready.json",
+          "index_load_s": 0.609644033,
+          "install_s": 10.790179971
+        }
+      ],
+      "input_load_s": 2.0583e-05,
+      "ingest_s": 5.081019784,
+      "build_s": 82.113317261,
+      "save_s": 1.567406514,
+      "install_s": 10.844731174,
+      "first_service_index_load_s": 0.595857022,
+      "first_service_install_s": 10.500457832
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "build",
+      "repeat": 1,
+      "graph_sha256": "0ae63cd0eaa6d0f43ccd35925ceccddaef29b6dc3eeaa52dcda602a3ecd653aa",
+      "build_diagnostic_ef128_recall": 0.9743279569892472,
+      "peak_rss_plus_hugetlb_bytes": 8546213888,
+      "sessions": [
+        {
+          "path": "native\\service-r1\\session-001\\ready.json",
+          "index_load_s": 0.626927898,
+          "install_s": 10.761438879
+        }
+      ],
+      "input_load_s": 2.9619e-05,
+      "ingest_s": 5.200988707,
+      "build_s": 82.220764062,
+      "save_s": 1.415297732,
+      "install_s": 10.923956884999999,
+      "first_service_index_load_s": 0.626927898,
+      "first_service_install_s": 10.761438879
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "build",
+      "repeat": 2,
+      "graph_sha256": "86649b8900fa016307bc26fbc4765b30b8b05987cdc460931f57be58bbfe1383",
+      "build_diagnostic_ef128_recall": 0.9741935483870967,
+      "peak_rss_plus_hugetlb_bytes": 8546152448,
+      "sessions": [
+        {
+          "path": "native\\service-r2\\session-001\\ready.json",
+          "index_load_s": 0.908976305,
+          "install_s": 10.460771824
+        }
+      ],
+      "input_load_s": 9.344e-06,
+      "ingest_s": 5.000606297,
+      "build_s": 81.918117784,
+      "save_s": 1.385510411,
+      "install_s": 10.802578298,
+      "first_service_index_load_s": 0.908976305,
+      "first_service_install_s": 10.460771824
+    }
+  ],
+  "points": [
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 0,
+      "ef": 88,
+      "threads": 1,
+      "graph_sha256": "286e38de73aef034e8982d958204339b5af59dd7fb26de806529851e6ad0f127",
+      "recall_at_10": 0.9637096774193549,
+      "recall_query_cluster_ci95": [
+        0.9538978494623658,
+        0.9724495967741937
+      ],
+      "qps_samples": [
+        4650.0054437759045,
+        4696.242175047978,
+        4499.127011351955,
+        4493.802811821558,
+        4564.88980616969
+      ],
+      "qps_mean": 4580.813449633417,
+      "qps_round_sample_sd": 90.28899492316556,
+      "qps_round_cv": 0.01971025362982005,
+      "p95_ms": 0.2975260499999999,
+      "p99_ms": 0.3685761099999999,
+      "p95_query_cluster_ci95_ms": [
+        0.28989999999999994,
+        0.30540881125
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.35115420999999997,
+        0.38492555000000006
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4105494528,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 125000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r0\\session-001\\ready.json",
+      "receipt_sha256": "68a658f0734e156db49ac9371cb5fa93e8a7bcb728758d7e894aa178cc5c2c2f"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 0,
+      "ef": 88,
+      "threads": 8,
+      "graph_sha256": "286e38de73aef034e8982d958204339b5af59dd7fb26de806529851e6ad0f127",
+      "recall_at_10": 0.9637096774193549,
+      "recall_query_cluster_ci95": [
+        0.9538978494623658,
+        0.9724495967741937
+      ],
+      "qps_samples": [
+        33292.80307063205,
+        33043.40847337541,
+        33133.60007174154,
+        33526.691530710385,
+        33903.57618709871
+      ],
+      "qps_mean": 33380.01586671162,
+      "qps_round_sample_sd": 345.42021964292377,
+      "qps_round_cv": 0.010348114303546384,
+      "p95_ms": 0.43309225,
+      "p99_ms": 0.6952184599999999,
+      "p95_query_cluster_ci95_ms": [
+        0.41598176249999974,
+        0.453847
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.64593,
+        0.73031949
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4107198464,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 1000000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r0\\session-001\\ready.json",
+      "receipt_sha256": "ab0537b37c6591be22d0e1f7b1cd3f26baf26c17acbd313e69072cad3d2f4c73"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 0,
+      "ef": 88,
+      "threads": 16,
+      "graph_sha256": "286e38de73aef034e8982d958204339b5af59dd7fb26de806529851e6ad0f127",
+      "recall_at_10": 0.9637096774193549,
+      "recall_query_cluster_ci95": [
+        0.9538978494623658,
+        0.9724495967741937
+      ],
+      "qps_samples": [
+        52259.91342384096,
+        52614.16329830391,
+        52171.419045642695,
+        53079.89107427926,
+        53483.50105299856
+      ],
+      "qps_mean": 52721.777579013076,
+      "qps_round_sample_sd": 555.9365460219527,
+      "qps_round_cv": 0.010544723102114335,
+      "p95_ms": 0.5449304999999999,
+      "p99_ms": 0.7924601,
+      "p95_query_cluster_ci95_ms": [
+        0.5252464849999996,
+        0.578944
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.7481129444999999,
+        0.8172216492499997
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4109037568,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 2000000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r0\\session-001\\ready.json",
+      "receipt_sha256": "b0af82edb31ca0b442e34cfc040a2a7900adee9cff8d2d4c9993c986455aa21b"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 0,
+      "ef": 88,
+      "threads": 32,
+      "graph_sha256": "286e38de73aef034e8982d958204339b5af59dd7fb26de806529851e6ad0f127",
+      "recall_at_10": 0.9637096774193549,
+      "recall_query_cluster_ci95": [
+        0.9538978494623658,
+        0.9724495967741937
+      ],
+      "qps_samples": [
+        62157.4281977458,
+        61480.08734240257,
+        61459.29507644339,
+        62164.12884117291,
+        61843.95649844819
+      ],
+      "qps_mean": 61820.97919124257,
+      "qps_round_sample_sd": 345.86855320134515,
+      "qps_round_cv": 0.005594679309937882,
+      "p95_ms": 0.7313455499999999,
+      "p99_ms": 0.8864887099999998,
+      "p95_query_cluster_ci95_ms": [
+        0.7056650999999999,
+        0.745328
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.85652,
+        0.9145161799999997
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4112547840,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 4000000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r0\\session-002\\ready.json",
+      "receipt_sha256": "c651790fc63894153dd03b888fb032e27fd8637abd0a59791569d9bf8c10d872"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 0,
+      "ef": 384,
+      "threads": 1,
+      "graph_sha256": "286e38de73aef034e8982d958204339b5af59dd7fb26de806529851e6ad0f127",
+      "recall_at_10": 0.9877688172043011,
+      "recall_query_cluster_ci95": [
+        0.9836021505376347,
+        0.9912634408602152
+      ],
+      "qps_samples": [
+        1524.6595140722004,
+        1537.4254473489318,
+        1543.0155820500934,
+        1515.2012106004447,
+        1525.481776204384
+      ],
+      "qps_mean": 1529.1567060552109,
+      "qps_round_sample_sd": 11.05583810654542,
+      "qps_round_cv": 0.007230022968062139,
+      "p95_ms": 0.8369015,
+      "p99_ms": 0.9320566899999998,
+      "p95_query_cluster_ci95_ms": [
+        0.8237662499999999,
+        0.8514166499999999
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.91351255,
+        0.94917203425
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4112478208,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 125000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r0\\session-002\\ready.json",
+      "receipt_sha256": "6f81e7ee563331afec695de0b2b83f4d7027caca7541fa1bac19a80df7e036cd"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 1,
+      "ef": 88,
+      "threads": 1,
+      "graph_sha256": "0ae63cd0eaa6d0f43ccd35925ceccddaef29b6dc3eeaa52dcda602a3ecd653aa",
+      "recall_at_10": 0.9630376344086021,
+      "recall_query_cluster_ci95": [
+        0.9530913978494624,
+        0.9721774193548387
+      ],
+      "qps_samples": [
+        4742.79497632821,
+        4621.487321466365,
+        4513.863690296918,
+        4509.187390714524,
+        4607.0941001357
+      ],
+      "qps_mean": 4598.885495788343,
+      "qps_round_sample_sd": 95.60677246071691,
+      "qps_round_cv": 0.02078911783045556,
+      "p95_ms": 0.2876769999999999,
+      "p99_ms": 0.3690070999999998,
+      "p95_query_cluster_ci95_ms": [
+        0.28187935000000003,
+        0.2930510575
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.3538282399999999,
+        0.39180842000000005
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4105371648,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 125000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r1\\session-001\\ready.json",
+      "receipt_sha256": "f05883fbd5ac6ba12d149db6c5b5e12ecf4f9e327d8fad464036d7cc831964a6"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 1,
+      "ef": 88,
+      "threads": 8,
+      "graph_sha256": "0ae63cd0eaa6d0f43ccd35925ceccddaef29b6dc3eeaa52dcda602a3ecd653aa",
+      "recall_at_10": 0.9630376344086021,
+      "recall_query_cluster_ci95": [
+        0.9530913978494624,
+        0.9721774193548387
+      ],
+      "qps_samples": [
+        33835.33754850567,
+        33528.66667051717,
+        34533.9414647963,
+        33982.95465609059,
+        34171.742159364905
+      ],
+      "qps_mean": 34010.528499854925,
+      "qps_round_sample_sd": 375.3644844509961,
+      "qps_round_cv": 0.011036714247254265,
+      "p95_ms": 0.4215795999999997,
+      "p99_ms": 0.6779169300000001,
+      "p95_query_cluster_ci95_ms": [
+        0.3972502999999999,
+        0.4430474224999994
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.6369918199999998,
+        0.7453724574999999
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4107063296,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 1000000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r1\\session-001\\ready.json",
+      "receipt_sha256": "dfbb63038117e51092e4dd09ff264d391cb9287a05ba93adbc7514ea648181e5"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 1,
+      "ef": 88,
+      "threads": 16,
+      "graph_sha256": "0ae63cd0eaa6d0f43ccd35925ceccddaef29b6dc3eeaa52dcda602a3ecd653aa",
+      "recall_at_10": 0.9630376344086021,
+      "recall_query_cluster_ci95": [
+        0.9530913978494624,
+        0.9721774193548387
+      ],
+      "qps_samples": [
+        51975.66526577605,
+        51625.2140312079,
+        54007.49577895311,
+        52886.13262803405,
+        54015.01231999666
+      ],
+      "qps_mean": 52901.904004793556,
+      "qps_round_sample_sd": 1112.3676909074788,
+      "qps_round_cv": 0.0210269878151585,
+      "p95_ms": 0.49725064999999996,
+      "p99_ms": 0.75107574,
+      "p95_query_cluster_ci95_ms": [
+        0.4781414512499999,
+        0.527047
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.705073,
+        0.7657171399999999
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4108881920,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 2000000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r1\\session-001\\ready.json",
+      "receipt_sha256": "d7b05b1d82e4c4c6e6de4dc9f885a5eb04b0003236cc48b5c49ef7b748d99748"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 1,
+      "ef": 88,
+      "threads": 32,
+      "graph_sha256": "0ae63cd0eaa6d0f43ccd35925ceccddaef29b6dc3eeaa52dcda602a3ecd653aa",
+      "recall_at_10": 0.9630376344086021,
+      "recall_query_cluster_ci95": [
+        0.9530913978494624,
+        0.9721774193548387
+      ],
+      "qps_samples": [
+        61684.32494276625,
+        62152.23414088963,
+        63164.86380275206,
+        62231.46885924749,
+        63680.08241364789
+      ],
+      "qps_mean": 62582.59483186067,
+      "qps_round_sample_sd": 815.3074133831967,
+      "qps_round_cv": 0.013027702280061507,
+      "p95_ms": 0.7206129999999998,
+      "p99_ms": 0.8970156299999997,
+      "p95_query_cluster_ci95_ms": [
+        0.701706,
+        0.7428806499999999
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.8586784199999999,
+        0.918211
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4112273408,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 4000000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r1\\session-001\\ready.json",
+      "receipt_sha256": "bb508c7d57c3787356461b1c2076172660f1201524770f733513058f77ea8254"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 1,
+      "ef": 384,
+      "threads": 1,
+      "graph_sha256": "0ae63cd0eaa6d0f43ccd35925ceccddaef29b6dc3eeaa52dcda602a3ecd653aa",
+      "recall_at_10": 0.9877688172043012,
+      "recall_query_cluster_ci95": [
+        0.9837365591397849,
+        0.991263440860215
+      ],
+      "qps_samples": [
+        1529.4387211622802,
+        1521.4893485181253,
+        1558.8113761551388,
+        1533.4233069208844,
+        1548.47414648001
+      ],
+      "qps_mean": 1538.3273798472878,
+      "qps_round_sample_sd": 15.07587859269631,
+      "qps_round_cv": 0.009800175690946173,
+      "p95_ms": 0.8645278,
+      "p99_ms": 0.9567269099999999,
+      "p95_query_cluster_ci95_ms": [
+        0.8520553500000001,
+        0.87468270625
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.94212221,
+        0.982199
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4112183296,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 125000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r1\\session-001\\ready.json",
+      "receipt_sha256": "467d8077117bd72972fc64b2ea6bef67411d11149e02c0d0b44d776d664b859e"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 2,
+      "ef": 88,
+      "threads": 1,
+      "graph_sha256": "86649b8900fa016307bc26fbc4765b30b8b05987cdc460931f57be58bbfe1383",
+      "recall_at_10": 0.9645161290322579,
+      "recall_query_cluster_ci95": [
+        0.9548387096774195,
+        0.9729838709677421
+      ],
+      "qps_samples": [
+        4640.4754260008185,
+        4638.366833749785,
+        4547.3139158457625,
+        4579.994004000687,
+        4569.1374414074835
+      ],
+      "qps_mean": 4595.057524200907,
+      "qps_round_sample_sd": 42.18025180435957,
+      "qps_round_cv": 0.009179482864405453,
+      "p95_ms": 0.29135405,
+      "p99_ms": 0.37613091,
+      "p95_query_cluster_ci95_ms": [
+        0.284429,
+        0.299395
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.36687701999999994,
+        0.39812755999999994
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4105437184,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 125000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r2\\session-001\\ready.json",
+      "receipt_sha256": "09ebcc739d900ca005b9525fa7d94a8608cfcce200e4d4d318eed17042405613"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 2,
+      "ef": 88,
+      "threads": 8,
+      "graph_sha256": "86649b8900fa016307bc26fbc4765b30b8b05987cdc460931f57be58bbfe1383",
+      "recall_at_10": 0.9645161290322579,
+      "recall_query_cluster_ci95": [
+        0.9548387096774195,
+        0.9729838709677421
+      ],
+      "qps_samples": [
+        32907.62840064466,
+        33735.2328117219,
+        33845.589755446934,
+        34074.90540881278,
+        34114.3311789969
+      ],
+      "qps_mean": 33735.53751112463,
+      "qps_round_sample_sd": 488.9274734915302,
+      "qps_round_cv": 0.014492950448182468,
+      "p95_ms": 0.41004109999999994,
+      "p99_ms": 0.6178149300000001,
+      "p95_query_cluster_ci95_ms": [
+        0.393073,
+        0.4285025
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.553976,
+        0.669236
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4107055104,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 1000000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r2\\session-001\\ready.json",
+      "receipt_sha256": "cadd95c5bf9588d53ada667aca89a62e43ae9c998dd7452eae6e28454a3b3a1d"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 2,
+      "ef": 88,
+      "threads": 16,
+      "graph_sha256": "86649b8900fa016307bc26fbc4765b30b8b05987cdc460931f57be58bbfe1383",
+      "recall_at_10": 0.9645161290322579,
+      "recall_query_cluster_ci95": [
+        0.9548387096774195,
+        0.9729838709677421
+      ],
+      "qps_samples": [
+        53305.23834713993,
+        52998.12856394447,
+        53022.214482489675,
+        53313.57401690993,
+        52284.759541938074
+      ],
+      "qps_mean": 52984.78299048442,
+      "qps_round_sample_sd": 419.04869171332166,
+      "qps_round_cv": 0.007908849825591981,
+      "p95_ms": 0.5445377999999987,
+      "p99_ms": 0.7809506599999999,
+      "p95_query_cluster_ci95_ms": [
+        0.517534,
+        0.60138065
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.7582506799999997,
+        0.8112252
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4108849152,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 2000000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r2\\session-001\\ready.json",
+      "receipt_sha256": "788ee6fe98982a850528ca117f13487e9e861ad63ed6ab0d4ea6b3deed8f9e32"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 2,
+      "ef": 88,
+      "threads": 32,
+      "graph_sha256": "86649b8900fa016307bc26fbc4765b30b8b05987cdc460931f57be58bbfe1383",
+      "recall_at_10": 0.9645161290322579,
+      "recall_query_cluster_ci95": [
+        0.9548387096774195,
+        0.9729838709677421
+      ],
+      "qps_samples": [
+        61981.20959863034,
+        62712.80900716802,
+        62685.622147818845,
+        63064.40210667721,
+        61094.59516940933
+      ],
+      "qps_mean": 62307.72760594075,
+      "qps_round_sample_sd": 783.8615700697566,
+      "qps_round_cv": 0.012580487207416934,
+      "p95_ms": 0.7475020499999994,
+      "p99_ms": 0.9032605999999994,
+      "p95_query_cluster_ci95_ms": [
+        0.720799,
+        0.77567435
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.8687426799999997,
+        0.9582679699999979
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4112056320,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 4000000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r2\\session-001\\ready.json",
+      "receipt_sha256": "22d151f690df0ac583010dca6dfe8c1af86c09a36e67fa3cfb8dfb74839a3f4c"
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "query",
+      "repeat": 2,
+      "ef": 384,
+      "threads": 1,
+      "graph_sha256": "86649b8900fa016307bc26fbc4765b30b8b05987cdc460931f57be58bbfe1383",
+      "recall_at_10": 0.9875,
+      "recall_query_cluster_ci95": [
+        0.9834643817204302,
+        0.9909979838709678
+      ],
+      "qps_samples": [
+        1522.080247651562,
+        1527.3297604777981,
+        1496.7158997182337,
+        1528.7839055463116,
+        1501.7968501098164
+      ],
+      "qps_mean": 1515.3413327007445,
+      "qps_round_sample_sd": 15.0016490962687,
+      "qps_round_cv": 0.009899848154693794,
+      "p95_ms": 0.8415525,
+      "p99_ms": 0.93129935,
+      "p95_query_cluster_ci95_ms": [
+        0.8289285012499998,
+        0.851958
+      ],
+      "p99_query_cluster_ci95_ms": [
+        0.91222271,
+        0.954074
+      ],
+      "peak_sampled_rss_plus_hugetlb_bytes": 4112179200,
+      "static_component_subtotal_bytes": 988000000,
+      "visited_bytes": 125000,
+      "logical_fp32_bytes": 3072000000,
+      "routed_memory": {
+        "dimension": 768,
+        "exact_norm_scales_bytes": 0,
+        "external_ids_bytes": 8000000,
+        "inline_reconstructed_norms_bytes": 4000000,
+        "inline_reconstructed_norms_included_in_sm_rows": true,
+        "logical_rerank_fp32_bytes": 3072000000,
+        "native_squared_l2": false,
+        "raw_bq_signature_bytes": 192000000,
+        "reconstructed_norms_bytes": 0,
+        "runtime_note": "不包含动态线程堆、分配器和原QuIVer其他管理结构；共享图仅计一次",
+        "scoring": "ReconstructedL2",
+        "shared_graph_bytes": 516000000,
+        "slot_mapping_bytes": 8000000,
+        "sm_owned_bytes": 264000000,
+        "visited_bytes_per_thread": 125000
+      },
+      "service_ready": "native\\service-r2\\session-001\\ready.json",
+      "receipt_sha256": "419bbfe11978e1d14e672a1e72ccf6fae62a89175f9eae72b3e458685988e4f6"
+    }
+  ],
+  "across_builds": [
+    {
+      "measurement_system": "TDB生产",
+      "kind": "across_builds",
+      "ef": 88,
+      "threads": 1,
+      "qps": {
+        "samples": [
+          4580.813449633417,
+          4598.885495788343,
+          4595.057524200907
+        ],
+        "count": 3,
+        "mean": 4591.585489874223,
+        "sample_sd": 9.523181182289065,
+        "cv": 0.002074050718055983
+      },
+      "recall": {
+        "samples": [
+          0.9637096774193549,
+          0.9630376344086021,
+          0.9645161290322579
+        ],
+        "count": 3,
+        "mean": 0.9637544802867383,
+        "sample_sd": 0.0007402648585061313,
+        "cv": 0.0007681052318282206
+      }
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "across_builds",
+      "ef": 88,
+      "threads": 8,
+      "qps": {
+        "samples": [
+          33380.01586671162,
+          34010.528499854925,
+          33735.53751112463
+        ],
+        "count": 3,
+        "mean": 33708.69395923039,
+        "sample_sd": 316.1122859792866,
+        "cv": 0.009377767241935108
+      },
+      "recall": {
+        "samples": [
+          0.9637096774193549,
+          0.9630376344086021,
+          0.9645161290322579
+        ],
+        "count": 3,
+        "mean": 0.9637544802867383,
+        "sample_sd": 0.0007402648585061313,
+        "cv": 0.0007681052318282206
+      }
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "across_builds",
+      "ef": 88,
+      "threads": 16,
+      "qps": {
+        "samples": [
+          52721.777579013076,
+          52901.904004793556,
+          52984.78299048442
+        ],
+        "count": 3,
+        "mean": 52869.48819143035,
+        "sample_sd": 134.46579614460003,
+        "cv": 0.0025433534680291397
+      },
+      "recall": {
+        "samples": [
+          0.9637096774193549,
+          0.9630376344086021,
+          0.9645161290322579
+        ],
+        "count": 3,
+        "mean": 0.9637544802867383,
+        "sample_sd": 0.0007402648585061313,
+        "cv": 0.0007681052318282206
+      }
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "across_builds",
+      "ef": 88,
+      "threads": 32,
+      "qps": {
+        "samples": [
+          61820.97919124257,
+          62582.59483186067,
+          62307.72760594075
+        ],
+        "count": 3,
+        "mean": 62237.10054301466,
+        "sample_sd": 385.68864712576453,
+        "cv": 0.0061970857215496245
+      },
+      "recall": {
+        "samples": [
+          0.9637096774193549,
+          0.9630376344086021,
+          0.9645161290322579
+        ],
+        "count": 3,
+        "mean": 0.9637544802867383,
+        "sample_sd": 0.0007402648585061313,
+        "cv": 0.0007681052318282206
+      }
+    },
+    {
+      "measurement_system": "TDB生产",
+      "kind": "across_builds",
+      "ef": 384,
+      "threads": 1,
+      "qps": {
+        "samples": [
+          1529.1567060552109,
+          1538.3273798472878,
+          1515.3413327007445
+        ],
+        "count": 3,
+        "mean": 1527.6084728677477,
+        "sample_sd": 11.570970588410033,
+        "cv": 0.007574565599710304
+      },
+      "recall": {
+        "samples": [
+          0.9877688172043011,
+          0.9877688172043012,
+          0.9875
+        ],
+        "count": 3,
+        "mean": 0.9876792114695341,
+        "sample_sd": 0.0001552016852660475,
+        "cv": 0.0001571377462072207
+      }
+    }
+  ],
+  "build_statistics": {
+    "build_s": {
+      "samples": [
+        82.113317261,
+        82.220764062,
+        81.918117784
+      ],
+      "count": 3,
+      "mean": 82.084066369,
+      "sample_sd": 0.15342882196285612,
+      "cv": 0.0018691669254436486
+    },
+    "install_s": {
+      "samples": [
+        10.844731174,
+        10.923956884999999,
+        10.802578298
+      ],
+      "count": 3,
+      "mean": 10.857088785666667,
+      "sample_sd": 0.06162567054488878,
+      "cv": 0.005676076871200121
+    },
+    "save_s": {
+      "samples": [
+        1.567406514,
+        1.415297732,
+        1.385510411
+      ],
+      "count": 3,
+      "mean": 1.4560715523333334,
+      "sample_sd": 0.09756242304328987,
+      "cv": 0.0670038659068282
+    },
+    "input_load_s": {
+      "samples": [
+        2.0583e-05,
+        2.9619e-05,
+        9.344e-06
+      ],
+      "count": 3,
+      "mean": 1.9848666666666665e-05,
+      "sample_sd": 1.0157427840419705e-05,
+      "cv": 0.5117435851486097
+    },
+    "ingest_s": {
+      "samples": [
+        5.081019784,
+        5.200988707,
+        5.000606297
+      ],
+      "count": 3,
+      "mean": 5.094204929333333,
+      "sample_sd": 0.10083979176122794,
+      "cv": 0.019795001017837852
+    },
+    "first_service_index_load_s": {
+      "samples": [
+        0.595857022,
+        0.626927898,
+        0.908976305
+      ],
+      "count": 3,
+      "mean": 0.7105870750000001,
+      "sample_sd": 0.17251105694663899,
+      "cv": 0.2427725792038069
+    },
+    "first_service_install_s": {
+      "samples": [
+        10.500457832,
+        10.761438879,
+        10.460771824
+      ],
+      "count": 3,
+      "mean": 10.574222845,
+      "sample_sd": 0.16334358679715846,
+      "cv": 0.015447337283457683
+    }
+  },
+  "sample_definition": "每次独立构建的五轮QPS均值形成一个构建级观测，跨构建样本数为3；查询五轮作为同一查询簇处理"
+}

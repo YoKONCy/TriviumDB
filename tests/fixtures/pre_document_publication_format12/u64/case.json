@@ -1,0 +1,47 @@
+{
+  "before": {
+    "schema_version": 1,
+    "revision": "b3c51f8d-55fe-4c48-abae-bcf879cf7379:1",
+    "graph_id": "历史命名图",
+    "metadata": null,
+    "members": [
+      "11",
+      "22"
+    ],
+    "edges": [
+      {
+        "source_id": "11",
+        "target_id": "22",
+        "label": "same",
+        "weight": 0.5,
+        "metadata": {
+          "fixture": "named-v5"
+        }
+      }
+    ]
+  },
+  "after": {
+    "schema_version": 1,
+    "revision": "b3c51f8d-55fe-4c48-abae-bcf879cf7379:2",
+    "graph_id": "历史命名图",
+    "metadata": {
+      "state": "after"
+    },
+    "members": [
+      "11",
+      "22",
+      "33"
+    ],
+    "edges": [
+      {
+        "source_id": "11",
+        "target_id": "22",
+        "label": "same",
+        "weight": 0.5,
+        "metadata": {
+          "fixture": "named-v5"
+        }
+      }
+    ]
+  }
+}

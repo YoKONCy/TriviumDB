@@ -7,6 +7,12 @@
 use crate::error::{Result, TriviumError};
 use serde::Serialize;
 
+pub(crate) fn check_control(control: &crate::query::tql_executor::QueryControl) -> Result<()> {
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::GraphAlgorithmStep);
+    control.check()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetExhaustionPolicy {

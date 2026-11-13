@@ -154,16 +154,28 @@ jobs:
           cargo test --target ${{ matrix.target }} --features test-hooks --test core console_host -- --test-threads=1
 
       - name: 运行定点 I/O 故障与发布阶段强杀测试
-        run: cargo test --target ${{ matrix.target }} --features test-hooks --test fault_io --test fault_power -- --test-threads=1
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cargo test --locked --profile release-contracts --target ${{ matrix.target }} --features test-hooks --test fault_allocator --test fault_io --test fault_power -- --test-threads=1
+          else
+            cargo test --target ${{ matrix.target }} --features test-hooks --test fault_io --test fault_power -- --test-threads=1
+          fi
+
+      - name: 验证 QuIVer SSD 缓存、原生读取与关闭排空
+        run: |
+          cargo test --locked --target ${{ matrix.target }} --features test-hooks --lib index::quiver::ssd -- --test-threads=1
+          cargo test --locked --target ${{ matrix.target }} --features test-hooks --lib storage::quiver_io -- --test-threads=1
+          cargo test --locked --target ${{ matrix.target }} --features test-hooks --test core quiver_ssd -- --test-threads=1
 
       - name: 运行文档测试
         run: cargo test --target ${{ matrix.target }} --doc
 
   # ═══════════════════════════════════════════
-  #  Job 2a: CLI/TUI 工具测试
+  #  Job 2a: CLI 命令与数据契约
   # ═══════════════════════════════════════════
   cli:
-    name: CLI/TUI
+    name: CLI Contracts
     runs-on: ubuntu-latest
     needs: check
 
@@ -179,10 +191,10 @@ jobs:
       - name: 构建 CLI/TUI
         run: cargo build -p triviumdb-cli --all-targets
 
-      - name: 运行 CLI/TUI 测试
+      - name: 验证 CLI 命令与数据契约
         run: cargo test -p triviumdb-cli -- --test-threads=1
 
-      - name: CLI/TUI Clippy
+      - name: CLI Clippy
         run: cargo clippy -p triviumdb-cli --no-deps --all-targets -- -D warnings
 
   python-binding:
@@ -278,15 +290,18 @@ jobs:
       - name: 验证 Node.js 公共 API 契约
         run: npm run test:public-api
 
+      - name: 验证 Console 非 UI 传输与事务契约
+        run: npm run test:console-transport
+
       - name: 验证 npm 产物的 TypeScript 消费与原生运行契约
         run: npm run test:package
 
   # ═══════════════════════════════════════════
-  #  Job 2b: ARM64 Linux 原生测试 (QEMU)
+  #  Job 2b: ARM64 Linux 原生测试
   # ═══════════════════════════════════════════
   test-arm64-linux:
-    name: Test (Linux ARM64 via QEMU)
-    runs-on: ubuntu-latest
+    name: Test (Linux ARM64 native)
+    runs-on: ubuntu-24.04-arm
     needs: check
 
     steps:
@@ -298,30 +313,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: arm64-linux
-
-      - name: 安装交叉编译工具链
-        run: |
-          sudo apt-get update \
-            -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" \
-            -o Dir::Etc::sourceparts="-"
-          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
-
-      - name: 设置 Cargo 链接器
-        run: |
-          mkdir -p .cargo
-          cat >> .cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          runner = "qemu-aarch64 -L /usr/aarch64-linux-gnu"
-          EOF
+          key: arm64-linux-native
 
       - name: 构建测试 (aarch64)
         run: cargo test --target aarch64-unknown-linux-gnu --lib --tests --no-run
 
-      - name: 运行测试 (aarch64 via QEMU, 跳过硬件测试)
-        env:
-          TRIVIUM_TEST_QEMU_AARCH64: "1"
+      - name: 运行测试 (aarch64 原生, 跳过硬件测试)
         run: |
           cargo test --target aarch64-unknown-linux-gnu --lib --tests -- \
             --test-threads=1 \
@@ -446,6 +443,7 @@ jobs:
           cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --features test-hooks --lib database::lifecycle::tests -- --test-threads=1
           cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --features test-hooks --lib database::transaction::guard_tests -- --test-threads=1
           cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --lib storage::compaction::tests -- --test-threads=1
+          cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --features test-hooks --lib index::quiver::ssd::tests::runtime_tests -- --test-threads=1
 
   # Miri 只运行无文件映射、无外部调用的小规模内存安全子集。
   # 保留默认别名、数据竞争与泄漏检查，使用多个随机种子探索交错。

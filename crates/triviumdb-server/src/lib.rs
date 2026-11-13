@@ -168,6 +168,28 @@ struct AppState {
 }
 
 pub async fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
+    build_app_with_shutdown(config)
+        .await
+        .map(|(router, _)| router)
+}
+
+/// 可等待的数据库关闭句柄；保留 Router 或此句柄不影响关闭后的文件资源释放。
+#[derive(Clone)]
+pub struct ServerShutdown {
+    engine: EngineHandle,
+}
+
+impl ServerShutdown {
+    /// 等待写队列和后台任务排空，再执行 Core 关闭。取消等待不会取消真实关闭任务。
+    pub async fn shutdown(&self) -> Result<(), ApiError> {
+        self.engine.shutdown().await
+    }
+}
+
+/// 创建 HTTP Router 及显式关闭句柄，供宿主在停服时等待持久化和文件租约释放。
+pub async fn build_app_with_shutdown(
+    config: ServerConfig,
+) -> Result<(Router, ServerShutdown), ApiError> {
     if config.max_body_bytes == 0 || config.request_timeout.is_zero() {
         return Err(ApiError::invalid_request(
             "请求体上限和超时必须大于 0 (Request body limit and timeout must be greater than zero)",
@@ -184,16 +206,23 @@ pub async fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         prepared_cache_capacity: config.prepared_cache_capacity,
     })
     .await?;
+    let shutdown = ServerShutdown {
+        engine: engine.clone(),
+    };
     let state = Arc::new(AppState {
         engine,
         request_timeout: config.request_timeout,
         request_metrics: Arc::new(RequestMetrics::default()),
     });
 
-    Ok(Router::new()
+    let router = Router::new()
         .route("/", get(webui_index))
         .route("/ui", get(webui_index))
         .route("/ui/", get(webui_index))
+        .route("/console-client.js", get(webui_client))
+        .route("/ui/console-client.js", get(webui_client))
+        .route("/console-embed.js", get(webui_embed))
+        .route("/ui/console-embed.js", get(webui_embed))
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/health/details", get(health_details))
@@ -221,13 +250,19 @@ pub async fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         )
         .route("/v1/nodes/{id}", get(get_node))
         .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(axum::middleware::from_fn(map_body_limit_error))
+        .layer(DefaultBodyLimit::max(config.max_body_bytes))
+        .layer(
+            ServiceBuilder::new().layer(CatchPanicLayer::custom(|_panic| {
+                ApiError::internal("请求任务异常终止 (Request task terminated unexpectedly)")
+                    .into_response()
+            })),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             access_log,
         ))
-        .layer(axum::middleware::from_fn(map_body_limit_error))
-        .layer(DefaultBodyLimit::max(config.max_body_bytes))
-        .layer(ServiceBuilder::new().layer(CatchPanicLayer::new()))
         // 最外层：按 Accept-Encoding 压缩（HTML ≈780KB，弱网首屏差距明显）。
         // 304 例外：RFC 9110 §15.4.5 规定 304 不得有响应体，而压缩层会把空体
         // 包装成 gzip 帧（实测 20 字节）并附带 Content-Encoding，故在谓词里排除。
@@ -241,14 +276,39 @@ pub async fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
                 },
             )),
         )
-        .with_state(state))
+        .with_state(state);
+    Ok((router, shutdown))
 }
 
 const WEBUI_HTML: &str = include_str!("../web/index.html");
 
-/// 导出现有控制台资源；传输接入与容器挂载由宿主及前端适配器负责。
+/// 导出控制台页面；宿主同时提供同目录的客户端脚本。
 pub fn console_html() -> &'static str {
     WEBUI_HTML
+}
+
+/// Console RPC 客户端资源，与 HTML 同版交付。
+pub fn console_client_script() -> &'static str {
+    include_str!("../web/console-client.js")
+}
+
+/// 宿主页面使用的同源 iframe 挂载入口。
+pub fn console_embed_script() -> &'static str {
+    include_str!("../web/console-embed.js")
+}
+
+async fn webui_client() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        console_client_script(),
+    )
+}
+
+async fn webui_embed() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        console_embed_script(),
+    )
 }
 
 /// 内嵌页面内容指纹（构建期固定、进程内一次性计算）。
@@ -603,7 +663,7 @@ async fn prepare(
 
 async fn execute_prepared(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     headers: HeaderMap,
     request: Result<Json<ExecutePreparedRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
@@ -895,7 +955,7 @@ fn index_advice(query: &str, indexed_fields: &[String]) -> Vec<serde_json::Value
 
 async fn get_node(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<u64>,
+    ApiPath(id): ApiPath<u64>,
 ) -> Result<impl IntoResponse, ApiError> {
     let result = state
         .engine
@@ -968,7 +1028,7 @@ fn graph_config(
 
 async fn get_neighbors(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<u64>,
+    ApiPath(id): ApiPath<u64>,
     ApiQuery(query): ApiQuery<NeighborsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let config = graph_config(query.depth, query.limit, query.labels, query.direction)?;
@@ -1014,7 +1074,7 @@ async fn get_neighbors(
 
 async fn get_edges(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<u64>,
+    ApiPath(id): ApiPath<u64>,
     ApiQuery(query): ApiQuery<EdgesQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     if query.limit == 0 || query.limit > 10_000 {
@@ -1081,7 +1141,7 @@ async fn batch_get_nodes(
 
 async fn get_paths(
     State(state): State<Arc<AppState>>,
-    Path((from, to)): Path<(u64, u64)>,
+    ApiPath((from, to)): ApiPath<(u64, u64)>,
     ApiQuery(query): ApiQuery<PathsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     if query.max_hops == 0 || query.max_hops > 64 {
@@ -1162,7 +1222,7 @@ async fn substring_lookup(
 
 async fn compare_and_set_payload_field(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<u64>,
+    ApiPath(id): ApiPath<u64>,
     request: Result<Json<ConditionalMutationRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let Json(request) = decode_json(request)?;
@@ -1256,6 +1316,28 @@ fn decode_json<T>(request: Result<Json<T>, JsonRejection>) -> Result<Json<T>, Ap
 /// 校验范围、400 状态与业务语义仍由 axum/serde 决定。
 struct ApiQuery<T>(T);
 
+struct ApiPath<T>(T);
+
+impl<T, S> FromRequestParts<S> for ApiPath<T>
+where
+    T: serde::de::DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Path(value) = Path::<T>::from_request_parts(parts, state)
+            .await
+            .map_err(|error| {
+                ApiError::invalid_request(format!(
+                    "路径参数无效 (Invalid path parameters): {error}"
+                ))
+                .at_field("path")
+            })?;
+        Ok(Self(value))
+    }
+}
+
 impl<T, S> FromRequestParts<S> for ApiQuery<T>
 where
     T: serde::de::DeserializeOwned + Send,
@@ -1273,6 +1355,7 @@ where
 
 fn query_rejection(rejection: QueryRejection) -> ApiError {
     ApiError::invalid_request(format!("查询参数无效 (Invalid query string): {rejection}"))
+        .at_field("query")
 }
 
 fn optional_header(
@@ -1510,6 +1593,16 @@ async fn not_found() -> ApiError {
         "ROUTE_NOT_FOUND",
         "接口不存在 (Route not found)",
         "请求的 HTTP 接口不存在 (The requested HTTP route does not exist)",
+        false,
+    )
+}
+
+async fn method_not_allowed() -> ApiError {
+    ApiError::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "METHOD_NOT_ALLOWED",
+        "HTTP 方法不受支持 (HTTP method not allowed)",
+        "当前路由拒绝该 HTTP 方法 (The route rejects this HTTP method)",
         false,
     )
 }

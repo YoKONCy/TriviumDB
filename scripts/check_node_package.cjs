@@ -64,6 +64,20 @@ try {
   fs.mkdirSync(consoleRoot)
   run(['-e', 'require(process.argv[1]).runConsoleContract(process.argv[2], require("triviumdb"))',
     path.join(root, 'tests/node/console_contracts.js'), consoleRoot], consumer)
+  run(['-e', 'process.exitCode = 1; require(process.argv[1])(process.argv[2], require("triviumdb")).then(() => { process.exitCode = 0 }).catch(error => { console.error(error) })',
+    path.join(root, 'tests/node/request_contexts.js'), consoleRoot], consumer)
+  const diagnosticsRoot = path.join(sample, 'query-diagnostics')
+  fs.mkdirSync(diagnosticsRoot)
+  run(['-e', 'process.exitCode = 1; require(process.argv[1]).runQueryDiagnostics(process.argv[2], require("triviumdb")).then(() => { process.exitCode = 0 }).catch(error => { console.error(error) })',
+    path.join(root, 'tests/node/error_contracts.js'), diagnosticsRoot], consumer)
+  const documentRoot = path.join(sample, 'document-retrieval')
+  fs.mkdirSync(documentRoot)
+  run(['-e', 'require(process.argv[1]).runQuiverSsd(process.argv[2], require("triviumdb"))',
+    path.join(root, 'tests/node/quiver_ssd.js'), documentRoot], consumer)
+  run(['-e', 'require(process.argv[1]).runDocuments(process.argv[2], require("triviumdb"))',
+    path.join(root, 'tests/node/documents.js'), documentRoot], consumer)
+  run(['-e', 'require(process.argv[1]).runNamedGraphs(process.argv[2], require("triviumdb"))',
+    path.join(root, 'tests/node/named_graphs.js'), documentRoot], consumer)
   console.log('npm 产物的 TypeScript 正反样例及原生运行行为验收通过')
 } finally {
   fs.rmSync(sample, { recursive: true, force: true })

@@ -10,6 +10,21 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConcurrencyPoint {
+    QuiverColdBeforeRead,
+    QuiverColdCoalesced,
+    QuiverColdIoCompleted,
+    QuiverColdBatchSubmitted,
+    QuiverColdAfterRead,
+    QuiverColdAfterHotRead,
+    QuiverColdBeforePublish,
+    QuiverColdAfterPublish,
+    /// 命名图复制前的受控读视图，用于取消和资源归还验收。
+    NamedGraphRead,
+    /// 文档精确向量评分及ANN导航的受控执行点。
+    DocumentVectorStep,
+    DocumentAnnStep,
+    /// 文档成员posting访问中断点，用于受控取消交错。
+    DocumentMemberStep,
     BeforeDatabasePathMetadata,
     BeforeDatabasePathIdentity,
     DatabasePathResolutionFailed,
@@ -46,10 +61,25 @@ pub enum ConcurrencyPoint {
     MigrationBeforeCommit,
     MigrationCommitted,
     TqlPathStep,
+    ConsoleBeforeCommit,
+    BeforeTransactionWal,
+    TransactionWalLockAcquired,
+    DirectWriteWalLockAcquired,
+    ExactScanStep,
+    GraphAlgorithmStep,
+    GraphAlgorithmIteration,
+    BeforeDocumentIndexAccountingReset,
+    DocumentPositionStep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoPoint {
+    QuiverColdWrite,
+    QuiverColdSync,
+    QuiverColdPublish,
+    QuiverColdDirectorySync,
+    QuiverColdRead,
+    DirectWriteApply,
     TransactionApply,
     SnapshotCopy,
     SnapshotSync,
@@ -74,6 +104,7 @@ pub enum IoPoint {
     MigrationAfterFirstFile,
     MigrationPublishMarker,
     MigrationAfterCommit,
+    MigrationCleanup,
     WalFlush,
     WalSync,
     WalMigrationCreate,

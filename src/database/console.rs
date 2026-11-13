@@ -1,17 +1,21 @@
 //! 嵌入式控制台宿主协议；只借用现有实例，不打开路径、不接管文件锁。
 
 use super::{AccessMode, Database, LifecycleState, TxBuilder, lock_or_recover};
+use crate::error::{WriteErrorInfo, WritePhase};
 use crate::query::tql_executor::{QueryControl, TqlValue};
 use crate::{Result, TriviumError, VectorType};
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
-use std::sync::{Arc, Condvar, Mutex, TryLockError, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 pub const CONSOLE_PROTOCOL_VERSION: u32 = 1;
 pub const CONSOLE_CONTRACT: &str = include_str!("console_contract.json");
+
+// 保留已有导入路径；共享宿主的准入与锁管理由 SDK 层维护。
+pub use crate::sdk::ConsoleHost;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +118,12 @@ impl ConsoleSession {
         lock_or_recover(&self.state).detached
     }
 
+    /// 已停止准入且所有 Core 请求实际退出，响应交付由宿主传输单独确认。
+    pub fn is_drained(&self) -> bool {
+        let state = lock_or_recover(&self.state);
+        state.detached && state.requests.is_empty()
+    }
+
     pub fn options(&self) -> &ConsoleOptions {
         &self.options
     }
@@ -131,12 +141,9 @@ impl ConsoleSession {
     fn enter(
         &self,
         instance: &Arc<Instance>,
-        request_id: &str,
-        external: Option<QueryControl>,
+        context: &crate::request::RequestContext,
     ) -> Result<RequestGuard> {
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(self.options.query_timeout_ms))
-            .ok_or_else(|| invalid("查询 deadline 溢出 (Query deadline overflow)"))?;
+        let request_id = context.request_id();
         let mut state = lock_or_recover(&self.state);
         if state.detached {
             return Err(TriviumError::ConsoleSessionClosed);
@@ -151,12 +158,11 @@ impl ConsoleSession {
             state.instance = Some(Arc::downgrade(instance));
         }
         if state.requests.contains_key(request_id) {
-            return Err(busy("请求 ID 正在执行 (Request ID is already active)"));
+            return Err(TriviumError::DatabaseBusy {
+                resource: "console_request_id",
+            });
         }
-        let control = external.map_or_else(
-            || QueryControl::with_deadline(deadline),
-            |control| control.bounded_by(deadline),
-        );
+        let control = context.control().clone();
         state
             .requests
             .insert(request_id.to_owned(), control.clone());
@@ -196,6 +202,19 @@ struct RequestGuard {
     control: QueryControl,
 }
 
+impl RequestGuard {
+    fn check_before_commit(&self) -> Result<()> {
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::ConsoleBeforeCommit);
+        self.control.check().map_err(|error| {
+            error.with_write_info(WriteErrorInfo {
+                phase: WritePhase::Validation,
+                ..WriteErrorInfo::MAINTENANCE_ADMISSION
+            })
+        })
+    }
+}
+
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         if let Some(state) = self.state.upgrade() {
@@ -204,80 +223,17 @@ impl Drop for RequestGuard {
     }
 }
 
-/// Rust 宿主适配器；所有宿主访问使用同一个 Mutex，组件只持有弱引用。
-pub struct ConsoleHost<T: VectorType> {
-    database: Weak<Mutex<Database<T>>>,
-    session: ConsoleSession,
-}
-
-impl<T: VectorType> Clone for ConsoleHost<T> {
-    fn clone(&self) -> Self {
-        Self {
-            database: self.database.clone(),
-            session: self.session.clone(),
-        }
+impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
+    pub(crate) fn attach_console_session(&self, session: &ConsoleSession) -> Result<()> {
+        let _operation = self.enter_operation()?;
+        lock_or_recover(&session.state).instance = Some(Arc::downgrade(&self.lifecycle));
+        Ok(())
     }
-}
-
-impl<T: VectorType + Serialize + serde::de::DeserializeOwned> ConsoleHost<T> {
-    pub fn attach(database: &Arc<Mutex<Database<T>>>, options: ConsoleOptions) -> Result<Self> {
-        let session = ConsoleSession::new(options)?;
-        // 不等待宿主锁，避免 Hook 重入、双向 IPC 或同线程重复加锁造成死锁。
-        let guard = database.try_lock().map_err(lock_error)?;
-        let _operation = guard.enter_operation()?;
-        lock_or_recover(&session.state).instance = Some(Arc::downgrade(&guard.lifecycle));
-        Ok(Self {
-            database: Arc::downgrade(database),
-            session,
-        })
-    }
-
-    pub fn session(&self) -> ConsoleSession {
-        self.session.clone()
-    }
-
-    pub fn request(&self, request_json: &str) -> Result<String> {
-        self.request_inner(request_json, None)
-    }
-
-    pub fn request_with_control(
-        &self,
-        request_json: &str,
-        control: QueryControl,
-    ) -> Result<String> {
-        self.request_inner(request_json, Some(control))
-    }
-
-    fn request_inner(&self, request_json: &str, control: Option<QueryControl>) -> Result<String> {
-        if self.session.is_detached() {
-            return Err(TriviumError::ConsoleSessionClosed);
-        }
-        let database = self
-            .database
-            .upgrade()
-            .ok_or(TriviumError::DatabaseClosed)?;
-        let mut guard = database.try_lock().map_err(lock_error)?;
-        guard.console_request_inner(&self.session, request_json, control)
-    }
-}
-
-fn lock_error<T>(error: TryLockError<T>) -> TriviumError {
-    match error {
-        TryLockError::WouldBlock => busy("宿主数据库正在使用 (Host database is busy)"),
-        TryLockError::Poisoned(_) => std::io::Error::other(
-            "宿主互斥锁中毒，拒绝继续访问 (Host mutex is poisoned; access rejected)",
-        )
-        .into(),
-    }
-}
-
-fn busy(message: &str) -> TriviumError {
-    std::io::Error::new(std::io::ErrorKind::WouldBlock, message).into()
 }
 fn invalid(message: impl Into<String>) -> TriviumError {
     TriviumError::InvalidInput(message.into())
 }
-fn parse<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
+fn parse<'a, T: serde::Deserialize<'a>>(raw: &'a str) -> Result<T> {
     serde_json::from_str(raw).map_err(|error| {
         invalid(format!(
             "控制台 JSON 无效 (Invalid console JSON): category={:?}, line={}, column={}",
@@ -299,12 +255,99 @@ fn id(raw: &str) -> Result<u64> {
         .ok_or_else(|| invalid("节点 ID 超出范围 (Node ID is out of range)"))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Request {
-    version: u32,
     request_id: String,
     command: Command,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Envelope<'a> {
+    version: u32,
+    request_id: String,
+    #[serde(borrow)]
+    command: &'a serde_json::value::RawValue,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum CommandKind {
+    Info,
+    Query,
+    Mutate,
+    GetNodes,
+    Search,
+    Subgraph,
+    Edges,
+    Path,
+    Indexes,
+    ManageIndex,
+    BuildQuiver,
+    Transaction,
+    GuardedTransaction,
+    TransactionStatus,
+    ImportNodes,
+    ImportEdges,
+}
+
+#[derive(Deserialize)]
+struct CommandHeader {
+    operation: CommandKind,
+}
+
+pub(crate) struct PreparedConsoleRequest<'a> {
+    envelope: Envelope<'a>,
+    pub(crate) context: crate::request::RequestContext,
+}
+
+impl ConsoleSession {
+    pub(crate) fn prepare_request<'a>(
+        &self,
+        raw: &'a str,
+        external: Option<QueryControl>,
+    ) -> Result<PreparedConsoleRequest<'a>> {
+        if self.is_detached() {
+            return Err(TriviumError::ConsoleSessionClosed);
+        }
+        if raw.len() > self.options.max_request_bytes {
+            return Err(TriviumError::ResourceBudgetExceeded {
+                resource: "console_request_bytes",
+                requested: raw.len(),
+                used: 0,
+                limit: self.options.max_request_bytes,
+            });
+        }
+        let request: Envelope<'_> = parse(raw)?;
+        if request.version != CONSOLE_PROTOCOL_VERSION
+            || request.request_id.is_empty()
+            || request.request_id.len() > 128
+        {
+            return Err(invalid(
+                "控制台协议版本或请求 ID 无效 (Invalid console protocol version or request ID)",
+            ));
+        }
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(self.options.query_timeout_ms))
+            .ok_or_else(|| invalid("查询 deadline 溢出 (Query deadline overflow)"))?;
+        let mut control = external.map_or_else(
+            || QueryControl::with_deadline(deadline),
+            |control| control.bounded_by(deadline),
+        );
+        if let Some(parent) = crate::request::control() {
+            control = control.combined_with(&parent);
+        }
+        let header: CommandHeader = parse(request.command.get())?;
+        let context = crate::request::RequestContext::new(
+            &request.request_id,
+            control,
+            header.operation.permission().1,
+        )?;
+        context.check_admission()?;
+        Ok(PreparedConsoleRequest {
+            envelope: request,
+            context,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -326,6 +369,8 @@ enum Command {
     },
     GetNodes {
         ids: Vec<String>,
+        #[serde(default)]
+        with_revision: bool,
     },
     Search {
         vector: Vec<Value>,
@@ -366,6 +411,16 @@ enum Command {
     Transaction {
         operations: Vec<Operation>,
     },
+    GuardedTransaction {
+        expected_revision: String,
+        idempotency_key: String,
+        operations: Vec<Operation>,
+    },
+    TransactionStatus {
+        idempotency_key: String,
+        expected_revision: String,
+        operations: Vec<Operation>,
+    },
     ImportNodes {
         records: Vec<NodeRecord>,
     },
@@ -380,7 +435,7 @@ fn thousand() -> usize {
     1000
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NodeRecord {
     #[serde(default)]
@@ -388,7 +443,7 @@ struct NodeRecord {
     vector: Vec<Value>,
     payload: Value,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EdgeRecord {
     source: String,
@@ -398,7 +453,7 @@ struct EdgeRecord {
     #[serde(default)]
     metadata: Value,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(
     tag = "op",
     rename_all = "camelCase",
@@ -435,16 +490,41 @@ enum Operation {
 
 impl Command {
     fn permission(&self) -> (ConsoleFeature, bool) {
+        let kind = match self {
+            Self::Info => CommandKind::Info,
+            Self::Query { .. } => CommandKind::Query,
+            Self::Mutate { .. } => CommandKind::Mutate,
+            Self::GetNodes { .. } => CommandKind::GetNodes,
+            Self::Search { .. } => CommandKind::Search,
+            Self::Subgraph { .. } => CommandKind::Subgraph,
+            Self::Edges { .. } => CommandKind::Edges,
+            Self::Path { .. } => CommandKind::Path,
+            Self::Indexes => CommandKind::Indexes,
+            Self::ManageIndex { .. } => CommandKind::ManageIndex,
+            Self::BuildQuiver => CommandKind::BuildQuiver,
+            Self::Transaction { .. } => CommandKind::Transaction,
+            Self::GuardedTransaction { .. } => CommandKind::GuardedTransaction,
+            Self::TransactionStatus { .. } => CommandKind::TransactionStatus,
+            Self::ImportNodes { .. } => CommandKind::ImportNodes,
+            Self::ImportEdges { .. } => CommandKind::ImportEdges,
+        };
+        kind.permission()
+    }
+}
+
+impl CommandKind {
+    fn permission(&self) -> (ConsoleFeature, bool) {
         use ConsoleFeature::*;
         match self {
-            Self::Info | Self::Query { .. } | Self::GetNodes { .. } => (Query, false),
-            Self::Mutate { .. } => (Query, true),
-            Self::Search { .. } => (Vector, false),
-            Self::Subgraph { .. } | Self::Edges { .. } | Self::Path { .. } => (Graph, false),
+            Self::Info | Self::Query | Self::GetNodes => (Query, false),
+            Self::Mutate => (Query, true),
+            Self::Search => (Vector, false),
+            Self::Subgraph | Self::Edges | Self::Path => (Graph, false),
             Self::Indexes => (Indexes, false),
-            Self::ManageIndex { .. } | Self::BuildQuiver => (Indexes, true),
-            Self::Transaction { .. } => (Transactions, true),
-            Self::ImportNodes { .. } | Self::ImportEdges { .. } => (Import, true),
+            Self::ManageIndex | Self::BuildQuiver => (Indexes, true),
+            Self::Transaction | Self::GuardedTransaction => (Transactions, true),
+            Self::TransactionStatus => (Transactions, false),
+            Self::ImportNodes | Self::ImportEdges => (Import, true),
         }
     }
 }
@@ -459,43 +539,49 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
         self.console_request_inner(session, request_json, None)
     }
 
-    fn console_request_inner(
+    pub(crate) fn console_request_inner(
         &mut self,
         session: &ConsoleSession,
         request_json: &str,
         external: Option<QueryControl>,
     ) -> Result<String> {
-        if session.is_detached() {
-            return Err(TriviumError::ConsoleSessionClosed);
-        }
-        let _operation = self.enter_operation()?;
+        let prepared = session.prepare_request(request_json, external)?;
+        self.execute_console_request(session, prepared)
+    }
+
+    pub(crate) fn execute_console_request(
+        &mut self,
+        session: &ConsoleSession,
+        prepared: PreparedConsoleRequest<'_>,
+    ) -> Result<String> {
+        let PreparedConsoleRequest { envelope, context } = prepared;
+        let _operation = self
+            .enter_operation()
+            .map_err(|error| context.admission_error(error))?;
         let options = &session.options;
-        if request_json.len() > options.max_request_bytes {
-            return Err(TriviumError::ResourceBudgetExceeded {
-                resource: "console_request_bytes",
-                requested: request_json.len(),
-                used: 0,
-                limit: options.max_request_bytes,
-            });
-        }
-        let request: Request = parse(request_json)?;
-        if request.version != CONSOLE_PROTOCOL_VERSION
-            || request.request_id.is_empty()
-            || request.request_id.len() > 128
-        {
-            return Err(invalid(
-                "控制台协议版本或请求 ID 无效 (Invalid console protocol version or request ID)",
-            ));
-        }
-        let active = session.enter(&self.lifecycle, &request.request_id, external)?;
+        context.check_admission()?;
+        let active = session
+            .enter(&self.lifecycle, &context)
+            .map_err(|error| context.admission_error(error))?;
+        let _request_context = context
+            .enter()
+            .map_err(|error| context.admission_error(error))?;
+        let command =
+            parse(envelope.command.get()).map_err(|error| context.admission_error(error))?;
+        let request = Request {
+            request_id: envelope.request_id,
+            command,
+        };
         let (feature, write) = request.command.permission();
+        let admission_error = |error| context.admission_error(error);
         if !matches!(request.command, Command::Info) {
-            session.require(feature, write)?;
+            session.require(feature, write).map_err(admission_error)?;
         }
         if write {
-            self.require_write_access("console_request")?;
+            self.require_write_access("console_request")
+                .map_err(admission_error)?;
         }
-        active.control.check()?;
+        active.control.check().map_err(admission_error)?;
         let limit = options.max_response_bytes;
         let runtime = self.resource_runtime.clone();
         let respond = |data: &Value, committed| {
@@ -522,17 +608,16 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                     .features
                     .iter()
                     .copied()
-                    .filter(|f| {
-                        writable
-                            || !matches!(f, ConsoleFeature::Transactions | ConsoleFeature::Import)
-                    })
+                    .filter(|f| writable || !matches!(f, ConsoleFeature::Import))
                     .collect();
                 respond(
                     &json!({"protocolVersion": CONSOLE_PROTOCOL_VERSION, "packageVersion": env!("CARGO_PKG_VERSION"),
                     "readOnly": !writable, "features": features, "dtype":dtype,"storage": self.storage_info(),
                     "limits": {"maxRequestBytes":options.max_request_bytes,"maxResponseBytes":limit,
                         "maxOperations":options.max_operations,"maxQueryRows":max_rows,"queryTimeoutMs":options.query_timeout_ms},
-                    "transport": {"streaming":false,"occ":false,"idEncoding":"decimal-string","cooperativeCancellation":["query"],"cooperativeWritePlanning":true}}),
+                    "transport": {"streaming":false,"occ":true,"occScope":"database-instance",
+                        "idempotency":{"operation":"guardedTransaction","statusOperation":"transactionStatus","durable":true,"persistence":"wal-checkpoint","maxReceipts":super::editing::RECEIPT_CAPACITY,"maxReceiptBytes":super::editing::RECEIPT_BYTES},
+                        "idEncoding":"decimal-string","cooperativeCancellation":["query"],"cooperativeWritePlanning":true}}),
                     false,
                 )
             }
@@ -541,7 +626,8 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 let parameters = parameters
                     .iter()
                     .map(|(key, value)| {
-                        crate::query::tql_prepared::TqlParamValue::from_json(value)
+                        prepared
+                            .parameter_from_json(key, value)
                             .map(|value| (key.clone(), value))
                     })
                     .collect::<Result<HashMap<_, _>>>()?;
@@ -588,9 +674,16 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 )?;
                 prepared.ok_or_else(||invalid("写入响应未准入 (Write response was not admitted)"))?.complete(&json!({"affected":result.affected,"createdIds":strings(result.created_ids)}))
             }
-            Command::GetNodes { ids } => {
+            Command::GetNodes { ids, with_revision } => {
                 check_count(ids.len(), options.max_operations)?;
-                encode_nodes(self, &request.request_id, ids, &active.control, limit)
+                encode_nodes(
+                    self,
+                    &request.request_id,
+                    ids,
+                    with_revision,
+                    &active.control,
+                    limit,
+                )
             }
             Command::Search {
                 vector,
@@ -755,6 +848,147 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 self.build_quiver_index(None)?;
                 prepared.into_response()
             }
+            Command::GuardedTransaction {
+                expected_revision,
+                idempotency_key,
+                operations,
+            } => {
+                validate_edit_key(&idempotency_key)?;
+                if expected_revision.len() != 49 {
+                    return Err(invalid("编辑版本令牌无效 (Invalid edit revision token)"));
+                }
+                check_count(operations.len(), options.max_operations)?;
+                if lock_or_recover(&self.lifecycle.0)
+                    .group_commit_owner
+                    .is_some()
+                {
+                    return Err(invalid(
+                        "分组提交内不能执行受保护的编辑事务 (Guarded editing cannot run inside group commit)",
+                    ));
+                }
+                // 指纹按解析后的完整事务内容编码，requestId 仅关联响应，不参与幂等身份。
+                let mut fingerprint = LimitedWriter::new(options.max_request_bytes, &runtime)?;
+                let encoded = fingerprint.json(&(&expected_revision, &operations));
+                fingerprint.verify(encoded, false)?;
+                {
+                    let mt = super::read_or_recover(&self.memtable);
+                    if let Some(receipt) = mt.editing.receipt(&idempotency_key) {
+                        if receipt.fingerprint != fingerprint.bytes {
+                            return Err(TriviumError::IdempotencyConflict);
+                        }
+                        let revision =
+                            receipt.committed.ok_or(TriviumError::WriteOutcomeUnknown)?;
+                        return encode_response(
+                            &request.request_id,
+                            &EditAck {
+                                created_ids: StringIds(&receipt.ids),
+                                revision,
+                                replayed: true,
+                            },
+                            limit,
+                            true,
+                            &runtime,
+                        );
+                    }
+                    mt.editing.check(&expected_revision)?;
+                }
+                let created = operations
+                    .iter()
+                    .filter(|op| matches!(op, Operation::Insert { .. }))
+                    .count();
+                // 所有确认缓冲和回执都在 WAL 之前准入。
+                let prepared = prepare_edit_ack(&request.request_id, created, limit, &runtime)?;
+                let extra = idempotency_key.capacity()
+                    + expected_revision.capacity()
+                    + created * std::mem::size_of::<u64>()
+                    + 256;
+                let bytes = fingerprint.bytes.capacity().saturating_add(extra);
+                if bytes > super::editing::RECEIPT_BYTES {
+                    return Err(TriviumError::ResourceBudgetExceeded {
+                        resource: "console_receipt_bytes",
+                        requested: bytes,
+                        used: 0,
+                        limit: super::editing::RECEIPT_BYTES,
+                    });
+                }
+                fingerprint.workspace.resize(bytes)?;
+                let mut ids = Vec::new();
+                ids.try_reserve_exact(created).map_err(|error| TriviumError::CapacityAllocationFailed {
+                    reason:format!("事务回执 ID 分配失败 (Transaction receipt ID allocation failed): {error}"),
+                })?;
+                let bytes =
+                    bytes + ids.capacity().saturating_sub(created) * std::mem::size_of::<u64>();
+                fingerprint.workspace.resize(bytes)?;
+                let receipt = super::editing::EditReceipt {
+                    key: idempotency_key.clone(),
+                    expected: expected_revision,
+                    fingerprint: fingerprint.bytes,
+                    ids,
+                    committed: None,
+                    bytes,
+                    planned: None,
+                    _workspace: Some(fingerprint.workspace),
+                };
+                let mut builder = TxBuilder::new();
+                for operation in operations {
+                    append_operation(&mut builder, operation)?;
+                }
+                active.check_before_commit()?;
+                self.commit_ops_guarded(builder.into_ops(), Some(receipt), Some(&active.control))?;
+                let mt = super::read_or_recover(&self.memtable);
+                let receipt = mt
+                    .editing
+                    .receipt(&idempotency_key)
+                    .ok_or(TriviumError::WriteOutcomeUnknown)?;
+                prepared.complete(&EditAck {
+                    created_ids: StringIds(&receipt.ids),
+                    revision: receipt.committed.ok_or(TriviumError::WriteOutcomeUnknown)?,
+                    replayed: false,
+                })
+            }
+            Command::TransactionStatus {
+                idempotency_key,
+                expected_revision,
+                operations,
+            } => {
+                validate_edit_key(&idempotency_key)?;
+                if expected_revision.len() != 49 {
+                    return Err(invalid("编辑版本令牌无效 (Invalid edit revision token)"));
+                }
+                check_count(operations.len(), options.max_operations)?;
+                let mut fingerprint = LimitedWriter::new(options.max_request_bytes, &runtime)?;
+                let encoded = fingerprint.json(&(&expected_revision, &operations));
+                fingerprint.verify(encoded, false)?;
+                let mt = super::read_or_recover(&self.memtable);
+                if let Some(receipt) = mt.editing.receipt(&idempotency_key)
+                    && receipt.fingerprint != fingerprint.bytes
+                {
+                    return Err(TriviumError::IdempotencyConflict);
+                }
+                match mt.editing.receipt(&idempotency_key) {
+                    Some(receipt) if receipt.committed.is_some() => {
+                        #[derive(Serialize)]
+                        #[serde(rename_all = "camelCase")]
+                        struct Status<'a> {
+                            outcome: &'static str,
+                            revision: Option<super::editing::Revision>,
+                            created_ids: StringIds<'a>,
+                        }
+                        encode_response(
+                            &request.request_id,
+                            &Status {
+                                outcome: "committed",
+                                revision: receipt.committed,
+                                created_ids: StringIds(&receipt.ids),
+                            },
+                            limit,
+                            false,
+                            &runtime,
+                        )
+                    }
+                    _ => respond(&json!({"outcome":"unknown"}), false),
+                }
+            }
             Command::Transaction { operations } => {
                 check_count(operations.len(), options.max_operations)?;
                 let prepared = preflight_ack(
@@ -771,8 +1005,9 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 for operation in operations {
                     append_operation(&mut builder, operation)?;
                 }
-                active.control.check()?;
-                let ids = self.commit_tx(builder)?;
+                active.check_before_commit()?;
+                let ids =
+                    self.commit_ops_guarded(builder.into_ops(), None, Some(&active.control))?;
                 prepared.complete(&json!({"createdIds":strings(ids)}))
             }
             Command::ImportNodes { records } => {
@@ -783,8 +1018,9 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 for record in records {
                     append_operation(&mut builder, Operation::Insert { record })?;
                 }
-                active.control.check()?;
-                let ids = self.commit_tx(builder)?;
+                active.check_before_commit()?;
+                let ids =
+                    self.commit_ops_guarded(builder.into_ops(), None, Some(&active.control))?;
                 prepared.complete(&json!({"createdIds":strings(ids)}))
             }
             Command::ImportEdges { records } => {
@@ -800,8 +1036,8 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                 for record in records {
                     append_operation(&mut builder, Operation::Link { record })?;
                 }
-                active.control.check()?;
-                self.commit_tx(builder)?;
+                active.check_before_commit()?;
+                self.commit_ops_guarded(builder.into_ops(), None, Some(&active.control))?;
                 prepared.into_response()
             }
         }
@@ -848,6 +1084,60 @@ fn check_count(count: usize, limit: usize) -> Result<()> {
 }
 fn strings(ids: Vec<u64>) -> Vec<String> {
     ids.into_iter().map(|id| id.to_string()).collect()
+}
+
+fn validate_edit_key(key: &str) -> Result<()> {
+    if key.is_empty() || key.len() > 128 {
+        return Err(invalid(
+            "幂等键必须为 1..=128 字节 (Idempotency key must contain 1..=128 bytes)",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditAck<'a> {
+    created_ids: StringIds<'a>,
+    revision: super::editing::Revision,
+    replayed: bool,
+}
+
+struct StringIds<'a>(&'a [u64]);
+impl Serialize for StringIds<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for id in self.0 {
+            sequence.serialize_element(&id.to_string())?;
+        }
+        sequence.end()
+    }
+}
+
+fn prepare_edit_ack(
+    request_id: &str,
+    created: usize,
+    limit: usize,
+    runtime: &crate::ResourceRuntime,
+) -> Result<PreparedResponse> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Ack {
+        created_ids: RepeatedIds,
+        revision: &'static str,
+        replayed: bool,
+    }
+    prepare_response(
+        request_id,
+        &Ack {
+            created_ids: RepeatedIds(created),
+            revision: "ffffffffffffffffffffffffffffffff:ffffffffffffffff",
+            replayed: false,
+        },
+        limit,
+        runtime,
+    )
 }
 
 fn preflight_ack(
@@ -987,9 +1277,21 @@ impl LimitedWriter {
         Ok(())
     }
     fn finish(mut self, result: Result<()>, committed: bool) -> Result<String> {
-        self.verify(result, committed)?;
-        String::from_utf8(self.bytes)
-            .map_err(|_| invalid("控制台响应编码无效 (Invalid console response encoding)"))
+        let response = self.verify(result, committed).and_then(|()| {
+            String::from_utf8(self.bytes)
+                .map_err(|_| invalid("控制台响应编码无效 (Invalid console response encoding)"))
+        });
+        response.map_err(|error| {
+            if committed {
+                error.with_write_info(crate::error::WriteErrorInfo {
+                    phase: crate::error::WritePhase::Response,
+                    outcome: crate::error::WriteOutcome::Committed,
+                    transaction_consumed: None,
+                })
+            } else {
+                error
+            }
+        })
     }
 }
 impl Write for LimitedWriter {
@@ -1114,10 +1416,12 @@ fn encode_nodes<T: VectorType + Serialize + serde::de::DeserializeOwned>(
     database: &Database<T>,
     request_id: &str,
     ids: Vec<String>,
+    with_revision: bool,
     control: &QueryControl,
     limit: usize,
 ) -> Result<String> {
     let mut writer = LimitedWriter::new(limit, &database.resource_runtime)?;
+    let mt = super::read_or_recover(&database.memtable);
     let result = (|| {
         writer.raw(b"{\"version\":1,\"requestId\":")?;
         writer.json(&request_id)?;
@@ -1126,7 +1430,21 @@ fn encode_nodes<T: VectorType + Serialize + serde::de::DeserializeOwned>(
         let mut missing = Vec::new();
         for raw in ids {
             control.check()?;
-            if let Some(node) = database.get(id(&raw)?)? {
+            let node_id = id(&raw)?;
+            if let Some(payload) = mt.try_get_payload(node_id)? {
+                let node = crate::NodeView {
+                    id: node_id,
+                    vector: mt
+                        .get_vector(node_id)
+                        .ok_or_else(|| {
+                            TriviumError::CorruptedFile(
+                                "节点缺少向量 (Node vector is missing)".into(),
+                            )
+                        })?
+                        .to_vec(),
+                    payload: (*payload).clone(),
+                    edges: mt.get_edges(node_id).unwrap_or(&[]).to_vec(),
+                };
                 if !first {
                     writer.raw(b",")?;
                 }
@@ -1139,6 +1457,10 @@ fn encode_nodes<T: VectorType + Serialize + serde::de::DeserializeOwned>(
         }
         writer.raw(b"],\"missingIds\":")?;
         writer.json(&missing)?;
+        if with_revision {
+            writer.raw(b",\"revision\":")?;
+            writer.json(&mt.editing.revision()?)?;
+        }
         writer.raw(b"}}")
     })();
     writer.finish(result, false)

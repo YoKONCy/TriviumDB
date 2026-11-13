@@ -125,6 +125,8 @@ pub fn traverse<T: VectorType>(
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<Vec<ReachabilityResult>> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     Ok(traverse_detailed(db, source_id, config)?.results)
 }
 pub fn traverse_detailed<T: VectorType>(
@@ -132,6 +134,8 @@ pub fn traverse_detailed<T: VectorType>(
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<ReachabilityOutput> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     Ok(traverse_leased(db, source_id, config)?.0)
 }
 
@@ -144,6 +148,8 @@ fn traverse_leased<T: VectorType>(
     Vec<crate::resources::WorkspaceReservation>,
     crate::resources::WorkspaceReservation,
 )> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     validate(db, source_id, config)?;
     let mut base = db
         .resource_runtime()
@@ -186,6 +192,7 @@ fn traverse_leased<T: VectorType>(
         }
         let (neighbors, _neighbor_lease) = collect_steps(db, state.node, config)?;
         for step in neighbors {
+            crate::graph::budget::check_control(&control)?;
             if traversed_edges >= config.max_edges {
                 truncated = exhausted(
                     &budget,
@@ -303,6 +310,8 @@ pub fn traverse_compact<T: VectorType>(
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<CompactReachabilityOutput> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     validate(db, source_id, config)?;
     let mut workspace = db
         .resource_runtime()
@@ -318,11 +327,13 @@ pub fn traverse_compact<T: VectorType>(
     }
     let mut traversed_edges = 0usize;
     while let Some((current, depth)) = queue.pop_front() {
+        crate::graph::budget::check_control(&control)?;
         if depth >= config.max_depth {
             continue;
         }
         let (targets, _targets_lease) = collect_targets(db, current, config)?;
         for target in targets {
+            crate::graph::budget::check_control(&control)?;
             if traversed_edges >= config.max_edges {
                 return Err(TriviumError::QueryExecution(
                     "图扩展检查边数超过预算 (Graph expansion examined-edge budget exceeded)".into(),
@@ -386,8 +397,11 @@ fn collect_target_slots<T: VectorType>(
     config: &ReachabilityConfig,
     words: &mut [u64],
 ) -> Result<usize> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     let (targets, _targets_lease) = collect_targets(db, current, config)?;
     for target in &targets {
+        crate::graph::budget::check_control(&control)?;
         if let Some(slot) = db.internal_slot_of(*target) {
             set_bit(words, slot);
         }
@@ -402,6 +416,8 @@ pub fn traverse_compact_parallel<T: VectorType>(
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<CompactReachabilityOutput> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     validate(db, source_id, config)?;
     let slot_count = db.internal_slot_count();
     let word_count = slot_count.div_ceil(64);
@@ -424,12 +440,14 @@ pub fn traverse_compact_parallel<T: VectorType>(
     }
     let mut traversed_edges = 0usize;
     for depth in 0..config.max_depth {
+        crate::graph::budget::check_control(&control)?;
         let workers = rayon::current_num_threads().min(frontier.len()).max(1);
         workspace.resize(state_bytes(visited_count, false, word_count, workers)?)?;
         let partials = if frontier.len() < 1_024 || workers == 1 {
             let mut bitmap = vec![0u64; word_count];
             let mut edges = 0usize;
             for &slot in &frontier {
+                crate::graph::budget::check_control(&control)?;
                 if let Some(id) = db.active_id_at_slot(slot) {
                     edges =
                         edges.saturating_add(collect_target_slots(db, id, config, &mut bitmap)?);
@@ -444,6 +462,7 @@ pub fn traverse_compact_parallel<T: VectorType>(
                     let mut bitmap = vec![0u64; word_count];
                     let mut edges = 0usize;
                     for &slot in chunk {
+                        crate::graph::budget::check_control(&control)?;
                         if let Some(id) = db.active_id_at_slot(slot) {
                             edges = edges.saturating_add(collect_target_slots(
                                 db,
@@ -468,15 +487,19 @@ pub fn traverse_compact_parallel<T: VectorType>(
         }
         let mut merged = vec![0u64; word_count];
         for (bitmap, _) in partials {
+            crate::graph::budget::check_control(&control)?;
             for (target, source) in merged.iter_mut().zip(bitmap) {
+                crate::graph::budget::check_control(&control)?;
                 *target |= source;
             }
         }
         let next_depth = depth + 1;
         let mut next_frontier = Vec::new();
         for (word_index, word) in merged.iter().copied().enumerate() {
+            crate::graph::budget::check_control(&control)?;
             let mut unseen = word & !visited[word_index];
             while unseen != 0 {
+                crate::graph::budget::check_control(&control)?;
                 let bit = unseen.trailing_zeros() as usize;
                 let slot = word_index * 64 + bit;
                 unseen &= unseen - 1;
@@ -507,6 +530,7 @@ pub fn traverse_compact_parallel<T: VectorType>(
         }
         visited_count = visited_count.saturating_add(next_frontier.len());
         for &slot in &next_frontier {
+            crate::graph::budget::check_control(&control)?;
             set_bit(&mut visited, slot);
             if next_depth >= config.min_depth {
                 if results.len() >= config.max_results {
@@ -538,6 +562,8 @@ fn collect_targets<T: VectorType>(
     current: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<(Vec<NodeId>, crate::resources::WorkspaceReservation)> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     let (steps, mut lease) = collect_steps(db, current, config)?;
     let bytes = steps
         .len()
@@ -556,12 +582,16 @@ pub fn query_subgraph<T: VectorType>(
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<SubgraphResult> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     let (output, _result_leases, _base) = traverse_leased(db, source_id, config)?;
     let mut ids = BTreeSet::from([source_id]);
     let mut edges = BTreeMap::new();
     for result in &output.results {
+        crate::graph::budget::check_control(&control)?;
         ids.extend(result.path.iter().copied());
         for step in &result.steps {
+            crate::graph::budget::check_control(&control)?;
             edges
                 .entry((step.edge_source, step.edge_target, step.label.as_str()))
                 .or_insert(step);
@@ -616,6 +646,8 @@ fn validate<T: VectorType>(
     source_id: NodeId,
     c: &ReachabilityConfig,
 ) -> Result<()> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     db.ensure_readable()?;
     if !db.contains(source_id) {
         return Err(TriviumError::NodeNotFound(source_id));
@@ -650,6 +682,8 @@ fn workspace_overflow() -> TriviumError {
 }
 
 fn state_bytes(nodes: usize, detailed: bool, bitmap_words: usize, workers: usize) -> Result<usize> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     // 状态按实际探索量增长，容器初次分配和几何扩容预留余量；JSON 与路径单独记账。
     let bytes = nodes
         .max(4)
@@ -671,6 +705,8 @@ fn collect_steps<'a, T: VectorType>(
     Vec<BorrowedStep<'a>>,
     crate::resources::WorkspaceReservation,
 )> {
+    let control = crate::request::control().unwrap_or_default();
+    control.check()?;
     let mut steps = Vec::new();
     let mut lease = db.resource_runtime().reserve_workspace(0)?;
     let mut add = |source, edge: &'a crate::node::Edge| -> Result<()> {
@@ -700,12 +736,15 @@ fn collect_steps<'a, T: VectorType>(
     };
     if c.direction != ReachabilityDirection::Incoming {
         for edge in db.get_edges(current).unwrap_or(&[]) {
+            crate::graph::budget::check_control(&control)?;
             add(current, edge)?;
         }
     }
     if c.direction != ReachabilityDirection::Outgoing {
         for &source in db.get_incoming_sources(current) {
+            crate::graph::budget::check_control(&control)?;
             for edge in db.get_edges(source).unwrap_or(&[]) {
+                crate::graph::budget::check_control(&control)?;
                 if edge.target_id == current {
                     add(source, edge)?;
                 }

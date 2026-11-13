@@ -1,13 +1,10 @@
 #![cfg(feature = "test-hooks")]
 //! 用真实文件替换和路径屏障验证打开入口的租约顺序。
 
-#[path = "../support/mod.rs"]
-mod support;
-
+use super::support::TestDir;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
-use support::TestDir;
 use triviumdb::database::{AccessMode, Config};
 use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_path};
 use triviumdb::{Database, TriviumError};

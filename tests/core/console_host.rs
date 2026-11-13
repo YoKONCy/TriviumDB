@@ -240,9 +240,12 @@ fn 卸载互不干扰且持有旧会话也能释放文件锁() {
         Err(TriviumError::DatabaseLocked(_))
     ));
     let guard = database.lock().unwrap();
-    assert!(
-        matches!(host.request(&request(json!({"operation":"info"}))),Err(TriviumError::Io(error)) if error.kind()==std::io::ErrorKind::WouldBlock)
-    );
+    assert!(matches!(
+        host.request(&request(json!({"operation":"info"}))),
+        Err(TriviumError::DatabaseBusy {
+            resource: "host_database"
+        })
+    ));
     host.session().detach();
     assert!(matches!(
         host.request(&request(json!({"operation":"info"}))),
@@ -324,6 +327,7 @@ fn 卸载在真实请求持锁时取消且宿主关闭等待真实退出() {
     });
     entered.wait();
     host.session().detach();
+    assert!(!host.session().is_drained());
     let (started_tx, started_rx) = mpsc::channel();
     let closing_db = database.clone();
     let closing = std::thread::spawn(move || {
@@ -343,6 +347,7 @@ fn 卸载在真实请求持锁时取消且宿主关闭等待真实退出() {
         Err(TriviumError::QueryCancelled)
     ));
     closing.join().unwrap().unwrap();
+    assert!(host.session().is_drained());
     let mut reopened = Database::<f32>::open(path, 2).unwrap();
     assert_eq!(
         reopened.get_payload(1).unwrap(),
@@ -501,6 +506,7 @@ fn 只读宿主即使会话开放写入也保持物理零写() {
     for command in [
         json!({"operation":"mutate","query":"CREATE (n {name: \"拒绝\"})"}),
         json!({"operation":"transaction","operations":[{"op":"delete","id":"1"}]}),
+        json!({"operation":"guardedTransaction","expectedRevision":"prior","idempotencyKey":"denied","operations":[{"op":"delete","id":"1"}]}),
         json!({"operation":"importNodes","records":[{"vector":[1,0],"payload":{}}]}),
         json!({"operation":"importEdges","records":[{"source":"1","target":"2","label":"拒绝","weight":1}]}),
         json!({"operation":"manageIndex","kind":"hash","fields":["kind"],"create":true}),
@@ -508,6 +514,10 @@ fn 只读宿主即使会话开放写入也保持物理零写() {
     ] {
         let error = db.console_request(&session, &request(command)).unwrap_err();
         assert_eq!(error.code(), "TDB_READ_ONLY");
+        assert_eq!(
+            serde_json::to_value(error.info().write).unwrap(),
+            json!({"phase":"admission","outcome":"not_committed"})
+        );
     }
     assert_eq!(snapshot(), before);
     db.close().unwrap();

@@ -3,8 +3,91 @@
 use super::TriviumError as E;
 use serde_json::{Value, json};
 
+#[test]
+fn 批量原文位置覆盖回车换行中间边界和非法排序() {
+    let source = "猫\r\n\tA";
+    let spans = super::QuerySpan::at_many(source, &[0, 3, 4, 5, 6, 7]).unwrap();
+    let expected = [
+        (0, 1, 1),
+        (3, 1, 2),
+        (4, 2, 1),
+        (5, 2, 1),
+        (6, 2, 2),
+        (7, 2, 3),
+    ];
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| (span.start_byte, span.line, span.column))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    for ((byte, line, column), span) in expected.into_iter().zip(spans) {
+        assert_eq!(
+            super::QuerySpan::at(source, byte),
+            Some(super::QuerySpan {
+                start_byte: byte,
+                end_byte: byte,
+                line,
+                column
+            })
+        );
+        assert_eq!(span.end_byte, byte);
+    }
+    for invalid in [vec![3, 0], vec![1], vec![8]] {
+        assert_eq!(
+            super::QuerySpan::at_many(source, &invalid)
+                .unwrap_err()
+                .code(),
+            "TDB_INVALID_INPUT"
+        );
+    }
+}
+
 pub(crate) fn cases() -> Vec<(E, &'static str, Value)> {
     vec![
+        (
+            E::GraphNotFound {
+                graph_id: "terms".into(),
+            },
+            "TDB_GRAPH_NOT_FOUND",
+            json!({"graph_id":"terms"}),
+        ),
+        (
+            E::GraphRevisionMismatch {
+                graph_id: "terms".into(),
+                expected: "old".into(),
+                actual: "new".into(),
+            },
+            "TDB_GRAPH_REVISION_MISMATCH",
+            json!({"graph_id":"terms","expected":"old","actual":"new"}),
+        ),
+        (
+            E::TransactionFinished,
+            "TDB_TRANSACTION_FINISHED",
+            json!({}),
+        ),
+        (
+            E::DatabaseBusy {
+                resource: "shared_database",
+            },
+            "TDB_BUSY",
+            json!({"resource":"shared_database"}),
+        ),
+        (
+            E::ReentrantAccess {
+                operation: "shared_write",
+            },
+            "TDB_REENTRANT_ACCESS",
+            json!({"operation":"shared_write"}),
+        ),
+        (
+            E::HostLockPoisoned {
+                resource: "host_database",
+            },
+            "TDB_HOST_LOCK_POISONED",
+            json!({"resource":"host_database"}),
+        ),
         (
             E::DtypeMismatch {
                 stored: "f32",
@@ -134,6 +217,11 @@ pub(crate) fn cases() -> Vec<(E, &'static str, Value)> {
         ),
         (E::QueryCancelled, "TDB_QUERY_CANCELLED", json!({})),
         (
+            E::QueryDeadlineExceeded,
+            "TDB_QUERY_DEADLINE_EXCEEDED",
+            json!({}),
+        ),
+        (
             E::QueryRowBudgetExceeded { budget: 2 },
             "TDB_QUERY_BUDGET",
             json!({"budget":2}),
@@ -220,6 +308,24 @@ pub(crate) fn cases() -> Vec<(E, &'static str, Value)> {
         ),
         (E::DatabaseClosed, "TDB_DATABASE_CLOSED", json!({})),
         (
+            E::WriteConflict {
+                expected: "old".into(),
+                actual: "new".into(),
+            },
+            "TDB_WRITE_CONFLICT",
+            json!({"expected":"old","actual":"new"}),
+        ),
+        (
+            E::IdempotencyConflict,
+            "TDB_IDEMPOTENCY_CONFLICT",
+            json!({}),
+        ),
+        (
+            E::WriteOutcomeUnknown,
+            "TDB_WRITE_OUTCOME_UNKNOWN",
+            json!({}),
+        ),
+        (
             E::ConsoleSessionClosed,
             "TDB_CONSOLE_SESSION_CLOSED",
             json!({}),
@@ -287,6 +393,120 @@ fn 错误描述符保持预期类别与完整精度() {
     for (error, code, details) in cases() {
         assert_eq!(error.code(), code);
         assert_eq!(error.details(), details, "{code}");
+        let info = error.info();
+        assert_eq!(info.schema_version, 1);
+        assert_eq!(info.code, code);
+        assert_eq!(info.details, details);
         assert!(codes.insert(code), "不同错误类别不应共享错误码");
     }
+}
+
+#[test]
+fn 参数定位保留原始错误链和无损字段() {
+    let error = E::NodeNotFound(u64::MAX).at_query_parameter("x");
+    assert!(matches!(error.underlying(), E::NodeNotFound(u64::MAX)));
+    let cause = std::error::Error::source(&error).unwrap();
+    let cause = cause.downcast_ref::<Box<E>>().unwrap();
+    assert!(matches!(cause.as_ref(), E::NodeNotFound(u64::MAX)));
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["code"], "TDB_NODE_NOT_FOUND");
+    assert_eq!(info["details"], json!({"id":u64::MAX}));
+    assert_eq!(info["stage"], "bind");
+    assert_eq!(info["target"], json!({"parameter":"x"}));
+}
+
+#[test]
+fn 写入上下文保留原始错误且外层准入不覆盖执行事实() {
+    use super::{WriteErrorInfo, WriteOutcome, WritePhase};
+    let write = WriteErrorInfo {
+        phase: WritePhase::Wal,
+        outcome: WriteOutcome::Unknown,
+        transaction_consumed: Some(true),
+    };
+    let error = E::Io(std::io::Error::from_raw_os_error(2))
+        .with_write_info(write)
+        .with_write_info(WriteErrorInfo::TRANSACTION_ADMISSION);
+    assert!(matches!(error.underlying(), E::Io(_)));
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["code"], "TDB_IO");
+    assert_eq!(info["details"], json!({"io_kind":"NotFound","os_code":2}));
+    assert_eq!(
+        info["write"],
+        json!({"phase":"wal","outcome":"unknown","transaction_consumed":true})
+    );
+    let error = E::QueryParameterSource {
+        parameter: "input".into(),
+        query_span: super::QuerySpan::range("$input", 0, 6).unwrap(),
+        source: Box::new(error.at_query_parameter("input")),
+    }
+    .with_write_info(WriteErrorInfo::TRANSACTION_ADMISSION);
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(
+        info["target"],
+        json!({"parameter":"input","query_span":{
+            "start_byte":0,"end_byte":6,"line":1,"column":1
+        }})
+    );
+    assert_eq!(info["stage"], "bind");
+    assert!(matches!(error.underlying(), E::Io(_)));
+    assert_eq!(info["write"]["phase"], "wal");
+    let error = error
+        .at_field("mb")
+        .with_write_info(WriteErrorInfo::TRANSACTION_ADMISSION);
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert!(matches!(error.underlying(), E::Io(_)));
+    assert_eq!(
+        info["target"],
+        json!({"field":"mb","query_span":{
+            "start_byte":0,"end_byte":6,"line":1,"column":1
+        }})
+    );
+    assert_eq!(info["stage"], "bind");
+    assert_eq!(info["code"], "TDB_IO");
+    assert_eq!(info["details"], json!({"io_kind":"NotFound","os_code":2}));
+    assert_eq!(
+        info["write"],
+        json!({"phase":"wal","outcome":"unknown","transaction_consumed":true})
+    );
+    let error = E::MissingQueryParameter {
+        parameter: "x".into(),
+    }
+    .with_write_info(WriteErrorInfo::TRANSACTION_ADMISSION);
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["stage"], "bind");
+    assert_eq!(info["target"], json!({"parameter":"x"}));
+    assert_eq!(
+        info["write"],
+        json!({"phase":"admission","outcome":"not_committed","transaction_consumed":false})
+    );
+}
+
+#[test]
+fn 查询来源补齐未知位置并保留内部阶段字段与写入事实() {
+    use super::{QueryErrorStage, QuerySpan, WriteErrorInfo, WriteOutcome, WritePhase};
+    let span = QuerySpan::range("$x", 0, 2).unwrap();
+    let error = E::InvalidInput("输入被拒绝 (Input rejected)".into())
+        .at_field("vector")
+        .with_write_info(WriteErrorInfo {
+            phase: WritePhase::Wal,
+            outcome: WriteOutcome::Unknown,
+            transaction_consumed: Some(true),
+        })
+        .at_query_source(QueryErrorStage::Plan, None)
+        .at_query_source(QueryErrorStage::Execute, Some(span))
+        .at_query_source(QueryErrorStage::Execute, QuerySpan::range("other", 0, 5));
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["code"], "TDB_INVALID_INPUT");
+    assert_eq!(info["stage"], "plan");
+    assert_eq!(info["target"], json!({"field":"vector","query_span":span}));
+    assert_eq!(
+        info["write"],
+        json!({"phase":"wal","outcome":"unknown","transaction_consumed":true})
+    );
+    let error = error.at_field("values").at_query_parameter("x");
+    let info = serde_json::to_value(error.info()).unwrap();
+    assert_eq!(info["target"], json!({"parameter":"x","query_span":span}));
+    assert_eq!(info["stage"], "bind");
+    assert_eq!(info["write"]["phase"], "wal");
+    assert!(matches!(error.underlying(), E::InvalidInput(_)));
 }

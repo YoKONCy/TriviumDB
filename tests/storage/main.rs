@@ -11,6 +11,7 @@ mod ordered_property_index;
 mod property_index_persistence;
 mod publication_recovery;
 mod quiver_facts;
+mod quiver_open;
 mod read_only;
 mod recovery;
 mod sidecar_facts;
@@ -22,3 +23,4 @@ mod wal_semantics;
 
 mod index_schema_boundaries;
 mod kernel_boundaries;
+mod receipt_history;

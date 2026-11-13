@@ -1,0 +1,74 @@
+\section{Decision Quality in Two-Bit Search}
+\label{sec:analysis}
+
+\begin{figure*}[!t]
+\centering
+\theoryfigure{theory-geometry}
+\caption{Low-bit decision geometry. (a) Four reconstruction levels and coordinate residuals. (b) With $\widehat q=(0.8,0)$, $\widehat x=(0.75,0.65)$, and $\widehat y=(0.65,0.2)$, inner product favors $x$ but squared L2 favors $y$. (c) For lower-is-better scores, the exact gap $\Delta=s_y-s_x>0$ becomes $\Delta+\epsilon_y-\epsilon_x$ under errors $\epsilon_i=\widehat s_i-s_i$. Overlapping error bounds permit a reversal. Coordinates and bands are illustrative.}
+\label{fig:theory-geometry}
+\end{figure*}
+
+\subsection{Local Scores and Global Search Work}
+For a query, write $N_s$ for the number of approximate scores, $N_e$ for the number of expanded vertices, and $N_f$ for the number of exact reranking evaluations. A useful cost decomposition is
+\begin{equation}
+\begin{split}
+ T(q)={}&T_{\mathrm{encode}}+N_s c_{\mathrm{SM}}\\
+       &+T_{\mathrm{graph,pool}}+N_f c_{\mathrm{FP32}},
+ \quad N_f\le B_{\mathrm{eff}}.
+\end{split}
+ \label{eq:cost}
+\end{equation}
+The quantities $c_{\mathrm{SM}}$ and $c_{\mathrm{FP32}}$ include the cost of accessing their operands. $T_{\mathrm{graph,pool}}$ includes adjacency traversal, visited-state updates, and candidate maintenance. Vector population-count kernels reduce the per-block arithmetic in $c_{\mathrm{SM}}$.
+
+Compression can change $N_s$, $N_e$, and candidate survival simultaneously. A higher-fidelity score can reduce the number of comparisons needed to reach the target recall, offsetting its greater cost per comparison.
+
+\subsection{Why the Reconstruction Norm Matters}
+Consider two candidates $x$ and $y$. Reconstructed inner product prefers $x$ when
+$\langle\widehat q,\widehat x\rangle>
+\langle\widehat q,\widehat y\rangle$.
+Reconstructed L2 instead compares
+\begin{equation}
+\begin{split}
+ D_{\mathrm{SM}}(q,x)-D_{\mathrm{SM}}(q,y)
+ ={}&\|\widehat x\|^2-\|\widehat y\|^2\\
+ &-2\langle\widehat q,\widehat x-\widehat y\rangle.
+\end{split}
+\label{eq:normgap}
+\end{equation}
+The candidate-norm difference can reverse the decision even when the original vectors all have unit norm. Figure~\ref{fig:theory-geometry}(b) isolates this effect at the reconstruction level: the candidate with the greater query projection is farther away in squared distance. This difference motivates the reconstruction-L2 and reconstruction-cosine controls in Section~\ref{sec:ablation}.
+
+For squared Euclidean scoring, let $r_x=x-\widehat x$ and $r_q=q-\widehat q$. The score error has the exact identity
+\begin{equation}
+\begin{split}
+ \|q-x\|^2-\|\widehat q-\widehat x\|^2
+ ={}&2\langle\widehat q-\widehat x,r_q-r_x\rangle\\
+ &+\|r_q-r_x\|^2.
+\end{split}
+\label{eq:residual}
+\end{equation}
+Thus, the direction of the residual relative to a comparison matters in addition to its magnitude. For a fixed pair of candidates with exact score gap $\Delta>0$, their order is preserved whenever the difference between their score errors has magnitude below $\Delta$. Figure~\ref{fig:theory-geometry}(c) contrasts preserved ordering with a possible reversal as error bounds overlap. During traversal, these comparisons govern frontier order and candidate retention. Distributional residual bounds use joint concentration assumptions, as in Bernstein-type inequalities~\cite{bernstein1924,boucheron2013concentration} and high-dimensional probability~\cite{vershynin2018highdim}. Decision-level distributional bounds and coupling results are developed by Xiao and Cao~\cite{xiao2026decisions}; this paper contributes the index design, its bitwise implementation, and the stage-wise diagnostics below.
+
+\subsection{An Exact Decomposition of Candidate Loss}
+Let $T_k(q)$ be the true top-$k$ set, $V(q)$ the set of vertices scored during traversal, $C(q)\subseteq V(q)$ the final beam, and $F(q)\subseteq C(q)$ the candidates sent to exact reranking. Assume a consistent tie convention, $|F(q)|\ge k$, and exact final scoring. Each true neighbor in $F(q)$ must appear in the returned top $k$, because fewer than $k$ database vectors can outrank it. Therefore
+\begin{equation}
+\begin{split}
+1-\operatorname{Recall@}k(q)
+={}&\frac{|T_k\setminus V|}{k}
+ +\frac{|T_k\cap(V\setminus C)|}{k}\\
+ &+\frac{|T_k\cap(C\setminus F)|}{k}.
+\end{split}
+\label{eq:decomposition}
+\end{equation}
+The three terms identify traversal loss, beam-retention loss, and reranking-selection loss: a true neighbor may be scored yet excluded from the final beam, or survive in the beam yet miss the exact budget. We compute these oracle coverages after each run from its visited set, retained candidates, and ground truth.
+
+The decomposition attributes each missed true neighbor to the stage that discards it. The construction--query crossovers in Section~\ref{sec:mechanism} further separate graph quality from query scoring.
+
+\subsection{Memory and Deployment Cost}
+The logical state has three principal parts:
+\begin{equation}
+ M_{\mathrm{nav}}+M_{\mathrm{rerank}}+M_{\mathrm{runtime}}.
+\end{equation}
+$M_{\mathrm{nav}}$ includes graph capacity, original BQ codes, derived SM rows, scalar factors, and identifier mappings. $M_{\mathrm{rerank}}$ is the original-vector store: $4nd$ bytes for dense FP32 vectors. We call $M_{\mathrm{total}}=M_{\mathrm{nav}}+M_{\mathrm{rerank}}$ the total logical memory. $M_{\mathrm{runtime}}$ includes thread workspaces, object and container overhead, allocator state, and other process data; process RSS also reflects page-cache state.
+
+For Cohere-1M, the measured persistent navigation arrays contain 192 MB of original BQ codes, 264 MB of SM-owned rows and identifiers, 516 MB of shared adjacency capacity, and an additional 16 MB of ID/slot mappings, totaling 988 MB or 0.920 GiB (MB denotes $10^6$ bytes). The BQ codes serve incremental insertion and the fallback route, and the reserved slots serve deferred pruning; a static layout without them would hold 0.503 GiB by layout arithmetic, but all measurements use the implemented layout. Each query thread additionally uses an $n$-bit visited set, or 125,000 bytes for this dataset. The 2.861 GiB original-vector store brings $M_{\mathrm{total}}$ to 3.781 GiB.
+

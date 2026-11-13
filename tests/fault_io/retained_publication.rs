@@ -169,7 +169,10 @@ fn run_failed_close<T: VectorType + serde::Serialize + serde::de::DeserializeOwn
                 db.link(1, 3, "新关系", 2.).unwrap();
                 {
                     let _failure = fail_io_at(point);
-                    assert!(matches!(db.flush(), Err(TriviumError::Io(_))));
+                    assert!(matches!(
+                        db.flush().unwrap_err().underlying(),
+                        TriviumError::Io(_)
+                    ));
                 }
                 db.index_text(1, "finaltoken").unwrap();
                 db.index_keyword(1, "finalalias").unwrap();

@@ -13,6 +13,8 @@
 
 # TriviumDB
 
+当前预发布版本为 **0.9.1-beta.1**，包含文档证据检索、命名图、解析与分批发布、QuIVer INT8 SSD 运行时及工程加固。完整内容见 [中英文版本说明](docs/changes/0.9.1-beta.1.md)，研究测量见 [ICDE 复现归档](evaluation/README.md)。
+
 **向量 × 图谱 × 文档 —— 三位一体的 AI 原生嵌入式数据库**
 
 **Battle-tested in mission-critical, air-gapped environments.**
@@ -25,6 +27,7 @@
 [![Python 3.9–3.12](https://img.shields.io/badge/Python-3.9%E2%80%933.12-blue?logo=python)](https://pypi.org/)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![arXiv](https://img.shields.io/badge/arXiv-2605.02171-b31b1b.svg)](https://arxiv.org/abs/2605.02171)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/YoKONCy/TriviumDB)
 
 **中文** | [**English**](README_EN.md)
 
@@ -43,7 +46,7 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式三模数据库引擎**，将
 - 🧮 **内嵌图算法库** —— PageRank / WCC / SCC / K-Core / Articulation Points / Triangle Count / Local Clustering Coefficient / HITS / Harmonic Centrality / Node Similarity / Leiden / Betweenness / Degree / Label Propagation / SA-PPR 可在查询内直接调用，并支持 Weighted Dijkstra、Yen K-Shortest Paths、PairSet 与有界路径/集合算子
 - 🗃️ **Rom/Mmap 双引擎切换** —— Rom 支持单文件 `*.tdb` 复制走人；Mmap 将向量和已发布 Payload 分离到 `.vec` 与 generation 化 `.pld.<generation>`，按需映射
 - ❄️ **Payload 冷热分层** —— 已发布 raw JSON 留在 mmap 冷基础层，新写入/更新进入内存 delta，解析结果进入有硬字节上限的 LRU Cache；ANN/BQ/Exact 候选阶段零 Payload 解析
-- 🔗 **节点即一切** —— 每个节点天然同时拥有限定长度的稠密向量、稀疏文本倒排词频、元数据和图关系，ID 全局唯一，绝不错位
+- 🔗 **节点即一切** —— 每个节点天然同时拥有限定长度的稠密向量、稀疏文本倒排词频、元数据和图关系，通过全局唯一 NodeId 关联
 - 🧠 **为 AI 而生** —— 可选启用“AC自动机+BM25稀疏文本”与“Dense Vector稠密向量”的**多路召回**来触发图谱扩散检索，并内置多层认知管线（FISTA / DPP / PPR）
 - 🛡️ **四层数据安全保障** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，`.flush_ok` v3 绑定 `.tdb/.vec/.pld`，发布前旧代备份与撤销日志支持中断恢复；备份增加磁盘读写与临时空间，损坏输入仍 fail-closed，详见[恢复协议](docs/security.md#8-mmap-三文件一致性标记flush_ok-v3)
 - 🐍 **Python / Node.js 原生** —— `pip install` 或 `npm install` 后直接使用，类 MongoDB 查询语法
@@ -287,7 +290,7 @@ RETURN path(route) AS nodes, path_length(route) AS hops
 
 一条查询内还能使用 `TEXT BM25/AC/HYBRID` 做稀疏召回，`RESIDUAL` 做 FISTA 残差召回，`DIVERSIFY` 做 DPP 多样化，`TOPICS` 做有界 NMF 主题分配，`SA_PPR_CONFIG` 控制扩散参数；也可使用 `union` / `intersect` / `except` 做多路候选集合运算、`iterate` 做定点迭代扩散、`COUNT/SUM/AVG/MIN/MAX/COLLECT` 做聚合。`text_score()`、`residual_score()`、`diversity_score()`、`topic()` 与 `topic_score()` 均是一等表达式。`EXPLAIN` 会暴露 Cascades 选出的物理算子、预计行数、临时字节与预算切片。
 
-`search_advanced()` 不会被 TQL 取代：它仍通过 `SearchConfig` 自由启停文本混合、FISTA、SA-PPR、DPP 与疲劳不应期，并按官方固定顺序执行；TQL 则复用同一底层算法，让高级用户自由安排无状态算子的顺序。
+`search_advanced()` 通过 `SearchConfig` 配置文本混合、FISTA、SA-PPR、DPP 与疲劳不应期，并按固定顺序执行。TQL 复用同一底层算法，支持按查询需求编排无状态算子。
 
 ```python
 # Prepared TQL：同一管线安全地重复绑定业务参数
@@ -329,11 +332,11 @@ Rust / Python / Node.js 三语言共享同一套 TQL、Prepared、四类属性�
 | 🔍 **混合检索**        | 向量锚定 → Top-K → 图谱扩散（Spreading Activation）→ 最终排序                                                                    |
 | 🧠 **认知管线**        | `search_advanced()` 提供组件可开关、顺序固定的官方模板；TQL 提供 FISTA / 参数化 SA-PPR / DPP / NMF 无状态算子的自由编排，疲劳不应期仍仅属有状态 API |
 | 🔌 **Hook 扩展系统**   | 6 个管线关键阶段的自定义注入点：查询预处理 / 自定义召回 / 召回后处理 / 图扩散前 / 重排序 / 最终后处理，支持 C/C++ FFI 动态库插件 |
-| 📦 **三位一体 O(1)**   | 自动增量 O(1) FreeList 墓碑空洞复用；删节点 O(1) 反向边哈希表（本项目称 Reverse Hash Net），彻底杜绝盘面膨胀与图谱雪崩           |
+| 📦 **槽位与边维护**   | FreeList 复用已删除节点的槽位；反向边哈希表（Reverse Hash Net）辅助清理入边           |
 | ⚡ **QuIVer ANN 索引** | BQ 快速构图 + 默认 SM-L2 导航 + 余弦精排，冷热分离架构，增量维护同步默认 SM 状态 |
 | 💾 **双模式存储**      | Mmap（大模型极速分体冷启动） / Rom（传统 SQLite 级单文件打包携带），无缝热切换                                                   |
 | 🛡️ **四层灾备防御**    | 预写日志(WAL) + 写入原子替换 + 事务预检干跑(Dry-Run) + OS 内存写时复制隔离                                                       |
-| 🔄 **零开销事务**      | `begin_tx()` 验证前置架构，中途报错绝不污染内存，实现真正的零代价原子回滚；QuIVer 索引事务安全（分离时间线架构）                 |
+| 🔄 **原子事务**      | `begin_tx()` 在写 WAL 前完成业务预检与容量准入，提交时原子更新事实及相关索引                 |
 | 🔎 **高级过滤**        | 类 MongoDB 语法：`$eq/$ne/$gt/$lt/$in/$and/$or` + 行级布隆特征阵列（Parallel Bit-Tag Array）硬件级加速                           |
 | 📝 **图谱查询**        | 内置类 Cypher 查询引擎：`MATCH (a)-[:knows]->(b) WHERE b.age > 18 RETURN b`                                                      |
 | 🐍 **Python 原生**     | PyO3 绑定，`pip install` 后直接 `import triviumdb`                                                                               |
@@ -390,7 +393,7 @@ finally:
 
 > 📖 [QuIVer 架构与配置](docs/quiver.md) · [基准测试指南](benches/README.md) · [0.9.0 变更说明](docs/changes/0.9.0.md)
 
-> ⚠️ **维度建议：强烈建议数据库向量维度不超过 3072。** TriviumDB 的通用存储与精确 BruteForce 检索允许更高维度，但 QuIVer 的 BQ 签名安全上限是 3072 维。超过该维度时引擎不会自动构建 QuIVer，检索会稳定回退到 BruteForce；手动构建 QuIVer 会返回明确错误。高维数据库仍可使用，但无法获得 QuIVer ANN 加速，内存和计算开销也会显著增加。
+> ⚠️ **维度建议：强烈建议数据库向量维度不超过 3072。** TriviumDB 的通用存储与精确 BruteForce 检索允许更高维度，但 QuIVer 的 BQ 签名安全上限是 3072 维。超过该维度时使用精确 BruteForce 检索；手动构建 QuIVer 会返回明确错误。高维数据库仍可使用，但无法获得 QuIVer ANN 加速，内存和计算开销也会显著增加。
 
 TriviumDB 采用**智能自适应双引擎**向量索引。自动 QuIVer 阈值按 `ceil(666,667 / dim)` 计算，并限制在 209–834 节点；低维数据保留更久的精确 BruteForce，高维数据更早切换 ANN：
 
@@ -407,7 +410,7 @@ TriviumDB 采用**智能自适应双引擎**向量索引。自动 QuIVer 阈值�
 
 > Mmap 按需映射冷向量页，未驻留页通过缺页读取。当随机查询工作集超过物理内存时，吞吐和尾延迟取决于 PageCache 命中率、设备随机读能力及系统回收压力。QuIVer 热索引位于匿名堆内存；容量评估分别记录内核堆、mmap 驻留和 OS PageCache。
 
-**增量图维护**：与传统 HNSW 不同，QuIVer 支持真正的增量操作：
+**增量图维护**：QuIVer 支持以下增量操作：
 
 - ✅ **增量 Insert**：新节点实时插入图中，无需全量重建
 - ✅ **增量 Delete**：Tombstone 软删除，25% 退化阈值触发重建
@@ -627,7 +630,7 @@ TriviumDB/
 
 > **并发多写模型**是 TriviumDB 当前明确的短板：Writer 通过进程级排他文件锁独占写路径，多读并发依赖 ReadOnly 共享锁，跨进程无锁读依赖 Immutable 不可换代际。这与 SQLite（WAL 单写）和原版 Kùzu（单进程写）同为嵌入式架构的常见取舍；需要高并发多写的场景，应选择服务端（Qdrant/Neo4j/pgvector）或分布式（SurrealDB）/MVCC 表格式（LanceDB）方案。
 >
-> 对比基于各家 2026-08 公开文档与官方仓库：pgvector 为 PostgreSQL C 扩展（v0.8.2，HNSW/IVFFlat + 迭代扫描过滤）；Qdrant 支持嵌入式本地模式（`QdrantClient(":memory:")` 或 `path=`，存储为目录而非单文件），并有 Rust/Python 的 Qdrant Edge 嵌入库；LanceDB 为 Rust 内核嵌入式多模态 Lakehouse（向量+FTS+SQL，无图遍历）；Kùzu 主仓库已于 2025-10 归档（团队加入 Apple，0.11.3 为最终版本），其 Cypher 支持 `*SHORTEST` 递归路径与 algo 扩展；Neo4j 自 5.13 起提供原生向量索引（Lucene HNSW，Cypher 25 `SEARCH` 子句支持索引内过滤）；SurrealDB 向量索引用 MTree/HNSW；SQLite 可用 sqlite-vec 扩展与递归 CTE 模拟部分能力。**"混合查询自由度"** 指能否把向量、属性过滤、图遍历、图算法、路径与集合运算在同一查询中作为可编排算子交给统一优化器——这正是 TQL `WITH` 管线 + Cascades 的定位。
+> 对比基于各家 2026-08 公开文档与官方仓库：pgvector 为 PostgreSQL C 扩展（v0.8.2，HNSW/IVFFlat + 迭代扫描过滤）；Qdrant 支持嵌入式本地模式（`QdrantClient(":memory:")` 或 `path=`，按目录存储），并有 Rust/Python 的 Qdrant Edge 嵌入库；LanceDB 为 Rust 内核嵌入式多模态 Lakehouse（向量+FTS+SQL，无图遍历）；Kùzu 主仓库已于 2025-10 归档（团队加入 Apple，0.11.3 为最终版本），其 Cypher 支持 `*SHORTEST` 递归路径与 algo 扩展；Neo4j 自 5.13 起提供原生向量索引（Lucene HNSW，Cypher 25 `SEARCH` 子句支持索引内过滤）；SurrealDB 向量索引用 MTree/HNSW；SQLite 可用 sqlite-vec 扩展与递归 CTE 模拟部分能力。**"混合查询自由度"** 指能否把向量、属性过滤、图遍历、图算法、路径与集合运算在同一查询中作为可编排算子交给统一优化器——这正是 TQL `WITH` 管线 + Cascades 的定位。
 
 ---
 
@@ -639,7 +642,7 @@ TriviumDB/
 4. **可预测的性能**：顺序 I/O only（WAL 追加写 + Compaction 顺序重写），SSD 寿命安全。
 5. **索引即加速层**：QuIVer 是可丢弃的派生数据（`.tdb.quiver` 独立文件），丢失后首次查询时自动重建，不依赖也不污染 WAL 真相源。
 6. **Rust 安全契约**：mmap、SIMD、裸指针和手工 `Send/Sync` 路径按长度、对齐、生命周期和并发条件审核，并结合 ASan、TSan 与 Miri 验证。执行范围见[安全文档](docs/security.md)与[测试实践](docs/testing.md)。
-7. **安全至上**：全引擎零 `panic!` / 零 `unreachable!()` 策略。数千个测试用例（单元 / 属性 / 模糊 / 变异 / 三语言公共 API 对齐），CI 强制 80% 行覆盖率门禁（实测值以 coverage artifact 为准），涵盖 EMI 比特翻转、WAL 截断恢复、事务预检失败等极端场景，确保在断网、断电、内存污染等恶劣条件下数据库引擎绝不崩溃。
+7. **安全至上**：全引擎零 `panic!` / 零 `unreachable!()` 策略。数千个测试用例（单元 / 属性 / 模糊 / 变异 / 三语言公共 API 对齐），CI 强制 80% 行覆盖率门禁（实测值以 coverage artifact 为准），涵盖 EMI 比特翻转、WAL 截断恢复、事务预检失败等极端场景，验证相应故障条件下的结构化拒绝、事务完整性与恢复行为。
 
 ---
 
@@ -653,6 +656,9 @@ TriviumDB/
 | **[最佳实践](docs/best-practices.md)**        | 数据建模范式、性能调优、Hook 使用指南、避坑指南        |
 | **[共享资源与实例诊断](docs/resource-runtime.md)** | 配额、维护保护额度、线程池、预算余额与结构化错误 |
 | **[关闭、快照与恢复](docs/lifecycle-snapshots.md)** | 关闭请求、限时等待、一致快照、校验与目录恢复 |
+| **[文档来源与结构](docs/documents.md)** | 来源修订、原子更新、分组 BM25、短语／邻近和原文证据 |
+| **[文档解析与分批发布](docs/document-ingestion.md)** | 自动解析、来源回映射、外部解析接入与持久化候选 |
+| **[命名图](docs/named-graphs.md)** | 共享成员、跨图独立边、条件编辑、显式联合和遍历 |
 | **[TQL 查询语言参考](docs/tql-reference.md)** | MATCH / FIND / SEARCH 语法、DML 写操作、属性索引       |
 | **[Hook 开发指南](docs/hook-guide.md)**       | C/C++ FFI 插件编写、Rust Hook 实现、管线诊断实战       |
 | **[测试实践](docs/testing.md)**               | 四层测试体系、属性测试、变异测试、覆盖率度量与 CI 建议 |

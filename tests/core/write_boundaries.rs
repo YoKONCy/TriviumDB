@@ -68,7 +68,10 @@ fn json_boundaries<T: VectorType + serde::Serialize + serde::de::DeserializeOwne
                     }
                 };
                 assert!(
-                    matches!(result, Err(TriviumError::InvalidInput(_))),
+                    matches!(
+                        result.as_ref().unwrap_err().underlying(),
+                        TriviumError::InvalidInput(_)
+                    ),
                     "{operation}: {result:?}"
                 );
                 assert_eq!(
@@ -186,8 +189,8 @@ fn payload增长在各更新入口遵守预算且失败保持原值和wal() {
             };
             assert!(
                 matches!(
-                    result,
-                    Err(TriviumError::CapacityReservationRejected { .. })
+                    result.as_ref().unwrap_err().underlying(),
+                    TriviumError::CapacityReservationRejected { .. }
                 ),
                 "{operation}: {result:?}"
             );
@@ -275,7 +278,10 @@ fn inc溢出和类型错误原子拒绝包括同补丁其他字段() {
             1,
             json!({"$set":{"keep":"changed"}, "$inc":{"value":delta}}),
         );
-        assert!(matches!(result, Err(TriviumError::InvalidInput(_))));
+        assert!(matches!(
+            result.unwrap_err().underlying(),
+            TriviumError::InvalidInput(_)
+        ));
         assert_eq!(db.get_payload(1).unwrap(), Some(original));
         assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
     }

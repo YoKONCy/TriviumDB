@@ -1,18 +1,29 @@
 {
   "schema_version": 1,
+  "admission": {
+    "reentrant_code": "TDB_REENTRANT_ACCESS",
+    "busy_code": "TDB_BUSY",
+    "closed_code": "TDB_DATABASE_CLOSED",
+    "python_operation": "python_callback",
+    "node_operation": "node_callback",
+    "python_resource": "python_database",
+    "transaction_finished_code": "TDB_TRANSACTION_FINISHED",
+    "python_transaction_operation": "python_transaction_callback",
+    "python_transaction_resource": "python_transaction"
+  },
   "cases": [
     {"operation": "missing_parameter", "code": "TDB_MISSING_QUERY_PARAMETER", "details": {"parameter": "required"}},
     {"operation": "unexpected_parameter", "code": "TDB_UNEXPECTED_QUERY_PARAMETER", "details": {"parameter": "extra"}},
-    {"operation": "dimension", "code": "TDB_DIMENSION_MISMATCH", "details": {"expected": 2, "got": 1}},
-    {"operation": "missing_node", "code": "TDB_NODE_NOT_FOUND", "details": {"id": 999}},
-    {"operation": "duplicate_node", "code": "TDB_NODE_ALREADY_EXISTS", "details": {"id": 1}},
-    {"operation": "unique", "code": "TDB_UNIQUE_CONSTRAINT", "details": {"fields": ["kind"], "existing_id": 1, "conflicting_id": 3}},
-    {"operation": "readonly", "code": "TDB_READ_ONLY", "details": {"operation": "insert"}},
+    {"operation": "dimension", "code": "TDB_DIMENSION_MISMATCH", "details": {"expected": 2, "got": 1}, "write": {"phase":"validation","outcome":"not_committed"}},
+    {"operation": "missing_node", "code": "TDB_NODE_NOT_FOUND", "details": {"id": 999}, "write": {"phase":"validation","outcome":"not_committed"}},
+    {"operation": "duplicate_node", "code": "TDB_NODE_ALREADY_EXISTS", "details": {"id": 1}, "write": {"phase":"validation","outcome":"not_committed"}},
+    {"operation": "unique", "code": "TDB_UNIQUE_CONSTRAINT", "details": {"fields": ["kind"], "existing_id": 1, "conflicting_id": 3}, "write": {"phase":"validation","outcome":"not_committed"}},
+    {"operation": "readonly", "code": "TDB_READ_ONLY", "details": {"operation": "insert"}, "write": {"phase":"admission","outcome":"not_committed"}},
     {"operation": "rows", "code": "TDB_QUERY_BUDGET", "details": {"budget": 1}},
-    {"operation": "migration", "code": "TDB_API_MIGRATION_REQUIRED", "details": {"removed_api": "tql_mut(read query)", "replacement": "tql() 或 tql_values()"}},
+    {"operation": "migration", "code": "TDB_API_MIGRATION_REQUIRED", "details": {"removed_api": "tql_mut(read query)", "replacement": "tql() 或 tql_values()"}, "write": {"phase":"validation","outcome":"not_committed"}},
     {"operation": "closed", "code": "TDB_DATABASE_CLOSED", "details": {}},
     {"operation": "locked", "code": "TDB_DATABASE_LOCKED", "details": {}, "string_fields": ["reason"]},
     {"operation": "io", "code": "TDB_IO", "details": {}, "string_fields": ["io_kind"], "integer_fields": ["os_code"]},
-    {"operation": "version", "code": "TDB_UNSUPPORTED_DATABASE_VERSION", "details": {"found": 65535, "minimum_supported": 5, "current": 10}}
+    {"operation": "version", "code": "TDB_UNSUPPORTED_DATABASE_VERSION", "details": {"found": 65535, "minimum_supported": 5, "current": 13}}
   ]
 }

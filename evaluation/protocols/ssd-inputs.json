@@ -1,0 +1,35 @@
+{
+  "status": "frozen",
+  "files": {
+    "prepare_server.py": {
+      "original_path": "recorded/research/QuIVer/integration/review_completion_20261108/source/prepare_server.py",
+      "bytes": 12465,
+      "sha256": "78261a704ddc7348454bb7dcb8c0bd022b4acad8df3688f03d725f379c7568ea"
+    },
+    "convert_local_vectors.py": {
+      "original_path": "recorded/research/QuIVer/integration/ssd_int8_local_20261108/source/convert_local_vectors.py",
+      "bytes": 7444,
+      "sha256": "830bde4bc1ccb9308613af501c55163ca082022e84b0327a18df662df3fdd9f2"
+    },
+    "convert_refined_vectors.py": {
+      "original_path": "recorded/research/QuIVer/integration/ssd_int8_refine_20261108/source/convert_refined_vectors.py",
+      "bytes": 8881,
+      "sha256": "8f49eb76d83bb195e6bd4fb54256b79716ff2567ea1445f86436b874ec9b8752"
+    },
+    "serial_queue.py": {
+      "original_path": "recorded/research/QuIVer/integration/review_completion_20261108/source/serial_queue.py",
+      "bytes": 35186,
+      "sha256": "9efcaa0661de97a202958015844bdf7dd5520dec85531e364148814f3bff193e"
+    },
+    "prepare_cohere5m_20261006.py": {
+      "original_path": "recorded/research/QuIVer/adaptation/prepare_cohere5m_20261006.py",
+      "bytes": 13544,
+      "sha256": "dc08d58101c7f27a31fdbc3b16519354e98f66c17a8ee2b4b044e2fe71250b6c"
+    },
+    "cohere5m-manifest-20261007.json": {
+      "original_path": "recorded/research/QuIVer/adaptation/cohere5m-manifest-20261007.json",
+      "bytes": 133885,
+      "sha256": "d0b60301105a906b1a80752a8c78007e87fe4c148d375d1fafa8f58016dcd428"
+    }
+  }
+}

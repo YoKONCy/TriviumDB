@@ -1,0 +1,16 @@
+{
+  "formats": [
+    {"name":"note.txt","raw":"甲\r\n乙\r\n\r\n尾","text":"甲\n乙\n\n尾"},
+    {"name":"note.md","raw":"# 标题\n\nHello **世界** &amp; ok.\n","text":"标题\nHello 世界 & ok.\n"},
+    {"name":"note.html","raw":"<h1>甲&amp;乙</h1><script>hidden</script><p>尾🐾</p>","text":"甲&乙\n尾🐾\n"},
+    {"name":"note.json","raw":"{\"name\":\"猫\\u0020🐾\",\"count\":2}","text":"name: 猫 🐾\ncount: 2\n"},
+    {"name":"note.jsonl","raw":"{\"a\":1}\n{\"a\":2}\n","text":"a: 1\na: 2\n"},
+    {"name":"media-wins.md","media_type":"TEXT/HTML; charset=utf-8","raw":"**literal**","text":"**literal**"},
+    {"name":"media-wins.html","media_type":"application/json","raw":"{\"name\":\"cat\"}","text":"name: cat\n"},
+    {"name":"explicit.pdf","media_type":"application/pdf","format":"plain","raw":"# literal","text":"# literal"}
+  ],
+  "upload_id":"ae01c329-a7e3-4f8c-88bd-7cfab66f26da",
+  "document_id":"9007199254740993",
+  "block_id":"9007199254740995",
+  "stream_text":"new 猫"
+}

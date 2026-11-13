@@ -1,8 +1,6 @@
 # TriviumDB Hook 开发指南
 
-> 面向深度定制固定检索管线的开发者。Hook 作用于 `search*` 工业检索管线；TQL 的 Cascades/NodeSet 管线通过查询算子和 EXPLAIN 扩展，不经过这些 Hook。
->
-> 对应 `0.9.0`；FFI Hook ABI 使用 v2。见[变更说明](changes/0.9.0.md)。
+> 本文介绍 `0.9.0` 的 `search*` 检索管线 Hook，覆盖 Rust、Python、Node.js 与 FFI ABI v2。TQL 的 Cascades/NodeSet 管线通过查询算子和 EXPLAIN 扩展。版本记录见[变更说明](changes/0.9.0.md)。
 
 ---
 
@@ -34,7 +32,7 @@ TriviumDB v0.6.0 引入的 Hook 系统提供了 **6 个管线关键阶段的自�
 ### 设计原则
 
 | 原则 | 说明 |
-|------|------|
+| ------ | ------ |
 | **可选扩展** | 默认使用空实现 `NoopHook`，注册后在对应阶段调用自定义逻辑 |
 | **按需覆写** | 所有方法都有默认空实现，开发者只需覆写感兴趣的阶段 |
 | **FFI 友好** | `FfiHook` 支持运行时加载 C/C++ `.so/.dll/.dylib` 动态库 |
@@ -153,13 +151,13 @@ for (stage, dur) in &ctx.stage_timings {
 `FfiHook` 按名称查找以下 C ABI 符号（**均为可选**，未找到的符号自动降级为空操作）：
 
 | 符号名 | 对应 Hook 点 | 说明 |
-|--------|-------------|------|
+| -------- | ------------- | ------ |
 | `trivium_hook_abi_version` | 全局 | 返回插件实现的 ABI 版本（当前 `2`），与内核不匹配时拒绝加载 |
 | `trivium_hook_invoke_v2` | 六阶段 | ABI v2 统一入口：`(stage, ctx, hits, count)`，返回 `0` 成功 / 非零错误码，覆盖 pre_search / custom_recall / post_recall / pre_graph_expand / rerank / post_search 全部六个阶段 |
 | `trivium_recall` | `on_custom_recall` | v1 兼容：`int(const float* query, size_t query_len, size_t top_k, FfiSearchHit* out_hits, size_t* out_count)` |
 | `trivium_rerank` | `on_rerank` | v1 兼容：`int(FfiSearchHit* hits, size_t count)` |
 
-> 💡 新插件建议直接实现 `trivium_hook_invoke_v2` + `trivium_hook_abi_version`：六阶段全部可注入，且错误码会传播为结构化查询错误而不是被静默吞掉；只导出 `trivium_recall`/`trivium_rerank` 的旧插件继续以 v1 兼容方式加载。
+> **提醒**：新插件建议直接实现 `trivium_hook_invoke_v2` + `trivium_hook_abi_version`：六阶段全部可注入，错误码会传播为结构化查询错误；只导出 `trivium_recall`/`trivium_rerank` 的旧插件继续以 v1 兼容方式加载。
 
 ### 完整示例：自定义重排序插件
 
@@ -423,7 +421,7 @@ FFI 动态库随最后一个 Hook 所有者释放而卸载。只有数据库持�
 ## 跨语言 API 参考
 
 | 功能 | Python | Node.js | Rust |
-|------|--------|---------|------|
+| ------ | -------- | --------- | ------ |
 | 原生六阶段 Hook | `db.set_hook(obj)`（对象实现 `on_*` 方法） | `db.setHook({...})`（同步 JS 回调对象） | `db.set_hook(impl SearchHook)` |
 | 加载 FFI 插件 | `db.load_ffi_hook(path)` | `db.loadFfiHook(path)` | `db.set_hook(FfiHook::load(path)?)` |
 | 清除 Hook | `db.clear_hook()` | `db.clearHook()` | `db.clear_hook()` |
@@ -432,14 +430,14 @@ FFI 动态库随最后一个 Hook 所有者释放而卸载。只有数据库持�
 | 上下文·数据 | `ctx.custom_data` (dict) | `context.customData` (object) | `ctx.custom_data` (serde_json::Value) |
 | 上下文·终止 | `ctx.aborted` (bool) | `context.aborted` (bool) | `ctx.abort` (bool) |
 
-> ⚠️ 原生 Python/JS Hook 的回调异常不会被静默吞掉：它们会转换为结构化错误并入查询错误路径；Node 侧回调必须是同步函数（不得返回 Promise）。
+> **回调提醒**：原生 Python/JS Hook 的异常转换为结构化查询错误。Node 回调必须是同步函数，禁止返回 Promise。
 
 ---
 
 ## 安全注意事项
 
 1. **FFI 插件信任**：`load_ffi_hook()` 加载的动态库在进程内执行任意代码，**请确保来源可信**
-2. **Hook 回调不要阻塞**：管线执行期间持有 MemTable 读锁，网络 I/O 或长计算会延迟 Writer；禁止从同线程重入写 API，内核会明确拒绝
+2. **Hook 回调工作范围**：管线执行期间持有 MemTable 读锁，网络 I/O 或长计算放到宿主调度。回调内同线程重入本库受准入管理的 API 返回 `TDB_REENTRANT_ACCESS`；共享宿主使用 `SharedDatabase` 和弱句柄管理所有权，见[内核 SDK](kernel-sdk.md)
 3. **不要修改向量维度**：`on_pre_search` 中可以修改查询向量的分量值，但**不要改变 Vec 长度**
 4. **C++ 异常安全**：FFI 回调中的 C++ 异常穿越 Rust FFI 边界会导致 UB，请在 C++ 侧 `try-catch` 所有异常
 5. **及时清除**：测试/调试用的 Hook 使用完毕后调用 `clear_hook()` 移除，避免影响后续正常查询性能

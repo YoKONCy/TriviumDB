@@ -1,0 +1,16 @@
+{
+  "dimension": 2,
+  "vector": [1, 0],
+  "encodedFloatVector": [1.0, 0.0],
+  "encodedBinaryVector": ["1", "0"],
+  "basePayload": {"body": "原始正文", "owner": "original"},
+  "hostPayload": {"body": "宿主的新正文", "owner": "host"},
+  "draftPayload": {"body": "编辑后的正文", "owner": "console"},
+  "createdPayload": {"body": "同笔事务创建", "owner": "console"},
+  "createdId": "2",
+  "receiptCapacity": 64,
+  "receiptDurable": true,
+  "receiptPersistence": "wal-checkpoint",
+  "conflictCode": "TDB_WRITE_CONFLICT",
+  "keyConflictCode": "TDB_IDEMPOTENCY_CONFLICT"
+}

@@ -3574,8 +3574,7 @@
        4) 当前节点条：跨三个工作区共享上下文
        5) 待提交条：界面写操作的暂存入口（常驻计数）
        6) 结果身份卡：节点值以「类型点 + 名称 + id + 摘要 + 维度」呈现
-       所有新选择器都带 r2-/entity-/context- 前缀或直接增强既有类，
-       不改动 V2-MAPPING §4 的测试锚点。
+       所有新选择器都带 r2-/entity-/context- 前缀或直接增强既有类。
        ========================================================== */
     :root {
       --sidebar-width: 232px;
@@ -4263,8 +4262,673 @@
       .main-nav .tab svg { display: none; }
       .context-strip .context-actions { gap: 2px; }
     }
+
+    /* ==========================================
+       文档工作区（dw = document workspace）
+       设计稿：.tmp/design-prototypes/document-workspace-v1
+       所有类名统一 dw- 前缀，避免与查询/图/向量工作区既有类名冲突。
+       颜色全部复用产品 token，明暗主题自动跟随。
+       ========================================== */
+    #docPane {
+      --dw-line: var(--border-color);
+      --dw-inset: var(--bg-inset);
+      --dw-panel: var(--bg-surface);
+      --dw-raised: var(--bg-surface-secondary);
+      --dw-doc: var(--tri-doc);
+      --dw-wash: rgba(114, 220, 210, 0.08);
+      --dw-mono-line: 22px;
+    }
+    [data-theme="light"] #docPane { --dw-wash: rgba(55, 108, 104, 0.08); }
+
+    .dw-shell {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 232px minmax(0, 1fr) 268px;
+      overflow: hidden;
+    }
+    .dw-side {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      border-right: 1px solid var(--dw-line);
+      background: var(--dw-inset);
+    }
+    .dw-side-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 14px 14px 10px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .dw-search {
+      margin: 0 10px 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--dw-line);
+      border-radius: 6px;
+      padding: 5px 8px;
+      color: var(--text-muted);
+      background: var(--dw-panel);
+    }
+    .dw-search input {
+      flex: 1;
+      min-width: 0;
+      border: 0;
+      background: none;
+      outline: none;
+      color: inherit;
+      font-size: 12px;
+    }
+    .dw-section-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 4px 14px 6px;
+      font-size: 10px;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .dw-file-list { flex: 1; min-height: 0; overflow: auto; padding: 0 6px; }
+    .dw-file {
+      width: 100%;
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      min-height: 54px;
+      padding: 8px 9px;
+      margin: 2px 0;
+      text-align: left;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+      position: relative;
+      cursor: pointer;
+    }
+    .dw-file:hover { background: var(--dw-raised); }
+    .dw-file.active { background: var(--dw-raised); border-color: var(--dw-line); }
+    .dw-file.active::before {
+      content: '';
+      position: absolute;
+      left: -1px;
+      top: 11px;
+      bottom: 11px;
+      width: 3px;
+      border-radius: 3px;
+      background: var(--dw-doc);
+    }
+    .dw-file-icon {
+      flex: none;
+      width: 24px;
+      height: 27px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--dw-line);
+      border-radius: 4px;
+      color: var(--dw-doc);
+      font: 10px var(--font-mono);
+    }
+    .dw-file-text { min-width: 0; flex: 1; }
+    .dw-file-title {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dw-file-meta {
+      display: block;
+      margin-top: 3px;
+      font: 10px var(--font-mono);
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dw-file-state { flex: none; font-size: 9px; color: var(--warning); }
+    .dw-list-empty { padding: 14px; font-size: 11px; color: var(--text-muted); line-height: 1.7; }
+    .dw-scope { padding: 8px 14px; font-size: 10px; color: var(--text-muted); line-height: 1.6; }
+    .dw-side-foot { border-top: 1px solid var(--dw-line); padding: 10px 12px; }
+    .dw-queue-row { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 6px; }
+    .dw-queue-count { margin-left: auto; font: 12px var(--font-mono); color: var(--dw-doc); }
+    .dw-side-foot .btn { width: 100%; justify-content: center; }
+
+    .dw-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--dw-panel); }
+    .dw-doc-tabs {
+      display: flex;
+      flex: none;
+      overflow-x: auto;
+      overflow-y: hidden;
+      background: var(--dw-inset);
+      border-bottom: 1px solid var(--dw-line);
+      height: 38px;
+    }
+    .dw-doc-tab {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex: none;
+      padding: 0 4px 0 8px;
+      border-right: 1px solid var(--dw-line);
+      border-top: 2px solid transparent;
+      white-space: nowrap;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .dw-doc-tab.active { border-top-color: var(--dw-doc); background: var(--dw-panel); color: var(--text-main); }
+    .dw-doc-tab button {
+      min-height: 26px;
+      padding: 2px 5px;
+      border: 0;
+      background: none;
+      color: inherit;
+      font-size: 11px;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    .dw-doc-tab button:hover { background: var(--dw-raised); }
+    .dw-doc-tab .dw-tab-close { color: var(--text-muted); }
+    .dw-doc-head {
+      flex: none;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 12px 16px 10px;
+    }
+    .dw-doc-head-text { min-width: 0; flex: 1; }
+    .dw-doc-title {
+      margin: 0 0 5px;
+      font: 600 18px/1.35 var(--font-display);
+      letter-spacing: -0.3px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dw-doc-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--text-muted); }
+    .dw-doc-actions { display: flex; gap: 6px; flex: none; }
+    .dw-doc-actions .btn { font-size: 12px; }
+    .dw-kbd-hint { font: 9px var(--font-mono); opacity: 0.7; }
+    .dw-toolbar {
+      flex: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 6px 12px;
+      border-top: 1px solid var(--dw-line);
+      border-bottom: 1px solid var(--dw-line);
+    }
+    .dw-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .dw-seg { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--dw-line); border-radius: 6px; background: var(--dw-inset); }
+    .dw-seg button {
+      min-height: 25px;
+      padding: 2px 9px;
+      font-size: 11px;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+    .dw-seg button.active { background: var(--dw-raised); color: var(--text-main); border-color: var(--dw-line); }
+    .dw-select {
+      background: var(--dw-inset);
+      border: 1px solid var(--dw-line);
+      border-radius: 5px;
+      padding: 4px 6px;
+      font-size: 11px;
+      color: inherit;
+      max-width: 130px;
+    }
+    .dw-banner {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 14px;
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-muted);
+      background: var(--dw-wash);
+      border-bottom: 1px solid var(--dw-line);
+    }
+    .dw-banner[hidden] { display: none; }
+    .dw-banner.warn { color: var(--warning); }
+    .dw-banner.error { color: var(--danger); background: rgba(238, 165, 170, 0.07); }
+    .dw-banner button {
+      margin-left: auto;
+      min-height: 22px;
+      padding: 1px 8px;
+      font-size: 11px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      flex: none;
+    }
+    .dw-editor-area { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; }
+    .dw-editor-area[data-view="edit"] { grid-template-columns: 1fr; }
+    .dw-editor-area[data-view="preview"] { grid-template-columns: 1fr; }
+    .dw-editor-area[data-view="edit"] .dw-preview-pane { display: none; }
+    .dw-editor-area[data-view="preview"] .dw-source-pane { display: none; }
+    .dw-source-pane, .dw-preview-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .dw-source-pane { background: var(--dw-inset); }
+    .dw-preview-pane { border-left: 1px solid var(--dw-line); }
+    .dw-pane-head {
+      flex: none;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 12px;
+      font: 10px var(--font-mono);
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--dw-line);
+    }
+    .dw-pane-head button {
+      border: 0;
+      background: none;
+      color: var(--primary);
+      font: 10px var(--font-mono);
+      cursor: pointer;
+      padding: 2px 4px;
+    }
+    .dw-text-frame { position: relative; flex: 1; min-height: 0; display: flex; overflow: hidden; }
+    .dw-gutter {
+      flex: none;
+      width: 44px;
+      padding: 14px 8px 40px 0;
+      text-align: right;
+      color: var(--text-muted);
+      opacity: 0.65;
+      font: 12px/var(--dw-mono-line) var(--font-mono);
+      white-space: pre;
+      overflow: hidden;
+      user-select: none;
+      background: var(--dw-inset);
+    }
+    .dw-source {
+      flex: 1;
+      min-width: 0;
+      max-width: 100%;
+      border: 0;
+      outline: none;
+      resize: none;
+      background: transparent;
+      padding: 14px 16px 40px 4px;
+      font: 12px/var(--dw-mono-line) var(--font-mono);
+      tab-size: 2;
+      color: var(--dw-doc);
+      white-space: pre;
+      overflow: auto;
+    }
+    .dw-source[readonly] { color: var(--text-muted); }
+    .dw-rendered {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 16px 20px 40px;
+      font-size: 12px;
+      line-height: 1.85;
+      overflow-wrap: anywhere;
+    }
+    .dw-rendered h1 { font: 600 22px/1.4 var(--font-display); margin: 0 0 14px; letter-spacing: -0.4px; }
+    .dw-rendered h2 { font: 600 16px/1.5 var(--font-display); margin: 20px 0 10px; color: var(--text-main); }
+    .dw-rendered h3 { font: 600 14px/1.5 var(--font-display); margin: 16px 0 8px; color: var(--text-main); }
+    .dw-rendered p { margin: 10px 0; color: var(--text-muted); }
+    .dw-rendered strong { color: var(--text-main); font-weight: 600; }
+    .dw-rendered code {
+      font: 11px var(--font-mono);
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: var(--dw-raised);
+      color: var(--dw-doc);
+    }
+    .dw-rendered pre {
+      margin: 10px 0;
+      padding: 12px;
+      border: 1px solid var(--dw-line);
+      border-radius: 6px;
+      background: var(--dw-inset);
+      white-space: pre-wrap;
+      overflow: auto;
+      font: 11px/1.8 var(--font-mono);
+      color: var(--dw-doc);
+    }
+    .dw-rendered blockquote {
+      margin: 14px 0;
+      padding: 8px 12px;
+      border-left: 2px solid var(--dw-doc);
+      background: var(--dw-raised);
+      color: var(--text-muted);
+    }
+    .dw-rendered ul { padding-left: 18px; color: var(--text-muted); }
+    .dw-rendered li { padding: 2px 0; }
+    .dw-rendered hr { border: 0; border-top: 1px solid var(--dw-line); margin: 18px 0; }
+    .dw-rendered a { color: var(--primary); }
+    .dw-caption {
+      font: 10px var(--font-mono);
+      letter-spacing: 1.1px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+    .dw-foot {
+      flex: none;
+      height: 26px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 12px;
+      border-top: 1px solid var(--dw-line);
+      font: 10px var(--font-mono);
+      color: var(--text-muted);
+    }
+    .dw-foot .dw-foot-right { margin-left: auto; display: flex; gap: 12px; }
+
+    .dw-find {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      padding: 5px 10px;
+      border-bottom: 1px solid var(--dw-line);
+      background: var(--dw-raised);
+      font-size: 11px;
+    }
+    .dw-find[hidden] { display: none; }
+    .dw-find input {
+      min-width: 0;
+      width: 132px;
+      padding: 3px 6px;
+      border: 1px solid var(--dw-line);
+      border-radius: 4px;
+      background: var(--dw-panel);
+      color: inherit;
+      font: 11px var(--font-mono);
+    }
+    .dw-find button {
+      min-height: 22px;
+      padding: 1px 7px;
+      border: 1px solid var(--dw-line);
+      border-radius: 4px;
+      background: var(--dw-panel);
+      color: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .dw-find-count { color: var(--text-muted); font: 10px var(--font-mono); min-width: 48px; }
+
+    .dw-inspect {
+      min-width: 0;
+      min-height: 0;
+      overflow: auto;
+      background: var(--dw-inset);
+      border-left: 1px solid var(--dw-line);
+    }
+    .dw-inspect-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--dw-line);
+      font-size: 12px;
+    }
+    .dw-inspect-section { padding: 14px; border-bottom: 1px solid var(--dw-line); min-width: 0; }
+    .dw-inspect-section h2 {
+      margin: 0 0 10px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .dw-identity { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+    .dw-identity-symbol {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--dw-line);
+      border-radius: 8px;
+      background: var(--dw-raised);
+      color: var(--dw-doc);
+      font: 11px var(--font-mono);
+    }
+    .dw-identity strong { font: 13px var(--font-mono); }
+    .dw-identity small { display: block; margin-top: 3px; font-size: 10px; color: var(--text-muted); }
+    .dw-props { display: grid; grid-template-columns: 62px 1fr; gap: 8px 6px; margin: 0; font-size: 11px; }
+    .dw-props dt { color: var(--text-muted); }
+    .dw-props dd { margin: 0; min-width: 0; word-break: break-all; overflow-wrap: anywhere; }
+    .dw-mapping {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 7px 9px;
+      border: 1px solid var(--dw-line);
+      border-radius: 5px;
+      background: var(--dw-panel);
+      font: 11px var(--font-mono);
+    }
+    .dw-mapping button {
+      min-height: 22px;
+      padding: 0 4px;
+      border: 0;
+      background: none;
+      color: var(--primary);
+      font: 10px var(--font-sans);
+      cursor: pointer;
+    }
+    .dw-note { margin: 8px 0 0; font-size: 10px; line-height: 1.8; color: var(--text-muted); overflow-wrap: anywhere; }
+    .dw-outline { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
+    .dw-outline button {
+      text-align: left;
+      min-height: 25px;
+      padding: 3px 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+      background: none;
+      border: 0;
+      border-left: 1px solid var(--dw-line);
+      cursor: pointer;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dw-outline button:hover { background: var(--dw-raised); color: var(--text-main); }
+    .dw-outline button.lv1 { color: var(--dw-doc); border-left: 2px solid var(--dw-doc); }
+    .dw-outline button.lv2 { padding-left: 18px; }
+    .dw-outline button.lv3 { padding-left: 28px; }
+    .dw-outline-empty { font-size: 10px; color: var(--text-muted); }
+
+    .dw-empty {
+      flex: 1;
+      display: grid;
+      place-content: center;
+      text-align: center;
+      gap: 8px;
+      padding: 28px;
+      color: var(--text-muted);
+    }
+    .dw-empty h2 { margin: 0; font-size: 17px; font-weight: 500; color: var(--text-main); }
+    .dw-empty p { margin: 0; font-size: 11px; line-height: 1.8; }
+    .dw-empty .btn { margin: 4px auto 0; }
+    .dw-missing { flex: 1; overflow: auto; padding: 16px; display: block; text-align: left; }
+    .dw-missing h2 { font-size: 15px; margin: 6px 0; }
+    .dw-missing p { font-size: 11px; margin: 6px 0; }
+    .dw-missing .btn { margin: 8px 0 0; }
+
+    .dw-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 1px 6px;
+      border: 1px solid var(--dw-line);
+      border-radius: 4px;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .dw-badge.doc { color: var(--dw-doc); border-color: color-mix(in srgb, var(--dw-doc) 45%, var(--dw-line)); }
+    .dw-dirty { color: var(--warning); }
+    .dw-ok { color: var(--success); }
+
+    .dw-diff { border: 1px solid var(--dw-line); border-radius: 6px; overflow: hidden; margin: 10px 0; }
+    .dw-diff h3 { margin: 0; padding: 7px 10px; font-size: 11px; background: var(--dw-raised); }
+    .dw-diff pre {
+      margin: 0;
+      padding: 10px;
+      max-height: 240px;
+      overflow: auto;
+      font: 11px/1.75 var(--font-mono);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--text-muted);
+    }
+    .dw-diff .dw-diff-line { display: block; min-height: 1.7em; padding: 0 6px; }
+    .dw-diff .dw-diff-line.changed { background: var(--dw-wash); border-left: 2px solid var(--primary); }
+    .dw-diff .dw-diff-line.changed.before { background: rgba(228, 189, 124, 0.1); border-left-color: var(--warning); }
+    .dw-narrow-only { display: none; }
+
+    /* ===== 差异视图（GitHub split 风格，纯文本） ===== */
+    .dw-diff-pane { display: none; min-width: 0; min-height: 0; flex-direction: column; }
+    .dw-editor-area[data-view="diff"] { grid-template-columns: 1fr; }
+    .dw-editor-area[data-view="diff"] .dw-source-pane,
+    .dw-editor-area[data-view="diff"] .dw-preview-pane { display: none; }
+    .dw-editor-area[data-view="diff"] .dw-diff-pane { display: flex; }
+    .dw-diffview { flex: 1; min-height: 0; overflow: auto; font: 12px/20px var(--font-mono); }
+    .dw-diff-head {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--dw-raised);
+      border-bottom: 1px solid var(--dw-line);
+    }
+    .dw-diff-head span {
+      padding: 5px 12px;
+      font-size: 10px;
+      letter-spacing: 0.6px;
+      color: var(--text-muted);
+    }
+    .dw-diff-head span + span { border-left: 1px solid var(--dw-line); }
+    .dw-diff-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) 48px minmax(0, 1fr); }
+    .dw-diff-row > .dw-ln,
+    .dw-diff-row > .dw-code { min-height: 20px; }
+    .dw-diff-row > .dw-ln {
+      padding: 0 8px;
+      text-align: right;
+      color: var(--text-muted);
+      opacity: 0.6;
+      background: var(--dw-inset);
+      user-select: none;
+      border-right: 1px solid var(--dw-line);
+    }
+    .dw-diff-row > .dw-code {
+      padding: 0 10px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--dw-doc);
+    }
+    .dw-diff-row > .dw-code.empty { background: rgba(127, 127, 127, 0.06); }
+    .dw-diff-row.add > .dw-code.right { background: rgba(63, 185, 80, 0.16); }
+    .dw-diff-row.del > .dw-code.left { background: rgba(248, 81, 73, 0.15); }
+    .dw-diff-row.mod > .dw-code.left { background: rgba(248, 81, 73, 0.15); }
+    .dw-diff-row.mod > .dw-code.right { background: rgba(63, 185, 80, 0.16); }
+    .dw-diff-row.add > .dw-ln.right { color: var(--success); opacity: 1; }
+    .dw-diff-row.del > .dw-ln.left { color: var(--danger); opacity: 1; }
+    .dw-diff-empty { padding: 22px 16px; font-size: 11px; color: var(--text-muted); }
+    .dw-diff-note { padding: 6px 12px; font-size: 10px; color: var(--warning); border-bottom: 1px solid var(--dw-line); }
+
+    /* 审阅弹层：文档差异需要更宽的容器 */
+    #txReviewOverlay .import-panel { width: min(1180px, 96vw); }
+    #txReviewOverlay .import-body { max-height: min(70vh, 720px); }
+    .dw-review-item .dw-diffview {
+      border: 1px solid var(--dw-line);
+      border-radius: 6px;
+      margin: 8px 0;
+    }
+    .dw-review-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 2px 0 6px;
+      font: 10px var(--font-mono);
+      color: var(--text-muted);
+    }
+    .dw-review-stat.add { color: var(--success); }
+    .dw-review-stat.del { color: var(--danger); }
+    .dw-doc-actions .btn.dw-armed { color: var(--danger); border-color: var(--danger); }
+
+    @media (min-width: 1600px) {
+      .dw-shell { grid-template-columns: 248px minmax(0, 1fr) 288px; }
+      #docPane { --dw-mono-line: 23px; }
+      .dw-source { font-size: 13px; }
+    }
+    @media (max-width: 1200px) {
+      .dw-shell { grid-template-columns: 208px minmax(0, 1fr); }
+      .dw-inspect { display: none; }
+    }
+    @media (max-width: 860px) {
+      .dw-narrow-only { display: inline-flex; }
+      .dw-shell { grid-template-columns: minmax(0, 1fr); position: relative; }
+      .dw-side {
+        display: none;
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: min(280px, 86%);
+        z-index: 6;
+        box-shadow: var(--shadow-lg);
+      }
+      .dw-side.open { display: flex; }
+      .dw-editor-area { grid-template-columns: 1fr; }
+      .dw-editor-area[data-view="split"] { grid-template-rows: 1fr 1fr; }
+      .dw-editor-area[data-view="split"] .dw-preview-pane { border-left: 0; border-top: 1px solid var(--dw-line); }
+      .dw-doc-head { flex-wrap: wrap; padding: 10px 12px 8px; }
+      .dw-doc-actions { width: 100%; }
+      .dw-doc-actions .btn { flex: 1; justify-content: center; }
+      .dw-doc-title { font-size: 16px; }
+      .dw-toolbar { padding: 5px 8px; }
+      .dw-find input { width: 100px; }
+    }
   </style>
+  <script src="./console-client.js"></script>
   <script>
+    // 嵌入宿主使用稳定数据库标识隔离草稿与偏好；独立 Server 保留已有键。
+    const consoleEmbedded = new URLSearchParams(location.search).get('embedded') === '1';
+    const consoleStorageId = new URLSearchParams(location.search).get('storageKey') || '';
+    const consoleStoragePrefix = consoleEmbedded ? 'tdb:' + encodeURIComponent(consoleStorageId) + ':' : '';
+    function consoleStorage(name) {
+      return {
+        getItem(key) { try { return window[name].getItem(consoleStoragePrefix + key); } catch (_) { return null; } },
+        setItem(key, value) { window[name].setItem(consoleStoragePrefix + key, value); },
+        removeItem(key) { window[name].removeItem(consoleStoragePrefix + key); },
+      };
+    }
+    const localStorage = consoleStorage('localStorage');
+    const sessionStorage = consoleStorage('sessionStorage');
+    let consoleClient = null;
+    let consoleMounted = false;
+    let consoleDisposed = false;
+    function apiFetch(input, init) {
+      if (consoleDisposed) return Promise.reject(new Error('控制台已卸载 (Console detached)'));
+      if (consoleEmbedded && !consoleClient) return Promise.reject(new Error('控制台尚未挂载 (Console not mounted)'));
+      return consoleClient ? consoleClient.fetch(input, init) : fetch(input, init);
+    }
     // 首屏前置：侧栏 rail 与界面语言在样式生效前恢复，避免展开态闪一下再收起
     try {
       if (localStorage.getItem('tdb_sidebar_rail') === '1') document.documentElement.dataset.rail = '1';
@@ -4373,6 +5037,10 @@
         <div class="tab" data-tab="vectorLabPane" data-action="quick-search" role="tab" id="tab-vectorLabPane" aria-controls="vectorLabPane" aria-selected="false" tabindex="-1">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="4" y1="20" x2="12" y2="12"/><line x1="12" y1="12" x2="20" y2="4"/><circle cx="4" cy="20" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="20" cy="4" r="2"/></svg>
           <span data-i18n="tabs.vector">向量检索</span>
+        </div>
+        <div class="tab" data-tab="docPane" data-action="quick-find" role="tab" id="tab-docPane" aria-controls="docPane" aria-selected="false" tabindex="-1">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h4"/><path d="M9 13h6M9 17h4"/></svg>
+          <span data-i18n="tabs.doc">节点文档</span>
         </div>
       </div>
     </nav>
@@ -4961,6 +5629,168 @@
           </section>
         </div>
       </div>
+
+      <!-- 标签页 4：节点文档工作区（JSON payload + 正文共享同一份草稿） -->
+      <div class="tab-pane" id="docPane" role="tabpanel" aria-labelledby="tab-docPane">
+        <div class="dw-shell">
+          <aside class="dw-side" id="docSideList" aria-label="节点文档列表">
+            <div class="dw-side-head">
+              <span data-i18n="doc.list.title">节点文档</span>
+              <span class="dw-badge" id="docListCount">0</span>
+            </div>
+            <label class="dw-search">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+              <input id="docListSearch" type="search" autocomplete="off" spellcheck="false"
+                data-i18n-placeholder="doc.list.search" placeholder="搜索标题或节点 ID" aria-label="搜索节点文档">
+            </label>
+            <div class="dw-section-label"><span data-i18n="doc.list.source">当前结果</span><span id="docListSource">-</span></div>
+            <div class="dw-file-list" id="docFileList"></div>
+            <div class="dw-scope" id="docListScope" data-i18n="doc.list.scope">仅显示当前查询返回范围，不代表库内全部文档。</div>
+            <div class="dw-side-foot">
+              <div class="dw-queue-row">
+                <span data-i18n="doc.queue.title">待提交更改</span>
+                <span class="dw-queue-count" id="docQueueCount">0</span>
+              </div>
+              <button class="btn" type="button" id="docSideReview" data-i18n="doc.queue.review">审阅更改</button>
+            </div>
+          </aside>
+
+          <main class="dw-main">
+            <div class="dw-doc-tabs" id="docTabs" role="tablist" aria-label="已打开的文档"></div>
+
+            <div id="docBody" style="display: contents">
+              <div class="dw-doc-head">
+                <button class="btn dw-narrow-only" type="button" id="docSideToggle" aria-label="打开节点列表">☰</button>
+                <div class="dw-doc-head-text">
+                  <h2 class="dw-doc-title" id="docTitle"></h2>
+                  <div class="dw-doc-meta">
+                    <span class="dw-badge doc" id="docTypeBadge">document</span>
+                    <span class="mono" id="docNodeMeta"></span>
+                    <span>·</span>
+                    <span id="docDirtyLabel"></span>
+                  </div>
+                </div>
+                <div class="dw-doc-actions">
+                  <button class="btn" type="button" id="docRevertBtn" data-i18n="doc.revert">还原</button>
+                  <button class="btn" type="button" id="docUnstageBtn" data-i18n="doc.unstage">取消暂存</button>
+                  <button class="btn" type="button" id="docExportBtn" data-i18n="doc.export">导出草稿</button>
+                  <button class="btn btn-primary" type="button" id="docStageBtn">暂存更改 <span class="dw-kbd-hint">Ctrl S</span></button>
+                </div>
+              </div>
+
+              <div class="dw-toolbar">
+                <div class="dw-seg" role="group" aria-label="编辑对象">
+                  <button type="button" id="docModeBody" class="active" aria-pressed="true" data-i18n="doc.mode.body">正文</button>
+                  <button type="button" id="docModeJson" aria-pressed="false" data-i18n="doc.mode.json">JSON payload</button>
+                </div>
+                <div class="dw-tools">
+                  <select class="dw-select" id="docFormat" aria-label="正文显示格式">
+                    <option value="markdown">Markdown</option>
+                    <option value="text" data-i18n="doc.format.text">纯文本</option>
+                  </select>
+                  <button class="btn" type="button" id="docFormatJson" hidden data-i18n="doc.format.json">格式化</button>
+                  <div class="dw-seg" role="group" aria-label="编辑器布局">
+                    <button type="button" data-doc-view="edit" data-i18n="doc.view.edit">编辑</button>
+                    <button type="button" data-doc-view="split" class="active" data-i18n="doc.view.split">分屏</button>
+                    <button type="button" data-doc-view="diff" data-i18n="doc.view.diff">差异</button>
+                    <button type="button" data-doc-view="preview" data-i18n="doc.view.preview">预览</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="dw-banner" id="docBanner" role="status" hidden>
+                <span id="docBannerText"></span>
+                <button type="button" id="docBannerAction" hidden></button>
+              </div>
+
+              <div class="dw-find" id="docFindBar" hidden>
+                <input id="docFindInput" type="text" placeholder="查找" aria-label="查找" spellcheck="false" data-i18n-placeholder="doc.find.placeholder">
+                <span class="dw-find-count" id="docFindCount">0/0</span>
+                <button type="button" id="docFindPrev" aria-label="上一个">↑</button>
+                <button type="button" id="docFindNext" aria-label="下一个">↓</button>
+                <input id="docReplaceInput" type="text" placeholder="替换为" aria-label="替换为" spellcheck="false" data-i18n-placeholder="doc.find.replace">
+                <button type="button" id="docReplaceOne" data-i18n="doc.find.one">替换</button>
+                <button type="button" id="docReplaceAll" data-i18n="doc.find.all">全部替换</button>
+                <button type="button" id="docFindClose" aria-label="关闭查找">✕</button>
+              </div>
+
+              <div class="dw-editor-area" id="docEditorArea" data-view="split">
+                <section class="dw-source-pane" aria-label="文档编辑器">
+                  <div class="dw-pane-head">
+                    <span id="docSourceLabel">MARKDOWN SOURCE</span>
+                    <button type="button" id="docSourcePath" title="更改正文来源字段">payload.content</button>
+                  </div>
+                  <div class="dw-text-frame" id="docTextFrame">
+                    <div class="dw-gutter" id="docGutter" aria-hidden="true"></div>
+                    <textarea class="dw-source" id="docEditor" wrap="off" spellcheck="false" aria-label="文档内容"></textarea>
+                  </div>
+                  <div class="dw-empty dw-missing" id="docMissingBody" hidden>
+                    <h2 data-i18n="doc.missing.title">这个节点还没有正文</h2>
+                    <p data-i18n="doc.missing.help">保留原有 payload，按所选字段添加正文；不会覆盖其他字段。</p>
+                    <button class="btn" type="button" id="docCreateBody" data-i18n="doc.missing.cta">添加正文到所选字段</button>
+                  </div>
+                </section>
+                <section class="dw-preview-pane" aria-label="内容预览">
+                  <div class="dw-pane-head"><span id="docPreviewLabel">LIVE PREVIEW</span><span data-i18n="doc.preview.sync">与当前草稿同步</span></div>
+                  <article class="dw-rendered" id="docPreview"></article>
+                </section>
+                <section class="dw-diff-pane" id="docDiffPane" aria-label="与基线的差异">
+                  <div class="dw-pane-head">
+                    <span id="docDiffLabel" data-i18n="doc.diff.plain">纯文本</span>
+                    <span id="docDiffStats"></span>
+                  </div>
+                  <div class="dw-diffview" id="docDiffView"></div>
+                </section>
+              </div>
+
+              <div class="dw-foot">
+                <span id="docCursor">Ln 1, Col 1</span>
+                <span id="docCharCount"></span>
+                <span id="docLossyHint" hidden></span>
+                <span class="dw-foot-right">
+                  <button class="btn" type="button" id="docFindToggle" style="min-height:20px;padding:0 6px;font-size:10px" data-i18n="doc.find.toggle">查找</button>
+                  <span>UTF-8</span>
+                </span>
+              </div>
+            </div>
+
+            <div class="dw-empty" id="docClosedState" hidden>
+              <h2 data-i18n="doc.empty.title">选择一个节点，开始编辑</h2>
+              <p data-i18n="doc.empty.help">从左侧节点列表打开正文或 JSON payload；入口也来自结果右键菜单与节点详情。</p>
+              <button class="btn" type="button" id="docOpenFirst" data-i18n="doc.empty.cta">打开节点列表</button>
+            </div>
+          </main>
+
+          <aside class="dw-inspect" id="docInspector" aria-label="节点上下文">
+            <div class="dw-inspect-head"><span data-i18n="doc.inspect.title">节点上下文</span><span class="dw-badge" id="docSubmitBadge">-</span></div>
+            <section class="dw-inspect-section">
+              <div class="dw-identity">
+                <span class="dw-identity-symbol">{ }</span>
+                <div><strong id="docInspectId">-</strong><small data-i18n="doc.inspect.sub">文档附属于节点</small></div>
+              </div>
+              <dl class="dw-props">
+                <dt data-i18n="doc.inspect.type">类型</dt><dd id="docInspectType">-</dd>
+                <dt data-i18n="doc.inspect.version">版本</dt><dd class="mono" id="docVersion">-</dd>
+                <dt data-i18n="doc.inspect.access">编辑状态</dt><dd id="docAccessStatus">-</dd>
+                <dt data-i18n="doc.inspect.vector">向量</dt><dd id="docVectorStatus">-</dd>
+              </dl>
+            </section>
+            <section class="dw-inspect-section">
+              <h2 data-i18n="doc.mapping.title">正文来源</h2>
+              <div class="dw-mapping"><span id="docMappingText">/content</span><button type="button" id="docMappingBtn" data-i18n="doc.mapping.change">更改</button></div>
+              <p class="dw-note" data-i18n="doc.mapping.note">一个节点一份 payload。正文只是所选字段的编辑视图，其余字段保留；不会写入 /format 等未定案字段。</p>
+            </section>
+            <section class="dw-inspect-section">
+              <h2 data-i18n="doc.outline.title">文档大纲</h2>
+              <div class="dw-outline" id="docOutline"></div>
+            </section>
+            <section class="dw-inspect-section">
+              <h2 data-i18n="doc.inspect.readonlyTitle">只读信息</h2>
+              <p class="dw-note" id="docInspectNote">关系与向量只在原工作区管理；正文编辑不会触发向量重建。</p>
+            </section>
+          </aside>
+        </div>
+      </div>
     </main>
   </div>
 
@@ -5034,6 +5864,7 @@
       <div class="node-detail-drawer" id="nodeDrawer">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
           <h2 id="drawerNodeTitle" data-i18n="detail.title">节点详情</h2>
+          <button class="btn" id="drawerOpenDocBtn" type="button" title="在文档工作区打开此节点" data-i18n="grid.openDocument" data-i18n-title="grid.openDocument">打开文档</button>
           <!-- 内层关闭按钮已移除：与面板 uspCollapseBtn 功能重合（双 X 问题），收起语义统一到面板 -->
         </div>
         <!-- Trinity 三平面：Payload / Vector / Edges（V3-G：图操作上移到 Payload 卡底部，四卡可同屏） -->
@@ -5220,6 +6051,77 @@
         <button class="btn" id="txReviewCancelBtn" type="button" data-i18n="tx.keepStaged">返回</button>
         <button class="btn" id="txReviewDiscardBtn" type="button" data-i18n="tx.discard">放弃这些修改</button>
         <button class="btn btn-primary" id="txReviewCommitBtn" type="button" data-i18n="tx.commit">提交</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文档工作区：关闭有未提交更改的标签（三选，替代内嵌 webview 不支持的原生 confirm） -->
+  <div class="import-overlay" id="docCloseOverlay" hidden>
+    <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="docCloseTitle">
+      <div class="import-header">
+        <h2 id="docCloseTitle" data-i18n="doc.close.title">此文档还有未提交更改</h2>
+      </div>
+      <div class="import-body">
+        <p class="import-hint" data-i18n="doc.close.hint">保留草稿后关闭标签，再次打开仍可继续编辑；已暂存的操作会继续留在审阅队列。</p>
+      </div>
+      <div class="import-footer">
+        <button class="btn" id="docCloseCancel" type="button" data-i18n="doc.close.keep">继续编辑</button>
+        <button class="btn" id="docCloseDiscard" type="button" data-i18n="doc.close.discard">放弃本节点更改</button>
+        <button class="btn btn-primary" id="docCloseKeepDraft" type="button" data-i18n="doc.close.saveAndClose">保留草稿并关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文档工作区：正文来源字段（JSON Pointer） -->
+  <div class="import-overlay" id="docMappingOverlay" hidden>
+    <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="docMappingTitle">
+      <div class="import-header">
+        <h2 id="docMappingTitle" data-i18n="doc.mapping.dialogTitle">选择正文来源字段</h2>
+        <button class="btn btn-quiet" id="docMappingClose" type="button" aria-label="关闭" title="关闭">✕</button>
+      </div>
+      <div class="import-body">
+        <p class="import-hint" data-i18n="doc.mapping.dialogHint">使用 JSON Pointer，例如 /content 或 /document/body。这只改变编辑视图，不移动、不删除原字段，也不会写入格式字段。</p>
+        <input class="dr-input" id="docMappingInput" type="text" spellcheck="false" style="width:100%;padding:8px 10px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-inset);color:inherit;font-family:var(--font-mono);font-size:12px" aria-label="正文来源字段">
+        <p class="import-hint" id="docMappingError" role="status"></p>
+      </div>
+      <div class="import-footer">
+        <button class="btn" id="docMappingCancel" type="button" data-i18n="import.cancel">取消</button>
+        <button class="btn btn-primary" id="docMappingApply" type="button" data-i18n="doc.mapping.apply">应用映射</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文档工作区：同一节点已有待提交更改时的显式三选（不静默覆盖） -->
+  <div class="import-overlay" id="docMergeOverlay" hidden>
+    <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="docMergeTitle">
+      <div class="import-header">
+        <h2 id="docMergeTitle" data-i18n="doc.merge.title">该节点已有待提交更改</h2>
+      </div>
+      <div class="import-body">
+        <p class="import-hint" id="docMergeHint" data-i18n="doc.merge.hint">另一个入口（payload 编辑 / 导入 / 文档）已暂存了此节点。选择合并会以队列中的最新 payload 为基，只覆盖本次正文或 JSON 变更。</p>
+      </div>
+      <div class="import-footer">
+        <button class="btn" id="docMergeCancel" type="button" data-i18n="import.cancel">取消</button>
+        <button class="btn" id="docMergeReplace" type="button" data-i18n="doc.merge.replace">替换整份 payload</button>
+        <button class="btn btn-primary" id="docMergeCombine" type="button" data-i18n="doc.merge.combine">合并并暂存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文档工作区：版本冲突（base / local / remote 三方，不做自动合并与强制覆盖） -->
+  <div class="import-overlay" id="docConflictOverlay" hidden>
+    <div class="import-panel" role="dialog" aria-modal="true" aria-labelledby="docConflictTitle" style="width:min(960px,94vw)">
+      <div class="import-header">
+        <h2 id="docConflictTitle" data-i18n="doc.conflict.title">版本冲突：服务端内容已变化</h2>
+        <button class="btn btn-quiet" id="docConflictClose" type="button" aria-label="关闭" title="关闭">✕</button>
+      </div>
+      <div class="import-body">
+        <p class="import-hint" id="docConflictHint" data-i18n="doc.conflict.hint">版本校验发现冲突，整批操作已拒绝。请对比远端与本地草稿，手工合并后重新审阅。</p>
+        <div class="dw-diff" id="docConflictDiff"></div>
+      </div>
+      <div class="import-footer">
+        <button class="btn" id="docConflictKeepLocal" type="button" data-i18n="doc.conflict.keepLocal">保留本地草稿</button>
+        <button class="btn btn-primary" id="docConflictRebase" type="button" data-i18n="doc.conflict.rebase">以远端为基继续合并</button>
       </div>
     </div>
   </div>
@@ -6253,6 +7155,156 @@
         'tx.op.link': '新增关系 · {source} → {target} ({label})',
         'tx.op.unknown': '未知操作 · {kind}',
         'history.filled': '已填入编辑器（未执行）',
+        'tabs.doc': '节点文档',
+        'workspace.desc.doc': '节点 payload 与正文共用一份草稿：暂存后统一审阅，提交成功才算保存。',
+        'palette.action.navDoc': '切换到节点文档',
+        'palette.action.openDoc': '打开当前节点的文档',
+        'grid.openDocument': '打开文档',
+        'tx.source.doc': '文档编辑',
+        'doc.list.title': '节点文档',
+        'doc.list.search': '搜索标题或节点 ID',
+        'doc.list.source': '当前结果',
+        'doc.list.scope': '仅显示当前查询返回范围，不代表库内全部文档。',
+        'doc.list.empty': '没有可打开的节点。先运行一次只读查询，或从节点详情打开。',
+        'doc.list.sample': '{n} 个节点 · 采样范围',
+        'doc.list.sourceGrid': '查询结果',
+        'doc.list.sourceVector': '向量命中',
+        'doc.list.sourceNode': '当前节点',
+        'doc.list.jsonOnly': '仅 JSON',
+        'doc.queue.title': '待提交更改',
+        'doc.queue.review': '审阅更改',
+        'doc.export': '导出草稿',
+        'doc.mode.body': '正文',
+        'doc.mode.json': 'JSON payload',
+        'doc.format.text': '纯文本',
+        'doc.format.json': '格式化',
+        'doc.view.edit': '编辑',
+        'doc.view.split': '分屏',
+        'doc.view.preview': '预览',
+        'doc.find.placeholder': '查找',
+        'doc.find.replace': '替换为',
+        'doc.find.one': '替换',
+        'doc.find.all': '全部替换',
+        'doc.find.toggle': '查找',
+        'doc.missing.title': '这个节点还没有正文',
+        'doc.missing.help': '保留原有 payload，按所选字段添加正文；不会覆盖其他字段。',
+        'doc.missing.cta': '添加正文到所选字段',
+        'doc.preview.sync': '与当前草稿同步',
+        'doc.empty.title': '选择一个节点，开始编辑',
+        'doc.empty.help': '从左侧节点列表打开正文或 JSON payload；入口也来自结果右键菜单与节点详情。',
+        'doc.empty.cta': '打开节点列表',
+        'doc.inspect.title': '节点上下文',
+        'doc.inspect.sub': '文档附属于节点',
+        'doc.inspect.type': '类型',
+        'doc.inspect.version': '版本',
+        'doc.inspect.access': '编辑状态',
+        'doc.inspect.vector': '向量',
+        'doc.inspect.readonlyTitle': '只读信息',
+        'doc.inspect.note': '关系与向量只在原工作区管理；正文编辑不会触发向量重建。',
+        'doc.mapping.title': '正文来源',
+        'doc.mapping.change': '更改',
+        'doc.mapping.note': '一个节点一份 payload。正文只是所选字段的编辑视图，其余字段保留；不会写入 /format 等未定案字段。',
+        'doc.mapping.dialogTitle': '选择正文来源字段',
+        'doc.mapping.dialogHint': '使用 JSON Pointer，例如 /content 或 /document/body。这只改变编辑视图，不移动、不删除原字段，也不会写入格式字段。',
+        'doc.mapping.apply': '应用映射',
+        'doc.outline.title': '文档大纲',
+        'doc.outline.empty': '暂无标题',
+        'doc.close.title': '此文档还有未提交更改',
+        'doc.close.hint': '保留草稿后关闭标签，再次打开仍可继续编辑；已暂存的操作会继续留在审阅队列。',
+        'doc.close.keep': '继续编辑',
+        'doc.close.discard': '放弃本节点更改',
+        'doc.close.saveAndClose': '保留草稿并关闭',
+        'doc.merge.title': '该节点已有待提交更改',
+        'doc.merge.hint': '另一个入口（payload 编辑 / 导入 / 文档）已暂存了此节点。合并会以队列中的最新 payload 为基，只覆盖本次变更；替换会用本地草稿整份覆盖队列项。',
+        'doc.merge.replace': '替换整份 payload',
+        'doc.merge.combine': '合并并暂存',
+        'doc.conflict.title': '版本冲突：服务端内容已变化',
+        'doc.conflict.hint': '版本校验发现冲突，整批操作已拒绝。请对比远端与本地草稿，手工合并后重新审阅。',
+        'doc.conflict.keepLocal': '保留本地草稿',
+        'doc.conflict.rebase': '以远端为基继续合并',
+        'doc.conflict.remote': '远端（服务端刚读到）',
+        'doc.conflict.local': '本地草稿',
+        'doc.conflict.base': '打开时的基线',
+        'doc.access.unknown': '未知（未确认）',
+        'doc.access.editable': '可编辑',
+        'doc.access.readonly': '只读',
+        'doc.access.heldByOther': '他人占用（模拟）',
+        'doc.access.expired': '资格失效（模拟）',
+        'doc.access.note': '无编辑租约：并发由节点 ETag 乐观校验，冲突会以 409 返回。',
+        'doc.submit.idle': '未提交',
+        'doc.submit.submitting': '提交中…',
+        'doc.submit.acknowledged': '已确认',
+        'doc.submit.rejected': '已拒绝',
+        'doc.submit.conflict': '冲突',
+        'doc.submit.outcomeUnknown': '结果待确认',
+        'doc.status.clean': '与基线一致',
+        'doc.status.dirty': '未暂存更改',
+        'doc.status.invalid': 'JSON 待修正',
+        'doc.status.staged': '已暂存，尚未提交',
+        'doc.status.stagedNew': '已暂存，另有新修改',
+        'doc.banner.invalid': 'JSON 格式无效：保留当前输入，修正后才能切到正文或暂存。',
+        'doc.banner.lossy': '包含超出 JavaScript 安全整数范围的数值或重复键：保存会改变原值，已禁止暂存。',
+        'doc.banner.readonly': '当前节点只读：可以查看与导出，不能修改或提交。',
+        'doc.banner.heldByOther': '此文档被其他编辑者占用（模拟状态，服务端未提供租约）。',
+        'doc.banner.expired': '编辑资格已失效（模拟状态）：草稿保留，提交已停止。',
+        'doc.banner.conflict': '服务端版本已变化：请对比远端与本地后手工合并。',
+        'doc.banner.unknown': '提交结果待确认：请确认保留的完整原事务。当前继续编辑的内容保留为新草稿。',
+        'doc.confirmOutcome': '确认原事务',
+        'doc.err.pendingCommit': '原事务仍在提交或结果待确认，请先确认原事务；草稿可以继续编辑。',
+        'doc.banner.noTxMode': '已开启写入审阅：文档暂存与提交走同一队列。',
+        'doc.toast.staged': '已暂存到审阅队列（未写入数据库）',
+        'doc.toast.stagedMerged': '已合并进该节点已有的待提交更改',
+        'doc.toast.draftRestored': '已恢复此节点的浏览器本地草稿',
+        'doc.toast.draftDropped': '本地草稿已损坏或版本不符，已丢弃',
+        'doc.toast.draftQuota': '浏览器存储不可用：草稿仅存在内存，请导出备份',
+        'doc.toast.exported': '草稿已导出',
+        'doc.toast.bodyCreated': '已按所选字段添加正文',
+        'doc.toast.formatted': '已格式化 JSON 显示',
+        'doc.toast.committed': '提交成功：{n} 项已确认',
+        'doc.toast.replayed': '服务端已确认（重放）',
+        'doc.toast.confirmedLate': '已确认：服务端存在本次提交的内容',
+        'doc.toast.findNone': '没有匹配项',
+        'doc.toast.replaced': '已替换 {n} 处',
+        'doc.toast.noDoc': '先在结果中选中一个节点',
+        'doc.toast.txMode': '已开启写入审阅：文档提交需要经同一队列',
+        'doc.err.jsonInvalid': 'JSON 无效：第 {line} 行第 {col} 列',
+        'doc.err.notObject': 'payload 必须是 JSON 对象',
+        'doc.err.pointerInvalid': '请输入有效路径，例如 /content',
+        'doc.err.pointerBlocked': '该路径包含不支持的键名',
+        'doc.err.pointerMid': '中间字段不是对象，请更换正文路径',
+        'doc.err.nonString': '该字段已有非文本数据，不会被覆盖；请更换路径或改用 JSON 编辑',
+        'doc.err.readonly': '当前节点只读，不能暂存',
+        'doc.err.notDirty': '没有需要暂存的更改',
+        'doc.err.invalid': '先修正 JSON，当前输入会保留',
+        'doc.err.lossy': '存在不可无损处理的数值或重复键，已阻止暂存',
+        'doc.err.nodeNotFound': '节点不存在（404）',
+        'doc.err.loadFailed': '读取节点失败：{msg}',
+        'doc.err.commitFailed': '提交失败：{msg}',
+        'doc.err.sizeLimit': 'payload 超过请求体上限（4 MiB），请缩小文档或改用更小的字段',
+        'doc.err.pendingDelete': '该节点有待提交的删除操作，请先在审阅中处理，文档不会覆盖它',
+        'doc.err.noVersion': '未能确认节点版本，暂不能暂存：没有版本前置条件的写入会静默覆盖他人改动',
+        'doc.err.noTxMode': '写入审阅未能开启，暂存已取消',
+        'doc.err.outcomeMismatch': '服务端内容与本次提交不一致：草稿保留，可重新审阅后再提交',
+        'doc.toast.conflictRebase': '已以远端为基重建；该节点的旧暂存已撤回，请合并后重新暂存',
+        'doc.review.bodyDiff': '正文行级差异',
+        'doc.view.diff': '差异',
+        'doc.diff.base': '基线',
+        'doc.diff.current': '当前草稿',
+        'doc.diff.added': '+{n} 行',
+        'doc.diff.removed': '−{n} 行',
+        'doc.diff.empty': '与基线一致，没有差异',
+        'doc.diff.truncated': '差异过大，已按整段替换展示（未做逐行对齐）',
+        'doc.diff.plain': '纯文本',
+        'doc.unstage': '取消暂存',
+        'doc.unstage.toast': '已取消暂存，更改仍保留在草稿中',
+        'doc.unstage.blocked': '该节点的待提交项不是本文档的修改，请到审阅中处理',
+        'doc.revert': '还原',
+        'doc.revert.armed': '再点一次还原',
+        'doc.revert.toast': '已还原到上次提交的内容，并撤回该节点的暂存',
+        'doc.review.stats': '{add} 行新增 · {del} 行删除',
+        'doc.review.noDiff': '正文没有变化，下面是字段级差异',
+        'doc.review.fieldDiff': '字段级差异',
+        'doc.err.prefix': '文档',
       },
       en: {
         'graph.loadWhole': 'Load full graph (top 100 edges)',
@@ -6707,6 +7759,156 @@
         'tx.op.link': 'Insert relation · {source} → {target} ({label})',
         'tx.op.unknown': 'Unknown operation · {kind}',
         'history.filled': 'Filled into the editor (not executed)',
+        'tabs.doc': 'Node documents',
+        'workspace.desc.doc': 'One draft shared by the node payload and its body: stage, review, and only a confirmed commit counts as saved.',
+        'palette.action.navDoc': 'Switch to node documents',
+        'palette.action.openDoc': 'Open the current node as a document',
+        'grid.openDocument': 'Open document',
+        'tx.source.doc': 'document edit',
+        'doc.list.title': 'Node documents',
+        'doc.list.search': 'Search title or node ID',
+        'doc.list.source': 'Current result',
+        'doc.list.scope': 'Only the current query result range is listed; this is not the whole database.',
+        'doc.list.empty': 'No node to open. Run a read-only query first, or open one from node details.',
+        'doc.list.sample': '{n} nodes · sample range',
+        'doc.list.sourceGrid': 'query result',
+        'doc.list.sourceVector': 'vector hits',
+        'doc.list.sourceNode': 'current node',
+        'doc.list.jsonOnly': 'JSON only',
+        'doc.queue.title': 'Pending changes',
+        'doc.queue.review': 'Review changes',
+        'doc.export': 'Export draft',
+        'doc.mode.body': 'Body',
+        'doc.mode.json': 'JSON payload',
+        'doc.format.text': 'Plain text',
+        'doc.format.json': 'Format',
+        'doc.view.edit': 'Edit',
+        'doc.view.split': 'Split',
+        'doc.view.preview': 'Preview',
+        'doc.find.placeholder': 'Find',
+        'doc.find.replace': 'Replace with',
+        'doc.find.one': 'Replace',
+        'doc.find.all': 'Replace all',
+        'doc.find.toggle': 'Find',
+        'doc.missing.title': 'This node has no body yet',
+        'doc.missing.help': 'Keep the existing payload and add a body at the mapped field; other fields are untouched.',
+        'doc.missing.cta': 'Add a body at the mapped field',
+        'doc.preview.sync': 'Follows the current draft',
+        'doc.empty.title': 'Pick a node to start editing',
+        'doc.empty.help': 'Open the body or the JSON payload from the list; the result context menu and node details also open documents.',
+        'doc.empty.cta': 'Open the node list',
+        'doc.inspect.title': 'Node context',
+        'doc.inspect.sub': 'A document belongs to a node',
+        'doc.inspect.type': 'Type',
+        'doc.inspect.version': 'Version',
+        'doc.inspect.access': 'Access',
+        'doc.inspect.vector': 'Vector',
+        'doc.inspect.readonlyTitle': 'Read-only facts',
+        'doc.inspect.note': 'Relations and vectors stay in their own workspaces; editing a body never rebuilds the vector.',
+        'doc.mapping.title': 'Body source',
+        'doc.mapping.change': 'Change',
+        'doc.mapping.note': 'One payload per node. The body is an editing view of the mapped field; other fields are preserved. Undecided fields such as /format are never written.',
+        'doc.mapping.dialogTitle': 'Choose the body source field',
+        'doc.mapping.dialogHint': 'Use a JSON Pointer such as /content or /document/body. This only changes the editing view; it does not move or delete fields and never writes a format field.',
+        'doc.mapping.apply': 'Apply mapping',
+        'doc.outline.title': 'Outline',
+        'doc.outline.empty': 'No headings',
+        'doc.close.title': 'This document has uncommitted changes',
+        'doc.close.hint': 'Keeping the draft closes the tab and lets you continue later; staged operations stay in the review queue.',
+        'doc.close.keep': 'Keep editing',
+        'doc.close.discard': 'Discard changes for this node',
+        'doc.close.saveAndClose': 'Keep draft and close',
+        'doc.merge.title': 'This node already has pending changes',
+        'doc.merge.hint': 'Another entry (payload editor / import / documents) already staged this node. Merge uses the latest queued payload as the base and applies only this change; replace overwrites the queued item with the local draft.',
+        'doc.merge.replace': 'Replace the whole payload',
+        'doc.merge.combine': 'Merge and stage',
+        'doc.conflict.title': 'Version conflict: the server content changed',
+        'doc.conflict.hint': 'Revision validation detected a conflict and rejected the entire batch. Compare the remote payload with your draft, merge manually, and review again.',
+        'doc.conflict.keepLocal': 'Keep local draft',
+        'doc.conflict.rebase': 'Rebase onto remote and merge',
+        'doc.conflict.remote': 'Remote (just read)',
+        'doc.conflict.local': 'Local draft',
+        'doc.conflict.base': 'Baseline when opened',
+        'doc.access.unknown': 'Unknown (unconfirmed)',
+        'doc.access.editable': 'Editable',
+        'doc.access.readonly': 'Read-only',
+        'doc.access.heldByOther': 'Held by another editor (simulated)',
+        'doc.access.expired': 'Access expired (simulated)',
+        'doc.access.note': 'No edit lease: concurrency is checked optimistically with the node ETag, and conflicts come back as 409.',
+        'doc.submit.idle': 'Not committed',
+        'doc.submit.submitting': 'Submitting…',
+        'doc.submit.acknowledged': 'Acknowledged',
+        'doc.submit.rejected': 'Rejected',
+        'doc.submit.conflict': 'Conflict',
+        'doc.submit.outcomeUnknown': 'Outcome unknown',
+        'doc.status.clean': 'Matches baseline',
+        'doc.status.dirty': 'Unstaged changes',
+        'doc.status.invalid': 'JSON needs fixing',
+        'doc.status.staged': 'Staged, not committed',
+        'doc.status.stagedNew': 'Staged, plus newer edits',
+        'doc.banner.invalid': 'Invalid JSON: the current input is preserved. Fix it before switching to the body or staging.',
+        'doc.banner.lossy': 'The payload contains integers beyond the JavaScript safe range or duplicate keys; saving would change values, so staging is blocked.',
+        'doc.banner.readonly': 'This node is read-only: you can view and export, but not modify or commit.',
+        'doc.banner.heldByOther': 'Another editor holds this document (simulated state; the server provides no lease).',
+        'doc.banner.expired': 'Edit access expired (simulated state): the draft is kept and committing is stopped.',
+        'doc.banner.conflict': 'The server version changed: compare remote and local, then merge manually.',
+        'doc.banner.unknown': 'Commit outcome unknown: confirm the retained original transaction. Further edits are kept as a new draft.',
+        'doc.confirmOutcome': 'Confirm original transaction',
+        'doc.err.pendingCommit': 'The original transaction is submitting or awaiting confirmation. Confirm it first; draft editing remains available.',
+        'doc.banner.noTxMode': 'Write review enabled: document staging and commits use the same queue.',
+        'doc.toast.staged': 'Staged in the review queue (nothing written yet)',
+        'doc.toast.stagedMerged': 'Merged into the pending change for this node',
+        'doc.toast.draftRestored': 'Restored the browser draft for this node',
+        'doc.toast.draftDropped': 'Local draft was corrupt or from another schema and was dropped',
+        'doc.toast.draftQuota': 'Browser storage unavailable: the draft lives in memory only, export a backup',
+        'doc.toast.exported': 'Draft exported',
+        'doc.toast.bodyCreated': 'Body added at the mapped field',
+        'doc.toast.formatted': 'JSON display formatted',
+        'doc.toast.committed': 'Committed: {n} item(s) acknowledged',
+        'doc.toast.replayed': 'Acknowledged by the server (replayed)',
+        'doc.toast.confirmedLate': 'Confirmed: the server holds this submission',
+        'doc.toast.findNone': 'No matches',
+        'doc.toast.replaced': 'Replaced {n} occurrence(s)',
+        'doc.toast.noDoc': 'Select a node in the results first',
+        'doc.toast.txMode': 'Write review enabled: document commits go through the same queue',
+        'doc.err.jsonInvalid': 'Invalid JSON at line {line}, column {col}',
+        'doc.err.notObject': 'The payload must be a JSON object',
+        'doc.err.pointerInvalid': 'Enter a valid path such as /content',
+        'doc.err.pointerBlocked': 'That path contains an unsupported key name',
+        'doc.err.pointerMid': 'A middle field is not an object; choose another body path',
+        'doc.err.nonString': 'That field already holds non-text data and will not be overwritten; change the path or use the JSON view',
+        'doc.err.readonly': 'This node is read-only and cannot be staged',
+        'doc.err.notDirty': 'Nothing to stage',
+        'doc.err.invalid': 'Fix the JSON first; the current input is preserved',
+        'doc.err.lossy': 'Unsafe numbers or duplicate keys block staging',
+        'doc.err.nodeNotFound': 'Node not found (404)',
+        'doc.err.loadFailed': 'Failed to load the node: {msg}',
+        'doc.err.commitFailed': 'Commit failed: {msg}',
+        'doc.err.sizeLimit': 'The payload exceeds the 4 MiB request limit; shrink the document',
+        'doc.err.pendingDelete': 'This node has a pending delete; resolve it in the review queue first, documents never overwrite it',
+        'doc.err.noVersion': 'Could not confirm the node version, so staging is blocked: writing without a version precondition would silently overwrite other edits',
+        'doc.err.noTxMode': 'Write review could not be enabled; staging was cancelled',
+        'doc.err.outcomeMismatch': 'The server content differs from this submission: the draft is kept, review it and commit again',
+        'doc.toast.conflictRebase': 'Rebased onto remote; the previous staging for this node was withdrawn, merge and stage again',
+        'doc.review.bodyDiff': 'Body line diff',
+        'doc.view.diff': 'Diff',
+        'doc.diff.base': 'Baseline',
+        'doc.diff.current': 'Current draft',
+        'doc.diff.added': '+{n} lines',
+        'doc.diff.removed': '−{n} lines',
+        'doc.diff.empty': 'Identical to the baseline',
+        'doc.diff.truncated': 'Diff too large; shown as a whole-block replacement without line alignment',
+        'doc.diff.plain': 'Plain text',
+        'doc.unstage': 'Unstage',
+        'doc.unstage.toast': 'Unstaged; the changes stay in the draft',
+        'doc.unstage.blocked': 'The pending item for this node is not from this document; use the review queue',
+        'doc.revert': 'Revert',
+        'doc.revert.armed': 'Click again to revert',
+        'doc.revert.toast': 'Reverted to the last committed content and withdrew this node staging',
+        'doc.review.stats': '{add} added · {del} removed',
+        'doc.review.noDiff': 'The body is unchanged; field-level differences follow',
+        'doc.review.fieldDiff': 'Field-level diff',
+        'doc.err.prefix': 'Document',
       }
     };
     Object.assign(I18N.zh, I18N_EXT.zh);
@@ -6895,6 +8097,8 @@
       if (typeof syncTxBar === 'function') syncTxBar();
       // 当前节点条 / 写入审阅弹层同样是运行时求值的动态 DOM
       if (typeof renderContextStrip === 'function') renderContextStrip();
+      // 文档工作区的标题/正文/大纲/状态都是渲染时求值的动态 DOM，切语言必须重建
+      if (typeof docRender === 'function') docRender();
       const txReview = document.getElementById('txReviewOverlay');
       if (txReview && !txReview.hidden && typeof renderTxReview === 'function') renderTxReview();
       if (typeof graphColorMode !== 'undefined' && graphColorMode === 'community'
@@ -7099,6 +8303,7 @@
       queryPane: 'workspace.desc.query',
       graphExplorePane: 'workspace.desc.graph',
       vectorLabPane: 'workspace.desc.vector',
+      docPane: 'workspace.desc.doc',
     };
     function syncWorkspaceHeader(paneId) {
       const active = paneId
@@ -7373,8 +8578,11 @@
       bar.hidden = n === 0;
       if (count) count.textContent = t('tx.pendingCount', { n });
       if (summary) summary.textContent = txOperationsSummaryText();
-      if (commit) commit.disabled = n === 0 || txCommitting;
-      if (rollback) rollback.disabled = n === 0 || txCommitting;
+      if (commit) {
+        commit.disabled = n === 0 || txCommitting;
+        commit.textContent = t(consoleClient && txPendingAttempt?.unknown ? 'doc.confirmOutcome' : 'tx.commit');
+      }
+      if (rollback) rollback.disabled = n === 0 || txCommitting || !!txPendingAttempt;
       const review = document.getElementById('txReviewBtn');
       if (review) review.disabled = n === 0 || txCommitting;
     }
@@ -7491,8 +8699,11 @@
       }
       const commit = document.getElementById('txReviewCommitBtn');
       const discard = document.getElementById('txReviewDiscardBtn');
-      if (commit) commit.disabled = !txOperations.length || txCommitting;
-      if (discard) discard.disabled = !txOperations.length || txCommitting;
+      if (commit) {
+        commit.disabled = !txOperations.length || txCommitting;
+        commit.textContent = t(consoleClient && txPendingAttempt?.unknown ? 'doc.confirmOutcome' : 'tx.commit');
+      }
+      if (discard) discard.disabled = !txOperations.length || txCommitting || !!txPendingAttempt;
     }
 
     // 结果操作菜单：导出 JSON / 导出 CSV / 列显隐（低频操作集中，主按钮仍在工具条）
@@ -7615,7 +8826,8 @@
     const TAB_SIDEBAR_MAP = {
       queryPane: 'quick-find',
       graphExplorePane: 'quick-match',
-      vectorLabPane: 'quick-search'
+      vectorLabPane: 'quick-search',
+      docPane: 'quick-find'
     };
     function syncSidebarHighlight(action) {
       document.querySelectorAll('.sidebar .nav-item[data-action]').forEach(el => {
@@ -8221,7 +9433,7 @@ RETURN doc, t</div>
         `url("data:image/svg+xml,${encodeURIComponent(graphSvg)}")`);
     }
 
-    document.addEventListener('DOMContentLoaded', () => {
+    function initializeConsolePage() {
       setupTheme();
       initStarfield();
       setupSidebarRail();
@@ -8266,6 +9478,9 @@ RETURN doc, t</div>
       // 应用初始化完成信号：供 scripts/ui-smoke.mjs 等自动化脚本等待，
       // 避免在 DOMContentLoaded 监听器挂载前点击按钮导致竞态
       window.__TRIVIUM_APP_READY = true;
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      if (!consoleEmbedded) initializeConsolePage();
     });
 
     // 主题切换（localStorage 优先；无保存值时跟随系统 prefers-color-scheme）
@@ -8294,7 +9509,7 @@ RETURN doc, t</div>
       });
       // 多标签页主题同步：其它标签页切主题时本页跟随（storage 事件只在异地标签触发）
       window.addEventListener('storage', (e) => {
-        if (e.key !== 'tdb_theme' || !e.newValue) return;
+        if (e.key !== consoleStoragePrefix + 'tdb_theme' || !e.newValue) return;
         if (e.newValue !== document.documentElement.getAttribute('data-theme')) {
           applyThemeAttributes(e.newValue);
         }
@@ -8506,7 +9721,7 @@ RETURN doc, t</div>
         .find((n) => Array.isArray(n.vector) && n.vector.length > 0);
       if (node) return node.vector.length;
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/1`);
+        const res = await apiFetch(`${API_BASE}/v1/nodes/1`);
         if (res.ok) {
           const data = await res.json();
           const len = data && data.node && Array.isArray(data.node.vector) ? data.node.vector.length : 0;
@@ -8787,14 +10002,14 @@ RETURN doc, t</div>
       const connBadge = document.getElementById('connStatus');
       const connText = document.getElementById('connText');
       try {
-        const res = await fetch(`${API_BASE}/health/ready`);
+        const res = await apiFetch(`${API_BASE}/health/ready`);
         if (res.ok) {
           const data = await res.json();
           connBadge.className = 'status-badge live';
           connText.textContent = t('status.online');
           const versionEl = document.getElementById('statusVersion');
           // 只信服务端上报的版本；缺失时退化为不带版本号，不写死一个会过期的默认值
-          if (versionEl) versionEl.textContent = data.version ? `TriviumDB Server v${data.version}` : 'TriviumDB Server';
+          if (versionEl) versionEl.textContent = (consoleClient ? 'TriviumDB Embedded' : 'TriviumDB Server') + (data.version ? ` v${data.version}` : '');
         } else {
           connBadge.className = 'status-badge dead';
           connText.textContent = t('status.degraded');
@@ -8804,9 +10019,15 @@ RETURN doc, t</div>
         connText.textContent = t('status.offline');
       }
 
+      // Embedded Core 未提供 Server 队列指标。
+      if (consoleClient) {
+        document.getElementById('statusQueue').textContent = 'Embedded';
+        document.getElementById('statusReads').textContent = '—';
+        return;
+      }
       // 抓取详细指标
       try {
-        const resDetails = await fetch(`${API_BASE}/health/details`);
+        const resDetails = await apiFetch(`${API_BASE}/health/details`);
         if (resDetails.ok) {
           const details = await resDetails.json();
           document.getElementById('statusQueue').textContent = t('status.queueValue', {
@@ -9284,7 +10505,7 @@ RETURN doc, t</div>
       __lastTqlRequest = { accept: requestHeaders['Accept'] || '', mutation: isMutation };
 
       try {
-        const response = await fetch(`${API_BASE}/v1/tql`, {
+        const response = await apiFetch(`${API_BASE}/v1/tql`, {
           method: 'POST',
           headers: requestHeaders,
           body: JSON.stringify({ query, mutation: isMutation, profile: isProfile }),
@@ -10499,6 +11720,7 @@ RETURN doc, t</div>
         closeGridContextMenu();
         if (act === 'csv') { exportCsv(); return; }
         if (act === 'edit') { openPayloadEditor(node, gridActiveCell ? gridActiveCell.idx : -1); return; }
+        if (act === 'doc') { if (node) docOpen(node, 'grid'); return; }
         if (act === 'delete') {
           if (!node) return;
           // 两步确认：第一次只是把菜单项变成「确认删除 #id」，4 秒内再点才真正删
@@ -10533,6 +11755,8 @@ RETURN doc, t</div>
       lastGridCtxPoint = { x: clientX, y: clientY };
       const cell = gridActiveCell;
       gridCtxNode = cell ? nodeFromGridCell(cell.idx, cell.key) : null;
+      // 右键行号列（key='#'）时也应按整行解析节点，否则同一个节点行会少掉编辑/文档/删除三项
+      if (!gridCtxNode && cell && gridDataRows) gridCtxNode = nodeFromGridRow(gridDataRows[cell.idx]);
       menu.replaceChildren();
       const add = (act, text, hint) => {
         const btn = document.createElement('button');
@@ -10561,6 +11785,7 @@ RETURN doc, t</div>
       if (gridCtxNode) {
         sep();
         add('edit', t('grid.editPayload'));
+        add('doc', t('grid.openDocument'));
         const armed = performance.now() < gridDeleteArmedUntil;
         add('delete', armed
           ? t('grid.deleteConfirm', { id: gridCtxNode.id })
@@ -10702,6 +11927,7 @@ RETURN doc, t</div>
 
     function openPayloadEditor(node, rowIndex) {
       if (!node) { showToast(t('grid.editOnlyNode')); return; }
+      if (consoleClient) { docOpen(node, 'grid'); return; }
       payloadEditorState = { id: String(node.id), node, rowIndex };
       const overlay = document.getElementById('payloadEditor');
       if (!overlay) return;
@@ -10729,6 +11955,7 @@ RETURN doc, t</div>
 
     // HTTP 写入协议使用 JSON 数字；转换前拒绝不安全 ID，防止降精度后操作相邻记录。
     function parseWriteNodeId(value) {
+      if (consoleClient) return TriviumConsoleClient.nodeId(value);
       const text = typeof value === 'string' ? value.trim() : value;
       if ((typeof text !== 'string' && typeof text !== 'number')
           || (typeof text === 'string' && !/^\d+$/.test(text))) {
@@ -10781,7 +12008,7 @@ RETURN doc, t</div>
         return;
       }
       try {
-        const res = await fetch(`${API_BASE}/v1/transactions`, {
+        const res = await apiFetch(`${API_BASE}/v1/transactions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -10817,11 +12044,16 @@ RETURN doc, t</div>
       let writeIds;
       try { writeIds = ids.map(parseWriteNodeId); }
       catch (err) { showToast(err.message); return; }
+      let revision = null;
+      try {
+        const observed = (gridRawRows || []).map(findNodeInRow).filter(node => node && ids.includes(String(node.id)));
+        revision = await embeddedStageRevision(writeIds, observed);
+      } catch (error) { showToast(error.message); return; }
       if (txModeOn()) {
         writeIds.forEach((id) => {
           const node = (gridRawRows || []).map((row) => findNodeInRow(row)).find((n) => n && String(n.id) === String(id));
           const op = { op: 'delete', id };
-          if (node) txOpMeta.set(op, { before: node.payload, source: t('tx.source.batchDelete') });
+          txOpMeta.set(op, { before: node?.payload, source: t('tx.source.batchDelete'), expectedVersion: revision });
           txOperations.push(op);
         });
         syncTxBar();
@@ -10831,7 +12063,7 @@ RETURN doc, t</div>
         return;
       }
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/delete-many`, {
+        const res = await apiFetch(`${API_BASE}/v1/nodes/delete-many`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ids: writeIds }),
@@ -10879,17 +12111,19 @@ RETURN doc, t</div>
       let writeId;
       try { writeId = parseWriteNodeId(id); }
       catch (err) { showToast(err.message); return; }
+      let revision = null;
+      try { revision = await embeddedStageRevision([writeId], [node]); } catch (error) { showToast(error.message); return; }
       if (txModeOn()) {
         stageTxOperation(
           { op: 'delete', id: writeId },
-          { before: node.payload, source: t('tx.source.delete') }
+          { before: node.payload, source: t('tx.source.delete'), expectedVersion: revision }
         );
         // 本地乐观移除；stageTxOperation 已提示「已暂存（提交后生效）」
         applyLocalNodeRemoval(new Set([id]));
         return;
       }
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/delete-many`, {
+        const res = await apiFetch(`${API_BASE}/v1/nodes/delete-many`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ids: [writeId] }),
@@ -11375,6 +12609,63 @@ RETURN doc, t</div>
     // ==========================================
     let txOperations = [];
     let txCommitting = false;
+    // 结果不确定时保留整笔请求；队列对象和编辑草稿都不是已发送内容的权威副本。
+    let txPendingAttempt = null;
+
+    function txOperationProtected(operation) {
+      return !!txPendingAttempt && txPendingAttempt.entries.some(entry => entry.source === operation);
+    }
+
+    function txNodeProtected(nodeId) {
+      return !!txPendingAttempt && txPendingAttempt.entries.some(entry =>
+        String(entry.operation.id) === String(nodeId));
+    }
+
+    async function embeddedStageRevision(ids, observed = []) {
+      if (!consoleClient) return null;
+      if (consoleClient.info.readOnly) throw new Error('宿主会话为只读 (Host session is read-only)');
+      if (!consoleClient.info.features.includes('transactions')) throw new Error('宿主未启用事务能力 (Host transactions are disabled)');
+      const snapshot = await consoleClient.call({ operation: 'getNodes', ids: ids.map(TriviumConsoleClient.nodeId), withRevision: true });
+      for (const before of observed) {
+        const current = snapshot.nodes.find(node => node.id === String(before.id));
+        if (!current || docCanonical(current.payload) !== docCanonical(before.payload)
+            || (Array.isArray(before.vector) && docCanonical(current.vector) !== docCanonical(before.vector))) {
+          throw new Error('节点已变化，请重新读取后审阅删除 (Node changed; read again before reviewing deletion)');
+        }
+      }
+      return snapshot.revision;
+    }
+
+    function txCreateAttempt() {
+      const expectedNodes = {};
+      const entries = txOperations.map(source => {
+        const operation = JSON.parse(JSON.stringify(source));
+        const meta = JSON.parse(JSON.stringify(txOpMeta.get(source) || {}));
+        txOpMeta.set(operation, meta);
+        if (meta.docSessionId && meta.expectedVersion) expectedNodes[String(operation.id)] = meta.expectedVersion;
+        return { source, operation };
+      });
+      if (consoleClient) {
+        const key = 'console-' + Array.from(crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, '0')).join('');
+        const revisions = entries.map(entry => (txOpMeta.get(entry.operation) || {}).expectedVersion);
+        if (!revisions[0] || revisions.some(revision => revision !== revisions[0])) {
+          throw new Error('暂存项基线已变化，请重新读取并审阅整批操作 (Staged baselines differ; read and review the complete batch again)');
+        }
+        return { entries, body: TriviumConsoleClient.freezeTransaction(entries.map(entry => entry.operation), revisions[0], key),
+          hasDocuments: entries.some(entry => (txOpMeta.get(entry.operation) || {}).docSessionId), key, unknown: false };
+      }
+      const request = { operations: entries.map(entry => entry.operation) };
+      const hasDocuments = entries.some(entry => (txOpMeta.get(entry.operation) || {}).docSessionId);
+      if (Object.keys(expectedNodes).length) request.expectedNodes = expectedNodes;
+      return {
+        entries,
+        body: JSON.stringify(request),
+        hasDocuments,
+        key: hasDocuments ? 'doc-' + Array.from(crypto.getRandomValues(new Uint32Array(4)),
+          value => value.toString(16).padStart(8, '0')).join('') : null,
+        unknown: false,
+      };
+    }
 
     // meta.before 只在审阅弹层展示；提交体仍是原始 TransactionOperation。
     function stageTxOperation(operation, meta) {
@@ -11387,10 +12678,15 @@ RETURN doc, t</div>
 
     async function commitTransaction() {
       if (!txModeOn() || !txOperations.length || txCommitting) return false;
+      let attempt;
+      try { attempt = txPendingAttempt || txCreateAttempt(); } catch (error) { showToast(error.message); return false; }
       txCommitting = true;
-      // 请求体一经发送便不会包含后续暂存项；响应只能确认本次快照中的操作。
-      const submitted = txOperations.slice();
+      txPendingAttempt = attempt;
+      const submitted = attempt.entries.map(entry => entry.operation);
       const count = submitted.length;
+      const requestHeaders = { 'Content-Type': 'application/json' };
+      if (attempt.key) requestHeaders['Idempotency-Key'] = attempt.key;
+      if (attempt.hasDocuments) docMarkSubmitting(submitted);
       const bar = document.getElementById('txBar');
       const countEl = document.getElementById('txCount');
       if (countEl) countEl.textContent = t('tx.committing');
@@ -11402,21 +12698,43 @@ RETURN doc, t</div>
       });
       syncTxBar();
       try {
-        const res = await fetch(`${API_BASE}/v1/transactions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ operations: submitted }),
-        });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
-        txOperations.splice(0, count);
-        showToast(t('tx.committed', { n: count, gen: body.generation || '-' }));
+        let body;
+        if (consoleClient) {
+          // 结果不确定时只查询原事务回执，避免用新草稿替换原事务身份。
+          body = await consoleClient.submit(attempt.body, attempt.unknown);
+        } else {
+          const res = await apiFetch(`${API_BASE}/v1/transactions`, {
+            method: 'POST', headers: requestHeaders, body: attempt.body,
+          });
+          body = await res.json();
+          if (!res.ok) {
+            const failure = new Error(body.detail || `HTTP ${res.status}`);
+            failure.status = res.status; failure.code = body.code || null; failure.problem = body;
+            throw failure;
+          }
+        }
+        const completed = new Set(attempt.entries.map(entry => entry.source));
+        txOperations = txOperations.filter(operation => !completed.has(operation));
+        txPendingAttempt = null;
+        showToast(t('tx.committed', { n: count, gen: body.revision || body.generation || '-' }));
+        if (attempt.hasDocuments) {
+          docOnCommitSuccess(submitted, body.revision);
+          if (body.replayed) showToast(t('doc.toast.replayed'));
+        }
         loadObjectTree();
         // 新暂存项尚未提交，保留它们的乐观视图，避免读库结果覆盖待提交的编辑。
         if (!txOperations.length) rerunActiveQueryTab();
         return true;
       } catch (err) {
-        // 失败保留全部暂存操作；不自动重试，避免重复写入
+        // 曾经结果不确定的批次，即使重试遇到冲突也不能拆开重发：服务端缓存可能已失效。
+        const unknown = (consoleClient || attempt.hasDocuments) && (attempt.unknown || !err.status || err.status >= 500
+          || err.code === 'TDB_WRITE_OUTCOME_UNKNOWN' || err.details?.committed === true);
+        attempt.unknown = unknown;
+        if (!unknown) txPendingAttempt = null;
+        if (attempt.hasDocuments) await docOnCommitFailure(submitted, err, unknown);
+        if (consoleClient && !unknown && err.code === 'TDB_WRITE_CONFLICT') {
+          showToast('数据已变化，请重新读取并审阅整批操作 (Data changed; read and review the complete batch again)');
+        }
         showToast(t('tx.failed', { msg: err.message }));
         return false;
       } finally {
@@ -11430,8 +12748,11 @@ RETURN doc, t</div>
 
     function rollbackTransaction() {
       if (txCommitting) return;
+      if (txPendingAttempt) { showToast(t('doc.err.pendingCommit')); return; }
       const count = txOperations.length;
       txOperations = [];
+      docSessions.forEach(session => { session.staged = null; docPersistDraft(session); });
+      docRender();
       syncTxBar();
       showToast(t('tx.rolledBack', { n: count }));
       rerunActiveQueryTab();   // 撤销本地乐观修改：重跑当前标签的查询
@@ -11522,9 +12843,9 @@ RETURN doc, t</div>
       try {
         const jsonOr = (promise) => promise.then((res) => (res.ok ? res.json() : null)).catch(() => null);
         const [indexRes, quiverRes, sampleRes] = await Promise.all([
-          jsonOr(fetch(`${API_BASE}/v1/indexes`)),
-          jsonOr(fetch(`${API_BASE}/v1/indexes/quiver`)),
-          jsonOr(fetch(`${API_BASE}/v1/tql`, {
+          jsonOr(apiFetch(`${API_BASE}/v1/indexes`)),
+          jsonOr(apiFetch(`${API_BASE}/v1/indexes/quiver`)),
+          jsonOr(apiFetch(`${API_BASE}/v1/tql`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -11706,7 +13027,7 @@ RETURN doc, t</div>
     async function dropObjectIndex(value) {
       let info = null;
       try { info = JSON.parse(value); } catch (_) { return; }
-      const res = await fetch(`${API_BASE}/v1/indexes/delete`, {
+      const res = await apiFetch(`${API_BASE}/v1/indexes/delete`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind: info.kind, fields: info.fields }),
@@ -11724,7 +13045,7 @@ RETURN doc, t</div>
       const btn = document.querySelector('#objectTree [data-ot-kind="quiver"] .ot-run');
       if (btn) { btn.disabled = true; btn.textContent = t('ot.building'); }
       try {
-        const res = await fetch(`${API_BASE}/v1/indexes/quiver`, { method: 'POST' });
+        const res = await apiFetch(`${API_BASE}/v1/indexes/quiver`, { method: 'POST' });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
         showToast(t('ot.built'));
@@ -12210,6 +13531,10 @@ RETURN doc, t</div>
       runBtn.disabled = true;
       status.className = 'import-status';
       status.textContent = t('import.running');
+      let revision = null;
+      try { revision = await embeddedStageRevision(['0']); } catch (error) {
+        status.textContent = error.message; runBtn.disabled = false; return;
+      }
       // 事务模式：把解析结果转成 TransactionOperation 暂存，提交时原子生效
       if (txModeOn()) {
         const ops = importState.tab === 'nodes'
@@ -12227,7 +13552,7 @@ RETURN doc, t</div>
             weight: record.weight,
           }));
         ops.forEach((op) => {
-          txOpMeta.set(op, { source: t('tx.source.import') });
+          txOpMeta.set(op, { source: t('tx.source.import'), expectedVersion: revision });
           txOperations.push(op);
         });
         syncTxBar();
@@ -12241,7 +13566,7 @@ RETURN doc, t</div>
       try {
         const url = importState.tab === 'nodes' ? `${API_BASE}/v1/import/nodes` : `${API_BASE}/v1/import/edges`;
         const body = parsed.records.map((record) => JSON.stringify(record)).join('\n');
-        const res = await fetch(url, {
+        const res = await apiFetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-ndjson' },
           body,
@@ -12499,7 +13824,7 @@ RETURN doc, t</div>
       let full = node;
       if (!Array.isArray(full.vector) || !full.vector.length) {
         try {
-          const res = await fetch(`${API_BASE}/v1/nodes/${node.id}`);
+          const res = await apiFetch(`${API_BASE}/v1/nodes/${node.id}`);
           if (res.ok) {
             const body = await res.json();
             if (body && body.node) full = body.node;
@@ -12558,7 +13883,7 @@ RETURN doc, t</div>
       hint.className = 'vl-hint';
       hint.textContent = t('vector.loading');
       try {
-        const res = await fetch(`${API_BASE}/v1/tql`, {
+        const res = await apiFetch(`${API_BASE}/v1/tql`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query, mutation: false, profile: false })
@@ -12730,7 +14055,7 @@ RETURN doc, t</div>
       btn.textContent = t('vector.searching');
       const started = performance.now();
       try {
-        const res = await fetch(`${API_BASE}/v1/search/vector?top_k=${topK}&min_score=${String(minScore)}`, {
+        const res = await apiFetch(`${API_BASE}/v1/search/vector?top_k=${topK}&min_score=${String(minScore)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/vnd.triviumdb.vector+f32' },
           body: vectorToBody(vector)
@@ -13030,8 +14355,9 @@ RETURN doc, t</div>
     const NEIGHBORS_LIMIT = 2000;
     async function expandNeighborhoodIntoGraph(nodeId, depth) {
       const url = `${API_BASE}/v1/nodes/${nodeId}/neighbors`
-        + `?depth=${encodeURIComponent(depth)}&limit=${NEIGHBORS_LIMIT}&direction=both`;
-      const res = await fetch(url);
+        + `?depth=${encodeURIComponent(depth)}&limit=${NEIGHBORS_LIMIT}&direction=${consoleClient ? 'out' : 'both'}`;
+      if (consoleClient) showToast('嵌入式邻域按出边扩展 (Embedded neighborhoods follow outgoing edges)');
+      const res = await apiFetch(url);
       if (!res.ok) {
         const err = await res.json().catch(() => ({ title: t('err.request'), detail: res.statusText }));
         throw new Error(t('gt.err.fail', { title: err.title || t('err.request'), detail: err.detail || '' }));
@@ -15121,7 +16447,7 @@ RETURN doc, t</div>
       btn.disabled = true;
       btn.textContent = t('graph.nebulaLoading');
       try {
-        const res = await fetch(`${API_BASE}/v1/tql`, {
+        const res = await apiFetch(`${API_BASE}/v1/tql`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query: NEBULA_QUERY, mutation: false })
@@ -16687,7 +18013,7 @@ RETURN doc, t</div>
 
     async function runCockpitVectorSearch(parsed) {
       const params = new URLSearchParams({ top_k: String(parsed.topK) });
-      const res = await fetch(`${API_BASE}/v1/search/vector?${params}`, {
+      const res = await apiFetch(`${API_BASE}/v1/search/vector?${params}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/vnd.triviumdb.vector+f32' },
         body: new Float32Array(parsed.vector),
@@ -16791,7 +18117,7 @@ RETURN doc, t</div>
       runBtn.textContent = t('gt.running');
       setGraphTqlError(null);
       try {
-        const res = await fetch(`${API_BASE}/v1/tql`, {
+        const res = await apiFetch(`${API_BASE}/v1/tql`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ query, mutation: false })
@@ -17060,7 +18386,7 @@ RETURN doc, t</div>
       }
       const offset = append ? __drawerEdgesState.offset : 0;
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/${nodeId}/edges`
+        const res = await apiFetch(`${API_BASE}/v1/nodes/${nodeId}/edges`
           + `?direction=both&offset=${offset}&limit=${DRAWER_EDGES_PAGE}`);
         if (seq !== __drawerFetchSeq) return;
         if (!res.ok) {
@@ -17259,10 +18585,10 @@ RETURN doc, t</div>
       const pc = document.getElementById('drawerProjection');
       if (pc) pc.getContext('2d').clearRect(0, 0, pc.width, pc.height);
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/batch-get`, {
+        const res = await apiFetch(`${API_BASE}/v1/nodes/batch-get`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: '{"ids":[' + ids.join(',') + ']}'
+          body: consoleClient ? JSON.stringify({ ids: ids.map(String) }) : '{"ids":[' + ids.join(',') + ']}'
         });
         if (seq !== __projectionSeq) return;
         if (!res.ok) throw new Error('batch-get http ' + res.status);
@@ -17317,7 +18643,7 @@ RETURN doc, t</div>
       const container = document.getElementById('drawerNodeEdges');
       container.textContent = t('detail.loading');
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/${nodeId}`);
+        const res = await apiFetch(`${API_BASE}/v1/nodes/${nodeId}`);
         if (seq !== __drawerFetchSeq) return;
         if (!res.ok) {
           const err = await res.json().catch(() => ({ title: t('err.request'), detail: res.statusText }));
@@ -17408,7 +18734,7 @@ RETURN doc, t</div>
       const seq = ++__pathTraceSeq;
       hint.textContent = t('detail.path.querying');
       try {
-        const res = await fetch(`${API_BASE}/v1/nodes/${from}/paths/to/${targetId}?maxHops=${encodeURIComponent(maxHops)}`);
+        const res = await apiFetch(`${API_BASE}/v1/nodes/${from}/paths/to/${targetId}?maxHops=${encodeURIComponent(maxHops)}`);
         if (seq !== __pathTraceSeq) return;
         if (!res.ok) {
           const err = await res.json().catch(() => ({ title: t('err.request'), detail: res.statusText }));
@@ -17433,11 +18759,11 @@ RETURN doc, t</div>
         }
         const rows = [];
         if (ids.length) {
-          const bres = await fetch(`${API_BASE}/v1/nodes/batch-get`, {
+          const bres = await apiFetch(`${API_BASE}/v1/nodes/batch-get`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             // 严格验证后的十进制数字可直接组成 JSON 数值，服务端按 u64 精确解析。
-            body: '{"ids":[' + ids.join(',') + ']}'
+            body: consoleClient ? JSON.stringify({ ids: ids.map(String) }) : '{"ids":[' + ids.join(',') + ']}'
           });
           if (seq !== __pathTraceSeq) return;
           if (!bres.ok) throw new Error(t('detail.path.backfillFail'));
@@ -17621,7 +18947,7 @@ RETURN doc, t</div>
       let succeeded = 0;
       for (const query of statements) {
         try {
-          const res = await fetch(`${API_BASE}/v1/tql`, {
+          const res = await apiFetch(`${API_BASE}/v1/tql`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ query, mutation: true })
@@ -17789,7 +19115,19 @@ RETURN doc, t</div>
         { group: t('palette.group.ops'), label: t('palette.action.tutorial'), run: () => document.getElementById('openTutorialBtn').click() },
         { group: t('palette.group.nav'), label: t('palette.action.navQuery'), run: () => document.querySelector('[data-tab="queryPane"]').click() },
         { group: t('palette.group.nav'), label: t('palette.action.navGraph'), run: () => document.querySelector('[data-tab="graphExplorePane"]').click() },
-        { group: t('palette.group.nav'), label: t('palette.action.navVector'), run: () => document.querySelector('[data-tab="vectorLabPane"]').click() }
+        { group: t('palette.group.nav'), label: t('palette.action.navVector'), run: () => document.querySelector('[data-tab="vectorLabPane"]').click() },
+        { group: t('palette.group.nav'), label: t('palette.action.navDoc'), run: () => document.querySelector('[data-tab="docPane"]').click() },
+        {
+          group: t('palette.group.ops'),
+          label: t('palette.action.openDoc'),
+          run: () => {
+            const node = (typeof selectedNode !== 'undefined' && selectedNode && selectedNode.id !== undefined)
+              ? selectedNode
+              : (typeof docDrawerNode !== 'undefined' && docDrawerNode ? docDrawerNode : null);
+            if (!node) { showToast(t('doc.toast.noDoc')); return; }
+            docOpen(node, 'node');
+          }
+        }
       );
       return addAiPaletteItems(items);
     }
@@ -18960,6 +20298,2351 @@ RETURN doc, t</div>
       );
       return items;
     }
+  </script>
+  <script>
+    // ==========================================
+    // 文档工作区（F1~F4）
+    // 一个节点一份 JSON payload；正文是 payload 中某个字符串字段的另一种视图。
+    // 两类视图共用一份草稿：编辑 → 浏览器草稿 → Ctrl+S 暂存 → 审阅 → 提交。
+    // 只在服务端确认后才算保存；本文件不新增任何 HTTP 端点，也不获取数据库写锁。
+    // ==========================================
+    const DOC_POINTER_DEFAULT = '/content';
+    const DOC_DRAFT_SCHEMA = 1;
+    const DOC_DRAFT_PREFIX = 'tdb_doc_draft_v1:';
+    const DOC_INDEX_KEY = 'tdb_doc_index_v1';
+    const DOC_INDEX_MAX = 60;
+    const DOC_HISTORY_MAX = 200;
+
+    let docSessions = [];          // 已打开文档（按打开顺序）
+    let docActiveSessionId = null;
+    let docSessionSeq = 0;
+    let docViewMode = 'split';
+    let docListFilter = '';
+    let docStorageOK = true;
+    let docPendingCloseId = null;
+    let docMergeTarget = null;
+    let docConflictSessionId = null;
+    let docFindState = { query: '', matches: [], index: -1 };
+    let docRevertArmedUntil = 0;
+    let docDrawerNode = null;
+    let docLastVectorHits = [];
+    let docHistoryTimer = 0;
+    let docStorage = {
+      get(key) { try { return localStorage.getItem(key); } catch (_) { return null; } },
+      set(key, value) { try { localStorage.setItem(key, value); return true; } catch (_) { return false; } },
+      remove(key) { try { localStorage.removeItem(key); } catch (_) { /* 存储不可用 */ } },
+    };
+
+    function docActive() {
+      return docSessions.find(s => s.sessionId === docActiveSessionId) || null;
+    }
+    function docById(id) {
+      return docSessions.find(s => s.sessionId === id) || null;
+    }
+    function docDbIdentity() {
+      const origin = (typeof location !== 'undefined' && location.origin) ? location.origin : 'app';
+      if (consoleEmbedded) return { connectionId: origin, databaseId: consoleStorageId };
+      const path = (typeof location !== 'undefined' && location.pathname) ? (location.pathname || '/') : '/';
+      return { connectionId: origin, databaseId: path };
+    }
+    // Embedded 使用宿主的稳定数据库标识；独立 Server 保留 origin 与页面路径作用域。
+    function docKeyOf(node) {
+      const id = docDbIdentity();
+      return id.connectionId + '|' + id.databaseId + '|' + String(node && node.id);
+    }
+    function docStorageKeyOf(key) {
+      return DOC_DRAFT_PREFIX + key;
+    }
+    function docTitleOf(payload, id) {
+      if (payload && typeof payload === 'object') {
+        const candidate = payload.title ?? payload.name ?? payload.label;
+        if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+      }
+      return '#' + id;
+    }
+    function docDeepClone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+    function docCanonical(value) {
+      // 服务端可能重排对象键；基线比较忽略键序，但保留数组顺序、数值和字段差异。
+      try {
+        return JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
+          ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+      } catch (_) { return ''; }
+    }
+
+    // ---------- JSON 解析与错误定位 ----------
+    function docParsePayload(text) {
+      try {
+        const value = JSON.parse(text);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return { ok: false, error: { key: 'doc.err.notObject', vars: {} } };
+        }
+        return { ok: true, value };
+      } catch (err) {
+        const message = String((err && err.message) || err);
+        const matched = /position (\d+)/.exec(message);
+        let pos = matched ? Number(matched[1]) : text.length;
+        if (!Number.isFinite(pos) || pos < 0) pos = 0;
+        if (pos > text.length) pos = text.length;
+        const lines = text.slice(0, pos).split('\n');
+        return {
+          ok: false,
+          error: {
+            key: 'doc.err.jsonInvalid',
+            vars: { line: lines.length, col: lines[lines.length - 1].length + 1 },
+            raw: message,
+          },
+        };
+      }
+    }
+    function docErrorText(error) {
+      if (!error) return '';
+      return t(error.key || 'doc.err.notDirty', error.vars || {});
+    }
+
+    // ---------- JSON Pointer（RFC 6901 子集；拒绝原型链键） ----------
+    function docPointerKeys(pointer) {
+      if (typeof pointer !== 'string' || !pointer.startsWith('/') || pointer === '/') {
+        throw new Error(t('doc.err.pointerInvalid'));
+      }
+      if (/~(?![01])/.test(pointer)) throw new Error(t('doc.err.pointerInvalid'));
+      const keys = pointer.slice(1).split('/').map((k) => k.replace(/~1/g, '/').replace(/~0/g, '~'));
+      if (keys.some(k => !k || k === '__proto__' || k === 'prototype' || k === 'constructor')) {
+        throw new Error(t('doc.err.pointerBlocked'));
+      }
+      return keys;
+    }
+    // 四种正文态必须分开：缺失 / 空串 / null / 非字符串。
+    function docReadBody(payload, pointer) {
+      let cursor = payload;
+      let keys;
+      try { keys = docPointerKeys(pointer); } catch (err) { return { state: 'invalid', message: err.message }; }
+      for (const key of keys) {
+        if (cursor === null || typeof cursor !== 'object' || !Object.prototype.hasOwnProperty.call(cursor, key)) {
+          return { state: 'missing' };
+        }
+        cursor = cursor[key];
+      }
+      if (cursor === null) return { state: 'null' };
+      if (typeof cursor === 'string') return { state: cursor === '' ? 'empty' : 'string', value: cursor };
+      return { state: 'nonString', value: cursor };
+    }
+    function docWriteBody(payload, pointer, value, create) {
+      const keys = docPointerKeys(pointer);
+      let cursor = payload;
+      for (let i = 0; i < keys.length - 1; i += 1) {
+        const key = keys[i];
+        const has = Object.prototype.hasOwnProperty.call(cursor, key);
+        if (!has) {
+          if (!create) throw new Error(t('doc.err.pointerMid'));
+          cursor[key] = {};
+        }
+        if (cursor[key] === null || typeof cursor[key] !== 'object' || Array.isArray(cursor[key])) {
+          throw new Error(t('doc.err.pointerMid'));
+        }
+        cursor = cursor[key];
+      }
+      const last = keys[keys.length - 1];
+      cursor[last] = value;
+      return payload;
+    }
+    function docBodyTextOf(payload, pointer) {
+      const body = docReadBody(payload, pointer);
+      return (body.state === 'string' || body.state === 'empty') ? body.value : null;
+    }
+
+    // ---------- 无损扫描：安全整数之外的数值 / 重复键 ----------
+    // 服务端 serde_json 未启用 arbitrary_precision，浏览器 JSON.parse 也在 2^53 之后丢精度；
+    // 因此这里只能「检测并阻止」，不能宣称往返无损。
+    // 归一化成「有效数字 + 十进制指数」，用于判断字面量与 double 的最短表示是否等价。
+    // 例：1.0 ≡ 1 ≡ 1e0；0.10000000149011612（f32 回读）保持原样，不误报。
+    function docNormalizeNumberText(input) {
+      let text = String(input).trim().toLowerCase();
+      let sign = '';
+      if (text.startsWith('-')) { sign = '-'; text = text.slice(1); } else if (text.startsWith('+')) text = text.slice(1);
+      const parts = text.split('e');
+      const mantissa = parts[0];
+      let exponent = parts.length > 1 ? Number(parts[1]) : 0;
+      const dot = mantissa.indexOf('.');
+      let digits = dot < 0 ? mantissa : mantissa.slice(0, dot) + mantissa.slice(dot + 1);
+      if (dot >= 0) exponent -= mantissa.length - dot - 1;
+      digits = digits.replace(/^0+/, '');
+      if (!digits) return '0e0';
+      while (digits.endsWith('0')) { digits = digits.slice(0, -1); exponent += 1; }
+      return sign + digits + 'e' + exponent;
+    }
+    function docNumberUnsafe(literal) {
+      const value = Number(literal);
+      if (!Number.isFinite(value)) return true;
+      // 整数只有超出 ±(2^53−1) 才真的无法无损表示。
+      if (/^-?\d+$/.test(literal) && !Number.isSafeInteger(value)) return true;
+      // 其余情况：字面量与 double 的最短往返表示必须等价（1.0 与 1 视为等价）。
+      return docNormalizeNumberText(literal) !== docNormalizeNumberText(String(value));
+    }
+    function docScanLossy(text) {
+      const numbers = [];
+      const duplicateKeys = [];
+      const stack = [];
+      let i = 0;
+      let line = 1;
+      let col = 1;
+      const total = text.length;
+      const step = (ch) => { if (ch === '\n') { line += 1; col = 1; } else { col += 1; } };
+      const readString = () => {
+        const startLine = line;
+        const startCol = col;
+        let out = '';
+        step(text[i]); i += 1;
+        while (i < total) {
+          const ch = text[i];
+          if (ch === '\\') {
+            const esc = text[i + 1];
+            if (esc === 'u') { out += String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16) || 0); i += 6; col += 6; continue; }
+            out += esc || ''; i += 2; col += 2; continue;
+          }
+          if (ch === '"') { step(ch); i += 1; return { value: out, line: startLine, col: startCol }; }
+          out += ch; step(ch); i += 1;
+        }
+        return { value: out, line: startLine, col: startCol };
+      };
+      while (i < total) {
+        const ch = text[i];
+        if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n') { step(ch); i += 1; continue; }
+        if (ch === '"') {
+          const literal = readString();
+          let peek = i;
+          while (peek < total && /\s/.test(text[peek])) peek += 1;
+          if (text[peek] === ':' && stack.length) {
+            const frame = stack[stack.length - 1];
+            if (frame.type === 'object') {
+              if (frame.keys.has(literal.value)) duplicateKeys.push({ key: literal.value, line: literal.line, col: literal.col });
+              frame.keys.add(literal.value);
+            }
+          }
+          continue;
+        }
+        if (ch === '{') { stack.push({ type: 'object', keys: new Set() }); step(ch); i += 1; continue; }
+        if (ch === '[') { stack.push({ type: 'array', keys: new Set() }); step(ch); i += 1; continue; }
+        if (ch === '}' || ch === ']') { stack.pop(); step(ch); i += 1; continue; }
+        if (ch === '-' || (ch >= '0' && ch <= '9')) {
+          const startLine = line;
+          const startCol = col;
+          let literal = '';
+          while (i < total && /[-+0-9.eE]/.test(text[i])) { literal += text[i]; step(text[i]); i += 1; }
+          if (docNumberUnsafe(literal)) numbers.push({ literal, line: startLine, col: startCol });
+          continue;
+        }
+        step(ch);
+        i += 1;
+      }
+      return { numbers, duplicateKeys };
+    }
+
+    // ---------- 会话 ----------
+    function docCreateSession(node, source) {
+      docSessionSeq += 1;
+      const payload = (node && node.payload && typeof node.payload === 'object' && !Array.isArray(node.payload))
+        ? docDeepClone(node.payload) : {};
+      const text = JSON.stringify(payload, null, 2);
+      const losses = docScanLossy(text);
+      return {
+        sessionId: 'doc-' + docSessionSeq,
+        key: docKeyOf(node),
+        nodeId: String(node.id),
+        node,
+        source: source || 'grid',
+        title: docTitleOf(payload, node.id),
+        pointer: DOC_POINTER_DEFAULT,
+        format: 'markdown',
+        basePayload: payload,
+        baseText: text,
+        draftPayload: docDeepClone(payload),
+        draftText: text,
+        staged: null,
+        load: 'loaded',
+        access: consoleClient && (consoleClient.info.readOnly || !consoleClient.info.features.includes('transactions')) ? 'readonly' : 'editable',
+        submit: 'idle',
+        version: (node && (node.version || node.etag)) || null,
+        generation: (node && node.generation) || null,
+        vectorDim: Array.isArray(node && node.vector) ? node.vector.length : 0,
+        editorMode: 'body',
+        restored: false,
+        losses,
+        parseError: null,
+        history: [],
+        historyIndex: -1,
+        composing: false,
+        requestSeq: 0,
+        staging: false,
+        needsRefresh: false,
+        remote: null,
+      };
+    }
+    function docContentState(session) {
+      if (!session) return 'clean';
+      if (session.parseError) return 'invalid';
+      // 两边的文本都由同一套 JSON.stringify(payload, null, 2) 生成，键序与缩进一致；
+      // 直接比文本即可，避免每次击键对 1 MB payload 做两次全量序列化（实测约 25 ms/次）。
+      return session.draftText === session.baseText ? 'clean' : 'dirty';
+    }
+    function docIsDirty(session) {
+      return docContentState(session) !== 'clean';
+    }
+    function docHasLosses(session) {
+      return !!(session && session.losses
+        && (session.losses.numbers.length || session.losses.duplicateKeys.length));
+    }
+    function docEditable(session) {
+      return !!session && session.access === 'editable';
+    }
+
+    // ---------- 候选节点（严格来自当前结果范围） ----------
+    function docNodeFromHit(hit) {
+      if (!hit || hit.id === undefined) return null;
+      return {
+        type: 'node',
+        id: String(hit.id),
+        payload: hit.payload || {},
+        vector: Array.isArray(hit.vector) ? hit.vector : [],
+        edges: [],
+      };
+    }
+    function docCandidateNodes() {
+      const out = [];
+      const seen = new Set();
+      const push = (node) => {
+        if (!node || node.id === undefined) return;
+        const id = String(node.id);
+        if (seen.has(id)) return;
+        seen.add(id);
+        out.push(node);
+      };
+      const activeTab = document.querySelector('.tabs-bar .tab.active');
+      const tab = activeTab ? activeTab.dataset.tab : 'queryPane';
+      if (tab === 'vectorLabPane' && docLastVectorHits.length) {
+        docLastVectorHits.forEach(hit => push(docNodeFromHit(hit)));
+        return { nodes: out, source: 'vector' };
+      }
+      if (Array.isArray(gridRawRows)) {
+        gridRawRows.forEach((row) => {
+          const node = (typeof nodeFromGridRow === 'function') ? nodeFromGridRow(row) : null;
+          if (node) push(node);
+        });
+      }
+      if (!out.length && typeof selectedNode !== 'undefined' && selectedNode && selectedNode.id !== undefined) {
+        push(selectedNode);
+        return { nodes: out, source: 'node' };
+      }
+      return { nodes: out, source: 'grid' };
+    }
+    function docListSourceLabel(source) {
+      if (source === 'vector') return t('doc.list.sourceVector');
+      if (source === 'node') return t('doc.list.sourceNode');
+      return t('doc.list.sourceGrid');
+    }
+    // ---------- 安全预览：只用手写 DOM，不执行 HTML、不加载外部资源 ----------
+    function docAppendInline(host, text) {
+      const patterns = [
+        { re: /`([^`\n]+)`/y, tag: 'code' },
+        { re: /\*\*([^*\n]+)\*\*/y, tag: 'strong' },
+        { re: /\[([^\]\n]+)\]\(([^)\s]+)\)/y, link: true },
+      ];
+      let index = 0;
+      let buffer = '';
+      const flush = () => {
+        if (buffer) { host.appendChild(document.createTextNode(buffer)); buffer = ''; }
+      };
+      while (index < text.length) {
+        let matched = false;
+        for (const pattern of patterns) {
+          pattern.re.lastIndex = index;
+          const m = pattern.re.exec(text);
+          if (!m) continue;
+          flush();
+          if (pattern.link) {
+            const url = m[2];
+            if (/^(https?:|mailto:)/i.test(url)) {
+              const link = document.createElement('a');
+              link.textContent = m[1];
+              link.href = url;
+              link.target = '_blank';
+              link.rel = 'noreferrer noopener';
+              host.appendChild(link);
+            } else {
+              host.appendChild(document.createTextNode(m[1] + ' (' + url + ')'));
+            }
+          } else {
+            const node = document.createElement(pattern.tag);
+            node.textContent = m[1];
+            host.appendChild(node);
+          }
+          index = pattern.re.lastIndex;
+          matched = true;
+          break;
+        }
+        if (!matched) { buffer += text[index]; index += 1; }
+      }
+      flush();
+    }
+    function docRenderMarkdown(text, host) {
+      const frag = document.createDocumentFragment();
+      const lines = String(text).split(/\r?\n/);
+      let list = null;
+      let code = null;
+      const flushList = () => { if (list) { frag.appendChild(list); list = null; } };
+      const flushCode = () => {
+        if (code) {
+          const pre = document.createElement('pre');
+          pre.textContent = code.join('\n');
+          frag.appendChild(pre);
+          code = null;
+        }
+      };
+      lines.forEach((line) => {
+        if (/^```/.test(line)) {
+          flushList();
+          if (code) flushCode(); else code = [];
+          return;
+        }
+        if (code) { code.push(line); return; }
+        const heading = /^(#{1,3}) (.*)$/.exec(line);
+        if (heading) {
+          flushList();
+          const el = document.createElement('h' + heading[1].length);
+          docAppendInline(el, heading[2]);
+          frag.appendChild(el);
+          return;
+        }
+        const item = /^[-*] (.*)$/.exec(line);
+        if (item) {
+          if (!list) list = document.createElement('ul');
+          const li = document.createElement('li');
+          docAppendInline(li, item[1]);
+          list.appendChild(li);
+          return;
+        }
+        flushList();
+        if (line.startsWith('> ')) {
+          const quote = document.createElement('blockquote');
+          docAppendInline(quote, line.slice(2));
+          frag.appendChild(quote);
+          return;
+        }
+        if (/^-{3,}$/.test(line.trim())) { frag.appendChild(document.createElement('hr')); return; }
+        if (line.trim()) {
+          const p = document.createElement('p');
+          docAppendInline(p, line);
+          frag.appendChild(p);
+        }
+      });
+      flushList();
+      flushCode();
+      host.replaceChildren(frag);
+    }
+
+    // ---------- 渲染 ----------
+    function docRender() {
+      docRenderTabs();
+      docRenderList();
+      docRenderQueueBadge();
+      const session = docActive();
+      const bodyHost = document.getElementById('docBody');
+      const closed = document.getElementById('docClosedState');
+      if (bodyHost) bodyHost.style.display = session ? 'contents' : 'none';
+      if (closed) closed.hidden = !!session;
+      if (!session) return;
+      docRenderHead(session);
+      docRenderEditor(session);
+      docRenderInspector(session);
+      docRenderBanner(session);
+    }
+
+    function docRenderTabs() {
+      const host = document.getElementById('docTabs');
+      if (!host) return;
+      host.replaceChildren();
+      docSessions.forEach((session) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'dw-doc-tab' + (session.sessionId === docActiveSessionId ? ' active' : '');
+        wrap.setAttribute('role', 'presentation');
+        wrap.dataset.docTabId = session.sessionId;
+        const label = document.createElement('button');
+        label.type = 'button';
+        label.setAttribute('role', 'tab');
+        label.setAttribute('aria-selected', String(session.sessionId === docActiveSessionId));
+        label.tabIndex = session.sessionId === docActiveSessionId ? 0 : -1;
+        label.dataset.docTab = session.sessionId;
+        label.textContent = session.title + (docIsDirty(session) ? ' ●' : '');
+        label.addEventListener('click', () => docActivate(session.sessionId));
+        label.addEventListener('keydown', (event) => docOnTabKeydown(event, session.sessionId));
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'dw-tab-close';
+        close.textContent = '×';
+        close.setAttribute('aria-label', t('doc.close.title') + ' · ' + session.title);
+        close.addEventListener('click', (event) => {
+          event.stopPropagation();
+          docRequestClose(session.sessionId);
+        });
+        wrap.append(label, close);
+        host.appendChild(wrap);
+      });
+    }
+
+    function docRenderList() {
+      const host = document.getElementById('docFileList');
+      if (!host) return;
+      host.replaceChildren();
+      const { nodes, source } = docCandidateNodes();
+      const sourceEl = document.getElementById('docListSource');
+      if (sourceEl) sourceEl.textContent = docListSourceLabel(source);
+      const countEl = document.getElementById('docListCount');
+      if (countEl) countEl.textContent = String(nodes.length);
+      const filter = docListFilter.trim().toLowerCase();
+      const rows = [];
+      nodes.forEach((node) => {
+        const title = docTitleOf(node.payload, node.id);
+        if (filter && !(title + ' ' + node.id).toLowerCase().includes(filter)) return;
+        rows.push({ node, title, session: docSessions.find(s => s.nodeId === String(node.id)) || null, outside: false });
+      });
+      docSessions.forEach((session) => {
+        if (nodes.some(n => String(n.id) === session.nodeId)) return;
+        if (filter && !(session.title + ' ' + session.nodeId).toLowerCase().includes(filter)) return;
+        rows.push({ node: session.node, title: session.title, session, outside: true });
+      });
+      if (!rows.length) {
+        const empty = document.createElement('div');
+        empty.className = 'dw-list-empty';
+        empty.textContent = t('doc.list.empty');
+        host.appendChild(empty);
+      }
+      rows.forEach(({ node, title, session, outside }) => {
+        const body = docReadBody(node.payload || {}, session ? session.pointer : DOC_POINTER_DEFAULT);
+        const hasBody = body.state === 'string' || body.state === 'empty';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'dw-file' + (session && session.sessionId === docActiveSessionId ? ' active' : '');
+        button.dataset.docNode = String(node.id);
+        const icon = document.createElement('span');
+        icon.className = 'dw-file-icon';
+        icon.textContent = hasBody ? 'M↓' : '{ }';
+        const text = document.createElement('span');
+        text.className = 'dw-file-text';
+        const titleEl = document.createElement('span');
+        titleEl.className = 'dw-file-title';
+        titleEl.textContent = title;
+        const meta = document.createElement('span');
+        meta.className = 'dw-file-meta';
+        meta.textContent = '#' + node.id + ' · ' + (hasBody ? (outside ? t('doc.list.sourceNode') : 'MARKDOWN') : t('doc.list.jsonOnly'));
+        text.append(titleEl, meta);
+        button.append(icon, text);
+        if (session && docIsDirty(session)) {
+          const dot = document.createElement('span');
+          dot.className = 'dw-file-state';
+          dot.textContent = '●';
+          dot.setAttribute('aria-label', t('doc.status.dirty'));
+          button.appendChild(dot);
+        }
+        button.addEventListener('click', () => docOpen(node, outside ? 'node' : source));
+        host.appendChild(button);
+      });
+      const scope = document.getElementById('docListScope');
+      if (scope) {
+        scope.textContent = nodes.length
+          ? t('doc.list.sample', { n: nodes.length }) + ' · ' + t('doc.list.scope')
+          : t('doc.list.empty');
+      }
+    }
+
+    function docRenderQueueBadge() {
+      const docOps = txOperations.filter(op => {
+        const meta = txOpMeta.get(op);
+        return meta && meta.docSessionId;
+      });
+      const count = document.getElementById('docQueueCount');
+      if (count) count.textContent = String(docOps.length);
+      const review = document.getElementById('docSideReview');
+      if (review) review.disabled = docOps.length === 0 || txCommitting;
+    }
+
+    function docRenderHead(session) {
+      const title = document.getElementById('docTitle');
+      if (title) title.textContent = session.title;
+      const meta = document.getElementById('docNodeMeta');
+      if (meta) meta.textContent = '#' + session.nodeId;
+      const typeBadge = document.getElementById('docTypeBadge');
+      if (typeBadge) {
+        const type = session.draftPayload && typeof session.draftPayload.type === 'string'
+          ? session.draftPayload.type : (session.node && session.node.type) || 'node';
+        typeBadge.textContent = type;
+      }
+      const dirty = document.getElementById('docDirtyLabel');
+      if (dirty) {
+        const state = docContentState(session);
+        const stagedSame = session.staged && session.staged.frozenText === session.draftText;
+        dirty.textContent = state === 'invalid' ? t('doc.status.invalid')
+          : stagedSame ? t('doc.status.staged')
+            : session.staged ? t('doc.status.stagedNew')
+              : state === 'dirty' ? t('doc.status.dirty') : t('doc.status.clean');
+        dirty.className = state === 'clean' && !session.staged ? 'dw-ok' : 'dw-dirty';
+      }
+      const stage = document.getElementById('docStageBtn');
+      if (stage) {
+        stage.disabled = !docEditable(session) || !!session.parseError || docHasLosses(session)
+          || !docIsDirty(session) || session.staging || session.submit === 'conflict' || txNodeProtected(session.nodeId);
+      }
+      const exportBtn = document.getElementById('docExportBtn');
+      if (exportBtn) exportBtn.disabled = session.load === 'loading';
+      const revert = document.getElementById('docRevertBtn');
+      if (revert) {
+        const armed = performance.now() < docRevertArmedUntil;
+        revert.textContent = armed ? t('doc.revert.armed') : t('doc.revert');
+        revert.disabled = (!docIsDirty(session) && !session.staged) || txNodeProtected(session.nodeId);
+        revert.classList.toggle('dw-armed', armed);
+      }
+      const unstage = document.getElementById('docUnstageBtn');
+      if (unstage) {
+        const queued = docQueuedOpFor(session.nodeId);
+        unstage.disabled = !queued || queued.op !== 'updatePayload' || txOperationProtected(queued);
+      }
+      const modeBody = document.getElementById('docModeBody');
+      const modeJson = document.getElementById('docModeJson');
+      if (modeBody) {
+        modeBody.classList.toggle('active', session.editorMode === 'body');
+        modeBody.setAttribute('aria-pressed', String(session.editorMode === 'body'));
+      }
+      if (modeJson) {
+        modeJson.classList.toggle('active', session.editorMode === 'json');
+        modeJson.setAttribute('aria-pressed', String(session.editorMode === 'json'));
+      }
+      const format = document.getElementById('docFormat');
+      if (format) { format.value = session.format; format.hidden = session.editorMode === 'json'; }
+      const formatJson = document.getElementById('docFormatJson');
+      if (formatJson) { formatJson.hidden = session.editorMode !== 'json'; formatJson.disabled = !docEditable(session); }
+    }
+
+    function docRenderEditor(session) {
+      const area = document.getElementById('docEditorArea');
+      if (area) area.dataset.view = docViewMode;
+      document.querySelectorAll('[data-doc-view]').forEach((btn) => {
+        const active = btn.dataset.docView === docViewMode;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', String(active));
+      });
+      const body = docReadBody(session.draftPayload, session.pointer);
+      const jsonMode = session.editorMode === 'json';
+      const hasBody = body.state === 'string' || body.state === 'empty';
+      const value = jsonMode ? session.draftText : (hasBody ? body.value : '');
+      const missing = !jsonMode && !hasBody;
+      const editor = document.getElementById('docEditor');
+      const frame = document.getElementById('docTextFrame');
+      const missingHost = document.getElementById('docMissingBody');
+      if (frame) frame.hidden = missing;
+      if (missingHost) missingHost.hidden = !missing;
+      if (editor) {
+        if (editor.value !== value) editor.value = value;
+        editor.readOnly = !docEditable(session);
+      }
+      const sourceLabel = document.getElementById('docSourceLabel');
+      if (sourceLabel) {
+        sourceLabel.textContent = jsonMode ? 'JSON SOURCE'
+          : session.format === 'text' ? 'PLAIN TEXT' : 'MARKDOWN SOURCE';
+      }
+      const previewLabel = document.getElementById('docPreviewLabel');
+      if (previewLabel) previewLabel.textContent = jsonMode ? 'JSON PREVIEW' : 'LIVE PREVIEW';
+      const pathLabel = document.getElementById('docSourcePath');
+      if (pathLabel) {
+        pathLabel.textContent = jsonMode ? 'payload' : 'payload' + session.pointer.replace(/\//g, '.');
+      }
+      docRenderGutter(value);
+      docRenderPreview(session, jsonMode, body);
+      docRenderOutline(session, body);
+      if (docViewMode === 'diff') docRenderDiffPane(session);
+      docUpdateCursor();
+      const lossy = document.getElementById('docLossyHint');
+      if (lossy) {
+        lossy.hidden = !docHasLosses(session);
+        lossy.textContent = docHasLosses(session) ? t('doc.err.lossy') : '';
+      }
+    }
+
+    function docRenderGutter(value) {
+      const gutter = document.getElementById('docGutter');
+      if (!gutter) return;
+      const count = String(value).split('\n').length;
+      const parts = [];
+      for (let i = 1; i <= count; i += 1) parts.push(i);
+      gutter.textContent = parts.join('\n');
+      const editor = document.getElementById('docEditor');
+      if (editor) gutter.scrollTop = editor.scrollTop;
+    }
+
+    function docRenderPreview(session, jsonMode, body) {
+      const host = document.getElementById('docPreview');
+      if (!host) return;
+      host.replaceChildren();
+      const caption = document.createElement('div');
+      caption.className = 'dw-caption';
+      if (jsonMode) {
+        caption.textContent = 'PAYLOAD / #' + session.nodeId;
+        host.appendChild(caption);
+        if (session.parseError) {
+          const p = document.createElement('p');
+          p.textContent = docErrorText(session.parseError) + ' — ' + (session.parseError.raw || '');
+          host.appendChild(p);
+          return;
+        }
+        const pre = document.createElement('pre');
+        pre.textContent = session.draftText;
+        host.appendChild(pre);
+        return;
+      }
+      if (body.state === 'string' || body.state === 'empty') {
+        caption.textContent = 'NODE DOCUMENT / #' + session.nodeId;
+        host.appendChild(caption);
+        if (session.format === 'text' || body.state === 'empty') {
+          const pre = document.createElement('pre');
+          pre.textContent = body.value || '';
+          host.appendChild(pre);
+        } else {
+          docRenderMarkdown(body.value, host);
+        }
+        return;
+      }
+      caption.textContent = 'NODE DOCUMENT / #' + session.nodeId;
+      host.appendChild(caption);
+      const p = document.createElement('p');
+      p.textContent = body.state === 'invalid' ? (body.message || '')
+        : t('doc.missing.help');
+      host.appendChild(p);
+    }
+
+    function docRenderOutline(session, body) {
+      const host = document.getElementById('docOutline');
+      if (!host) return;
+      host.replaceChildren();
+      const text = (body && (body.state === 'string')) ? body.value : null;
+      const headings = (text !== null && session.format === 'markdown')
+        ? text.split('\n').map((line, index) => ({ line, index })).filter(x => /^#{1,3} /.test(x.line))
+        : [];
+      if (!headings.length) {
+        const empty = document.createElement('span');
+        empty.className = 'dw-outline-empty';
+        empty.textContent = t('doc.outline.empty');
+        host.appendChild(empty);
+        return;
+      }
+      headings.forEach((heading) => {
+        const level = heading.line.match(/^#+/)[0].length;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'lv' + level;
+        button.textContent = heading.line.replace(/^#+ /, '');
+        button.addEventListener('click', () => docGotoHeading(heading.index, text));
+        host.appendChild(button);
+      });
+    }
+
+    function docRenderInspector(session) {
+      const set = (id, text) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = text;
+      };
+      set('docInspectId', '#' + session.nodeId);
+      set('docInspectType', (session.draftPayload && typeof session.draftPayload.type === 'string')
+        ? session.draftPayload.type : 'node');
+      set('docVersion', session.version ? String(session.version) : '—');
+      set('docAccessStatus', t('doc.access.' + session.access));
+      set('docVectorStatus', session.vectorDim ? session.vectorDim + ' dim' : '—');
+      set('docMappingText', session.pointer);
+      const badge = document.getElementById('docSubmitBadge');
+      if (badge) {
+        badge.textContent = t('doc.submit.' + session.submit);
+        badge.className = 'dw-badge' + (session.submit === 'acknowledged' ? ' doc'
+          : session.submit === 'conflict' || session.submit === 'rejected' ? ' dw-dirty' : '');
+      }
+      const note = document.getElementById('docInspectNote');
+      if (note) {
+        note.textContent = t('doc.inspect.note') + (session.access === 'editable' ? ' ' + t('doc.access.note') : '');
+      }
+    }
+
+    function docRenderBanner(session) {
+      const banner = document.getElementById('docBanner');
+      const text = document.getElementById('docBannerText');
+      const action = document.getElementById('docBannerAction');
+      if (!banner || !text || !action) return;
+      let message = '';
+      let tone = '';
+      let actionLabel = '';
+      let actionKind = '';
+      if (session.parseError) {
+        message = t('doc.banner.invalid');
+        tone = 'error';
+      } else if (docHasLosses(session)) {
+        message = t('doc.banner.lossy');
+        tone = 'error';
+      } else if (session.access === 'readonly') {
+        message = t('doc.banner.readonly');
+        tone = 'warn';
+      } else if (session.access === 'heldByOther') {
+        message = t('doc.banner.heldByOther');
+        tone = 'warn';
+      } else if (session.access === 'expired') {
+        message = t('doc.banner.expired');
+        tone = 'warn';
+      } else if (session.submit === 'conflict') {
+        message = t('doc.banner.conflict');
+        tone = 'error';
+        actionLabel = t('doc.conflict.title');
+        actionKind = 'conflict';
+      } else if (session.submit === 'outcomeUnknown') {
+        message = t('doc.banner.unknown');
+        tone = 'warn';
+        actionLabel = t('doc.confirmOutcome');
+        actionKind = 'confirm-outcome';
+      } else if (session.load === 'error') {
+        message = t('doc.err.loadFailed', { msg: session.loadError || '' });
+        tone = 'error';
+      }
+      banner.hidden = !message;
+      banner.className = 'dw-banner' + (tone ? ' ' + tone : '');
+      text.textContent = message;
+      action.hidden = !actionLabel;
+      action.textContent = actionLabel;
+      action.dataset.docBannerAction = actionKind;
+    }
+
+    function docUpdateCursor() {
+      const editor = document.getElementById('docEditor');
+      const cursor = document.getElementById('docCursor');
+      const chars = document.getElementById('docCharCount');
+      if (!editor) return;
+      if (cursor) {
+        const before = editor.value.slice(0, editor.selectionStart);
+        const lines = before.split('\n');
+        cursor.textContent = 'Ln ' + lines.length + ', Col ' + (lines[lines.length - 1].length + 1);
+      }
+      if (chars) chars.textContent = editor.value.length.toLocaleString() + ' chars';
+    }
+
+    // ---------- 打开 / 激活 / 关闭 ----------
+    function docOpen(node, source) {
+      if (!node || node.id === undefined || node.id === null) {
+        showToast(t('doc.toast.noDoc'));
+        return null;
+      }
+      const key = docKeyOf(node);
+      const existing = docSessions.find(s => s.key === key);
+      if (existing) {
+        // 同一节点只保留一个标签：重复打开只聚焦已有标签，不新建草稿。
+        existing.node = node;
+        if (!existing.version && (node.version || node.etag)) existing.version = node.version || node.etag;
+        docActivate(existing.sessionId);
+        return existing;
+      }
+      const session = docCreateSession(node, source);
+      docSessions.push(session);
+      docActiveSessionId = session.sessionId;
+      docRestoreDraft(session);
+      // 统一右侧面板（节点详情/AI/过滤器）是覆盖在内容区之上的抽屉，开文档时必须收起，
+      // 否则它会盖住「暂存更改」等主操作按钮（实测 1280×720 与 1440 均命中）。
+      if (typeof collapseUnifiedPanel === 'function') collapseUnifiedPanel();
+      const tab = document.querySelector('[data-tab="docPane"]');
+      if (tab) tab.click();
+      docRender();
+      docPersistDraft(session);
+      docPushHistoryNow(session);
+      docRefreshFromServer(session).catch(() => {});
+      return session;
+    }
+
+    function docActivate(sessionId) {
+      if (!docById(sessionId)) return;
+      docActiveSessionId = sessionId;
+      docFindState = { query: docFindState.query, matches: [], index: -1 };
+      docRender();
+      const tab = document.querySelector('[data-tab="docPane"]');
+      if (tab) tab.click();
+      const label = document.querySelector('[data-doc-tab="' + sessionId + '"]');
+      if (label && typeof label.focus === 'function') label.focus();
+    }
+
+    function docOnTabKeydown(event, sessionId) {
+      const index = docSessions.findIndex(s => s.sessionId === sessionId);
+      if (index < 0) return;
+      let next = index;
+      if (event.key === 'ArrowLeft') next = Math.max(0, index - 1);
+      else if (event.key === 'ArrowRight') next = Math.min(docSessions.length - 1, index + 1);
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = docSessions.length - 1;
+      else return;
+      event.preventDefault();
+      docActivate(docSessions[next].sessionId);
+    }
+
+    function docQueuedOpFor(nodeId) {
+      return txOperations.find((op) => String(op.id) === String(nodeId)
+        && (op.op === 'updatePayload' || op.op === 'delete')) || null;
+    }
+    function docQueuedDocOpFor(session) {
+      return txOperations.find((op) => {
+        const meta = txOpMeta.get(op);
+        return meta && meta.docSessionId === session.sessionId;
+      }) || null;
+    }
+
+    function docRequestClose(sessionId) {
+      const session = docById(sessionId);
+      if (!session) return;
+      if (docIsDirty(session) || docQueuedOpFor(session.nodeId)) {
+        docPendingCloseId = sessionId;
+        docOpenOverlay('docCloseOverlay');
+        return;
+      }
+      docFinalizeClose(sessionId);
+    }
+
+    function docFinalizeClose(sessionId) {
+      const index = docSessions.findIndex(s => s.sessionId === sessionId);
+      if (index < 0) return;
+      docSessions.splice(index, 1);
+      if (docActiveSessionId === sessionId) {
+        const next = docSessions[index] || docSessions[index - 1] || null;
+        docActiveSessionId = next ? next.sessionId : null;
+      }
+      docRender();
+    }
+
+    function docDiscardChanges(session) {
+      if (!session) return;
+      if (txNodeProtected(session.nodeId)) { showToast(t('doc.err.pendingCommit')); return false; }
+      session.draftPayload = docDeepClone(session.basePayload);
+      session.draftText = session.baseText;
+      session.parseError = null;
+      session.losses = docScanLossy(session.baseText);
+      session.staged = null;
+      session.history = [];
+      session.historyIndex = -1;
+      const queued = docQueuedDocOpFor(session);
+      if (queued) {
+        const at = txOperations.indexOf(queued);
+        if (at >= 0) txOperations.splice(at, 1);
+        syncTxBar();
+      }
+      docDraftForget(session);
+      docRender();
+      return true;
+    }
+
+    // ---------- 编辑器输入 / 撤销重做 ----------
+    function docApplyEditorValue(session, value) {
+      if (session.editorMode === 'json') {
+        session.draftText = value;
+        const parsed = docParsePayload(value);
+        if (parsed.ok) {
+          session.parseError = null;
+          session.draftPayload = parsed.value;
+        } else {
+          session.parseError = parsed.error;
+        }
+      } else {
+        if (!session.draftPayload) return;
+        try {
+          docWriteBody(session.draftPayload, session.pointer, value, false);
+        } catch (err) {
+          showToast(err.message);
+          return;
+        }
+        session.parseError = null;
+        session.draftText = JSON.stringify(session.draftPayload, null, 2);
+      }
+      // 无损扫描是 O(n) 全量遍历：击键路径只安排防抖扫描，暂存前必定重扫一次（见 docStage）。
+      session.title = docTitleOf(session.draftPayload, session.nodeId);
+    }
+
+    // 击键路径的三处防抖：草稿落盘、无损扫描、预览/大纲重建。
+    // 1 MB 文档下同步做这三件事会直接拖垮输入响应，而它们都不是「所见即所得」必需。
+    let docPersistTimer = 0;
+    let docPersistSession = null;
+    let docLossTimer = 0;
+    let docLossSession = null;
+    let docPreviewTimer = 0;
+    let docPreviewSession = null;
+
+    function docSchedulePersist(session) {
+      docPersistSession = session;
+      if (docPersistTimer) return;
+      docPersistTimer = setTimeout(() => {
+        docPersistTimer = 0;
+        const target = docPersistSession;
+        docPersistSession = null;
+        if (target) docPersistDraft(target);
+      }, 600);
+    }
+    function docFlushPersist() {
+      if (docPersistTimer) { clearTimeout(docPersistTimer); docPersistTimer = 0; }
+      const target = docPersistSession;
+      docPersistSession = null;
+      if (target) docPersistDraft(target);
+    }
+    function docScheduleLossScan(session) {
+      docLossSession = session;
+      if (docLossTimer) return;
+      docLossTimer = setTimeout(() => {
+        docLossTimer = 0;
+        const target = docLossSession;
+        docLossSession = null;
+        if (!target || !docById(target.sessionId)) return;
+        target.losses = docScanLossy(target.draftText);
+        docRenderHead(target);
+        docRenderBanner(target);
+        const hint = document.getElementById('docLossyHint');
+        if (hint) {
+          hint.hidden = !docHasLosses(target);
+          hint.textContent = docHasLosses(target) ? t('doc.err.lossy') : '';
+        }
+      }, 450);
+    }
+    function docSchedulePreview(session) {
+      docPreviewSession = session;
+      if (docPreviewTimer) clearTimeout(docPreviewTimer);
+      docPreviewTimer = setTimeout(() => {
+        docPreviewTimer = 0;
+        const target = docPreviewSession;
+        docPreviewSession = null;
+        if (!target || !docById(target.sessionId)) return;
+        const body = docReadBody(target.draftPayload, target.pointer);
+        docRenderPreview(target, target.editorMode === 'json', body);
+        docRenderOutline(target, body);
+        if (docViewMode === 'diff') docRenderDiffPane(target);
+      }, 220);
+    }
+    // 轻量外壳：行号 / 光标 / 空态 / 只读态，不重建 Markdown 预览与节点列表
+    function docRefreshEditorChrome(session) {
+      const body = docReadBody(session.draftPayload, session.pointer);
+      const hasBody = body.state === 'string' || body.state === 'empty';
+      const jsonMode = session.editorMode === 'json';
+      const missing = !jsonMode && !hasBody;
+      const editor = document.getElementById('docEditor');
+      const frame = document.getElementById('docTextFrame');
+      const missingHost = document.getElementById('docMissingBody');
+      if (frame) frame.hidden = missing;
+      if (missingHost) missingHost.hidden = !missing;
+      if (editor) editor.readOnly = !docEditable(session);
+      const value = editor ? editor.value : '';
+      docRenderGutter(value);
+      const chars = document.getElementById('docCharCount');
+      if (chars) chars.textContent = value.length.toLocaleString() + ' chars';
+    }
+
+    function docOnEditorInput() {
+      const session = docActive();
+      if (!session || !docEditable(session)) return;
+      const editor = document.getElementById('docEditor');
+      if (!editor) return;
+      docApplyEditorValue(session, editor.value);
+      if (!session.composing) docScheduleHistory(session);
+      docScheduleLossScan(session);
+      docSchedulePersist(session);
+      docRenderHead(session);
+      docRefreshEditorChrome(session);
+      docSchedulePreview(session);
+      const label = document.querySelector('[data-doc-tab="' + session.sessionId + '"]');
+      if (label) label.textContent = session.title + (docIsDirty(session) ? ' ●' : '');
+    }
+
+    function docSnapshot(session) {
+      const editor = document.getElementById('docEditor');
+      return {
+        mode: session.editorMode,
+        value: editor ? editor.value : session.draftText,
+        start: editor ? editor.selectionStart : 0,
+        end: editor ? editor.selectionEnd : 0,
+        scrollTop: editor ? editor.scrollTop : 0,
+      };
+    }
+    function docPushHistoryNow(session) {
+      if (!session) return;
+      const snap = docSnapshot(session);
+      const last = session.history[session.historyIndex];
+      if (last && last.mode === snap.mode && last.value === snap.value) return;
+      session.history = session.history.slice(0, session.historyIndex + 1);
+      session.history.push(snap);
+      if (session.history.length > DOC_HISTORY_MAX) session.history.shift();
+      session.historyIndex = session.history.length - 1;
+    }
+    function docScheduleHistory(session) {
+      if (docHistoryTimer) clearTimeout(docHistoryTimer);
+      docHistoryTimer = setTimeout(() => {
+        docHistoryTimer = 0;
+        docPushHistoryNow(session);
+      }, 400);
+    }
+    function docApplySnapshot(session, snap) {
+      if (!session || !snap) return;
+      if (snap.mode !== session.editorMode) {
+        if (snap.mode === 'body' && session.parseError) return;
+        session.editorMode = snap.mode;
+      }
+      docApplyEditorValue(session, snap.value);
+      const editor = document.getElementById('docEditor');
+      if (editor) {
+        editor.value = snap.value;
+        editor.setSelectionRange(snap.start, snap.end);
+        editor.scrollTop = snap.scrollTop || 0;
+      }
+      docRender();
+      docPersistDraft(session);
+    }
+    function docUndo() {
+      const session = docActive();
+      if (!session || session.historyIndex <= 0) return;
+      session.historyIndex -= 1;
+      docApplySnapshot(session, session.history[session.historyIndex]);
+    }
+    function docRedo() {
+      const session = docActive();
+      if (!session || session.historyIndex >= session.history.length - 1) return;
+      session.historyIndex += 1;
+      docApplySnapshot(session, session.history[session.historyIndex]);
+    }
+
+    function docSetEditorMode(mode) {
+      const session = docActive();
+      if (!session) return;
+      if (mode === 'body' && session.parseError) {
+        showToast(t('doc.err.invalid'));
+        return;
+      }
+      if (session.editorMode === mode) return;
+      docPushHistoryNow(session);
+      session.editorMode = mode;
+      docRender();
+      const editor = document.getElementById('docEditor');
+      if (editor) editor.focus();
+    }
+
+    // 取消暂存：只撤回待提交项，草稿继续留在编辑器里（与「还原」区分）
+    function docUnstage() {
+      const session = docActive();
+      if (!session) return;
+      const queued = docQueuedOpFor(session.nodeId);
+      if (txOperationProtected(queued)) { showToast(t('doc.err.pendingCommit')); return; }
+      if (!queued || queued.op !== 'updatePayload') {
+        showToast(t('doc.unstage.blocked'));
+        return;
+      }
+      const at = txOperations.indexOf(queued);
+      if (at >= 0) txOperations.splice(at, 1);
+      session.staged = null;
+      session.submit = 'idle';
+      syncTxBar();
+      docRender();
+      docPersistDraft(session);
+      showToast(t('doc.unstage.toast'));
+    }
+
+    // 还原：丢弃本地草稿并撤回该节点的暂存，回到上次提交的内容（两步确认，不用原生 confirm）
+    function docRevert() {
+      const session = docActive();
+      if (!session) return;
+      if (txNodeProtected(session.nodeId)) { showToast(t('doc.err.pendingCommit')); return; }
+      if (performance.now() > docRevertArmedUntil) {
+        docRevertArmedUntil = performance.now() + 4000;
+        docRenderHead(session);
+        setTimeout(() => {
+          const current = docActive();
+          if (current) docRenderHead(current);
+        }, 4200);
+        return;
+      }
+      docRevertArmedUntil = 0;
+      docDiscardChanges(session);
+      showToast(t('doc.revert.toast'));
+    }
+
+    function docFormatJson() {
+      const session = docActive();
+      if (!session || !docEditable(session) || session.parseError) return;
+      session.draftText = JSON.stringify(session.draftPayload, null, 2);
+      session.losses = docScanLossy(session.draftText);
+      docRender();
+      docPushHistoryNow(session);
+      docPersistDraft(session);
+      showToast(t('doc.toast.formatted'));
+    }
+
+    function docCreateBody() {
+      const session = docActive();
+      if (!session || !docEditable(session)) return;
+      const body = docReadBody(session.draftPayload, session.pointer);
+      if (body.state === 'nonString' || body.state === 'null' || body.state === 'invalid') {
+        showToast(t('doc.err.nonString'));
+        return;
+      }
+      try {
+        docWriteBody(session.draftPayload, session.pointer, '# ' + session.title + '\n\n', true);
+      } catch (err) {
+        showToast(err.message);
+        return;
+      }
+      session.draftText = JSON.stringify(session.draftPayload, null, 2);
+      session.losses = docScanLossy(session.draftText);
+      docRender();
+      docPushHistoryNow(session);
+      docPersistDraft(session);
+      showToast(t('doc.toast.bodyCreated'));
+      const editor = document.getElementById('docEditor');
+      if (editor) editor.focus();
+    }
+
+    function docGotoHeading(lineIndex, text) {
+      const session = docActive();
+      if (!session) return;
+      if (session.editorMode !== 'body') {
+        if (session.parseError) return;
+        session.editorMode = 'body';
+      }
+      const lines = String(text).split('\n');
+      const pos = lines.slice(0, lineIndex).join('\n').length + (lineIndex ? 1 : 0);
+      docRender();
+      const editor = document.getElementById('docEditor');
+      if (!editor) return;
+      editor.focus();
+      editor.setSelectionRange(pos, pos);
+      editor.scrollTop = Math.max(0, lineIndex * 22);
+      docUpdateCursor();
+    }
+
+    // ---------- 查找替换（选区驱动，不做覆盖层高亮） ----------
+    function docFindMatches(value, query) {
+      const matches = [];
+      if (!query) return matches;
+      let cursor = 0;
+      while (cursor <= value.length) {
+        const at = value.indexOf(query, cursor);
+        if (at < 0) break;
+        matches.push(at);
+        cursor = at + Math.max(1, query.length);
+      }
+      return matches;
+    }
+    function docToggleFind(force) {
+      const bar = document.getElementById('docFindBar');
+      if (!bar) return;
+      const show = typeof force === 'boolean' ? force : bar.hidden;
+      bar.hidden = !show;
+      if (show) {
+        const input = document.getElementById('docFindInput');
+        if (input) { input.focus(); input.select(); }
+        docRefreshFind();
+      } else {
+        docFindState = { query: docFindState.query, matches: [], index: -1 };
+      }
+    }
+    function docRefreshFind(step) {
+      const session = docActive();
+      const editor = document.getElementById('docEditor');
+      const input = document.getElementById('docFindInput');
+      const count = document.getElementById('docFindCount');
+      if (!session || !editor || !input) return;
+      const query = input.value;
+      const matches = docFindMatches(editor.value, query);
+      docFindState = { query, matches, index: matches.length ? (typeof step === 'number' ? step : docFindState.index) : -1 };
+      if (docFindState.index < 0 && matches.length) docFindState.index = 0;
+      if (docFindState.index >= matches.length) docFindState.index = matches.length - 1;
+      if (count) count.textContent = (matches.length ? docFindState.index + 1 : 0) + '/' + matches.length;
+      if (matches.length) {
+        const at = matches[Math.max(0, docFindState.index)];
+        editor.focus();
+        editor.setSelectionRange(at, at + query.length);
+      }
+    }
+    function docFindStep(direction) {
+      const editor = document.getElementById('docEditor');
+      const input = document.getElementById('docFindInput');
+      if (!editor || !input) return;
+      const matches = docFindMatches(editor.value, input.value);
+      if (!matches.length) { showToast(t('doc.toast.findNone')); return; }
+      const current = editor.selectionStart;
+      let index = matches.findIndex(at => at === current);
+      if (index < 0) index = direction > 0 ? 0 : matches.length - 1;
+      else index = (index + direction + matches.length) % matches.length;
+      docFindState = { query: input.value, matches, index };
+      const at = matches[index];
+      editor.focus();
+      editor.setSelectionRange(at, at + input.value.length);
+      const count = document.getElementById('docFindCount');
+      if (count) count.textContent = (index + 1) + '/' + matches.length;
+    }
+    function docReplaceOne() {
+      const session = docActive();
+      const editor = document.getElementById('docEditor');
+      const input = document.getElementById('docFindInput');
+      const replacement = document.getElementById('docReplaceInput');
+      if (!session || !docEditable(session) || !editor || !input || !replacement) return;
+      const query = input.value;
+      if (!query) return;
+      const selected = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+      if (selected !== query) { docFindStep(1); return; }
+      const at = editor.selectionStart;
+      editor.value = editor.value.slice(0, at) + replacement.value + editor.value.slice(at + query.length);
+      editor.setSelectionRange(at + replacement.value.length, at + replacement.value.length);
+      docApplyEditorValue(session, editor.value);
+      docRender();
+      docPushHistoryNow(session);
+      docPersistDraft(session);
+      docRefreshFind();
+    }
+    function docReplaceAll() {
+      const session = docActive();
+      const editor = document.getElementById('docEditor');
+      const input = document.getElementById('docFindInput');
+      const replacement = document.getElementById('docReplaceInput');
+      if (!session || !docEditable(session) || !editor || !input || !replacement) return;
+      const query = input.value;
+      if (!query) return;
+      const matches = docFindMatches(editor.value, query);
+      if (!matches.length) { showToast(t('doc.toast.findNone')); return; }
+      editor.value = editor.value.split(query).join(replacement.value);
+      docApplyEditorValue(session, editor.value);
+      docRender();
+      docPushHistoryNow(session);
+      docPersistDraft(session);
+      docRefreshFind();
+      showToast(t('doc.toast.replaced', { n: matches.length }));
+    }
+
+    // ---------- 正文来源映射 ----------
+    function docOpenMapping() {
+      const session = docActive();
+      if (!session) return;
+      const input = document.getElementById('docMappingInput');
+      const error = document.getElementById('docMappingError');
+      if (input) input.value = session.pointer;
+      if (error) error.textContent = '';
+      docOpenOverlay('docMappingOverlay');
+      if (input) input.focus();
+    }
+    function docApplyMapping() {
+      const session = docActive();
+      const input = document.getElementById('docMappingInput');
+      const error = document.getElementById('docMappingError');
+      if (!session || !input) return;
+      const value = input.value.trim();
+      try {
+        docPointerKeys(value);
+      } catch (err) {
+        if (error) error.textContent = err.message;
+        return;
+      }
+      // 变更映射只影响编辑视图，不改动 payload；但正文草稿与 JSON 草稿必须重新对齐。
+      session.pointer = value;
+      session.staged = null;
+      session.history = [];
+      session.historyIndex = -1;
+      docCloseOverlay('docMappingOverlay');
+      docRender();
+      docPushHistoryNow(session);
+      docPersistDraft(session);
+    }
+
+    // ---------- 导出 ----------
+    function docExport() {
+      const session = docActive();
+      if (!session) return;
+      const jsonMode = session.editorMode === 'json';
+      const body = docReadBody(session.draftPayload, session.pointer);
+      const value = jsonMode ? session.draftText
+        : ((body.state === 'string' || body.state === 'empty') ? body.value : '');
+      if (!jsonMode && !value) {
+        showToast(t('doc.err.nonString'));
+        return;
+      }
+      const blob = new Blob([value], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'node-' + session.nodeId + '-draft.'
+        + (jsonMode ? 'json' : session.format === 'markdown' ? 'md' : 'txt');
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      showToast(t('doc.toast.exported'));
+    }
+
+    // ---------- 弹层工具（复用既有 .import-overlay，不新增遮罩样式） ----------
+    function docOpenOverlay(id) {
+      const overlay = document.getElementById(id);
+      if (overlay) overlay.hidden = false;
+    }
+    function docCloseOverlay(id) {
+      const overlay = document.getElementById(id);
+      if (overlay) overlay.hidden = true;
+    }
+
+    // ---------- 浏览器草稿（键含 origin / pathname / nodeId / 映射 / schema） ----------
+    function docDraftsEnabled() {
+      return !window.__TRIVIUM_SELFTEST__ || window.__docTestAllowDrafts === true;
+    }
+    function docDraftIndexRead() {
+      try {
+        const parsed = JSON.parse(docStorage.get(DOC_INDEX_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed.filter(k => typeof k === 'string') : [];
+      } catch (_) { return []; }
+    }
+    function docDraftIndexWrite(list) {
+      docStorage.set(DOC_INDEX_KEY, JSON.stringify(list.slice(0, DOC_INDEX_MAX)));
+    }
+    function docDraftIndexAdd(key) {
+      const list = docDraftIndexRead().filter(k => k !== key);
+      list.unshift(key);
+      docDraftIndexWrite(list);
+    }
+    function docDraftIndexRemove(key) {
+      docDraftIndexWrite(docDraftIndexRead().filter(k => k !== key));
+    }
+    function docPersistDraft(session) {
+      if (!session || !docDraftsEnabled()) return;
+      const key = docStorageKeyOf(session.key);
+      if (!docIsDirty(session) && !session.staged) {
+        docStorage.remove(key);
+        docDraftIndexRemove(key);
+        return;
+      }
+      const payload = {
+        schema: DOC_DRAFT_SCHEMA,
+        key: session.key,
+        nodeId: session.nodeId,
+        baseText: session.baseText,
+        baseVersion: session.version,
+        draftText: session.draftText,
+        pointer: session.pointer,
+        format: session.format,
+        editorMode: session.editorMode,
+        savedAt: Date.now(),
+      };
+      const ok = docStorage.set(key, JSON.stringify(payload));
+      docStorageOK = ok;
+      if (!ok) { showToast(t('doc.toast.draftQuota')); return; }
+      docDraftIndexAdd(key);
+    }
+    function docDraftForget(session) {
+      if (!session) return;
+      const key = docStorageKeyOf(session.key);
+      docStorage.remove(key);
+      docDraftIndexRemove(key);
+    }
+    function docRestoreDraft(session) {
+      if (!session || !docDraftsEnabled()) return false;
+      const key = docStorageKeyOf(session.key);
+      const raw = docStorage.get(key);
+      if (!raw) return false;
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
+      if (!parsed || parsed.schema !== DOC_DRAFT_SCHEMA || parsed.nodeId !== session.nodeId
+        || typeof parsed.draftText !== 'string') {
+        docStorage.remove(key);
+        docDraftIndexRemove(key);
+        return false;
+      }
+      // 草稿自带「它当时的基线」：恢复时必须连 baseline 一起恢复，
+      // 否则远端对比会拿新会话的 payload 当基线，误报版本冲突。
+      if (typeof parsed.baseText === 'string') {
+        const base = docParsePayload(parsed.baseText);
+        if (base.ok) {
+          session.baseText = parsed.baseText;
+          session.basePayload = base.value;
+          session.version = typeof parsed.baseVersion === 'string' ? parsed.baseVersion : null;
+        }
+      }
+      session.draftText = parsed.draftText;
+      const draft = docParsePayload(parsed.draftText);
+      if (draft.ok) { session.draftPayload = draft.value; session.parseError = null; }
+      else { session.parseError = draft.error; }
+      if (typeof parsed.pointer === 'string') session.pointer = parsed.pointer;
+      session.format = parsed.format === 'text' ? 'text' : 'markdown';
+      session.editorMode = parsed.editorMode === 'json' ? 'json' : 'body';
+      session.losses = docScanLossy(session.draftText);
+      session.restored = true;
+      showToast(t('doc.toast.draftRestored'));
+      return true;
+    }
+
+    // ---------- 暂存（复用唯一写审阅队列） ----------
+    function docEnsureTxMode() {
+      const check = document.getElementById('txModeCheck');
+      if (check && !check.checked) {
+        check.checked = true;
+        check.dispatchEvent(new Event('change', { bubbles: true }));
+        showToast(t('doc.toast.txMode'));
+      }
+      return (typeof txModeOn === 'function') ? txModeOn() : true;
+    }
+    async function docEnsureVersion(session) {
+      if (session.submit === 'conflict') return false;
+      if (session.version) return true;
+      try {
+        const remote = await docFetchNode(session.nodeId);
+        if (!docById(session.sessionId)) return false;
+        if (docCanonical(remote.payload) !== docCanonical(session.basePayload)) {
+          session.remote = remote;
+          session.submit = 'conflict';
+          docRender();
+          return false;
+        }
+        session.version = remote.version || null;
+        session.generation = remote.generation || null;
+        return !!session.version;
+      } catch (_) { return false; }
+    }
+    function docQueueStage(session, payload) {
+      const op = { op: 'updatePayload', id: parseWriteNodeId(session.nodeId), payload };
+      stageTxOperation(op, {
+        before: docDeepClone(session.basePayload),
+        source: t('tx.source.doc'),
+        docSessionId: session.sessionId,
+        docTitle: session.title,
+        expectedVersion: session.version || null,
+        pointer: session.pointer,
+        bodyBefore: docBodyTextOf(session.basePayload, session.pointer),
+        bodyAfter: docBodyTextOf(payload, session.pointer),
+      });
+      session.staged = { frozenText: session.draftText, frozenPayload: docDeepClone(payload) };
+      session.submit = 'idle';
+      docRender();
+      docPersistDraft(session);
+    }
+    async function docStage() {
+      const session = docActive();
+      if (!session) return false;
+      if (session.staging) return false;
+      if (txNodeProtected(session.nodeId)) { showToast(t('doc.err.pendingCommit')); return false; }
+      if (session.submit === 'conflict') { showToast(t('doc.banner.conflict')); return false; }
+      try { parseWriteNodeId(session.nodeId); } catch (error) { showToast(error.message); return false; }
+      if (!docEditable(session)) { showToast(t('doc.err.readonly')); return false; }
+      if (session.parseError) { showToast(t('doc.err.invalid')); return false; }
+      // 击键路径只做防抖扫描：真正落库前必须用当前文本重扫一次，避免拿陈旧结论放行
+      session.losses = docScanLossy(session.draftText);
+      if (docHasLosses(session)) { showToast(t('doc.err.lossy')); return false; }
+      if (!docIsDirty(session)) { showToast(t('doc.err.notDirty')); return false; }
+      session.staging = true;
+      try {
+        // 没有节点版本就无法做 OCC：宁可拒绝，也不发一次会静默覆盖别人改动的写请求。
+        const hasVersion = await docEnsureVersion(session);
+        if (!hasVersion) { showToast(t('doc.err.noVersion')); return false; }
+        // 等待读取期间可能关闭、改写或开始提交；返回后重新检查当前草稿与队列。
+        if (!docById(session.sessionId) || !docEditable(session) || txNodeProtected(session.nodeId)
+            || session.submit === 'conflict' || session.parseError || !docIsDirty(session)) return false;
+        session.losses = docScanLossy(session.draftText);
+        if (docHasLosses(session)) { showToast(t('doc.err.lossy')); return false; }
+        const existing = docQueuedOpFor(session.nodeId);
+        if (existing && existing.op === 'delete') { showToast(t('doc.err.pendingDelete')); return false; }
+        if (!docEnsureTxMode()) { showToast(t('doc.err.noTxMode')); return false; }
+        const payload = docDeepClone(session.draftPayload);
+        if (existing) {
+          const existingMeta = txOpMeta.get(existing);
+          if (existingMeta && existingMeta.docSessionId === session.sessionId) {
+            // 同一会话重复暂存：替换自己的快照，保留最初 before 与版本前置条件。
+            existing.payload = payload;
+            existingMeta.bodyAfter = docBodyTextOf(payload, session.pointer);
+            session.staged = { frozenText: session.draftText, frozenPayload: docDeepClone(payload) };
+            session.submit = 'idle';
+            syncTxBar();
+            docRender();
+            docPersistDraft(session);
+            return true;
+          }
+          docMergeTarget = { session, payload, existing };
+          docOpenOverlay('docMergeOverlay');
+          return false;
+        }
+        docQueueStage(session, payload);
+        return true;
+      } finally {
+        session.staging = false;
+        if (docActive() === session) docRenderHead(session);
+      }
+    }
+    function docResolveMerge(mode) {
+      const target = docMergeTarget;
+      docMergeTarget = null;
+      docCloseOverlay('docMergeOverlay');
+      if (!target) return;
+      const { session, payload, existing } = target;
+      if (!docById(session.sessionId) || !txOperations.includes(existing)) return;
+      if (txOperationProtected(existing)) { showToast(t('doc.err.pendingCommit')); return; }
+      if (mode === 'replace') {
+        existing.payload = payload;
+        const meta = txOpMeta.get(existing);
+        if (meta) meta.expectedVersion = session.version || meta.expectedVersion || null;
+      } else {
+        // 合并：以队列中的最新 payload 为基，只应用本次会话相对它自己基线的变更。
+        const merged = docDeepClone(existing.payload);
+        if (session.editorMode === 'json') {
+          const base = session.basePayload || {};
+          Object.keys(payload).forEach((key) => {
+            if (docCanonical(payload[key]) !== docCanonical(base[key])) merged[key] = docDeepClone(payload[key]);
+          });
+          Object.keys(base).forEach((key) => {
+            if (!Object.prototype.hasOwnProperty.call(payload, key)) delete merged[key];
+          });
+        } else {
+          const bodyText = docBodyTextOf(payload, session.pointer);
+          if (bodyText !== null) docWriteBody(merged, session.pointer, bodyText, true);
+        }
+        existing.payload = merged;
+        const meta = txOpMeta.get(existing);
+        if (meta) {
+          meta.expectedVersion = meta.expectedVersion || session.version || null;
+          meta.bodyAfter = docBodyTextOf(merged, meta.pointer || session.pointer);
+        }
+      }
+      // 合并或替换都必须把该队列项完整纳入文档提交契约，不能只补一个版本字段。
+      const previousMeta = txOpMeta.get(existing) || {};
+      txOpMeta.set(existing, {
+        ...previousMeta,
+        before: previousMeta.before || docDeepClone(session.basePayload),
+        source: t('tx.source.doc'),
+        docSessionId: session.sessionId,
+        docTitle: session.title,
+        expectedVersion: previousMeta.expectedVersion || session.version,
+        pointer: session.pointer,
+        bodyBefore: docBodyTextOf(previousMeta.before || session.basePayload, session.pointer),
+        bodyAfter: docBodyTextOf(existing.payload, session.pointer),
+      });
+      session.draftPayload = docDeepClone(existing.payload);
+      session.draftText = JSON.stringify(session.draftPayload, null, 2);
+      session.staged = { frozenText: session.draftText, frozenPayload: docDeepClone(existing.payload) };
+      session.submit = 'idle';
+      syncTxBar();
+      docRender();
+      docPersistDraft(session);
+      showToast(t('doc.toast.stagedMerged'));
+    }
+
+    // ---------- 服务端读取与提交结果 ----------
+    async function docFetchNode(nodeId) {
+      const res = await apiFetch(`${API_BASE}/v1/nodes/${nodeId}`, { headers: { Accept: 'application/json' } });
+      const text = await res.text();
+      if (!res.ok) {
+        let detail = 'HTTP ' + res.status;
+        let code = null;
+        try {
+          const body = JSON.parse(text);
+          if (body && body.detail) detail = body.detail;
+          if (body && body.code) code = body.code;
+        } catch (_) { /* 非 JSON 错误体 */ }
+        const err = new Error(res.status === 404 ? t('doc.err.nodeNotFound') : detail);
+        err.status = res.status;
+        err.code = code;
+        throw err;
+      }
+      let body = null;
+      try { body = JSON.parse(text); } catch (_) {
+        const err = new Error('invalid JSON response');
+        err.status = res.status;
+        throw err;
+      }
+      const payload = (body && body.node && body.node.payload && typeof body.node.payload === 'object') ? body.node.payload : {};
+      return {
+        payload,
+        version: body && typeof body.version === 'string' ? body.version : null,
+        generation: body && typeof body.generation === 'string' ? body.generation : null,
+        node: (body && body.node) || null,
+        // 只扫描 payload：向量、generation、版本串不属于文档写入面，扫描整份响应会把
+        // f32 回读值（0.10000000149011612）误判成不可无损处理。
+        losses: docScanLossy(JSON.stringify(payload)),
+      };
+    }
+    async function docRefreshFromServer(session) {
+      if (!session || session.load === 'loading') return;
+      session.load = 'loading';
+      const seq = ++session.requestSeq;
+      docRender();
+      try {
+        const remote = await docFetchNode(session.nodeId);
+        // 迟到响应隔离：会话已关闭或被新请求取代时，不能改当前编辑器状态。
+        if (seq !== session.requestSeq || !docById(session.sessionId)) return;
+        session.load = 'loaded';
+        // 提交开始后到达的旧读取不能改变该批次或当前基线。
+        if (txNodeProtected(session.nodeId)) return;
+        if (remote.node && Array.isArray(remote.node.vector)) session.vectorDim = remote.node.vector.length;
+        if (docCanonical(remote.payload) !== docCanonical(session.basePayload)) {
+          if (docIsDirty(session)) {
+            session.submit = 'conflict';
+            session.remote = remote;
+            docRender();
+            docPersistDraft(session);
+            return;
+          } else {
+            session.basePayload = docDeepClone(remote.payload);
+            session.baseText = JSON.stringify(session.basePayload, null, 2);
+            session.draftPayload = docDeepClone(remote.payload);
+            session.draftText = session.baseText;
+            session.title = docTitleOf(session.draftPayload, session.nodeId);
+          }
+        }
+        session.version = remote.version || null;
+        session.generation = remote.generation || null;
+        if (remote.losses.numbers.length || remote.losses.duplicateKeys.length) session.losses = remote.losses;
+        docRender();
+        docPersistDraft(session);
+      } catch (err) {
+        if (seq !== session.requestSeq || !docById(session.sessionId)) return;
+        session.load = err.status === 404 ? 'notFound' : 'error';
+        session.loadError = err.message;
+        if (err.status === 404) session.access = 'readonly';
+        docRender();
+      }
+    }
+
+    function docOnCommitSuccess(submitted, revision) {
+      submitted.forEach((op) => {
+        const meta = txOpMeta.get(op);
+        if (!meta || !meta.docSessionId) return;
+        const session = docById(meta.docSessionId);
+        if (!session) return;
+        session.requestSeq += 1;
+        session.load = 'loaded';
+        session.basePayload = docDeepClone(op.payload);
+        session.baseText = JSON.stringify(session.basePayload, null, 2);
+        session.staged = null;
+        session.submit = 'acknowledged';
+        session.version = revision || null; // Console 回执提供提交后的完整版本令牌
+        session.needsRefresh = true;
+        docPersistDraft(session);
+      });
+      docRender();
+    }
+    async function docOnCommitFailure(submitted, err, unknown) {
+      const status = err && err.status;
+      const code = err && err.code;
+      let touched = null;
+      submitted.forEach((op) => {
+        const meta = txOpMeta.get(op);
+        if (!meta || !meta.docSessionId) return;
+        const session = docById(meta.docSessionId);
+        if (!session) return;
+        touched = touched || session;
+        if (unknown) session.submit = 'outcomeUnknown';
+        else if (status === 409 && ['WRITE_CONFLICT', 'TDB_WRITE_CONFLICT'].includes(code)) session.submit = 'conflict';
+        else session.submit = 'rejected';
+      });
+      if (!touched) return;
+      docRender();
+      if (unknown) showToast(t('doc.banner.unknown'));
+      else if (status === 409 && ['WRITE_CONFLICT', 'TDB_WRITE_CONFLICT'].includes(code)) await docLoadConflict(touched);
+    }
+    function docMarkSubmitting(submitted) {
+      submitted.forEach((op) => {
+        const meta = txOpMeta.get(op);
+        if (!meta || !meta.docSessionId) return;
+        const session = docById(meta.docSessionId);
+        if (session) session.submit = 'submitting';
+      });
+      docRender();
+    }
+
+    async function docLoadConflict(session) {
+      if (txNodeProtected(session.nodeId)) return;
+      try {
+        const remote = await docFetchNode(session.nodeId);
+        if (!docById(session.sessionId) || txNodeProtected(session.nodeId)) return;
+        session.remote = remote;
+        session.submit = 'conflict';
+        docRenderConflict(session, remote);
+        docConflictSessionId = session.sessionId;
+        docOpenOverlay('docConflictOverlay');
+        docRender();
+      } catch (err) {
+        showToast(t('doc.err.loadFailed', { msg: err.message }));
+      }
+    }
+    function docRenderConflict(session, remote) {
+      const host = document.getElementById('docConflictDiff');
+      if (!host) return;
+      host.replaceChildren();
+      host.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:10px;max-height:52vh;overflow:auto;border:0';
+      const make = (title, text) => {
+        const box = document.createElement('div');
+        const head = document.createElement('h3');
+        head.textContent = title;
+        const pre = document.createElement('pre');
+        pre.textContent = text;
+        box.append(head, pre);
+        return box;
+      };
+      host.append(
+        make(t('doc.conflict.remote'), JSON.stringify(remote.payload, null, 2)),
+        make(t('doc.conflict.local'), session.draftText || ''),
+      );
+      // 基线也保留可查：手工合并需要知道「我打开时看到的原始内容」，但不必占用主视觉。
+      const details = document.createElement('details');
+      details.style.gridColumn = '1 / -1';
+      const summary = document.createElement('summary');
+      summary.textContent = t('doc.conflict.base');
+      summary.style.cssText = 'cursor:pointer;font-size:11px;color:var(--text-muted)';
+      const pre = document.createElement('pre');
+      pre.textContent = JSON.stringify(session.basePayload, null, 2);
+      pre.style.cssText = 'max-height:200px;overflow:auto;font:11px/1.7 var(--font-mono);white-space:pre-wrap';
+      details.append(summary, pre);
+      host.appendChild(details);
+    }
+    function docRebaseToRemote() {
+      const session = docById(docConflictSessionId);
+      docConflictSessionId = null;
+      docCloseOverlay('docConflictOverlay');
+      if (!session || !session.remote) return;
+      if (txNodeProtected(session.nodeId)) { showToast(t('doc.err.pendingCommit')); return; }
+      session.basePayload = docDeepClone(session.remote.payload);
+      session.baseText = JSON.stringify(session.basePayload, null, 2);
+      session.version = session.remote.version || null;
+      session.access = consoleClient && (consoleClient.info.readOnly || !consoleClient.info.features.includes('transactions')) ? 'readonly' : 'editable';
+      session.submit = 'idle';
+      session.remote = null;
+      // 合并后必须重新审阅：撤回该节点的旧暂存快照，避免用旧 payload 覆盖远端字段。
+      const queued = docQueuedDocOpFor(session);
+      if (queued) {
+        const at = txOperations.indexOf(queued);
+        if (at >= 0) txOperations.splice(at, 1);
+      }
+      session.staged = null;
+      syncTxBar();
+      docRender();
+      docPersistDraft(session);
+      showToast(t('doc.toast.conflictRebase'));
+    }
+    async function docConfirmOutcome(session) {
+      if (!session || !txPendingAttempt || !txNodeProtected(session.nodeId)) return false;
+      // Console 读取完整原事务的回执；Server 通过原幂等请求确认整批结果。
+      return commitTransaction();
+    }
+
+    // ---------- 差异引擎（GitHub split 风格，纯文本） ----------
+    const DOC_DIFF_CELL_LIMIT = 4000000;
+
+    // 行级 LCS；超大文本直接退化为「整段删除 + 整段新增」，保证不卡死并如实标注。
+    function docLcsOps(a, b) {
+      const n = a.length;
+      const m = b.length;
+      if (!n && !m) return { ops: [], truncated: false };
+      if (n * m > DOC_DIFF_CELL_LIMIT) {
+        const ops = [];
+        for (let i = 0; i < n; i += 1) ops.push({ t: 'del', ai: i });
+        for (let j = 0; j < m; j += 1) ops.push({ t: 'add', bi: j });
+        return { ops, truncated: true };
+      }
+      const width = m + 1;
+      const dp = new Uint32Array((n + 1) * width);
+      for (let i = n - 1; i >= 0; i -= 1) {
+        for (let j = m - 1; j >= 0; j -= 1) {
+          dp[i * width + j] = a[i] === b[j]
+            ? dp[(i + 1) * width + (j + 1)] + 1
+            : Math.max(dp[(i + 1) * width + j], dp[i * width + (j + 1)]);
+        }
+      }
+      const ops = [];
+      let i = 0;
+      let j = 0;
+      while (i < n && j < m) {
+        if (a[i] === b[j]) { ops.push({ t: 'ctx', ai: i, bi: j }); i += 1; j += 1; }
+        else if (dp[(i + 1) * width + j] >= dp[i * width + (j + 1)]) { ops.push({ t: 'del', ai: i }); i += 1; }
+        else { ops.push({ t: 'add', bi: j }); j += 1; }
+      }
+      while (i < n) { ops.push({ t: 'del', ai: i }); i += 1; }
+      while (j < m) { ops.push({ t: 'add', bi: j }); j += 1; }
+      return { ops, truncated: false };
+    }
+
+    // 输出左右成对的行：ctx 两边都有；mod 左边旧、右边新；del/add 只有一边。
+    function docDiffRows(before, after) {
+      const a = String(before == null ? '' : before).split('\n');
+      const b = String(after == null ? '' : after).split('\n');
+      let start = 0;
+      while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+      let endA = a.length;
+      let endB = b.length;
+      while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) { endA -= 1; endB -= 1; }
+      const rows = [];
+      for (let i = 0; i < start; i += 1) {
+        rows.push({ type: 'ctx', left: { no: i + 1, text: a[i] }, right: { no: i + 1, text: b[i] } });
+      }
+      const mid = docLcsOps(a.slice(start, endA), b.slice(start, endB));
+      let added = 0;
+      let removed = 0;
+      let k = 0;
+      while (k < mid.ops.length) {
+        const op = mid.ops[k];
+        if (op.t === 'ctx') {
+          rows.push({
+            type: 'ctx',
+            left: { no: start + op.ai + 1, text: a[start + op.ai] },
+            right: { no: start + op.bi + 1, text: b[start + op.bi] },
+          });
+          k += 1;
+          continue;
+        }
+        const dels = [];
+        const adds = [];
+        while (k < mid.ops.length && mid.ops[k].t === 'del') { dels.push(mid.ops[k].ai); k += 1; }
+        while (k < mid.ops.length && mid.ops[k].t === 'add') { adds.push(mid.ops[k].bi); k += 1; }
+        const pairs = Math.max(dels.length, adds.length);
+        for (let x = 0; x < pairs; x += 1) {
+          const ai = dels[x];
+          const bi = adds[x];
+          if (ai !== undefined && bi !== undefined) {
+            rows.push({
+              type: 'mod',
+              left: { no: start + ai + 1, text: a[start + ai] },
+              right: { no: start + bi + 1, text: b[start + bi] },
+            });
+            added += 1;
+            removed += 1;
+          } else if (ai !== undefined) {
+            rows.push({ type: 'del', left: { no: start + ai + 1, text: a[start + ai] }, right: null });
+            removed += 1;
+          } else {
+            rows.push({ type: 'add', left: null, right: { no: start + bi + 1, text: b[start + bi] } });
+            added += 1;
+          }
+        }
+      }
+      for (let i = 0; i < a.length - endA; i += 1) {
+        rows.push({
+          type: 'ctx',
+          left: { no: endA + i + 1, text: a[endA + i] },
+          right: { no: endB + i + 1, text: b[endB + i] },
+        });
+      }
+      return { rows, added, removed, truncated: mid.truncated };
+    }
+
+    function docBuildDiffView(before, after) {
+      const diff = docDiffRows(before, after);
+      const box = document.createElement('div');
+      box.className = 'dw-diffview';
+      const head = document.createElement('div');
+      head.className = 'dw-diff-head';
+      const leftTitle = document.createElement('span');
+      leftTitle.textContent = t('doc.diff.base');
+      const rightTitle = document.createElement('span');
+      rightTitle.textContent = t('doc.diff.current');
+      head.append(leftTitle, rightTitle);
+      box.appendChild(head);
+      if (diff.truncated) {
+        const note = document.createElement('div');
+        note.className = 'dw-diff-note';
+        note.textContent = t('doc.diff.truncated');
+        box.appendChild(note);
+      }
+      const changed = diff.rows.some(row => row.type !== 'ctx');
+      if (!changed) {
+        const empty = document.createElement('div');
+        empty.className = 'dw-diff-empty';
+        empty.textContent = t('doc.diff.empty');
+        box.appendChild(empty);
+        return { box, diff, changed };
+      }
+      const body = document.createElement('div');
+      diff.rows.forEach((row) => {
+        const line = document.createElement('div');
+        line.className = 'dw-diff-row ' + row.type;
+        const mkNo = (side) => {
+          const el = document.createElement('span');
+          el.className = 'dw-ln ' + side;
+          el.textContent = row[side] ? String(row[side].no) : '';
+          return el;
+        };
+        const mkCode = (side) => {
+          const el = document.createElement('span');
+          el.className = 'dw-code ' + side + (row[side] ? '' : ' empty');
+          el.textContent = row[side] ? row[side].text : '';
+          return el;
+        };
+        line.append(mkNo('left'), mkCode('left'), mkNo('right'), mkCode('right'));
+        body.appendChild(line);
+      });
+      box.appendChild(body);
+      return { box, diff, changed };
+    }
+
+    function docDiffSource(session) {
+      if (session.editorMode === 'json') {
+        return {
+          before: JSON.stringify(session.basePayload, null, 2),
+          after: session.draftText,
+        };
+      }
+      const before = docBodyTextOf(session.basePayload, session.pointer);
+      const after = docBodyTextOf(session.draftPayload, session.pointer);
+      return { before: before == null ? '' : before, after: after == null ? '' : after };
+    }
+
+    function docRenderDiffPane(session) {
+      const host = document.getElementById('docDiffView');
+      if (!host) return;
+      host.replaceChildren();
+      const src = docDiffSource(session);
+      const { box, diff, changed } = docBuildDiffView(src.before, src.after);
+      host.appendChild(box);
+      const stats = document.getElementById('docDiffStats');
+      if (stats) {
+        stats.textContent = changed
+          ? t('doc.diff.added', { n: diff.added }) + '  ' + t('doc.diff.removed', { n: diff.removed })
+          : t('doc.diff.empty');
+      }
+      const label = document.getElementById('docDiffLabel');
+      if (label) {
+        label.textContent = session.editorMode === 'json'
+          ? 'JSON · ' + t('doc.diff.plain') : t('doc.diff.plain');
+      }
+    }
+
+    // 审阅项：文档操作直接用 split diff 取代原始 JSON 行；其他字段差异折叠在下方。
+    const docOriginalTxReviewItem = txReviewItem;
+    function docReviewItem(op) {
+      const meta = txOpMeta.get(op) || {};
+      const item = document.createElement('div');
+      item.className = 'review-item dw-review-item';
+      const head = document.createElement('div');
+      head.className = 'review-item-head';
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = txOperationKind(op);
+      const title = document.createElement('strong');
+      title.textContent = txOperationSummary(op);
+      head.append(badge, title);
+      if (meta.source) {
+        const source = document.createElement('span');
+        source.className = 'badge';
+        source.textContent = meta.source;
+        head.appendChild(source);
+      }
+      const plain = document.createElement('span');
+      plain.className = 'badge';
+      plain.textContent = t('doc.diff.plain');
+      head.appendChild(plain);
+      item.appendChild(head);
+
+      const metaRow = document.createElement('div');
+      metaRow.className = 'dw-review-meta';
+      const target = document.createElement('span');
+      target.textContent = '#' + op.id + ' · ' + (meta.pointer || DOC_POINTER_DEFAULT);
+      metaRow.appendChild(target);
+      item.appendChild(metaRow);
+
+      const before = typeof meta.bodyBefore === 'string' ? meta.bodyBefore : '';
+      const after = typeof meta.bodyAfter === 'string' ? meta.bodyAfter : '';
+      const { box, diff, changed } = docBuildDiffView(before, after);
+      if (changed) {
+        const addStat = document.createElement('span');
+        addStat.className = 'dw-review-stat add';
+        addStat.textContent = t('doc.diff.added', { n: diff.added });
+        const delStat = document.createElement('span');
+        delStat.className = 'dw-review-stat del';
+        delStat.textContent = t('doc.diff.removed', { n: diff.removed });
+        metaRow.append(addStat, delStat);
+        item.appendChild(box);
+        // 长文档默认把第一处变更滚进视野：先看改了哪里，而不是从头看一遍未变的正文。
+        setTimeout(() => {
+          const first = box.querySelector('.dw-diff-row.add, .dw-diff-row.del, .dw-diff-row.mod');
+          if (first && first.isConnected) first.scrollIntoView({ block: 'center' });
+        }, 30);
+      } else {
+        const note = document.createElement('p');
+        note.className = 'nav-section-hint';
+        note.textContent = t('doc.review.noDiff');
+        item.appendChild(note);
+      }
+
+      const lines = payloadDiffLines(meta.before, op.payload);
+      if (lines.length) {
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = t('doc.review.fieldDiff');
+        summary.style.cssText = 'cursor:pointer;font-size:11px;color:var(--text-muted);margin:6px 0';
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'max-height:220px;overflow:auto';
+        lines.forEach((line) => {
+          const span = document.createElement('span');
+          span.style.display = 'block';
+          span.style.color = line.sign === '-' ? 'var(--danger)' : 'var(--success)';
+          span.textContent = line.sign + ' ' + line.text;
+          pre.appendChild(span);
+        });
+        details.append(summary, pre);
+        item.appendChild(details);
+      }
+      return item;
+    }
+    txReviewItem = function (op) {
+      if (op.op === 'updatePayload' && (txOpMeta.get(op) || {}).docSessionId) return docReviewItem(op);
+      return docOriginalTxReviewItem(op);
+    };
+
+    // ---------- 接线 ----------
+    function setupDocWorkspace() {
+      const editor = document.getElementById('docEditor');
+      if (!editor) return;
+      editor.addEventListener('input', docOnEditorInput);
+      editor.addEventListener('scroll', () => {
+        const gutter = document.getElementById('docGutter');
+        if (gutter) gutter.scrollTop = editor.scrollTop;
+      });
+      ['keyup', 'click', 'select'].forEach((name) => editor.addEventListener(name, docUpdateCursor));
+      editor.addEventListener('compositionstart', () => {
+        const session = docActive();
+        if (session) session.composing = true;
+      });
+      editor.addEventListener('compositionend', () => {
+        const session = docActive();
+        if (!session) return;
+        session.composing = false;
+        docOnEditorInput();
+        docPushHistoryNow(session);
+      });
+      editor.addEventListener('keydown', (event) => {
+        const mod = event.ctrlKey || event.metaKey;
+        if (!mod) return;
+        const key = event.key.toLowerCase();
+        if (key === 'z') { event.preventDefault(); if (event.shiftKey) docRedo(); else docUndo(); }
+        else if (key === 'y') { event.preventDefault(); docRedo(); }
+        else if (key === 's') { event.preventDefault(); event.stopPropagation(); docStage(); }
+        else if (key === 'f') { event.preventDefault(); docToggleFind(true); }
+      });
+
+      const bind = (id, handler) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('click', handler);
+      };
+      bind('docModeBody', () => docSetEditorMode('body'));
+      bind('docModeJson', () => docSetEditorMode('json'));
+      bind('docStageBtn', () => docStage());
+      bind('docUnstageBtn', docUnstage);
+      bind('docRevertBtn', docRevert);
+      bind('docExportBtn', docExport);
+      bind('docFormatJson', docFormatJson);
+      bind('docCreateBody', docCreateBody);
+      bind('docMappingBtn', docOpenMapping);
+      bind('docSourcePath', docOpenMapping);
+      bind('docSideReview', () => { renderTxReview(); docOpenOverlay('txReviewOverlay'); });
+      bind('docSideToggle', () => {
+        const side = document.getElementById('docSideList');
+        if (side) side.classList.toggle('open');
+      });
+      bind('docOpenFirst', () => {
+        const side = document.getElementById('docSideList');
+        if (side) side.classList.add('open');
+        docRender();
+      });
+      bind('docFindToggle', () => docToggleFind());
+      bind('docFindClose', () => docToggleFind(false));
+      bind('docFindNext', () => docFindStep(1));
+      bind('docFindPrev', () => docFindStep(-1));
+      bind('docReplaceOne', docReplaceOne);
+      bind('docReplaceAll', docReplaceAll);
+      bind('docBannerAction', () => {
+        const session = docActive();
+        const action = document.getElementById('docBannerAction');
+        if (!session || !action) return;
+        if (action.dataset.docBannerAction === 'conflict') docLoadConflict(session);
+        else if (action.dataset.docBannerAction === 'confirm-outcome') docConfirmOutcome(session);
+      });
+
+      document.querySelectorAll('[data-doc-view]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          docViewMode = btn.dataset.docView;
+          docRender();
+          if (docViewMode === 'diff') {
+            const host = document.getElementById('docDiffView');
+            const first = host && host.querySelector('.dw-diff-row.add, .dw-diff-row.del, .dw-diff-row.mod');
+            if (first && first.isConnected) first.scrollIntoView({ block: 'center' });
+          }
+        });
+      });
+      const format = document.getElementById('docFormat');
+      if (format) {
+        format.addEventListener('change', () => {
+          const session = docActive();
+          if (!session) return;
+          session.format = format.value === 'text' ? 'text' : 'markdown';
+          docRender();
+          docPersistDraft(session);
+        });
+      }
+      const search = document.getElementById('docListSearch');
+      if (search) {
+        search.addEventListener('input', () => {
+          docListFilter = search.value;
+          docRenderList();
+        });
+      }
+      const findInput = document.getElementById('docFindInput');
+      if (findInput) {
+        findInput.addEventListener('input', () => docRefreshFind());
+        findInput.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') { event.preventDefault(); docFindStep(event.shiftKey ? -1 : 1); }
+          else if (event.key === 'Escape') { event.preventDefault(); docToggleFind(false); }
+        });
+      }
+
+      // 关闭保护：三选，替代内嵌 webview 不支持的原生 confirm
+      bind('docCloseCancel', () => { docPendingCloseId = null; docCloseOverlay('docCloseOverlay'); });
+      bind('docCloseKeepDraft', () => {
+        const session = docById(docPendingCloseId);
+        if (session) { docFlushPersist(); docPersistDraft(session); }
+        docCloseOverlay('docCloseOverlay');
+        if (docPendingCloseId) docFinalizeClose(docPendingCloseId);
+        docPendingCloseId = null;
+      });
+      bind('docCloseDiscard', () => {
+        const session = docById(docPendingCloseId);
+        if (session && docDiscardChanges(session) === false) return;
+        docCloseOverlay('docCloseOverlay');
+        if (docPendingCloseId) docFinalizeClose(docPendingCloseId);
+        docPendingCloseId = null;
+      });
+      bind('docMappingApply', docApplyMapping);
+      bind('docMappingCancel', () => docCloseOverlay('docMappingOverlay'));
+      bind('docMappingClose', () => docCloseOverlay('docMappingOverlay'));
+      bind('docMergeCombine', () => docResolveMerge('combine'));
+      bind('docMergeReplace', () => docResolveMerge('replace'));
+      bind('docMergeCancel', () => { docMergeTarget = null; docCloseOverlay('docMergeOverlay'); });
+      bind('docConflictClose', () => { docConflictSessionId = null; docCloseOverlay('docConflictOverlay'); });
+      bind('docConflictKeepLocal', () => { docConflictSessionId = null; docCloseOverlay('docConflictOverlay'); });
+      bind('docConflictRebase', docRebaseToRemote);
+
+      // 节点详情抽屉入口：覆盖打开函数以记住当前节点（不改原函数行为）
+      const originalOpenNodeDrawer = openNodeDrawer;
+      openNodeDrawer = function (node) {
+        docDrawerNode = node || null;
+        const btn = document.getElementById('drawerOpenDocBtn');
+        if (btn) btn.disabled = !node;
+        return originalOpenNodeDrawer(node);
+      };
+      bind('drawerOpenDocBtn', () => {
+        if (!docDrawerNode) { showToast(t('doc.toast.noDoc')); return; }
+        docOpen(docDrawerNode, 'node');
+      });
+
+      // 向量命中：捕获最近一次结果，供左侧列表按同一范围展示
+      const originalRenderVectorResults = renderVectorResults;
+      renderVectorResults = function (data, topK) {
+        docLastVectorHits = (data && Array.isArray(data.hits)) ? data.hits : [];
+        return originalRenderVectorResults(data, topK);
+      };
+
+      // 全局快捷键：仅文档工作区激活、且没有弹层时接管
+      document.addEventListener('keydown', (event) => {
+        if (event.defaultPrevented) return;
+        const activeTab = document.querySelector('.tabs-bar .tab.active');
+        if (!activeTab || activeTab.dataset.tab !== 'docPane') return;
+        const overlayOpen = [...document.querySelectorAll('.import-overlay')].some(el => !el.hidden);
+        if (overlayOpen) return;
+        const mod = event.ctrlKey || event.metaKey;
+        if (mod && event.key.toLowerCase() === 's') { event.preventDefault(); docStage(); }
+        else if (mod && event.key.toLowerCase() === 'f') { event.preventDefault(); docToggleFind(true); }
+        else if (event.key === 'Escape') {
+          const bar = document.getElementById('docFindBar');
+          if (bar && !bar.hidden) { event.preventDefault(); docToggleFind(false); }
+        }
+      });
+
+      // 离开页面：覆盖所有未提交会话，不只当前标签
+      window.addEventListener('beforeunload', (event) => {
+        const dirty = docSessions.some(s => docIsDirty(s));
+        const pending = txOperations.some(op => {
+          const meta = txOpMeta.get(op);
+          return !!(meta && meta.docSessionId);
+        });
+        if (!dirty && !pending) return;
+        event.preventDefault();
+        event.returnValue = '';
+      });
+
+      docRender();
+    }
+
+    // ---------- 测试钩子（只读观测 + 显式状态注入；生产 UI 不暴露模拟状态入口） ----------
+    window.__docWorkspace = {
+      sessions: () => docSessions.map(s => ({
+        sessionId: s.sessionId, nodeId: s.nodeId, pointer: s.pointer,
+        content: docContentState(s), access: s.access, submit: s.submit,
+        dirty: docIsDirty(s), version: s.version, restored: s.restored,
+      })),
+      active: () => (docActive() ? docActive().sessionId : null),
+      open: (node) => docOpen(node, 'node'),
+      forceAccess: (state) => {
+        if (!window.__TRIVIUM_SELFTEST__) return false;
+        const session = docActive();
+        if (!session) return false;
+        session.access = state;
+        docRender();
+        return true;
+      },
+      setStorage: (impl) => {
+        if (!window.__TRIVIUM_SELFTEST__) return false;
+        docStorage = impl || docStorage;
+        window.__docTestAllowDrafts = true;
+        return true;
+      },
+      state: () => ({
+        sessions: docSessions.length,
+        queue: txOperations.length,
+        docQueue: txOperations.filter(op => {
+          const meta = txOpMeta.get(op);
+          return !!(meta && meta.docSessionId);
+        }).length,
+        commitKey: txPendingAttempt && txPendingAttempt.key,
+      }),
+    };
+
+    if (!consoleEmbedded) setupDocWorkspace();
+
+    window.TriviumConsole = Object.freeze({
+      async mount(options) {
+        if (!consoleEmbedded || consoleMounted || consoleDisposed || !consoleStorageId) {
+          throw new Error('控制台挂载状态或存储标识无效 (Invalid mount state or storage identity)');
+        }
+        if (!options || typeof options.detach !== 'function') throw new Error('需要宿主 detach 回调 (Host detach callback required)');
+        consoleMounted = true;
+        consoleClient = TriviumConsoleClient.create(options);
+        try {
+          const info = await consoleClient.call({ operation: 'info' });
+          if (consoleDisposed) throw new Error('控制台已卸载 (Console detached)');
+          initializeConsolePage();
+          setupDocWorkspace();
+          // 嵌入式界面写入统一进入审阅，普通 TQL 写入继续使用明确的写入开关。
+          const tx = document.getElementById('txModeCheck');
+          tx.checked = true; tx.disabled = true;
+          const profile = document.getElementById('profileCheck');
+          profile.checked = false; profile.disabled = true;
+          const writable = !info.readOnly;
+          document.getElementById('mutationCheck').disabled = !writable;
+          return info;
+        } catch (error) {
+          consoleDisposed = true;
+          await consoleClient.dispose();
+          throw error;
+        }
+      },
+      pendingTransaction() { return txPendingAttempt ? JSON.parse(txPendingAttempt.body) : null; },
+      async dispose({ discard = false } = {}) {
+        if (!discard && (txOperations.length || docSessions.some(docIsDirty))) {
+          throw new Error('请先处理或导出草稿与原事务 (Resolve or export drafts and original transaction first)');
+        }
+        consoleDisposed = true;
+        clearInterval(healthTimer);
+        __queryAbort?.abort();
+        docSessions.forEach(docPersistDraft);
+        await consoleClient?.dispose();
+      },
+    });
+    window.addEventListener('pagehide', () => {
+      if (consoleEmbedded) window.TriviumConsole.dispose({ discard: true }).catch(() => {});
+    });
   </script>
   <script>
     // ==========================================

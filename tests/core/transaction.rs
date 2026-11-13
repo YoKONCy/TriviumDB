@@ -283,8 +283,8 @@ fn 事务批内唯一冲突在_wal_前拒绝() {
         tx.commit()
     };
     assert!(matches!(
-        result,
-        Err(TriviumError::UniqueConstraintViolation { .. })
+        result.unwrap_err().underlying(),
+        TriviumError::UniqueConstraintViolation { .. }
     ));
     assert_eq!(db.node_count().unwrap(), 0);
     assert_eq!(
@@ -319,12 +319,14 @@ fn 条件更新与原子批量删除保持稳定失败语义() {
             "version",
             &serde_json::json!(1),
             serde_json::json!(3)
-        ),
-        Err(TriviumError::ConditionalUpdateNotMatched { id }) if id == first
+        ).unwrap_err().underlying(),
+        TriviumError::ConditionalUpdateNotMatched { id } if *id == first
     ));
     assert!(matches!(
-        db.delete_many_atomic(&[first, 999_999]),
-        Err(TriviumError::NodeNotFound(999_999))
+        db.delete_many_atomic(&[first, 999_999])
+            .unwrap_err()
+            .underlying(),
+        TriviumError::NodeNotFound(999_999)
     ));
     assert!(db.contains(first).unwrap());
     assert!(db.contains(second).unwrap());

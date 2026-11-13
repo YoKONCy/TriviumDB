@@ -388,13 +388,13 @@ fn 容量规划_ReserveNodes零值与溢出均防呆拒绝() {
     cleanup(&path);
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert!(matches!(
-        db.reserve_nodes(0),
-        Err(TriviumError::InvalidInput(_))
+        db.reserve_nodes(0).unwrap_err().underlying(),
+        TriviumError::InvalidInput(_)
     ));
     assert!(matches!(
-        db.reserve_nodes(usize::MAX),
-        Err(TriviumError::CapacityAllocationFailed { .. })
-            | Err(TriviumError::CapacityReservationRejected { .. })
+        db.reserve_nodes(usize::MAX).unwrap_err().underlying(),
+        TriviumError::CapacityAllocationFailed { .. }
+            | TriviumError::CapacityReservationRejected { .. }
     ));
     assert_eq!(db.node_count().unwrap(), 0);
     drop(db);
@@ -414,7 +414,7 @@ fn 容量规划_事务预留拒绝前后WAL与代际完全不变() {
     tx.insert(&[1.0, 0.0, 0.0, 0.0], json!({"id": 1}));
     let error = db.commit_tx(tx).unwrap_err();
     assert!(matches!(
-        error,
+        error.underlying(),
         TriviumError::CapacityReservationRejected { .. }
     ));
     let wal_after = std::fs::metadata(format!("{path}.wal"))
@@ -443,16 +443,22 @@ fn 容量规划_更新与图边增长在WAL前统一拒绝() {
     let before = db.storage_write_stats();
 
     assert!(matches!(
-        db.update_payload(first, json!({"name": "blocked"})),
-        Err(TriviumError::CapacityReservationRejected { .. })
+        db.update_payload(first, json!({"name": "blocked"}))
+            .unwrap_err()
+            .underlying(),
+        TriviumError::CapacityReservationRejected { .. }
     ));
     assert!(matches!(
-        db.update_vector(first, &[0.0, 0.0, 1.0, 0.0]),
-        Err(TriviumError::CapacityReservationRejected { .. })
+        db.update_vector(first, &[0.0, 0.0, 1.0, 0.0])
+            .unwrap_err()
+            .underlying(),
+        TriviumError::CapacityReservationRejected { .. }
     ));
     assert!(matches!(
-        db.link(first, second, "blocked", 1.0),
-        Err(TriviumError::CapacityReservationRejected { .. })
+        db.link(first, second, "blocked", 1.0)
+            .unwrap_err()
+            .underlying(),
+        TriviumError::CapacityReservationRejected { .. }
     ));
     assert_eq!(db.storage_write_stats(), before);
     assert!(db.get_edge(first, second, "blocked").unwrap().is_none());

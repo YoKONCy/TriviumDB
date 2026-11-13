@@ -1,0 +1,2 @@
+# 冻结复现资料以原始内容哈希验收，保留原始换行及空白。
+evaluation/** -whitespace

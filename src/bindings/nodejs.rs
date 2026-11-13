@@ -8,12 +8,92 @@
 pub mod nodejs {
     use crate::bindings::node_json::NodeJson;
     use crate::database::Database as GenericDatabase;
-    use napi::bindgen_prelude::{Function, This};
-    use napi::{Env, JsObject};
+    use napi::bindgen_prelude::{Either, Function, This};
+    use napi::{Env, JsObject, JsUnknown, ValueType};
     use napi_derive::napi;
+
+    #[napi(js_name = "__callArgumentInfo")]
+    pub fn call_argument_info(
+        env: Env,
+        owner: String,
+        operation: String,
+        field: String,
+        kind: String,
+    ) -> napi::Result<NodeJson> {
+        let info = crate::sdk::call_argument_info(&owner, &operation, &field, &kind)
+            .map_err(|error| to_napi_error(env, error))?;
+        node_json_value(info).map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
 
     fn node_json_value(value: impl serde::Serialize) -> serde_json::Result<NodeJson> {
         serde_json::to_value(value).map(NodeJson)
+    }
+
+    #[napi(js_name = "RequestContext")]
+    pub struct JsRequestContext {
+        inner: crate::sdk::RequestContext,
+    }
+
+    #[napi]
+    impl JsRequestContext {
+        #[napi(constructor)]
+        pub fn new(
+            env: Env,
+            request_id: JsUnknown,
+            timeout_ms: Option<Either<f64, JsUnknown>>,
+        ) -> napi::Result<Self> {
+            let request_id = read_string(env, request_id, "requestId")?;
+            let timeout_ms = parse_search_usize(env, timeout_ms, 0.0, "timeoutMs", false)?;
+            crate::sdk::RequestContext::with_timeout(
+                &request_id,
+                std::time::Duration::from_millis(timeout_ms as u64),
+                false,
+            )
+            .map(|inner| Self { inner })
+            .map_err(|error| to_napi_error(env, error))
+        }
+
+        #[napi(getter)]
+        pub fn request_id(&self) -> String {
+            self.inner.request_id().to_owned()
+        }
+        #[napi]
+        pub fn cancel(&self) {
+            self.inner.cancel();
+        }
+        #[napi]
+        pub fn check(&self, env: Env) -> napi::Result<()> {
+            self.inner
+                .control()
+                .check()
+                .map_err(|error| to_napi_error(env, error))
+        }
+    }
+
+    #[napi(js_name = "__invokeRequest")]
+    pub fn invoke_request(
+        env: Env,
+        context: &JsRequestContext,
+        owner: String,
+        operation: String,
+        callback: Function<(), JsUnknown>,
+    ) -> napi::Result<JsUnknown> {
+        let admission = |error| {
+            to_napi_error(
+                env,
+                crate::sdk::request_admission(error, &owner, &operation),
+            )
+        };
+        let _scope = context.inner.enter().map_err(admission)?;
+        if operation != "console_request" {
+            crate::request::check_current().map_err(admission)?;
+        }
+        callback.call(())
+    }
+
+    #[napi(js_name = "__requestOperation")]
+    pub fn request_operation(owner: String, operation: String) -> bool {
+        crate::sdk::request_operation(&owner, &operation)
     }
 
     /// 会话只保存策略与取消状态，数据库仍由宿主持有。
@@ -25,10 +105,11 @@ pub mod nodejs {
     #[napi]
     impl JsConsoleSession {
         #[napi(constructor)]
-        pub fn new(env: Env, options_json: Option<String>) -> napi::Result<Self> {
-            crate::ConsoleSession::from_json(options_json.as_deref().unwrap_or("{}"))
+        pub fn new(env: Env, options_json: Option<JsUnknown>) -> napi::Result<Self> {
+            let options_json = constructor_string(env, options_json, "{}", "optionsJson")?;
+            crate::ConsoleSession::from_json(&options_json)
                 .map(|inner| Self { inner })
-                .map_err(|error| to_napi_error(env, error))
+                .map_err(|error| to_napi_error(env, error.at_field("optionsJson")))
         }
 
         #[napi]
@@ -40,8 +121,13 @@ pub mod nodejs {
             self.inner.is_detached()
         }
         #[napi]
-        pub fn cancel(&self, request_id: String) -> bool {
-            self.inner.cancel(&request_id)
+        pub fn is_drained(&self) -> bool {
+            self.inner.is_drained()
+        }
+        #[napi]
+        pub fn cancel(&self, env: Env, request_id: JsUnknown) -> napi::Result<bool> {
+            let request_id = read_string(env, request_id, "requestId")?;
+            Ok(self.inner.cancel(&request_id))
         }
     }
 
@@ -182,32 +268,105 @@ pub mod nodejs {
         }
     }
 
-    fn parse_runtime(runtime: Option<JsObject>) -> napi::Result<crate::resources::ResourceRuntime> {
-        Ok(if let Some(object) = runtime {
-            if !object.has_own_property("__tdbResourceRuntime")? {
-                return Err(napi::Error::new(
-                    napi::Status::InvalidArg,
-                    "runtime 必须是有效的 ResourceRuntime 句柄",
-                ));
+    fn parse_runtime(
+        env: Env,
+        runtime: Option<JsUnknown>,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> napi::Result<crate::resources::ResourceRuntime> {
+        let invalid = || {
+            let error = crate::TriviumError::InvalidInput(
+                "runtime 必须是有效的 ResourceRuntime 句柄 (runtime must contain a valid ResourceRuntime handle)".into(),
+            ).at_field("runtime");
+            to_napi_error(
+                env,
+                match write {
+                    Some(write) => error.with_write_info(write),
+                    None => error,
+                },
+            )
+        };
+        Ok(if let Some(value) = runtime {
+            if value.get_type()? != ValueType::Object {
+                return Err(invalid());
             }
-            let handle: napi::bindgen_prelude::External<crate::resources::ResourceRuntime> =
-                object.get_named_property("__tdbResourceRuntime")?;
+            let object = JsObject::try_from(value)?;
+            if !object.has_own_property("__tdbResourceRuntime")? {
+                return Err(invalid());
+            }
+            let handle: napi::bindgen_prelude::External<crate::resources::ResourceRuntime> = object
+                .get_named_property("__tdbResourceRuntime")
+                .map_err(|error| {
+                    // 已知句柄类型拒绝附加字段，getter 或 Proxy 的宿主异常原样传播。
+                    if error.status == napi::Status::InvalidArg {
+                        invalid()
+                    } else {
+                        error
+                    }
+                })?;
             (*handle).clone()
         } else {
             crate::resources::ResourceRuntime::shared_default()
         })
     }
 
-    fn to_napi_error(env: Env, error: crate::error::TriviumError) -> napi::Error {
-        let code = error.code();
-        let details = node_tql_scalar_json(error.details());
+    pub(crate) fn to_napi_error(env: Env, error: crate::error::TriviumError) -> napi::Error {
+        let mut info = error.info();
+        if let Some(
+            crate::error::ErrorTarget::Field { field }
+            | crate::error::ErrorTarget::FieldReference { field, .. },
+        ) = &mut info.target
+        {
+            *field = match field.as_str() {
+                "min_score" => "minScore",
+                "request_id" => "requestId",
+                "timeout_ms" => "timeoutMs",
+                "teleport_alpha" => "teleportAlpha",
+                "fista_lambda" => "fistaLambda",
+                "fista_threshold" => "fistaThreshold",
+                "dpp_quality_weight" => "dppQualityWeight",
+                "text_boost" => "textBoost",
+                "min_edge_weight" => "minEdgeWeight",
+                "diffusion_bias" => "diffusionBias",
+                "hybrid_alpha" => "hybridAlpha",
+                "max_results" => "maxResults",
+                _ => field.as_str(),
+            }
+            .to_owned();
+        }
+        let details = crate::sdk::json_error_details(info.details);
         let result = env
-            .create_error(napi::Error::from_reason(format!("{code}: {error}")))
+            .create_error(napi::Error::from_reason(info.message))
             .and_then(|mut object| {
-                object.set_named_property("code", code)?;
+                object.set_named_property("schema_version", info.schema_version)?;
+                object.set_named_property("code", info.code)?;
                 object.set_named_property("details", details.clone())?;
+                if let Some(stage) = info.stage {
+                    object.set_named_property("stage", stage.as_str())?;
+                }
+                if let Some(target) = info.target {
+                    let target = serde_json::to_value(target)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    object.set_named_property("target", target)?;
+                }
+                if let Some(write) = info.write {
+                    let write = serde_json::to_value(write)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    object.set_named_property("write", write)?;
+                }
                 if let Some(fields) = details.as_object() {
                     for (name, value) in fields {
+                        if matches!(
+                            name.as_str(),
+                            "schema_version"
+                                | "code"
+                                | "message"
+                                | "details"
+                                | "stage"
+                                | "target"
+                                | "write"
+                        ) {
+                            continue;
+                        }
                         object.set_named_property(name, value.clone())?;
                     }
                 }
@@ -218,13 +377,33 @@ pub mod nodejs {
         }
     }
 
+    fn with_napi_write_info(
+        env: Env,
+        error: napi::Error,
+        write: crate::error::WriteErrorInfo,
+    ) -> napi::Error {
+        let result = napi::JsError::from(error)
+            .into_unknown(env)
+            .coerce_to_object()
+            .and_then(|mut object| {
+                let write = serde_json::to_value(write)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                object.set_named_property("write", write)?;
+                Ok(napi::Error::from(object.into_unknown()))
+            });
+        match result {
+            Ok(error) | Err(error) => error,
+        }
+    }
+
     #[napi]
     pub fn verify_snapshot(
         env: Env,
-        directory: String,
-        runtime: Option<JsObject>,
+        directory: JsUnknown,
+        runtime: Option<JsUnknown>,
     ) -> napi::Result<NodeJson> {
-        let runtime = parse_runtime(runtime)?;
+        let directory = read_string(env, directory, "directory")?;
+        let runtime = parse_runtime(env, runtime, None)?;
         let manifest = crate::storage::snapshot::verify_snapshot_with_runtime(&directory, &runtime)
             .map_err(|e| to_napi_error(env, e))?;
         node_json_value(manifest).map_err(|e| napi::Error::from_reason(e.to_string()))
@@ -233,11 +412,17 @@ pub mod nodejs {
     #[napi]
     pub fn restore_snapshot(
         env: Env,
-        source: String,
-        destination: String,
-        runtime: Option<JsObject>,
+        source: JsUnknown,
+        destination: JsUnknown,
+        runtime: Option<JsUnknown>,
     ) -> napi::Result<NodeJson> {
-        let runtime = parse_runtime(runtime)?;
+        let source = write_string(env, source, "source")?;
+        let destination = write_string(env, destination, "destination")?;
+        let runtime = parse_runtime(
+            env,
+            runtime,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )?;
         let manifest = crate::storage::snapshot::restore_snapshot_with_runtime(
             &source,
             &destination,
@@ -343,6 +528,7 @@ pub mod nodejs {
     }
 
     pub struct BatchSearchTask {
+        context: Option<crate::sdk::RequestContext>,
         backend: SearchBackendHandle,
         queries: Vec<Vec<f64>>,
         search_config: crate::database::SearchConfig,
@@ -354,6 +540,18 @@ pub mod nodejs {
         type JsValue = Vec<Vec<JsSearchHit>>;
 
         fn compute(&mut self) -> napi::Result<Self::Output> {
+            let _scope = match self
+                .context
+                .as_ref()
+                .map(crate::sdk::RequestContext::enter)
+                .transpose()
+            {
+                Ok(scope) => scope,
+                Err(error) => return Ok(Err(error)),
+            };
+            if let Err(error) = crate::request::check_current() {
+                return Ok(Err(error));
+            }
             Ok(match &self.backend {
                 SearchBackendHandle::F32(db) => {
                     let queries = self
@@ -380,11 +578,17 @@ pub mod nodejs {
                     let queries = self
                         .queries
                         .iter()
-                        .map(|query| {
+                        .enumerate()
+                        .map(|(row, query)| {
                             query
                                 .iter()
                                 .copied()
-                                .map(validate_u64_component)
+                                .enumerate()
+                                .map(|(column, value)| {
+                                    validate_u64_component(value).map_err(|error| {
+                                        error.at_field(&format!("/queryVectors/{row}/{column}"))
+                                    })
+                                })
                                 .collect::<crate::Result<Vec<_>>>()
                         })
                         .collect::<crate::Result<Vec<_>>>();
@@ -530,24 +734,13 @@ pub mod nodejs {
         pub truncated: bool,
     }
 
-    #[napi(object)]
-    pub struct JsReachabilityOptions {
-        pub min_depth: Option<f64>,
-        pub max_depth: Option<f64>,
-        pub labels: Option<Vec<String>>,
-        pub direction: Option<String>,
-        pub max_visited_nodes: Option<f64>,
-        pub max_results: Option<f64>,
-        pub max_edges: Option<f64>,
-    }
-
     /// 多个数据库共享的运行时资源配置，字节统计不等于进程 RSS。
     #[napi(object)]
     pub struct JsResourceLimits {
-        pub maintenance_memory_limit_mb: Option<f64>,
-        pub memory_limit_mb: Option<f64>,
-        pub max_threads: Option<f64>,
-        pub max_active_tasks: Option<f64>,
+        pub maintenance_memory_limit_mb: Option<Either<f64, JsUnknown>>,
+        pub memory_limit_mb: Option<Either<f64, JsUnknown>>,
+        pub max_threads: Option<Either<f64, JsUnknown>>,
+        pub max_active_tasks: Option<Either<f64, JsUnknown>>,
     }
 
     #[napi(js_name = "ResourceRuntime")]
@@ -561,43 +754,64 @@ pub mod nodejs {
         pub fn new(
             env: Env,
             mut this: napi::bindgen_prelude::This<JsObject>,
-            options: Option<JsResourceLimits>,
+            options: Option<JsUnknown>,
         ) -> napi::Result<Self> {
-            let options = options.unwrap_or(JsResourceLimits {
-                maintenance_memory_limit_mb: None,
-                memory_limit_mb: None,
-                max_threads: None,
-                max_active_tasks: None,
-            });
-            let memory_limit =
-                parse_safe_usize(env, options.memory_limit_mb.unwrap_or(0.0), "memoryLimitMb")?
-                    .checked_mul(1024 * 1024)
-                    .filter(|bytes| (*bytes as u128) <= 9_007_199_254_740_991)
-                    .ok_or_else(|| {
-                        napi::Error::from_reason("memoryLimitMb 换算后超过安全整数范围")
-                    })?;
+            let object = constructor_options(env, options)?;
+            let options = JsResourceLimits {
+                maintenance_memory_limit_mb: object.get("maintenanceMemoryLimitMb")?,
+                memory_limit_mb: object.get("memoryLimitMb")?,
+                max_threads: object.get("maxThreads")?,
+                max_active_tasks: object.get("maxActiveTasks")?,
+            };
+            let memory_limit = constructor_mib(
+                env,
+                parse_search_usize(env, options.memory_limit_mb, 0.0, "memoryLimitMb", false)?,
+                "memoryLimitMb",
+                9_007_199_254_740_991,
+            )?;
             let inner = crate::resources::ResourceRuntime::new(crate::resources::ResourceLimits {
                 memory_limit,
-                maintenance_memory_limit: parse_safe_usize(
+                maintenance_memory_limit: constructor_mib(
                     env,
-                    options.maintenance_memory_limit_mb.unwrap_or(0.0),
+                    parse_search_usize(
+                        env,
+                        options.maintenance_memory_limit_mb,
+                        0.0,
+                        "maintenanceMemoryLimitMb",
+                        false,
+                    )?,
                     "maintenanceMemoryLimitMb",
-                )?
-                .checked_mul(1024 * 1024)
-                .filter(|bytes| (*bytes as u128) <= 9_007_199_254_740_991)
-                .ok_or_else(|| napi::Error::from_reason("维护额度换算超过安全整数范围"))?,
-                max_threads: parse_safe_usize(
-                    env,
-                    options.max_threads.unwrap_or(0.0),
-                    "maxThreads",
+                    9_007_199_254_740_991,
                 )?,
-                max_active_tasks: parse_safe_usize(
+                max_threads: parse_search_usize(
                     env,
-                    options.max_active_tasks.unwrap_or(0.0),
+                    options.max_threads,
+                    0.0,
+                    "maxThreads",
+                    false,
+                )?,
+                max_active_tasks: parse_search_usize(
+                    env,
+                    options.max_active_tasks,
+                    0.0,
                     "maxActiveTasks",
+                    false,
                 )?,
             })
-            .map_err(|error| to_napi_error(env, error))?;
+            .map_err(|error| {
+                let error = match error.info().target {
+                    Some(crate::error::ErrorTarget::Field { field }) if field == "max_threads" => {
+                        error.at_field("maxThreads")
+                    }
+                    Some(crate::error::ErrorTarget::Field { field })
+                        if field == "maintenance_memory_limit" =>
+                    {
+                        error.at_field("maintenanceMemoryLimitMb")
+                    }
+                    _ => error,
+                };
+                to_napi_error(env, error)
+            })?;
             // 使用带类型标记的外部句柄，避免把其他原生类的指针误解为资源运行时。
             let handle = env.create_external(inner.clone(), None)?;
             this.define_properties(&[
@@ -613,64 +827,24 @@ pub mod nodejs {
         }
     }
 
-    /// 完整文本索引重建的节点正文与关键词。
-    #[napi(object)]
-    pub struct JsTextIndexDocument {
-        pub id: f64,
-        pub text: String,
-        pub keywords: Option<Vec<String>>,
-    }
-
     /// 数据库打开与容量规划配置。
     #[napi(object)]
     pub struct JsDatabaseOptions {
-        pub runtime: Option<JsObject>,
-        pub dim: Option<f64>,
-        pub dtype: Option<String>,
-        pub sync_mode: Option<String>,
-        pub storage_mode: Option<String>,
-        pub auto_build_quiver: Option<bool>,
-        pub load_text_index: Option<bool>,
-        pub expected_nodes: Option<f64>,
-        pub memory_limit_mb: Option<f64>,
-        pub payload_cache_mb: Option<f64>,
-        pub payload_cache_entry_mb: Option<f64>,
-        pub access_mode: Option<String>,
-        pub missing_index_policy: Option<String>,
-        pub max_query_rows: Option<f64>,
-        pub row_overflow: Option<String>,
-    }
-
-    /// 高级管线专用配置结构
-    #[napi(object)]
-    pub struct JsSearchConfig {
-        /// 保留原始 JS Number，在转换为整数前检查有限性、整数性和范围。
-        pub top_k: Option<f64>,
-        pub recall_k: Option<f64>,
-        pub rerank_k: Option<f64>,
-        pub expand_depth: Option<f64>,
-        pub min_score: Option<f64>,
-        pub teleport_alpha: Option<f64>,
-        pub enable_advanced_pipeline: Option<bool>,
-        pub enable_sparse_residual: Option<bool>,
-        pub fista_lambda: Option<f64>,
-        pub fista_threshold: Option<f64>,
-        pub enable_dpp: Option<bool>,
-        pub dpp_quality_weight: Option<f64>,
-        pub enable_refractory_fatigue: Option<bool>,
-        pub enable_text_hybrid_search: Option<bool>,
-        pub text_boost: Option<f64>,
-        pub force_brute_force: Option<bool>,
-        pub custom_query_text: Option<String>,
-        /// 类 MongoDB JSON Payload 过滤器，在向量召回阶段生效。
-        pub payload_filter: Option<NodeJson>,
-        /// CCSA: 扩散方向偏置向量，让图扩散优先沿语义相近的节点方向传播
-        pub diffusion_bias: Option<Vec<f64>>,
-        /// 图扩散允许的边标签；空数组表示禁止扩散。
-        pub expand_labels: Option<Vec<String>>,
-        pub max_edges_per_node: Option<f64>,
-        pub min_edge_weight: Option<f64>,
-        pub edge_direction: Option<String>,
+        pub runtime: Option<JsUnknown>,
+        pub dim: Option<Either<f64, JsUnknown>>,
+        pub dtype: Option<JsUnknown>,
+        pub sync_mode: Option<JsUnknown>,
+        pub storage_mode: Option<JsUnknown>,
+        pub auto_build_quiver: Option<Either<bool, JsUnknown>>,
+        pub load_text_index: Option<Either<bool, JsUnknown>>,
+        pub expected_nodes: Option<Either<f64, JsUnknown>>,
+        pub memory_limit_mb: Option<Either<f64, JsUnknown>>,
+        pub payload_cache_mb: Option<Either<f64, JsUnknown>>,
+        pub payload_cache_entry_mb: Option<Either<f64, JsUnknown>>,
+        pub access_mode: Option<JsUnknown>,
+        pub missing_index_policy: Option<JsUnknown>,
+        pub max_query_rows: Option<Either<f64, JsUnknown>>,
+        pub row_overflow: Option<JsUnknown>,
     }
 
     /// 节点关系边
@@ -775,20 +949,529 @@ pub mod nodejs {
     }
 
     fn parse_safe_usize(env: Env, value: f64, name: &str) -> napi::Result<usize> {
+        validate_safe_usize(value, name).map_err(|error| to_napi_error(env, error))
+    }
+
+    fn validate_safe_usize(value: f64, name: &str) -> crate::Result<usize> {
         if !value.is_finite()
             || value < 0.0
             || value.fract() != 0.0
             || value > 9_007_199_254_740_991.0
             || value > usize::MAX as f64
         {
+            return Err(crate::TriviumError::InvalidInput(format!(
+                    "{name} 必须是 JavaScript 安全范围内的非负整数 ({name} must be a non-negative JavaScript safe integer)"
+                )).at_field(name));
+        }
+        Ok(value as usize)
+    }
+
+    fn parse_management_usize(
+        env: Env,
+        value: Either<f64, JsUnknown>,
+        field: &str,
+    ) -> napi::Result<usize> {
+        parse_usize_argument(
+            env,
+            value,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    fn parse_usize_argument(
+        env: Env,
+        value: Either<f64, JsUnknown>,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> napi::Result<usize> {
+        let parsed = match value {
+            Either::A(value) => validate_safe_usize(value, field),
+            Either::B(_) => Err(crate::TriviumError::InvalidInput(format!(
+                "参数必须是数值 (Argument must be a number): {field}"
+            ))
+            .at_field(field)),
+        };
+        parsed.map_err(|error| {
+            to_napi_error(
+                env,
+                match write {
+                    Some(write) => error.with_write_info(write),
+                    None => error,
+                },
+            )
+        })
+    }
+
+    fn parse_management_string(
+        env: Env,
+        value: Either<String, JsUnknown>,
+        field: &str,
+    ) -> napi::Result<String> {
+        parse_string_argument(
+            env,
+            value,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    fn parse_string_argument(
+        env: Env,
+        value: Either<String, JsUnknown>,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> napi::Result<String> {
+        match value {
+            Either::A(value) => Ok(value),
+            Either::B(_) => {
+                let error = crate::TriviumError::InvalidInput(format!(
+                    "参数必须是字符串 (Argument must be a string): {field}"
+                ))
+                .at_field(field);
+                Err(to_napi_error(
+                    env,
+                    match write {
+                        Some(write) => error.with_write_info(write),
+                        None => error,
+                    },
+                ))
+            }
+        }
+    }
+
+    fn invalid_constructor_field(env: Env, field: &str, reason: &str) -> napi::Error {
+        to_napi_error(
+            env,
+            crate::TriviumError::InvalidInput(reason.into()).at_field(field),
+        )
+    }
+
+    fn write_input_error(env: Env, field: &str, reason: &str) -> napi::Error {
+        argument_input_error(
+            env,
+            field,
+            reason,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    fn argument_input_error(
+        env: Env,
+        field: &str,
+        reason: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> napi::Error {
+        let input = crate::TriviumError::InvalidInput(reason.into()).at_field(field);
+        to_napi_error(
+            env,
+            match write {
+                Some(write) => input.with_write_info(write),
+                None => input,
+            },
+        )
+    }
+
+    fn write_number(env: Env, value: JsUnknown, field: &str) -> napi::Result<f64> {
+        number_value(
+            env,
+            value,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    fn read_number(env: Env, value: JsUnknown, field: &str) -> napi::Result<f64> {
+        number_value(env, value, field, None)
+    }
+
+    fn number_value(
+        env: Env,
+        value: JsUnknown,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> napi::Result<f64> {
+        if value.get_type()? != ValueType::Number {
+            return Err(argument_input_error(
+                env,
+                field,
+                "参数必须是数值 (Argument must be a number)",
+                write,
+            ));
+        }
+        napi::JsNumber::try_from(value)?.get_double()
+    }
+
+    fn write_id(env: Env, value: JsUnknown, field: &str) -> napi::Result<u64> {
+        let value = write_number(env, value, field)?;
+        validate_safe_usize(value, field)
+            .map(|value| value as u64)
+            .map_err(|error| {
+                to_napi_error(
+                    env,
+                    error.with_write_info(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+                )
+            })
+    }
+
+    fn raw_string(
+        env: Env,
+        value: JsUnknown,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> napi::Result<String> {
+        let parsed = if value.get_type()? == ValueType::String {
+            crate::bindings::node_json::string_from_js(value)
+        } else {
+            Err(napi::Error::new(
+                napi::Status::InvalidArg,
+                "参数必须是字符串 (Argument must be a string)",
+            ))
+        };
+        parsed.map_err(|error| {
+            if error.status != napi::Status::InvalidArg {
+                return error;
+            }
+            let input = crate::TriviumError::InvalidInput(error.reason).at_field(field);
+            to_napi_error(
+                env,
+                match write {
+                    Some(write) => input.with_write_info(write),
+                    None => input,
+                },
+            )
+        })
+    }
+
+    fn write_string(env: Env, value: JsUnknown, field: &str) -> napi::Result<String> {
+        raw_string(
+            env,
+            value,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+        )
+    }
+
+    fn write_array<T>(
+        env: Env,
+        value: JsUnknown,
+        field: &str,
+        parse: impl FnMut(Env, JsUnknown, &str) -> napi::Result<T>,
+    ) -> napi::Result<Vec<T>> {
+        array_value(
+            env,
+            value,
+            field,
+            Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+            parse,
+        )
+    }
+
+    fn read_array<T>(
+        env: Env,
+        value: JsUnknown,
+        field: &str,
+        parse: impl FnMut(Env, JsUnknown, &str) -> napi::Result<T>,
+    ) -> napi::Result<Vec<T>> {
+        array_value(env, value, field, None, parse)
+    }
+
+    fn array_value<T>(
+        env: Env,
+        value: JsUnknown,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+        mut parse: impl FnMut(Env, JsUnknown, &str) -> napi::Result<T>,
+    ) -> napi::Result<Vec<T>> {
+        let invalid = || {
+            argument_input_error(
+                env,
+                field,
+                "参数必须是数组 (Argument must be an array)",
+                write,
+            )
+        };
+        if value.get_type()? != ValueType::Object {
+            return Err(invalid());
+        }
+        let array = JsObject::try_from(value)?;
+        if !array.is_array()? {
+            return Err(invalid());
+        }
+        let mut result = Vec::new();
+        for index in 0..array.get_array_length()? {
+            let path = crate::sdk::field_member(field, &index.to_string());
+            let item = parse(env, array.get_element(index)?, &path)?;
+            result.try_reserve(1).map_err(|error| {
+                let error = crate::TriviumError::CapacityAllocationFailed {
+                    reason: format!(
+                        "参数缓冲分配失败 (Argument buffer allocation failed): {error}"
+                    ),
+                }
+                .at_field(&path);
+                to_napi_error(
+                    env,
+                    match write {
+                        Some(write) => error.with_write_info(write),
+                        None => error,
+                    },
+                )
+            })?;
+            result.push(item);
+        }
+        Ok(result)
+    }
+
+    fn write_json(env: Env, value: JsUnknown, field: &str) -> napi::Result<serde_json::Value> {
+        NodeJson::from_js_at(env, value, field).map(|value| value.0)
+    }
+
+    fn read_json(env: Env, value: JsUnknown, field: &str) -> napi::Result<serde_json::Value> {
+        NodeJson::from_js_field(env, value, field, None).map(|value| value.0)
+    }
+
+    fn read_id(env: Env, value: JsUnknown, field: &str) -> napi::Result<u64> {
+        validate_safe_usize(read_number(env, value, field)?, field)
+            .map(|value| value as u64)
+            .map_err(|error| to_napi_error(env, error))
+    }
+
+    fn read_string(env: Env, value: JsUnknown, field: &str) -> napi::Result<String> {
+        raw_string(env, value, field, None)
+    }
+
+    fn read_vector(env: Env, value: JsUnknown, field: &str, dtype: &str) -> napi::Result<Vec<f64>> {
+        read_array(env, value, field, |env, value, path| {
+            let number = read_number(env, value, path)?;
+            if dtype == "u64" {
+                validate_u64_component(number)
+                    .map_err(|error| to_napi_error(env, error.at_field(path)))?;
+            }
+            Ok(number)
+        })
+    }
+
+    fn argument_object(
+        env: Env,
+        value: JsUnknown,
+        field: &str,
+        write: Option<crate::error::WriteErrorInfo>,
+    ) -> napi::Result<JsObject> {
+        let invalid = || {
+            argument_input_error(
+                env,
+                field,
+                "参数必须是非数组对象 (Argument must be a non-array object)",
+                write,
+            )
+        };
+        if value.get_type()? != ValueType::Object {
+            return Err(invalid());
+        }
+        let object = JsObject::try_from(value)?;
+        if object.is_array()? {
+            return Err(invalid());
+        }
+        Ok(object)
+    }
+
+    fn optional_number(
+        env: Env,
+        value: Option<JsUnknown>,
+        default: f64,
+        field: &str,
+    ) -> napi::Result<f64> {
+        value
+            .map(|value| read_number(env, value, field))
+            .transpose()
+            .map(|value| value.unwrap_or(default))
+    }
+
+    fn optional_bool(
+        env: Env,
+        value: Option<JsUnknown>,
+        default: bool,
+        field: &str,
+    ) -> napi::Result<bool> {
+        value
+            .map(|value| {
+                if value.get_type()? != ValueType::Boolean {
+                    return Err(argument_input_error(
+                        env,
+                        field,
+                        "参数必须是布尔值 (Argument must be a boolean)",
+                        None,
+                    ));
+                }
+                napi::JsBoolean::try_from(value)?.get_value()
+            })
+            .transpose()
+            .map(|value| value.unwrap_or(default))
+    }
+
+    fn write_vector(
+        env: Env,
+        value: JsUnknown,
+        field: &str,
+        dtype: &str,
+    ) -> napi::Result<Vec<f64>> {
+        write_array(env, value, field, |env, value, path| {
+            let number = write_number(env, value, path)?;
+            if dtype == "u64" {
+                validate_u64_component(number).map_err(|error| {
+                    to_napi_error(
+                        env,
+                        error
+                            .at_field(path)
+                            .with_write_info(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+                    )
+                })?;
+            }
+            Ok(number)
+        })
+    }
+
+    fn constructor_options(env: Env, options: Option<JsUnknown>) -> napi::Result<JsObject> {
+        let Some(value) = options else {
+            return env.create_object();
+        };
+        let invalid = || {
+            invalid_constructor_field(
+                env,
+                "options",
+                "配置必须是非数组对象 (Options must be a non-array object)",
+            )
+        };
+        if value.get_type()? != ValueType::Object {
+            return Err(invalid());
+        }
+        let object = JsObject::try_from(value)?;
+        if object.is_array()? {
+            return Err(invalid());
+        }
+        Ok(object)
+    }
+
+    fn constructor_string(
+        env: Env,
+        value: Option<JsUnknown>,
+        default: &str,
+        field: &str,
+    ) -> napi::Result<String> {
+        match value {
+            Some(value) => raw_string(env, value, field, None),
+            None => Ok(default.into()),
+        }
+    }
+
+    fn constructor_bool(
+        env: Env,
+        value: Option<Either<bool, JsUnknown>>,
+        default: bool,
+        field: &str,
+    ) -> napi::Result<bool> {
+        match value {
+            None => Ok(default),
+            Some(Either::A(value)) => Ok(value),
+            Some(Either::B(_)) => Err(invalid_constructor_field(
+                env,
+                field,
+                "参数必须是布尔值 (Argument must be a boolean)",
+            )),
+        }
+    }
+
+    fn constructor_mib(
+        env: Env,
+        value: usize,
+        field: &str,
+        max_bytes: u128,
+    ) -> napi::Result<usize> {
+        value.checked_mul(1024 * 1024).filter(|bytes| (*bytes as u128) <= max_bytes).ok_or_else(|| {
+            invalid_constructor_field(env, field, "MiB 换算超出字节表示范围 (MiB conversion exceeds the byte representation range)")
+        })
+    }
+
+    fn parse_search_usize(
+        env: Env,
+        value: Option<Either<f64, JsUnknown>>,
+        default: f64,
+        field: &str,
+        positive: bool,
+    ) -> napi::Result<usize> {
+        let value = parse_usize_argument(env, value.unwrap_or(Either::A(default)), field, None)?;
+        if positive && value == 0 {
             return Err(to_napi_error(
                 env,
                 crate::TriviumError::InvalidInput(format!(
-                    "{name} 必须是 JavaScript 安全范围内的非负整数 ({name} must be a non-negative JavaScript safe integer)"
-                )),
+                    "{field} 必须大于零 ({field} must be positive)"
+                ))
+                .at_field(field),
             ));
         }
-        Ok(value as usize)
+        Ok(value)
+    }
+
+    fn collect_prepared_parameters(
+        env: Env,
+        parameters: JsUnknown,
+        prepared: &crate::query::tql_prepared::PreparedTql,
+    ) -> napi::Result<std::collections::HashMap<String, crate::query::tql_prepared::TqlParamValue>>
+    {
+        let invalid_container = || {
+            to_napi_error(
+                env,
+                crate::TriviumError::InvalidInput(
+                    "Prepared TQL 参数必须是对象 (Prepared TQL parameters must be an object)"
+                        .into(),
+                )
+                .at_field("parameters"),
+            )
+        };
+        if parameters.get_type()? != ValueType::Object {
+            return Err(invalid_container());
+        }
+        let object = JsObject::try_from(parameters)?;
+        if object.is_array()? {
+            return Err(invalid_container());
+        }
+        let keys = object.get_property_names()?;
+        let mut values = std::collections::HashMap::new();
+        for index in 0..keys.get_array_length()? {
+            let name = keys
+                .get_element::<napi::JsString>(index)?
+                .into_utf8()?
+                .as_str()?
+                .to_owned();
+            // 枚举与 getter 可执行宿主代码，原异常直接传播。
+            let value: JsUnknown = object.get_property(env.create_string(&name)?)?;
+            let invalid_value = || {
+                to_napi_error(
+                    env,
+                    prepared.locate_parameter_error(crate::TriviumError::InvalidInput(
+                        "参数值无法表示为 Prepared 标量 (Value cannot be represented as a Prepared scalar)".into(),
+                    )
+                    .at_query_parameter(&name)),
+                )
+            };
+            match value.get_type()? {
+                ValueType::Null | ValueType::Boolean | ValueType::Number | ValueType::String => {}
+                // 复合值在标量边界拒绝，避免遍历无效参数中的循环或宿主 getter。
+                _ => return Err(invalid_value()),
+            }
+            let json = NodeJson::from_js(env, value).map_err(|error| {
+                if error.status == napi::Status::InvalidArg {
+                    invalid_value()
+                } else {
+                    error
+                }
+            })?;
+            let value = prepared
+                .parameter_from_json(&name, &json)
+                .map_err(|error| to_napi_error(env, error))?;
+            values.insert(name, value);
+        }
+        Ok(values)
     }
 
     fn parse_positive_usize(env: Env, value: f64, name: &str) -> napi::Result<usize> {
@@ -819,81 +1502,234 @@ pub mod nodejs {
 
     fn parse_reachability_options(
         env: Env,
-        options: Option<JsReachabilityOptions>,
+        options: Option<JsUnknown>,
     ) -> napi::Result<crate::graph::reachability::ReachabilityConfig> {
-        let options = options.unwrap_or(JsReachabilityOptions {
-            min_depth: None,
-            max_depth: None,
-            labels: None,
-            direction: None,
-            max_visited_nodes: None,
-            max_results: None,
-            max_edges: None,
-        });
-        let direction = match options.direction.as_deref().unwrap_or("outgoing") {
+        let object = match options {
+            Some(value) => argument_object(env, value, "options", None)?,
+            None => env.create_object()?,
+        };
+        let direction = object
+            .get("direction")?
+            .map(|value| read_string(env, value, "direction"))
+            .transpose()?;
+        let direction = match direction.as_deref().unwrap_or("outgoing") {
             "outgoing" => crate::graph::reachability::ReachabilityDirection::Outgoing,
             "incoming" => crate::graph::reachability::ReachabilityDirection::Incoming,
             "both" => crate::graph::reachability::ReachabilityDirection::Both,
             _ => {
-                return Err(napi::Error::from_reason(
-                    "direction 必须是 outgoing / incoming / both",
+                return Err(argument_input_error(
+                    env,
+                    "direction",
+                    "direction 必须是 outgoing / incoming / both (direction must be outgoing / incoming / both)",
+                    None,
                 ));
             }
         };
         Ok(crate::graph::reachability::ReachabilityConfig {
-            min_depth: parse_safe_usize(env, options.min_depth.unwrap_or(1.0), "minDepth")?,
-            max_depth: parse_safe_usize(env, options.max_depth.unwrap_or(1.0), "maxDepth")?,
-            labels: options.labels,
+            min_depth: parse_search_usize(env, object.get("minDepth")?, 1.0, "minDepth", false)?,
+            max_depth: parse_search_usize(env, object.get("maxDepth")?, 1.0, "maxDepth", false)?,
+            labels: object
+                .get("labels")?
+                .map(|value| read_array(env, value, "labels", read_string))
+                .transpose()?,
             direction,
-            max_visited_nodes: options
-                .max_visited_nodes
-                .map(|value| parse_safe_usize(env, value, "maxVisitedNodes"))
-                .transpose()?
-                .unwrap_or(10_000),
-            max_results: options
-                .max_results
-                .map(|value| parse_safe_usize(env, value, "maxResults"))
-                .transpose()?
-                .unwrap_or(10_000),
-            max_edges: options
-                .max_edges
-                .map(|value| parse_safe_usize(env, value, "maxEdges"))
-                .transpose()?
-                .unwrap_or(50_000),
+            max_visited_nodes: parse_search_usize(
+                env,
+                object.get("maxVisitedNodes")?,
+                10_000.0,
+                "maxVisitedNodes",
+                false,
+            )?,
+            max_results: parse_search_usize(
+                env,
+                object.get("maxResults")?,
+                10_000.0,
+                "maxResults",
+                false,
+            )?,
+            max_edges: parse_search_usize(
+                env,
+                object.get("maxEdges")?,
+                50_000.0,
+                "maxEdges",
+                false,
+            )?,
             max_frontier_size: 10_000,
             exhaustion_policy: crate::graph::budget::BudgetExhaustionPolicy::Partial,
         })
     }
 
+    fn parse_search_config(
+        env: Env,
+        value: Option<JsUnknown>,
+        advanced: bool,
+    ) -> napi::Result<(crate::database::SearchConfig, Option<String>)> {
+        let object = match value {
+            Some(value) => argument_object(env, value, "config", None)?,
+            None => env.create_object()?,
+        };
+        let config = crate::database::SearchConfig {
+            top_k: parse_search_usize(env, object.get("topK")?, 5.0, "topK", true)?,
+            recall_k: parse_search_usize(env, object.get("recallK")?, 0.0, "recallK", false)?,
+            rerank_k: parse_search_usize(env, object.get("rerankK")?, 0.0, "rerankK", false)?,
+            expand_depth: parse_search_usize(
+                env,
+                object.get("expandDepth")?,
+                2.0,
+                "expandDepth",
+                false,
+            )?,
+            min_score: optional_number(env, object.get("minScore")?, 0.1, "minScore")? as f32,
+            teleport_alpha: optional_number(
+                env,
+                object.get("teleportAlpha")?,
+                0.0,
+                "teleportAlpha",
+            )? as f32,
+            enable_advanced_pipeline: optional_bool(
+                env,
+                object.get("enableAdvancedPipeline")?,
+                advanced,
+                "enableAdvancedPipeline",
+            )?,
+            enable_sparse_residual: optional_bool(
+                env,
+                object.get("enableSparseResidual")?,
+                false,
+                "enableSparseResidual",
+            )?,
+            fista_lambda: optional_number(env, object.get("fistaLambda")?, 0.1, "fistaLambda")?
+                as f32,
+            fista_threshold: optional_number(
+                env,
+                object.get("fistaThreshold")?,
+                0.3,
+                "fistaThreshold",
+            )? as f32,
+            enable_dpp: optional_bool(env, object.get("enableDpp")?, false, "enableDpp")?,
+            dpp_quality_weight: optional_number(
+                env,
+                object.get("dppQualityWeight")?,
+                1.0,
+                "dppQualityWeight",
+            )? as f32,
+            enable_refractory_fatigue: optional_bool(
+                env,
+                object.get("enableRefractoryFatigue")?,
+                false,
+                "enableRefractoryFatigue",
+            )?,
+            enable_text_hybrid_search: optional_bool(
+                env,
+                object.get("enableTextHybridSearch")?,
+                false,
+                "enableTextHybridSearch",
+            )?,
+            text_boost: optional_number(env, object.get("textBoost")?, 1.5, "textBoost")? as f32,
+            force_brute_force: optional_bool(
+                env,
+                object.get("forceBruteForce")?,
+                false,
+                "forceBruteForce",
+            )?,
+            diffusion_bias: object
+                .get("diffusionBias")?
+                .map(|value| {
+                    read_array(env, value, "diffusionBias", read_number)
+                        .map(|values| values.into_iter().map(|value| value as f32).collect())
+                })
+                .transpose()?,
+            expand_labels: object
+                .get("expandLabels")?
+                .map(|value| read_array(env, value, "expandLabels", read_string))
+                .transpose()?,
+            max_edges_per_node: parse_search_usize(
+                env,
+                object.get("maxEdgesPerNode")?,
+                0.0,
+                "maxEdgesPerNode",
+                false,
+            )?,
+            min_edge_weight: optional_number(
+                env,
+                object.get("minEdgeWeight")?,
+                0.0,
+                "minEdgeWeight",
+            )? as f32,
+            edge_direction: parse_edge_direction(
+                env,
+                object
+                    .get("edgeDirection")?
+                    .map(|value| read_string(env, value, "edgeDirection"))
+                    .transpose()?
+                    .as_deref(),
+            )?,
+            payload_filter: parse_payload_filter(
+                env,
+                object
+                    .get("payloadFilter")?
+                    .map(|value| read_json(env, value, "payloadFilter"))
+                    .transpose()?,
+            )?,
+            ..Default::default()
+        };
+        let query_text = object
+            .get("customQueryText")?
+            .map(|value| read_string(env, value, "customQueryText"))
+            .transpose()?;
+        Ok((config, query_text))
+    }
+
     fn build_transaction<T: crate::VectorType>(
         env: Env,
         operations: &[serde_json::Value],
-        convert: impl Fn(f64) -> napi::Result<T>,
+        convert: impl Fn(f64, &str) -> napi::Result<T>,
     ) -> napi::Result<crate::database::TxBuilder<T>> {
         let mut tx = crate::database::TxBuilder::new();
-        for operation in operations {
+        for (index, operation) in operations.iter().enumerate() {
+            let path = crate::sdk::field_member("operations", &index.to_string());
+            let invalid = |field: &str| {
+                argument_input_error(
+                    env,
+                    &crate::sdk::field_member(&path, field),
+                    "事务操作字段无效或缺失 (Transaction operation field is invalid or missing)",
+                    None,
+                )
+            };
             let kind = operation
                 .get("type")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| napi::Error::from_reason("事务操作缺少 type"))?;
+                .ok_or_else(|| invalid("type"))?;
             let id = |name: &str| -> napi::Result<u64> {
                 let value = operation
                     .get(name)
                     .and_then(serde_json::Value::as_f64)
-                    .ok_or_else(|| napi::Error::from_reason(format!("事务操作缺少 {name}")))?;
-                Ok(parse_safe_usize(env, value, name)? as u64)
+                    .ok_or_else(|| invalid(name))?;
+                Ok(parse_safe_usize(env, value, &crate::sdk::field_member(&path, name))? as u64)
             };
             let vector = || -> napi::Result<Vec<T>> {
                 operation
                     .get("vector")
                     .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| napi::Error::from_reason("事务操作缺少 vector"))?
+                    .ok_or_else(|| invalid("vector"))?
                     .iter()
-                    .map(|value| {
+                    .enumerate()
+                    .map(|(index, value)| {
+                        let field = crate::sdk::field_member(
+                            &crate::sdk::field_member(&path, "vector"),
+                            &index.to_string(),
+                        );
                         value
                             .as_f64()
-                            .ok_or_else(|| napi::Error::from_reason("vector 必须是数字数组"))
-                            .and_then(&convert)
+                            .ok_or_else(|| {
+                                argument_input_error(
+                                    env,
+                                    &field,
+                                    "向量成员必须是数字 (Vector components must be numbers)",
+                                    None,
+                                )
+                            })
+                            .and_then(|value| convert(value, &field))
                     })
                     .collect()
             };
@@ -918,11 +1754,13 @@ pub mod nodejs {
                     id("dst")?,
                     operation
                         .get("label")
-                        .and_then(serde_json::Value::as_str)
+                        .map(|value| value.as_str().ok_or_else(|| invalid("label")))
+                        .transpose()?
                         .unwrap_or("related"),
                     operation
                         .get("weight")
-                        .and_then(serde_json::Value::as_f64)
+                        .map(|value| value.as_f64().ok_or_else(|| invalid("weight")))
+                        .transpose()?
                         .unwrap_or(1.0) as f32,
                     operation.get("metadata").cloned().unwrap_or_default(),
                 ),
@@ -933,12 +1771,10 @@ pub mod nodejs {
                     operation
                         .get("label")
                         .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| napi::Error::from_reason("事务操作缺少 label"))?,
+                        .ok_or_else(|| invalid("label"))?,
                 ),
                 _ => {
-                    return Err(napi::Error::from_reason(format!(
-                        "不支持的事务操作类型: {kind}"
-                    )));
+                    return Err(invalid("type"));
                 }
             }
         }
@@ -974,71 +1810,105 @@ pub mod nodejs {
         })
     }
 
-    fn parse_row_overflow(value: Option<&str>) -> napi::Result<crate::database::RowOverflowPolicy> {
+    fn parse_row_overflow(
+        env: Env,
+        value: Option<&str>,
+    ) -> napi::Result<crate::database::RowOverflowPolicy> {
         match value.unwrap_or("throw") {
             "throw" => Ok(crate::database::RowOverflowPolicy::Throw),
             "break" => Ok(crate::database::RowOverflowPolicy::Break),
-            _ => Err(napi::Error::from_reason("rowOverflow 必须是 throw / break")),
+            _ => Err(invalid_constructor_field(
+                env,
+                "rowOverflow",
+                "rowOverflow 必须是 throw / break (rowOverflow must be throw / break)",
+            )),
         }
     }
 
-    fn parse_storage_mode(value: Option<&str>) -> napi::Result<crate::database::StorageMode> {
+    fn parse_storage_mode(
+        env: Env,
+        value: Option<&str>,
+    ) -> napi::Result<crate::database::StorageMode> {
         match value.unwrap_or("mmap") {
             "mmap" => Ok(crate::database::StorageMode::Mmap),
             "rom" => Ok(crate::database::StorageMode::Rom),
-            _ => Err(napi::Error::from_reason("storageMode 必须是 mmap / rom")),
+            _ => Err(invalid_constructor_field(
+                env,
+                "storageMode",
+                "storageMode 必须是 mmap / rom (storageMode must be mmap / rom)",
+            )),
         }
     }
 
-    fn parse_access_mode(value: Option<&str>) -> napi::Result<crate::database::AccessMode> {
+    fn parse_access_mode(
+        env: Env,
+        value: Option<&str>,
+    ) -> napi::Result<crate::database::AccessMode> {
         match value.unwrap_or("readWrite") {
             "readWrite" => Ok(crate::database::AccessMode::ReadWrite),
             "readOnly" => Ok(crate::database::AccessMode::ReadOnly),
             "immutable" => Ok(crate::database::AccessMode::Immutable),
-            _ => Err(napi::Error::from_reason(
-                "accessMode 必须是 readWrite / readOnly / immutable",
+            _ => Err(invalid_constructor_field(
+                env,
+                "accessMode",
+                "accessMode 必须是 readWrite / readOnly / immutable (accessMode must be readWrite / readOnly / immutable)",
             )),
         }
     }
 
     fn parse_missing_index_policy(
+        env: Env,
         value: Option<&str>,
     ) -> napi::Result<crate::database::MissingIndexPolicy> {
         match value.unwrap_or("fallback") {
             "fallback" => Ok(crate::database::MissingIndexPolicy::Fallback),
             "buildInMemory" => Ok(crate::database::MissingIndexPolicy::BuildInMemory),
             "error" => Ok(crate::database::MissingIndexPolicy::Error),
-            _ => Err(napi::Error::from_reason(
-                "missingIndexPolicy 必须是 fallback / buildInMemory / error",
+            _ => Err(invalid_constructor_field(
+                env,
+                "missingIndexPolicy",
+                "missingIndexPolicy 必须是 fallback / buildInMemory / error (missingIndexPolicy must be fallback / buildInMemory / error)",
             )),
         }
     }
 
-    fn parse_sync_mode(s: &str) -> napi::Result<crate::storage::wal::SyncMode> {
-        crate::storage::wal::SyncMode::parse(s).map_err(napi::Error::from_reason)
+    fn parse_sync_mode(env: Env, s: &str) -> napi::Result<crate::storage::wal::SyncMode> {
+        crate::storage::wal::SyncMode::parse(s)
+            .map_err(|reason| invalid_constructor_field(env, "syncMode", &reason))
     }
 
     fn parse_payload_filter(
+        env: Env,
         value: Option<serde_json::Value>,
     ) -> napi::Result<Option<crate::filter::Filter>> {
         value
             .map(|filter| {
                 crate::filter::Filter::from_json(&filter).map_err(|error| {
-                    napi::Error::from_reason(format!(
-                        "payloadFilter 无效 (Invalid payloadFilter): {error}"
-                    ))
+                    to_napi_error(
+                        env,
+                        crate::TriviumError::InvalidInput(format!(
+                            "payloadFilter 无效 (Invalid payloadFilter): {error}"
+                        ))
+                        .at_field("payloadFilter"),
+                    )
                 })
             })
             .transpose()
     }
 
-    fn parse_edge_direction(value: Option<&str>) -> napi::Result<crate::database::EdgeDirection> {
+    fn parse_edge_direction(
+        env: Env,
+        value: Option<&str>,
+    ) -> napi::Result<crate::database::EdgeDirection> {
         match value.unwrap_or("out") {
             "out" | "outgoing" => Ok(crate::database::EdgeDirection::Outgoing),
             "in" | "incoming" => Ok(crate::database::EdgeDirection::Incoming),
             "both" => Ok(crate::database::EdgeDirection::Both),
-            _ => Err(napi::Error::from_reason(
-                "edgeDirection 必须是 out / in / both",
+            _ => Err(argument_input_error(
+                env,
+                "edgeDirection",
+                "edgeDirection 必须是 out / in / both (edgeDirection must be out / in / both)",
+                None,
             )),
         }
     }
@@ -1056,12 +1926,31 @@ pub mod nodejs {
             if count == 0 {
                 return Ok(());
             }
-            let next = dispatch!(self,db=>db.next_id_for_binding())
-                .map_err(|error| to_napi_error(env, error))?;
-            let last = next.checked_add(count as u64 - 1).ok_or_else(|| {
-                napi::Error::from_reason("节点 ID 分配溢出 (Node ID allocation overflow)")
+            let next = dispatch!(self,db=>db.next_id_for_binding()).map_err(|error| {
+                to_napi_error(
+                    env,
+                    error.with_write_info(crate::error::WriteErrorInfo {
+                        transaction_consumed: None,
+                        ..crate::error::WriteErrorInfo::TRANSACTION_ADMISSION
+                    }),
+                )
             })?;
-            node_id_to_js(env, last)?;
+            let last = next.checked_add(count as u64 - 1).ok_or_else(|| {
+                to_napi_error(
+                    env,
+                    crate::TriviumError::InvalidInput(
+                        "节点 ID 分配溢出 (Node ID allocation overflow)".into(),
+                    )
+                    .with_write_info(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+                )
+            })?;
+            node_id_to_js(env, last).map_err(|error| {
+                with_napi_write_info(
+                    env,
+                    error,
+                    crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION,
+                )
+            })?;
             Ok(())
         }
 
@@ -1072,7 +1961,7 @@ pub mod nodejs {
         ) -> napi::Result<()> {
             let mut next = dispatch!(self,db=>db.next_id_for_binding())
                 .map_err(|error| to_napi_error(env, error))?;
-            for operation in operations {
+            for (index, operation) in operations.iter().enumerate() {
                 match operation.get("type").and_then(serde_json::Value::as_str) {
                     Some("insert") => {
                         node_id_to_js(env, next)?;
@@ -1083,9 +1972,15 @@ pub mod nodejs {
                             .get("id")
                             .and_then(serde_json::Value::as_f64)
                             .ok_or_else(|| {
-                                napi::Error::from_reason("缺少事务 ID (Missing transaction ID)")
+                                argument_input_error(
+                                    env,
+                                    &format!("/operations/{index}/id"),
+                                    "缺少事务 ID (Missing transaction ID)",
+                                    None,
+                                )
                             })?;
-                        next = next.max(parse_node_id(env, id, "id")? + 1);
+                        next = next
+                            .max(parse_node_id(env, id, &format!("/operations/{index}/id"))? + 1);
                     }
                     _ => {}
                 }
@@ -1102,83 +1997,127 @@ pub mod nodejs {
         /// const db = new TriviumDB("data.tdb", { dim: 1536, dtype: "f32", syncMode: "normal" })
         /// ```
         #[napi(constructor)]
-        pub fn new(
-            env: Env,
-            path: String,
-            options: Option<napi::bindgen_prelude::Either<f64, JsDatabaseOptions>>,
-        ) -> napi::Result<Self> {
-            let options = match options {
-                Some(napi::bindgen_prelude::Either::A(_)) => {
-                    return Err(napi::Error::from_reason(
-                        "TDB_API_MIGRATION_REQUIRED: 数字位置参数已移除，请使用 options 对象 (numeric positional arguments were removed; use an options object)",
-                    ));
-                }
-                Some(napi::bindgen_prelude::Either::B(options)) => options,
-                None => JsDatabaseOptions {
-                    runtime: None,
-                    dim: None,
-                    dtype: None,
-                    sync_mode: None,
-                    storage_mode: None,
-                    auto_build_quiver: None,
-                    load_text_index: None,
-                    expected_nodes: None,
-                    memory_limit_mb: None,
-                    payload_cache_mb: None,
-                    payload_cache_entry_mb: None,
-                    access_mode: None,
-                    missing_index_policy: None,
-                    max_query_rows: None,
-                    row_overflow: None,
-                },
+        pub fn new(env: Env, path: JsUnknown, options: Option<JsUnknown>) -> napi::Result<Self> {
+            let path = raw_string(env, path, "path", None)?;
+            if let Some(value) = options.as_ref()
+                && value.get_type()? == ValueType::Number
+            {
+                return Err(to_napi_error(
+                    env,
+                    crate::TriviumError::ApiMigrationRequired {
+                        removed_api: "new TriviumDB(path, dim)",
+                        replacement: "new TriviumDB(path, { dim })",
+                    }
+                    .at_field("options"),
+                ));
+            }
+            let object = constructor_options(env, options)?;
+            let options = JsDatabaseOptions {
+                runtime: object.get("runtime")?,
+                dim: object.get("dim")?,
+                dtype: object.get("dtype")?,
+                sync_mode: object.get("syncMode")?,
+                storage_mode: object.get("storageMode")?,
+                auto_build_quiver: object.get("autoBuildQuiver")?,
+                load_text_index: object.get("loadTextIndex")?,
+                expected_nodes: object.get("expectedNodes")?,
+                memory_limit_mb: object.get("memoryLimitMb")?,
+                payload_cache_mb: object.get("payloadCacheMb")?,
+                payload_cache_entry_mb: object.get("payloadCacheEntryMb")?,
+                access_mode: object.get("accessMode")?,
+                missing_index_policy: object.get("missingIndexPolicy")?,
+                max_query_rows: object.get("maxQueryRows")?,
+                row_overflow: object.get("rowOverflow")?,
             };
-            let dim = parse_positive_usize(env, options.dim.unwrap_or(1536.0), "dim")?;
-            let dtype = options.dtype.unwrap_or_else(|| "f32".into());
+            let dim = parse_search_usize(env, options.dim, 1536.0, "dim", true)?;
+            let dtype = constructor_string(env, options.dtype, "f32", "dtype")?;
             let expected_nodes = options
                 .expected_nodes
-                .map(|value| parse_safe_usize(env, value, "expectedNodes"))
+                .map(|value| parse_usize_argument(env, value, "expectedNodes", None))
                 .transpose()?;
             let memory_limit_mb = options
                 .memory_limit_mb
-                .map(|value| parse_safe_usize(env, value, "memoryLimitMb"))
+                .map(|value| parse_usize_argument(env, value, "memoryLimitMb", None))
                 .transpose()?
                 .unwrap_or(0);
-            let memory_limit = memory_limit_mb
-                .checked_mul(1024 * 1024)
-                .ok_or_else(|| napi::Error::from_reason("memoryLimitMb 换算字节时溢出"))?;
-            let mb_to_bytes = |value: Option<f64>, name: &str, default_mb: usize| {
-                value
-                    .map(|value| parse_safe_usize(env, value, name))
-                    .transpose()?
-                    .unwrap_or(default_mb)
-                    .checked_mul(1024 * 1024)
-                    .ok_or_else(|| napi::Error::from_reason(format!("{name} 换算字节时溢出")))
-            };
+            let memory_limit =
+                constructor_mib(env, memory_limit_mb, "memoryLimitMb", usize::MAX as u128)?;
+            let mb_to_bytes =
+                |value: Option<Either<f64, JsUnknown>>, name: &str, default_mb: usize| {
+                    let mb = value
+                        .map(|value| parse_usize_argument(env, value, name, None))
+                        .transpose()?
+                        .unwrap_or(default_mb);
+                    constructor_mib(env, mb, name, usize::MAX as u128)
+                };
             let payload_cache_bytes = mb_to_bytes(options.payload_cache_mb, "payloadCacheMb", 64)?;
             let payload_cache_entry_bytes =
                 mb_to_bytes(options.payload_cache_entry_mb, "payloadCacheEntryMb", 8)?;
             let max_query_rows = options
                 .max_query_rows
-                .map(|value| parse_safe_usize(env, value, "maxQueryRows"))
+                .map(|value| parse_usize_argument(env, value, "maxQueryRows", None))
                 .transpose()?;
             let config = crate::database::Config {
                 dim,
-                sync_mode: parse_sync_mode(options.sync_mode.as_deref().unwrap_or("normal"))?,
-                storage_mode: parse_storage_mode(options.storage_mode.as_deref())?,
-                auto_build_quiver: options.auto_build_quiver.unwrap_or(true),
-                load_text_index: options.load_text_index.unwrap_or(false),
+                sync_mode: parse_sync_mode(
+                    env,
+                    &constructor_string(env, options.sync_mode, "normal", "syncMode")?,
+                )?,
+                storage_mode: parse_storage_mode(
+                    env,
+                    Some(&constructor_string(
+                        env,
+                        options.storage_mode,
+                        "mmap",
+                        "storageMode",
+                    )?),
+                )?,
+                auto_build_quiver: constructor_bool(
+                    env,
+                    options.auto_build_quiver,
+                    true,
+                    "autoBuildQuiver",
+                )?,
+                load_text_index: constructor_bool(
+                    env,
+                    options.load_text_index,
+                    false,
+                    "loadTextIndex",
+                )?,
                 expected_nodes,
                 memory_limit,
                 payload_cache_bytes,
                 payload_cache_entry_bytes,
-                access_mode: parse_access_mode(options.access_mode.as_deref())?,
+                access_mode: parse_access_mode(
+                    env,
+                    Some(&constructor_string(
+                        env,
+                        options.access_mode,
+                        "readWrite",
+                        "accessMode",
+                    )?),
+                )?,
                 missing_index_policy: parse_missing_index_policy(
-                    options.missing_index_policy.as_deref(),
+                    env,
+                    Some(&constructor_string(
+                        env,
+                        options.missing_index_policy,
+                        "fallback",
+                        "missingIndexPolicy",
+                    )?),
                 )?,
                 max_query_rows,
-                row_overflow: parse_row_overflow(options.row_overflow.as_deref())?,
+                row_overflow: parse_row_overflow(
+                    env,
+                    Some(&constructor_string(
+                        env,
+                        options.row_overflow,
+                        "throw",
+                        "rowOverflow",
+                    )?),
+                )?,
             };
-            let runtime = parse_runtime(options.runtime)?;
+            let runtime = parse_runtime(env, options.runtime, None)?;
             let dtype_str = dtype.as_str();
 
             let inner = match dtype_str {
@@ -1194,7 +2133,13 @@ pub mod nodejs {
                     GenericDatabase::<u64>::open_with_runtime(&path, config, runtime.clone())
                         .map_err(|error| to_napi_error(env, error))?,
                 ),
-                _ => return Err(napi::Error::from_reason("dtype 必须是 f32 / f16 / u64")),
+                _ => {
+                    return Err(invalid_constructor_field(
+                        env,
+                        "dtype",
+                        "dtype 必须是 f32 / f16 / u64 (dtype must be f32 / f16 / u64)",
+                    ));
+                }
             };
             Ok(Self {
                 inner,
@@ -1231,7 +2176,8 @@ pub mod nodejs {
         /// const results = db.search(queryVec)  // 自动经过 C++ Hook
         /// ```
         #[napi]
-        pub fn load_ffi_hook(&mut self, env: Env, lib_path: String) -> napi::Result<()> {
+        pub fn load_ffi_hook(&mut self, env: Env, lib_path: JsUnknown) -> napi::Result<()> {
+            let lib_path = read_string(env, lib_path, "libPath")?;
             let ffi_hook =
                 crate::hook::FfiHook::load(&lib_path).map_err(|error| to_napi_error(env, error))?;
             dispatch!(self, mut db => db.set_hook(ffi_hook))
@@ -1257,75 +2203,13 @@ pub mod nodejs {
         pub fn search_with_context(
             &self,
             env: Env,
-            query_vector: Vec<f64>,
-            config: Option<JsSearchConfig>,
+            query_vector: JsUnknown,
+            config: Option<JsUnknown>,
         ) -> napi::Result<JsSearchWithContextResult> {
-            let mut cfg = config.unwrap_or(JsSearchConfig {
-                top_k: None,
-                recall_k: None,
-                rerank_k: None,
-                expand_depth: None,
-                min_score: None,
-                teleport_alpha: None,
-                enable_advanced_pipeline: None,
-                enable_sparse_residual: None,
-                fista_lambda: None,
-                fista_threshold: None,
-                enable_dpp: None,
-                dpp_quality_weight: None,
-                enable_refractory_fatigue: None,
-                custom_query_text: None,
-                payload_filter: None,
-                enable_text_hybrid_search: None,
-                text_boost: None,
-                force_brute_force: None,
-                diffusion_bias: None,
-                expand_labels: None,
-                max_edges_per_node: None,
-                min_edge_weight: None,
-                edge_direction: None,
-            });
+            let query_vector = read_vector(env, query_vector, "queryVector", &self.dtype)?;
+            let (core_config, query_text) = parse_search_config(env, config, false)?;
 
-            let top_k = parse_positive_usize(env, cfg.top_k.unwrap_or(5.0), "topK")?;
-            let payload_filter =
-                parse_payload_filter(cfg.payload_filter.take().map(|value| value.0))?;
-            let core_config = crate::database::SearchConfig {
-                top_k,
-                recall_k: parse_safe_usize(env, cfg.recall_k.unwrap_or(0.0), "recallK")?,
-                rerank_k: parse_safe_usize(env, cfg.rerank_k.unwrap_or(0.0), "rerankK")?,
-                expand_depth: parse_safe_usize(
-                    env,
-                    cfg.expand_depth.unwrap_or(2.0),
-                    "expandDepth",
-                )?,
-                min_score: cfg.min_score.unwrap_or(0.1) as f32,
-                teleport_alpha: cfg.teleport_alpha.unwrap_or(0.0) as f32,
-                enable_advanced_pipeline: cfg.enable_advanced_pipeline.unwrap_or(false),
-                enable_sparse_residual: cfg.enable_sparse_residual.unwrap_or(false),
-                fista_lambda: cfg.fista_lambda.unwrap_or(0.1) as f32,
-                fista_threshold: cfg.fista_threshold.unwrap_or(0.3) as f32,
-                enable_dpp: cfg.enable_dpp.unwrap_or(false),
-                dpp_quality_weight: cfg.dpp_quality_weight.unwrap_or(1.0) as f32,
-                enable_refractory_fatigue: cfg.enable_refractory_fatigue.unwrap_or(false),
-                enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
-                text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
-                force_brute_force: cfg.force_brute_force.unwrap_or(false),
-                diffusion_bias: cfg
-                    .diffusion_bias
-                    .map(|v| v.into_iter().map(|x| x as f32).collect()),
-                expand_labels: cfg.expand_labels,
-                max_edges_per_node: cfg
-                    .max_edges_per_node
-                    .map(|value| parse_safe_usize(env, value, "maxEdgesPerNode"))
-                    .transpose()?
-                    .unwrap_or(0),
-                min_edge_weight: cfg.min_edge_weight.unwrap_or(0.0) as f32,
-                edge_direction: parse_edge_direction(cfg.edge_direction.as_deref())?,
-                payload_filter,
-                ..Default::default()
-            };
-
-            let q_text = cfg.custom_query_text.as_deref();
+            let q_text = query_text.as_deref();
 
             let (results, hook_ctx) = match &self.inner {
                 DbBackend::F32(db) => {
@@ -1391,10 +2275,11 @@ pub mod nodejs {
         pub fn insert(
             &mut self,
             env: Env,
-            vector: Vec<f64>,
-            payload: NodeJson,
+            vector: JsUnknown,
+            payload: JsUnknown,
         ) -> napi::Result<f64> {
-            let payload = payload.0;
+            let vector = write_vector(env, vector, "vector", &self.dtype)?;
+            let payload = write_json(env, payload, "payload")?;
             self.check_generated_ids(env, 1)?;
             match &mut self.inner {
                 DbBackend::F32(db) => {
@@ -1424,15 +2309,19 @@ pub mod nodejs {
         pub fn batch_insert(
             &mut self,
             env: Env,
-            vectors: Vec<Vec<f64>>,
-            payloads: Vec<NodeJson>,
+            vectors: JsUnknown,
+            payloads: JsUnknown,
         ) -> napi::Result<Vec<f64>> {
-            let payloads = payloads
-                .into_iter()
-                .map(|value| value.0)
-                .collect::<Vec<_>>();
+            let vectors = write_array(env, vectors, "vectors", |env, value, path| {
+                write_vector(env, value, path, &self.dtype)
+            })?;
+            let payloads = write_array(env, payloads, "payloads", write_json)?;
             if vectors.len() != payloads.len() {
-                return Err(napi::Error::from_reason("向量列表与负载列表长度不一致"));
+                return Err(write_input_error(
+                    env,
+                    "payloads",
+                    "向量列表与 Payload 列表长度不一致 (Vector and payload list lengths differ)",
+                ));
             }
             self.check_generated_ids(env, vectors.len())?;
             match &mut self.inner {
@@ -1446,6 +2335,7 @@ pub mod nodejs {
                         tx.insert(vector, payload);
                     }
                     db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
                         .map_err(|error| to_napi_error(env, error))
                         .and_then(|value| node_ids_to_js(env, value))
                 }
@@ -1459,6 +2349,7 @@ pub mod nodejs {
                         tx.insert(vector, payload);
                     }
                     db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
                         .map_err(|error| to_napi_error(env, error))
                         .and_then(|value| node_ids_to_js(env, value))
                 }
@@ -1472,6 +2363,7 @@ pub mod nodejs {
                         tx.insert(vector, payload);
                     }
                     db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
                         .map_err(|error| to_napi_error(env, error))
                         .and_then(|value| node_ids_to_js(env, value))
                 }
@@ -1483,21 +2375,29 @@ pub mod nodejs {
         pub fn batch_insert_with_ids(
             &mut self,
             env: Env,
-            ids: Vec<f64>,
-            vectors: Vec<Vec<f64>>,
-            payloads: Vec<NodeJson>,
+            ids: JsUnknown,
+            vectors: JsUnknown,
+            payloads: JsUnknown,
         ) -> napi::Result<()> {
-            let payloads = payloads
-                .into_iter()
-                .map(|value| value.0)
-                .collect::<Vec<_>>();
-            if ids.len() != vectors.len() || vectors.len() != payloads.len() {
-                return Err(napi::Error::from_reason("ID、向量与负载列表长度不一致"));
+            let parsed_ids = write_array(env, ids, "ids", write_id)?;
+            let vectors = write_array(env, vectors, "vectors", |env, value, path| {
+                write_vector(env, value, path, &self.dtype)
+            })?;
+            let payloads = write_array(env, payloads, "payloads", write_json)?;
+            if vectors.len() != payloads.len() {
+                return Err(write_input_error(
+                    env,
+                    "payloads",
+                    "向量列表与 Payload 列表长度不一致 (Vector and payload list lengths differ)",
+                ));
             }
-            let parsed_ids: Vec<u64> = ids
-                .into_iter()
-                .map(|id| parse_safe_usize(env, id, "id").map(|value| value as u64))
-                .collect::<napi::Result<_>>()?;
+            if parsed_ids.len() != vectors.len() {
+                return Err(write_input_error(
+                    env,
+                    "ids",
+                    "ID 列表与向量列表长度不一致 (ID and vector list lengths differ)",
+                ));
+            }
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     let converted: Vec<Vec<f32>> = vectors
@@ -1511,6 +2411,7 @@ pub mod nodejs {
                         tx.insert_with_id(*id, vector, payload);
                     }
                     db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
                         .map(|_| ())
                         .map_err(|error| to_napi_error(env, error))
                 }
@@ -1526,6 +2427,7 @@ pub mod nodejs {
                         tx.insert_with_id(*id, vector, payload);
                     }
                     db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
                         .map(|_| ())
                         .map_err(|error| to_napi_error(env, error))
                 }
@@ -1541,6 +2443,7 @@ pub mod nodejs {
                         tx.insert_with_id(*id, vector, payload);
                     }
                     db.commit_tx(tx)
+                        .map_err(crate::sdk::direct_write_error)
                         .map(|_| ())
                         .map_err(|error| to_napi_error(env, error))
                 }
@@ -1552,12 +2455,13 @@ pub mod nodejs {
         pub fn insert_with_id(
             &mut self,
             env: Env,
-            id: f64,
-            vector: Vec<f64>,
-            payload: NodeJson,
+            id: JsUnknown,
+            vector: JsUnknown,
+            payload: JsUnknown,
         ) -> napi::Result<()> {
-            let payload = payload.0;
-            let id = parse_safe_usize(env, id, "id")? as u64;
+            let id = write_id(env, id, "id")?;
+            let vector = write_vector(env, vector, "vector", &self.dtype)?;
+            let payload = write_json(env, payload, "payload")?;
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     let v: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
@@ -1583,12 +2487,13 @@ pub mod nodejs {
         pub fn upsert_with_id(
             &mut self,
             env: Env,
-            id: f64,
-            vector: Vec<f64>,
-            payload: NodeJson,
+            id: JsUnknown,
+            vector: JsUnknown,
+            payload: JsUnknown,
         ) -> napi::Result<()> {
-            let payload = payload.0;
-            let id = parse_safe_usize(env, id, "id")? as u64;
+            let id = write_id(env, id, "id")?;
+            let vector = write_vector(env, vector, "vector", &self.dtype)?;
+            let payload = write_json(env, payload, "payload")?;
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     let vector = vector
@@ -1617,28 +2522,71 @@ pub mod nodejs {
         pub fn commit_transaction(
             &mut self,
             env: Env,
-            operations: Vec<NodeJson>,
+            operations: JsUnknown,
         ) -> napi::Result<Vec<f64>> {
-            let operations = operations
-                .into_iter()
-                .map(|value| value.0)
-                .collect::<Vec<_>>();
-            self.check_transaction_ids(env, &operations)?;
+            dispatch!(self, db => db.check_transaction_admission()).map_err(|error| {
+                to_napi_error(
+                    env,
+                    error.with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION),
+                )
+            })?;
+            let write = crate::error::WriteErrorInfo {
+                phase: crate::error::WritePhase::Validation,
+                ..crate::error::WriteErrorInfo::TRANSACTION_ADMISSION
+            };
+            let operations = NodeJson::from_js_field(env, operations, "operations", Some(write))?.0;
+            let operations = operations.as_array().ok_or_else(|| {
+                argument_input_error(
+                    env,
+                    "operations",
+                    "事务操作必须是数组 (Transaction operations must be an array)",
+                    Some(write),
+                )
+            })?;
+            let validation = |error| {
+                with_napi_write_info(
+                    env,
+                    error,
+                    crate::error::WriteErrorInfo {
+                        phase: crate::error::WritePhase::Validation,
+                        ..crate::error::WriteErrorInfo::TRANSACTION_ADMISSION
+                    },
+                )
+            };
+            self.check_transaction_ids(env, operations)
+                .map_err(validation)?;
             let ids = match &mut self.inner {
-                DbBackend::F32(db) => db.commit_tx(build_transaction(env, &operations, |value| {
-                    Ok(value as f32)
-                })?),
-                DbBackend::F16(db) => db.commit_tx(build_transaction(env, &operations, |value| {
-                    Ok(half::f16::from_f64(value))
-                })?),
-                DbBackend::U64(db) => db.commit_tx(build_transaction(env, &operations, |value| {
-                    parse_u64_component(env, value)
-                })?),
+                DbBackend::F32(db) => db.commit_tx(
+                    build_transaction(env, operations, |value, _| Ok(value as f32))
+                        .map_err(validation)?,
+                ),
+                DbBackend::F16(db) => db.commit_tx(
+                    build_transaction(env, operations, |value, _| Ok(half::f16::from_f64(value)))
+                        .map_err(validation)?,
+                ),
+                DbBackend::U64(db) => db.commit_tx(
+                    build_transaction(env, operations, |value, field| {
+                        validate_u64_component(value)
+                            .map_err(|error| to_napi_error(env, error.at_field(field)))
+                    })
+                    .map_err(validation)?,
+                ),
             }
             .map_err(|error| to_napi_error(env, error))?;
             ids.into_iter()
                 .map(|value| node_id_to_js(env, value))
                 .collect::<napi::Result<_>>()
+                .map_err(|error| {
+                    with_napi_write_info(
+                        env,
+                        error,
+                        crate::error::WriteErrorInfo {
+                            phase: crate::error::WritePhase::Response,
+                            outcome: crate::error::WriteOutcome::Committed,
+                            transaction_consumed: Some(true),
+                        },
+                    )
+                })
         }
 
         #[napi]
@@ -1663,9 +2611,13 @@ pub mod nodejs {
         }
 
         #[napi]
-        pub fn get(&self, env: Env, id: f64) -> napi::Result<Option<JsNodeView>> {
+        pub fn get(
+            &self,
+            env: Env,
+            id: Either<f64, JsUnknown>,
+        ) -> napi::Result<Option<JsNodeView>> {
             {
-                let id = parse_node_id(env, id, "id")?;
+                let id = parse_usize_argument(env, id, "id", None)? as u64;
                 match &self.inner {
                     DbBackend::F32(db) => db
                         .get(id)
@@ -1751,9 +2703,15 @@ pub mod nodejs {
 
         /// 更新节点元数据
         #[napi]
-        pub fn update_payload(&mut self, env: Env, id: f64, payload: NodeJson) -> napi::Result<()> {
-            let payload = payload.0;
-            dispatch!(self, mut db => db.update_payload(parse_node_id(env, id, "id")?, payload))
+        pub fn update_payload(
+            &mut self,
+            env: Env,
+            id: JsUnknown,
+            payload: JsUnknown,
+        ) -> napi::Result<()> {
+            let id = write_id(env, id, "id")?;
+            let payload = write_json(env, payload, "payload")?;
+            dispatch!(self, mut db => db.update_payload(id, payload))
                 .map_err(|error| to_napi_error(env, error))
         }
 
@@ -1765,19 +2723,30 @@ pub mod nodejs {
         /// db.patchPayload(id, { $set: { name: "Alice" } })
         /// db.patchPayload(id, { $inc: { visits: 1 } })
         /// db.patchPayload(id, { $unset: { oldField: true } })
-        /// db.patchPayload(id, { name: "Bob" })  // 简写，等价于 $set
         /// ```
         #[napi]
-        pub fn patch_payload(&mut self, env: Env, id: f64, patch: NodeJson) -> napi::Result<()> {
-            let patch = patch.0;
-            dispatch!(self, mut db => db.patch_payload(parse_node_id(env, id, "id")?, patch))
+        pub fn patch_payload(
+            &mut self,
+            env: Env,
+            id: JsUnknown,
+            patch: JsUnknown,
+        ) -> napi::Result<()> {
+            let id = write_id(env, id, "id")?;
+            let patch = write_json(env, patch, "patch")?;
+            dispatch!(self, mut db => db.patch_payload(id, patch))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         /// 更新节点向量
         #[napi]
-        pub fn update_vector(&mut self, env: Env, id: f64, vector: Vec<f64>) -> napi::Result<()> {
-            let id = parse_node_id(env, id, "id")?;
+        pub fn update_vector(
+            &mut self,
+            env: Env,
+            id: JsUnknown,
+            vector: JsUnknown,
+        ) -> napi::Result<()> {
+            let id = write_id(env, id, "id")?;
+            let vector = write_vector(env, vector, "vector", &self.dtype)?;
             match &mut self.inner {
                 DbBackend::F32(db) => {
                     let v: Vec<f32> = vector.iter().map(|&x| x as f32).collect();
@@ -1799,11 +2768,8 @@ pub mod nodejs {
         }
 
         #[napi]
-        pub fn delete_many_atomic(&mut self, env: Env, ids: Vec<f64>) -> napi::Result<u32> {
-            let ids = ids
-                .into_iter()
-                .map(|id| parse_node_id(env, id, "id"))
-                .collect::<napi::Result<Vec<_>>>()?;
+        pub fn delete_many_atomic(&mut self, env: Env, ids: JsUnknown) -> napi::Result<u32> {
+            let ids = write_array(env, ids, "ids", write_id)?;
             let deleted = dispatch!(self, mut db => db.delete_many_atomic(&ids))
                 .map_err(|error| to_napi_error(env, error))?;
             u32::try_from(deleted).map_err(|_| napi::Error::from_reason("删除数量超出 u32"))
@@ -1813,22 +2779,24 @@ pub mod nodejs {
         pub fn compare_and_set_payload_field(
             &mut self,
             env: Env,
-            id: f64,
-            field: String,
-            expected: NodeJson,
-            replacement: NodeJson,
+            id: JsUnknown,
+            field: JsUnknown,
+            expected: JsUnknown,
+            replacement: JsUnknown,
         ) -> napi::Result<()> {
-            let expected = expected.0;
-            let replacement = replacement.0;
-            dispatch!(self, mut db => db.compare_and_set_payload_field(parse_node_id(env, id, "id")?, &field, &expected, replacement))
+            let id = write_id(env, id, "id")?;
+            let field = write_string(env, field, "field")?;
+            let expected = write_json(env, expected, "expected")?;
+            let replacement = write_json(env, replacement, "replacement")?;
+            dispatch!(self, mut db => db.compare_and_set_payload_field(id, &field, &expected, replacement))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         /// 删除节点（三层原子联删：向量 + Payload + 所有关联边）
         #[napi]
-        pub fn delete(&mut self, env: Env, id: f64) -> napi::Result<()> {
-            dispatch!(self, mut db => db.delete(parse_node_id(env, id, "id")?))
-                .map_err(|error| to_napi_error(env, error))
+        pub fn delete(&mut self, env: Env, id: JsUnknown) -> napi::Result<()> {
+            let id = write_id(env, id, "id")?;
+            dispatch!(self, mut db => db.delete(id)).map_err(|error| to_napi_error(env, error))
         }
 
         // ── 图谱操作 ──
@@ -1838,14 +2806,22 @@ pub mod nodejs {
         pub fn link(
             &mut self,
             env: Env,
-            src: f64,
-            dst: f64,
-            label: Option<String>,
-            weight: Option<f64>,
+            src: JsUnknown,
+            dst: JsUnknown,
+            label: Option<JsUnknown>,
+            weight: Option<JsUnknown>,
         ) -> napi::Result<()> {
-            let label = label.as_deref().unwrap_or("related");
-            let weight = weight.unwrap_or(1.0) as f32;
-            dispatch!(self, mut db => db.link(parse_node_id(env, src, "src")?, parse_node_id(env, dst, "dst")?, label, weight))
+            let src = write_id(env, src, "src")?;
+            let dst = write_id(env, dst, "dst")?;
+            let label = label
+                .map(|value| write_string(env, value, "label"))
+                .transpose()?
+                .unwrap_or_else(|| "related".into());
+            let weight = weight
+                .map(|value| write_number(env, value, "weight"))
+                .transpose()?
+                .unwrap_or(1.0) as f32;
+            dispatch!(self, mut db => db.link(src, dst, &label, weight))
                 .map_err(|error| to_napi_error(env, error))
         }
 
@@ -1853,12 +2829,15 @@ pub mod nodejs {
         pub fn get_edge(
             &self,
             env: Env,
-            src: f64,
-            dst: f64,
-            label: String,
+            src: Either<f64, JsUnknown>,
+            dst: Either<f64, JsUnknown>,
+            label: JsUnknown,
         ) -> napi::Result<Option<JsEdge>> {
+            let src = parse_usize_argument(env, src, "src", None)? as u64;
+            let dst = parse_usize_argument(env, dst, "dst", None)? as u64;
+            let label = raw_string(env, label, "label", None)?;
             Ok({
-                dispatch!(self, db => db.get_edge(parse_node_id(env, src, "src")?, parse_node_id(env, dst, "dst")?, &label).map_err(|error| to_napi_error(env, error))?).map(|edge| Ok::<_,napi::Error>(JsEdge {
+                dispatch!(self, db => db.get_edge(src, dst, &label).map_err(|error| to_napi_error(env, error))?).map(|edge| Ok::<_,napi::Error>(JsEdge {
                 target_id: node_id_to_js(env, edge.target_id)?,
                 label: edge.label,
                 weight: round_api_f32(edge.weight),
@@ -1871,16 +2850,22 @@ pub mod nodejs {
         pub fn upsert_edge(
             &mut self,
             env: Env,
-            src: f64,
-            dst: f64,
-            label: String,
-            weight: f64,
-            metadata: Option<NodeJson>,
+            src: JsUnknown,
+            dst: JsUnknown,
+            label: JsUnknown,
+            weight: JsUnknown,
+            metadata: Option<JsUnknown>,
         ) -> napi::Result<()> {
-            let metadata = metadata.map(|value| value.0);
+            let src = write_id(env, src, "src")?;
+            let dst = write_id(env, dst, "dst")?;
+            let label = write_string(env, label, "label")?;
+            let weight = write_number(env, weight, "weight")?;
+            let metadata = metadata
+                .map(|value| write_json(env, value, "metadata"))
+                .transpose()?;
             dispatch!(self, mut db => db.upsert_edge(
-                parse_node_id(env, src, "src")?,
-                parse_node_id(env, dst, "dst")?,
+                src,
+                dst,
                 &label,
                 weight as f32,
                 metadata.unwrap_or(serde_json::Value::Null),
@@ -1892,16 +2877,24 @@ pub mod nodejs {
         pub fn update_edge(
             &mut self,
             env: Env,
-            src: f64,
-            dst: f64,
-            label: String,
-            weight: Option<f64>,
-            metadata: Option<NodeJson>,
+            src: JsUnknown,
+            dst: JsUnknown,
+            label: JsUnknown,
+            weight: Option<JsUnknown>,
+            metadata: Option<JsUnknown>,
         ) -> napi::Result<()> {
-            let metadata = metadata.map(|value| value.0);
+            let src = write_id(env, src, "src")?;
+            let dst = write_id(env, dst, "dst")?;
+            let label = write_string(env, label, "label")?;
+            let weight = weight
+                .map(|value| write_number(env, value, "weight"))
+                .transpose()?;
+            let metadata = metadata
+                .map(|value| write_json(env, value, "metadata"))
+                .transpose()?;
             dispatch!(self, mut db => db.update_edge(
-                parse_node_id(env, src, "src")?,
-                parse_node_id(env, dst, "dst")?,
+                src,
+                dst,
                 &label,
                 weight.map(|value| value as f32),
                 metadata,
@@ -1914,15 +2907,20 @@ pub mod nodejs {
         pub fn unlink(
             &mut self,
             env: Env,
-            src: f64,
-            dst: f64,
-            label: Option<String>,
+            src: JsUnknown,
+            dst: JsUnknown,
+            label: Option<JsUnknown>,
         ) -> napi::Result<()> {
+            let src = write_id(env, src, "src")?;
+            let dst = write_id(env, dst, "dst")?;
+            let label = label
+                .map(|value| write_string(env, value, "label"))
+                .transpose()?;
             match label {
                 Some(label) => {
-                    dispatch!(self, mut db => db.unlink_label(parse_node_id(env, src, "src")?, parse_node_id(env, dst, "dst")?, &label))
+                    dispatch!(self, mut db => db.unlink_label(src, dst, &label))
                 }
-                None => dispatch!(self, mut db => db.unlink(parse_node_id(env, src, "src")?, parse_node_id(env, dst, "dst")?)),
+                None => dispatch!(self, mut db => db.unlink(src, dst)),
             }
             .map_err(|error| to_napi_error(env, error))
         }
@@ -1932,13 +2930,17 @@ pub mod nodejs {
         pub fn neighbors(
             &self,
             env: Env,
-            id: f64,
-            depth: Option<f64>,
-            labels: Option<Vec<String>>,
+            id: Either<f64, JsUnknown>,
+            depth: Option<Either<f64, JsUnknown>>,
+            labels: Option<JsUnknown>,
         ) -> napi::Result<Vec<f64>> {
+            let labels = labels
+                .map(|value| read_array(env, value, "labels", read_string))
+                .transpose()?;
             Ok({
-                let depth = parse_safe_usize(env, depth.unwrap_or(1.0), "depth")?;
-                dispatch!(self, db => db.neighbors_with_labels(parse_node_id(env, id, "id")?, depth, labels.as_deref()).map_err(|error| to_napi_error(env, error))?)
+                let depth = parse_search_usize(env, depth, 1.0, "depth", false)?;
+                let id = parse_usize_argument(env, id, "id", None)? as u64;
+                dispatch!(self, db => db.neighbors_with_labels(id, depth, labels.as_deref()).map_err(|error| to_napi_error(env, error))?)
                 .into_iter()
                 .map(|value| node_id_to_js(env, value)).collect::<napi::Result<_>>()?
             })
@@ -1948,11 +2950,12 @@ pub mod nodejs {
         pub fn reachable(
             &self,
             env: Env,
-            id: f64,
-            options: Option<JsReachabilityOptions>,
+            id: Either<f64, JsUnknown>,
+            options: Option<JsUnknown>,
         ) -> napi::Result<Vec<JsReachabilityResult>> {
             let config = parse_reachability_options(env, options)?;
-            dispatch!(self, db => db.reachable(parse_node_id(env, id, "id")?, &config))
+            let id = parse_usize_argument(env, id, "id", None)? as u64;
+            dispatch!(self, db => db.reachable(id, &config))
                 .map_err(|error| to_napi_error(env, error))?
                 .into_iter()
                 .map(|value| to_js_reachability(env, value))
@@ -1963,13 +2966,13 @@ pub mod nodejs {
         pub fn reachable_detailed(
             &self,
             env: Env,
-            id: f64,
-            options: Option<JsReachabilityOptions>,
+            id: Either<f64, JsUnknown>,
+            options: Option<JsUnknown>,
         ) -> napi::Result<JsReachabilityOutput> {
             let config = parse_reachability_options(env, options)?;
-            let output =
-                dispatch!(self, db => db.reachable_detailed(parse_node_id(env, id, "id")?, &config))
-                    .map_err(|error| to_napi_error(env, error))?;
+            let id = parse_usize_argument(env, id, "id", None)? as u64;
+            let output = dispatch!(self, db => db.reachable_detailed(id, &config))
+                .map_err(|error| to_napi_error(env, error))?;
             Ok(JsReachabilityOutput {
                 results: output
                     .results
@@ -1986,13 +2989,13 @@ pub mod nodejs {
         pub fn query_subgraph(
             &self,
             env: Env,
-            id: f64,
-            options: Option<JsReachabilityOptions>,
+            id: Either<f64, JsUnknown>,
+            options: Option<JsUnknown>,
         ) -> napi::Result<JsSubgraphResult> {
             let config = parse_reachability_options(env, options)?;
-            let output =
-                dispatch!(self, db => db.query_subgraph(parse_node_id(env, id, "id")?, &config))
-                    .map_err(|error| to_napi_error(env, error))?;
+            let id = parse_usize_argument(env, id, "id", None)? as u64;
+            let output = dispatch!(self, db => db.query_subgraph(id, &config))
+                .map_err(|error| to_napi_error(env, error))?;
             Ok(JsSubgraphResult {
                 nodes: output
                     .nodes
@@ -2027,20 +3030,16 @@ pub mod nodejs {
         pub fn search_graph_first(
             &self,
             env: Env,
-            query_vector: Vec<f64>,
-            anchor_ids: Vec<f64>,
-            top_k: f64,
-            max_anchor_nodes: Option<f64>,
+            query_vector: JsUnknown,
+            anchor_ids: JsUnknown,
+            top_k: Either<f64, JsUnknown>,
+            max_anchor_nodes: Option<Either<f64, JsUnknown>>,
         ) -> napi::Result<Vec<JsSearchHit>> {
-            let top_k = parse_positive_usize(env, top_k, "topK")?;
-            let anchors: Vec<u64> = anchor_ids
-                .into_iter()
-                .map(|id| parse_node_id(env, id, "anchorId"))
-                .collect::<napi::Result<_>>()?;
-            let max_anchor_nodes = max_anchor_nodes
-                .map(|value| parse_safe_usize(env, value, "maxAnchorNodes"))
-                .transpose()?
-                .unwrap_or(100_000);
+            let query_vector = read_vector(env, query_vector, "queryVector", &self.dtype)?;
+            let top_k = parse_search_usize(env, Some(top_k), 0.0, "topK", true)?;
+            let anchors = read_array(env, anchor_ids, "anchorIds", read_id)?;
+            let max_anchor_nodes =
+                parse_search_usize(env, max_anchor_nodes, 100_000.0, "maxAnchorNodes", false)?;
             let hits = match &self.inner {
                 DbBackend::F32(db) => {
                     let query: Vec<f32> = query_vector.iter().map(|value| *value as f32).collect();
@@ -2068,10 +3067,11 @@ pub mod nodejs {
         pub fn search_exact(
             &self,
             env: Env,
-            query_vector: Vec<f64>,
-            top_k: f64,
+            query_vector: JsUnknown,
+            top_k: Either<f64, JsUnknown>,
         ) -> napi::Result<Vec<JsSearchHit>> {
-            let top_k = parse_positive_usize(env, top_k, "topK")?;
+            let query_vector = read_vector(env, query_vector, "queryVector", &self.dtype)?;
+            let top_k = parse_search_usize(env, Some(top_k), 0.0, "topK", true)?;
             let hits = match &self.inner {
                 DbBackend::F32(db) => {
                     let query: Vec<f32> = query_vector.iter().map(|value| *value as f32).collect();
@@ -2105,26 +3105,32 @@ pub mod nodejs {
         pub fn leiden_cluster(
             &self,
             env: Env,
-            config: Option<JsLeidenConfig>,
+            config: Option<JsUnknown>,
         ) -> napi::Result<JsClusterResult> {
-            let cfg = config.unwrap_or(JsLeidenConfig {
-                min_community_size: None,
-                max_iterations: None,
-                with_centroids: None,
-            });
-            let min_c = parse_safe_usize(
+            let object = match config {
+                Some(value) => argument_object(env, value, "config", None)?,
+                None => env.create_object()?,
+            };
+            let min_c = parse_search_usize(
                 env,
-                cfg.min_community_size.unwrap_or(3.0),
+                object.get("minCommunitySize")?,
+                3.0,
                 "minCommunitySize",
+                false,
             )?;
-            let max_iter = cfg
-                .max_iterations
-                .map(|v| parse_safe_usize(env, v, "maxIterations"))
-                .transpose()?;
-            let with_cent = cfg.with_centroids;
+            let max_iter = parse_search_usize(
+                env,
+                object.get("maxIterations")?,
+                15.0,
+                "maxIterations",
+                false,
+            )?;
+            let with_cent =
+                optional_bool(env, object.get("withCentroids")?, true, "withCentroids")?;
 
-            let result = dispatch!(self, db => db.leiden_cluster(min_c, max_iter, with_cent))
-                .map_err(|error| to_napi_error(env, error))?;
+            let result =
+                dispatch!(self, db => db.leiden_cluster(min_c, Some(max_iter), Some(with_cent)))
+                    .map_err(|error| to_napi_error(env, error))?;
 
             // 排序确保确定性输出
             let mut sorted_nodes: Vec<_> = result.node_to_cluster.into_iter().collect();
@@ -2172,18 +3178,21 @@ pub mod nodejs {
         pub fn search(
             &self,
             env: Env,
-            query_vector: Vec<f64>,
-            top_k: Option<f64>,
-            expand_depth: Option<f64>,
-            min_score: Option<f64>,
-            payload_filter: Option<NodeJson>,
+            query_vector: JsUnknown,
+            top_k: Option<Either<f64, JsUnknown>>,
+            expand_depth: Option<Either<f64, JsUnknown>>,
+            min_score: Option<JsUnknown>,
+            payload_filter: Option<JsUnknown>,
         ) -> napi::Result<Vec<JsSearchHit>> {
-            let payload_filter = payload_filter.map(|value| value.0);
-            let top_k = parse_positive_usize(env, top_k.unwrap_or(5.0), "topK")?;
+            let query_vector = read_vector(env, query_vector, "queryVector", &self.dtype)?;
+            let payload_filter = payload_filter
+                .map(|value| read_json(env, value, "payloadFilter"))
+                .transpose()?;
+            let top_k = parse_search_usize(env, top_k, 5.0, "topK", true)?;
 
-            let expand_depth = parse_safe_usize(env, expand_depth.unwrap_or(0.0), "expandDepth")?;
-            let min_score = min_score.unwrap_or(0.5) as f32;
-            let payload_filter = parse_payload_filter(payload_filter)?;
+            let expand_depth = parse_search_usize(env, expand_depth, 0.0, "expandDepth", false)?;
+            let min_score = optional_number(env, min_score, 0.5, "minScore")? as f32;
+            let payload_filter = parse_payload_filter(env, payload_filter)?;
 
             let search_config = crate::database::SearchConfig {
                 top_k,
@@ -2222,19 +3231,22 @@ pub mod nodejs {
         pub fn search_grouped(
             &self,
             env: Env,
-            query_vector: Vec<f64>,
-            top_k: Option<f64>,
-            expand_depth: Option<f64>,
-            min_score: Option<f64>,
-            payload_filter: Option<NodeJson>,
+            query_vector: JsUnknown,
+            top_k: Option<Either<f64, JsUnknown>>,
+            expand_depth: Option<Either<f64, JsUnknown>>,
+            min_score: Option<JsUnknown>,
+            payload_filter: Option<JsUnknown>,
         ) -> napi::Result<JsGroupedSearchResult> {
-            let payload_filter = payload_filter.map(|value| value.0);
-            let top_k = parse_positive_usize(env, top_k.unwrap_or(5.0), "topK")?;
-            let payload_filter = parse_payload_filter(payload_filter)?;
+            let query_vector = read_vector(env, query_vector, "queryVector", &self.dtype)?;
+            let payload_filter = payload_filter
+                .map(|value| read_json(env, value, "payloadFilter"))
+                .transpose()?;
+            let top_k = parse_search_usize(env, top_k, 5.0, "topK", true)?;
+            let payload_filter = parse_payload_filter(env, payload_filter)?;
             let config = crate::database::SearchConfig {
                 top_k,
-                expand_depth: parse_safe_usize(env, expand_depth.unwrap_or(2.0), "expandDepth")?,
-                min_score: min_score.unwrap_or(0.1) as f32,
+                expand_depth: parse_search_usize(env, expand_depth, 2.0, "expandDepth", false)?,
+                min_score: optional_number(env, min_score, 0.1, "minScore")? as f32,
                 payload_filter,
                 ..Default::default()
             };
@@ -2274,30 +3286,35 @@ pub mod nodejs {
         pub fn search_batch(
             &self,
             env: Env,
-            query_vectors: Vec<Vec<f64>>,
-            top_k: Option<f64>,
-            parallelism: Option<f64>,
-            min_score: Option<f64>,
+            query_vectors: JsUnknown,
+            top_k: Option<Either<f64, JsUnknown>>,
+            parallelism: Option<Either<f64, JsUnknown>>,
+            min_score: Option<JsUnknown>,
         ) -> napi::Result<napi::bindgen_prelude::AsyncTask<BatchSearchTask>> {
-            let top_k = parse_positive_usize(env, top_k.unwrap_or(5.0), "topK")?;
+            let query_vectors =
+                read_array(env, query_vectors, "queryVectors", |env, value, path| {
+                    // 保留 u64 数值范围在任务阶段拒绝的 Promise 完成语义。
+                    read_array(env, value, path, read_number)
+                })?;
+            let top_k = parse_search_usize(env, top_k, 5.0, "topK", true)?;
+            let parallelism = parse_search_usize(env, parallelism, 0.0, "parallelism", false)?;
             let backend = match &self.inner {
                 DbBackend::F32(db) => SearchBackendHandle::F32(db.search_handle()),
                 DbBackend::F16(db) => SearchBackendHandle::F16(db.search_handle()),
                 DbBackend::U64(db) => SearchBackendHandle::U64(db.search_handle()),
             };
             Ok(napi::bindgen_prelude::AsyncTask::new(BatchSearchTask {
+                context: crate::request::current(),
                 backend,
                 queries: query_vectors,
                 search_config: crate::database::SearchConfig {
                     top_k,
                     expand_depth: 0,
-                    min_score: min_score.unwrap_or(0.5) as f32,
+                    min_score: optional_number(env, min_score, 0.5, "minScore")? as f32,
                     enable_advanced_pipeline: false,
                     ..Default::default()
                 },
-                batch_config: crate::database::BatchSearchConfig {
-                    parallelism: parse_safe_usize(env, parallelism.unwrap_or(0.0), "parallelism")?,
-                },
+                batch_config: crate::database::BatchSearchConfig { parallelism },
             }))
         }
 
@@ -2306,75 +3323,13 @@ pub mod nodejs {
         pub fn search_advanced(
             &self,
             env: Env,
-            query_vector: Vec<f64>,
-            config: Option<JsSearchConfig>,
+            query_vector: JsUnknown,
+            config: Option<JsUnknown>,
         ) -> napi::Result<Vec<JsSearchHit>> {
-            let mut cfg = config.unwrap_or(JsSearchConfig {
-                top_k: None,
-                recall_k: None,
-                rerank_k: None,
-                expand_depth: None,
-                min_score: None,
-                teleport_alpha: None,
-                enable_advanced_pipeline: None,
-                enable_sparse_residual: None,
-                fista_lambda: None,
-                fista_threshold: None,
-                enable_dpp: None,
-                dpp_quality_weight: None,
-                enable_refractory_fatigue: None,
-                custom_query_text: None,
-                payload_filter: None,
-                enable_text_hybrid_search: None,
-                text_boost: None,
-                force_brute_force: None,
-                diffusion_bias: None,
-                expand_labels: None,
-                max_edges_per_node: None,
-                min_edge_weight: None,
-                edge_direction: None,
-            });
+            let query_vector = read_vector(env, query_vector, "queryVector", &self.dtype)?;
+            let (core_config, query_text) = parse_search_config(env, config, true)?;
 
-            let top_k = parse_positive_usize(env, cfg.top_k.unwrap_or(5.0), "topK")?;
-            let payload_filter =
-                parse_payload_filter(cfg.payload_filter.take().map(|value| value.0))?;
-            let core_config = crate::database::SearchConfig {
-                top_k,
-                recall_k: parse_safe_usize(env, cfg.recall_k.unwrap_or(0.0), "recallK")?,
-                rerank_k: parse_safe_usize(env, cfg.rerank_k.unwrap_or(0.0), "rerankK")?,
-                expand_depth: parse_safe_usize(
-                    env,
-                    cfg.expand_depth.unwrap_or(2.0),
-                    "expandDepth",
-                )?,
-                min_score: cfg.min_score.unwrap_or(0.1) as f32,
-                teleport_alpha: cfg.teleport_alpha.unwrap_or(0.0) as f32,
-                enable_advanced_pipeline: cfg.enable_advanced_pipeline.unwrap_or(true),
-                enable_sparse_residual: cfg.enable_sparse_residual.unwrap_or(false),
-                fista_lambda: cfg.fista_lambda.unwrap_or(0.1) as f32,
-                fista_threshold: cfg.fista_threshold.unwrap_or(0.3) as f32,
-                enable_dpp: cfg.enable_dpp.unwrap_or(false),
-                dpp_quality_weight: cfg.dpp_quality_weight.unwrap_or(1.0) as f32,
-                enable_refractory_fatigue: cfg.enable_refractory_fatigue.unwrap_or(false),
-                enable_text_hybrid_search: cfg.enable_text_hybrid_search.unwrap_or(false),
-                text_boost: cfg.text_boost.unwrap_or(1.5) as f32,
-                force_brute_force: cfg.force_brute_force.unwrap_or(false),
-                diffusion_bias: cfg
-                    .diffusion_bias
-                    .map(|v| v.iter().map(|&x| x as f32).collect()),
-                expand_labels: cfg.expand_labels,
-                max_edges_per_node: cfg
-                    .max_edges_per_node
-                    .map(|value| parse_safe_usize(env, value, "maxEdgesPerNode"))
-                    .transpose()?
-                    .unwrap_or(0),
-                min_edge_weight: cfg.min_edge_weight.unwrap_or(0.0) as f32,
-                edge_direction: parse_edge_direction(cfg.edge_direction.as_deref())?,
-                payload_filter,
-                ..Default::default()
-            };
-
-            let q_text = cfg.custom_query_text.as_deref();
+            let q_text = query_text.as_deref();
 
             let hits = match &self.inner {
                 DbBackend::F32(db) => {
@@ -2405,23 +3360,28 @@ pub mod nodejs {
         pub fn search_hybrid(
             &self,
             env: Env,
-            query_vector: Vec<f64>,
-            query_text: String,
-            top_k: Option<f64>,
-            expand_depth: Option<f64>,
-            min_score: Option<f64>,
-            hybrid_alpha: Option<f64>,
-            payload_filter: Option<NodeJson>,
+            query_vector: JsUnknown,
+            query_text: JsUnknown,
+            top_k: Option<Either<f64, JsUnknown>>,
+            expand_depth: Option<Either<f64, JsUnknown>>,
+            min_score: Option<JsUnknown>,
+            hybrid_alpha: Option<JsUnknown>,
+            payload_filter: Option<JsUnknown>,
         ) -> napi::Result<Vec<JsSearchHit>> {
-            let payload_filter = payload_filter.map(|value| value.0);
-            let top_k = parse_positive_usize(env, top_k.unwrap_or(5.0), "topK")?;
+            let query_vector = read_vector(env, query_vector, "queryVector", &self.dtype)?;
+            let payload_filter = payload_filter
+                .map(|value| read_json(env, value, "payloadFilter"))
+                .transpose()?;
+            let query_text = read_string(env, query_text, "queryText")?;
+            let top_k = parse_search_usize(env, top_k, 5.0, "topK", true)?;
 
-            let expand_depth = parse_safe_usize(env, expand_depth.unwrap_or(2.0), "expandDepth")?;
-            let min_score = min_score.unwrap_or(0.1) as f32;
-            let alpha = hybrid_alpha.unwrap_or(0.7) as f32;
-            let payload_filter = parse_payload_filter(payload_filter)?;
+            let expand_depth = parse_search_usize(env, expand_depth, 2.0, "expandDepth", false)?;
+            let min_score = optional_number(env, min_score, 0.1, "minScore")? as f32;
+            let alpha = optional_number(env, hybrid_alpha, 0.7, "hybridAlpha")? as f32;
+            let payload_filter = parse_payload_filter(env, payload_filter)?;
             // 简单的启发式权重换算
-            let boost = (1.0 - alpha).max(0.1) * 3.0;
+            let boost =
+                crate::sdk::hybrid_text_boost(alpha).map_err(|error| to_napi_error(env, error))?;
 
             let core_config = crate::database::SearchConfig {
                 top_k,
@@ -2461,15 +3421,24 @@ pub mod nodejs {
 
         /// 对节点建立用于双路召回的长文本 BM25 索引
         #[napi]
-        pub fn index_text(&mut self, env: Env, id: f64, text: String) -> napi::Result<()> {
-            dispatch!(self, mut db => db.index_text(parse_node_id(env, id, "id")?, &text))
+        pub fn index_text(&mut self, env: Env, id: JsUnknown, text: JsUnknown) -> napi::Result<()> {
+            let id = write_id(env, id, "id")?;
+            let text = write_string(env, text, "text")?;
+            dispatch!(self, mut db => db.index_text(id, &text))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         /// 对节点建立用于精确命中的 AC自动机 高级关键词索引
         #[napi]
-        pub fn index_keyword(&mut self, env: Env, id: f64, keyword: String) -> napi::Result<()> {
-            dispatch!(self, mut db => db.index_keyword(parse_node_id(env, id, "id")?, &keyword))
+        pub fn index_keyword(
+            &mut self,
+            env: Env,
+            id: JsUnknown,
+            keyword: JsUnknown,
+        ) -> napi::Result<()> {
+            let id = write_id(env, id, "id")?;
+            let keyword = write_string(env, keyword, "keyword")?;
+            dispatch!(self, mut db => db.index_keyword(id, &keyword))
                 .map_err(|error| to_napi_error(env, error))
         }
 
@@ -2482,21 +3451,57 @@ pub mod nodejs {
 
         /// 从完整正文与关键词集合重建文本索引，通过 flush 或 close 持久化。
         #[napi]
-        pub fn rebuild_text_index(
-            &mut self,
-            env: Env,
-            documents: Vec<JsTextIndexDocument>,
-        ) -> napi::Result<()> {
-            let documents = documents
-                .into_iter()
-                .map(|document| {
-                    Ok(crate::index::text::TextIndexDocument {
-                        id: parse_safe_usize(env, document.id, "文本重建节点 ID")? as u64,
-                        text: document.text,
-                        keywords: document.keywords.unwrap_or_default(),
+        pub fn rebuild_text_index(&mut self, env: Env, documents: JsUnknown) -> napi::Result<()> {
+            let documents = write_array(env, documents, "documents", |env, value, path| {
+                let write = Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION);
+                let document = argument_object(env, value, path, write)?;
+                let keys = document.get_all_property_names(
+                    napi::KeyCollectionMode::OwnOnly,
+                    napi::KeyFilter::Enumerable,
+                    napi::KeyConversion::NumbersToStrings,
+                )?;
+                for index in 0..keys.get_array_length()? {
+                    let key = write_string(env, keys.get_element(index)?, path)?;
+                    if !matches!(key.as_str(), "id" | "text" | "keywords") {
+                        return Err(argument_input_error(
+                            env,
+                            &crate::sdk::field_member(path, &key),
+                            "文本重建记录包含未知字段 (Text rebuild record contains an unknown field)",
+                            write,
+                        ));
+                    }
+                }
+                let required = |name: &str| {
+                    document.get(name)?.ok_or_else(|| {
+                        argument_input_error(
+                            env,
+                            &crate::sdk::field_member(path, name),
+                            "文本重建记录缺少字段 (Text rebuild record is missing a field)",
+                            write,
+                        )
                     })
+                };
+                Ok(crate::index::text::TextIndexDocument {
+                    id: write_id(env, required("id")?, &crate::sdk::field_member(path, "id"))?,
+                    text: write_string(
+                        env,
+                        required("text")?,
+                        &crate::sdk::field_member(path, "text"),
+                    )?,
+                    keywords: document
+                        .get("keywords")?
+                        .map(|value| {
+                            write_array(
+                                env,
+                                value,
+                                &crate::sdk::field_member(path, "keywords"),
+                                write_string,
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or_default(),
                 })
-                .collect::<napi::Result<Vec<_>>>()?;
+            })?;
             dispatch!(self, mut db => db.rebuild_text_index(&documents))
                 .map_err(|error| to_napi_error(env, error))
         }
@@ -2512,29 +3517,38 @@ pub mod nodejs {
         pub fn indexed_lookup(
             &self,
             env: Env,
-            equalities: NodeJson,
-            max_results: Option<f64>,
+            equalities: JsUnknown,
+            max_results: Option<Either<f64, JsUnknown>>,
         ) -> napi::Result<Vec<f64>> {
-            let equalities = equalities.0;
-            let object = equalities.as_object().ok_or_else(|| {
-                napi::Error::from_reason("equalities 必须是对象 (equalities must be an object)")
+            let value = read_json(env, equalities, "equalities")?;
+            let object = value.as_object().ok_or_else(|| {
+                argument_input_error(
+                    env,
+                    "equalities",
+                    "equalities 必须是对象 (equalities must be an object)",
+                    None,
+                )
             })?;
             let equalities = object
                 .iter()
                 .map(|(field, value)| (field.clone(), value.clone()))
                 .collect::<Vec<_>>();
-            dispatch!(self, db => db.indexed_lookup(&equalities, parse_safe_usize(env, max_results.unwrap_or(10_000.0), "maxResults")?))
-                .map_err(|error| to_napi_error(env, error)).and_then(|value| node_ids_to_js(env, value))
+            let max_results = parse_search_usize(env, max_results, 10_000.0, "maxResults", false)?;
+            dispatch!(self, db => db.indexed_lookup(&equalities, max_results))
+                .map_err(|error| to_napi_error(env, error))
+                .and_then(|value| node_ids_to_js(env, value))
         }
 
         #[napi]
-        pub fn create_ngram_index(&mut self, env: Env, field: String) -> napi::Result<()> {
+        pub fn create_ngram_index(&mut self, env: Env, field: JsUnknown) -> napi::Result<()> {
+            let field = write_string(env, field, "field")?;
             dispatch!(self, mut db => db.create_ngram_index(&field))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         #[napi]
-        pub fn drop_ngram_index(&mut self, env: Env, field: String) -> napi::Result<()> {
+        pub fn drop_ngram_index(&mut self, env: Env, field: JsUnknown) -> napi::Result<()> {
+            let field = write_string(env, field, "field")?;
             dispatch!(self, mut db => db.drop_ngram_index(&field))
                 .map_err(|error| to_napi_error(env, error))
         }
@@ -2543,16 +3557,21 @@ pub mod nodejs {
         pub fn substring_lookup(
             &self,
             env: Env,
-            field: String,
-            needle: String,
-            max_results: Option<f64>,
+            field: JsUnknown,
+            needle: JsUnknown,
+            max_results: Option<Either<f64, JsUnknown>>,
         ) -> napi::Result<Vec<f64>> {
-            dispatch!(self, db => db.substring_lookup(&field, &needle, parse_safe_usize(env, max_results.unwrap_or(10_000.0), "maxResults")?))
-                .map_err(|error| to_napi_error(env, error)).and_then(|value| node_ids_to_js(env, value))
+            let field = read_string(env, field, "field")?;
+            let needle = read_string(env, needle, "needle")?;
+            let max_results = parse_search_usize(env, max_results, 10_000.0, "maxResults", false)?;
+            dispatch!(self, db => db.substring_lookup(&field, &needle, max_results))
+                .map_err(|error| to_napi_error(env, error))
+                .and_then(|value| node_ids_to_js(env, value))
         }
 
         #[napi]
-        pub fn create_unique_index(&mut self, env: Env, field: String) -> napi::Result<()> {
+        pub fn create_unique_index(&mut self, env: Env, field: JsUnknown) -> napi::Result<()> {
+            let field = write_string(env, field, "field")?;
             dispatch!(self, mut db => db.create_unique_index(&field))
                 .map_err(|error| to_napi_error(env, error))
         }
@@ -2561,8 +3580,9 @@ pub mod nodejs {
         pub fn create_unique_composite_index(
             &mut self,
             env: Env,
-            fields: Vec<String>,
+            fields: JsUnknown,
         ) -> napi::Result<()> {
+            let fields = write_array(env, fields, "fields", write_string)?;
             dispatch!(self, mut db => db.create_unique_composite_index(&fields))
                 .map_err(|error| to_napi_error(env, error))
         }
@@ -2575,54 +3595,58 @@ pub mod nodejs {
         }
 
         #[napi]
-        pub fn create_index(&mut self, env: Env, field: String) -> napi::Result<()> {
+        pub fn create_index(&mut self, env: Env, field: JsUnknown) -> napi::Result<()> {
+            let field = write_string(env, field, "field")?;
             dispatch!(self, mut db => db.create_index(&field))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         #[napi]
-        pub fn create_ordered_index(&mut self, env: Env, field: String) -> napi::Result<()> {
+        pub fn create_ordered_index(&mut self, env: Env, field: JsUnknown) -> napi::Result<()> {
+            let field = write_string(env, field, "field")?;
             dispatch!(self, mut db => db.create_ordered_index(&field))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         #[napi]
-        pub fn create_composite_index(
-            &mut self,
-            env: Env,
-            fields: Vec<String>,
-        ) -> napi::Result<()> {
+        pub fn create_composite_index(&mut self, env: Env, fields: JsUnknown) -> napi::Result<()> {
+            let fields = write_array(env, fields, "fields", write_string)?;
             dispatch!(self, mut db => db.create_composite_index(&fields))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         #[napi]
-        pub fn create_bitmap_index(&mut self, env: Env, field: String) -> napi::Result<()> {
+        pub fn create_bitmap_index(&mut self, env: Env, field: JsUnknown) -> napi::Result<()> {
+            let field = write_string(env, field, "field")?;
             dispatch!(self, mut db => db.create_bitmap_index(&field))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         /// 删除属性索引（查询仍可用，退化为全扫描）
         #[napi]
-        pub fn drop_index(&mut self, env: Env, field: String) -> napi::Result<()> {
+        pub fn drop_index(&mut self, env: Env, field: JsUnknown) -> napi::Result<()> {
+            let field = write_string(env, field, "field")?;
             dispatch!(self, mut db => db.drop_index(&field))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         #[napi]
-        pub fn drop_ordered_index(&mut self, env: Env, field: String) -> napi::Result<()> {
+        pub fn drop_ordered_index(&mut self, env: Env, field: JsUnknown) -> napi::Result<()> {
+            let field = write_string(env, field, "field")?;
             dispatch!(self, mut db => db.drop_ordered_index(&field))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         #[napi]
-        pub fn drop_composite_index(&mut self, env: Env, fields: Vec<String>) -> napi::Result<()> {
+        pub fn drop_composite_index(&mut self, env: Env, fields: JsUnknown) -> napi::Result<()> {
+            let fields = write_array(env, fields, "fields", write_string)?;
             dispatch!(self, mut db => db.drop_composite_index(&fields))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         #[napi]
-        pub fn drop_bitmap_index(&mut self, env: Env, field: String) -> napi::Result<()> {
+        pub fn drop_bitmap_index(&mut self, env: Env, field: JsUnknown) -> napi::Result<()> {
+            let field = write_string(env, field, "field")?;
             dispatch!(self, mut db => db.drop_bitmap_index(&field))
                 .map_err(|error| to_napi_error(env, error))
         }
@@ -2643,24 +3667,33 @@ pub mod nodejs {
 
         /// 获取节点的 payload（不含向量，比 get() 更轻量）
         #[napi]
-        pub fn get_payload(&self, env: Env, id: f64) -> napi::Result<Option<NodeJson>> {
+        pub fn get_payload(
+            &self,
+            env: Env,
+            id: Either<f64, JsUnknown>,
+        ) -> napi::Result<Option<NodeJson>> {
+            let id = parse_usize_argument(env, id, "id", None)? as u64;
             Ok(
-                dispatch!(self, db => db.get_payload(parse_node_id(env, id, "id")?).map_err(|error| to_napi_error(env, error))?).map(NodeJson),
+                dispatch!(self, db => db.get_payload(id).map_err(|error| to_napi_error(env, error))?).map(NodeJson),
             )
         }
 
         /// 获取节点的出边列表
         #[napi]
-        pub fn get_edges(&self, env: Env, id: f64) -> napi::Result<Vec<JsEdge>> {
+        pub fn get_edges(&self, env: Env, id: Either<f64, JsUnknown>) -> napi::Result<Vec<JsEdge>> {
+            let id = parse_usize_argument(env, id, "id", None)? as u64;
             Ok({
-                dispatch!(self, db => db.get_edges(parse_node_id(env, id, "id")?).map_err(|error| to_napi_error(env, error))?)
+                dispatch!(self, db => db.get_edges(id).map_err(|error| to_napi_error(env, error))?)
                     .into_iter()
-                    .map(|e| Ok(JsEdge {
-                        target_id: node_id_to_js(env, e.target_id)?,
-                        label: e.label,
-                        weight: round_api_f32(e.weight),
-                        metadata: e.metadata.into(),
-                    })).collect::<napi::Result<_>>()?
+                    .map(|e| {
+                        Ok(JsEdge {
+                            target_id: node_id_to_js(env, e.target_id)?,
+                            label: e.label,
+                            weight: round_api_f32(e.weight),
+                            metadata: e.metadata.into(),
+                        })
+                    })
+                    .collect::<napi::Result<_>>()?
             })
         }
 
@@ -2669,11 +3702,15 @@ pub mod nodejs {
         pub fn get_incoming_edges(
             &self,
             env: Env,
-            id: f64,
-            label: Option<String>,
+            id: Either<f64, JsUnknown>,
+            label: Option<JsUnknown>,
         ) -> napi::Result<Vec<JsIncomingEdge>> {
+            let id = parse_usize_argument(env, id, "id", None)? as u64;
+            let label = label
+                .map(|value| raw_string(env, value, "label", None))
+                .transpose()?;
             Ok({
-                dispatch!(self, db => db.get_incoming_edges(parse_node_id(env, id, "id")?, label.as_deref()).map_err(|error| to_napi_error(env, error))?)
+                dispatch!(self, db => db.get_incoming_edges(id, label.as_deref()).map_err(|error| to_napi_error(env, error))?)
                 .into_iter()
                 .map(|edge| Ok(JsIncomingEdge {
                     source_id: node_id_to_js(env, edge.source_id)?,
@@ -2698,7 +3735,12 @@ pub mod nodejs {
         /// const rows = db.tql('FIND {type: "event", heat: {$gte: 0.7}} RETURN *')
         /// ```
         #[napi]
-        pub fn tql(&self, env: Env, query: String) -> napi::Result<Vec<NodeJson>> {
+        pub fn tql(
+            &self,
+            env: Env,
+            query: Either<String, JsUnknown>,
+        ) -> napi::Result<Vec<NodeJson>> {
+            let query = parse_string_argument(env, query, "query", None)?;
             match &self.inner {
                 DbBackend::F32(db) => db
                     .tql_values(&query)
@@ -2716,7 +3758,12 @@ pub mod nodejs {
         }
 
         #[napi]
-        pub fn prepare_tql(&self, env: Env, query: String) -> napi::Result<JsPreparedTql> {
+        pub fn prepare_tql(
+            &self,
+            env: Env,
+            query: Either<String, JsUnknown>,
+        ) -> napi::Result<JsPreparedTql> {
+            let query = parse_string_argument(env, query, "query", None)?;
             dispatch!(self, db => db.prepare_tql(&query))
                 .map(|inner| JsPreparedTql { inner })
                 .map_err(|error| to_napi_error(env, error))
@@ -2727,22 +3774,9 @@ pub mod nodejs {
             &self,
             env: Env,
             prepared: &JsPreparedTql,
-            parameters: NodeJson,
+            parameters: JsUnknown,
         ) -> napi::Result<Vec<NodeJson>> {
-            let parameters = parameters.0;
-            let object = parameters.as_object().ok_or_else(|| {
-                napi::Error::from_reason(
-                    "Prepared TQL 参数必须是对象 (Prepared TQL parameters must be an object)",
-                )
-            })?;
-            let mut values = std::collections::HashMap::new();
-            for (name, value) in object {
-                values.insert(
-                    name.clone(),
-                    crate::query::tql_prepared::TqlParamValue::from_json(value)
-                        .map_err(|error| to_napi_error(env, error))?,
-                );
-            }
+            let values = collect_prepared_parameters(env, parameters, &prepared.inner)?;
             match &self.inner {
                 DbBackend::F32(db) => db
                     .execute_prepared_tql(&prepared.inner, &values)
@@ -2757,14 +3791,43 @@ pub mod nodejs {
             .map_err(|error| to_napi_error(env, error))
         }
 
+        /// 文档JSON适配复用Core的解析、来源映射、分批发布、修订、检索与证据上下文。
+        #[napi]
+        pub fn document_request(
+            &mut self,
+            env: Env,
+            request_json: JsUnknown,
+        ) -> napi::Result<String> {
+            let request_json = read_string(env, request_json, "requestJson")?;
+            dispatch!(self, mut db => crate::sdk::documents::request(db, &request_json))
+                .map_err(|error| to_napi_error(env, error))
+        }
+
+        /// SSD运行时JSON适配复用Core的事实绑定、驻留、缓存与I/O生命周期。
+        #[napi]
+        pub fn quiver_request(&self, env: Env, request_json: JsUnknown) -> napi::Result<String> {
+            let request_json = read_string(env, request_json, "requestJson")?;
+            dispatch!(self, db => crate::sdk::quiver::request(db, &request_json))
+                .map_err(|error| to_napi_error(env, error))
+        }
+
+        /// 命名图JSON适配复用Core的成员、独立边、修订及作用域契约。
+        #[napi]
+        pub fn graph_request(&mut self, env: Env, request_json: JsUnknown) -> napi::Result<String> {
+            let request_json = read_string(env, request_json, "requestJson")?;
+            dispatch!(self, mut db => crate::sdk::named_graphs::request(db, &request_json))
+                .map_err(|error| to_napi_error(env, error))
+        }
+
         /// 同步执行宿主控制台请求。
         #[napi]
         pub fn console_request(
             &mut self,
             env: Env,
             session: &JsConsoleSession,
-            request_json: String,
+            request_json: JsUnknown,
         ) -> napi::Result<String> {
+            let request_json = read_string(env, request_json, "requestJson")?;
             dispatch!(self, mut db => db.console_request(&session.inner, &request_json))
                 .map_err(|error| to_napi_error(env, error))
         }
@@ -2783,7 +3846,12 @@ pub mod nodejs {
         /// ```
         /// 执行内核 TQL 写操作。
         #[napi]
-        pub fn tql_mut(&mut self, env: Env, query: String) -> napi::Result<NodeJson> {
+        pub fn tql_mut(
+            &mut self,
+            env: Env,
+            query: Either<String, JsUnknown>,
+        ) -> napi::Result<NodeJson> {
+            let query = parse_management_string(env, query, "query")?;
             let result =
                 dispatch!(self, mut db => db.tql_mut_with_id_limit(&query,9_007_199_254_740_991))
                     .map_err(|error| to_napi_error(env, error))?;
@@ -2806,8 +3874,9 @@ pub mod nodejs {
         pub fn publish_generation_manifest(
             &mut self,
             env: Env,
-            generation_id: String,
+            generation_id: Either<String, JsUnknown>,
         ) -> napi::Result<NodeJson> {
+            let generation_id = parse_management_string(env, generation_id, "generationId")?;
             let manifest =
                 dispatch!(self, mut db => db.publish_generation_manifest(&generation_id))
                     .map_err(|error| to_napi_error(env, error))?;
@@ -2816,8 +3885,20 @@ pub mod nodejs {
 
         /// 运行时切换 WAL 同步模式
         #[napi]
-        pub fn set_sync_mode(&mut self, env: Env, mode: String) -> napi::Result<()> {
-            let sm = parse_sync_mode(&mode)?;
+        pub fn set_sync_mode(
+            &mut self,
+            env: Env,
+            mode: Either<String, JsUnknown>,
+        ) -> napi::Result<()> {
+            let mode = parse_management_string(env, mode, "mode")?;
+            let sm = crate::storage::wal::SyncMode::parse(&mode).map_err(|reason| {
+                to_napi_error(
+                    env,
+                    crate::TriviumError::InvalidInput(reason)
+                        .at_field("mode")
+                        .with_write_info(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+                )
+            })?;
             dispatch!(self, mut db => db.set_sync_mode(sm))
                 .map_err(|error| to_napi_error(env, error))
         }
@@ -2827,16 +3908,36 @@ pub mod nodejs {
         pub fn enable_auto_compaction(
             &mut self,
             env: Env,
-            interval_secs: Option<f64>,
+            interval_secs: Option<Either<f64, JsUnknown>>,
         ) -> napi::Result<()> {
-            let secs =
-                parse_safe_usize(env, interval_secs.unwrap_or(7200.0), "intervalSecs")? as u64;
+            let secs = parse_management_usize(
+                env,
+                interval_secs.unwrap_or(Either::A(7200.0)),
+                "intervalSecs",
+            )? as u64;
             dispatch!(self, mut db => db.enable_auto_compaction(std::time::Duration::from_secs(secs)))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         #[napi]
-        pub fn set_auto_build_quiver(&mut self, env: Env, enabled: bool) -> napi::Result<()> {
+        pub fn set_auto_build_quiver(
+            &mut self,
+            env: Env,
+            enabled: Either<bool, JsUnknown>,
+        ) -> napi::Result<()> {
+            let enabled = match enabled {
+                Either::A(enabled) => enabled,
+                Either::B(_) => {
+                    return Err(to_napi_error(
+                        env,
+                        crate::TriviumError::InvalidInput(
+                            "enabled 必须是布尔值 (enabled must be a boolean)".into(),
+                        )
+                        .at_field("enabled")
+                        .with_write_info(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+                    ));
+                }
+            };
             dispatch!(self, mut db => db.set_auto_build_quiver(enabled))
                 .map_err(|error| to_napi_error(env, error))
         }
@@ -2861,21 +3962,43 @@ pub mod nodejs {
 
         /// 为后续插入主动预留额外节点容量。
         #[napi]
-        pub fn reserve_nodes(&self, env: Env, additional: f64) -> napi::Result<()> {
-            let additional = parse_safe_usize(env, additional, "additional")?;
+        pub fn reserve_nodes(
+            &self,
+            env: Env,
+            additional: Either<f64, JsUnknown>,
+        ) -> napi::Result<()> {
+            let additional = parse_management_usize(env, additional, "additional")?;
             dispatch!(self, db => db.reserve_nodes(additional))
                 .map_err(|error| to_napi_error(env, error))
         }
 
         /// 设置内存上限（MiB），0 = 无限制。
         #[napi]
-        pub fn set_memory_limit(&mut self, env: Env, mb: f64) -> napi::Result<()> {
-            let mb = parse_safe_usize(env, mb, "memoryLimitMb")?;
-            let bytes = mb
-                .checked_mul(1024 * 1024)
-                .ok_or_else(|| napi::Error::from_reason("memoryLimitMb 换算字节时溢出"))?;
-            dispatch!(self, mut db => db.set_memory_limit(bytes))
-                .map_err(|error| to_napi_error(env, error))
+        pub fn set_memory_limit(
+            &mut self,
+            env: Env,
+            mb: Either<f64, JsUnknown>,
+        ) -> napi::Result<()> {
+            let mb = parse_management_usize(env, mb, "mb")?;
+            let bytes = mb.checked_mul(1024 * 1024).ok_or_else(|| {
+                to_napi_error(
+                    env,
+                    crate::TriviumError::InvalidInput(
+                        "内存上限换算字节时溢出 (Memory limit overflows when converted to bytes)"
+                            .into(),
+                    )
+                    .at_field("mb")
+                    .with_write_info(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+                )
+            })?;
+            dispatch!(self, mut db => db.set_memory_limit(bytes)).map_err(|error| {
+                let error = if error.info().target.is_some() {
+                    error.at_field("mb")
+                } else {
+                    error
+                };
+                to_napi_error(env, error)
+            })
         }
 
         /// 读取多个数据库共享的配额、工作线程和任务统计。
@@ -2925,8 +4048,22 @@ pub mod nodejs {
 
         /// 维度迁移：结构复制到新维度数据库，返回需要更新向量的节点 ID 列表
         #[napi]
-        pub fn migrate(&self, env: Env, new_path: String, new_dim: f64) -> napi::Result<Vec<f64>> {
-            let new_dim = parse_positive_usize(env, new_dim, "newDim")?;
+        pub fn migrate(
+            &self,
+            env: Env,
+            new_path: JsUnknown,
+            new_dim: JsUnknown,
+        ) -> napi::Result<Vec<f64>> {
+            let new_path = write_string(env, new_path, "newPath")?;
+            let new_dim = write_number(env, new_dim, "newDim").and_then(|value| {
+                parse_positive_usize(env, value, "newDim").map_err(|error| {
+                    with_napi_write_info(
+                        env,
+                        error,
+                        crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION,
+                    )
+                })
+            })?;
             self.all_node_ids(env)?;
             match &self.inner {
                 DbBackend::F32(db) => {
@@ -2964,10 +4101,9 @@ pub mod nodejs {
 
         /// 检查节点是否存在
         #[napi]
-        pub fn contains(&self, env: Env, id: f64) -> napi::Result<bool> {
-            Ok(
-                dispatch!(self, db => db.contains(parse_node_id(env, id, "id")?).map_err(|error| to_napi_error(env, error))?),
-            )
+        pub fn contains(&self, env: Env, id: Either<f64, JsUnknown>) -> napi::Result<bool> {
+            let id = parse_usize_argument(env, id, "id", None)? as u64;
+            Ok(dispatch!(self, db => db.contains(id).map_err(|error| to_napi_error(env, error))?))
         }
 
         #[napi]
@@ -2994,9 +4130,10 @@ pub mod nodejs {
             &mut self,
             env: Env,
             this: This<JsObject>,
-            timeout_ms: f64,
+            timeout_ms: JsUnknown,
         ) -> napi::Result<bool> {
-            let milliseconds = parse_safe_usize(env, timeout_ms, "timeoutMs")?;
+            let milliseconds =
+                parse_safe_usize(env, read_number(env, timeout_ms, "timeoutMs")?, "timeoutMs")?;
             let closed = dispatch!(self, mut db => db.close_timeout(std::time::Duration::from_millis(milliseconds as u64)))
                 .map_err(|e| to_napi_error(env, e))?;
             super::super::node_hook_refs::flush(env, &this)?;
@@ -3007,9 +4144,11 @@ pub mod nodejs {
         pub fn create_snapshot(
             &mut self,
             env: Env,
-            destination: String,
-            generation_id: String,
+            destination: JsUnknown,
+            generation_id: JsUnknown,
         ) -> napi::Result<NodeJson> {
+            let destination = write_string(env, destination, "destination")?;
+            let generation_id = write_string(env, generation_id, "generationId")?;
             let manifest =
                 dispatch!(self, mut db => db.create_snapshot(&destination, &generation_id))
                     .map_err(|e| to_napi_error(env, e))?;

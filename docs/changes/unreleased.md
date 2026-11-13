@@ -1,11 +1,15 @@
 # 未发布变更
 
-后续变更以 `0.9.0` 正式版为基线。已发布内容见[完整中英文变更说明](0.9.0.md)。
+后续开发以 `0.9.1-beta.1` 为基线。本版完整变更见 [0.9.1-beta.1 中英文说明](0.9.1-beta.1.md)。
 
-暂无新的未发布变更。
+## 中文说明
 
-## Unreleased
+后续变更在对应实现完成后记录于此。
 
-Subsequent changes build on stable `0.9.0`. Published changes are recorded in the [complete Chinese and English release notes](0.9.0.md).
+---
 
-No additional unreleased changes are recorded.
+## English
+
+Subsequent development builds on `0.9.1-beta.1`. Its complete changes are recorded in the [bilingual release notes](0.9.1-beta.1.md).
+
+Record subsequent changes here as their implementations are completed.
