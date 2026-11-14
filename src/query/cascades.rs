@@ -21,6 +21,7 @@ pub type GroupId = usize;
 #[serde(rename_all = "snake_case")]
 pub enum LogicalOperator {
     SearchSource,
+    DocumentSearch,
     With,
     Expand,
     Filter,
@@ -70,6 +71,7 @@ pub enum MaterializationProperty {
 #[serde(rename_all = "snake_case")]
 pub enum ScoreProperty {
     None,
+    Document,
     ApproximateSimilarity,
     ExactSimilarity,
     Graph,
@@ -96,6 +98,10 @@ pub struct PhysicalProperties {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PhysicalOperator {
+    NamedGraphMatch,
+    DocumentTextSearch,
+    DocumentExactSearch,
+    DocumentAnnSearch,
     ExactVectorSearch,
     QuiverVectorSearch,
     NodeScan,
@@ -310,10 +316,22 @@ pub fn optimize_pipeline_with_profile<T: VectorType>(
     budget: OptimizerBudget,
     profile: bool,
 ) -> CascadesPlan {
+    optimize_pipeline_scoped(query, mt, budget, profile, None)
+}
+
+pub(crate) fn optimize_pipeline_scoped<T: VectorType>(
+    query: &TqlQuery,
+    mt: &MemTable<T>,
+    budget: OptimizerBudget,
+    profile: bool,
+    selected_graph: Option<&crate::storage::memtable::GraphStats>,
+) -> CascadesPlan {
     let total_started = profile.then(Instant::now);
     let requirements = StatsRequirement::for_query(query);
     let stats_started = profile.then(Instant::now);
-    let graph = requirements.graph.then(|| mt.graph_stats());
+    let graph = requirements
+        .graph
+        .then(|| selected_graph.cloned().unwrap_or_else(|| mt.graph_stats()));
     let property_stats = if requirements.property {
         mt.property_index_stats()
             .into_iter()
@@ -340,16 +358,30 @@ pub fn optimize_pipeline_with_profile<T: VectorType>(
     let mut stages = Vec::new();
     let mut status = OptimizationStatus::Complete;
     let mut exact_rerank_after = BTreeSet::new();
-    let mut input_rows = source_rows(query, mt.node_count());
+    let mut input_rows = source_rows(
+        query,
+        if matches!(
+            query.entry,
+            QueryEntry::Match { .. } | QueryEntry::OptionalMatch { .. }
+        ) {
+            selected_graph.map_or_else(|| mt.node_count(), |graph| graph.node_count)
+        } else {
+            mt.node_count()
+        },
+    );
     let mut parent = None;
     let mut explored = 0usize;
     let mut pruned = 0usize;
 
-    let source_alt = source_alternative(query, mt, input_rows);
+    let source_alt = source_alternative(query, mt, input_rows, selected_graph);
     push_group(
         &mut groups,
         GroupExpression {
-            operator: LogicalOperator::SearchSource,
+            operator: if matches!(query.entry, QueryEntry::Documents { .. }) {
+                LogicalOperator::DocumentSearch
+            } else {
+                LogicalOperator::SearchSource
+            },
             children: Vec::new(),
             stage_index: None,
         },
@@ -411,6 +443,7 @@ pub fn optimize_pipeline_with_profile<T: VectorType>(
                 };
                 let fanout = input_origin
                     .as_ref()
+                    .filter(|_| selected_graph.is_none())
                     .and_then(|(field, value)| mt.cross_modal_stats(field, value))
                     .filter(|stats| stats.sampled >= 2)
                     .map_or(base_fanout, |stats| {
@@ -420,7 +453,7 @@ pub fn optimize_pipeline_with_profile<T: VectorType>(
                 let hops = expand.expand.max_depth.max(1);
                 let estimated = (input_rows as f64 * fanout.powi(hops.min(8) as i32))
                     .ceil()
-                    .min(mt.node_count() as f64) as usize;
+                    .min(graph.node_count as f64) as usize;
                 (
                     LogicalOperator::Expand,
                     vec![PhysicalAlternative {
@@ -1047,6 +1080,7 @@ fn estimate_source_for(operator: &PhysicalOperator) -> EstimateSource {
         | PhysicalOperator::PropertyCompositeLookup
         | PhysicalOperator::PropertyBitmapLookup
         | PhysicalOperator::PropertyIndexIntersection
+        | PhysicalOperator::NamedGraphMatch
         | PhysicalOperator::GraphExpandIncoming
         | PhysicalOperator::GraphExpandLabelDirectory => EstimateSource::IndexStatistics,
         PhysicalOperator::GraphExpandSerial
@@ -1068,6 +1102,27 @@ fn estimate_confidence_for(operator: &PhysicalOperator) -> f32 {
 
 fn source_rows(query: &TqlQuery, node_count: usize) -> usize {
     match &query.entry {
+        QueryEntry::Documents { request } => request
+            .value()
+            .ok()
+            .and_then(|request| {
+                let query = request.get("query")?;
+                Some(
+                    query
+                        .get("max_documents")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(10)
+                        .saturating_mul(
+                            query
+                                .get("hits_per_document")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(2),
+                        )
+                        .min(usize::MAX as u64) as usize,
+                )
+            })
+            .unwrap_or(node_count)
+            .min(node_count),
         QueryEntry::Search { top_k, .. } => (*top_k).min(node_count),
         QueryEntry::Text { clause } => clause.top_k.min(node_count),
         QueryEntry::Find { .. } | QueryEntry::Match { .. } | QueryEntry::OptionalMatch { .. } => {
@@ -1300,8 +1355,28 @@ fn source_alternative<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
     rows: usize,
+    selected_graph: Option<&crate::storage::memtable::GraphStats>,
 ) -> PhysicalAlternative {
     let operator = match &query.entry {
+        QueryEntry::Match { .. } | QueryEntry::OptionalMatch { .. } if selected_graph.is_some() => {
+            PhysicalOperator::NamedGraphMatch
+        }
+        QueryEntry::Documents { request } => {
+            match crate::query::tql_documents::DocumentRequest::<T>::parse(request)
+                .ok()
+                .and_then(|request| request.vector_options().cloned())
+            {
+                None => PhysicalOperator::DocumentTextSearch,
+                Some(options)
+                    if options.strategy == crate::document::DocumentVectorStrategy::Exact
+                        || crate::vector::is_binary_vector::<T>()
+                        || mt.quiver().is_none() =>
+                {
+                    PhysicalOperator::DocumentExactSearch
+                }
+                Some(_) => PhysicalOperator::DocumentAnnSearch,
+            }
+        }
         QueryEntry::Search { .. } if mt.quiver().is_some() => PhysicalOperator::QuiverVectorSearch,
         QueryEntry::Search { .. } => PhysicalOperator::ExactVectorSearch,
         QueryEntry::Find { filter } => match filter {
@@ -1322,11 +1397,28 @@ fn source_alternative<T: VectorType>(
         QueryEntry::Text { .. } => PhysicalOperator::TextFirstSource,
         QueryEntry::Match { .. } | QueryEntry::OptionalMatch { .. } => PhysicalOperator::NodeScan,
     };
-    let approximate = operator == PhysicalOperator::QuiverVectorSearch;
-    let text_source = operator == PhysicalOperator::TextFirstSource;
+    let approximate = matches!(
+        operator,
+        PhysicalOperator::QuiverVectorSearch | PhysicalOperator::DocumentAnnSearch
+    );
+    let text_source = matches!(
+        operator,
+        PhysicalOperator::TextFirstSource | PhysicalOperator::DocumentTextSearch
+    );
+    let named_graph_source = operator == PhysicalOperator::NamedGraphMatch;
+    let document_source = matches!(
+        operator,
+        PhysicalOperator::DocumentTextSearch
+            | PhysicalOperator::DocumentExactSearch
+            | PhysicalOperator::DocumentAnnSearch
+    );
     PhysicalAlternative {
         operator,
-        estimated_cost: if approximate {
+        estimated_cost: if named_graph_source {
+            selected_graph.map_or(rows, |graph| {
+                graph.node_count.saturating_add(graph.edge_count)
+            }) as f64
+        } else if approximate {
             rows.max(1).ilog2() as f64 * mt.dim() as f64
         } else if text_source {
             rows as f64
@@ -1335,13 +1427,31 @@ fn source_alternative<T: VectorType>(
         },
         estimated_rows: rows,
         temp_bytes: rows.saturating_mul(std::mem::size_of::<crate::query::pipeline::NodeRow>()),
-        vector_page_reads: pages(
-            mt.node_count()
-                .saturating_mul(mt.dim())
-                .saturating_mul(std::mem::size_of::<T>()),
-        ),
-        payload_page_reads: 0,
-        graph_page_reads: 0,
+        vector_page_reads: if text_source || named_graph_source {
+            0
+        } else {
+            pages(
+                mt.node_count()
+                    .saturating_mul(mt.dim())
+                    .saturating_mul(std::mem::size_of::<T>()),
+            )
+        },
+        payload_page_reads: if document_source {
+            pages(mt.node_count().saturating_mul(128))
+        } else {
+            0
+        },
+        graph_page_reads: if named_graph_source {
+            selected_graph.map_or(0, |graph| {
+                pages(
+                    graph
+                        .edge_count
+                        .saturating_mul(std::mem::size_of::<crate::Edge>()),
+                )
+            })
+        } else {
+            0
+        },
         exact: !approximate,
         materialized: true,
     }
@@ -1412,6 +1522,19 @@ fn collect_predicate_fields(predicate: &Predicate, output: &mut Vec<String>) {
 
 fn properties_for(operator: &PhysicalOperator) -> PhysicalProperties {
     let (ordering, exactness, materialization, score, path) = match operator {
+        PhysicalOperator::DocumentTextSearch
+        | PhysicalOperator::DocumentExactSearch
+        | PhysicalOperator::DocumentAnnSearch => (
+            OrderingProperty::Unordered,
+            if *operator == PhysicalOperator::DocumentAnnSearch {
+                ExactnessProperty::Approximate
+            } else {
+                ExactnessProperty::Exact
+            },
+            MaterializationProperty::Materialized,
+            ScoreProperty::Document,
+            PathProperty::Unavailable,
+        ),
         PhysicalOperator::ExactVectorSearch | PhysicalOperator::ExactRerankHeap => (
             OrderingProperty::SimilarityDesc,
             ExactnessProperty::Exact,
@@ -1427,6 +1550,7 @@ fn properties_for(operator: &PhysicalOperator) -> PhysicalProperties {
             PathProperty::Unavailable,
         ),
         PhysicalOperator::GraphExpandSerial
+        | PhysicalOperator::NamedGraphMatch
         | PhysicalOperator::GraphExpandParallel
         | PhysicalOperator::GraphExpandIncoming
         | PhysicalOperator::GraphExpandLabelDirectory

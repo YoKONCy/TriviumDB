@@ -264,32 +264,7 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                 crate::storage::payload_store::serialized_json_len(scope)?.saturating_mul(64);
             self.ensure_incremental_memory_budget(scope_bytes)?;
             let _scope_workspace = self.resource_runtime.reserve_workspace(scope_bytes)?;
-            let mut selected = BTreeSet::new();
-            for id in &scope.graph_ids {
-                validate_id(id)?;
-                if !selected.insert(id.as_str()) {
-                    return Err(invalid(
-                        "scope.graph_ids",
-                        "图作用域包含重复身份 (Graph scope contains duplicate identities)",
-                    ));
-                }
-            }
-            if selected.is_empty() && !scope.include_default {
-                return Err(invalid(
-                    "scope",
-                    "查询要求显式选择图 (Query requires an explicit graph selection)",
-                ));
-            }
-            if scope
-                .expected_revisions
-                .keys()
-                .any(|id| !selected.contains(id.as_str()))
-            {
-                return Err(invalid(
-                    "scope.expected_revisions",
-                    "预期修订必须对应所选图 (Expected revisions must refer to selected graphs)",
-                ));
-            }
+            let selected = scope.selected(limits)?;
             let mt = read_or_recover(&self.memtable);
             let mut nodes = if scope.include_default {
                 mt.node_count()

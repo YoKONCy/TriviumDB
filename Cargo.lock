@@ -1184,6 +1184,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inventory"
+version = "0.3.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6928282826c822ad91bf1c9a1cb90a30ba1c26770749929b4656cd6be829cd7c"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "is-terminal"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1725,6 +1734,7 @@ checksum = "7778bffd85cf38175ac1f545509665d0b9b92a198ca7941f131f85f7a4f9a872"
 dependencies = [
  "cfg-if",
  "indoc",
+ "inventory",
  "libc",
  "memoffset",
  "once_cell",
@@ -2627,7 +2637,7 @@ checksum = "0d15f4f5898bcfc5d8a8e45ed30b2f108d710c1a2e5489dbf80e078f707181bc"
 
 [[package]]
 name = "triviumdb"
-version = "0.9.1-beta.1"
+version = "0.9.1"
 dependencies = [
  "aho-corasick",
  "bincode",
@@ -2666,7 +2676,7 @@ dependencies = [
 
 [[package]]
 name = "triviumdb-cli"
-version = "0.9.1-beta.1"
+version = "0.9.1"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2688,7 +2698,7 @@ dependencies = [
 
 [[package]]
 name = "triviumdb-server"
-version = "0.9.1-beta.1"
+version = "0.9.1"
 dependencies = [
  "async-stream",
  "axum",

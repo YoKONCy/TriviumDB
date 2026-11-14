@@ -13,4 +13,5 @@ pub mod pathfinding;
 pub mod reachability;
 pub mod subset;
 pub mod traversal;
+pub(crate) mod view;
 pub mod wcc;

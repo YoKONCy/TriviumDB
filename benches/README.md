@@ -109,9 +109,11 @@ cargo bench --features ablation --bench bench_variance
 
 ## 生产 QuIVer SSD 测量
 
-`cargo bench --bench bench_quiver_ssd` 使用生产 QVSSD v1／codec 1 和固定来源制品，比较缓冲零缓存、Direct I/O 零缓存、三档行缓存及全 Hot 驻留。适用平台为 Windows 和 Linux，严格 Direct I/O 失败时保留错误。数据采用固定种子 `20261113` 的均匀、聚簇及稀疏分布，默认图参数为 `m=16`、`ef_construction=96`、`alpha=1.2`，检索采用 `top_k=10` 和 `ef=rerank_limit=32／96`。
+`cargo bench --bench bench_quiver_ssd` 使用生产压缩重排及固定来源制品，比较缓冲零缓存、Direct I/O 零缓存、三档行缓存及全 Hot 驻留。适用平台为 Windows 和 Linux，严格 Direct I/O 失败时保留错误。数据采用固定种子 `20261113` 的均匀、聚簇及稀疏分布，默认图参数为 `m=16`、`ef_construction=96`、`alpha=1.2`，检索采用 `top_k=10` 和 `ef=rerank_limit=32／96`。
 
 环境变量 `TDB_SSD_NODES`、`TDB_SSD_QUERIES` 和 `TDB_SSD_ROUNDS` 调整规模，`TDB_SSD_ROOT` 指定制品目录。默认目录为 `target/bench-reports/quiver-ssd/`，相同输入复用已存在的制品，构图参数变化时使用新的目录。缓存候选为完整行缓存估算的 `0、1/16、1/4、1`，并逐轮轮换配置顺序。每个配置重新打开 Reader，使用前八条查询预热，再记录完整测量窗口。
+
+`TDB_SSD_ENCODING` 选择 `int8`、`centered_int8` 或 `centered_int4`，`TDB_SSD_QUERY_PRECISION` 选择 `fp32`、`int8` 或 `int4`。默认均为 `int8`。同一目录复用固定图，按编码分别保存派生制品，报告记录实际编码和查询精度。跨编码比较时使用相同输入、图和工作点，并分别报告召回代价。
 
 报告位于 `target/bench-reports/quiver-ssd.json`，包含来源摘要、图制品摘要、实际参数、QPS、P50／P95／P99、逻辑与系统读取、Runtime 账本及进程内存。精确余弦真值由独立 f64 扫描产生，所有配置逐条核对完整 ID、分数和顺序。查询在稳定事实及编码下比较工程实现，计时用于研究报告。
 

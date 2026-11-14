@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> 本文列出以 `0.9.0` 为基线的当前开发版本Rust、Python（PyO3）和Node.js（napi-rs）公共API。版本记录见[变更说明](changes/0.9.0.md)，开发中的接口扩展见[未发布变更](changes/unreleased.md)。许可为Apache-2.0。
+> 本文列出 `0.9.1` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本记录见[变更说明](changes/0.9.1.md)，后续进展见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
 
 ---
 
@@ -13,7 +13,7 @@
 - [节点 CRUD](#节点-crud)
 - [图谱操作](#图谱操作)
 - [搜索与召回](#搜索与召回)
-- [QuIVer INT8 运行时](#quiver-int8-运行时)
+- [QuIVer 压缩运行时](#quiver-压缩运行时)
 - [Hook 扩展系统](#hook-扩展系统)
 - [元数据过滤](#元数据过滤)
 - [TQL、Prepared 与一等值](#tqlprepared-与一等值)
@@ -39,11 +39,11 @@
 
 `ConsoleSession::is_drained()`、Python `session.is_drained()` 和 Node `session.isDrained()` 在 detach 后全部 Core 请求实际退出时返回 `true`。嵌入 HTTP 通过 `GET /v1/console/status` 返回相同的 `drained` 字段。请求执行、客户端取消调用与响应交付的完成范围见[请求与传输完成点](error-contracts.md#请求与传输完成点)。
 
-当前开发版本扩展 Console RPC v1：`getNodes(withRevision:true)` 返回一致的编辑快照，`guardedTransaction` 原子校验全库版本并提供实例内幂等回执，`transactionStatus` 以完整原请求确认结果。这些是未发布能力，普通事务的无条件写入语义保持不变；具体字段、冲突和重启边界见[编辑协议](embedded-console.md#编辑快照冲突与原事务确认)。Rust、Python、Node 继续通过现有 JSON 字符串入口调用，三端使用同一份协议字段。
+Console RPC v1 的 `getNodes(withRevision:true)` 返回一致的编辑快照，`guardedTransaction` 原子校验全库版本并提供有界持久回执，`transactionStatus` 以完整原请求确认结果。具体字段、冲突和跨重开确认边界见[编辑协议](embedded-console.md#编辑快照冲突与原事务确认)。Rust、Python、Node 通过同一 JSON 字符串协议调用。
 
 共享资源运行时、实例诊断、受控关闭和目录快照从 `0.9.0-beta.1` 起提供。配置与示例见[资源运行时](resource-runtime.md)和[关闭、快照与恢复](lifecycle-snapshots.md)。
 
-当前开发版本为 Python 公开实例方法、选定魔术方法和模块函数的缺参、未知关键字、重复赋值及位置数量错误提供 `TypeError`、`TDB_INVALID_INPUT`、`target.field` 与 `details.argument_kind`。Node 公共加载器为已登记的必需位置参数提供同类缺参字段。已覆盖写调用在执行前拒绝时返回 `validation/not_committed`，事务缓冲保留。调用形状与构造期覆盖范围见[错误契约](error-contracts.md#公开调用形状)。
+Python 公开实例方法、选定魔术方法和模块函数的缺参、未知关键字、重复赋值及位置数量错误提供 `TypeError`、`TDB_INVALID_INPUT`、`target.field` 与 `details.argument_kind`。Node 公共加载器为已登记的必需位置参数提供同类缺参字段。已覆盖写调用在执行前拒绝时返回 `validation/not_committed`，事务缓冲保留。调用形状与构造期覆盖范围见[错误契约](error-contracts.md#公开调用形状)。
 
 数据库、资源运行时和会话构造补齐已覆盖参数值的字段诊断。Python 保留内置提取错误继承及宿主原异常，Node 校验已覆盖配置的原始类型。维度、运行时线程上限、维护额度和 MiB 换算拒绝提供对应字段，打开失败后配额归还；字段清单与剩余范围见[构造参数值](error-contracts.md#构造参数值)。
 
@@ -61,13 +61,13 @@ Python 批量插入的 vectors 和 payloads 外层为 list，ID 集合与单条�
 
 实例通过同步关闭或受控关闭完成持久化与资源释放。独立目录快照支持捕获、校验和恢复已打开数据库的状态。
 
-当前开发版的数据库共享访问及结构化拒绝见[SDK 指南](kernel-sdk.md#请求失败与错误字段)。Python 数据库方法区分同库回调重入和跨线程借用争用；事务提交在借用或内核准入被拒绝时保留待提交操作。
+数据库共享访问及结构化拒绝见[SDK 指南](kernel-sdk.md#请求失败与错误字段)。Python 数据库方法区分同库回调重入和跨线程借用争用；事务提交在借用或内核准入被拒绝时保留待提交操作。
 
 Rust 的 `sdk::RequestContext` 统一携带请求 ID、取消／期限及写入类别，供共享句柄的 `try_read_with_context`、`try_write_with_context` 和 `commit_tx_with_context` 使用。Console 复用同一 Core 上下文，版本保护事务通过有界持久回执支持跨重开确认，调用及完成点见[统一请求上下文](kernel-sdk.md#统一请求上下文)和[回执协议](embedded-console.md#回执与结果确认)。
 
 普通类型化方法通过 Python `with RequestContext(...)` 和 Node `context.run(...)` 继承请求控制，Rust Reader／Writer 提供 `with_request_context`。两端构造器的期限单位为毫秒，0 由宿主取消管理，期限从创建时开始计算。任务局部传播、原生工作线程、事务消费及取消后的清理入口见[类型化绑定与包装对象](kernel-sdk.md#类型化绑定与包装对象)。
 
-当前开发版的 TQL 解析错误保留 `TDB_QUERY_PARSE` 和 `details.reason`，补充 `stage` 与可选 `target.query_span`。位置来自原始查询的 UTF-8 字节，行列按 Unicode 标量计算；字段、跨语言表示及 Rust 变体见 [TQL 结构化诊断](tql-reference.md#结构化查询诊断)。
+TQL 解析错误提供 `TDB_QUERY_PARSE`、`details.reason`、`stage` 与可选 `target.query_span`。位置来自原始查询的 UTF-8 字节，行列按 Unicode 标量计算；字段、跨语言表示及 Rust 变体见 [TQL 结构化诊断](tql-reference.md#结构化查询诊断)。
 
 可靠解析位置提供完整 token 的半开范围。数据库准备的 Prepared 参数拒绝同时提供 `target.parameter` 和首个真实引用的 `target.query_span`。输入结束使用零长度锚点，额外参数提供名称，手工 AST 与独立标量转换按各自已知信息定位。
 
@@ -348,7 +348,7 @@ manifest 包含 generation ID、dtype、维度、节点数、制品长度和 CRC
 
 ## 文档来源与结构
 
-当前开发版新增 `document::DocumentWrite<T>`、`DocumentSnapshot`、`DocumentReference` 和 `DocumentEvidence`。Rust Core 提供 `put_document`、`get_document`、`resolve_document_reference`、`delete_document`，以及 `search_documents`、`search_documents_vector`、`search_documents_hybrid`、`document_context`、`clear_document_index`。`DatabaseReader` 提供对应读取和内存缓存回收入口。Python 的 `document_request(request_json)`、Node 的 `documentRequest(requestJson)` 和 Rust 的 `sdk::documents::request` 共享 `put/get/resolve/delete/search/search_vector/search_hybrid/context/clear_index` JSON 协议。
+文档类型包括 `document::DocumentWrite<T>`、`DocumentSnapshot`、`DocumentReference` 和 `DocumentEvidence`。Rust Core 提供 `put_document`、`get_document`、`resolve_document_reference`、`delete_document`，以及 `search_documents`、`search_documents_vector`、`search_documents_hybrid`、`document_context`、`clear_document_index`。`DatabaseReader` 提供对应读取和内存缓存回收入口。Python 的 `document_request(request_json)`、Node 的 `documentRequest(requestJson)` 和 Rust 的 `sdk::documents::request` 共享 `put/get/resolve/delete/search/search_vector/search_hybrid/context/clear_index` JSON 协议。
 
 文档根节点及可选片段表示复用现有节点，纯目录块保存在版本化 Payload 结构清单中。来源修订、SHA-256、UTF-8 范围、父子层级及原子替换／删除的字段和示例见[文档来源与结构](documents.md)。JSON NodeId 采用十进制字符串，文档修订保护使用 `TDB_DOCUMENT_REVISION_MISMATCH`。
 
@@ -992,11 +992,13 @@ let results = db.search_advanced(&query_vec, &config)?;
 
 ---
 
-## QuIVer INT8 运行时
+## QuIVer 压缩运行时
 
-Rust 的 `Database` 与 `DatabaseReader` 通过 `configure_quiver_int8(SsdRuntimeOptions)`、`search_quiver_int8(query, config)`、`quiver_int8_stats()` 和 `close_quiver_int8()` 使用显式 INT8 检索。可写数据库另提供 `collect_quiver_temporary()`。
+Rust 的 `Database` 与 `DatabaseReader` 通过 `configure_quiver(SsdRuntimeOptions)`、`search_quiver(query, config)`、`quiver_stats()` 和 `close_quiver()` 使用压缩检索，原有 `*_quiver_int8`／`quiver_int8_stats` 名称继续作为兼容入口。可写数据库另提供 `collect_quiver_temporary()`。
 
-Python 的 `quiver_request(request_json: str) -> str` 与 Node 的 `quiverRequest(requestJson: string): string` 共享 JSON 命令。`configure` 接收 `options`，字段为 `residency`、`cache_bytes`、`io_mode`、`io_depth`。`search` 接收 `vector`、`top_k`、`ef_search` 和可选 `rerank_limit`，结果中的 NodeId 使用十进制字符串。`stats` 返回活动 Reader 统计或 `null`，`close` 释放当前运行时，`collect_temporary` 返回 `removed` 数量。
+Python 的 `quiver_request(request_json: str) -> str` 与 Node 的 `quiverRequest(requestJson: string): string` 共享 JSON 命令。`configure` 接收 `options`，支持 `encoding`、`query_precision`、`residency`、`cache_bytes`、`io_mode`、`io_depth` 及 `use_for_ann`。编码支持 `int8`、`centered_int8`、`centered_int4`，查询表示支持 `fp32`、`int8`、`int4`。`search` 接收 `vector`、`top_k`、`ef_search` 和可选 `rerank_limit`，结果中的 NodeId 使用十进制字符串。`stats` 返回活动 Reader 统计或 `null`，`close` 释放当前运行时，`collect_temporary` 返回 `removed` 数量。
+
+精度优先预设为中心化 INT8 × FP32，紧凑优先预设为中心化 INT4 × FP32，两者均支持 Hot／SSD。普通 ANN 通过 `use_for_ann` 选择压缩重排，文档向量／混合查询独立使用 `rerank="compressed"`，默认使用 `original`。TQL 的 `DOCUMENTS` 来源与 `GRAPH` 图作用域、Prepared 和 Planner 组合方式见 [TQL 参考](tql-reference.md)。
 
 数据库负责来源摘要、checkpoint 后的派生代际刷新和关闭排空。缓存、Hot／SSD 切换、真实 Direct I/O 后端、预算与备份条件见 [QuIVer 运行时](quiver.md#数据库与-sdk-入口)。
 
@@ -1335,7 +1337,7 @@ Python 的参数容器接受字符串键 `Mapping`，包括 `dict`、`MappingPro
 
 Node Prepared 对 NaN、无穷、undefined、BigInt、Symbol、函数及复合值提供具名绑定错误。数组和对象参数在标量边界拒绝。属性枚举与 getter 抛出的宿主异常保留原对象与 cause；有效标量沿用原有数值和字符串转换规则。
 
-当前开发版本的命名参数转换及绑定错误提供 `stage=bind` 和 `target.parameter`。缺参、多参与类型错误保留各自错误码和详情，Python 保留原异常继承关系。映射协议产生的宿主异常保留原对象与 cause。Rust 使用 `TriviumError::underlying()` 取得带定位错误的原始变体。覆盖边界见[公共错误契约](error-contracts.md)。
+命名参数转换及绑定错误提供 `stage=bind` 和 `target.parameter`。缺参、多参与类型错误保留各自错误码和详情，Python 保留原异常继承关系。映射协议产生的宿主异常保留原对象与 cause。Rust 使用 `TriviumError::underlying()` 取得带定位错误的原始变体。覆盖边界见[公共错误契约](error-contracts.md)。
 
 SEARCH 向量的字面量与数值参数按数据库 dtype 转换，u64 分量保持整数位模式。RANK 和 RESIDUAL 的向量字面量采用相同转换。Rust 的 `QueryEntry::Search.vector`、`RankClause.vector` 和 `ResidualStage.vector` 使用 `Vec<serde_json::Number>`；`pipeline::lower_search_entry()` 返回 `Result`，调用方传播数值转换错误。
 
@@ -1724,7 +1726,7 @@ let ids = db.all_node_ids()?;    // Vec<NodeId>
 
 ### QuIVer 自动索引说明
 
-QuIVer 是自研 ANN 图索引，常规查询自动选择与维护索引。从 `0.8.9` 起默认采用 BQ 构图、无训练 SM-L2 导航和原始向量余弦精排，无需调用 `enable_quiver_sm_l2()`：
+QuIVer 是自研 ANN 图索引，常规查询自动选择与维护索引。默认采用 BQ 构图、无训练 SM-L2 导航和原始向量余弦精排；配置压缩运行时的 `use_for_ann` 后，ANN 使用所选压缩编码重排。
 
 | 条件 | 检索引擎 | 召回行为 |
 | ------ | ---------- | ---------- |
@@ -1737,7 +1739,7 @@ QuIVer 是自研 ANN 图索引，常规查询自动选择与维护索引。从 `
 
 自动阈值按 `ceil(666,667 / dim)` 计算并限制在 209–834 节点；384/768 维为 834，1024 维为 652，1536 维为 435，3072 维为 218。
 
-QuIVer 支持增量 Insert/Delete/Update，并保护入口导航树，入口升层时连接旧树。旧索引通过重建应用 `0.8.10` 的签名多样性和连通性规则；查询召回率由数据、搜索参数与精排预算共同决定。索引以 `.tdb.quiver` 持久化，并通过 `.tdb.quiver.meta` 的主数据代际、文件尺寸、节点数、维度与 CRC 校验后 mmap 加载。有效图按保存的邻接表加载，默认 SM 状态从原始向量池流式恢复，启动时读取相应冷向量；断连图按缺失索引策略重建或返回错误。显式评分模式由宿主重新配置。TextIndex 对应 `.tdb.text` 和 `.tdb.text.meta`。
+QuIVer 支持增量 Insert/Delete/Update，并保护入口导航树，入口升层时连接旧树。查询召回率由数据、搜索参数与精排预算共同决定。索引以 `.tdb.quiver` 持久化，通过 `.tdb.quiver.meta` 的主数据代际、文件尺寸、节点数、维度与 CRC 校验后加载。有效 QUIV v2／QDSM 快照恢复默认 SM 路由，历史图按对应格式恢复所需状态，断连图按缺失索引策略重建或返回错误。打开期间复用校验结果并按平台回收扫描后的冷页。显式评分模式和压缩运行时由宿主重新配置。TextIndex 对应 `.tdb.text` 和 `.tdb.text.meta`。
 
 批量导入可在构造时设置 `auto_build_quiver=False`，或运行时调用 `set_auto_build_quiver(False)`，避免导入中途因查询触发索引构建；导入完成后重新开启并执行一次查询，或显式调用 Rust `build_quiver_index()`。`flush()` 负责持久化；QuIVer 由查询准备或显式构建入口生成。无状态评测或独立查询之间可调用 `clear_search_state()` 清空疲劳状态。
 

@@ -8,7 +8,7 @@ resolver = "2"
 
 [package]
 name = "triviumdb"
-version = "0.9.1-beta.1"
+version = "0.9.1"
 edition = "2024"
 authors = ["YoKONCy <2752026184@qq.com>"]
 description = "A high-performance memory-mmap hybrid search engine built for AI, combining dense vector, sparse text, graph relations, and JSON metadata."
@@ -38,7 +38,7 @@ thiserror = "1.0"
 bincode = "1.3"
 rayon = "1.10"
 memmap2 = "0.9"
-pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"], optional = true }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39", "multiple-pymethods"], optional = true }
 napi = { version = "2", features = ["napi8", "serde-json"], optional = true }
 napi-derive = { version = "2", optional = true }
 half = { version = "2.7.1", features = ["bytemuck", "serde"] }

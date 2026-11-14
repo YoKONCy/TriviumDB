@@ -319,10 +319,28 @@ pub enum DocumentVectorStrategy {
     Ann,
 }
 
+/// 文档向量候选的评分来源，与候选生成策略分别配置。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentVectorRerank {
+    #[default]
+    Original,
+    Compressed,
+}
+
+/// 本次查询实际使用的压缩表示与驻留策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentCompressionInfo {
+    pub encoding: crate::index::quiver::ssd::RerankEncoding,
+    pub query_precision: crate::index::quiver::ssd::QueryPrecision,
+    pub residency: crate::index::quiver::ssd::Residency,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DocumentVectorOptions {
     pub strategy: DocumentVectorStrategy,
+    pub rerank: DocumentVectorRerank,
     pub min_score: Option<f32>,
     pub initial_candidates: usize,
     pub candidate_limit: usize,
@@ -333,6 +351,7 @@ impl Default for DocumentVectorOptions {
     fn default() -> Self {
         Self {
             strategy: Default::default(),
+            rerank: Default::default(),
             min_score: None,
             initial_candidates: 64,
             candidate_limit: 4096,
@@ -379,6 +398,10 @@ pub struct DocumentRetrievalInfo {
     pub hybrid: bool,
     pub strategy: DocumentVectorStrategy,
     pub approximate: bool,
+    #[serde(default)]
+    pub rerank: DocumentVectorRerank,
+    #[serde(default)]
+    pub compression: Option<DocumentCompressionInfo>,
     pub eligible_units: usize,
     pub vector_candidates: usize,
     pub vector_scores: usize,

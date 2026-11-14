@@ -1,6 +1,6 @@
 # TriviumDB Server（HTTP 服务端版）
 
-> 本文说明 `0.9.0` 源码中的 nightly Server，覆盖 HTTP 协议、并发调度、部署与关闭。服务端使用 Rust、Axum 和 Tokio，许可为 Apache-2.0。版本记录见[变更说明](changes/0.9.0.md)。
+> 本文说明 `0.9.1` 源码中的 nightly Server，覆盖 HTTP 协议、并发调度、部署与关闭。服务端使用 Rust、Axum 和 Tokio，许可为 Apache-2.0。版本记录见[变更说明](changes/0.9.1.md)。
 
 ---
 

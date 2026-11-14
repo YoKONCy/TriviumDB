@@ -759,6 +759,7 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                         .edges
                         .iter()
                         .map(|edge| EdgeOutput {
+                            graph_id: None,
                             source: Some(edge.source_id),
                             target: edge.target_id,
                             label: &edge.label,
@@ -786,6 +787,7 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                         edges: edges
                             .iter()
                             .map(|edge| EdgeOutput {
+                                graph_id: None,
                                 source: Some(edge.source_id),
                                 target: edge.target_id,
                                 label: &edge.label,
@@ -805,6 +807,7 @@ impl<T: VectorType + Serialize + serde::de::DeserializeOwned> Database<T> {
                         edges: edges
                             .iter()
                             .map(|edge| EdgeOutput {
+                                graph_id: None,
                                 source: Some(node_id),
                                 target: edge.target_id,
                                 label: &edge.label,
@@ -1467,6 +1470,7 @@ fn encode_nodes<T: VectorType + Serialize + serde::de::DeserializeOwned>(
 }
 
 struct EdgeOutput<'a> {
+    graph_id: Option<&'a str>,
     source: Option<u64>,
     target: u64,
     label: &'a str,
@@ -1477,10 +1481,15 @@ struct EdgeOutput<'a> {
 impl Serialize for EdgeOutput<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(
-            4 + usize::from(self.source.is_some()) + usize::from(self.typed),
+            4 + usize::from(self.source.is_some())
+                + usize::from(self.typed)
+                + usize::from(self.graph_id.is_some()),
         ))?;
         if self.typed {
             map.serialize_entry("type", "edge")?;
+        }
+        if let Some(graph_id) = self.graph_id {
+            map.serialize_entry("graph_id", graph_id)?;
         }
         if let Some(source) = self.source {
             map.serialize_entry("source", &source.to_string())?;
@@ -1500,6 +1509,7 @@ impl Serialize for NodeEdges<'_> {
         let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
         for edge in self.0 {
             seq.serialize_element(&EdgeOutput {
+                graph_id: None,
                 source: None,
                 target: edge.target_id,
                 label: &edge.label,
@@ -1546,6 +1556,7 @@ impl<T: VectorType + Serialize> Serialize for ValueOutput<'_, T> {
         match self.0 {
             TqlValue::Node(node) => NodeOutput(node).serialize(serializer),
             TqlValue::Edge(edge) => EdgeOutput {
+                graph_id: edge.graph_id.as_deref(),
                 source: Some(edge.source_id),
                 target: edge.target_id,
                 label: &edge.label,

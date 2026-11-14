@@ -13,7 +13,7 @@
 
 # TriviumDB
 
-The current prerelease is **0.9.1-beta.1**, with document evidence retrieval, named graphs, parsing and staged publication, the QuIVer INT8 SSD runtime, and engineering hardening. See the [bilingual release notes](docs/changes/0.9.1-beta.1.md) and the [ICDE evaluation archive](evaluation/README.md).
+The current stable release is **0.9.1**, with document evidence retrieval, parsing and staged publication, unified document and named-graph TQL, QuIVer centered INT8/INT4 compressed reranking, Hot/SSD residency, and engineering hardening. See the [bilingual release notes](docs/changes/0.9.1.md) and the [ICDE evaluation archive](evaluation/README.md).
 
 **Vector × Graph × Document — A Trinity AI-Native Embedded Database**
 

@@ -3,6 +3,7 @@ use super::{
     EdgeDirection, QueryControl, TqlPattern, TqlResult, TriviumError, VectorType,
     eval_predicate_env, matches_filter_with_id,
 };
+use crate::graph::view::GraphRead;
 use crate::node::{Edge, NodeId};
 use crate::storage::memtable::MemTable;
 use std::collections::{HashMap, HashSet};
@@ -49,7 +50,7 @@ pub(super) struct Neighbors<'a> {
 
 impl<'a> Neighbors<'a> {
     pub(super) fn new<T: VectorType>(
-        mt: &'a MemTable<T>,
+        mt: &'a impl GraphRead<T>,
         current: NodeId,
         direction: EdgeDirection,
     ) -> Self {
@@ -75,7 +76,7 @@ impl<'a> Neighbors<'a> {
 
     pub(super) fn next<T: VectorType>(
         &mut self,
-        mt: &'a MemTable<T>,
+        mt: &'a impl GraphRead<T>,
         labels: &[String],
         budget: &mut WorkBudget<'_>,
     ) -> Result<Option<(NodeId, &'a Edge)>, TriviumError> {
@@ -122,7 +123,11 @@ struct PathWalker<'a> {
 }
 
 impl<'a> PathWalker<'a> {
-    fn new<T: VectorType>(mt: &'a MemTable<T>, node: NodeId, edge: &super::TqlEdgePattern) -> Self {
+    fn new<T: VectorType>(
+        mt: &'a impl GraphRead<T>,
+        node: NodeId,
+        edge: &super::TqlEdgePattern,
+    ) -> Self {
         let range = edge.hop_range.unwrap_or(super::HopRange { min: 1, max: 1 });
         Self {
             frames: vec![HopFrame {
@@ -138,7 +143,7 @@ impl<'a> PathWalker<'a> {
 
     fn next<T: VectorType>(
         &mut self,
-        mt: &'a MemTable<T>,
+        mt: &'a impl GraphRead<T>,
         edge: &super::TqlEdgePattern,
         budget: &mut WorkBudget<'_>,
     ) -> Result<Option<NodeId>, TriviumError> {
@@ -229,6 +234,7 @@ pub(super) fn workspace_bytes(pattern: &TqlPattern, nodes: usize) -> Result<usiz
 #[allow(clippy::too_many_arguments)]
 pub(super) fn walk<T: VectorType>(
     mt: &MemTable<T>,
+    graph: &impl GraphRead<T>,
     pattern: &TqlPattern,
     predicate: Option<&super::Predicate>,
     return_vars: &[String],
@@ -254,7 +260,7 @@ pub(super) fn walk<T: VectorType>(
                 mut neighbors,
             } => {
                 if let Some((source, edge)) =
-                    neighbors.next(mt, &pattern.edges[layer].labels, budget)?
+                    neighbors.next(graph, &pattern.edges[layer].labels, budget)?
                 {
                     let next = if source == current {
                         edge.target_id
@@ -273,7 +279,7 @@ pub(super) fn walk<T: VectorType>(
                 }
             }
             Frame::Variable { layer, mut walker } => {
-                if let Some(next) = walker.next(mt, &pattern.edges[layer], budget)? {
+                if let Some(next) = walker.next(graph, &pattern.edges[layer], budget)? {
                     frames.push(Frame::Variable { layer, walker });
                     frames.push(Frame::Visit {
                         layer: layer + 1,
@@ -321,13 +327,13 @@ pub(super) fn walk<T: VectorType>(
                     frames.push(if edge.hop_range.is_some() {
                         Frame::Variable {
                             layer,
-                            walker: PathWalker::new(mt, node, edge),
+                            walker: PathWalker::new(graph, node, edge),
                         }
                     } else {
                         Frame::Single {
                             layer,
                             current: node,
-                            neighbors: Neighbors::new(mt, node, edge.direction),
+                            neighbors: Neighbors::new(graph, node, edge.direction),
                         }
                     });
                 }

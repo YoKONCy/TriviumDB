@@ -1900,6 +1900,29 @@ impl<T: VectorType> MemTable<T> {
         self.quiver_index.as_ref()
     }
 
+    /// 同一独占借用内分离主路由与Reader，运行时切换完整复用当前绑定代际。
+    pub(crate) fn configure_quiver_ssd_runtime(
+        &mut self,
+        options: crate::index::quiver::ssd::SsdRuntimeOptions,
+        capacity: usize,
+    ) -> Result<Option<crate::index::quiver::ssd::SsdStats>> {
+        let generation = self.vector_generation();
+        let Some((index, active)) = self.quiver_index.as_ref().zip(self.quiver_ssd.as_mut()) else {
+            return Ok(None);
+        };
+        if active.generation != generation
+            || active.reader.stats().closed
+            || active.options.encoding != options.encoding
+            || !active.reader.routing_matches(index)
+        {
+            return Ok(None);
+        }
+        active.reader.set_database_capacity(capacity);
+        active.reader.configure_bound(options, index)?;
+        active.options = options;
+        Ok(Some(active.reader.stats()))
+    }
+
     /// 给已构建的快速QuIVer图显式安装查询校正，系数按外部节点ID绑定。
     /// 安装过程中只临时收集FP32向量，查询继续通过原VecPool按slot读取。
     pub fn enable_quiver_corrected_sm(

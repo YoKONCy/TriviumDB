@@ -23,6 +23,25 @@ pub struct DatabaseReader<T: VectorType> {
 }
 
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseReader<T> {
+    pub fn configure_quiver(
+        &self,
+        options: crate::index::quiver::ssd::SsdRuntimeOptions,
+    ) -> Result<crate::index::quiver::ssd::SsdStats> {
+        self.inner.configure_quiver(options)
+    }
+    pub fn search_quiver(
+        &self,
+        query: &[f32],
+        config: &crate::index::quiver::QuIVerSearchConfig,
+    ) -> Result<Vec<(u64, f32)>> {
+        self.inner.search_quiver(query, config)
+    }
+    pub fn quiver_stats(&self) -> Result<Option<crate::index::quiver::ssd::SsdStats>> {
+        self.inner.quiver_stats()
+    }
+    pub fn close_quiver(&self) -> Result<()> {
+        self.inner.close_quiver()
+    }
     pub fn configure_quiver_int8(
         &self,
         options: crate::index::quiver::ssd::SsdRuntimeOptions,

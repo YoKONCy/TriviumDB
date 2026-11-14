@@ -1042,7 +1042,11 @@ pub(crate) fn approximate_search<T: VectorType>(
     };
     let pure_vector = query.weights.property == 0.0 && query.weights.graph == 0.0;
     let (candidates, metrics) = if pure_vector {
-        let candidates = quiver.search(&query_f32, &mut fill_vector, &search_config);
+        let candidates =
+            match memtable.configured_quiver_search(&query_f32, &search_config, &|_| true)? {
+                Some(hits) => hits,
+                None => quiver.search(&query_f32, &mut fill_vector, &search_config),
+            };
         let reranked = candidates.len();
         (
             candidates,

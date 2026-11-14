@@ -45,7 +45,7 @@ fn value_json<T>(value: &TqlValue<T>) -> serde_json::Value {
     match value {
         TqlValue::Node(node) => serde_json::json!(node.id),
         TqlValue::Edge(edge) => {
-            serde_json::json!({"source":edge.source_id,"target":edge.target_id,"label":edge.label})
+            serde_json::json!({"graph_id":edge.graph_id,"source":edge.source_id,"target":edge.target_id,"label":edge.label})
         }
         TqlValue::Int(v) => (*v).into(),
         TqlValue::UInt(v) => (*v).into(),
@@ -129,6 +129,10 @@ fn expression<T: VectorType>(
             match field.as_str() {
                 "weight" => RuntimeValue::Float(f64::from(edge.weight)),
                 "label" => RuntimeValue::Str(edge.label.clone()),
+                "graph_id" => edge
+                    .graph_id
+                    .clone()
+                    .map_or(RuntimeValue::Null, RuntimeValue::Str),
                 "source" | "source_id" => runtime_u64(edge.source_id),
                 "target" | "target_id" => runtime_u64(edge.target_id),
                 "metadata" => json_to_runtime(&edge.metadata),
@@ -204,7 +208,7 @@ fn runtime_signature(value: RuntimeValue) -> Result<String, TriviumError> {
         RuntimeValue::Node(id) => ("node", serde_json::json!(id)),
         RuntimeValue::Edge(edge) => (
             "edge",
-            serde_json::json!([edge.source_id, edge.target_id, edge.label]),
+            serde_json::json!([edge.graph_id, edge.source_id, edge.target_id, edge.label]),
         ),
         RuntimeValue::Path(path) => ("path", serde_json::json!(path)),
         other => ("value", runtime_json(other)),
@@ -515,6 +519,9 @@ fn finish_inner<T: VectorType>(
     inputs: &[Input<'_, T>],
     scope: &Scope<'_, T>,
 ) -> Result<Vec<Row<T>>, TriviumError> {
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeTqlProjection);
+    scope.limits.check_cancelled()?;
     validate_return_columns(&scope.query.returns)?;
     admit_return_workspace(inputs, scope)?;
     let expressions = match &scope.query.returns {
@@ -766,6 +773,7 @@ fn admit_return_workspace<T: VectorType>(
                             &edge.metadata,
                         ))
                         .and_then(|v| v.checked_add(edge.label.len()))
+                        .and_then(|v| v.checked_add(edge.graph_id.as_ref().map_or(0, String::len)))
                         .ok_or_else(memory::overflow)?;
                 }
             }
@@ -811,6 +819,7 @@ fn pipeline_binding_bytes<T: VectorType>(
         (Some(RuntimeValue::Edge(edge)), None | Some("metadata")) => {
             crate::storage::payload_store::query_clone_peak(&edge.metadata)
                 .saturating_add(edge.label.len())
+                .saturating_add(edge.graph_id.as_ref().map_or(0, String::len))
                 .saturating_add(256)
         }
         (Some(RuntimeValue::Edge(edge)), Some("label")) => edge.label.len().saturating_add(64),

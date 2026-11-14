@@ -1,9 +1,11 @@
 //! TQL 统一查询执行器
 //!
-//! 将 TqlQuery AST 在 MemTable 上执行，支持三种入口：
+//! 将 TqlQuery AST 在同一事实读视图上执行，支持统一节点、文档与图入口：
 //! - MATCH: 图模式匹配（含可变长路径、多标签边）
 //! - FIND: 文档过滤扫描
 //! - SEARCH: 向量检索 + 图扩散（桥接到现有管线）
+//! - TEXT / DOCUMENTS: 文本或文档来源及其证据
+//! - GRAPH 前缀: 命名图与默认图的显式拓扑作用域
 //!
 //! DML 写操作通过 execute_tql_mutation() 生成 MutationOp 指令，
 //! 由 Database 层统一执行并写入 WAL。
@@ -26,6 +28,7 @@ use super::tql_source::{QueryOrigin, SourceSelector, TqlSource};
 use crate::VectorType;
 use crate::error::{QueryErrorStage, TriviumError};
 use crate::filter::Filter;
+use crate::graph::view::GraphRead;
 use crate::node::{EdgeView, Node, NodeId};
 use crate::storage::memtable::MemTable;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -224,6 +227,7 @@ impl TqlLimits {
 /// 执行来源属于内核请求，独立于预算配置、取消句柄和 SDK 共享借用。
 #[derive(Clone)]
 struct ExecutionContext {
+    graph: Option<Arc<crate::graph::view::ScopedGraph>>,
     limits: TqlLimits,
     source: Option<Arc<TqlSource>>,
     /// 内核生成的源查询沿原入口追溯，合成投影共享该来源。
@@ -244,6 +248,75 @@ impl std::ops::DerefMut for ExecutionContext {
 }
 
 impl ExecutionContext {
+    fn prepare_graph<T: VectorType>(
+        &mut self,
+        query: &TqlQuery,
+        mt: &MemTable<T>,
+    ) -> Result<(), TriviumError> {
+        if let Some(scope) = &query.graph_scope
+            && self.graph.is_none()
+        {
+            let prepare = || {
+                let inherited = crate::request::current();
+                let request = self
+                    .query_control
+                    .as_ref()
+                    .map(|control| {
+                        crate::request::RequestContext::new(
+                            inherited
+                                .as_ref()
+                                .map_or("tql_graph", |request| request.request_id()),
+                            control.clone(),
+                            false,
+                        )
+                    })
+                    .transpose()?;
+                let _scope = request
+                    .as_ref()
+                    .map(|request| request.enter())
+                    .transpose()?;
+                let scope = serde_json::from_value(scope.value()?).map_err(|error| {
+                    crate::named_graph::invalid(
+                        "graph_scope",
+                        &format!("图作用域配置无效 (Invalid graph scope configuration): {error}"),
+                    )
+                })?;
+                crate::graph::view::ScopedGraph::build(mt, &scope, self.memory_limit)
+            };
+            self.graph = Some(prepare().map_err(|error| {
+                self.error(error, QueryErrorStage::Plan, SourceSelector::GraphScope)
+            })?);
+        }
+        Ok(())
+    }
+    fn graph<'a, T: VectorType>(
+        &'a self,
+        mt: &'a MemTable<T>,
+    ) -> crate::graph::view::GraphView<'a, T> {
+        crate::graph::view::GraphView {
+            facts: mt,
+            scoped: self.graph.as_deref(),
+        }
+    }
+    fn compose_memory<T: VectorType>(
+        &self,
+        query: &TqlQuery,
+        mt: &MemTable<T>,
+        memory: &QueryMemory,
+        workspaces: &[crate::resources::WorkspaceReservation],
+    ) {
+        if self.graph.is_some() || matches!(query.entry, QueryEntry::Documents { .. }) {
+            let bytes = workspaces.iter().fold(
+                mt.estimated_memory_bytes().saturating_add(
+                    self.graph
+                        .as_ref()
+                        .map_or(0, |graph| graph.reserved_bytes()),
+                ),
+                |bytes, workspace| bytes.saturating_add(workspace.bytes()),
+            );
+            memory.include_external(bytes);
+        }
+    }
     fn origin(&self, selector: SourceSelector) -> Option<QueryOrigin> {
         self.source
             .as_ref()
@@ -279,6 +352,9 @@ struct SourcedOperator<T: VectorType> {
 }
 
 impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for SourcedOperator<T> {
+    fn uses_graph(&self) -> bool {
+        self.inner.uses_graph()
+    }
     fn name(&self) -> &'static str {
         self.inner.name()
     }
@@ -458,6 +534,7 @@ pub(crate) fn execute_tql_with_source<T: VectorType>(
     source: Option<Arc<TqlSource>>,
 ) -> Result<TqlResult<T>, TriviumError> {
     let context = ExecutionContext {
+        graph: None,
         limits: limits.with_request(),
         source,
         focus: None,
@@ -477,12 +554,18 @@ fn execute_tql_context<T: VectorType>(
 fn execute_tql_context_inner<T: VectorType>(
     query: &TqlQuery,
     memtable: &MemTable<T>,
-    limits: ExecutionContext,
+    mut limits: ExecutionContext,
 ) -> Result<TqlResult<T>, TriviumError> {
-    let memory = QueryMemory::new(limits.memory_limit, memtable);
     limits.check_cancelled()?;
     ensure_search_vector_bound(query)
         .map_err(|error| limits.error(error, QueryErrorStage::Plan, SourceSelector::Entry))?;
+    limits.prepare_graph(query, memtable)?;
+    let memory = QueryMemory::new(limits.memory_limit, memtable);
+    if let QueryEntry::Documents { request } = &query.entry {
+        crate::query::tql_documents::DocumentRequest::<T>::parse(request)
+            .and_then(|request| request.validate(memtable))
+            .map_err(|error| limits.error(error, QueryErrorStage::Plan, SourceSelector::Entry))?;
+    }
     if query.explain {
         // EXPLAIN 与执行共用候选规划及行数预算，不能另走忽略 LIMIT 的路径。
         let find_plan = if query.pipeline.is_empty()
@@ -506,9 +589,12 @@ fn execute_tql_context_inner<T: VectorType>(
             let mut executable = query.clone();
             executable.explain = false;
             executable.analyze = false;
-            if !executable.pipeline.is_empty() {
-                let (set, name, aliases, profile) =
+            if !executable.pipeline.is_empty()
+                || matches!(executable.entry, QueryEntry::Documents { .. })
+            {
+                let (set, name, aliases, profile, workspaces) =
                     execute_pipeline_set(&executable, memtable, true, &limits)?;
+                limits.compose_memory(&executable, memtable, &memory, &workspaces);
                 let mut rows = set.into_rows();
                 rows.truncate(admit_input_rows(
                     &executable,
@@ -537,21 +623,26 @@ fn execute_tql_context_inner<T: VectorType>(
                         profile,
                     )),
                     find_plan,
+                    &limits,
                 ));
             }
-            let rows = execute_tql_values_context(&executable, memtable, limits)?;
+            let rows = execute_tql_values_context(&executable, memtable, limits.clone())?;
             return Ok(generate_explain_plan(
                 query,
                 memtable,
                 Some((rows.len(), started.elapsed().as_secs_f64() * 1000.0, None)),
                 find_plan,
+                &limits,
             ));
         }
-        return Ok(generate_explain_plan(query, memtable, None, find_plan));
+        return Ok(generate_explain_plan(
+            query, memtable, None, find_plan, &limits,
+        ));
     }
-    if !query.pipeline.is_empty() {
+    if !query.pipeline.is_empty() || matches!(query.entry, QueryEntry::Documents { .. }) {
         return execute_pipeline_node_query(query, memtable, limits, &memory);
     }
+    limits.compose_memory(query, memtable, &memory, &[]);
 
     if let QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } = &query.entry
         && pattern.edges.iter().any(|edge| edge.var.is_some())
@@ -562,7 +653,8 @@ fn execute_tql_context_inner<T: VectorType>(
         })?;
         let inputs = expanded
             .iter()
-            .map(|(nodes, edge)| {
+            .map(|row| {
+                let (nodes, edge) = (&row.nodes, &row.edge);
                 returning::Input::Nodes(nodes, edge.as_ref().map(|edge| (edge_var, edge)))
             })
             .collect::<Vec<_>>();
@@ -673,7 +765,7 @@ fn execute_binding_rows_inner<T: VectorType>(
             )?,
             false,
         ),
-        QueryEntry::Text { .. } => {
+        QueryEntry::Text { .. } | QueryEntry::Documents { .. } => {
             return Err(TriviumError::QueryExecution(
                 "TEXT 入口必须通过可组合管线执行 (TEXT entry requires composable pipeline execution)"
                     .into(),
@@ -748,6 +840,7 @@ type PipelineSetResult = (
     String,
     std::collections::BTreeSet<String>,
     Option<PipelineExecutionProfile>,
+    Vec<crate::resources::WorkspaceReservation>,
 );
 
 fn execute_pipeline_set<T: VectorType>(
@@ -758,15 +851,36 @@ fn execute_pipeline_set<T: VectorType>(
 ) -> Result<PipelineSetResult, TriviumError> {
     limits.check_cancelled()?;
     requested_row_limit(query, requires_full_input(query, false), limits, mt)?;
-    let source_vector = match &query.entry {
-        QueryEntry::Search { vector, .. } => Some(vector.as_slice()),
+    let document_request = match &query.entry {
+        QueryEntry::Documents { request } => Some(
+            crate::query::tql_documents::DocumentRequest::<T>::parse(request)?,
+        ),
         _ => None,
     };
-    let plan = crate::query::cascades::optimize_pipeline_with_profile(
+    let document_vector = document_request
+        .as_ref()
+        .and_then(|request| request.vector())
+        .map(|vector| {
+            vector
+                .iter()
+                .copied()
+                .map(T::to_json_number)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    let source_vector = match &query.entry {
+        QueryEntry::Search { vector, .. } => Some(vector.as_slice()),
+        _ => document_vector.as_deref(),
+    };
+    let document_vector_budget = document_request
+        .as_ref()
+        .map_or(0, |request| request.query().limits.max_vector_scores);
+    let plan = crate::query::cascades::optimize_pipeline_scoped(
         query,
         mt,
         crate::query::cascades::OptimizerBudget::default(),
         profile,
+        limits.graph.as_ref().map(|graph| &graph.stats),
     );
     let mut operators: Vec<Box<dyn crate::query::pipeline::PipelineOperator<T>>> =
         (|| -> Result<Vec<Box<dyn crate::query::pipeline::PipelineOperator<T>>>, TriviumError> {
@@ -818,6 +932,13 @@ fn execute_pipeline_set<T: VectorType>(
                     ) => {
                         crate::query::pipeline::lower_search_entry(vector, *top_k, expand.as_ref())?
                     }
+                    (QueryEntry::Documents { request }, _) => {
+                        vec![Box::new(crate::query::tql_documents::DocumentSource {
+                            request: crate::query::tql_documents::DocumentRequest::<T>::parse(
+                                request,
+                            )?,
+                        })]
+                    }
                     (QueryEntry::Text { clause }, _) => {
                         vec![Box::new(crate::query::pipeline::TextSearchSource {
                             query: clause.query.clone(),
@@ -835,6 +956,30 @@ fn execute_pipeline_set<T: VectorType>(
                                 crate::query::tql_ast::TextSearchKind::Ac
                                     | crate::query::tql_ast::TextSearchKind::Hybrid
                             ),
+                        })]
+                    }
+                    (QueryEntry::Match { .. } | QueryEntry::OptionalMatch { .. }, _) => {
+                        let mut source_query = query.clone();
+                        source_query.pipeline.clear();
+                        source_query.predicate = None;
+                        source_query.rank = None;
+                        source_query.order_by.clear();
+                        source_query.limit = None;
+                        source_query.offset = None;
+                        source_query.returns = ReturnClause::All;
+                        if let QueryEntry::Match { pattern }
+                        | QueryEntry::OptionalMatch { pattern } = &mut source_query.entry
+                            && pattern.edges.is_empty()
+                            && pattern.nodes.first().is_some_and(|node| node.var.is_none())
+                        {
+                            pattern.nodes[0].var = Some("_".into());
+                        }
+                        // 返回行上限由最终管线执行，来源仍遵守内存、遍历和取消预算。
+                        let mut source_limits = limits.clone();
+                        source_limits.max_query_rows = Some(0);
+                        vec![Box::new(TqlMatchSource {
+                            query: source_query,
+                            limits: source_limits,
                         })]
                     }
                     (
@@ -867,6 +1012,7 @@ fn execute_pipeline_set<T: VectorType>(
                             &source_query,
                             mt,
                             ExecutionContext {
+                                graph: limits.graph.clone(),
                                 source: limits.source.clone(),
                                 focus: Some(SourceSelector::Entry),
                                 limits: TqlLimits {
@@ -889,6 +1035,16 @@ fn execute_pipeline_set<T: VectorType>(
     let disable_fusion = cfg!(feature = "test-hooks") && test_disable_fusion();
     let mut current_name = "_".to_owned();
     let mut columns = std::collections::BTreeSet::<String>::from(["_".into()]);
+    if matches!(query.entry, QueryEntry::Documents { .. }) {
+        columns.insert("document".into());
+    }
+    if let QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } = &query.entry {
+        if let Some(var) = pattern.nodes.first().and_then(|node| node.var.clone()) {
+            current_name = var;
+        }
+        columns.extend(pattern.nodes.iter().filter_map(|node| node.var.clone()));
+        columns.extend(pattern.edges.iter().filter_map(|edge| edge.var.clone()));
+    }
     let physical_stage = |stage_index: usize| {
         plan.stages
             .iter()
@@ -910,15 +1066,10 @@ fn execute_pipeline_set<T: VectorType>(
         let stage_plan = (|| {
             match stage {
                 PipelineStage::With(with) => {
-                    let preferred =
-                        query
-                            .pipeline
-                            .get(stage_index + 1)
-                            .and_then(|next| match next {
-                                PipelineStage::Expand(stage) => Some(stage.input.as_str()),
-                                PipelineStage::GraphAlgorithm(stage) => Some(stage.input.as_str()),
-                                _ => None,
-                            });
+                    let preferred = query
+                        .pipeline
+                        .get(stage_index + 1)
+                        .and_then(PipelineStage::node_input);
                     let primary = with
                         .items
                         .iter()
@@ -1428,6 +1579,7 @@ fn execute_pipeline_set<T: VectorType>(
                 }),
             max_vector_read_bytes: mt
                 .node_count()
+                .max(document_vector_budget)
                 .saturating_mul(mt.dim())
                 .saturating_mul(std::mem::size_of::<T>())
                 .saturating_mul(query.pipeline.len().saturating_add(1)),
@@ -1445,13 +1597,21 @@ fn execute_pipeline_set<T: VectorType>(
     );
     context.query_control = limits.query_control.clone();
     context.workspace_limit = limits.memory_limit;
-    let set = crate::query::pipeline::execute_pipeline(&mut context, &operators)?;
+    context.database_memory_limit =
+        if matches!(query.entry, QueryEntry::Documents { .. }) || limits.graph.is_some() {
+            limits.memory_limit
+        } else {
+            0
+        };
+    context.graph_scope = limits.graph.clone();
+    let (set, workspaces) =
+        crate::query::pipeline::execute_pipeline_with_workspace(&mut context, &operators)?;
     limits.check_cancelled()?;
     let execution_profile = profile.then_some(PipelineExecutionProfile {
         plan,
         metrics: context.metrics,
     });
-    Ok((set, current_name, columns, execution_profile))
+    Ok((set, current_name, columns, execution_profile, workspaces))
 }
 
 fn execute_pipeline_node_query<T: VectorType>(
@@ -1466,7 +1626,9 @@ fn execute_pipeline_node_query<T: VectorType>(
             "节点结果 API 无法承载标量列，请使用 tql_values (Node-only result API cannot carry scalar columns; use tql_values)".into(),
         ));
     }
-    let (set, current_name, columns, _) = execute_pipeline_set(query, mt, false, &limits)?;
+    let (set, current_name, columns, _, workspaces) =
+        execute_pipeline_set(query, mt, false, &limits)?;
+    limits.compose_memory(query, mt, memory, &workspaces);
     let mut rows = set.into_rows();
     rows.truncate(admit_input_rows(query, mt, &limits, rows.len())?);
     let inputs = rows
@@ -1525,6 +1687,7 @@ pub(crate) fn execute_tql_values_with_source<T: VectorType>(
     source: Option<Arc<TqlSource>>,
 ) -> Result<TqlValueResult<T>, TriviumError> {
     let context = ExecutionContext {
+        graph: None,
         limits: limits.with_request(),
         source,
         focus: None,
@@ -1544,17 +1707,24 @@ fn execute_tql_values_context<T: VectorType>(
 fn execute_tql_values_context_inner<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
-    limits: ExecutionContext,
+    mut limits: ExecutionContext,
 ) -> Result<TqlValueResult<T>, TriviumError> {
-    let memory = QueryMemory::new(limits.memory_limit, mt);
     limits.check_cancelled()?;
     ensure_search_vector_bound(query)
         .map_err(|error| limits.error(error, QueryErrorStage::Plan, SourceSelector::Entry))?;
+    limits.prepare_graph(query, mt)?;
+    let memory = QueryMemory::new(limits.memory_limit, mt);
+    if let QueryEntry::Documents { request } = &query.entry {
+        crate::query::tql_documents::DocumentRequest::<T>::parse(request)
+            .and_then(|request| request.validate(mt))
+            .map_err(|error| limits.error(error, QueryErrorStage::Plan, SourceSelector::Entry))?;
+    }
     if !query.explain
         && query.pipeline.is_empty()
         && let QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } = &query.entry
         && pattern.edges.iter().any(|edge| edge.var.is_some())
     {
+        limits.compose_memory(query, mt, &memory, &[]);
         return execute_single_edge_values(query, pattern, mt, limits, &memory);
     }
     if query.explain {
@@ -1568,7 +1738,8 @@ fn execute_tql_values_context_inner<T: VectorType>(
                 .collect()
         });
     }
-    if query.pipeline.is_empty() {
+    if query.pipeline.is_empty() && !matches!(query.entry, QueryEntry::Documents { .. }) {
+        limits.compose_memory(query, mt, &memory, &[]);
         let (rows, _) = execute_binding_rows(query, mt, &limits, &memory)?;
         let inputs = rows
             .iter()
@@ -1584,7 +1755,9 @@ fn execute_tql_values_context_inner<T: VectorType>(
         return returning::finish(&inputs, &scope)
             .map(|rows| rows.into_iter().map(|row| row.values).collect());
     }
-    let (set, current_name, columns, _) = execute_pipeline_set(query, mt, false, &limits)?;
+    let (set, current_name, columns, _, workspaces) =
+        execute_pipeline_set(query, mt, false, &limits)?;
+    limits.compose_memory(query, mt, &memory, &workspaces);
     let mut rows = set.into_rows();
     rows.truncate(admit_input_rows(query, mt, &limits, rows.len())?);
     let inputs = rows
@@ -1615,7 +1788,8 @@ fn execute_single_edge_values<T: VectorType>(
         .ok_or_else(|| TriviumError::QueryExecution("缺少边变量 (Missing edge variable)".into()))?;
     let inputs = expanded
         .iter()
-        .map(|(nodes, edge)| {
+        .map(|row| {
+            let (nodes, edge) = (&row.nodes, &row.edge);
             returning::Input::Nodes(nodes, edge.as_ref().map(|edge| (edge_var, edge)))
         })
         .collect::<Vec<_>>();
@@ -1629,7 +1803,52 @@ fn execute_single_edge_values<T: VectorType>(
     returning::finish(&inputs, &scope).map(|rows| rows.into_iter().map(|row| row.values).collect())
 }
 
-type EdgeBindingRow<T> = (HashMap<String, Node<T>>, Option<EdgeView>);
+struct EdgeBindingRow<T> {
+    nodes: HashMap<String, Node<T>>,
+    edge: Option<EdgeView>,
+    anchor: NodeId,
+}
+
+fn scoped_match_plan<T: VectorType>(
+    pattern: &TqlPattern,
+    mt: &MemTable<T>,
+    optional: bool,
+    limits: &ExecutionContext,
+) -> crate::query::planner::MatchPlan {
+    let Some(scope) = &limits.graph else {
+        return plan_match(pattern, mt, optional);
+    };
+    let graph = limits.graph(mt);
+    let mut access = pattern
+        .nodes
+        .first()
+        .and_then(|node| node.filter.as_ref())
+        .map(|filter| plan_filter(filter, mt));
+    let candidates = match &mut access {
+        Some(plan)
+            if !matches!(
+                plan.access_path,
+                AccessPath::FullNodeScan | AccessPath::ColdPayloadScan
+            ) =>
+        {
+            plan.candidates.retain(|id| graph.contains(*id));
+            std::mem::take(&mut plan.candidates)
+        }
+        _ => graph.all_node_ids(),
+    };
+    crate::query::planner::MatchPlan {
+        access_path: access
+            .map(|plan| plan.access_path)
+            .filter(|path| !matches!(path, AccessPath::FullNodeScan | AccessPath::ColdPayloadScan))
+            .unwrap_or_else(|| AccessPath::NamedGraphMembers {
+                graph_ids: scope.revisions.keys().cloned().collect(),
+            }),
+        estimated_rows: candidates.len(),
+        reversed: false,
+        pattern: pattern.clone(),
+        candidates,
+    }
+}
 
 fn collect_single_edge_rows<T: VectorType>(
     query: &TqlQuery,
@@ -1656,7 +1875,8 @@ fn collect_single_edge_rows_inner<T: VectorType>(
         ));
     }
     let optional = matches!(query.entry, QueryEntry::OptionalMatch { .. });
-    let plan = plan_match(pattern, mt, optional);
+    let graph = limits.graph(mt);
+    let plan = scoped_match_plan(pattern, mt, optional, limits);
     let left = &plan.pattern.nodes[0];
     let right = &plan.pattern.nodes[1];
     let edge_pattern = &plan.pattern.edges[0];
@@ -1693,8 +1913,10 @@ fn collect_single_edge_rows_inner<T: VectorType>(
         }
         // 与匿名边共享物理边枚举、取消和步数预算；排序保留具名边的确定性。
         let mut edges = BTreeMap::new();
-        let mut neighbors = matching::Neighbors::new(mt, start, edge_pattern.direction);
-        while let Some((source, edge)) = neighbors.next(mt, &edge_pattern.labels, &mut budget)? {
+        let mut neighbors = matching::Neighbors::new(&graph, start, edge_pattern.direction);
+        while let Some((source, edge)) =
+            neighbors.next(&graph, &edge_pattern.labels, &mut budget)?
+        {
             let bytes = edges
                 .len()
                 .saturating_add(1)
@@ -1705,10 +1927,18 @@ fn collect_single_edge_rows_inner<T: VectorType>(
                     budget: edges.len(),
                 });
             }
-            edges.insert((source, edge.target_id, edge.label.as_str()), edge);
+            edges.insert(
+                (
+                    source,
+                    edge.target_id,
+                    edge.label.as_str(),
+                    graph.edge_graph_id(source, edge),
+                ),
+                edge,
+            );
         }
         let mut matched = false;
-        for ((source, target, _), edge) in edges {
+        for ((source, target, _, graph_id), edge) in edges {
             let end = if source == start { target } else { source };
             if left.var.is_some() && left.var == right.var && start != end {
                 continue;
@@ -1735,6 +1965,7 @@ fn collect_single_edge_rows_inner<T: VectorType>(
                     .saturating_add(256),
             )?;
             let view = EdgeView {
+                graph_id: graph_id.map(str::to_owned),
                 source_id: source,
                 target_id: target,
                 label: edge.label.clone(),
@@ -1750,7 +1981,11 @@ fn collect_single_edge_rows_inner<T: VectorType>(
                 continue;
             }
             matched = true;
-            expanded.push((nodes, Some(view)));
+            expanded.push(EdgeBindingRow {
+                nodes,
+                edge: Some(view),
+                anchor: start,
+            });
             if expanded.len() > row_limit {
                 break 'anchors;
             }
@@ -1760,7 +1995,11 @@ fn collect_single_edge_rows_inner<T: VectorType>(
             if let Some(var) = &left.var {
                 nodes.insert(var.clone(), memory.snapshot(start, mt)?);
             }
-            expanded.push((nodes, None));
+            expanded.push(EdgeBindingRow {
+                nodes,
+                edge: None,
+                anchor: start,
+            });
             if expanded.len() > row_limit {
                 break;
             }
@@ -1768,7 +2007,7 @@ fn collect_single_edge_rows_inner<T: VectorType>(
     }
     expanded.truncate(admit_input_rows(query, mt, limits, expanded.len())?);
     if let Some(rank) = &query.rank {
-        expanded = rank_rows_by_node(expanded, rank, mt, |row| &row.0)
+        expanded = rank_rows_by_node(expanded, rank, mt, |row| &row.nodes)
             .map_err(|error| limits.error(error, QueryErrorStage::Plan, SourceSelector::Rank))?;
     }
     Ok(expanded)
@@ -1825,6 +2064,89 @@ struct TqlScopeProjection {
     primary: Option<String>,
 }
 
+struct TqlMatchSource {
+    query: TqlQuery,
+    limits: ExecutionContext,
+}
+
+impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlMatchSource {
+    fn name(&self) -> &'static str {
+        "match_source"
+    }
+    fn apply(
+        &self,
+        _input: crate::query::pipeline::NodeSet,
+        context: &mut crate::query::pipeline::PipelineContext<'_, T>,
+    ) -> Result<crate::query::pipeline::NodeSet, TriviumError> {
+        use crate::query::pipeline::{BindingValue, NodeRow, NodeSet};
+        let mt = context.memtable;
+        let memory = if self.limits.graph.is_some() {
+            let memory = QueryMemory::new(context.document_memory_limit()?, mt);
+            memory.include_external(mt.estimated_memory_bytes());
+            memory
+        } else {
+            QueryMemory::new(self.limits.memory_limit, mt)
+        };
+        let pattern = match &self.query.entry {
+            QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } => pattern,
+            _ => {
+                return Err(TriviumError::QueryExecution(
+                    "MATCH 来源类型无效 (Invalid MATCH source type)".into(),
+                ));
+            }
+        };
+        let rows = if pattern.edges.iter().any(|edge| edge.var.is_some()) {
+            collect_single_edge_rows(&self.query, pattern, mt, &self.limits, &memory)?
+        } else {
+            execute_binding_rows(&self.query, mt, &self.limits, &memory)?
+                .0
+                .into_iter()
+                .map(|nodes| {
+                    let anchor = pattern
+                        .nodes
+                        .first()
+                        .and_then(|node| node.var.as_ref())
+                        .and_then(|name| nodes.get(name))
+                        .map(|node| node.id)
+                        .or_else(|| nodes.values().map(|node| node.id).min())
+                        .ok_or_else(|| TriviumError::QueryExecution("MATCH 管线来源缺少锚点身份 (MATCH pipeline source has no anchor identity)".into()))?;
+                    Ok(EdgeBindingRow { nodes, edge: None, anchor })
+                })
+                .collect::<Result<Vec<_>, TriviumError>>()?
+        };
+        let mut output = Vec::with_capacity(rows.len());
+        for source in rows {
+            let mut bindings = BTreeMap::from([("_".into(), BindingValue::Node(source.anchor))]);
+            for node in &pattern.nodes {
+                if let Some(name) = &node.var {
+                    bindings.insert(
+                        name.clone(),
+                        source
+                            .nodes
+                            .get(name)
+                            .map_or(BindingValue::Null, |node| BindingValue::Node(node.id)),
+                    );
+                }
+            }
+            for edge in &pattern.edges {
+                if let Some(name) = &edge.var {
+                    bindings.insert(
+                        name.clone(),
+                        source
+                            .edge
+                            .clone()
+                            .map_or(BindingValue::Null, BindingValue::Edge),
+                    );
+                }
+            }
+            let mut row = NodeRow::new(source.anchor);
+            row.bindings = Some(Arc::new(bindings));
+            output.push(row);
+        }
+        Ok(NodeSet::from_rows(output))
+    }
+}
+
 impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlScopeProjection {
     fn name(&self) -> &'static str {
         "scope_projection"
@@ -1871,6 +2193,9 @@ struct TqlOutputBinding<T: VectorType> {
     name: String,
 }
 impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlOutputBinding<T> {
+    fn uses_graph(&self) -> bool {
+        self.inner.uses_graph()
+    }
     fn name(&self) -> &'static str {
         self.inner.name()
     }
@@ -2539,7 +2864,8 @@ fn execute_match<T: VectorType>(
         var_map.entry(var.clone()).or_insert(next_idx);
     }
 
-    let match_plan = plan_match(pattern, mt, optional);
+    let graph = limits.graph(mt);
+    let match_plan = scoped_match_plan(pattern, mt, optional, limits);
     let planned_pattern = &match_plan.pattern;
     let full_scan = matches!(
         match_plan.access_path,
@@ -2558,7 +2884,7 @@ fn execute_match<T: VectorType>(
         MAX_BUDGET
     };
 
-    let bytes = matching::workspace_bytes(planned_pattern, mt.node_count())?;
+    let bytes = matching::workspace_bytes(planned_pattern, graph.node_count())?;
     if limits.memory_limit > 0 && bytes > limits.memory_limit {
         return Err(TriviumError::ResourceBudgetExceeded {
             resource: "query_memory_bytes",
@@ -2582,6 +2908,7 @@ fn execute_match<T: VectorType>(
         let mut env = vec![None; var_map.len()];
         let cont = matching::walk(
             mt,
+            &graph,
             planned_pattern,
             query.predicate.as_ref(),
             &return_vars,
@@ -2824,6 +3151,10 @@ fn runtime_property<T: VectorType>(
             .map_or(RuntimeValue::Null, |value| json_to_runtime(&value[field])),
         RuntimeValue::Json(value) => json_to_runtime(&value[field]),
         RuntimeValue::Edge(edge) => match field {
+            "graph_id" => edge
+                .graph_id
+                .clone()
+                .map_or(RuntimeValue::Null, RuntimeValue::Str),
             "source" | "source_id" => runtime_u64(edge.source_id),
             "target" | "target_id" => runtime_u64(edge.target_id),
             "label" => RuntimeValue::Str(edge.label.clone()),
@@ -2990,7 +3321,11 @@ fn runtime_number(value: &RuntimeValue) -> Option<serde_json::Number> {
 }
 
 fn edge_json(edge: &EdgeView) -> serde_json::Value {
-    serde_json::json!({"source":edge.source_id,"target":edge.target_id,"label":edge.label,"weight":edge.weight,"metadata":edge.metadata})
+    let mut value = edge.query_json(edge.source_id.into(), edge.target_id.into());
+    if let Some(object) = value.as_object_mut() {
+        object.remove("type");
+    }
+    value
 }
 
 /// 容器按完整内容比较，其中所有数字共用精确数值比较。
@@ -3092,8 +3427,8 @@ fn compare_runtime(lhs: &RuntimeValue, op: &TqlCompOp, rhs: &RuntimeValue) -> bo
             _ => false,
         },
         (RuntimeValue::Edge(a), RuntimeValue::Edge(b)) => {
-            let equal =
-                (a.source_id, a.target_id, &a.label) == (b.source_id, b.target_id, &b.label);
+            let equal = (&a.graph_id, a.source_id, a.target_id, &a.label)
+                == (&b.graph_id, b.source_id, b.target_id, &b.label);
             match op {
                 TqlCompOp::Eq => equal,
                 TqlCompOp::Ne => !equal,
@@ -3222,9 +3557,13 @@ pub(crate) fn compare_for_sort(a: &RuntimeValue, b: &RuntimeValue) -> std::cmp::
         (RuntimeValue::Path(a), RuntimeValue::Path(b)) => a.cmp(b),
         (RuntimeValue::Json(a), RuntimeValue::Json(b)) => compare_json(a, b),
         (RuntimeValue::Node(a), RuntimeValue::Node(b)) => a.cmp(b),
-        (RuntimeValue::Edge(a), RuntimeValue::Edge(b)) => {
-            (a.source_id, a.target_id, &a.label).cmp(&(b.source_id, b.target_id, &b.label))
-        }
+        (RuntimeValue::Edge(a), RuntimeValue::Edge(b)) => (
+            &a.graph_id,
+            a.source_id,
+            a.target_id,
+            &a.label,
+        )
+            .cmp(&(&b.graph_id, b.source_id, b.target_id, &b.label)),
         (RuntimeValue::Str(a), RuntimeValue::Str(b)) => a.cmp(b),
         (RuntimeValue::Null, RuntimeValue::Null) => std::cmp::Ordering::Equal,
         (RuntimeValue::Null, _) => std::cmp::Ordering::Greater, // NULL 排最后
@@ -3473,11 +3812,36 @@ fn generate_explain_plan<T: VectorType>(
     mt: &MemTable<T>,
     actual: Option<(usize, f64, Option<PipelineExecutionProfile>)>,
     find_plan: Option<NodeAccessPlan>,
+    limits: &ExecutionContext,
 ) -> TqlResult<T> {
     let mut plan = serde_json::Map::new();
 
+    if let Some(scope) = &query.graph_scope {
+        plan.insert(
+            "graph_scope".into(),
+            scope.value().unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(graph) = &limits.graph {
+        plan.insert("graph_revisions".into(), serde_json::json!(graph.revisions));
+        plan.insert(
+            "selected_graph_stats".into(),
+            serde_json::json!(graph.stats),
+        );
+    }
+    if let QueryEntry::Documents { request } = &query.entry {
+        plan.insert(
+            "document_source".into(),
+            request.value().unwrap_or(serde_json::Value::Null),
+        );
+    }
+
     // 入口类型
     let (entry_type, entry_detail) = match &query.entry {
+        QueryEntry::Documents { .. } => (
+            "DOCUMENTS".to_owned(),
+            "文档分组与来源证据 (Document groups and source evidence)".to_owned(),
+        ),
         QueryEntry::Find { filter } => ("FIND".to_string(), format!("{:?}", filter)),
         QueryEntry::Match { pattern } => {
             let detail = format_pattern_detail(pattern);
@@ -3509,7 +3873,7 @@ fn generate_explain_plan<T: VectorType>(
             (planned.access_path, planned.estimated_rows, false)
         }
         QueryEntry::Match { pattern } => {
-            let planned = plan_match(pattern, mt, false);
+            let planned = scoped_match_plan(pattern, mt, false, limits);
             (
                 planned.access_path,
                 planned.estimated_rows,
@@ -3517,10 +3881,10 @@ fn generate_explain_plan<T: VectorType>(
             )
         }
         QueryEntry::OptionalMatch { pattern } => {
-            let planned = plan_match(pattern, mt, true);
+            let planned = scoped_match_plan(pattern, mt, true, limits);
             (planned.access_path, planned.estimated_rows, false)
         }
-        QueryEntry::Search { .. } | QueryEntry::Text { .. } => {
+        QueryEntry::Search { .. } | QueryEntry::Text { .. } | QueryEntry::Documents { .. } => {
             (AccessPath::FullNodeScan, mt.node_count(), false)
         }
     };
@@ -3529,6 +3893,9 @@ fn generate_explain_plan<T: VectorType>(
         serde_json::to_value(&access_path).unwrap_or(serde_json::Value::Null),
     );
     let strategy = match &access_path {
+        AccessPath::NamedGraphMembers { graph_ids } => {
+            format!("named_graph_members ({})", graph_ids.join(", "))
+        }
         AccessPath::PrimaryKey { .. } => "id_shortcut O(1)".to_owned(),
         AccessPath::PropertyIndex { field } => format!("property_index ({field})"),
         AccessPath::OrderedPropertyIndex { field, descending } => {
@@ -3555,11 +3922,13 @@ fn generate_explain_plan<T: VectorType>(
     plan.insert("candidate_strategy".into(), serde_json::json!(strategy));
     plan.insert("estimated_rows".into(), serde_json::json!(estimated_rows));
     plan.insert("reversed".into(), serde_json::json!(reversed));
-    if !query.pipeline.is_empty() {
-        let cascades = crate::query::cascades::optimize_pipeline(
+    if !query.pipeline.is_empty() || matches!(query.entry, QueryEntry::Documents { .. }) {
+        let cascades = crate::query::cascades::optimize_pipeline_scoped(
             query,
             mt,
             crate::query::cascades::OptimizerBudget::default(),
+            false,
+            limits.graph.as_ref().map(|graph| &graph.stats),
         );
         plan.insert("optimizer".into(), serde_json::json!("cascades_memo"));
         plan.insert(
@@ -4046,6 +4415,7 @@ pub(crate) fn execute_tql_mutation_with_source<T: VectorType>(
     source: Option<Arc<TqlSource>>,
 ) -> Result<Vec<MutationOp<T>>, TriviumError> {
     let context = ExecutionContext {
+        graph: None,
         limits: limits.with_request(),
         source,
         focus: None,
@@ -4348,6 +4718,7 @@ fn execute_delete<T: VectorType>(
 /// 从 MutationSource 构建一个用于内部执行的 TqlQuery（RETURN *）
 fn build_match_query(pattern: &TqlPattern, predicate: Option<&Predicate>) -> TqlQuery {
     TqlQuery {
+        graph_scope: None,
         explain: false,
         analyze: false,
         entry: QueryEntry::Match {

@@ -147,6 +147,7 @@ fn mutation_action_变体() {
 #[test]
 fn tql_statement_变体() {
     let query = TqlQuery {
+        graph_scope: None,
         explain: false,
         analyze: false,
         entry: QueryEntry::Find {

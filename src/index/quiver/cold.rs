@@ -20,6 +20,10 @@ use crate::index::bq::MAX_BQ_DIM;
 use crate::vector::{is_binary_vector, validate_query_vector};
 use std::ops::Range;
 
+#[path = "cold/rerank.rs"]
+mod rerank;
+pub use rerank::{ColdLayout, ColdRow, QueryPrecision, RerankEncoding, RerankQuery};
+
 /// 每个完整量化组的维度数；末组使用实际剩余维度。
 pub const INT8_GROUP_DIM: usize = 128;
 /// 布局头的固定字节数，供容器目录读取和验证。
