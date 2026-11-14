@@ -4,6 +4,7 @@
 //! 入度抑制和不应期。它不会迭代到 PageRank 收敛：每层都按绝对边权归一化并注入
 //! restart 能量，因此深度和扫描成本可预测；排序以 score 和 NodeId 稳定归并。
 
+use crate::graph::view::GraphRead;
 use crate::node::{NodeId, SearchHit};
 use crate::storage::memtable::MemTable;
 use std::collections::BTreeMap;
@@ -33,7 +34,29 @@ pub fn expand_graph<T: crate::VectorType>(
     enable_refractory_fatigue: bool,
     diffusion_bias: Option<&[f32]>,
 ) -> Vec<SearchHit> {
-    expand_graph_with_labels(
+    expand_graph_view(
+        db,
+        seeds,
+        max_depth,
+        restart_alpha,
+        enable_inverse_inhibition,
+        lateral_inhibition_threshold,
+        enable_refractory_fatigue,
+        diffusion_bias,
+    )
+}
+
+pub(crate) fn expand_graph_view<T: crate::VectorType>(
+    db: &impl GraphRead<T>,
+    seeds: Vec<SearchHit>,
+    max_depth: usize,
+    restart_alpha: f32,
+    enable_inverse_inhibition: bool,
+    lateral_inhibition_threshold: usize,
+    enable_refractory_fatigue: bool,
+    diffusion_bias: Option<&[f32]>,
+) -> Vec<SearchHit> {
+    expand_graph_with_labels_view(
         db,
         seeds,
         max_depth,
@@ -52,6 +75,36 @@ pub fn expand_graph<T: crate::VectorType>(
 /// 执行可按标签限制的有限深度 SA-PPR。
 pub fn expand_graph_with_labels<T: crate::VectorType>(
     db: &MemTable<T>,
+    seeds: Vec<SearchHit>,
+    max_depth: usize,
+    restart_alpha: f32,
+    enable_inverse_inhibition: bool,
+    lateral_inhibition_threshold: usize,
+    enable_refractory_fatigue: bool,
+    diffusion_bias: Option<&[f32]>,
+    expand_labels: Option<&[String]>,
+    max_edges_per_node: usize,
+    min_edge_weight: f32,
+    edge_direction: EdgeDirection,
+) -> Vec<SearchHit> {
+    expand_graph_with_labels_view(
+        db,
+        seeds,
+        max_depth,
+        restart_alpha,
+        enable_inverse_inhibition,
+        lateral_inhibition_threshold,
+        enable_refractory_fatigue,
+        diffusion_bias,
+        expand_labels,
+        max_edges_per_node,
+        min_edge_weight,
+        edge_direction,
+    )
+}
+
+pub(crate) fn expand_graph_with_labels_view<T: crate::VectorType>(
+    db: &impl GraphRead<T>,
     seeds: Vec<SearchHit>,
     max_depth: usize,
     restart_alpha: f32,
@@ -86,7 +139,7 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
     let mut current_tier = BTreeMap::<NodeId, f32>::new();
     let mut active_fatigue = Vec::new();
     for seed in &seeds {
-        let fatigue_discount = if enable_refractory_fatigue && db.get_fatigue(seed.id) > 0 {
+        let fatigue_discount = if enable_refractory_fatigue && db.facts().get_fatigue(seed.id) > 0 {
             active_fatigue.push(seed.id);
             0.15
         } else {
@@ -191,7 +244,7 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
                     1.0
                 };
                 let fatigue_discount = if enable_refractory_fatigue {
-                    if db.get_fatigue(edge.target_id) > 0 {
+                    if db.facts().get_fatigue(edge.target_id) > 0 {
                         active_fatigue.push(edge.target_id);
                         0.15
                     } else {
@@ -202,7 +255,8 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
                 };
                 let attention_gate = if let (Some(bias), Some(scale)) = (diffusion_bias, bias_scale)
                 {
-                    db.get_vector(edge.target_id)
+                    db.facts()
+                        .get_vector(edge.target_id)
                         .map(|target_vec| {
                             let dot: f32 = bias
                                 .iter()
@@ -261,7 +315,7 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
 
     let mut expanded_results = Vec::new();
     for (id, score) in total_activation {
-        if let Some(payload) = db.get_payload(id) {
+        if let Some(payload) = db.facts().get_payload(id) {
             expanded_results.push(SearchHit {
                 id,
                 score,
@@ -274,7 +328,7 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
     if enable_refractory_fatigue {
         active_fatigue.sort_unstable();
         active_fatigue.dedup();
-        db.consume_fatigue_batch(&active_fatigue);
+        db.facts().consume_fatigue_batch(&active_fatigue);
         let top_ids: Vec<NodeId> = expanded_results
             .iter()
             .take(15)
@@ -282,7 +336,7 @@ pub fn expand_graph_with_labels<T: crate::VectorType>(
             .filter(|id| !active_fatigue.contains(id))
             .collect();
         if !top_ids.is_empty() {
-            db.mark_fatigued(&top_ids);
+            db.facts().mark_fatigued(&top_ids);
         }
     }
 

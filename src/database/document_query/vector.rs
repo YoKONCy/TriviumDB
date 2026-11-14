@@ -3,7 +3,7 @@ use super::*;
 use crate::index::quiver::{NavigationScorer, QuIVerSearchConfig};
 use std::cell::RefCell;
 
-pub(super) struct Recall<'a, T: VectorType> {
+pub(crate) struct Recall<'a, T: VectorType> {
     pub vector: &'a [T],
     pub options: &'a DocumentVectorOptions,
     pub text_weight: Option<f32>,
@@ -52,6 +52,17 @@ impl<T: VectorType> Recall<'_, T> {
             return Err(invalid(
                 &format!("{prefix}.strategy"),
                 "ANN要求已就绪的浮点QuIVer索引 (ANN requires a ready floating-point QuIVer index)",
+            ));
+        }
+        if self.options.rerank == DocumentVectorRerank::Compressed
+            && (self.options.strategy == DocumentVectorStrategy::Exact
+                || crate::vector::is_binary_vector::<T>()
+                || mt.quiver().is_none()
+                || mt.quiver_ssd.is_none())
+        {
+            return Err(invalid(
+                &format!("{prefix}.rerank"),
+                "压缩重排要求浮点ANN和已配置的QuIVer运行时 (Compressed reranking requires floating-point ANN and a configured QuIVer runtime)",
             ));
         }
         if let Some(weight) = self.text_weight {
@@ -259,49 +270,84 @@ fn ann<'a, T: VectorType>(
     loop {
         crate::request::check_current()?;
         control.borrow_mut().info.ann_rounds += 1;
-        let mut scorer = Scorer {
-            eligible,
-            control: &control,
+        let raw = if recall.options.rerank == DocumentVectorRerank::Compressed {
+            let active = work.mt.quiver_ssd.as_ref().ok_or_else(|| {
+                stored_error("压缩运行时未就绪 (Compressed runtime is not ready)")
+            })?;
+            if active.generation != work.mt.vector_generation() {
+                return Err(TriviumError::DatabaseBusy {
+                    resource: "quiver_rerank_generation",
+                });
+            }
+            active
+                .reader
+                .set_database_capacity(super::super::quiver_ssd::database_capacity(
+                    work.memory_limit,
+                    work.mt.base_memory_bytes(),
+                )?);
+            active.reader.search_bound_observed(
+                &vector,
+                &QuIVerSearchConfig {
+                    top_k: width,
+                    ef_search: recall.options.ef_search.max(width),
+                    rerank_limit: None,
+                },
+                quiver,
+                &|id| eligible.contains(&id),
+                &|stage| match stage {
+                    crate::index::quiver::ssd::SearchStage::Navigation => {
+                        control.borrow_mut().navigation()
+                    }
+                    crate::index::quiver::ssd::SearchStage::Score => control.borrow_mut().score(),
+                },
+                work.workspace.bytes(),
+            )?
+        } else {
+            let mut scorer = Scorer {
+                eligible,
+                control: &control,
+            };
+            quiver.search_with_scorer_local(
+                &vector,
+                |slot, buffer| {
+                    let mut state = control.borrow_mut();
+                    if state.failure.is_some() {
+                        return false;
+                    }
+                    let result = (|| {
+                        let (id, stored) =
+                            work.mt.active_vector_at_slot(slot)?.ok_or_else(|| {
+                                stored_error("ANN候选向量缺失 (ANN candidate vector is missing)")
+                            })?;
+                        if !eligible.contains(&id) {
+                            return Ok(false);
+                        }
+                        state.score()?;
+                        buffer.clear();
+                        buffer.extend(stored.iter().map(|value| value.to_f32()));
+                        if buffer.iter().any(|value| !value.is_finite()) {
+                            return Err(stored_error(
+                                "ANN候选向量无效 (Invalid ANN candidate vector)",
+                            ));
+                        }
+                        Ok(true)
+                    })();
+                    match result {
+                        Ok(value) => value,
+                        Err(error) => {
+                            state.failure = Some(error);
+                            false
+                        }
+                    }
+                },
+                &QuIVerSearchConfig {
+                    top_k: width,
+                    ef_search: recall.options.ef_search.max(width),
+                    rerank_limit: None,
+                },
+                &mut scorer,
+            )
         };
-        let raw = quiver.search_with_scorer_local(
-            &vector,
-            |slot, buffer| {
-                let mut state = control.borrow_mut();
-                if state.failure.is_some() {
-                    return false;
-                }
-                let result = (|| {
-                    let (id, stored) = work.mt.active_vector_at_slot(slot)?.ok_or_else(|| {
-                        stored_error("ANN候选向量缺失 (ANN candidate vector is missing)")
-                    })?;
-                    if !eligible.contains(&id) {
-                        return Ok(false);
-                    }
-                    state.score()?;
-                    buffer.clear();
-                    buffer.extend(stored.iter().map(|value| value.to_f32()));
-                    if buffer.iter().any(|value| !value.is_finite()) {
-                        return Err(stored_error(
-                            "ANN候选向量无效 (Invalid ANN candidate vector)",
-                        ));
-                    }
-                    Ok(true)
-                })();
-                match result {
-                    Ok(value) => value,
-                    Err(error) => {
-                        state.failure = Some(error);
-                        false
-                    }
-                }
-            },
-            &QuIVerSearchConfig {
-                top_k: width,
-                ef_search: recall.options.ef_search.max(width),
-                rerank_limit: None,
-            },
-            &mut scorer,
-        );
         if let Some(error) = control.borrow_mut().failure.take() {
             return Err(error);
         }
@@ -364,6 +410,25 @@ pub(super) fn recall<T: VectorType>(
                 DocumentVectorStrategy::Exact
             },
             approximate: use_ann,
+            rerank: recall.options.rerank,
+            compression: if recall.options.rerank == DocumentVectorRerank::Compressed {
+                let stats = work
+                    .mt
+                    .quiver_ssd
+                    .as_ref()
+                    .ok_or_else(|| {
+                        stored_error("压缩运行时未就绪 (Compressed runtime is not ready)")
+                    })?
+                    .reader
+                    .stats();
+                Some(DocumentCompressionInfo {
+                    encoding: stats.metadata.encoding,
+                    query_precision: stats.query_precision,
+                    residency: stats.residency,
+                })
+            } else {
+                None
+            },
             eligible_units: eligible.len(),
             vector_candidates: 0,
             vector_scores: 0,

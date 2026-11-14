@@ -8,6 +8,7 @@ pub(super) struct QueryMemory {
     runtime: ResourceRuntime,
     limit: usize,
     bytes: Cell<usize>,
+    external_bytes: Cell<usize>,
     leases: RefCell<Vec<WorkspaceReservation>>,
 }
 
@@ -83,8 +84,15 @@ impl QueryMemory {
             runtime: mt.resource_runtime().clone(),
             limit,
             bytes: Cell::new(0),
+            external_bytes: Cell::new(0),
             leases: RefCell::new(Vec::new()),
         }
+    }
+
+    /// 同一查询中其他所有者持有的基础堆、拓扑和管线凭证参与峰值准入。
+    pub(super) fn include_external(&self, bytes: usize) {
+        self.external_bytes
+            .set(self.external_bytes.get().saturating_add(bytes));
     }
 
     pub(super) fn retain(&self, bytes: usize) -> crate::Result<()> {
@@ -98,7 +106,10 @@ impl QueryMemory {
     }
 
     pub(super) fn temporary(&self, bytes: usize) -> crate::Result<Temporary<'_>> {
-        let used = self.bytes.get();
+        let owned = self.bytes.get();
+        let used = owned
+            .checked_add(self.external_bytes.get())
+            .ok_or_else(overflow)?;
         let projected = used.checked_add(bytes).ok_or_else(overflow)?;
         if self.limit > 0 && projected > self.limit {
             return Err(TriviumError::ResourceBudgetExceeded {
@@ -109,7 +120,8 @@ impl QueryMemory {
             });
         }
         let lease = self.runtime.reserve_workspace(bytes)?;
-        self.bytes.set(projected);
+        self.bytes
+            .set(owned.checked_add(bytes).ok_or_else(overflow)?);
         Ok(Temporary {
             owner: self,
             bytes,
@@ -131,5 +143,42 @@ impl QueryMemory {
                 "TQL 活跃节点缺少向量 (TQL active node has no vector)".into(),
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 外层持有额度参与投影峰值且临时凭证仅归还自身() {
+        let mt = MemTable::<f32>::new(2);
+        let memory = QueryMemory::new(1000, &mt);
+        memory.include_external(900);
+        memory.retain(60).unwrap();
+        assert!(matches!(
+            memory.temporary(41),
+            Err(TriviumError::ResourceBudgetExceeded {
+                resource: "query_memory_bytes",
+                requested: 41,
+                used: 960,
+                limit: 1000,
+            })
+        ));
+        let temporary = memory.temporary(40).unwrap();
+        assert_eq!(memory.bytes.get(), 100);
+        drop(temporary);
+        assert_eq!(memory.bytes.get(), 60);
+        memory.retain(40).unwrap();
+        assert_eq!(memory.bytes.get(), 100);
+        assert!(matches!(
+            memory.temporary(1),
+            Err(TriviumError::ResourceBudgetExceeded {
+                requested: 1,
+                used: 1000,
+                limit: 1000,
+                ..
+            })
+        ));
     }
 }

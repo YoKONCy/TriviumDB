@@ -1,6 +1,6 @@
 # TriviumDB 文档来源与结构
 
-> 本文说明当前开发版的文档身份、修订、UTF-8 证据范围、结构清单与原子更新。文档事实由 Rust Core 管理，Python 和 Node 通过共享 SDK JSON 适配调用。版本说明见[未发布变更](changes/unreleased.md)。
+> 本文说明 `0.9.1` 的文档身份、修订、UTF-8 证据范围、结构清单与原子更新。文档事实由 Rust Core 管理，Python 和 Node 通过共享 SDK JSON 适配调用。版本说明见[变更说明](changes/0.9.1.md)。
 
 ---
 
@@ -262,6 +262,7 @@ Rust Core 和 Reader 提供 `search_documents_vector(query, vector, options)` �
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
 | `strategy` | `auto` | 已有浮点 QuIVer 索引时使用 ANN，其余采用精确评分。`exact` 指定精确评分，`ann` 要求已就绪的浮点 QuIVer 索引 |
+| `rerank` | `original` | `original` 使用原始向量评分，`compressed` 使用已配置 QuIVer 运行时的编码与查询精度 |
 | `min_score` | `null` | 可选有限向量分数阈值，按大于等于保留 |
 | `initial_candidates` | 64 | ANN 初始候选宽度基数 |
 | `candidate_limit` | 4096 | 单轮 ANN 结果候选池的宽度上限 |
@@ -270,6 +271,28 @@ Rust Core 和 Reader 提供 `search_documents_vector(query, vector, options)` �
 三个候选参数须为正数，`initial_candidates <= candidate_limit`。`auto` 采用当前读视图中已就绪的索引，查询通过现有来源事实派生文档缓存。QuIVer 建图沿既有内核维护及自动构建流程执行。显式 `ann` 的前置条件失败时返回 `TDB_INVALID_INPUT`，字段定位到相应 `strategy`。
 
 精确路径对全部合格表示按原生 dtype 评分，随后按文档分组和截断。ANN 复用 QuIVer BQ 查询时评分入口，导航访问现有图，精排通过候选集合筛选并按需读取向量。初始宽度取 `max(initial_candidates, max_documents * hits_per_document)`，随后受候选上限及索引节点数约束。每轮按分数和节点 ID 排序，目标文档组数为请求组数与合格来源数的较小值，组数不足时宽度倍增。最终分组采用停止轮的候选。
+
+`rerank="compressed"` 要求浮点数据库、已就绪的 QuIVer 索引与已配置的压缩运行时，策略可选 `auto` 或 `ann`。参数错误返回 `TDB_INVALID_INPUT`，压缩配置定位为 `options.rerank`，混合入口使用 `options.vector.rerank`。显式 `ann` 的索引前置条件定位到对应 `strategy`。编码、查询精度、驻留和字节缓存预算从 QuIVer 运行时读取，文档请求独立选择 `rerank`，`use_for_ann` 控制普通 ANN 入口。
+
+Python 可先配置运行时，再通过文档入口选择压缩重排。Node 使用相同 JSON 字段，通过 `quiverRequest` 与 `documentRequest` 调用。Rust 使用 `configure_quiver` 和 `DocumentVectorOptions::rerank`。
+
+```python
+import json
+
+db.quiver_request(json.dumps({"operation": "configure", "options": {
+    "encoding": "centered_int4", "query_precision": "fp32",
+    "residency": "ssd", "cache_bytes": 64 * 1024 * 1024,
+    "io_mode": "auto", "io_depth": 4, "use_for_ann": False
+}}))
+result = json.loads(db.document_request(json.dumps({
+    "operation": "search_vector",
+    "query": {"max_documents": 10, "hits_per_document": 2},
+    "vector": query_vector,
+    "options": {"strategy": "ann", "rerank": "compressed"}
+})))
+```
+
+压缩路径在同一事实读视图中复用来源过滤、组覆盖扩展和证据生成，借用数据库主 QuIVer 路由，并通过压缩 Reader 批量预取和评分。Hot 与 SSD 使用相同编码行与评分逻辑，查询精度可选 FP32、INT8、INT4。压缩向量分数为近似余弦相似度，`min_score` 和混合排名作用于实际返回的分数。向量更新后的派生代际由后续压缩查询刷新。
 
 ```json
 {
@@ -298,17 +321,23 @@ Rust Core 和 Reader 提供 `search_documents_vector(query, vector, options)` �
 | --- | --- |
 | `hybrid` | 是否使用混合入口 |
 | `strategy`、`approximate` | 实际执行的 `exact`／`ann` 路由及 ANN 近似范围 |
+| `rerank` | 实际使用的 `original`／`compressed` 评分来源 |
+| `compression` | 压缩模式的实际 `encoding`、`query_precision`、`residency`，原始模式为 `null` |
 | `eligible_units` | 完成来源、元数据、成员及位置约束后的向量候选表示数 |
 | `vector_candidates` | 达到向量分数阈值的最终向量候选数 |
-| `vector_scores` | 精确评分或 ANN 精排取数的累计次数，多轮访问累计 |
+| `vector_scores` | 精确评分或 ANN 精排候选的累计准入次数，多轮访问累计 |
 | `ann_visits`、`ann_rounds` | ANN 控制检查点访问量及已执行轮数 |
 | `stop` | `exact_complete`、`groups_satisfied`、`candidate_limit` 或 `index_exhausted` |
 
 `groups_satisfied` 记录当前候选覆盖目标组数，ANN 结果同时携带 `approximate=true`。`candidate_limit` 记录宽度达到配置上限，`index_exhausted` 记录宽度覆盖索引或合格候选为空。硬资源预算超额统一返回结构化错误。文档组仍取最高命中分数，组与组内排序沿既有规则执行。
 
+压缩候选先完成过滤和评分预算准入，再进行批量取数，缓存命中与 Hot 驻留采用相同计数。导航控制检查点计入 `max_ann_visits`，候选准入计入 `max_vector_scores`。外层文档工作区与 Reader 内存合并核对数据库额度，共享 Runtime 中的工作区额度只预留一次。预算拒绝、取消及读取失败返回完整错误，临时额度和行租约沿请求退出归还。
+
 顶层 `corpus_units` 继续统计相应层级的非空文本表示，向量候选规模通过 `retrieval.eligible_units` 解释。空正文、纯向量命中及混合命中都返回拥有型来源证据，可直接使用现有引用解析和上下文展开。
 
 > **调用提醒**　示例使用二维向量，调用时按实际数据库维度提供向量。JavaScript 宿主通过原始请求 JSON 传递完整 `u64` 分量。ANN 导航范围及候选上限通过响应字段解释，调用方按自身召回需求配置。
+
+> **精度提醒**　压缩重排的分数与召回质量随编码、查询精度和业务数据变化。业务阈值按实际配置验证，运行时重开后重新配置。配置与制品要求见 [QuIVer 压缩重排](quiver.md#可选压缩重排与查询精度)。
 
 ---
 
@@ -465,4 +494,4 @@ JSON 请求在解码前预留工作区。已经识别的写命令在正文转换
 
 当前实现提供完整文档来源、逻辑结构、可选块表示、修订保护、原文范围引用、原子替换／删除、分组 BM25、块类型字段权重、文档／片段元数据与集合成员过滤、文档级向量与 RRF 混合分组、位置倒排、短语／有序邻近、词项证据和版本绑定的上下文窗口。现有向量、属性及图查询可以访问已建立的表示节点及边。
 
-文档节点可以同时加入多个[命名图](named-graphs.md)，共享成员通过全库NodeId引用，业务边在所属图内独立保存。文档结构边使用默认图。嵌入宿主通过 Core 和共享 SDK 使用解析、外部映射与分批发布。CLI、TQL 与 Server 的专用文档协议按后续接入批次推进。
+文档节点可以同时加入多个[命名图](named-graphs.md)，共享成员通过全库NodeId引用，业务边在所属图内独立保存。文档结构边使用默认图。嵌入宿主通过 Core 和共享 SDK 使用解析、外部映射与分批发布。TQL 的 `DOCUMENTS` 来源复用文本、向量和混合召回，逐命中携带来源与证据，并接入过滤、图扩展、聚合及重排。语法和元数据字段见 [TQL 文档来源](tql-reference.md#documents--文档来源)。

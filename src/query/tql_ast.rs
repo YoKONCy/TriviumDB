@@ -10,6 +10,8 @@ use crate::filter::Filter;
 /// TQL 顶层查询 AST
 #[derive(Debug, Clone)]
 pub struct TqlQuery {
+    /// 显式图作用域只约束图匹配与图算子，节点事实继续按全库身份读取。
+    pub graph_scope: Option<Box<TqlJson>>,
     /// EXPLAIN 模式：输出查询计划而不执行
     pub explain: bool,
     /// EXPLAIN ANALYZE：执行查询并返回计划与实际观测。
@@ -112,6 +114,28 @@ pub enum PipelineStage {
     NodeSimilarity(NodeSimilarityStage),
     SetCombine(SetCombineStage),
     Iterate(IterateStage),
+}
+
+impl PipelineStage {
+    pub(crate) fn node_input(&self) -> Option<&str> {
+        match self {
+            Self::Expand(stage) => Some(&stage.input),
+            Self::Rank(stage) => Some(&stage.var),
+            Self::Diversify(stage) => Some(&stage.input),
+            Self::Residual(stage) => Some(&stage.input),
+            Self::Topics(stage) => Some(&stage.input),
+            Self::SaPpr(stage) => Some(&stage.input),
+            Self::GraphAlgorithm(stage) => Some(&stage.input),
+            Self::AllPaths(stage) => Some(&stage.input),
+            Self::ShortestPaths(stage) => Some(&stage.input),
+            Self::WeightedPaths(stage) => Some(&stage.input),
+            Self::YenPaths(stage) => Some(&stage.input),
+            Self::NodeSimilarity(stage) => Some(&stage.input),
+            Self::SetCombine(stage) => Some(&stage.input),
+            Self::Iterate(stage) => Some(&stage.input),
+            Self::With(_) | Self::Filter(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +276,8 @@ pub struct IterateStage {
 /// 查询入口类型
 #[derive(Debug, Clone)]
 pub enum QueryEntry {
+    /// 文档读取协议作为可组合来源，包含文本、向量和混合召回。
+    Documents { request: TqlJson },
     /// MATCH (a)-[:r]->(b)
     Match { pattern: TqlPattern },
 
@@ -273,6 +299,32 @@ pub enum QueryEntry {
     },
     /// BM25、AC 或两者相加的文本召回入口。
     Text { clause: TextSearchClause },
+}
+
+/// 保留参数叶节点的结构化来源配置，与普通 Payload 字面量分别解析。
+#[derive(Debug, Clone)]
+pub enum TqlJson {
+    Literal(serde_json::Value),
+    Parameter(String),
+    Array(Vec<TqlJson>),
+    Object(std::collections::BTreeMap<String, TqlJson>),
+}
+
+impl TqlJson {
+    pub fn value(&self) -> crate::Result<serde_json::Value> {
+        match self {
+            Self::Literal(value) => Ok(value.clone()),
+            Self::Parameter(parameter) => Err(crate::TriviumError::MissingQueryParameter {
+                parameter: parameter.clone(),
+            }),
+            Self::Array(values) => values.iter().map(Self::value).collect(),
+            Self::Object(values) => values
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), value.value()?)))
+                .collect::<crate::Result<serde_json::Map<_, _>>>()
+                .map(serde_json::Value::Object),
+        }
+    }
 }
 
 /// 图路径模式：交替的节点模式和边模式

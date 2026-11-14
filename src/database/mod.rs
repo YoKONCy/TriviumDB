@@ -11,7 +11,7 @@
 pub mod config;
 pub mod console;
 mod document_ingestion;
-mod document_query;
+pub(crate) mod document_query;
 mod documents;
 pub(crate) mod editing;
 mod named_graphs;
@@ -689,6 +689,7 @@ impl<T: VectorType> SearchHandle<T> {
                 self.storage_mode,
                 self.access_mode,
                 self.memory_limit,
+                false,
             )?;
         }
 
@@ -2646,7 +2647,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         self.require_reader_determinism(config)?;
         let _operation = self.enter_operation()?;
         if query_vector.is_some() && !config.force_brute_force {
-            self.prepare_quiver_rerank()?;
+            self.prepare_quiver_rerank(false)?;
         }
         #[cfg(feature = "test-hooks")]
         if config.enable_refractory_fatigue {
@@ -2686,7 +2687,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         self.require_reader_determinism(config)?;
         let _operation = self.enter_operation()?;
         if query_vector.is_some() && !config.force_brute_force {
-            self.prepare_quiver_rerank()?;
+            self.prepare_quiver_rerank(false)?;
         }
         #[cfg(feature = "test-hooks")]
         if config.enable_refractory_fatigue {
@@ -2722,7 +2723,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         self.require_reader_determinism(config)?;
         let _operation = self.enter_operation()?;
         if query_vector.is_some() && !config.force_brute_force {
-            self.prepare_quiver_rerank()?;
+            self.prepare_quiver_rerank(false)?;
         }
         let _stateful_guard = config
             .enable_refractory_fatigue
@@ -2884,7 +2885,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ) -> Result<crate::tsng::TsngSearchResult> {
         let _operation = self.enter_operation()?;
         if query.weights.property == 0.0 && query.weights.graph == 0.0 {
-            self.prepare_quiver_rerank()?;
+            self.prepare_quiver_rerank(false)?;
         }
         let mt = read_or_recover(&self.memtable);
         self.resource_runtime

@@ -944,6 +944,7 @@ export class TriviumDB {
    * // 文档过滤
    * const rows = db.tql('FIND {type: "event", heat: {$gte: 0.7}} RETURN *')
    * ```
+   * DOCUMENTS来源支持文档读取配置，GRAPH前缀选择图作用域，命名边结果携带graph_id。
    */
   tql(query: string): any[];
 
@@ -954,6 +955,8 @@ export class TriviumDB {
    * parse/ingest/put_parsed及begin_upload/append_upload/upload_status/list_uploads/publish_upload/abort_upload提供解析、原文映射与持久化候选发布。
    * NodeId使用十进制字符串，向量分量采用当前dtype的JSON数值表示。
    * search支持字段权重、document_filter/block_filter、members、位置查询及analyzer_id。
+   * search_vector与search_hybrid的向量options.rerank可选original或compressed，默认original。
+   * compressed复用已配置QuIVer运行时，要求浮点ANN，retrieval.compression返回编码、查询精度与驻留方式。
    * 字段复用块kind，元数据过滤作用于调用方data，完整协议见docs/documents.md与docs/document-ingestion.md。
    */
   documentRequest(requestJson: string): string;

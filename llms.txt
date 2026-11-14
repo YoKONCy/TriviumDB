@@ -1,14 +1,14 @@
 # TriviumDB
 
-Current prerelease: 0.9.1-beta.1. Python metadata: 0.9.1b1. Full release notes: https://github.com/YoKONCy/TriviumDB/blob/master/docs/changes/0.9.1-beta.1.md . Frozen ICDE measurements and source identities: https://github.com/YoKONCy/TriviumDB/tree/master/evaluation .
+Current stable release is 0.9.1 across Rust, Python, Node.js, CLI, and Server source. Full bilingual release notes are available at https://github.com/YoKONCy/TriviumDB/blob/master/docs/changes/0.9.1.md . Frozen ICDE measurements and source identities are available at https://github.com/YoKONCy/TriviumDB/tree/master/evaluation .
 
-Document APIs provide source revisions, logical blocks, grouped text/vector/hybrid retrieval, phrase and proximity evidence, parser mappings, and staged publication. Named graphs share global NodeIds while retaining graph-local edges. Explicit QuIVer INT8 APIs offer SSD/Hot residency, bounded row caches, native I/O, and reusable aligned windows. Rust, Python, and Node share Core semantics.
+Document APIs provide source revisions, logical blocks, grouped text/vector/hybrid retrieval, phrase and proximity evidence, parser mappings, and staged publication. DOCUMENTS sources and GRAPH scopes integrate documents and named graphs into TQL, Prepared queries, and Planner. QuIVer offers centered INT8/INT4 reranking, FP32/INT8/INT4 query representations, SSD/Hot residency, byte-bounded caches, native I/O, and aligned window reuse. Document ANN can select compressed reranking per request. Rust, Python, and Node share Core semantics.
 
 > TriviumDB is a native tri-model embedded database engine written in Rust. Vector search, property graphs, and JSON documents share one storage kernel and NodeId space. A unified Cascades optimizer plans cross-model TQL query pipelines. Native APIs are available for Rust, Python, and Node.js. License: Apache-2.0.
 
 TriviumDB runs inside the host application. Applications use it for AI agent memory, AI companion memory, retrieval-augmented generation (RAG), local knowledge bases, and knowledge graphs. Independent database instances support per-agent, per-session, and per-tenant data organization in desktop applications and containers.
 
-- Native tri-model unification: vector, graph, and document operations share the same storage kernel, node identities, and transaction system. Each NodeId connects a stored vector, a JSON payload, indexed text, and graph edges. Applications combine semantic similarity, document predicates, and graph relationships over the same data.
+- Native tri-model unification: vector, graph, and document operations share the same storage kernel, node identities, and transaction system. NodeIds connect optional vectors, JSON payloads, indexed text, and graph edges. Applications combine semantic similarity, document predicates, and graph relationships over the same data.
 - Typed query values: WITH projections capture per-row values and node identities across graph expansion. Aggregation, DISTINCT, alias ordering, and pagination share evaluation semantics. Unsigned vectors and integers retain their exact values through the corresponding typed APIs.
 - Unified Cascades planning: TQL brings vector recall, document filtering, text retrieval, graph traversal, paths, set operations, aggregation, iteration, and reranking into one query pipeline. The same deterministic, cost-driven Cascades optimizer plans these cross-model pipelines using shared statistics, index availability, and resource budgets. MATCH, FIND, SEARCH, and WITH express the combined query.
 - Vector retrieval: f32, f16, and u64 storage; exact vector search; and the QuIVer approximate nearest-neighbor (ANN) index. QuIVer uses compact 2-bit representations, sign-magnitude SM-L2 navigation, and candidate reranking with stored vectors. Dimension-aware automatic index construction supports growing datasets. The engine supports vector dimensions from 1 to 65,536, with QuIVer ANN covering 1 to 3,072 dimensions.
@@ -32,7 +32,7 @@ TriviumDB runs inside the host application. Applications use it for AI agent mem
 - [Shutdown, snapshots, and restore](https://raw.githubusercontent.com/YoKONCy/TriviumDB/master/docs/lifecycle-snapshots.md): Instance lifecycle, consistent directory snapshots, verification, and restore.
 - [Best practices](https://raw.githubusercontent.com/YoKONCy/TriviumDB/master/docs/best-practices.md): Data modeling, application integration, retrieval patterns, and resource configuration.
 
-- [0.9.0-beta.4 release notes](https://raw.githubusercontent.com/YoKONCy/TriviumDB/master/docs/changes/0.9.0-beta.4.md): Bilingual changes, Rust API migration, persisted index formats, and installation versions.
+- [0.9.1 release notes](https://raw.githubusercontent.com/YoKONCy/TriviumDB/master/docs/changes/0.9.1.md) provide bilingual changes, format and upgrade conditions, configuration, and installation versions.
 
 ## Packages
 

@@ -39,7 +39,7 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         self.close_quiver_int8()
     }
 
-    pub(crate) fn prepare_quiver_rerank(&self) -> Result<()> {
+    pub(crate) fn prepare_quiver_rerank(&self, require_runtime: bool) -> Result<()> {
         prepare_configured_rerank(
             &self.memtable,
             &self.wal,
@@ -47,6 +47,7 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
             self.storage_mode,
             self.access_mode,
             self.memory_limit,
+            require_runtime,
         )
     }
 
@@ -55,15 +56,46 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         query: &crate::query::tql_ast::TqlQuery,
         source: Option<&std::sync::Arc<crate::query::tql_source::TqlSource>>,
     ) -> Result<()> {
-        if (query.explain && !query.analyze)
-            || !matches!(
-                query.entry,
-                crate::query::tql_ast::QueryEntry::Search { .. }
-            )
-        {
+        if query.explain && !query.analyze {
             return Ok(());
         }
-        self.prepare_quiver_rerank().map_err(|error| {
+        let prepare = || {
+            let required = match &query.entry {
+                crate::query::tql_ast::QueryEntry::Documents { request } => {
+                    let mut parameters = std::collections::BTreeSet::new();
+                    crate::query::tql_prepared::collect_query_parameters(query, &mut parameters);
+                    if !parameters.is_empty() {
+                        return Ok(());
+                    }
+                    let request = crate::query::tql_documents::DocumentRequest::<T>::parse(request)
+                        .and_then(|request| {
+                            request.validate(&read_or_recover(&self.memtable))?;
+                            Ok(request)
+                        })
+                        .map_err(|error| match source {
+                            Some(source) => source
+                                .origin(crate::query::tql_source::SourceSelector::Entry)
+                                .error(error, crate::error::QueryErrorStage::Plan),
+                            None => {
+                                error.at_query_source(crate::error::QueryErrorStage::Plan, None)
+                            }
+                        })?;
+                    request.compressed()
+                }
+                crate::query::tql_ast::QueryEntry::Search { .. } => false,
+                _ => return Ok(()),
+            };
+            if required
+                || matches!(
+                    query.entry,
+                    crate::query::tql_ast::QueryEntry::Search { .. }
+                )
+            {
+                self.prepare_quiver_rerank(required)?;
+            }
+            Ok(())
+        };
+        prepare().map_err(|error| {
             let stage = crate::error::QueryErrorStage::Execute;
             match source {
                 Some(source) => source
@@ -227,12 +259,13 @@ pub(super) fn prepare_configured_rerank<T: VectorType>(
     mode: super::StorageMode,
     access: AccessMode,
     limit: usize,
+    require_runtime: bool,
 ) -> Result<()> {
     crate::request::check_current()?;
     let needs_refresh = |mt: &crate::storage::memtable::MemTable<T>| {
         mt.active_vector_count() > 0
             && mt.quiver_ssd.as_ref().is_some_and(|active| {
-                active.options.use_for_ann
+                (active.options.use_for_ann || require_runtime)
                     && (active.generation != mt.vector_generation()
                         || active.reader.stats().closed
                         || mt
@@ -284,7 +317,7 @@ pub(super) fn prepare_configured_rerank<T: VectorType>(
     Ok(())
 }
 
-fn database_capacity(limit: usize, used: usize) -> Result<usize> {
+pub(super) fn database_capacity(limit: usize, used: usize) -> Result<usize> {
     if limit == 0 {
         return Ok(0);
     }

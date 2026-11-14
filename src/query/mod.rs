@@ -8,6 +8,7 @@ pub mod parallel;
 pub mod pipeline;
 pub mod planner;
 pub mod tql_ast;
+pub(crate) mod tql_documents;
 pub mod tql_executor;
 pub mod tql_lexer;
 pub mod tql_parser;

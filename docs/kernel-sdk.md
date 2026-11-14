@@ -1,12 +1,13 @@
 # 内核 SDK 与存储内核分层
 
-> 本文定义嵌入式调用的职责、共享所有权、请求失败与关闭边界，适用于以 `0.9.0` 为基线的当前开发版本。实现入口见 [`src/sdk/`](../src/sdk/mod.rs)，变更记录见[未发布变更](changes/unreleased.md)。
+> 本文定义 `0.9.1` 嵌入式调用的职责、共享所有权、请求失败与关闭边界。实现入口见 [`src/sdk/`](../src/sdk/mod.rs)，变更记录见[版本说明](changes/0.9.1.md)。
 
 ---
 
 ## 目录
 
 - [职责与依赖](#职责与依赖)
+- [原生绑定模块组织](#原生绑定模块组织)
 - [当前依赖记录](#当前依赖记录)
 - [共享访问与事务提交](#共享访问与事务提交)
 - [统一请求上下文](#统一请求上下文)
@@ -54,6 +55,33 @@ Node 外层配置在已知属性读取前检查对象形状，拒绝数组、函
 检索、图与文本入口复用带读／写上下文的标量、序列和 JSON 转换。SDK 换算混合权重并拒绝非有限输入及溢出，绑定保留原宿主异常、Python 请求借用与 Node Promise 完成方式。检索配置、扩散偏置及查找范围由存储内核验证并提供字段，空批次复用内核配置校验。文本重建在候选提交前完成记录映射与成员校验，后续预算、索引安装及持久化沿内核维护入口执行。
 
 `DatabaseReader`、`DatabaseWriter` 的实现位于 `sdk::facade`；`ConsoleHost` 位于 `sdk::console`。已有根路径与 `database::facade`、`database::console::ConsoleHost` 导入继续可用。Console 命令执行与条件事务校验继续通过内核现有入口完成。
+
+---
+
+## 原生绑定模块组织
+
+Python 与 Node 的原生绑定分别位于 [`src/bindings/python/`](../src/bindings/python/mod.rs) 和 [`src/bindings/nodejs/`](../src/bindings/nodejs/mod.rs)。目录入口装配职责模块、dtype 分发宏及公开导出，模块之间显式导入所需类型和转换函数。共享数据库句柄及后端字段在各自语言绑定目录内可见，业务调用沿 SDK 请求借用进入 Core。
+
+| 模块 | 职责 |
+| --- | --- |
+| `arguments.rs`、`json.rs`、`options.rs` | 实参、数值、字符串、容器、JSON 和配置的语言表示 |
+| `errors.rs`、`requests.rs`、`runtime.rs` | 结构化错误、请求上下文、调用形状及共享资源句柄 |
+| `database.rs` | 数据库包装类型、dtype 后端、构造与基础信息 |
+| `records.rs`、`transaction.rs` | 节点读写、批量操作及事务构建、提交和对象生命周期 |
+| `search.rs`、`graph.rs`、`queries.rs` | 检索、图操作、TQL、Prepared 参数与结果适配 |
+| `text.rs`、`indexes.rs` | 文本、属性及唯一索引维护与查找 |
+| `protocols.rs` | 文档、命名图、QuIVer 与 Console 的共享 JSON 协议入口 |
+| `hooks.rs`、`types.rs` | 宿主回调、回调重入及查询结果对象 |
+| `lifecycle.rs`、`maintenance.rs`、`snapshots.rs` | 关闭排空、上下文管理器、后台维护、容量及快照入口 |
+| Python `registration.rs` | 模块初始化、异常、类、函数及私有桥接注册 |
+| Node `registration.rs` | 原生导出阶段的数据库类名登记，组合各职责实现块的方法 |
+| Node `batch_search.rs`、`hook_refs.rs` | 异步检索任务、请求传播及所属事件线程的 Hook 引用清理 |
+
+Python 通过 PyO3 的 `multiple-pymethods` 特性，将同一类的公开方法按职责注册。每个 `#[pyclass]` 在所属模块定义一次，方法实现分布在对应职责文件。Node 的 `#[napi]` 方法实现采用相同的职责划分。Python 的 `.pyi` 从已安装 wheel 生成，npm 的公开声明由 `triviumdb.d.ts` 提供。
+
+Node 原生注册在 napi-rs 2 装配类之前统一登记 `TriviumDB` 名称，将构造器及各职责实现块的属性装配到同一公开类。注册回调使用 Node 提供的当前环境，并随每个模块实例初始化执行。
+
+原 Rust 绑定路径 `bindings::python::python` 与 `bindings::nodejs::nodejs` 通过重导出提供原有公开对象。Python 模块入口在 `src/lib.rs` 连接到统一注册函数，Node 的原生导出由 napi-rs 注册。
 
 ---
 
@@ -265,3 +293,7 @@ Core 会话通过 `is_drained()` 提供 detach 后的执行完成确认。Server
 字段语料统计与权重、文档／片段元数据作用域、成员倒排交并及完整事实谓词复核由 Core 执行。SDK 将 `fields`、`document_filter`、`block_filter` 与 `members` 转换到同一类型化请求，沿用内核的参数定位、预算、取消及修订错误。字段语料和成员倒排复用可重建文档缓存，事实仍由现有节点、Payload 和 WAL 管理。
 
 文档 `search_vector` 与 `search_hybrid` 由 Core 在同一事实读视图中执行原生向量评分、QuIVer 候选扩展和既有 RRF 融合。Core 负责统一候选约束、组覆盖目标、近似范围、停止原因和工作预算。SDK 校验 JSON 数值表示，保留 f16 有限范围与完整 u64 位模式，传递原始请求及结构化结果。Python／Node 继续复用现有字符串请求与借用完成点。QuIVer 的查询控制检查点在请求侧保留取消或额度失败，内核返回完整错误并归还工作区。
+
+文档 `rerank="compressed"` 在 Core 组合文档查询管线与已有压缩 Reader。文档管线维护过滤、候选扩展、分组、RRF 和修订证据，Reader 维护编码评分、缓存、驻留与 I/O。导航与候选取数前的观察回调执行文档预算和取消检查，外层已预留工作区登记到 Reader 局部账本，共享 Runtime 维持一次预留。代际刷新在取得最终事实读视图前执行，读视图内校验向量代际与主路由身份。SDK 传递 `rerank` 与 `retrieval.compression`，配置及失败语义由 Core 统一维护。
+
+TQL `DOCUMENTS` 的配置 AST 保存参数叶节点，Prepared 复用既有参数目录和来源范围。文档 API 与 TQL 物理来源调用同一 Core 锁内查询函数，后续管线保留节点及来源对象。`GRAPH` 前缀建立请求内只读拓扑视图，图算法通过 Core 的图读取接口访问所选成员、独立边和作用域统计。公共图函数保留既有 MemTable 入口，底层算法复用相同实现。SDK 与传输层传递边的可选 `graph_id` 和文档对象，查询、预算、取消和持久化由 Core 维护。

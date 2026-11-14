@@ -9,6 +9,7 @@ use crate::error::{Result, TriviumError};
 use crate::graph::budget::{
     BudgetDimension, BudgetExhaustionPolicy, TraversalBudget, TraversalMetrics, exhausted,
 };
+use crate::graph::view::GraphRead;
 use crate::node::NodeId;
 use crate::storage::memtable::MemTable;
 use rayon::prelude::*;
@@ -125,12 +126,28 @@ pub fn traverse<T: VectorType>(
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<Vec<ReachabilityResult>> {
+    traverse_view(db, source_id, config)
+}
+
+pub(crate) fn traverse_view<T: VectorType>(
+    db: &impl GraphRead<T>,
+    source_id: NodeId,
+    config: &ReachabilityConfig,
+) -> Result<Vec<ReachabilityResult>> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
-    Ok(traverse_detailed(db, source_id, config)?.results)
+    Ok(traverse_detailed_view(db, source_id, config)?.results)
 }
 pub fn traverse_detailed<T: VectorType>(
     db: &MemTable<T>,
+    source_id: NodeId,
+    config: &ReachabilityConfig,
+) -> Result<ReachabilityOutput> {
+    traverse_detailed_view(db, source_id, config)
+}
+
+pub(crate) fn traverse_detailed_view<T: VectorType>(
+    db: &impl GraphRead<T>,
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<ReachabilityOutput> {
@@ -140,7 +157,7 @@ pub fn traverse_detailed<T: VectorType>(
 }
 
 fn traverse_leased<T: VectorType>(
-    db: &MemTable<T>,
+    db: &impl GraphRead<T>,
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<(
@@ -310,6 +327,14 @@ pub fn traverse_compact<T: VectorType>(
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<CompactReachabilityOutput> {
+    traverse_compact_view(db, source_id, config)
+}
+
+pub(crate) fn traverse_compact_view<T: VectorType>(
+    db: &impl GraphRead<T>,
+    source_id: NodeId,
+    config: &ReachabilityConfig,
+) -> Result<CompactReachabilityOutput> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
     validate(db, source_id, config)?;
@@ -392,7 +417,7 @@ fn set_bit(words: &mut [u64], slot: usize) {
 }
 
 fn collect_target_slots<T: VectorType>(
-    db: &MemTable<T>,
+    db: &impl GraphRead<T>,
     current: NodeId,
     config: &ReachabilityConfig,
     words: &mut [u64],
@@ -413,6 +438,14 @@ fn collect_target_slots<T: VectorType>(
 /// worker 仅写本地位图，层末按固定 chunk 顺序 OR，再按 slot 升序提交结果。
 pub fn traverse_compact_parallel<T: VectorType>(
     db: &MemTable<T>,
+    source_id: NodeId,
+    config: &ReachabilityConfig,
+) -> Result<CompactReachabilityOutput> {
+    traverse_compact_parallel_view(db, source_id, config)
+}
+
+pub(crate) fn traverse_compact_parallel_view<T: VectorType>(
+    db: &impl GraphRead<T>,
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<CompactReachabilityOutput> {
@@ -558,7 +591,7 @@ pub fn traverse_compact_parallel<T: VectorType>(
 }
 
 fn collect_targets<T: VectorType>(
-    db: &MemTable<T>,
+    db: &impl GraphRead<T>,
     current: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<(Vec<NodeId>, crate::resources::WorkspaceReservation)> {
@@ -642,7 +675,7 @@ pub fn query_subgraph<T: VectorType>(
     })
 }
 fn validate<T: VectorType>(
-    db: &MemTable<T>,
+    db: &impl GraphRead<T>,
     source_id: NodeId,
     c: &ReachabilityConfig,
 ) -> Result<()> {
@@ -698,7 +731,7 @@ fn state_bytes(nodes: usize, detailed: bool, bitmap_words: usize, workers: usize
 }
 
 fn collect_steps<'a, T: VectorType>(
-    db: &'a MemTable<T>,
+    db: &'a impl GraphRead<T>,
     current: NodeId,
     c: &ReachabilityConfig,
 ) -> Result<(
@@ -798,8 +831,8 @@ mod admission_tests {
         );
         let config = ReachabilityConfig::default();
         for result in [
-            traverse_compact(&db, 1, &config),
-            traverse_compact_parallel(&db, 1, &config),
+            traverse_compact_view(&db, 1, &config),
+            traverse_compact_parallel_view(&db, 1, &config),
         ] {
             assert!(matches!(
                 result,
@@ -809,8 +842,8 @@ mod admission_tests {
         assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
         db.resize_resource_reservation(2 * 1024 * 1024).unwrap();
         for result in [
-            traverse_compact(&db, 1, &config),
-            traverse_compact_parallel(&db, 1, &config),
+            traverse_compact_view(&db, 1, &config),
+            traverse_compact_parallel_view(&db, 1, &config),
         ] {
             assert_eq!(
                 result.unwrap().results,
@@ -829,7 +862,7 @@ mod admission_tests {
             ..config
         };
         assert!(matches!(
-            traverse_detailed(&db, 1, &partial),
+            traverse_detailed_view(&db, 1, &partial),
             Err(TriviumError::ResourceBudgetExceeded { .. })
         ));
         assert_eq!(runtime.stats().reserved_workspace_bytes, 0);

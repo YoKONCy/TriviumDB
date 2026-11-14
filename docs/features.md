@@ -1,6 +1,6 @@
 # TriviumDB 支持特性详解
 
-> 本文介绍 TriviumDB `0.9.1-beta.1` 的能力与适用条件。完整内容见[中英文版本说明](changes/0.9.1-beta.1.md)，后续进展见[未发布说明](changes/unreleased.md)。
+> 本文介绍 TriviumDB `0.9.1` 的能力与适用条件。完整内容见[中英文版本说明](changes/0.9.1.md)，后续进展见[未发布说明](changes/unreleased.md)。
 
 ---
 
@@ -27,12 +27,13 @@
 
 ## 当前能力快照
 
-- **QuIVer INT8 SSD**　数据库自动绑定事实来源，提供显式 INT8 查询、LRU 行缓存、Pending 合并、Hot／SSD 驻留转换、实际对齐、读取窗口复用及关闭排空。资源和接口见 [QuIVer SSD](quiver.md#ssd-索引制品与-reader)。
+- **QuIVer 压缩运行时**　中心化 INT8／INT4 和既有 INT8 编码支持 FP32／INT8／INT4 查询，可选择 Hot／SSD 驻留、字节缓存及普通 ANN 压缩重排。数据库 Reader 共享主路由，批量预取与评分 SIMD 独立派发，提供实际对齐、窗口复用和关闭排空。资源和接口见 [QuIVer](quiver.md#数据库与-sdk-入口)。
 - **文档解析与发布**　纯文本、Markdown、HTML、JSON／JSONL 自动解析，外部解析结果接入、来源回映射及可恢复的分批候选发布。契约见[文档接入](document-ingestion.md)。
 - **持久化索引**：QuIVer ANN、Hash、Ordered ART、Composite ART、Roaring Bitmap、AC+BM25 TextIndex、业务图块索引。
 - **自由 DIY 混合查询**：TQL 提供可编排执行管线。开发者可将向量召回、BM25/AC 文本召回、属性过滤、图扩展、图算法、FISTA 残差召回、DPP 多样化、NMF 主题分配、路径、集合代数、迭代、聚合和重排按业务语义自由串联，并由 Cascades 在预算内选择物理计划。
 - **双形态认知检索**：`search_advanced()` 保留组件可开关、顺序固定的官方模板；TQL 复用相同 BM25、AC、FISTA、DPP、NMF 与图扩散底层实现，允许自由编排无状态组件。疲劳不应期仍仅属于有状态 API。
 - **统一查询底座**：TQL Parser/AST、WITH 管线、Cascades 优化、Prepared TQL、Path 与一等值结果共同支撑上述自由组合；数字字面量支持科学计数法，MATCH 属性/ID 投影按实际值去重，`SET VECTOR` 通过原子 mutation 更新向量。
+- **文档与命名图统一查询**　`DOCUMENTS` 接入文本、向量与混合检索及压缩重排，保留修订、分组和原文证据。只读 `GRAPH` 前缀选择图成员及独立边，匹配、路径和图算法共享请求内拓扑，Planner、Prepared、EXPLAIN 与 ANALYZE 使用同一作用域。语法见 [TQL 参考](tql-reference.md)。
 - **统一返回与匹配写入**：MATCH、FIND、WITH 和单跳具名边共享分组、聚合、去重、别名排序与分页；COUNT 按表达式值计数。多字段 SET 按节点合并，CREATE 按完整匹配集建立独立变量作用域，SET VECTOR 保留完整 u64 整数并按 dtype 准入。
 - **系统保证**：确定性执行、查询/遍历/内存/并行预算、ReadOnly/Immutable 零写、generation 原子发布。
 - **命名图**　独立图身份与Metadata、共享全库NodeId、按图独立的成员及同键边、条件批量编辑、显式联合与出边遍历。契约见[命名图](named-graphs.md)。
@@ -120,7 +121,7 @@ flowchart TD
 
 ## 三位一体数据模型
 
-当前开发版新增文档来源、持久修订、SHA-256 正文摘要和 UTF-8 证据范围。文档结构清单保存在根节点 Payload，可选片段表示使用普通节点，结构边连接最近的已表示祖先。完整替换与删除复用 Core 原子事务，字段、兼容性和 SDK 入口见[文档来源与结构](documents.md)。
+文档来源保存持久修订、SHA-256 正文摘要和 UTF-8 证据范围。结构清单保存在根节点 Payload，可选片段表示使用普通节点，结构边连接最近的已表示祖先。完整替换与删除复用 Core 原子事务，字段、兼容性和 SDK 入口见[文档来源与结构](documents.md)。
 
 每个节点在内部同时持有三种数据，共享全局唯一的 `u64` 主键：
 
@@ -308,7 +309,7 @@ flat_vectors
 - **激活条件**：维度在 `1..=3072` 且达到动态阈值；包含非完整尾块维度。
 - **构图与表示**：BQ 批量并行构图在最终剪枝时保护签名多样性，收尾连接入口不可达区域；默认查询另保存紧凑 SM 位码、幅值和重建范数。
 - **导航**：利用位计数、每向量幅值及重建范数计算平方 L2 评分，并沿图扩展。
-- **精排**：普通查询仍按原始向量余弦相似度排序，按有效预算读取冷向量，最后按需 hydrate Payload。
+- **精排**　默认使用原始向量余弦相似度，配置 `use_for_ann` 后采用压缩重排。候选读取遵守有效预算，最后按需 hydrate Payload。
 - **执行与维护**：SIMD/标量与尾部处理、线程工作区、增量追加和墓碑屏蔽共同维护；数据库重载时自动恢复默认 SM。
 - **拓扑边界**：增量剪枝保护导航树；旧索引通过重建应用修复。入口全可达仅保证拓扑可遍历，有限搜索宽度与精排预算下的召回需另行测量。
 

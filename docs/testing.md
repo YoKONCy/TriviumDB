@@ -1,6 +1,6 @@
 # TriviumDB 测试实践
 
-> 本文说明 TriviumDB 的测试组织、契约设计、故障注入与验收证据。以 `0.9.0` 为基线，版本记录见[变更说明](changes/0.9.0.md)，后续加固见[未发布变更](changes/unreleased.md)。
+> 本文说明 TriviumDB `0.9.1` 的测试组织、契约设计、故障注入与验收证据。版本记录见[变更说明](changes/0.9.1.md)，后续进展见[未发布变更](changes/unreleased.md)。
 
 ---
 
@@ -56,6 +56,10 @@
 
 `tests/contracts/document_vector_cases.json` 独立指定向量及混合结果的来源、命中顺序、RRF 分数和两路排名，复用文档字段样例中的真实来源范围。`cargo test --features test-hooks --test core document_vectors -- --test-threads=1` 覆盖三种 dtype、Rom／Mmap、Reader、完整整数指纹、空正文、缓存开关、过滤与位置约束、只读零写及文件移动。集中于单一来源的高分片段验证 ANN 按组扩展、候选宽度上限与硬资源预算，f32／f16 同时执行二维和 384 维路径。受控向量评分与 ANN 导航 Hook 验证执行中取消和资源归还，WAL 同步故障覆盖旧向量视图、完整新修订恢复、索引重建及再次持久化。实际 Python wheel、Node 模块和 npm 安装包复用精确及混合共享样例，额外核对完整 u64 JSON 分量。
 
+`tests/contracts/document_compressed_cases.json` 独立指定 129 维文档根／片段的压缩分数、完整分组、过滤、RRF 排名与来源证据。`cargo test --features test-hooks --test core document_compressed -- --test-threads=1` 覆盖 f32／f16、三种编码、三种查询精度、Hot／SSD、缓存、候选扩展、预算先于取数、更新刷新、只读重开和文件移动。受控导航／读取屏障及 I/O 故障验证取消、组合工作区计量、额度归还与完整重试。Python wheel 和 npm 安装制品复用相同独立样例，CI 的 QuIVer 专项入口显式启用该 Hook 套件。
+
+`tests/contracts/tql_documents_graphs_cases.json` 独立指定文档文本／向量／RRF 分数、完整来源、跨图独立边、反向／可变长／可选匹配、命名绑定、图度数与加权路径结果。`cargo test --features test-hooks --test core tql_documents_graphs -- --test-threads=1` 验证三种 dtype、Prepared 配置叶节点、规划范围、图修订、文档压缩精度和冷热策略、原文证据、只读重开及资源归还。受控命名图读取、文档评分、路径及投影屏障验证执行中取消、凭证持有和完整重试。内存准入覆盖作用域拒绝和组合投影峰值。Python wheel 和 npm 安装制品复用相同结果样例，Console 与 Server 编码检查完整命名边对象及整数，公共调用核对错误阶段和范围。
+
 默认 SM 路由快照由独立 QDSM 样例及 QUIV v1 图布局验证，覆盖位平面、幅值、极端精算比例、墓碑、截断、CRC 和重算 CRC 后的非法字段。`tests/storage/quiver_open.rs` 通过真实数据库核对 f32／f16、Rom／Mmap、完整节点／边／分数、只读零写、配额归还、文件组移动及 WAL 更新后的再次持久化。校验读取记录用于确认单次打开对主文件与向量分别执行一次完整摘要，随后重开仍识别同长度内容损坏。数据库重开性能通过 `bench_open` 单独报告。
 
 `tests/contracts/index_maintenance_cases.json` 定义维护准入、字段拒绝及文本查询的独立预期。Rust 覆盖 28 个入口，Python／Node 覆盖已开放的 23 个入口；三种 dtype 核对只读、关闭、预算拒绝、完整事实及后续持久化。Rust 与 Node 使用 Rom／Mmap，Python 使用当前构造接口的默认 Mmap。故障套件验证 WAL 关闭后的全部维护拒绝、唯一约束发布前后恢复、刷盘与压实的 `publish` 结果，并通过文件组移动及再次重开验证资源和数据。共享配额用例核对文本工作区拒绝、归还、释放其他实例后的真实重试及完整内容。
@@ -98,7 +102,7 @@ Console 数据传输用例在真实事务提交后注入连接失败、损坏 JS
 
 后台构建使用通道和发布 Hook 分别控制执行前与发布前的 WAL 失效，核对拒绝字段、工作区归还和重开后的全部记录。周期压实通过真实登记派发和完成通知验证 I/O 故障。快照／迁移沿用现有故障套件，补齐独立目标结果、完整内容及再次持久化，迁移配额在发布屏障上验证。
 
-当前未发布加固增加 `tests/contracts/error_cases.json`：Rust、已构建 Python wheel 与 Node 原生模块通过真实 API 核对错误码及完整字段，覆盖 Prepared 参数、维度、节点、唯一约束、只读、行预算、迁移、关闭、锁、I/O 与格式版本。Rust 描述符及 Python 映射测试使用独立的全部错误变体样例；Node 另验大整数详情与 Promise 拒绝。语言参数提取错误按各语言类型契约验证。
+`tests/contracts/error_cases.json` 由 Rust、已构建 Python wheel 与 Node 原生模块通过真实 API 核对错误码及完整字段，覆盖 Prepared 参数、维度、节点、唯一约束、只读、行预算、迁移、关闭、锁、I/O 与格式版本。Rust 描述符及 Python 映射测试使用独立的全部错误变体样例；Node 另验大整数详情与 Promise 拒绝。语言参数提取错误按各语言类型契约验证。
 
 `tests/contracts/prepared_diagnostics.json` 为 Prepared 缺参、多参、JSON 容器值和向量参数类型提供独立诊断预期。Core、三种 dtype 的 Python／Node 实际包、独立 Server、嵌入 HTTP 与 Console 数据传输核对原始类别、`stage=bind`、参数原名和首个真实引用范围，覆盖注释、Unicode／CRLF／Tab、重复引用、文档过滤操作符同名，以及 WITH、WHERE、ORDER BY、聚合和嵌套表达式。适用入口核对拒绝后的正常查询、WAL 字节与重开完整事实。Rust 另覆盖 NaN 与正负无穷参数、独立标量转换及手工 AST 的已知信息、原查询释放与 Prepared 克隆继续持有时的关闭和文件移动。Python 核对原异常继承关系。
 

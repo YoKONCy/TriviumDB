@@ -59,6 +59,13 @@ pub enum Residency {
     Hot,
 }
 
+/// 组合查询在实际导航和候选取数前执行自己的预算与取消检查。
+#[derive(Clone, Copy)]
+pub(crate) enum SearchStage {
+    Navigation,
+    Score,
+}
+
 /// 编码选择与运行时策略分别配置；Hot和SSD共用制品行及评分。
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -770,7 +777,7 @@ impl SsdQuiver {
 
     /// 复用默认SM图导航，以所选压缩编码重排并按分数、NodeId稳定排序。
     pub fn search(&self, query: &[f32], config: &QuIVerSearchConfig) -> Result<Vec<(u64, f32)>> {
-        self.search_routed(query, config, &|_| true, None)
+        self.search_routed(query, config, &|_| true, None, None, 0)
     }
 
     pub(crate) fn search_bound(
@@ -780,7 +787,26 @@ impl SsdQuiver {
         eligible: &dyn Fn(u64) -> bool,
         index: &QuIVer,
     ) -> Result<Vec<(u64, f32)>> {
-        self.search_routed(query, config, eligible, Some(index))
+        self.search_routed(query, config, eligible, Some(index), None, 0)
+    }
+
+    pub(crate) fn search_bound_observed(
+        &self,
+        query: &[f32],
+        config: &QuIVerSearchConfig,
+        index: &QuIVer,
+        eligible: &dyn Fn(u64) -> bool,
+        observer: &dyn Fn(SearchStage) -> Result<()>,
+        workspace_bytes: usize,
+    ) -> Result<Vec<(u64, f32)>> {
+        self.search_routed(
+            query,
+            config,
+            eligible,
+            Some(index),
+            Some(observer),
+            workspace_bytes,
+        )
     }
 
     fn search_routed(
@@ -789,6 +815,8 @@ impl SsdQuiver {
         config: &QuIVerSearchConfig,
         eligible: &dyn Fn(u64) -> bool,
         index: Option<&QuIVer>,
+        observer: Option<&dyn Fn(SearchStage) -> Result<()>>,
+        workspace_bytes: usize,
     ) -> Result<Vec<(u64, f32)>> {
         let state = self.active()?;
         let route = self.routing(index)?;
@@ -797,6 +825,8 @@ impl SsdQuiver {
         if config.top_k == 0 {
             return Ok(Vec::new());
         }
+        // 宿主工作区已由同一Runtime预留，在Reader局部账本中组合计量。
+        let _external = self.memory.charge_external(workspace_bytes)?;
         let top_k = config.top_k.min(route.n);
         let ef = config.ef_search.max(top_k).min(route.n);
         let budget = config.rerank_limit.unwrap_or(64).max(top_k).min(ef);
@@ -823,6 +853,7 @@ impl SsdQuiver {
             prefetched: Vec::new(),
             _prefetch_memory: None,
             eligible,
+            observer,
         };
         let squared = query
             .iter()
@@ -908,6 +939,7 @@ struct Source<'a> {
     prefetched: Vec<(usize, SsdRow)>,
     _prefetch_memory: Option<MemoryLease>,
     eligible: &'a dyn Fn(u64) -> bool,
+    observer: Option<&'a dyn Fn(SearchStage) -> Result<()>>,
 }
 impl Source<'_> {
     fn score(&mut self, row: usize) -> Result<Option<f32>> {
@@ -921,6 +953,7 @@ impl Source<'_> {
         if identity.deleted || !(self.eligible)(identity.node_id) {
             return Ok(None);
         }
+        self.observe(SearchStage::Score)?;
         self.reader
             .load_record_routed(row, self.route)?
             .score_prepared(&self.query)
@@ -931,6 +964,14 @@ impl Source<'_> {
             self.error = Some(error);
             io::Error::other("SSD读取或请求控制失败 (SSD read or request control failed)")
         })
+    }
+
+    fn observe(&self, stage: SearchStage) -> Result<()> {
+        crate::request::check_current()?;
+        if let Some(observer) = self.observer {
+            observer(stage)?;
+        }
+        Ok(())
     }
 }
 impl ExactSource for Source<'_> {
@@ -945,7 +986,8 @@ impl ExactSource for Source<'_> {
         true
     }
     fn checkpoint(&mut self) -> io::Result<()> {
-        self.capture(crate::request::check_current())
+        let result = self.observe(SearchStage::Navigation);
+        self.capture(result)
     }
     fn one(&mut self, _query: &[f32], row: usize) -> io::Result<Option<f32>> {
         let result = self.score(row);
@@ -981,6 +1023,9 @@ impl Source<'_> {
             }
         }
         self.prefetched.reserve(ids.len());
+        for _ in &ids {
+            self.observe(SearchStage::Score)?;
+        }
         for batch in ids.chunks(64) {
             let loaded = self.reader.load_records_routed(batch, self.route)?;
             self.prefetched.extend(batch.iter().copied().zip(loaded));
@@ -1130,6 +1175,27 @@ impl Memory {
             local: self.local.clone(),
             bytes,
         })
+    }
+
+    fn charge_external(&self, bytes: usize) -> Result<ExternalMemory> {
+        let mut used = crate::database::lock_or_recover(&self.local.used);
+        *used = self.local.projected(*used, bytes)?;
+        Ok(ExternalMemory {
+            local: self.local.clone(),
+            bytes,
+        })
+    }
+}
+
+/// 外层请求继续持有共享额度，本凭证只登记组合查询的Reader局部占用。
+struct ExternalMemory {
+    local: Arc<LocalBudget>,
+    bytes: usize,
+}
+
+impl Drop for ExternalMemory {
+    fn drop(&mut self) {
+        *crate::database::lock_or_recover(&self.local.used) -= self.bytes;
     }
 }
 

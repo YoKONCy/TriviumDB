@@ -32,11 +32,28 @@ pub struct IncomingEdge {
 /// 查询投影使用的拥有型边视图。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EdgeView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_id: Option<String>,
     pub source_id: NodeId,
     pub target_id: NodeId,
     pub label: Label,
     pub weight: Weight,
     pub metadata: serde_json::Value,
+}
+
+impl EdgeView {
+    /// 传输层提供自身的无损ID表示，图身份随完整边内容传递。
+    pub(crate) fn query_json(
+        &self,
+        source: serde_json::Value,
+        target: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut value = serde_json::json!({"type":"edge", "source":source, "target":target, "label":self.label, "weight":self.weight, "metadata":self.metadata});
+        if let Some(graph_id) = &self.graph_id {
+            value["graph_id"] = graph_id.clone().into();
+        }
+        value
+    }
 }
 
 /// 用户在查询时返回的统一节点数据视图

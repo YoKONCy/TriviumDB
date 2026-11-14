@@ -9,8 +9,11 @@ use crate::error::{Result, TriviumError};
 use crate::filter::Filter;
 use crate::graph::budget::{BudgetExhaustionPolicy, TraversalBudget};
 use crate::graph::reachability::{
-    ReachabilityConfig, ReachabilityDirection, traverse_compact, traverse_compact_parallel,
+    ReachabilityConfig, ReachabilityDirection,
+    traverse_compact_parallel_view as traverse_compact_parallel,
+    traverse_compact_view as traverse_compact,
 };
+use crate::graph::view::GraphRead;
 use crate::node::NodeId;
 use crate::query::parallel::{QueryParallelismBudget, query_pool};
 use crate::storage::memtable::MemTable;
@@ -43,9 +46,13 @@ impl BindingValue {
                 .capacity()
                 .saturating_mul(std::mem::size_of::<NodeId>()),
             Self::Json(value) => crate::storage::payload_store::estimate_json_memory(value),
-            Self::Edge(value) => value.label.capacity().saturating_add(
-                crate::storage::payload_store::estimate_json_memory(&value.metadata),
-            ),
+            Self::Edge(value) => value
+                .label
+                .capacity()
+                .saturating_add(value.graph_id.as_ref().map_or(0, String::capacity))
+                .saturating_add(crate::storage::payload_store::estimate_json_memory(
+                    &value.metadata,
+                )),
             _ => 0,
         }
     }
@@ -118,6 +125,8 @@ pub enum GraphMetric {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NodeRow {
     pub id: NodeId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_score: Option<ScoreValue>,
     /// WITH 投影快照在扩展分支间共享；不同快照保持独立的逻辑行。
     #[serde(skip)]
     pub bindings: Option<Arc<BTreeMap<String, BindingValue>>>,
@@ -143,6 +152,7 @@ impl NodeRow {
     pub fn new(id: NodeId) -> Self {
         Self {
             id,
+            document_score: None,
             bindings: None,
             similarity: None,
             property_score: None,
@@ -250,6 +260,8 @@ impl NodeSet {
     }
 
     fn normalize(&mut self) {
+        let document_ranked =
+            !self.rows.is_empty() && self.rows.iter().all(|row| row.document_score.is_some());
         let ranked = !self.rows.is_empty() && self.rows.iter().all(|row| row.similarity.is_some());
         self.rows.sort_by(|left, right| {
             left.id
@@ -277,7 +289,22 @@ impl NodeSet {
             merge_row(right, left);
             true
         });
-        if ranked {
+        if document_ranked {
+            self.rows.sort_by(|left, right| {
+                right
+                    .document_score
+                    .map(|score| score.value)
+                    .unwrap_or_default()
+                    .total_cmp(
+                        &left
+                            .document_score
+                            .map(|score| score.value)
+                            .unwrap_or_default(),
+                    )
+                    .then(left.id.cmp(&right.id))
+                    .then_with(|| compare_bindings(left, right))
+            });
+        } else if ranked {
             self.rows.sort_by(compare_similarity);
         }
     }
@@ -331,6 +358,7 @@ fn merge_row(target: &mut NodeRow, source: &NodeRow) {
         }
     }
     target.text_score = better_score(target.text_score, source.text_score);
+    target.document_score = better_score(target.document_score, source.document_score);
     target.diversity_score = better_score(target.diversity_score, source.diversity_score);
     target.residual_score = better_score(target.residual_score, source.residual_score);
     target.topic_id = target.topic_id.or(source.topic_id);
@@ -437,6 +465,8 @@ pub struct PipelineContext<'a, T: VectorType> {
     pub metrics: Vec<PipelineStageMetrics>,
     pub query_control: Option<super::tql_executor::QueryControl>,
     pub(crate) workspace_limit: usize,
+    pub(crate) database_memory_limit: usize,
+    pub(crate) graph_scope: Option<Arc<crate::graph::view::ScopedGraph>>,
     profile: bool,
     stages: usize,
     vector_read_bytes: usize,
@@ -457,6 +487,8 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
             metrics: Vec::new(),
             query_control: crate::request::control(),
             workspace_limit: 0,
+            database_memory_limit: 0,
+            graph_scope: None,
             profile,
             stages: 0,
             vector_read_bytes: 0,
@@ -467,6 +499,16 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
     }
 
     pub(crate) fn reserve_row_workspace(&mut self, bytes: usize) -> Result<()> {
+        if self.database_memory_limit > 0 {
+            let graph_bytes = self
+                .graph_scope
+                .as_ref()
+                .map_or(0, |graph| graph.reserved_bytes());
+            self.memtable.ensure_additional_memory(
+                self.database_memory_limit,
+                bytes.saturating_add(graph_bytes),
+            )?;
+        }
         if bytes > self.workspace_bytes {
             let extra = bytes - self.workspace_bytes;
             self.workspaces
@@ -474,6 +516,33 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
             self.workspace_bytes = bytes;
         }
         Ok(())
+    }
+
+    pub(crate) fn graph(&self) -> crate::graph::view::GraphView<'_, T> {
+        crate::graph::view::GraphView {
+            facts: self.memtable,
+            scoped: self.graph_scope.as_deref(),
+        }
+    }
+
+    pub(crate) fn document_memory_limit(&self) -> Result<usize> {
+        if self.database_memory_limit == 0 {
+            return Ok(0);
+        }
+        let used = self.workspace_bytes.saturating_add(
+            self.graph_scope
+                .as_ref()
+                .map_or(0, |graph| graph.reserved_bytes()),
+        );
+        self.database_memory_limit
+            .checked_sub(used)
+            .filter(|remaining| *remaining > 0)
+            .ok_or(TriviumError::ResourceBudgetExceeded {
+                resource: "query_memory_bytes",
+                requested: 1,
+                used,
+                limit: self.database_memory_limit,
+            })
     }
 
     fn graph_request(&self) -> Result<crate::request::RequestContext> {
@@ -537,6 +606,17 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
         Ok(bytes)
     }
 
+    pub(crate) fn remaining_vectors(&self) -> usize {
+        self.budget
+            .max_vector_read_bytes
+            .saturating_sub(self.vector_read_bytes)
+            / self
+                .memtable
+                .dim()
+                .saturating_mul(std::mem::size_of::<T>())
+                .max(1)
+    }
+
     fn payload_usage(&self) -> (u64, u64) {
         let current = self.memtable.payload_access_counters();
         (
@@ -580,6 +660,9 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
 }
 
 pub trait PipelineOperator<T: VectorType> {
+    fn uses_graph(&self) -> bool {
+        false
+    }
     fn name(&self) -> &'static str;
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet>;
     /// 查询装配器附加实际算子来源；通用管线继续传递原始错误。
@@ -611,6 +694,14 @@ pub fn execute_pipeline<T: VectorType>(
     context: &mut PipelineContext<'_, T>,
     operators: &[Box<dyn PipelineOperator<T> + '_>],
 ) -> Result<NodeSet> {
+    execute_pipeline_with_workspace(context, operators).map(|(set, _workspaces)| set)
+}
+
+/// 返回结果及其工作区凭证，供上层在投影完成后统一归还额度。
+pub(crate) fn execute_pipeline_with_workspace<T: VectorType>(
+    context: &mut PipelineContext<'_, T>,
+    operators: &[Box<dyn PipelineOperator<T> + '_>],
+) -> Result<(NodeSet, Vec<crate::resources::WorkspaceReservation>)> {
     let mut workspace = PipelineWorkspace(context);
     let inherited = crate::request::current();
     let request = workspace
@@ -649,6 +740,10 @@ pub fn execute_pipeline<T: VectorType>(
     for operator in operators {
         let locate = |error| operator.map_error(error);
         context.begin_stage().map_err(locate)?;
+        if operator.uses_graph() && context.graph_scope.is_some() {
+            let graph = context.graph();
+            current.rows.retain(|row| graph.contains(row.id));
+        }
         let input_rows = context.profile.then(|| current.len());
         let started = context.profile.then(Instant::now);
         current = operator.apply(current, context).map_err(locate)?;
@@ -677,7 +772,8 @@ pub fn execute_pipeline<T: VectorType>(
             });
         }
     }
-    Ok(current)
+    let workspaces = std::mem::take(&mut context.workspaces);
+    Ok((current, workspaces))
 }
 
 pub struct FullNodeScanSource;
@@ -1276,6 +1372,7 @@ impl<T: VectorType> PipelineOperator<T> for ExactRerank<T> {
         let score_row = |mut rows: Vec<NodeRow>, mut row: NodeRow| -> Result<Vec<NodeRow>> {
             control.check()?;
             if let Some(vector) = context.memtable.get_vector(row.id) {
+                row.document_score = None;
                 row.similarity = Some(ScoreValue {
                     value: T::similarity(&self.query, vector),
                     kind: ScoreKind::Exact,
@@ -1459,6 +1556,9 @@ struct ExpandSourceOutput {
 }
 
 impl<T: VectorType> PipelineOperator<T> for Expand {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "expand"
     }
@@ -1483,7 +1583,7 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
         };
         let request = context.graph_request()?;
         let traverse_source = |&source_id: &NodeId| -> Result<ExpandSourceOutput> {
-            let reached = request.run(|| traverse_compact(context.memtable, source_id, &config))?;
+            let reached = request.run(|| traverse_compact(&context.graph(), source_id, &config))?;
             Ok(ExpandSourceOutput {
                 hits: reached
                     .results
@@ -1498,7 +1598,11 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
                 examined_edges: reached.traversed_edges,
             })
         };
-        let graph_stats = context.memtable.graph_stats();
+        let graph_stats = context
+            .graph_scope
+            .as_ref()
+            .map(|graph| graph.stats.clone())
+            .unwrap_or_else(|| context.memtable.graph_stats());
         let estimated_reachable = if sources.len() == 1 {
             let degree = graph_stats.avg_out_degree.max(1.0);
             (0..self.max_depth).fold(1.0f64, |total, _| {
@@ -1515,7 +1619,7 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
         let outputs = if sources.len() == 1 && threads > 1 {
             vec![context.run_graph(threads, || {
                 let source_id = sources[0];
-                let reached = traverse_compact_parallel(context.memtable, source_id, &config)?;
+                let reached = traverse_compact_parallel(&context.graph(), source_id, &config)?;
                 Ok::<_, TriviumError>(ExpandSourceOutput {
                     hits: reached
                         .results
@@ -1628,6 +1732,9 @@ pub struct ExpandExactRerank<T: VectorType> {
 }
 
 impl<T: VectorType> PipelineOperator<T> for ExpandExactRerank<T> {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "expand_exact_rerank"
     }
@@ -1659,6 +1766,9 @@ pub struct MultiAnchorExpand {
 }
 
 impl<T: VectorType> PipelineOperator<T> for MultiAnchorExpand {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "multi_anchor_expand"
     }
@@ -1669,7 +1779,7 @@ impl<T: VectorType> PipelineOperator<T> for MultiAnchorExpand {
         let mut examined_edges = 0usize;
         for source in input.rows {
             let reached = traverse_compact(
-                context.memtable,
+                &context.graph(),
                 source.id,
                 &ReachabilityConfig {
                     min_depth: 1,
@@ -1745,6 +1855,9 @@ pub struct BatchShortestPaths {
 }
 
 impl<T: VectorType> PipelineOperator<T> for BatchShortestPaths {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "batch_shortest_paths"
     }
@@ -1755,8 +1868,8 @@ impl<T: VectorType> PipelineOperator<T> for BatchShortestPaths {
         let mut consumed_edges = 0usize;
         for source in input.rows {
             for &target in &self.targets {
-                let result = crate::graph::pathfinding::shortest_path_bidirectional(
-                    context.memtable,
+                let result = crate::graph::pathfinding::shortest_path_bidirectional_view(
+                    &context.graph(),
                     source.id,
                     target,
                     self.label_filter.as_deref(),
@@ -1808,20 +1921,23 @@ pub struct WeightedShortestPathsOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for WeightedShortestPathsOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "weighted_dijkstra"
     }
 
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
-        if context.memtable.node_count() > context.budget.max_nodes {
+        if context.graph().node_count() > context.budget.max_nodes {
             return Err(TriviumError::QueryExecution(
                 "加权最短路径全图节点数超过预算 (Weighted shortest path graph exceeds node budget)"
                     .into(),
             ));
         }
-        let universe = context.memtable.active_node_ids().collect();
-        let workspace = crate::graph::analytics::build_workspace(
-            context.memtable,
+        let universe = context.graph().all_node_ids().into_iter().collect();
+        let workspace = crate::graph::analytics::build_workspace_view(
+            &context.graph(),
             &universe,
             self.label_filter.as_deref(),
             context.budget.traversal.max_examined_edges,
@@ -1875,19 +1991,22 @@ pub struct YenKShortestPathsOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for YenKShortestPathsOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "yen_k_shortest_paths"
     }
 
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
-        if context.memtable.node_count() > context.budget.max_nodes {
+        if context.graph().node_count() > context.budget.max_nodes {
             return Err(TriviumError::QueryExecution(
                 "Yen 全图节点数超过预算 (Yen graph exceeds node budget)".into(),
             ));
         }
-        let universe = context.memtable.active_node_ids().collect();
-        let workspace = crate::graph::analytics::build_workspace(
-            context.memtable,
+        let universe = context.graph().all_node_ids().into_iter().collect();
+        let workspace = crate::graph::analytics::build_workspace_view(
+            &context.graph(),
             &universe,
             self.label_filter.as_deref(),
             context.budget.traversal.max_examined_edges,
@@ -1933,14 +2052,17 @@ pub struct NodeSimilarityOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for NodeSimilarityOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "node_similarity"
     }
 
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
         let universe = ids(&input);
-        let workspace = crate::graph::analytics::build_workspace(
-            context.memtable,
+        let workspace = crate::graph::analytics::build_workspace_view(
+            &context.graph(),
             &universe,
             self.label_filter.as_deref(),
             context.budget.traversal.max_examined_edges,
@@ -1978,6 +2100,9 @@ pub struct BoundedAllPaths {
 }
 
 impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "bounded_all_paths"
     }
@@ -1988,8 +2113,8 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
         let mut consumed_edges = 0usize;
         for source in input.rows {
             for &target in &self.targets {
-                let result = crate::graph::pathfinding::bounded_all_paths(
-                    context.memtable,
+                let result = crate::graph::pathfinding::bounded_all_paths_view(
+                    &context.graph(),
                     source.id,
                     target,
                     &self.config,
@@ -2123,6 +2248,9 @@ pub struct PageRankOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for PageRankOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "subset_pagerank"
     }
@@ -2132,16 +2260,16 @@ impl<T: VectorType> PipelineOperator<T> for PageRankOperator {
         let threads = context.budget.parallelism.threads(universe.len());
         let result = context.run_graph(threads, || {
             if threads == 1 {
-                crate::graph::subset::subset_pagerank(
-                    context.memtable,
+                crate::graph::subset::subset_pagerank_view(
+                    &context.graph(),
                     &universe,
                     self.config,
                     self.label_filter.as_deref(),
                     context.budget.traversal.max_examined_edges,
                 )
             } else {
-                crate::graph::subset::subset_pagerank_parallel(
-                    context.memtable,
+                crate::graph::subset::subset_pagerank_parallel_view(
+                    &context.graph(),
                     &universe,
                     self.config,
                     self.label_filter.as_deref(),
@@ -2179,6 +2307,9 @@ pub struct DegreeCentralityOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for DegreeCentralityOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "subset_degree_centrality"
     }
@@ -2188,15 +2319,15 @@ impl<T: VectorType> PipelineOperator<T> for DegreeCentralityOperator {
         let degree_threads = context.budget.parallelism.threads(universe.len());
         let (scores, _) = context.run_graph(degree_threads, || {
             if degree_threads == 1 {
-                crate::graph::subset::subset_degree_centrality(
-                    context.memtable,
+                crate::graph::subset::subset_degree_centrality_view(
+                    &context.graph(),
                     &universe,
                     self.label_filter.as_deref(),
                     context.budget.traversal.max_examined_edges,
                 )
             } else {
-                crate::graph::subset::subset_degree_centrality_parallel(
-                    context.memtable,
+                crate::graph::subset::subset_degree_centrality_parallel_view(
+                    &context.graph(),
                     &universe,
                     self.label_filter.as_deref(),
                     context.budget.traversal.max_examined_edges,
@@ -2234,6 +2365,9 @@ pub struct BetweennessOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for BetweennessOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "subset_betweenness"
     }
@@ -2243,16 +2377,16 @@ impl<T: VectorType> PipelineOperator<T> for BetweennessOperator {
         let threads = context.budget.parallelism.threads(universe.len());
         let result = context.run_graph(threads, || {
             if threads == 1 {
-                crate::graph::subset::subset_betweenness(
-                    context.memtable,
+                crate::graph::subset::subset_betweenness_view(
+                    &context.graph(),
                     &universe,
                     self.label_filter.as_deref(),
                     self.sample_size,
                     context.budget.traversal.max_examined_edges,
                 )
             } else {
-                crate::graph::subset::subset_betweenness_parallel(
-                    context.memtable,
+                crate::graph::subset::subset_betweenness_parallel_view(
+                    &context.graph(),
                     &universe,
                     self.label_filter.as_deref(),
                     self.sample_size,
@@ -2291,6 +2425,9 @@ pub struct WccOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for WccOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "subset_wcc"
     }
@@ -2300,15 +2437,15 @@ impl<T: VectorType> PipelineOperator<T> for WccOperator {
         let threads = context.budget.parallelism.threads(universe.len());
         let (components, _) = context.run_graph(threads, || {
             if threads == 1 {
-                crate::graph::subset::subset_wcc(
-                    context.memtable,
+                crate::graph::subset::subset_wcc_view(
+                    &context.graph(),
                     &universe,
                     self.label_filter.as_deref(),
                     context.budget.traversal.max_examined_edges,
                 )
             } else {
-                crate::graph::subset::subset_wcc_parallel(
-                    context.memtable,
+                crate::graph::subset::subset_wcc_parallel_view(
+                    &context.graph(),
                     &universe,
                     self.label_filter.as_deref(),
                     context.budget.traversal.max_examined_edges,
@@ -2342,6 +2479,9 @@ pub struct LeidenOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for LeidenOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "leiden_modularity"
     }
@@ -2353,7 +2493,7 @@ impl<T: VectorType> PipelineOperator<T> for LeidenOperator {
         let mut examined = 0usize;
         for &source in &universe {
             let mut neighbors = Vec::new();
-            for edge in context.memtable.get_edges(source).unwrap_or(&[]) {
+            for edge in context.graph().get_edges(source).unwrap_or(&[]) {
                 examined = examined.saturating_add(1);
                 if examined > context.budget.traversal.max_examined_edges {
                     return Err(TriviumError::QueryExecution(
@@ -2398,6 +2538,9 @@ pub struct LabelPropagationOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for LabelPropagationOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "deterministic_label_propagation"
     }
@@ -2407,16 +2550,16 @@ impl<T: VectorType> PipelineOperator<T> for LabelPropagationOperator {
         let threads = context.budget.parallelism.threads(universe.len());
         let result = context.run_graph(threads, || {
             if threads == 1 {
-                crate::graph::subset::deterministic_label_propagation(
-                    context.memtable,
+                crate::graph::subset::deterministic_label_propagation_view(
+                    &context.graph(),
                     &universe,
                     self.config,
                     self.label_filter.as_deref(),
                     context.budget.traversal.max_examined_edges,
                 )
             } else {
-                crate::graph::subset::deterministic_label_propagation_parallel(
-                    context.memtable,
+                crate::graph::subset::deterministic_label_propagation_parallel_view(
+                    &context.graph(),
                     &universe,
                     self.config,
                     self.label_filter.as_deref(),
@@ -2459,6 +2602,9 @@ pub struct StructuralGraphOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         match self.algorithm {
             StructuralAlgorithm::Scc => "subset_scc",
@@ -2477,8 +2623,8 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
                 "图算法节点数超过预算 (Graph algorithm node count exceeds budget)".into(),
             ));
         }
-        let workspace = crate::graph::analytics::build_workspace(
-            context.memtable,
+        let workspace = crate::graph::analytics::build_workspace_view(
+            &context.graph(),
             &universe,
             self.label_filter.as_deref(),
             context.budget.traversal.max_examined_edges,
@@ -2609,6 +2755,9 @@ pub struct SaPprOperator {
 }
 
 impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "sa_ppr_depth_bounded"
     }
@@ -2629,8 +2778,8 @@ impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
                 })
             })
             .collect();
-        let hits = crate::graph::traversal::expand_graph_with_labels(
-            context.memtable,
+        let hits = crate::graph::traversal::expand_graph_with_labels_view(
+            &context.graph(),
             seeds,
             self.max_depth.min(context.budget.traversal.max_depth),
             self.restart_alpha,
@@ -2669,6 +2818,9 @@ pub struct BoundedIterate<T: VectorType> {
 }
 
 impl<T: VectorType> PipelineOperator<T> for BoundedIterate<T> {
+    fn uses_graph(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "bounded_iterate"
     }

@@ -1,6 +1,6 @@
 # QuIVer 向量索引
 
-> 本文介绍 QuIVer 的图导航、原始向量精排、可选压缩重排、冷热驻留、构建维护与资源计量。开发基线为 `0.9.1-beta.1`，新增能力见[未发布变更](changes/unreleased.md)，冻结研究资料见 [ICDE 复现归档](../evaluation/README.md)。
+> 本文介绍 `0.9.1` 的 QuIVer 图导航、原始向量精排、可选压缩重排、冷热驻留、构建维护与资源计量。版本记录见[变更说明](changes/0.9.1.md)，冻结研究资料见 [ICDE 复现归档](../evaluation/README.md)。
 
 ---
 
@@ -118,7 +118,7 @@ Hot 驻留保存压缩记录与共享均值，评分按组解包。SSD 驻留使
 }
 ```
 
-`use_for_ann=true` 接入普通混合检索中的 QuIVer 召回、TQL QuIVer 向量来源与纯向量 TSNG 路径。带独立业务评分的 TSNG 与文档 ANN 路径继续遵循自身评分契约。TQL 的压缩重排分数标记为 Approximate。原始向量精确扫描通过现有精确入口选择。默认配置为 codec 1、INT8 查询、SSD 驻留、零 Ready 缓存以及 `use_for_ann=false`。
+`use_for_ann=true` 接入普通混合检索中的 QuIVer 召回、TQL QuIVer 向量来源与纯向量 TSNG 路径。带独立业务评分的 TSNG 继续遵循自身评分契约。文档 ANN 和混合检索通过 `DocumentVectorOptions.rerank="compressed"` 独立选择压缩 Reader，复用已配置的编码、查询精度、Hot／SSD 与缓存预算。文档默认 `rerank="original"`，结果通过 `retrieval.compression` 返回实际压缩配置。详见[文档向量与混合召回](documents.md#文档向量与混合召回)。TQL 的压缩重排分数标记为 Approximate。原始向量精确扫描通过现有精确入口选择。默认配置为 codec 1、INT8 查询、SSD 驻留、零 Ready 缓存以及 `use_for_ann=false`。
 
 普通查询按实际使用的来源准备压缩索引。精确扫描、纯文本及图文档查询、仅输出计划的 `EXPLAIN` 直接使用各自的数据来源。向量写入后的压缩代际刷新由后续压缩 ANN 或显式维护操作触发。
 

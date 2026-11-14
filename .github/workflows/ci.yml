@@ -162,11 +162,13 @@ jobs:
             cargo test --target ${{ matrix.target }} --features test-hooks --test fault_io --test fault_power -- --test-threads=1
           fi
 
-      - name: 验证 QuIVer SSD 缓存、原生读取与关闭排空
+      - name: 验证 QuIVer SSD、文档压缩与命名图 TQL 契约
         run: |
           cargo test --locked --target ${{ matrix.target }} --features test-hooks --lib index::quiver::ssd -- --test-threads=1
           cargo test --locked --target ${{ matrix.target }} --features test-hooks --lib storage::quiver_io -- --test-threads=1
           cargo test --locked --target ${{ matrix.target }} --features test-hooks --test core quiver_ssd -- --test-threads=1
+          cargo test --locked --target ${{ matrix.target }} --features test-hooks --test core document_compressed -- --test-threads=1
+          cargo test --locked --target ${{ matrix.target }} --features test-hooks --test core tql_documents_graphs -- --test-threads=1
 
       - name: 运行文档测试
         run: cargo test --target ${{ matrix.target }} --doc
@@ -524,7 +526,7 @@ jobs:
   #  python/triviumdb/__init__.pyi 由 scripts/generate_pyi.py 反射已编译模块生成、并提交入库
   #  （与 tokenizers/safetensors/dora 同模式）。本 job 构建并安装 wheel，然后：
   #    1. --check —— 用当前绑定重新生成，若与提交的 __init__.pyi 不一致则失败
-  #       （改了 src/bindings/python.rs 却忘记重生成时报错）；
+  #       （修改 src/bindings/python/ 后遗漏存根更新时报告差异）；
   #    2. stubtest —— 存根与运行时原生模块逐方法、逐签名严格一致；
   #    3. assert_type 端到端测试 —— 对已安装 wheel 断言各 API 的精确类型、
   #       误用被拒绝、py.typed 生效（缺失即被 mypy 判为 Any）。

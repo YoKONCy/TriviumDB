@@ -1,6 +1,6 @@
 # TriviumDB 安全特性详解
 
-> 本文说明当前内核的并发、数据完整性、格式校验、资源预算、ReadOnly/Immutable、输入验证与跨平台 I/O 实现。当前版本见[变更说明](changes/0.9.0.md)，后续更新见[未发布变更](changes/unreleased.md)。
+> 本文说明 `0.9.1` 内核的并发、数据完整性、格式校验、资源预算、ReadOnly/Immutable、输入验证与跨平台 I/O 实现。版本记录见[变更说明](changes/0.9.1.md)，后续更新见[未发布变更](changes/unreleased.md)。
 
 ---
 
@@ -87,7 +87,7 @@ QuIVer 构建：不得持有 MemTable guard 等待 singleflight Condvar
 
 受控关闭通过 `request_shutdown()` 登记排空与保存任务，`close_timeout()` 在期限内等待，`shutdown_status()` 提供阶段和结构化故障。等待超时后，任务继续持有数据、配额和文件锁。异步保存失败进入 `failed` 状态，调用方取得原始错误后可发起重试。详见[关闭协议](lifecycle-snapshots.md#关闭协议)。
 
-当前开发版本的嵌入式 Console 提供显式版本保护事务：节点快照与全库版本共用读锁，前置条件与 WAL 提交共用事务写锁。宿主普通写入也推进版本，版本令牌在当前实例内有效。回执以原版本和完整操作匹配。详细契约见[编辑协议](embedded-console.md#编辑快照冲突与原事务确认)。
+嵌入式 Console 的版本保护事务在同一读锁内取得节点快照与全库版本，前置条件与 WAL 提交共用事务写锁。宿主普通写入也推进版本，版本令牌在当前实例内有效。有界持久回执以原版本和完整操作匹配，支持跨重开确认。详细契约见[编辑协议](embedded-console.md#编辑快照冲突与原事务确认)。
 
 > **接入提醒**　权限由宿主控制，编辑保护通过 guardedTransaction 显式调用。保留的持久回执按完整原事务身份支持跨重开确认，缺失或淘汰后按业务身份核对整笔事务的实际数据。
 
@@ -625,7 +625,8 @@ db.clear_hook()
 | `vector.rs`、`index/quiver/corrected_sm*` | SIMD 加载及计算 | 指令集分派、长度/尾部、对齐与浮点数值边界 |
 | `index/quiver.rs` | UnsafeCell 邻接表、手工 Sync、其他并行构图代码 | 行锁与访问范围、别名约束、并行阶段结束后的冻结 |
 | `hook.rs` | 外部函数调用与手工 Send/Sync | ABI、动态库与回调寿命、跨线程调用约束 |
-| `bindings/python.rs`、`bindings/nodejs.rs` | 回调包装的手工 Send/Sync | 对象跨线程访问及 Python/Node 运行时约束 |
+| `bindings/python/hooks.rs`、`bindings/nodejs/hook_refs.rs` | 回调包装的手工 Send/Sync | 对象跨线程访问及 Python/Node 运行时约束 |
+| `bindings/nodejs/json.rs`、`bindings/nodejs/registration.rs` | N-API 对象转换与模块初始化调用 | 环境所属线程、字符串及输出缓冲边界、导出回调和类装配顺序 |
 | `observability.rs` | Windows 外部系统调用 | API 参数、缓冲区布局与返回值检查 |
 
 上表列出各模块的审核范围与安全契约。手工 `Send/Sync` 按内部访问、所有权和同步条件逐项审核。`unsafe_audit` 执行专项回归，ASan、TSan、Miri 按各自范围运行；验收记录关联具体提交、平台和实际执行路径。

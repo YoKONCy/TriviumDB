@@ -145,6 +145,12 @@ impl PreparedTql {
 }
 
 pub(crate) fn collect_query_parameters(query: &TqlQuery, output: &mut BTreeSet<String>) {
+    if let Some(scope) = &query.graph_scope {
+        collect_json_parameters(scope, output);
+    }
+    if let QueryEntry::Documents { request } = &query.entry {
+        collect_json_parameters(request, output);
+    }
     if let QueryEntry::Search {
         vector_parameters, ..
     } = &query.entry
@@ -221,6 +227,12 @@ fn bind_query(
     query: &mut TqlQuery,
     values: &HashMap<String, TqlParamValue>,
 ) -> Result<(), TriviumError> {
+    if let Some(scope) = &mut query.graph_scope {
+        bind_json(scope, values)?;
+    }
+    if let QueryEntry::Documents { request } = &mut query.entry {
+        bind_json(request, values)?;
+    }
     if let QueryEntry::Search {
         vector,
         vector_parameters,
@@ -285,6 +297,70 @@ fn bind_query(
         for item in items {
             bind_kind(&mut item.kind, values)?;
         }
+    }
+    Ok(())
+}
+
+fn collect_json_parameters(value: &TqlJson, output: &mut BTreeSet<String>) {
+    match value {
+        TqlJson::Parameter(name) => {
+            output.insert(name.clone());
+        }
+        TqlJson::Array(values) => {
+            for value in values {
+                collect_json_parameters(value, output);
+            }
+        }
+        TqlJson::Object(values) => {
+            for value in values.values() {
+                collect_json_parameters(value, output);
+            }
+        }
+        TqlJson::Literal(_) => {}
+    }
+}
+
+fn bind_json(
+    value: &mut TqlJson,
+    parameters: &HashMap<String, TqlParamValue>,
+) -> Result<(), TriviumError> {
+    match value {
+        TqlJson::Parameter(name) => {
+            let parameter =
+                parameters
+                    .get(name)
+                    .ok_or_else(|| TriviumError::MissingQueryParameter {
+                        parameter: name.clone(),
+                    })?;
+            let json = match parameter {
+                TqlParamValue::Int(value) => (*value).into(),
+                TqlParamValue::UInt(value) => (*value).into(),
+                TqlParamValue::Float(value) => serde_json::Number::from_f64(*value)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| {
+                        crate::document::invalid(
+                            "parameter",
+                            "参数须为有限数值 (Parameter must be finite)",
+                        )
+                        .at_query_parameter(name)
+                    })?,
+                TqlParamValue::String(value) => value.clone().into(),
+                TqlParamValue::Bool(value) => (*value).into(),
+                TqlParamValue::Null => serde_json::Value::Null,
+            };
+            *value = TqlJson::Literal(json);
+        }
+        TqlJson::Array(values) => {
+            for value in values {
+                bind_json(value, parameters)?;
+            }
+        }
+        TqlJson::Object(values) => {
+            for value in values.values_mut() {
+                bind_json(value, parameters)?;
+            }
+        }
+        TqlJson::Literal(_) => {}
     }
     Ok(())
 }

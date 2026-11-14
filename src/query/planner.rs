@@ -16,6 +16,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AccessPath {
+    NamedGraphMembers { graph_ids: Vec<String> },
     PrimaryKey { id: NodeId },
     PropertyIndex { field: String },
     OrderedPropertyIndex { field: String, descending: bool },
@@ -31,6 +32,7 @@ pub enum AccessPath {
 impl AccessPath {
     pub fn name(&self) -> &'static str {
         match self {
+            Self::NamedGraphMembers { .. } => "named_graph_members",
             Self::PrimaryKey { .. } => "primary_key",
             Self::PropertyIndex { .. } => "property_index",
             Self::OrderedPropertyIndex { .. } => "ordered_property_index",
@@ -684,6 +686,7 @@ fn reverse_pattern(pattern: &TqlPattern) -> TqlPattern {
 
 fn access_path_key(path: &AccessPath) -> (u8, String) {
     match path {
+        AccessPath::NamedGraphMembers { graph_ids } => (7, graph_ids.join("\0")),
         AccessPath::PrimaryKey { id } => (0, id.to_string()),
         AccessPath::PropertyIndex { field } => (1, field.clone()),
         AccessPath::OrderedPropertyIndex { field, descending } => {
