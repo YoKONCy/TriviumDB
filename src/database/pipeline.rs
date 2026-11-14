@@ -321,9 +321,9 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         } else {
             0
         };
-        runtime.pool(runtime.parallelism())?.install(|| {
-            recall_vector_ranked(&mt, config, query_vector, &mut dense_ranking);
-        });
+        runtime
+            .pool(runtime.parallelism())?
+            .install(|| recall_vector_ranked(&mt, config, query_vector, &mut dense_ranking))?;
         ctx.record_timing("vector_recall", vector_recall_started.elapsed());
         ctx.record_observation("vector_route_quiver", route);
         ctx.record_observation("vector_recall_candidates", dense_ranking.len() as u64);
@@ -356,9 +356,9 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             } else {
                 None
             };
-        runtime.pool(runtime.parallelism())?.install(|| {
-            recall_residual(&mt, config, query_vector, &mut seed_map);
-        });
+        runtime
+            .pool(runtime.parallelism())?
+            .install(|| recall_residual(&mt, config, query_vector, &mut seed_map))?;
     }
 
     // 内置召回已在分支内完成 RRF；自定义召回保留调用方给出的原始分数。
@@ -571,7 +571,7 @@ fn recall_vector<T: VectorType>(
     seed_map: &mut std::collections::HashMap<NodeId, f32>,
 ) {
     let mut ranking = Vec::new();
-    recall_vector_ranked(mt, config, query_vector, &mut ranking);
+    recall_vector_ranked(mt, config, query_vector, &mut ranking).unwrap();
     seed_map.extend(ranking);
 }
 
@@ -609,10 +609,10 @@ fn recall_vector_ranked<T: VectorType>(
     config: &SearchConfig,
     query_vector: Option<&[T]>,
     ranking: &mut Vec<(NodeId, f32)>,
-) {
+) -> Result<()> {
     let query_vector = match query_vector {
         Some(qv) => qv,
-        None => return,
+        None => return Ok(()),
     };
 
     let dim = mt.dim();
@@ -628,7 +628,7 @@ fn recall_vector_ranked<T: VectorType>(
         && !config.force_brute_force
         && mt.quiver().is_some()
     {
-        let approximate_hits = quiver_pipeline(mt, config, query_vector);
+        let approximate_hits = quiver_pipeline(mt, config, query_vector)?;
         if config.payload_filter.is_some() && approximate_hits.len() < config.top_k {
             tracing::debug!(
                 returned = approximate_hits.len(),
@@ -645,6 +645,7 @@ fn recall_vector_ranked<T: VectorType>(
     };
 
     ranking.extend(vector_hits.into_iter().map(|hit| (hit.id, hit.score)));
+    Ok(())
 }
 
 /// 暴力全扫管线，供索引尚未就绪或 force_brute_force 时使用。
@@ -693,7 +694,7 @@ fn quiver_pipeline<T: VectorType + Sync>(
     mt: &MemTable<T>,
     config: &SearchConfig,
     query_vector: &[T],
-) -> Vec<SearchHit> {
+) -> Result<Vec<SearchHit>> {
     let quiver = mt.quiver().unwrap();
     let q_f32: Vec<f32> = query_vector.iter().map(|x| x.to_f32()).collect();
 
@@ -715,23 +716,30 @@ fn quiver_pipeline<T: VectorType + Sync>(
     // 转为 f32 写入复用缓冲区。整个查询只触达 ~ef 个候选，
     // 不再物化全量 f32 数组（不触发 merged 缓存），冷数据始终留在 OS PageCache。
     let vec_pool = mt.vec_pool();
-    let raw_results = quiver.search(
-        &q_f32,
-        |slot, buf| {
-            if eligible_node_id(mt, filter_ref, bloom_mask, slot).is_none() {
-                return false;
-            }
-            match vec_pool.get(slot) {
-                Some(v) => {
-                    buf.clear();
-                    buf.extend(v.iter().map(|x| x.to_f32()));
-                    true
+    let configured = mt.configured_quiver_search(&q_f32, &search_cfg, &|id| {
+        matches_payload_filter(mt, filter_ref, id)
+    })?;
+    let raw_results = if let Some(hits) = configured {
+        hits
+    } else {
+        quiver.search(
+            &q_f32,
+            |slot, buf| {
+                if eligible_node_id(mt, filter_ref, bloom_mask, slot).is_none() {
+                    return false;
                 }
-                None => false,
-            }
-        },
-        &search_cfg,
-    );
+                match vec_pool.get(slot) {
+                    Some(v) => {
+                        buf.clear();
+                        buf.extend(v.iter().map(|x| x.to_f32()));
+                        true
+                    }
+                    None => false,
+                }
+            },
+            &search_cfg,
+        )
+    };
 
     // 应用 payload 过滤 + min_score 阈值
     let mut hits: Vec<SearchHit> = raw_results
@@ -748,7 +756,7 @@ fn quiver_pipeline<T: VectorType + Sync>(
 
     hits.sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
     hits.truncate(recall_k);
-    hits
+    Ok(hits)
 }
 
 /// L4 + L5: FISTA 残差搜索 + 影子查询
@@ -757,13 +765,13 @@ fn recall_residual<T: VectorType>(
     config: &SearchConfig,
     query_vector: Option<&[T]>,
     seed_map: &mut std::collections::HashMap<NodeId, f32>,
-) {
+) -> Result<()> {
     if !config.enable_advanced_pipeline || !config.enable_sparse_residual || seed_map.is_empty() {
-        return;
+        return Ok(());
     }
     let query_vector = match query_vector {
         Some(qv) => qv,
-        None => return,
+        None => return Ok(()),
     };
 
     let filter_ref = config.payload_filter.as_ref();
@@ -779,7 +787,7 @@ fn recall_residual<T: VectorType>(
         })
         .collect();
     if entity_vecs.is_empty() {
-        return;
+        return Ok(());
     }
     let q_f32: Vec<f32> = query_vector.iter().map(|&x| x.to_f32()).collect();
 
@@ -799,13 +807,14 @@ fn recall_residual<T: VectorType>(
         shadow_config.top_k = config.rerank_k;
         shadow_config.min_score = -1.0;
         let mut shadow_ranking = Vec::new();
-        recall_vector_ranked(mt, &shadow_config, Some(&r_orig), &mut shadow_ranking);
+        recall_vector_ranked(mt, &shadow_config, Some(&r_orig), &mut shadow_ranking)?;
         for (rank, (id, _)) in shadow_ranking.into_iter().enumerate() {
             // 影子分支使用排名融合，避免残差余弦与主召回分数跨量纲相加。
             let score = 0.5 * 60.0 / (61.0 + rank as f32);
             *seed_map.entry(id).or_insert(0.0) += score;
         }
     }
+    Ok(())
 }
 
 /// 将 seed_map 聚合为排序后的 anchor_hits
@@ -1209,7 +1218,8 @@ mod tests {
             },
             Some(&[1.0, 0.0, 0.0]),
             &mut ranking,
-        );
+        )
+        .unwrap();
         let after = mt.payload_memory_stats();
         assert_eq!(ranking.len(), 2);
         assert_eq!(after.payload_lookups, before.payload_lookups);
@@ -1359,7 +1369,7 @@ mod tests {
         let mut seed_map = std::collections::HashMap::new();
         seed_map.insert(1u64, 0.9f32);
         let before = seed_map.clone();
-        recall_residual(&mt, &cfg, Some(&query), &mut seed_map);
+        recall_residual(&mt, &cfg, Some(&query), &mut seed_map).unwrap();
         assert_eq!(seed_map, before, "disabled 时 seed_map 不应变化");
     }
 
@@ -1374,7 +1384,7 @@ mod tests {
         };
         let query = vec![1.0, 0.0, 0.0];
         let mut seed_map = std::collections::HashMap::new();
-        recall_residual(&mt, &cfg, Some(&query), &mut seed_map);
+        recall_residual(&mt, &cfg, Some(&query), &mut seed_map).unwrap();
         assert!(seed_map.is_empty());
     }
 

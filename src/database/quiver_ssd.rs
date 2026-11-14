@@ -1,4 +1,4 @@
-//! 数据库绑定的INT8 QuIVer运行时，来源身份和刷新由内核维护。
+//! 数据库绑定的压缩 QuIVer 运行时，来源身份和刷新由内核维护。
 
 use super::{AccessMode, Database, read_or_recover, write_or_recover};
 use crate::index::quiver::{
@@ -10,6 +10,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
+#[cfg(test)]
+#[path = "quiver_ssd/tests.rs"]
+mod tests;
+
 pub(crate) struct DatabaseSsd {
     pub generation: u64,
     pub options: SsdRuntimeOptions,
@@ -18,7 +22,58 @@ pub(crate) struct DatabaseSsd {
 }
 
 impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
-    /// 选择INT8候选精排与驻留策略。数据库自动绑定已确认事实，按需发布派生制品。
+    pub fn configure_quiver(&self, options: SsdRuntimeOptions) -> Result<SsdStats> {
+        self.configure_quiver_int8(options)
+    }
+    pub fn search_quiver(
+        &self,
+        query: &[f32],
+        config: &QuIVerSearchConfig,
+    ) -> Result<Vec<(u64, f32)>> {
+        self.search_quiver_int8(query, config)
+    }
+    pub fn quiver_stats(&self) -> Result<Option<SsdStats>> {
+        self.quiver_int8_stats()
+    }
+    pub fn close_quiver(&self) -> Result<()> {
+        self.close_quiver_int8()
+    }
+
+    pub(crate) fn prepare_quiver_rerank(&self) -> Result<()> {
+        prepare_configured_rerank(
+            &self.memtable,
+            &self.wal,
+            &self.db_path,
+            self.storage_mode,
+            self.access_mode,
+            self.memory_limit,
+        )
+    }
+
+    pub(crate) fn prepare_quiver_rerank_with_source(
+        &self,
+        query: &crate::query::tql_ast::TqlQuery,
+        source: Option<&std::sync::Arc<crate::query::tql_source::TqlSource>>,
+    ) -> Result<()> {
+        if (query.explain && !query.analyze)
+            || !matches!(
+                query.entry,
+                crate::query::tql_ast::QueryEntry::Search { .. }
+            )
+        {
+            return Ok(());
+        }
+        self.prepare_quiver_rerank().map_err(|error| {
+            let stage = crate::error::QueryErrorStage::Execute;
+            match source {
+                Some(source) => source
+                    .origin(crate::query::tql_source::SourceSelector::Root)
+                    .error(error, stage),
+                None => error.at_query_source(stage, None),
+            }
+        })
+    }
+    /// 选择压缩候选精排与驻留策略。数据库自动绑定已确认事实，按需发布派生制品。
     pub fn configure_quiver_int8(&self, options: SsdRuntimeOptions) -> Result<SsdStats> {
         let _operation = self.enter_operation()?;
         options.validate()?;
@@ -30,16 +85,10 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         }
         {
             let mut mt = write_or_recover(&self.memtable);
-            let generation = mt.vector_generation();
+            validate_ann_mode(&mt, options)?;
             let capacity = database_capacity(self.memory_limit, mt.base_memory_bytes())?;
-            if let Some(active) = &mut mt.quiver_ssd
-                && active.generation == generation
-                && !active.reader.stats().closed
-            {
-                active.reader.set_database_capacity(capacity);
-                active.reader.configure(options)?;
-                active.options = options;
-                return Ok(active.reader.stats());
+            if let Some(stats) = mt.configure_quiver_ssd_runtime(options, capacity)? {
+                return Ok(stats);
             }
         }
         if self.access_mode == AccessMode::ReadWrite {
@@ -72,8 +121,9 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
             &self.db_path,
             self.memory_limit,
             self.access_mode == AccessMode::ReadWrite,
+            options.encoding,
         )?;
-        reader.configure(options)?;
+        reader.configure_bound(options, mt.quiver().ok_or(TriviumError::DatabaseClosed)?)?;
         reader.set_database_capacity(database_capacity(
             self.memory_limit,
             mt.base_memory_bytes(),
@@ -115,7 +165,11 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
             if mt.quiver().is_some_and(|index| index.active_count() == 0) {
                 return Ok(Vec::new());
             }
-            (active.generation != mt.vector_generation()).then_some(active.options)
+            (active.generation != mt.vector_generation()
+                || mt
+                    .quiver()
+                    .is_none_or(|index| !active.reader.routing_matches(index)))
+            .then_some(active.options)
         };
         if let Some(options) = refresh {
             self.configure_quiver_int8(options)?;
@@ -132,7 +186,12 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
             )
             .at_field("quiver"));
         }
-        active.reader.search(query, config)
+        active.reader.search_bound(
+            query,
+            config,
+            &|_| true,
+            mt.quiver().ok_or(TriviumError::DatabaseClosed)?,
+        )
     }
 
     pub fn quiver_int8_stats(&self) -> Result<Option<SsdStats>> {
@@ -158,6 +217,71 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
     fn quiver_ssd_path(&self) -> PathBuf {
         PathBuf::from(format!("{}.qssd", self.db_path))
     }
+}
+
+/// 同步入口和排队查询在实际执行时共同确认事实代际，存储锁内完成checkpoint与派生刷新。
+pub(super) fn prepare_configured_rerank<T: VectorType>(
+    memtable: &std::sync::RwLock<crate::storage::memtable::MemTable<T>>,
+    wal: &std::sync::Mutex<crate::storage::wal::Wal>,
+    path: &str,
+    mode: super::StorageMode,
+    access: AccessMode,
+    limit: usize,
+) -> Result<()> {
+    crate::request::check_current()?;
+    let needs_refresh = |mt: &crate::storage::memtable::MemTable<T>| {
+        mt.active_vector_count() > 0
+            && mt.quiver_ssd.as_ref().is_some_and(|active| {
+                active.options.use_for_ann
+                    && (active.generation != mt.vector_generation()
+                        || active.reader.stats().closed
+                        || mt
+                            .quiver()
+                            .is_none_or(|index| !active.reader.routing_matches(index)))
+            })
+    };
+    if !needs_refresh(&read_or_recover(memtable)) {
+        return Ok(());
+    }
+    let mut mt = write_or_recover(memtable);
+    mt.ensure_readable()?;
+    if !needs_refresh(&mt) {
+        return Ok(());
+    }
+    if access == AccessMode::ReadWrite && mt.needs_checkpoint() {
+        let mut wal = super::lock_or_recover(wal);
+        crate::error::WriteErrorInfo::capture(|write| {
+            crate::storage::file_format::checkpoint_with_write_info(
+                &mut mt, &mut wal, path, mode, true, write,
+            )
+        })?;
+        if !needs_refresh(&mt) {
+            mt.advise_cold_vectors_dontneed();
+            return Ok(());
+        }
+    }
+    let options = mt
+        .quiver_ssd
+        .as_ref()
+        .ok_or(TriviumError::DatabaseClosed)?
+        .options;
+    let mut reader = load_reader(
+        &mt,
+        path,
+        limit,
+        access == AccessMode::ReadWrite,
+        options.encoding,
+    )?;
+    reader.configure_bound(options, mt.quiver().ok_or(TriviumError::DatabaseClosed)?)?;
+    reader.set_database_capacity(database_capacity(limit, mt.base_memory_bytes())?);
+    mt.quiver_ssd = Some(DatabaseSsd {
+        generation: mt.vector_generation(),
+        options,
+        reader,
+        database_memory_limit: limit,
+    });
+    mt.advise_cold_vectors_dontneed();
+    Ok(())
 }
 
 fn database_capacity(limit: usize, used: usize) -> Result<usize> {
@@ -211,6 +335,7 @@ fn load_reader<T: VectorType>(
     db_path: &str,
     limit: usize,
     writable: bool,
+    encoding: crate::index::quiver::ssd::RerankEncoding,
 ) -> Result<SsdQuiver> {
     let index =
         mt.quiver().ok_or_else(|| {
@@ -220,6 +345,7 @@ fn load_reader<T: VectorType>(
     let path = PathBuf::from(format!("{db_path}.qssd"));
     let (source, hot_bytes, hot_crc) = source::<T>(db_path)?;
     let options = SsdOptions {
+        encoding,
         memory_limit_bytes: database_capacity(limit, mt.estimated_memory_bytes())?,
         ..Default::default()
     };
@@ -228,13 +354,20 @@ fn load_reader<T: VectorType>(
         SsdQuiver::collect_temporary(&path)?;
     }
     let open = || {
-        SsdQuiver::open_bound(
+        let reader = SsdQuiver::open_bound(
             &path,
             source,
             options,
             runtime.clone(),
-            Some((hot_bytes, hot_crc)),
-        )
+            (hot_bytes, hot_crc),
+            index,
+        )?;
+        if reader.stats().metadata.encoding != encoding {
+            return Err(TriviumError::ImmutableArtifactInvalid {
+                reason: "重排制品编码不匹配 (Reranking artifact encoding mismatch)".into(),
+            });
+        }
+        Ok(reader)
     };
     match open() {
         Ok(reader) => Ok(reader),
@@ -261,6 +394,35 @@ fn load_reader<T: VectorType>(
 }
 
 impl<T: VectorType> crate::storage::memtable::MemTable<T> {
+    pub(crate) fn configured_quiver_search(
+        &self,
+        query: &[f32],
+        config: &QuIVerSearchConfig,
+        eligible: &dyn Fn(u64) -> bool,
+    ) -> Result<Option<Vec<(u64, f32)>>> {
+        let Some(active) = self
+            .quiver_ssd
+            .as_ref()
+            .filter(|active| active.options.use_for_ann)
+        else {
+            return Ok(None);
+        };
+        validate_ann_mode(self, active.options)?;
+        if active.generation != self.vector_generation() || active.reader.stats().closed {
+            return Err(TriviumError::DatabaseBusy {
+                resource: "quiver_rerank_generation",
+            });
+        }
+        active
+            .reader
+            .search_bound(
+                query,
+                config,
+                eligible,
+                self.quiver().ok_or(TriviumError::DatabaseClosed)?,
+            )
+            .map(Some)
+    }
     /// 在事实文件组提交之后刷新启用的派生索引；失败保留原Reader并允许重试checkpoint。
     pub(crate) fn refresh_quiver_ssd_after_checkpoint(&mut self, path: &str) -> Result<()> {
         if self.quiver().is_none() {
@@ -280,8 +442,8 @@ impl<T: VectorType> crate::storage::memtable::MemTable<T> {
         }
         let options = active.options;
         let limit = active.database_memory_limit;
-        let mut reader = load_reader(self, path, limit, true)?;
-        reader.configure(options)?;
+        let mut reader = load_reader(self, path, limit, true, options.encoding)?;
+        reader.configure_bound(options, self.quiver().ok_or(TriviumError::DatabaseClosed)?)?;
         reader.set_database_capacity(database_capacity(limit, self.base_memory_bytes())?);
         self.quiver_ssd = Some(DatabaseSsd {
             generation: self.vector_generation(),
@@ -291,4 +453,18 @@ impl<T: VectorType> crate::storage::memtable::MemTable<T> {
         });
         Ok(())
     }
+}
+
+fn validate_ann_mode<T: VectorType>(
+    mt: &crate::storage::memtable::MemTable<T>,
+    options: SsdRuntimeOptions,
+) -> Result<()> {
+    if options.use_for_ann
+        && mt
+            .quiver()
+            .is_some_and(|index| index.sm_native_l2_enabled() || index.corrected_sm_enabled())
+    {
+        return Err(TriviumError::InvalidInput("压缩ANN重排使用默认SM余弦模式 (Compressed ANN reranking requires default SM cosine mode)".into()).at_field("use_for_ann"));
+    }
+    Ok(())
 }

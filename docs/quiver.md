@@ -1,6 +1,6 @@
 # QuIVer 向量索引
 
-> 本文介绍 QuIVer 的图导航、原始向量精排、INT8 SSD 运行时、构建维护与资源计量。当前版本为 `0.9.1-beta.1`，版本记录见[中英文说明](changes/0.9.1-beta.1.md)，冻结研究资料见 [ICDE 复现归档](../evaluation/README.md)。
+> 本文介绍 QuIVer 的图导航、原始向量精排、可选压缩重排、冷热驻留、构建维护与资源计量。开发基线为 `0.9.1-beta.1`，新增能力见[未发布变更](changes/unreleased.md)，冻结研究资料见 [ICDE 复现归档](../evaluation/README.md)。
 
 ---
 
@@ -91,7 +91,42 @@ QuIVer 是 TriviumDB 的近似最近邻（ANN）图索引，使用紧凑量化�
 
 ## SSD 冷向量编码基底
 
-Rust 底层模块 `triviumdb::index::quiver::cold` 提供 `Int8Layout`、`Int8Row` 与 `Int8Query`，用于准备冷向量编码、校验读取缓冲和验证量化评分。维度覆盖 `1..=3072`，输入支持 `f32/f16`，二进制整数指纹返回带 `dtype` 字段的 `TDB_INVALID_INPUT`。
+### 可选压缩重排与查询精度
+
+库编码、重排查询精度和驻留策略分别配置。`RerankEncoding` 提供 `int8`、`centered_int8`、`centered_int4`，`QueryPrecision` 提供 `fp32`、`int8`、`int4`。`SsdRuntimeOptions::accuracy()` 选择中心化 INT8 与 FP32 查询，`compact()` 选择中心化 INT4 与 FP32 查询。两种预设均启用 `use_for_ann`，驻留策略通过 `residency` 选择 `ssd` 或 `hot`。
+
+中心化编码先稳定归一化库向量，减去制品共享的 FP32 均值，再逐 128 维分组量化。INT8 采用 `[-127,127]`，INT4 采用 `[0,15]`，两码压紧到一个字节，尾部高半字节填零。分组参数为 FP32 scale 与 bias，舍入采用 ties-even。每行记录完整重建向量的逆范数，原始零向量使用零因子。均值按当前索引内部行序等距抽样至多 32768 行，跳过墓碑，以归一化后的 FP32 分量进行 FP64 累加，最终保存 FP32 均值。均值固定于本次发布代际。
+
+独立宿主可通过 `SsdQuiver::publish_with_center` 传入冻结的中心，以复现指定标定结果。中心化编码要求中心长度等于维度，所有分量有限且位于 `[-1,1]`。传入 `None` 使用上述抽样规则。
+
+每条查询按所选精度准备一次范数、分组和与中心点积。FP32 查询保留输入表示并以 FP64 累加；INT8 和 INT4 查询分别使用全局对称范围 `[-127,127]`、`[-7,7]`，评分使用该整数表示的范数和中心项。完整组在支持 AVX2 的 x86_64 上使用向量化核，尾组与其他平台使用标量核。图导航继续使用原查询的现有 SM-L2 表示。
+
+Hot 驻留保存压缩记录与共享均值，评分按组解包。SSD 驻留使用同一编码和评分逻辑，通过 `cache_bytes` 控制 Ready 行缓存。数据库入口在查询与维护期间借用主 QuIVer 的导航结构，数据库读写锁保障借用期间的代际稳定。独立 `SsdQuiver::open` 加载制品中的自有路由。均值及行租约计入资源预算，关闭后仍被调用方持有的行继续持有中心和对应额度。原始向量事实由数据库存储模式管理，Ram 存储模式还需计入原始向量的常驻成本。
+
+数据库通用入口为 `configure_quiver`、`search_quiver`、`quiver_stats`、`close_quiver`，既有 `*_quiver_int8` 入口继续调用同一实现。Python 与 Node 通过已有 JSON 请求接入，例如以下配置选择紧凑重排并用于普通 ANN 查询。
+
+```json
+{
+  "operation": "configure",
+  "options": {
+    "encoding": "centered_int4",
+    "query_precision": "fp32",
+    "residency": "hot",
+    "cache_bytes": 0,
+    "use_for_ann": true
+  }
+}
+```
+
+`use_for_ann=true` 接入普通混合检索中的 QuIVer 召回、TQL QuIVer 向量来源与纯向量 TSNG 路径。带独立业务评分的 TSNG 与文档 ANN 路径继续遵循自身评分契约。TQL 的压缩重排分数标记为 Approximate。原始向量精确扫描通过现有精确入口选择。默认配置为 codec 1、INT8 查询、SSD 驻留、零 Ready 缓存以及 `use_for_ann=false`。
+
+普通查询按实际使用的来源准备压缩索引。精确扫描、纯文本及图文档查询、仅输出计划的 `EXPLAIN` 直接使用各自的数据来源。向量写入后的压缩代际刷新由后续压缩 ANN 或显式维护操作触发。
+
+> **精度提醒**　中心化 INT4 与中心化 INT8 的召回代价随数据分布和工作点变化。查询精度、编码与实际驻留方式均由统计返回，应用应在自身数据上选择配置。当前可用查询精度为 FP32、INT8 和 INT4。
+
+> **配置提醒**　查询精度、驻留方式及 `use_for_ann` 属于运行时设置，重开后重新配置。普通压缩 ANN 使用默认 SM 余弦模式，显式校正及原生 L2 可配置 `use_for_ann=false`，继续通过原始向量评分入口执行。
+
+Rust 底层模块 `triviumdb::index::quiver::cold` 提供通用 `ColdLayout`、`ColdRow`、`RerankQuery` 及历史 codec 1 的 `Int8Layout`、`Int8Row`、`Int8Query`，用于编码、读取缓冲校验和量化评分。维度覆盖 `1..=3072`，数据库原始输入支持 `f32/f16`，二进制整数指纹返回带 `dtype` 字段的 `TDB_INVALID_INPUT`。
 
 ### 编码与评分
 
@@ -149,34 +184,36 @@ fn main() -> triviumdb::Result<()> {
 
 ## SSD 索引制品与 Reader
 
-`triviumdb::index::quiver::ssd` 提供 `SsdQuiver`、`SsdOptions`、`SsdMetadata`、`SsdStats` 和 `SsdRow`。Rust 底层调用可从已有 QuIVer 图与稳定的 slot 向量来源流式生成单文件 SSD 索引，随后只读打开、按 NodeId 取得冷行，或执行显式 INT8 检索。
+`triviumdb::index::quiver::ssd` 提供 `SsdQuiver`、`SsdOptions`、`SsdMetadata`、`SsdStats` 和 `SsdRow`。Rust 底层调用可从已有 QuIVer 图与稳定的 slot 向量来源流式生成单文件压缩索引，随后只读打开、按 NodeId 取得编码行，或执行显式压缩重排检索。
 
 ### 来源与单文件布局
 
+底层 `publish_with_center` 接受可选冻结中心，用于宿主复现已有校准结果。传入 `None` 时使用当前发布代际的固定抽样规则，传入中心时核对维度、有限值与分量范围 `[-1,1]`，随后随制品持久化。
+
 底层 `publish` 和 `open` 接收 32 字节来源身份，并检查其相等性。独立宿主可从包含数据库身份、dtype、维度和事实代际的不可变清单计算摘要，构建期间固定同一事实快照。数据库入口自动生成并校验来源身份。每次发布另生成 16 字节 UUID，`SsdMetadata` 返回来源、发布代际、维度、行数及区段大小。Reader 持有实际打开的文件句柄，后续同路径发布通过新的文件代际提供数据。
 
-制品采用 QVSSD v1，依次保存 160 字节目录头、既有 QUIV v2 热快照及冷记录区。热快照包含默认 QDSM 路由状态，编码器按内部行顺序逐条读取原始 slot；墓碑保存零冷行并跳过已复用 slot 的读取。构建工作区包含固定 I/O 缓冲、单条浮点向量和单条编码记录。
+codec 1 制品采用 QVSSD v1，依次保存 160 字节目录头、既有 QUIV v2 热快照及冷记录区。中心化 codec 2／3 使用 QVSSD v2，在热快照与冷记录之间保存 `dimension × 4` 字节共享中心。头部偏移 108 保存中心 CRC32，偏移 152 保存中心字节数，40 字节行布局头中的编码身份分别为 1／2／3。头部 CRC 覆盖上述字段，中心在打开时验证，冷行在读取时验证。热快照包含默认 QDSM 路由状态，墓碑保存零冷行并跳过已复用 slot 的读取。构建与中心采样工作区均在分配前准入。
 
 | 头部偏移 | 字段 | 字节数 |
 | --- | --- | --- |
 | 0 | Magic `QVSSD001` | 8 |
-| 8 | 版本 1、头部长度 160 | 8 |
+| 8 | 容器版本 1／2、头部长度 160 | 8 |
 | 16 | 来源摘要 | 32 |
 | 48 | 发布 UUID | 16 |
 | 64 | 热区起点、热区长度、冷区起点、行数、记录步长 | 40 |
-| 104 | 热区 CRC32、值为 0 的保留字段 | 8 |
-| 112 | 40 字节 INT8 布局头 | 40 |
-| 152 | 值为 0 的保留字段、头部 CRC32 | 8 |
+| 104 | 热区 CRC32、中心 CRC32（v1 为 0） | 8 |
+| 112 | 40 字节压缩行布局头 | 40 |
+| 152 | 中心字节数（v1 为 0）、头部 CRC32 | 8 |
 
-每条冷记录由 32 字节身份前缀和完整 INT8 行组成。前缀依次保存 u64 NodeId、u64 slot、u64 内部行号、u32 墓碑标志及 u32 记录 CRC。记录 CRC 覆盖前 28 字节和完整 INT8 行，包含填充。读取时同时核对热区中的 NodeId／slot／墓碑、内部行号、记录 CRC 及编码行的完整校验。完整记录交换、跨节点或跨 slot 混入返回 `TDB_CORRUPTED_FILE`。
+每条冷记录由 32 字节身份前缀和完整压缩行组成。前缀依次保存 u64 NodeId、u64 slot、u64 内部行号、u32 墓碑标志及 u32 记录 CRC。记录 CRC 覆盖前 28 字节和完整压缩行，包含填充。读取时同时核对热区中的 NodeId／slot／墓碑、内部行号、记录 CRC 及编码行的完整校验。完整记录交换、跨节点或跨 slot 混入返回 `TDB_CORRUPTED_FILE`。
 
 ### 发布、读取与关闭
 
 发布目标须为空路径或已有 QVSSD 普通文件，类型校验先于来源读取，并在原子替换前再次执行。发布采用同目录独占 UUID 临时文件、流式写入、文件同步、原子替换和父目录同步。构建或提交点前失败保留旧制品；重命名成功后目录同步失败返回 `publish/unknown`。并发发布采用最后完成原子替换的制品作为当前版本，各 Reader 固定自己的文件代际。宿主按预期来源打开，来源不匹配返回 `TDB_IMMUTABLE_ARTIFACT`。
 
-打开阶段只读取目录头和热区，并在分配前核对来源、文件长度、区段几何及预算。冷区在行读取时校验。缓冲后端在 Windows 使用 `seek_read`、Unix 使用 `read_at`，并发请求各自携带行缓冲。Direct I/O 后端及其完成语义见下文。短读、I/O 错误和取消沿稳定错误码传播，精排错误结束本次请求。
+打开阶段读取目录头、热区及共享中心，并在分配前核对来源、文件长度、区段几何及预算。冷区在行读取时校验。缓冲后端在 Windows 使用 `seek_read`、Unix 使用 `read_at`，并发请求各自携带行缓冲。Direct I/O 后端及其完成语义见下文。短读、I/O 错误和取消沿稳定错误码传播，精排错误结束本次请求。
 
-`search` 复用默认 SM 导航、有效候选预算和 NodeId 同分规则，以 codec 1 近似余弦完成精排，返回 `(NodeId, score)`。请求使用自有导航工作区，并在导航、冷读取前后及返回前检查请求控制。`close` 释放热图、文件和对应额度；已经取得的 `SsdRow` 继续持有其自有字节及额度，最终释放时归还预算。
+`search` 复用默认 SM 导航、有效候选预算和 NodeId 同分规则，以所选编码和查询精度完成近似余弦重排，返回 `(NodeId, score)`。请求使用自有导航工作区，并在导航、冷读取前后及返回前检查请求控制。`close` 释放热图、文件和对应额度；已经取得的 `SsdRow` 继续持有其自有字节、中心及额度，最终释放时归还预算。
 
 ### 配额与使用入口
 
@@ -208,9 +245,9 @@ fn publish_and_query(path: &Path, source: [u8; 32]) -> triviumdb::Result<Vec<(u6
 
 ### 数据库与 SDK 入口
 
-数据库提供 `configure_quiver_int8`、`search_quiver_int8`、`quiver_int8_stats`、`close_quiver_int8` 和可写实例的 `collect_quiver_temporary`。Rust Reader 提供配置、查询、统计和关闭入口。Python 使用 `db.quiver_request(json)`，Node 使用 `db.quiverRequest(json)`，两端经过 `sdk::quiver` 调用同一 Core 契约。SDK 使用共享请求借用，状态维护和写权限由内核判定，冷查询期间可准入其他读取。
+数据库提供 `configure_quiver`、`search_quiver`、`quiver_stats`、`close_quiver` 和可写实例的 `collect_quiver_temporary`，旧 INT8 命名入口委托同一实现。Rust Reader 提供配置、查询、统计和关闭入口。Python 使用 `db.quiver_request(json)`，Node 使用 `db.quiverRequest(json)`，两端经过 `sdk::quiver` 调用同一 Core 契约。SDK 使用共享请求借用，状态维护和写权限由内核判定，冷查询期间可准入其他读取。
 
-首次配置需要数据库包含浮点向量。可写实例按需构建图并 checkpoint，内核根据已确认的 dtype、事实文件与热图绑定元数据生成 SHA-256 来源身份，发布到 `<数据库路径>.qssd`。打开时在热区分配前同时核对来源身份、数据库热图长度及 CRC 绑定。后续向量写入由首次 INT8 查询、flush 或关闭 checkpoint 刷新派生代际。只读实例配置已经发布且匹配当前事实的制品。读取、预算和来源失败沿结构化错误返回，调用方可在条件恢复后重试。
+首次配置需要数据库包含浮点向量。可写实例按需构建图并 checkpoint，内核根据已确认的 dtype、事实文件与热图绑定元数据生成 SHA-256 来源身份，发布到 `<数据库路径>.qssd`。打开时在热区分配前同时核对来源身份、数据库热图长度及 CRC 绑定。数据库 Reader 以固定 64 KiB 工作区流式校验制品热区，并绑定主路由的运行期身份。后续向量写入与主路由重建由压缩查询、flush 或关闭 checkpoint 刷新派生绑定。只读实例配置已经发布且匹配当前事实的制品。读取、预算和来源失败沿结构化错误返回，调用方可在条件恢复后重试。
 
 ```python
 import json
@@ -235,7 +272,7 @@ request({"operation": "close"})
 
 | 字段 | 默认值 | 契约 |
 | --- | --- | --- |
-| `residency` | `ssd` | `ssd` 按需读取，`hot` 预热全部 INT8 记录 |
+| `residency` | `ssd` | `ssd` 按需读取，`hot` 预热全部所选编码记录 |
 | `cache_bytes` | `0` | SSD Ready 行缓存的预算，含记录字节和每行 512 字节目录及租约额度 |
 | `io_mode` | `buffered` | `buffered`、`auto`、`direct` |
 | `io_depth` | `4` | `1..=32`，实际工作线程数受共享 Runtime 上限约束 |
@@ -244,13 +281,15 @@ request({"operation": "close"})
 
 数据库的内存估算与准入包含基础堆和 SSD Reader。构建及代际刷新同时覆盖旧 Reader 和候选状态，查询按当前基础堆占用更新 Reader 的可用额度。源代际变化采用全量冷记录重编码和发布。配置、预热和代际安装通过维护操作串行执行。
 
+`routing_shared=true` 表示当前 Reader 使用数据库主路由，`reserved_hot_bytes` 统计 Reader 自有的固定账本开销。主路由及其 ID／slot 映射、墓碑和运行期身份在数据库基础堆中计量一次，均值、压缩记录、缓存与 I/O 工作区通过各自额度计量。独立 Reader 返回 `routing_shared=false`，其 `reserved_hot_bytes` 包含自有导航结构。主路由实例替换与向量代际分别检查，图重建完成后由下一次压缩查询确认新绑定。自有行租约只持有编码字节和中心，生命周期独立于主路由。
+
 删除最后一个向量并完成 checkpoint 后，Reader 的 `closed` 统计变为 `true`，缓存、驻留行、I/O 后端和文件资源随之释放。运行时策略继续用于后续向量写入的自动刷新，空库 INT8 查询返回空集合。
 
 缓存按行维护 LRU，命中返回共享行租约，同代际同一行的 Pending 请求合并读取。`cache_bytes=0` 保留在途合并能力。Reader 热区额度包含 4 KiB 固定目录，覆盖缓存账本、空树根及读取计数器。调小缓存时立即淘汰缓存引用，外部持有的行继续占用其真实额度。每行在分配前准入记录、目录和传输峰值，完成后收缩为持有额度。
 
-批量精排每次处理至多四条候选，缓冲后端合并相邻记录，Direct I/O 后端同时合并相邻记录和重叠的实际对齐窗口，其余范围进入有界读取队列。批内请求先提交，再逐项等待实际完成并恢复输入顺序。每条记录独立验证身份、slot、墓碑和 CRC。批次先完成自身持有的 Pending，再等待其他请求，预算拒绝、读取失败和取消均释放本批登记并唤醒等待者。
+最终重排按成功评分预算预取候选，过滤拒绝和墓碑在预取前排除。每个读取批次至多 64 行，批量 I/O 与评分 SIMD 分别派发。缓冲后端合并相邻记录，Direct I/O 后端同时合并相邻记录和重叠的实际对齐窗口，其余范围进入有界读取队列。批内请求先提交，再逐项等待实际完成并恢复输入顺序。每条记录独立验证身份、slot、墓碑和 CRC，查询持有本次预取行的租约。批次先完成自身持有的 Pending，再等待其他请求，预算拒绝、读取失败和取消均释放本批登记并唤醒等待者。
 
-Hot 模式把同一 codec 1 记录预热到内存，两种驻留策略采用相同评分。预热沿当前读取后端完成，成功后释放异步 I/O 后端、工作线程及其额度。`io_active` 表示当前异步后端是否已安装，Hot 状态为 `false`。切回 SSD 时重新准备请求的后端与额度，准备失败保留 Hot 状态及查询能力。切换成功后释放 Hot 持有，已取得的行租约按自身生命周期归还额度。转换与代际刷新需要旧状态和候选状态的峰值预算，资源不足时返回 `QueueFull`。
+Hot 模式把所选编码的记录预热到内存，两种驻留策略采用相同评分。预热沿当前读取后端完成，成功后释放异步 I/O 后端、工作线程及其额度。`io_active` 表示当前异步后端是否已安装，Hot 状态为 `false`。切回 SSD 时重新准备请求的后端与额度，准备失败保留 Hot 状态及查询能力。切换成功后释放 Hot 持有，已取得的行租约按自身生命周期归还额度。转换与代际刷新需要旧状态和候选状态的峰值预算，资源不足时返回 `QueueFull`。
 
 异步读取使用有界队列。Windows 后端通过 `ReOpenFile` 固定原文件代际，使用 `FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING`、独立事件及完成等待。Linux 后端使用同一已打开文件的 `/proc/self/fd` 路径、`O_DIRECT` 和内核 AIO，异常排空通过 `io_destroy` 等待全部未取消操作完成。线程、传输副本和对齐缓冲纳入 Runtime 准入。取消在实际 I/O 完成和缓冲归还后返回，关闭排空队列、join 工作线程，再释放文件与线程额度。[Windows 读取契约](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile)、[Linux AIO 排空契约](https://man7.org/linux/man-pages/man2/io_destroy.2.html)。
 
@@ -266,7 +305,7 @@ I/O 后台线程为 CPU 维护保留一个共享线程额度。线程上限为 1
 
 发布与回收使用 `<制品路径>.publish-lock` 管理租约。每个 UUID 暂存候选持有独立 `.tmp.lease`，活跃发布者继续工作。可写配置、发布和显式回收扫描同目标命名空间，仅删除已取得独占租约的遗留候选，普通完成和失败立即回收本次候选。进程强杀后的租约由 OS 释放，下次可写入口自动回收。只读入口只访问正式制品。
 
-> **接入范围提醒**　INT8 查询使用上述显式入口。普通混合搜索、文档向量检索和 TQL 具有各自的查询策略。数据库同时持有主 QuIVer 热图与 SSD Reader 热图，原始向量事实继续保留。`.qssd` 为可重建派生制品，数据库快照保存已有事实文件组，恢复后由可写配置入口重建。独立低层宿主自行维护事实与制品的备份关系。CLI 和 Server 可通过 Core 适配此协议。
+> **接入范围提醒**　`use_for_ann` 控制普通 ANN 入口的压缩重排选择。数据库入口共享主 QuIVer 路由，原始向量事实按存储模式保存。`.qssd` 为可重建派生制品，数据库快照保存已有事实文件组，恢复后由可写配置入口重建。只读配置要求已有匹配来源与编码的制品。独立低层宿主自行维护事实与制品的备份关系。CLI 和 Server 可通过 Core 适配此协议。
 
 ---
 

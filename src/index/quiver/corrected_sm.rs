@@ -165,6 +165,12 @@ thread_local! {
 }
 
 pub(super) trait ExactSource {
+    fn batch_reads(&self) -> bool {
+        false
+    }
+    fn prefetch(&mut self, _ids: &[u32], _budget: usize) -> io::Result<()> {
+        Ok(())
+    }
     fn owns_workspace(&self) -> bool {
         false
     }
@@ -1039,12 +1045,13 @@ impl CorrectedSmIndex {
             crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeVectorRerank);
             let mut j = 0;
             let count = st.exact_ids.len();
+            source.prefetch(&st.exact_ids, budget.saturating_sub(st.exact.len()))?;
             while j < count && st.exact.len() < budget {
                 source.checkpoint()?;
                 if optimized
                     && j + 4 <= count
                     && budget - st.exact.len() >= 4
-                    && dot_simd_available()
+                    && (source.batch_reads() || dot_simd_available())
                 {
                     let values =
                         source.four(q, std::array::from_fn(|k| st.exact_ids[j + k] as usize))?;

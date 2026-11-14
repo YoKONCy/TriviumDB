@@ -19,7 +19,9 @@
 
 ## 职责与依赖
 
-QuIVer 冷向量编码位于 Core 的 `index::quiver::cold`，维护版本化行布局、浮点量化、完整字节校验及标量评分。`index::quiver::ssd` 维护 SM 导航、INT8 行租约、LRU/Pending 缓存及驻留转换，`storage::quiver_cold` 与 `storage::quiver_io` 管理流式发布、来源绑定、代际句柄、异步 Direct I/O、排空和暂存回收。`database::quiver_ssd` 计算数据库来源身份，并在 checkpoint 后刷新启用的派生代际。SDK 的 `quiver` 模块转换 JSON 与字符串 ID，Python／Node 复用请求借用和结构化错误。数据库关闭复用现有操作排空和存储释放路径，Reader 缓冲及 I/O 线程分别在内核与共享 Runtime 中准入。当前接口及使用条件见 [QuIVer SSD Reader](quiver.md#ssd-索引制品与-reader)。
+QuIVer 冷向量编码位于 Core 的 `index::quiver::cold`，维护版本化行布局、中心化 INT8／INT4、查询表示、字节校验及标量／SIMD 评分。`index::quiver::ssd` 维护 SM 导航、压缩行与共享中心租约、LRU/Pending 缓存、候选预取及驻留转换，`storage::quiver_cold` 与 `storage::quiver_io` 管理流式发布、来源绑定、代际句柄、异步 Direct I/O、排空和暂存回收。`database::quiver_ssd` 计算数据库来源身份，并在 checkpoint 后刷新启用的派生代际。SDK 的 `quiver` 模块转换 JSON 与字符串 ID，Python／Node 复用请求借用和结构化错误。数据库关闭复用现有操作排空和存储释放路径，中心、Reader 缓冲及 I/O 线程分别在内核与共享 Runtime 中准入。当前接口及使用条件见 [QuIVer SSD Reader](quiver.md#ssd-索引制品与-reader)。
+
+数据库压缩 Reader 在 Core 读写锁内借用主 QuIVer 路由，运行期身份令牌与向量代际共同限定绑定。Reader 维护压缩行、中心、缓存、I/O 及固定账本，主路由由数据库基础堆统一计量。独立 Reader 管理自有路由。来源绑定、流式 CRC 校验、图重建后的重新绑定以及关闭排空均由存储内核完成，SDK 传递 `routing_shared` 等统计字段。
 
 命名图的身份、成员、独立边、修订比较、节点删除级联和作用域由Core及存储层维护。`sdk::named_graphs`负责共享JSON协议，Python／Node沿现有请求借用和错误适配接入。Reader暴露图读取、列举、显式联合及遍历，Writer调用Core事务入口。持久事实位于主文件版本化图块和WAL，详细接口见[命名图](named-graphs.md)。
 

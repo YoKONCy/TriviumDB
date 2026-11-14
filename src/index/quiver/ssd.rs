@@ -1,7 +1,8 @@
 //! 显式SSD QuIVer索引，复用既有图、SM导航及候选排序。
 //!
-//! 宿主提供不可变事实来源摘要和稳定slot读取。发布逐行编码，Reader只装载热区，
-//! 精排使用位置读取与INT8评分。单个Reader固定一个文件代际，关闭释放其文件及热额度。
+//! 宿主提供不可变事实来源摘要和稳定slot读取。发布逐行编码，独立Reader装载热路由，
+//! 数据库Reader在锁内借用主路由，并流式校验制品绑定。
+//! 重排使用位置读取与所选压缩编码。单个Reader固定一个文件代际，关闭释放其文件及热额度。
 //!
 //! ```
 //! use triviumdb::index::quiver::{QuIVer, QuIVerConfig, QuIVerSearchConfig};
@@ -29,7 +30,8 @@
 //! # Ok::<(), triviumdb::TriviumError>(())
 //! ```
 
-use super::cold::{Int8Layout, Int8Query};
+use super::cold::{ColdLayout, Int8Query, RerankQuery};
+pub use super::cold::{QueryPrecision, RerankEncoding};
 use super::corrected_sm::ExactSource;
 use super::{FlatAdj, QuIVer, QuIVerSearchConfig};
 use crate::error::{Result, TriviumError, WriteErrorInfo, WritePhase};
@@ -57,10 +59,16 @@ pub enum Residency {
     Hot,
 }
 
-/// 运行时策略独立于磁盘编码；Hot预热和SSD缓存使用相同的INT8行及评分。
+/// 编码选择与运行时策略分别配置；Hot和SSD共用制品行及评分。
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SsdRuntimeOptions {
+    /// 数据库配置入口按此选择派生制品，低层Reader要求与当前制品一致。
+    pub encoding: RerankEncoding,
+    /// 查询在每个请求开始时准备，作用于最终重排。
+    pub query_precision: QueryPrecision,
+    /// 为数据库普通ANN入口显式选择该压缩重排运行时。
+    pub use_for_ann: bool,
     pub residency: Residency,
     pub cache_bytes: usize,
     pub io_mode: IoMode,
@@ -70,6 +78,9 @@ impl Default for SsdRuntimeOptions {
     fn default() -> Self {
         Self {
             residency: Residency::Ssd,
+            encoding: RerankEncoding::Int8,
+            query_precision: QueryPrecision::Int8,
+            use_for_ann: false,
             cache_bytes: 0,
             io_mode: IoMode::Buffered,
             io_depth: 4,
@@ -77,6 +88,20 @@ impl Default for SsdRuntimeOptions {
     }
 }
 impl SsdRuntimeOptions {
+    pub fn accuracy() -> Self {
+        Self {
+            encoding: RerankEncoding::CenteredInt8,
+            query_precision: QueryPrecision::Fp32,
+            use_for_ann: true,
+            ..Self::default()
+        }
+    }
+    pub fn compact() -> Self {
+        Self {
+            encoding: RerankEncoding::CenteredInt4,
+            ..Self::accuracy()
+        }
+    }
     pub(crate) fn validate(&self) -> Result<()> {
         if !(1..=32).contains(&self.io_depth) {
             return Err(
@@ -91,6 +116,8 @@ impl SsdRuntimeOptions {
 /// 单次构建或Reader的资源配置；零内存上限沿用共享Runtime准入。
 #[derive(Debug, Clone, Copy)]
 pub struct SsdOptions {
+    /// 发布时选择编码，打开时以制品头为准。
+    pub encoding: RerankEncoding,
     pub memory_limit_bytes: usize,
     /// 发布时控制编码行步长；Reader按制品头确定行布局，物理I/O使用平台位置读取。
     pub row_alignment: usize,
@@ -100,12 +127,18 @@ impl Default for SsdOptions {
         Self {
             memory_limit_bytes: 0,
             row_alignment: 64,
+            encoding: RerankEncoding::Int8,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct SsdStats {
+    /// 活跃Reader是否借用数据库主路由，关闭后为false。
+    pub routing_shared: bool,
+    pub query_precision: QueryPrecision,
+    pub use_for_ann: bool,
+    pub center_bytes: usize,
     pub metadata: SsdMetadata,
     pub closed: bool,
     pub reserved_hot_bytes: usize,
@@ -131,10 +164,18 @@ pub struct SsdStats {
 }
 
 struct State {
-    index: RoutingIndex,
+    index: Option<RoutingIndex>,
+    // 身份令牌固定代际，路由数组由请求期间的数据库借用提供。
+    bound_routing: Option<Arc<()>>,
     file: ColdFile,
     _hot: MemoryLease,
     hot_bytes: usize,
+    center: Arc<Center>,
+}
+
+struct Center {
+    values: Vec<f32>,
+    _memory: MemoryLease,
 }
 
 /// 只保留冷查询所需的路由及身份，加载校验后回收BQ构图数据、上层图和维护工作区。
@@ -150,18 +191,61 @@ struct RoutingIndex {
 }
 
 impl RoutingIndex {
-    fn identity(&self, row: usize) -> Result<RowIdentity> {
+    fn view(&self) -> RoutingView<'_> {
+        RoutingView {
+            dim: self.dim,
+            n: self.n,
+            layer0: &self.layer0,
+            model: &self.model,
+            ids: &self.ids,
+            slot_indices: &self.slot_indices,
+            id_to_internal: &self.id_to_internal,
+            tombstones: &self.tombstones,
+        }
+    }
+}
+
+/// 路由只在请求或维护操作期间借用，数据库锁保证这段时间内的代际稳定。
+#[derive(Clone, Copy)]
+struct RoutingView<'a> {
+    dim: usize,
+    n: usize,
+    layer0: &'a FlatAdj,
+    model: &'a super::corrected_sm::CorrectedSmIndex,
+    ids: &'a [u64],
+    slot_indices: &'a [usize],
+    id_to_internal: &'a std::collections::HashMap<u64, u32>,
+    tombstones: &'a [bool],
+}
+
+impl<'a> RoutingView<'a> {
+    fn borrowed(index: &'a QuIVer) -> Result<Self> {
+        Ok(Self {
+            dim: index.dim,
+            n: index.n,
+            layer0: &index.layer0,
+            model: index.default_sm.as_ref().ok_or_else(|| {
+                invalid("数据库默认SM路由缺失 (Database default SM routing is missing)")
+            })?,
+            ids: &index.ids,
+            slot_indices: &index.slot_indices,
+            id_to_internal: &index.id_to_internal,
+            tombstones: &index.tombstones,
+        })
+    }
+
+    fn identity(self, row: usize) -> Result<RowIdentity> {
         identity(
-            &self.ids,
-            &self.slot_indices,
-            &self.tombstones,
-            &self.id_to_internal,
+            self.ids,
+            self.slot_indices,
+            self.tombstones,
+            self.id_to_internal,
             row,
         )
     }
 }
 
-/// 显式量化检索入口，持有热索引和同一代际的只读文件句柄。
+/// 显式量化检索入口，关联同一代际路由与只读文件句柄。
 pub struct SsdQuiver {
     state: Option<State>,
     metadata: SsdMetadata,
@@ -205,8 +289,9 @@ impl Cache {
 /// 自有冷行租约，继续持有行缓冲额度；文件句柄归Reader管理。
 #[derive(Clone)]
 pub struct SsdRow {
-    layout: Int8Layout,
+    layout: ColdLayout,
     data: Arc<RowData>,
+    center: Arc<Center>,
 }
 struct RowData {
     bytes: Vec<u8>,
@@ -216,11 +301,17 @@ struct RowData {
 impl SsdRow {
     pub fn decode_into(&self, output: &mut [f32]) -> Result<()> {
         self.layout
-            .row(&self.data.bytes[RECORD_HEADER_BYTES..])?
+            .validated_row(&self.data.bytes[RECORD_HEADER_BYTES..], &self.center.values)
             .decode_into(output)
     }
     pub fn score(&self, query: &Int8Query) -> Result<f32> {
-        query.score(self.layout.row(&self.data.bytes[RECORD_HEADER_BYTES..])?)
+        self.score_prepared(&RerankQuery::from_int8(query, &self.center.values)?)
+    }
+    pub fn score_prepared(&self, query: &RerankQuery) -> Result<f32> {
+        query.score(
+            self.layout
+                .validated_row(&self.data.bytes[RECORD_HEADER_BYTES..], &self.center.values),
+        )
     }
 }
 
@@ -246,6 +337,19 @@ impl SsdQuiver {
         source: [u8; 32],
         options: SsdOptions,
         runtime: &ResourceRuntime,
+        fill: impl FnMut(usize, &mut [f32]) -> Result<()>,
+    ) -> Result<SsdMetadata> {
+        Self::publish_with_center(index, path, source, options, None, runtime, fill)
+    }
+
+    /// 宿主可提供冻结中心用于复现；None按本代固定抽样规则计算中心。
+    pub fn publish_with_center(
+        index: &QuIVer,
+        path: &Path,
+        source: [u8; 32],
+        options: SsdOptions,
+        center_override: Option<&[f32]>,
+        runtime: &ResourceRuntime,
         mut fill: impl FnMut(usize, &mut [f32]) -> Result<()>,
     ) -> Result<SsdMetadata> {
         WriteErrorInfo::capture(|write| {
@@ -263,20 +367,69 @@ impl SsdQuiver {
                     "SSD构建需要非空图及默认SM状态 (SSD build requires a nonempty graph and default SM state)",
                 ));
             }
-            let layout = Int8Layout::new(index.dim, options.row_alignment)?;
+            let layout = ColdLayout::new(index.dim, options.row_alignment, options.encoding)?;
+            quiver_cold::validate_target(path)?;
+            let vector_work_bytes = index.dim
+                * if options.encoding.is_centered() {
+                    24
+                } else {
+                    4
+                };
             let bytes = layout
                 .row_stride_bytes()
                 .checked_add(RECORD_HEADER_BYTES + 64 * 1024 + 4096 + MAX_BQ_DIM * 4)
-                .and_then(|bytes| bytes.checked_add(index.dim * 4))
+                .and_then(|bytes| bytes.checked_add(vector_work_bytes))
                 .ok_or_else(capacity)?;
             let memory = Memory::new(runtime.clone(), options.memory_limit_bytes);
             let _memory = memory.reserve(bytes)?;
             let _task = runtime.enter_task()?;
+            // 每代按内部行序等距抽样至多32768行，跳过墓碑，归一化后以f64累加均值。
+            let mut center = if let Some(center) = center_override {
+                layout.validate_center(center)?;
+                center.to_vec()
+            } else {
+                Vec::new()
+            };
+            if options.encoding.is_centered() && center_override.is_none() {
+                let mut sums = vec![0f64; index.dim];
+                let mut vector = vec![0f32; index.dim];
+                let samples = index.n.min(32768);
+                let mut count = 0usize;
+                for sample in 0..samples {
+                    crate::request::check_current()?;
+                    let row = (sample as u64 * index.n as u64 / samples as u64) as usize;
+                    if index.tombstones[row] {
+                        continue;
+                    }
+                    vector.fill(f32::NAN);
+                    fill(index.slot_indices[row], &mut vector)?;
+                    crate::vector::validate_query_vector(&vector, index.dim)?;
+                    let norm = vector
+                        .iter()
+                        .map(|&x| f64::from(x).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    for (sum, &value) in sums.iter_mut().zip(&vector) {
+                        let normalized = if norm == 0. {
+                            0.
+                        } else {
+                            (f64::from(value) / norm) as f32
+                        };
+                        *sum += f64::from(normalized);
+                    }
+                    count += 1;
+                }
+                center = sums
+                    .into_iter()
+                    .map(|sum| (sum / count.max(1) as f64) as f32)
+                    .collect();
+            }
             write.phase = WritePhase::Apply;
             quiver_cold::publish(
                 path,
                 source,
                 layout,
+                &center,
                 index.n,
                 |writer| index.write_snapshot(writer).map_err(TriviumError::Io),
                 |row, vector| {
@@ -304,10 +457,29 @@ impl SsdQuiver {
         options: SsdOptions,
         runtime: ResourceRuntime,
     ) -> Result<Self> {
-        Self::open_bound(path, expected_source, options, runtime, None)
+        Self::open_routed(path, expected_source, options, runtime, None)
     }
 
+    /// 数据库已经拥有通过来源校验的主路由，Reader仅保留文件、中心与缓存。
     pub(crate) fn open_bound(
+        path: &Path,
+        expected_source: [u8; 32],
+        options: SsdOptions,
+        runtime: ResourceRuntime,
+        binding: (u64, u32),
+        index: &QuIVer,
+    ) -> Result<Self> {
+        let mut reader = Self::open_routed(path, expected_source, options, runtime, Some(binding))?;
+        reader
+            .state
+            .as_mut()
+            .ok_or(TriviumError::DatabaseClosed)?
+            .bound_routing = Some(index.routing_identity.clone());
+        reader.routing(Some(index))?;
+        Ok(reader)
+    }
+
+    fn open_routed(
         path: &Path,
         expected_source: [u8; 32],
         options: SsdOptions,
@@ -323,67 +495,122 @@ impl SsdQuiver {
         let metadata = file.metadata();
         let serialized = usize::try_from(metadata.hot_bytes).map_err(|_| capacity())?;
         let memory = Memory::new(runtime.clone(), options.memory_limit_bytes);
-        // 先准入热区读取缓冲，再按已校验热区的节点和层数准入解码峰值。
-        let initial = serialized.checked_add(64 * 1024).ok_or_else(capacity)?;
-        let mut hot_memory = memory.reserve(initial)?;
-        let hot = file.read_hot()?;
-        let peak = loading_bytes(&hot, metadata)?;
-        hot_memory.resize(peak)?;
-        let index = {
-            let mut decoded = QuIVer::load_from_bytes(&hot).map_err(|error| {
-                TriviumError::CorruptedFile(format!(
-                    "SSD热索引无效 (Invalid SSD hot index): {error}"
-                ))
-            })?;
-            if decoded.n != metadata.rows || decoded.dim != metadata.dimension {
-                return Err(TriviumError::CorruptedFile(
-                    "SSD热区与目录不匹配 (SSD hot section and directory mismatch)".into(),
-                ));
-            }
-            let model = decoded.default_sm.take().ok_or_else(|| {
-                TriviumError::CorruptedFile(
-                    "SSD默认SM状态缺失 (SSD default SM state is missing)".into(),
-                )
-            })?;
-            RoutingIndex {
-                dim: decoded.dim,
-                n: decoded.n,
-                layer0: decoded.layer0,
-                model,
-                ids: decoded.ids,
-                slot_indices: decoded.slot_indices,
-                id_to_internal: decoded.id_to_internal,
-                tombstones: decoded.tombstones,
-            }
+        // 数据库Reader准入固定流式工作区，独立Reader另按节点和层数准入解码峰值。
+        let initial = if binding.is_some() {
+            64 * 1024 + 4096 + std::mem::size_of::<State>()
+        } else {
+            serialized.checked_add(64 * 1024).ok_or_else(capacity)?
         };
-        drop(hot);
-        crate::request::check_current()?;
-        let retained = retained_bytes(&index)?;
-        if retained > peak {
-            return Err(capacity());
-        }
+        let mut hot_memory = memory.reserve(initial)?;
+        let center_bytes = file.layout().center_bytes();
+        let center_memory = memory.reserve(if center_bytes == 0 {
+            0
+        } else {
+            center_bytes
+                .checked_mul(3)
+                .and_then(|x| x.checked_add(512))
+                .ok_or_else(capacity)?
+        })?;
+        let mut center = Center {
+            values: file.read_center()?,
+            _memory: center_memory,
+        };
+        center._memory.resize(if center.values.is_empty() {
+            0
+        } else {
+            center.values.capacity() * 4 + 512
+        })?;
+        let (index, retained) = if binding.is_some() {
+            file.verify_hot()?;
+            (None, 4096 + std::mem::size_of::<State>())
+        } else {
+            let hot = file.read_hot()?;
+            let peak = loading_bytes(&hot, metadata)?;
+            hot_memory.resize(peak)?;
+            let index = {
+                let mut decoded = QuIVer::load_from_bytes(&hot).map_err(|error| {
+                    TriviumError::CorruptedFile(format!(
+                        "SSD热索引无效 (Invalid SSD hot index): {error}"
+                    ))
+                })?;
+                if decoded.n != metadata.rows || decoded.dim != metadata.dimension {
+                    return Err(TriviumError::CorruptedFile(
+                        "SSD热区与目录不匹配 (SSD hot section and directory mismatch)".into(),
+                    ));
+                }
+                let model = decoded.default_sm.take().ok_or_else(|| {
+                    TriviumError::CorruptedFile(
+                        "SSD默认SM状态缺失 (SSD default SM state is missing)".into(),
+                    )
+                })?;
+                RoutingIndex {
+                    dim: decoded.dim,
+                    n: decoded.n,
+                    layer0: decoded.layer0,
+                    model,
+                    ids: decoded.ids,
+                    slot_indices: decoded.slot_indices,
+                    id_to_internal: decoded.id_to_internal,
+                    tombstones: decoded.tombstones,
+                }
+            };
+            drop(hot);
+            crate::request::check_current()?;
+            let retained = retained_bytes(&index)?;
+            if retained > peak {
+                return Err(capacity());
+            }
+            (Some(index), retained)
+        };
         hot_memory.resize(retained)?;
         crate::request::check_current()?;
         Ok(Self {
             state: Some(State {
                 index,
+                bound_routing: None,
                 file,
                 _hot: hot_memory,
                 hot_bytes: retained,
+                center: Arc::new(center),
             }),
             metadata,
             memory,
             cache: Mutex::new(Cache::default()),
             hot_rows: None,
             hot_directory: None,
-            runtime_options: SsdRuntimeOptions::default(),
+            runtime_options: SsdRuntimeOptions {
+                encoding: metadata.encoding,
+                ..Default::default()
+            },
             io_memory: None,
         })
     }
 
     /// 预热成功后替换驻留策略，失败或取消保持既有策略；调用方独占Reader完成切换。
     pub fn configure(&mut self, options: SsdRuntimeOptions) -> Result<()> {
-        self.active()?;
+        self.configure_routed(options, None)
+    }
+
+    pub(crate) fn configure_bound(
+        &mut self,
+        options: SsdRuntimeOptions,
+        index: &QuIVer,
+    ) -> Result<()> {
+        self.configure_routed(options, Some(index))
+    }
+
+    fn configure_routed(
+        &mut self,
+        options: SsdRuntimeOptions,
+        index: Option<&QuIVer>,
+    ) -> Result<()> {
+        self.routing(index)?;
+        if options.encoding != self.metadata.encoding {
+            return Err(
+                invalid("运行时编码与制品不匹配 (Runtime encoding differs from artifact)")
+                    .at_field("encoding"),
+            );
+        }
         crate::request::check_current()?;
         options.validate()?;
         let _task = self.memory.runtime.enter_task()?;
@@ -419,6 +646,7 @@ impl SsdQuiver {
             let mut rows = Vec::new();
             rows.try_reserve_exact(self.metadata.rows)
                 .map_err(|_| capacity())?;
+            let route = self.routing(index)?;
             for start in (0..self.metadata.rows).step_by(4) {
                 crate::request::check_current()?;
                 let count = (self.metadata.rows - start).min(4);
@@ -426,7 +654,7 @@ impl SsdQuiver {
                 for (offset, row) in batch[..count].iter_mut().enumerate() {
                     *row += offset;
                 }
-                rows.extend(self.load_records(&batch[..count])?);
+                rows.extend(self.load_records_routed(&batch[..count], route)?);
             }
             warm = Some(rows);
         }
@@ -468,6 +696,16 @@ impl SsdQuiver {
             .as_ref()
             .map_or_else(Default::default, |state| state.file.io_alignment());
         SsdStats {
+            routing_shared: self
+                .state
+                .as_ref()
+                .is_some_and(|state| state.index.is_none()),
+            query_precision: self.runtime_options.query_precision,
+            use_for_ann: self.runtime_options.use_for_ann,
+            center_bytes: self
+                .state
+                .as_ref()
+                .map_or(0, |state| state.center.values.len() * 4),
             metadata: self.metadata,
             closed: self.state.is_none(),
             reserved_hot_bytes: self.state.as_ref().map_or(0, |state| state.hot_bytes),
@@ -519,46 +757,72 @@ impl SsdQuiver {
 
     /// 取得活跃节点的自有行租约；后续Reader关闭和新版发布不改变该行内容。
     pub fn row(&self, node_id: u64) -> Result<SsdRow> {
-        let state = self.active()?;
+        let route = self.routing(None)?;
         crate::request::check_current()?;
-        let row = state
-            .index
+        let row = route
             .id_to_internal
             .get(&node_id)
             .copied()
-            .filter(|&row| !state.index.tombstones[row as usize])
+            .filter(|&row| !route.tombstones[row as usize])
             .ok_or(TriviumError::NodeNotFound(node_id))? as usize;
-        self.load_record(row)
+        self.load_record_routed(row, route)
     }
 
-    /// 复用默认SM图导航，以codec 1近似余弦精排并按分数、NodeId稳定排序。
+    /// 复用默认SM图导航，以所选压缩编码重排并按分数、NodeId稳定排序。
     pub fn search(&self, query: &[f32], config: &QuIVerSearchConfig) -> Result<Vec<(u64, f32)>> {
+        self.search_routed(query, config, &|_| true, None)
+    }
+
+    pub(crate) fn search_bound(
+        &self,
+        query: &[f32],
+        config: &QuIVerSearchConfig,
+        eligible: &dyn Fn(u64) -> bool,
+        index: &QuIVer,
+    ) -> Result<Vec<(u64, f32)>> {
+        self.search_routed(query, config, eligible, Some(index))
+    }
+
+    fn search_routed(
+        &self,
+        query: &[f32],
+        config: &QuIVerSearchConfig,
+        eligible: &dyn Fn(u64) -> bool,
+        index: Option<&QuIVer>,
+    ) -> Result<Vec<(u64, f32)>> {
         let state = self.active()?;
-        crate::vector::validate_query_vector(query, state.index.dim)?;
+        let route = self.routing(index)?;
+        crate::vector::validate_query_vector(query, route.dim)?;
         crate::request::check_current()?;
         if config.top_k == 0 {
             return Ok(Vec::new());
         }
-        let top_k = config.top_k.min(state.index.n);
-        let ef = config.ef_search.max(top_k).min(state.index.n);
+        let top_k = config.top_k.min(route.n);
+        let ef = config.ef_search.max(top_k).min(route.n);
         let budget = config.rerank_limit.unwrap_or(64).max(top_k).min(ef);
         // 导航候选队列在最坏情况下可覆盖全图，准入同时覆盖堆扩容和结果工作区。
-        let bytes = state
-            .index
+        let bytes = route
             .n
             .checked_mul(96)
             .and_then(|bytes| bytes.checked_add(self.metadata.record_bytes))
-            .and_then(|bytes| bytes.checked_add(state.index.n.div_ceil(64) * 8))
+            .and_then(|bytes| bytes.checked_add(route.n.div_ceil(64) * 8))
             .and_then(|bytes| bytes.checked_add(64 * 1024))
             .ok_or_else(capacity)?;
         let _memory = self.memory.reserve(bytes)?;
         let _task = self.memory.runtime.enter_task()?;
-        let quantized = Int8Query::new(query)?;
+        let quantized = RerankQuery::new(
+            query,
+            self.runtime_options.query_precision,
+            &state.center.values,
+        )?;
         let mut source = Source {
-            state,
+            route,
             reader: self,
             query: quantized,
             error: None,
+            prefetched: Vec::new(),
+            _prefetch_memory: None,
+            eligible,
         };
         let squared = query
             .iter()
@@ -574,9 +838,9 @@ impl SsdQuiver {
             ef_search: ef,
             rerank_limit: Some(budget),
         };
-        let output = state.index.model.search_routed_source(
+        let output = route.model.search_routed_source(
             &normalized[..query.len()],
-            &state.index.layer0,
+            route.layer0,
             &config,
             &mut source,
         );
@@ -597,24 +861,70 @@ impl SsdQuiver {
         self.io_memory.take();
     }
 
+    pub(crate) fn routing_matches(&self, index: &QuIVer) -> bool {
+        self.state
+            .as_ref()
+            .and_then(|state| state.bound_routing.as_ref())
+            .is_some_and(|identity| Arc::ptr_eq(identity, &index.routing_identity))
+    }
+
+    fn routing<'a>(&'a self, index: Option<&'a QuIVer>) -> Result<RoutingView<'a>> {
+        let state = self.active()?;
+        let route = match (&state.index, index) {
+            (Some(index), None) => index.view(),
+            (None, Some(index)) => {
+                if !self.routing_matches(index) {
+                    return Err(TriviumError::DatabaseBusy {
+                        resource: "quiver_rerank_generation",
+                    });
+                }
+                RoutingView::borrowed(index)?
+            }
+            _ => {
+                return Err(invalid(
+                    "SSD路由所有权不匹配 (SSD routing ownership mismatch)",
+                ));
+            }
+        };
+        if route.dim != self.metadata.dimension || route.n != self.metadata.rows {
+            return Err(TriviumError::ImmutableArtifactInvalid {
+                reason: "SSD路由与制品代际不匹配 (SSD routing does not match artifact generation)"
+                    .into(),
+            });
+        }
+        Ok(route)
+    }
+
     fn active(&self) -> Result<&State> {
         self.state.as_ref().ok_or(TriviumError::DatabaseClosed)
     }
 }
 
 struct Source<'a> {
-    state: &'a State,
+    route: RoutingView<'a>,
     reader: &'a SsdQuiver,
-    query: Int8Query,
+    query: RerankQuery,
     error: Option<TriviumError>,
+    prefetched: Vec<(usize, SsdRow)>,
+    _prefetch_memory: Option<MemoryLease>,
+    eligible: &'a dyn Fn(u64) -> bool,
 }
 impl Source<'_> {
     fn score(&mut self, row: usize) -> Result<Option<f32>> {
-        let identity = self.state.index.identity(row)?;
-        if identity.deleted {
+        if let Ok(position) = self.prefetched.binary_search_by_key(&row, |&(id, _)| id) {
+            return self.prefetched[position]
+                .1
+                .score_prepared(&self.query)
+                .map(Some);
+        }
+        let identity = self.route.identity(row)?;
+        if identity.deleted || !(self.eligible)(identity.node_id) {
             return Ok(None);
         }
-        self.reader.load_record(row)?.score(&self.query).map(Some)
+        self.reader
+            .load_record_routed(row, self.route)?
+            .score_prepared(&self.query)
+            .map(Some)
     }
     fn capture<T>(&mut self, result: Result<T>) -> io::Result<T> {
         result.map_err(|error| {
@@ -624,6 +934,13 @@ impl Source<'_> {
     }
 }
 impl ExactSource for Source<'_> {
+    fn batch_reads(&self) -> bool {
+        true
+    }
+    fn prefetch(&mut self, rows: &[u32], budget: usize) -> io::Result<()> {
+        let result = self.prepare_rows(rows, budget);
+        self.capture(result)
+    }
     fn owns_workspace(&self) -> bool {
         true
     }
@@ -641,18 +958,40 @@ impl ExactSource for Source<'_> {
 }
 
 impl Source<'_> {
-    fn score_four(&self, rows: [usize; 4]) -> Result<[Option<f32>; 4]> {
-        let mut scores = [None; 4];
-        let mut active = Vec::with_capacity(4);
-        for (position, row) in rows.into_iter().enumerate() {
-            if !self.state.index.identity(row)?.deleted {
-                active.push((position, row));
+    fn prepare_rows(&mut self, rows: &[u32], budget: usize) -> Result<()> {
+        let count = budget.min(rows.len());
+        if count == 0 {
+            return Ok(());
+        }
+        self._prefetch_memory = Some(
+            self.reader.memory.reserve(
+                count
+                    .checked_mul(std::mem::size_of::<(usize, SsdRow)>() + 8)
+                    .ok_or_else(capacity)?,
+            )?,
+        );
+        let mut ids = Vec::with_capacity(count);
+        for &row in rows {
+            let identity = self.route.identity(row as usize)?;
+            if !identity.deleted && (self.eligible)(identity.node_id) {
+                ids.push(row as usize);
+                if ids.len() == count {
+                    break;
+                }
             }
         }
-        let indices = active.iter().map(|&(_, row)| row).collect::<Vec<_>>();
-        let loaded = self.reader.load_records(&indices)?;
-        for ((position, _), value) in active.into_iter().zip(loaded) {
-            scores[position] = Some(value.score(&self.query)?);
+        self.prefetched.reserve(ids.len());
+        for batch in ids.chunks(64) {
+            let loaded = self.reader.load_records_routed(batch, self.route)?;
+            self.prefetched.extend(batch.iter().copied().zip(loaded));
+        }
+        self.prefetched.sort_by_key(|&(row, _)| row);
+        Ok(())
+    }
+    fn score_four(&mut self, rows: [usize; 4]) -> Result<[Option<f32>; 4]> {
+        let mut scores = [None; 4];
+        for (position, row) in rows.into_iter().enumerate() {
+            scores[position] = self.score(row)?;
         }
         Ok(scores)
     }

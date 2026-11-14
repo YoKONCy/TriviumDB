@@ -16,6 +16,7 @@ impl PendingRead<'_> {
         memory.resize(self.charge)?;
         let value = SsdRow {
             layout: self.reader.active()?.file.layout(),
+            center: self.reader.active()?.center.clone(),
             data: Arc::new(RowData {
                 bytes,
                 charge: self.charge,
@@ -52,13 +53,24 @@ impl Drop for PendingRead<'_> {
 }
 
 impl SsdQuiver {
-    pub(super) fn load_record(&self, row: usize) -> Result<SsdRow> {
-        self.load_records(&[row])?.pop().ok_or_else(capacity)
+    pub(super) fn load_record_routed(&self, row: usize, route: RoutingView<'_>) -> Result<SsdRow> {
+        self.load_records_routed(&[row], route)?
+            .pop()
+            .ok_or_else(capacity)
     }
 
+    #[cfg(test)]
     pub(super) fn load_records(&self, rows: &[usize]) -> Result<Vec<SsdRow>> {
+        self.load_records_routed(rows, self.routing(None)?)
+    }
+
+    pub(super) fn load_records_routed(
+        &self,
+        rows: &[usize],
+        route: RoutingView<'_>,
+    ) -> Result<Vec<SsdRow>> {
         let state = self.active()?;
-        if rows.len() > 4 || rows.iter().any(|&row| row >= self.metadata.rows) {
+        if rows.len() > 64 || rows.iter().any(|&row| row >= self.metadata.rows) {
             return Err(invalid("SSD批次范围无效 (Invalid SSD batch range)"));
         }
         crate::request::check_current()?;
@@ -66,7 +78,9 @@ impl SsdQuiver {
             return Ok(rows.iter().map(|&row| hot[row].clone()).collect());
         }
         // 批次目录有固定上限；行、传输副本和对齐窗口按每条缺失记录另行准入。
-        let _directory = self.memory.reserve(4096)?;
+        let _directory = self
+            .memory
+            .reserve(4096 + rows.len().saturating_sub(4) * 256)?;
         let _task = self.memory.runtime.enter_task()?;
         let charge = self
             .metadata
@@ -118,9 +132,9 @@ impl SsdQuiver {
             if !reads.is_empty() {
                 let requests = reads
                     .iter()
-                    .map(|read| Ok((read.row, state.index.identity(read.row)?)))
+                    .map(|read| Ok((read.row, route.identity(read.row)?)))
                     .collect::<Result<Vec<_>>>()?;
-                let buffers = state.file.read_records(&requests)?;
+                let buffers = state.file.read_records(&requests, &state.center.values)?;
                 if buffers.len() != reads.len() {
                     return Err(capacity());
                 }

@@ -957,7 +957,11 @@ export class TriviumDB {
    * 字段复用块kind，元数据过滤作用于调用方data，完整协议见docs/documents.md与docs/document-ingestion.md。
    */
   documentRequest(requestJson: string): string;
-  /** INT8 QuIVer运行时协议，支持configure、search、stats、close、collect_temporary。 */
+  /** QuIVer压缩重排协议，支持configure、search、stats、close、collect_temporary。
+   * options.encoding选择int8、centered_int8、centered_int4，query_precision选择fp32、int8、int4。
+   * residency选择hot或ssd，cache_bytes按字节配置，use_for_ann控制普通ANN入口。
+   * stats.routing_shared表示数据库路由借用，reserved_hot_bytes统计Reader自有热区预算。
+   */
   quiverRequest(requestJson: string): string;
   /** 命名图、共享成员、独立边及显式联合查询的Core JSON入口。 */
   graphRequest(requestJson: string): string;

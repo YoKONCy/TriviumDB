@@ -61,6 +61,24 @@ function runQuiverSsd(root, { TriviumDB } = require('../..')) {
     assert.equal(hot.io_alignment_bytes, 0)
     assert.deepEqual(request(search), { hits: fixture.expected_hits })
     assert.equal(request({ operation: 'stats' }).cold_read_calls, hot.cold_read_calls)
+    for (const encoding of fixture.encodings) {
+      for (const precision of fixture.query_precisions) {
+        for (const residency of ['ssd', 'hot']) {
+          const configured = request({ operation: 'configure', options: {
+            ...fixture.options, encoding, query_precision: precision,
+            residency, cache_bytes: 0, use_for_ann: true
+          } })
+          assert.equal(configured.metadata.encoding, encoding)
+          assert.equal(configured.query_precision, precision)
+          assert.equal(configured.residency, residency)
+          assert.equal(configured.routing_shared, true)
+          assert.deepEqual(request(search), { hits: fixture.expected_hits })
+        }
+      }
+    }
+    request({ operation: 'configure', options: fixture.options })
+    assert.throws(() => request({ operation: 'configure', options: { query_precision: 'fp16' } }),
+      error => error.code === 'TDB_INVALID_INPUT')
     assert.throws(() => request({ operation: 'configure', options: { io_depth: 0 } }), error => error.code === 'TDB_INVALID_INPUT')
     assert.throws(() => request({ operation: 'stats', unexpected: true }), error => error.code === 'TDB_INVALID_INPUT')
     db.close()

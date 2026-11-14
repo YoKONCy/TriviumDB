@@ -815,27 +815,36 @@ impl<T: VectorType> PipelineOperator<T> for QuiverVectorSearch<T> {
             .map(|value| value.to_f32())
             .collect::<Vec<_>>();
         let mut vector_error = None;
-        let hits = index.search(
-            &query,
-            |slot, output| {
-                let vector = match context.memtable.active_vector_at_slot(slot) {
-                    Ok(Some((_, vector))) => vector,
-                    Ok(None) => return false,
-                    Err(error) => {
-                        vector_error = Some(error);
-                        return false;
-                    }
-                };
-                output.clear();
-                output.extend(vector.iter().map(|value| value.to_f32()));
-                true
-            },
-            &crate::index::quiver::QuIVerSearchConfig {
-                top_k: self.top_k,
-                ef_search: self.ef_search.max(self.top_k),
-                rerank_limit: Some(self.ef_search.max(self.top_k)),
-            },
-        );
+        let config = crate::index::quiver::QuIVerSearchConfig {
+            top_k: self.top_k,
+            ef_search: self.ef_search.max(self.top_k),
+            rerank_limit: Some(self.ef_search.max(self.top_k)),
+        };
+        let configured = context
+            .memtable
+            .configured_quiver_search(&query, &config, &|_| true)?;
+        let approximate = configured.is_some();
+        let hits = if let Some(hits) = configured {
+            hits
+        } else {
+            index.search(
+                &query,
+                |slot, output| {
+                    let vector = match context.memtable.active_vector_at_slot(slot) {
+                        Ok(Some((_, vector))) => vector,
+                        Ok(None) => return false,
+                        Err(error) => {
+                            vector_error = Some(error);
+                            return false;
+                        }
+                    };
+                    output.clear();
+                    output.extend(vector.iter().map(|value| value.to_f32()));
+                    true
+                },
+                &config,
+            )
+        };
         if let Some(error) = vector_error {
             return Err(error);
         }
@@ -846,7 +855,11 @@ impl<T: VectorType> PipelineOperator<T> for QuiverVectorSearch<T> {
                     let mut row = NodeRow::new(id);
                     row.similarity = Some(ScoreValue {
                         value: score,
-                        kind: ScoreKind::Exact,
+                        kind: if approximate {
+                            ScoreKind::Approximate
+                        } else {
+                            ScoreKind::Exact
+                        },
                     });
                     row.provenance.source_ids.push(id);
                     row
