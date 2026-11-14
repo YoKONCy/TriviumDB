@@ -4,7 +4,9 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::Instant;
-use triviumdb::index::quiver::ssd::{IoMode, Residency, SsdOptions, SsdQuiver, SsdRuntimeOptions};
+use triviumdb::index::quiver::ssd::{
+    IoMode, QueryPrecision, RerankEncoding, Residency, SsdOptions, SsdQuiver, SsdRuntimeOptions,
+};
 use triviumdb::index::quiver::{QuIVer, QuIVerConfig, QuIVerSearchConfig};
 use triviumdb::{ResourceLimits, ResourceRuntime};
 
@@ -41,6 +43,14 @@ fn main() {
     let nodes = support::env_usize("TDB_SSD_NODES", 4096);
     let query_count = support::env_usize("TDB_SSD_QUERIES", 64);
     let rounds = support::env_usize("TDB_SSD_ROUNDS", 3);
+    let encoding: RerankEncoding = serde_json::from_value(json!(
+        std::env::var("TDB_SSD_ENCODING").unwrap_or_else(|_| "int8".into())
+    ))
+    .expect("重排编码无效 (Invalid reranking encoding)");
+    let precision: QueryPrecision = serde_json::from_value(json!(
+        std::env::var("TDB_SSD_QUERY_PRECISION").unwrap_or_else(|_| "int8".into())
+    ))
+    .expect("查询精度无效 (Invalid query precision)");
     assert!(nodes >= 32 && query_count > 0 && rounds > 0, "基准规模无效");
     let root = PathBuf::from(
         std::env::var("TDB_SSD_ROOT").unwrap_or_else(|_| "target/bench-reports/quiver-ssd".into()),
@@ -96,29 +106,42 @@ fn main() {
             digest.update(value.to_le_bytes());
         }
         let source: [u8; 32] = digest.finalize().into();
-        let path = root.join(format!("{dataset}-{nodes}-{dim}.qssd"));
+        let path = root.join(format!("{dataset}-{nodes}-{dim}-{encoding:?}.qssd"));
+        let graph_path = root.join(format!("{dataset}-{nodes}-{dim}.quiver"));
         let runtime = ResourceRuntime::new(ResourceLimits {
             max_threads: 4,
             ..Default::default()
         })
         .unwrap();
         if !path.exists() {
-            let mut index = QuIVer::new(
-                dim,
-                &QuIVerConfig {
-                    m: 16,
-                    ef_construction: 96,
-                    alpha: 1.2,
-                },
-            );
-            let ids = (1..=nodes as u64).collect::<Vec<_>>();
-            let slots = (0..nodes).collect::<Vec<_>>();
-            index.batch_build(&base, &ids, &slots);
+            let index = if graph_path.exists() {
+                QuIVer::load_from_file(&graph_path)
+                    .expect("读取固定基准图失败 (Failed to load the fixed benchmark graph)")
+            } else {
+                let mut index = QuIVer::new(
+                    dim,
+                    &QuIVerConfig {
+                        m: 16,
+                        ef_construction: 96,
+                        alpha: 1.2,
+                    },
+                );
+                let ids = (1..=nodes as u64).collect::<Vec<_>>();
+                let slots = (0..nodes).collect::<Vec<_>>();
+                index.batch_build(&base, &ids, &slots);
+                index
+                    .save_to_file(&graph_path)
+                    .expect("保存固定基准图失败 (Failed to save the fixed benchmark graph)");
+                index
+            };
             SsdQuiver::publish(
                 &index,
                 &path,
                 source,
-                SsdOptions::default(),
+                SsdOptions {
+                    encoding,
+                    ..Default::default()
+                },
                 &runtime,
                 |slot, output| {
                     output.copy_from_slice(&base[slot * dim..(slot + 1) * dim]);
@@ -165,6 +188,9 @@ fn main() {
                             cache_bytes,
                             io_mode: mode,
                             io_depth: 3,
+                            encoding,
+                            query_precision: precision,
+                            ..Default::default()
                         })
                         .unwrap();
                     let configure_ms = configured.elapsed().as_secs_f64() * 1000.;
@@ -220,7 +246,8 @@ fn main() {
     let report = support::write_json_report(
         "quiver-ssd.json",
         &json!({"schema_version":1,
-        "platform":std::env::consts::OS,"architecture":std::env::consts::ARCH,"rounds":reports}),
+        "platform":std::env::consts::OS,"architecture":std::env::consts::ARCH,
+        "encoding":encoding,"query_precision":precision,"rounds":reports}),
     );
     println!(
         "SSD测量完成 (SSD measurement completed) {}",

@@ -728,6 +728,11 @@ pub(crate) struct WorkspaceReservation {
 }
 
 impl WorkspaceReservation {
+    /// 当前请求已在共享Runtime取得的额度，组合执行器据此避免重复预留。
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
     /// 扩容先准入，再把新增预留转入当前凭证；缩容和异常退出均准确归还账本。
     pub(crate) fn resize(&mut self, bytes: usize) -> Result<()> {
         if bytes > self.bytes {

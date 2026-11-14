@@ -5,6 +5,7 @@
 
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
+use crate::graph::view::GraphRead;
 use crate::node::NodeId;
 use crate::storage::memtable::MemTable;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,6 +21,16 @@ pub struct GraphWorkspace {
 
 pub fn build_workspace<T: VectorType>(
     mt: &MemTable<T>,
+    nodes: &BTreeSet<NodeId>,
+    label_filter: Option<&str>,
+    max_examined_edges: usize,
+    max_bytes: usize,
+) -> Result<GraphWorkspace> {
+    build_workspace_view(mt, nodes, label_filter, max_examined_edges, max_bytes)
+}
+
+pub(crate) fn build_workspace_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
     nodes: &BTreeSet<NodeId>,
     label_filter: Option<&str>,
     max_examined_edges: usize,

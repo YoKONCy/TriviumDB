@@ -13,7 +13,7 @@
 
 # TriviumDB
 
-当前预发布版本为 **0.9.1-beta.1**，包含文档证据检索、命名图、解析与分批发布、QuIVer INT8 SSD 运行时及工程加固。完整内容见 [中英文版本说明](docs/changes/0.9.1-beta.1.md)，研究测量见 [ICDE 复现归档](evaluation/README.md)。
+当前正式版本为 **0.9.1**，包含文档证据检索、解析与分批发布、文档与命名图统一 TQL、QuIVer 中心化 INT8／INT4 压缩重排、Hot／SSD 驻留及工程加固。完整内容见 [中英文版本说明](docs/changes/0.9.1.md)，研究测量见 [ICDE 复现归档](evaluation/README.md)。
 
 **向量 × 图谱 × 文档 —— 三位一体的 AI 原生嵌入式数据库**
 

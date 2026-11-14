@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 
 mod context;
 mod filters;
-mod vector;
+pub(crate) mod vector;
 
 pub(super) struct ReadBudget<'a> {
     pub cost: &'a mut DocumentReadCost,
@@ -937,296 +937,313 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         recall: Option<vector::Recall<'_, T>>,
     ) -> Result<DocumentSearchResult> {
         self.read_operation(|| {
+            let mut mt = read_or_recover(&self.memtable);
+            validate_search(&mt, query, recall.as_ref())?;
             if recall
                 .as_ref()
-                .is_none_or(|recall| recall.text_weight.is_some())
-                && query.text.trim().is_empty()
+                .is_some_and(|recall| recall.options.rerank == DocumentVectorRerank::Compressed)
             {
-                return Err(invalid(
-                    "query.text",
-                    "文档查询文本不能为空 (Document query text must be nonempty)",
-                ));
+                drop(mt);
+                self.prepare_quiver_rerank(true)?;
+                mt = read_or_recover(&self.memtable);
             }
-            if query.max_documents == 0 {
-                return Err(invalid(
-                    "query.max_documents",
-                    "文档数须为正 (Document limit must be positive)",
-                ));
+            search_locked(&mt, query, recall, self.memory_limit)
+        })?
+    }
+}
+
+/// 公共入口和规划器共享参数检查，检查过程读取当前事实与运行时配置。
+pub(crate) fn validate_search<T: VectorType>(
+    mt: &MemTable<T>,
+    query: &DocumentSearchQuery,
+    recall: Option<&vector::Recall<'_, T>>,
+) -> Result<()> {
+    if recall
+        .as_ref()
+        .is_none_or(|recall| recall.text_weight.is_some())
+        && query.text.trim().is_empty()
+    {
+        return Err(invalid(
+            "query.text",
+            "文档查询文本不能为空 (Document query text must be nonempty)",
+        ));
+    }
+    if query.max_documents == 0 {
+        return Err(invalid(
+            "query.max_documents",
+            "文档数须为正 (Document limit must be positive)",
+        ));
+    }
+    if query.hits_per_document == 0 {
+        return Err(invalid(
+            "query.hits_per_document",
+            "组内命中数须为正 (Per-document hit limit must be positive)",
+        ));
+    }
+    for &id in &query.document_ids {
+        crate::document::valid_id(id, "query.document_ids")?;
+    }
+    if let Some(recall) = &recall {
+        recall.validate(query, mt)?;
+    }
+    Ok(())
+}
+
+/// 文档 API 和 TQL 在同一事实读视图中复用查询及证据装配。
+pub(crate) fn search_locked<T: VectorType>(
+    mt: &MemTable<T>,
+    query: &DocumentSearchQuery,
+    recall: Option<vector::Recall<'_, T>>,
+    memory_limit: usize,
+) -> Result<DocumentSearchResult> {
+    validate_search(mt, query, recall.as_ref())?;
+    let mut workspace = mt.resource_runtime().reserve_workspace(0)?;
+    let request_work =
+        crate::storage::payload_store::serialized_json_len(query)?.saturating_mul(64);
+    reserve(mt, memory_limit, &mut workspace, request_work)?;
+    let tokens = query_tokens(query)?;
+    let filters = filters::Prepared::new(query)?;
+    let (selection, documents, units, field_corpora) = if query.use_cache {
+        let mut cache = lock_or_recover(&mt.document_index);
+        if cache.as_ref().is_none_or(|index| {
+            (query.uses_positions() && index.positions.is_none())
+                || (!query.fields.is_empty() && index.field_text.is_none())
+                || (!query.members.is_empty() && index.members.is_none())
+        }) {
+            // 升级派生缓存时持有同一互斥锁，旧缓存先归还额度。
+            *cache = None;
+            mt.document_index_bytes.store(0, Ordering::Release);
+            let built = build_index(mt, query, memory_limit, &mut workspace)?;
+            let bytes = built.heap_bytes();
+            mt.ensure_additional_memory(memory_limit, bytes)?;
+            mt.document_index_bytes.store(bytes, Ordering::Release);
+            *cache = Some(built);
+        }
+        let index = cache
+            .as_ref()
+            .ok_or_else(|| stored_error("文档索引未就绪 (Document index is not ready)"))?;
+        let selection = SearchWorkspace {
+            mt,
+            workspace: &mut workspace,
+            memory_limit,
+            filters: &filters,
+        }
+        .select(index, query, &tokens, 0, recall.as_ref())?;
+        (
+            selection,
+            index.documents.len(),
+            index.text(query.level).document_count(),
+            filters::field_corpora(index, query),
+        )
+    } else {
+        let index = build_index(mt, query, memory_limit, &mut workspace)?;
+        let selection = SearchWorkspace {
+            mt,
+            workspace: &mut workspace,
+            memory_limit,
+            filters: &filters,
+        }
+        .select(&index, query, &tokens, index.heap_bytes(), recall.as_ref())?;
+        (
+            selection,
+            index.documents.len(),
+            index.text(query.level).document_count(),
+            filters::field_corpora(&index, query),
+        )
+    };
+    let SearchSelection {
+        rows: selected,
+        matched,
+        work,
+        mut cost,
+        retrieval,
+    } = selection;
+    let mut groups = Vec::new();
+    let mut returned = 256usize
+        .saturating_add(crate::storage::payload_store::serialized_json_len(
+            &field_corpora,
+        )?)
+        .saturating_add(crate::storage::payload_store::serialized_json_len(
+            &retrieval,
+        )?);
+    budget(
+        "document_return_bytes",
+        returned,
+        query.limits.max_return_bytes,
+    )?;
+    for row in selected {
+        crate::request::check_current()?;
+        let raw = mt
+            .get_payload_raw(row.document_id)
+            .ok_or(TriviumError::NodeNotFound(row.document_id))?;
+        let base = work
+            .saturating_add(returned.saturating_mul(8))
+            .saturating_add(raw.len().saturating_mul(32));
+        let mut read = ReadBudget {
+            cost: &mut cost,
+            limits: &query.limits,
+            workspace: &mut workspace,
+            base,
+            memory_limit,
+        };
+        let snapshot = read_snapshot_checked(mt, row.document_id, Some(&mut read))?
+            .ok_or(TriviumError::NodeNotFound(row.document_id))?;
+        let mut by_node = BTreeMap::new();
+        for block in &snapshot.blocks {
+            if let Some(id) = &block.node_id {
+                by_node.insert(node_id(id, "document.blocks.node_id")?, block);
             }
-            if query.hits_per_document == 0 {
-                return Err(invalid(
-                    "query.hits_per_document",
-                    "组内命中数须为正 (Per-document hit limit must be positive)",
-                ));
-            }
-            for &id in &query.document_ids {
-                crate::document::valid_id(id, "query.document_ids")?;
-            }
-            let mt = read_or_recover(&self.memtable);
-            if let Some(recall) = &recall {
-                recall.validate(query, &mt)?;
-            }
-            let mut workspace = self.resource_runtime.reserve_workspace(0)?;
-            let request_work =
-                crate::storage::payload_store::serialized_json_len(query)?.saturating_mul(64);
-            reserve(&mt, self.memory_limit, &mut workspace, request_work)?;
-            let tokens = query_tokens(query)?;
-            let filters = filters::Prepared::new(query)?;
-            let (selection, documents, units, field_corpora) = if query.use_cache {
-                let mut cache = lock_or_recover(&mt.document_index);
-                if cache.as_ref().is_none_or(|index| {
-                    (query.uses_positions() && index.positions.is_none())
-                        || (!query.fields.is_empty() && index.field_text.is_none())
-                        || (!query.members.is_empty() && index.members.is_none())
-                }) {
-                    // 升级派生缓存时持有同一互斥锁，旧缓存先归还额度。
-                    *cache = None;
-                    mt.document_index_bytes.store(0, Ordering::Release);
-                    let built = build_index(&mt, query, self.memory_limit, &mut workspace)?;
-                    let bytes = built.heap_bytes();
-                    mt.ensure_additional_memory(self.memory_limit, bytes)?;
-                    mt.document_index_bytes.store(bytes, Ordering::Release);
-                    *cache = Some(built);
-                }
-                let index = cache
-                    .as_ref()
-                    .ok_or_else(|| stored_error("文档索引未就绪 (Document index is not ready)"))?;
-                let selection = SearchWorkspace {
-                    mt: &mt,
-                    workspace: &mut workspace,
-                    memory_limit: self.memory_limit,
-                    filters: &filters,
-                }
-                .select(index, query, &tokens, 0, recall.as_ref())?;
-                (
-                    selection,
-                    index.documents.len(),
-                    index.text(query.level).document_count(),
-                    filters::field_corpora(index, query),
-                )
+        }
+        let mut boundaries = BTreeSet::new();
+        for hit in &row.hits {
+            let (first, last) = if hit.id == snapshot.document_id {
+                (0, snapshot.content.len())
             } else {
-                let index = build_index(&mt, query, self.memory_limit, &mut workspace)?;
-                let selection = SearchWorkspace {
-                    mt: &mt,
-                    workspace: &mut workspace,
-                    memory_limit: self.memory_limit,
-                    filters: &filters,
+                let block = by_node
+                    .get(&hit.id)
+                    .ok_or_else(|| stored_error("候选片段缺失 (Candidate fragment is missing)"))?;
+                (block.start_byte, block.end_byte)
+            };
+            boundaries.insert(first);
+            boundaries.insert(last);
+            for found in &hit.matches {
+                let start = first
+                    .checked_add(found.start)
+                    .ok_or_else(|| stored_error("命中范围溢出 (Match range overflow)"))?;
+                let end = first
+                    .checked_add(found.end)
+                    .ok_or_else(|| stored_error("命中范围溢出 (Match range overflow)"))?;
+                if end > last {
+                    return Err(stored_error(
+                        "命中超出检索单位 (Match exceeds its retrieval unit)",
+                    ));
                 }
-                .select(
-                    &index,
-                    query,
-                    &tokens,
-                    index.heap_bytes(),
-                    recall.as_ref(),
-                )?;
+                boundaries.insert(start);
+                boundaries.insert(end);
+            }
+        }
+        let boundaries = boundaries.into_iter().collect::<Vec<_>>();
+        let locations = crate::error::QuerySpan::at_many(&snapshot.content, &boundaries)?
+            .into_iter()
+            .map(|span| (span.start_byte, span))
+            .collect::<BTreeMap<_, _>>();
+        returned = returned
+            .saturating_add(512)
+            .saturating_add(snapshot.source_id.len().saturating_mul(6))
+            .saturating_add(snapshot.source_revision.len().saturating_mul(6));
+        budget(
+            "document_return_bytes",
+            returned,
+            query.limits.max_return_bytes,
+        )?;
+        let mut hits = Vec::new();
+        for SelectedHit {
+            id,
+            score,
+            matches: pending,
+            scores,
+        } in row.hits
+        {
+            crate::request::check_current()?;
+            let (key, kind, start, end) = if id == snapshot.document_id {
+                (None, "document", 0, snapshot.content.len())
+            } else {
+                let block = by_node
+                    .get(&id)
+                    .ok_or_else(|| stored_error("候选片段缺失 (Candidate fragment is missing)"))?;
                 (
-                    selection,
-                    index.documents.len(),
-                    index.text(query.level).document_count(),
-                    filters::field_corpora(&index, query),
+                    Some(block.key.as_str()),
+                    block.kind.as_str(),
+                    block.start_byte,
+                    block.end_byte,
                 )
             };
-            let SearchSelection {
-                rows: selected,
-                matched,
-                work,
-                mut cost,
-                retrieval,
-            } = selection;
-            let mut groups = Vec::new();
-            let mut returned = 256usize
-                .saturating_add(crate::storage::payload_store::serialized_json_len(
-                    &field_corpora,
-                )?)
-                .saturating_add(crate::storage::payload_store::serialized_json_len(
-                    &retrieval,
-                )?);
+            returned = returned
+                .saturating_add(crate::storage::payload_store::serialized_json_len(&scores)?)
+                .saturating_add(evidence_charge(&snapshot, start, end)?)
+                .saturating_add(key.map_or(0, str::len).saturating_mul(6))
+                .saturating_add(kind.len().saturating_mul(6));
             budget(
                 "document_return_bytes",
                 returned,
                 query.limits.max_return_bytes,
             )?;
-            for row in selected {
+            reserve(
+                mt,
+                memory_limit,
+                &mut workspace,
+                base.saturating_add(returned.saturating_mul(4)),
+            )?;
+            let mut matches = Vec::new();
+            for mut found in pending {
                 crate::request::check_current()?;
-                let raw = mt
-                    .get_payload_raw(row.document_id)
-                    .ok_or(TriviumError::NodeNotFound(row.document_id))?;
-                let base = work
-                    .saturating_add(returned.saturating_mul(8))
-                    .saturating_add(raw.len().saturating_mul(32));
-                let mut read = ReadBudget {
-                    cost: &mut cost,
-                    limits: &query.limits,
-                    workspace: &mut workspace,
-                    base,
-                    memory_limit: self.memory_limit,
-                };
-                let snapshot = read_snapshot_checked(&mt, row.document_id, Some(&mut read))?
-                    .ok_or(TriviumError::NodeNotFound(row.document_id))?;
-                let mut by_node = BTreeMap::new();
-                for block in &snapshot.blocks {
-                    if let Some(id) = &block.node_id {
-                        by_node.insert(node_id(id, "document.blocks.node_id")?, block);
-                    }
+                let first = start
+                    .checked_add(found.start)
+                    .ok_or_else(|| stored_error("命中范围溢出 (Match range overflow)"))?;
+                let last = start
+                    .checked_add(found.end)
+                    .ok_or_else(|| stored_error("命中范围溢出 (Match range overflow)"))?;
+                if last > end {
+                    return Err(stored_error(
+                        "命中超出检索单位 (Match exceeds its retrieval unit)",
+                    ));
                 }
-                let mut boundaries = BTreeSet::new();
-                for hit in &row.hits {
-                    let (first, last) = if hit.id == snapshot.document_id {
-                        (0, snapshot.content.len())
-                    } else {
-                        let block = by_node.get(&hit.id).ok_or_else(|| {
-                            stored_error("候选片段缺失 (Candidate fragment is missing)")
-                        })?;
-                        (block.start_byte, block.end_byte)
-                    };
-                    boundaries.insert(first);
-                    boundaries.insert(last);
-                    for found in &hit.matches {
-                        let start = first
-                            .checked_add(found.start)
-                            .ok_or_else(|| stored_error("命中范围溢出 (Match range overflow)"))?;
-                        let end = first
-                            .checked_add(found.end)
-                            .ok_or_else(|| stored_error("命中范围溢出 (Match range overflow)"))?;
-                        if end > last {
-                            return Err(stored_error(
-                                "命中超出检索单位 (Match exceeds its retrieval unit)",
-                            ));
-                        }
-                        boundaries.insert(start);
-                        boundaries.insert(end);
-                    }
+                for term in &mut found.terms {
+                    term.start_byte = start
+                        .checked_add(term.start_byte)
+                        .ok_or_else(|| stored_error("词项范围溢出 (Token range overflow)"))?;
+                    term.end_byte = start
+                        .checked_add(term.end_byte)
+                        .ok_or_else(|| stored_error("词项范围溢出 (Token range overflow)"))?;
+                    returned = returned
+                        .saturating_add(crate::storage::payload_store::serialized_json_len(term)?)
+                        .saturating_add(1);
                 }
-                let boundaries = boundaries.into_iter().collect::<Vec<_>>();
-                let locations = crate::error::QuerySpan::at_many(&snapshot.content, &boundaries)?
-                    .into_iter()
-                    .map(|span| (span.start_byte, span))
-                    .collect::<BTreeMap<_, _>>();
-                returned = returned
-                    .saturating_add(512)
-                    .saturating_add(snapshot.source_id.len().saturating_mul(6))
-                    .saturating_add(snapshot.source_revision.len().saturating_mul(6));
+                returned = returned.saturating_add(evidence_charge(&snapshot, first, last)?);
                 budget(
                     "document_return_bytes",
                     returned,
                     query.limits.max_return_bytes,
                 )?;
-                let mut hits = Vec::new();
-                for SelectedHit {
-                    id,
-                    score,
-                    matches: pending,
-                    scores,
-                } in row.hits
-                {
-                    crate::request::check_current()?;
-                    let (key, kind, start, end) = if id == snapshot.document_id {
-                        (None, "document", 0, snapshot.content.len())
-                    } else {
-                        let block = by_node.get(&id).ok_or_else(|| {
-                            stored_error("候选片段缺失 (Candidate fragment is missing)")
-                        })?;
-                        (
-                            Some(block.key.as_str()),
-                            block.kind.as_str(),
-                            block.start_byte,
-                            block.end_byte,
-                        )
-                    };
-                    returned = returned
-                        .saturating_add(crate::storage::payload_store::serialized_json_len(
-                            &scores,
-                        )?)
-                        .saturating_add(evidence_charge(&snapshot, start, end)?)
-                        .saturating_add(key.map_or(0, str::len).saturating_mul(6))
-                        .saturating_add(kind.len().saturating_mul(6));
-                    budget(
-                        "document_return_bytes",
-                        returned,
-                        query.limits.max_return_bytes,
-                    )?;
-                    reserve(
-                        &mt,
-                        self.memory_limit,
-                        &mut workspace,
-                        base.saturating_add(returned.saturating_mul(4)),
-                    )?;
-                    let mut matches = Vec::new();
-                    for mut found in pending {
-                        crate::request::check_current()?;
-                        let first = start
-                            .checked_add(found.start)
-                            .ok_or_else(|| stored_error("命中范围溢出 (Match range overflow)"))?;
-                        let last = start
-                            .checked_add(found.end)
-                            .ok_or_else(|| stored_error("命中范围溢出 (Match range overflow)"))?;
-                        if last > end {
-                            return Err(stored_error(
-                                "命中超出检索单位 (Match exceeds its retrieval unit)",
-                            ));
-                        }
-                        for term in &mut found.terms {
-                            term.start_byte =
-                                start.checked_add(term.start_byte).ok_or_else(|| {
-                                    stored_error("词项范围溢出 (Token range overflow)")
-                                })?;
-                            term.end_byte = start.checked_add(term.end_byte).ok_or_else(|| {
-                                stored_error("词项范围溢出 (Token range overflow)")
-                            })?;
-                            returned = returned
-                                .saturating_add(crate::storage::payload_store::serialized_json_len(
-                                    term,
-                                )?)
-                                .saturating_add(1);
-                        }
-                        returned =
-                            returned.saturating_add(evidence_charge(&snapshot, first, last)?);
-                        budget(
-                            "document_return_bytes",
-                            returned,
-                            query.limits.max_return_bytes,
-                        )?;
-                        reserve(
-                            &mt,
-                            self.memory_limit,
-                            &mut workspace,
-                            base.saturating_add(returned.saturating_mul(4)),
-                        )?;
-                        matches.push(DocumentTextMatch {
-                            evidence: evidence_at(&snapshot, first, last, Some(&locations))?,
-                            terms: found.terms,
-                        });
-                    }
-                    hits.push(DocumentMatch {
-                        node_id: id,
-                        block_key: key.map(str::to_owned),
-                        kind: kind.to_owned(),
-                        score,
-                        evidence: evidence_at(&snapshot, start, end, Some(&locations))?,
-                        matches,
-                        scores,
-                    });
-                }
-                groups.push(DocumentSearchGroup {
-                    document_id: row.document_id,
-                    revision: snapshot.revision,
-                    source_id: snapshot.source_id,
-                    source_revision: snapshot.source_revision,
-                    score: row.score,
-                    hits,
+                reserve(
+                    mt,
+                    memory_limit,
+                    &mut workspace,
+                    base.saturating_add(returned.saturating_mul(4)),
+                )?;
+                matches.push(DocumentTextMatch {
+                    evidence: evidence_at(&snapshot, first, last, Some(&locations))?,
+                    terms: found.terms,
                 });
             }
-            crate::request::check_current()?;
-            Ok(DocumentSearchResult {
-                analyzer_id: TEXT_ANALYZER_ID.into(),
-                level: query.level,
-                corpus_documents: documents,
-                corpus_units: units,
-                matched_units: matched,
-                groups,
-                field_corpora,
-                retrieval,
-            })
-        })?
+            hits.push(DocumentMatch {
+                node_id: id,
+                block_key: key.map(str::to_owned),
+                kind: kind.to_owned(),
+                score,
+                evidence: evidence_at(&snapshot, start, end, Some(&locations))?,
+                matches,
+                scores,
+            });
+        }
+        groups.push(DocumentSearchGroup {
+            document_id: row.document_id,
+            revision: snapshot.revision,
+            source_id: snapshot.source_id,
+            source_revision: snapshot.source_revision,
+            score: row.score,
+            hits,
+        });
     }
+    crate::request::check_current()?;
+    Ok(DocumentSearchResult {
+        analyzer_id: TEXT_ANALYZER_ID.into(),
+        level: query.level,
+        corpus_documents: documents,
+        corpus_units: units,
+        matched_units: matched,
+        groups,
+        field_corpora,
+        retrieval,
+    })
 }

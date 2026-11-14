@@ -108,6 +108,48 @@ pub struct NamedGraphScope {
     pub expected_revisions: BTreeMap<String, String>,
 }
 
+impl NamedGraphScope {
+    pub(crate) fn selected<'a>(
+        &'a self,
+        limits: &NamedGraphLimits,
+    ) -> Result<std::collections::BTreeSet<&'a str>> {
+        bound(
+            "named_graph_count",
+            self.graph_ids
+                .len()
+                .saturating_add(usize::from(self.include_default)),
+            limits.max_graphs,
+        )?;
+        let mut selected = std::collections::BTreeSet::new();
+        for id in &self.graph_ids {
+            validate_id(id)?;
+            if !selected.insert(id.as_str()) {
+                return Err(invalid(
+                    "scope.graph_ids",
+                    "图作用域包含重复身份 (Graph scope contains duplicate identities)",
+                ));
+            }
+        }
+        if selected.is_empty() && !self.include_default {
+            return Err(invalid(
+                "scope",
+                "查询要求显式选择图 (Query requires an explicit graph selection)",
+            ));
+        }
+        if self
+            .expected_revisions
+            .keys()
+            .any(|id| !selected.contains(id.as_str()))
+        {
+            return Err(invalid(
+                "scope.expected_revisions",
+                "预期修订必须对应所选图 (Expected revisions must refer to selected graphs)",
+            ));
+        }
+        Ok(selected)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScopedGraphEdge {
     pub graph_id: Option<String>,

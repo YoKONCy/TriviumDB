@@ -1,11 +1,12 @@
 //! 图谱路径算法模块
 //!
 //! 提供 BFS 最短路径、可变长路径遍历、全路径枚举等图查询算法。
-//! 所有算法接收 `&MemTable<T>` 只读引用，不修改状态。
+//! 所有算法接收 `&impl GraphRead<T>` 只读引用，不修改状态。
 
 use crate::VectorType;
 use crate::error::Result;
 use crate::graph::budget::{BudgetDimension, TraversalBudget, TraversalMetrics, exhausted};
+use crate::graph::view::GraphRead;
 use crate::node::NodeId;
 use crate::storage::memtable::MemTable;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -23,6 +24,16 @@ pub struct ShortestPathOutput {
 
 pub fn shortest_path_bidirectional<T: VectorType>(
     mt: &MemTable<T>,
+    src: NodeId,
+    dst: NodeId,
+    label_filter: Option<&str>,
+    budget: &TraversalBudget,
+) -> Result<ShortestPathOutput> {
+    shortest_path_bidirectional_view(mt, src, dst, label_filter, budget)
+}
+
+pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
     src: NodeId,
     dst: NodeId,
     label_filter: Option<&str>,
@@ -216,6 +227,16 @@ pub fn shortest_path<T: VectorType>(
     max_depth: usize,
     label_filter: Option<&str>,
 ) -> Option<Path> {
+    shortest_path_view(mt, src, dst, max_depth, label_filter)
+}
+
+pub(crate) fn shortest_path_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
+    src: NodeId,
+    dst: NodeId,
+    max_depth: usize,
+    label_filter: Option<&str>,
+) -> Option<Path> {
     if src == dst {
         return Some(vec![src]);
     }
@@ -279,6 +300,17 @@ pub fn variable_length_paths<T: VectorType>(
     label_filter: Option<&str>,
     limit: usize,
 ) -> Vec<(NodeId, Path)> {
+    variable_length_paths_view(mt, src, min_depth, max_depth, label_filter, limit)
+}
+
+pub(crate) fn variable_length_paths_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
+    src: NodeId,
+    min_depth: usize,
+    max_depth: usize,
+    label_filter: Option<&str>,
+    limit: usize,
+) -> Vec<(NodeId, Path)> {
     let mut results = Vec::new();
     let mut visited = HashSet::new();
     visited.insert(src);
@@ -299,7 +331,7 @@ pub fn variable_length_paths<T: VectorType>(
 }
 
 fn dfs_variable_length<T: VectorType>(
-    mt: &MemTable<T>,
+    mt: &impl GraphRead<T>,
     current: NodeId,
     path: &Vec<NodeId>,
     min_depth: usize,
@@ -396,6 +428,16 @@ pub fn bounded_all_paths<T: VectorType>(
     config: &BoundedPathConfig,
     budget: &TraversalBudget,
 ) -> Result<BoundedPathsOutput> {
+    bounded_all_paths_view(mt, src, dst, config, budget)
+}
+
+pub(crate) fn bounded_all_paths_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
+    src: NodeId,
+    dst: NodeId,
+    config: &BoundedPathConfig,
+    budget: &TraversalBudget,
+) -> Result<BoundedPathsOutput> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
     budget.validate()?;
@@ -446,7 +488,7 @@ struct BoundedPathState {
 }
 
 fn bounded_path_dfs<T: VectorType>(
-    mt: &MemTable<T>,
+    mt: &impl GraphRead<T>,
     current: NodeId,
     dst: NodeId,
     config: &BoundedPathConfig,
@@ -550,6 +592,17 @@ pub fn all_paths<T: VectorType>(
     label_filter: Option<&str>,
     limit: usize,
 ) -> Vec<Path> {
+    all_paths_view(mt, src, dst, max_depth, label_filter, limit)
+}
+
+pub(crate) fn all_paths_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
+    src: NodeId,
+    dst: NodeId,
+    max_depth: usize,
+    label_filter: Option<&str>,
+    limit: usize,
+) -> Vec<Path> {
     let mut results = Vec::new();
     let mut visited = HashSet::new();
     visited.insert(src);
@@ -570,7 +623,7 @@ pub fn all_paths<T: VectorType>(
 }
 
 fn dfs_all_paths<T: VectorType>(
-    mt: &MemTable<T>,
+    mt: &impl GraphRead<T>,
     current: NodeId,
     dst: NodeId,
     path: &Vec<NodeId>,
@@ -645,6 +698,15 @@ fn dfs_all_paths<T: VectorType>(
 /// 用于影响力范围评估、事件扩散分析等场景。
 pub fn k_hop_neighbors<T: VectorType>(
     mt: &MemTable<T>,
+    src: NodeId,
+    k: usize,
+    label_filter: Option<&str>,
+) -> HashMap<NodeId, usize> {
+    k_hop_neighbors_view(mt, src, k, label_filter)
+}
+
+pub(crate) fn k_hop_neighbors_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
     src: NodeId,
     k: usize,
     label_filter: Option<&str>,

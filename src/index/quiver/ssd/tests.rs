@@ -8,6 +8,310 @@ const SOURCE: [u8; 32] = [0x31; 32];
 #[path = "runtime_tests.rs"]
 mod runtime_tests;
 
+#[test]
+fn database_routing_borrow_fits_a_fixed_open_budget_and_keeps_row_leases_independent() {
+    for encoding in [
+        RerankEncoding::Int8,
+        RerankEncoding::CenteredInt8,
+        RerankEncoding::CenteredInt4,
+    ] {
+        let directory = TestDir::new("quiver-shared-routing");
+        let path = directory.0.join("sample.qssd");
+        let runtime = runtime();
+        let dimension = 3072;
+        let rows = 128;
+        let vectors = (0..rows)
+            .map(|row| {
+                let mut vector = vec![0.; dimension];
+                vector[dimension - 1] = match row % 4 {
+                    0 => 1.,
+                    1 => -1.,
+                    _ => 0.,
+                };
+                vector
+            })
+            .collect::<Vec<_>>();
+        let mut index = QuIVer::new(
+            dimension,
+            &super::super::QuIVerConfig {
+                m: 2,
+                ef_construction: 16,
+                alpha: 1.2,
+            },
+        );
+        index.batch_build(
+            &vectors.iter().flatten().copied().collect::<Vec<_>>(),
+            &(1..=rows as u64).collect::<Vec<_>>(),
+            &(0..rows).collect::<Vec<_>>(),
+        );
+        let metadata = SsdQuiver::publish(
+            &index,
+            &path,
+            SOURCE,
+            SsdOptions {
+                encoding,
+                ..Default::default()
+            },
+            &runtime,
+            |slot, output| {
+                output.copy_from_slice(&vectors[slot]);
+                Ok(())
+            },
+        )
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let binding = (
+            metadata.hot_bytes,
+            u32::from_le_bytes(bytes[104..108].try_into().unwrap()),
+        );
+        // 128 KiB可容纳固定校验工作区和3072维中心，完整热区超过这个宿主额度。
+        let options = SsdOptions {
+            memory_limit_bytes: 128 * 1024,
+            ..Default::default()
+        };
+        assert!(metadata.hot_bytes as usize > options.memory_limit_bytes);
+        assert_eq!(
+            SsdQuiver::open(&path, SOURCE, options, runtime.clone())
+                .err()
+                .unwrap()
+                .details()["resource"],
+            "quiver_ssd_memory_bytes"
+        );
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+        let mut reader =
+            SsdQuiver::open_bound(&path, SOURCE, options, runtime.clone(), binding, &index)
+                .unwrap();
+        assert!(reader.stats().routing_shared);
+        assert!(reader.stats().reserved_hot_bytes < 8 * 1024);
+        let baseline = reader.stats().reserved_bytes;
+        // 查询工作区仍独立准入，扩大宿主额度后可完整重试。
+        let config = QuIVerSearchConfig {
+            top_k: rows,
+            ef_search: rows,
+            rerank_limit: Some(rows),
+        };
+        assert_eq!(
+            reader
+                .search_bound(&vectors[0], &config, &|_| true, &index)
+                .unwrap_err()
+                .details()["resource"],
+            "quiver_ssd_memory_bytes"
+        );
+        assert_eq!(reader.stats().reserved_bytes, baseline);
+        reader.set_database_capacity(0);
+        let hits = reader
+            .search_bound(&vectors[0], &config, &|_| true, &index)
+            .unwrap();
+        let mut expected = (1..=rows as u64)
+            .map(|id| {
+                let score = match (id - 1) % 4 {
+                    0 => 1f32,
+                    1 => -1.,
+                    _ => 0.,
+                };
+                (id, score)
+            })
+            .collect::<Vec<_>>();
+        expected.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        assert_eq!(hits, expected);
+        let route = reader.routing(Some(&index)).unwrap();
+        let held = reader.load_record_routed(0, route).unwrap();
+        let query =
+            RerankQuery::new(&vectors[0], QueryPrecision::Fp32, &held.center.values).unwrap();
+        reader.close();
+        drop(index);
+        std::fs::rename(&path, directory.0.join("moved.qssd")).unwrap();
+        assert_eq!(held.score_prepared(&query).unwrap(), 1.);
+        drop(held);
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+    }
+}
+
+#[test]
+fn shared_routing_open_still_rejects_corrupt_hot_bytes() {
+    let directory = TestDir::new("quiver-shared-corruption");
+    let path = directory.0.join("sample.qssd");
+    let runtime = runtime();
+    let (index, vectors) = fixture(129);
+    let metadata = publish(&path, &index, &vectors, SOURCE, &runtime);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let binding = (
+        metadata.hot_bytes,
+        u32::from_le_bytes(bytes[104..108].try_into().unwrap()),
+    );
+    bytes[160 + 16] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(
+        SsdQuiver::open_bound(
+            &path,
+            SOURCE,
+            SsdOptions::default(),
+            runtime.clone(),
+            binding,
+            &index
+        )
+        .err()
+        .unwrap()
+        .code(),
+        "TDB_CORRUPTED_FILE"
+    );
+    assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+    std::fs::rename(&path, directory.0.join("rejected.qssd")).unwrap();
+}
+
+#[test]
+fn compressed_codecs_batch_all_candidates_and_keep_center_leases_across_close() {
+    for dimension in [1, 129, 768, 769, 3072] {
+        for encoding in [RerankEncoding::CenteredInt8, RerankEncoding::CenteredInt4] {
+            let directory = TestDir::new("quiver-centered");
+            let path = directory.0.join("sample.qssd");
+            let runtime = runtime();
+            let (index, vectors) = fixture(dimension);
+            SsdQuiver::publish(
+                &index,
+                &path,
+                SOURCE,
+                SsdOptions {
+                    encoding,
+                    ..Default::default()
+                },
+                &runtime,
+                |slot, output| {
+                    output.copy_from_slice(&vectors[slot]);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let mut reader =
+                SsdQuiver::open(&path, SOURCE, SsdOptions::default(), runtime.clone()).unwrap();
+            let query = &vectors[1];
+            for precision in [
+                QueryPrecision::Fp32,
+                QueryPrecision::Int8,
+                QueryPrecision::Int4,
+            ] {
+                reader
+                    .configure(SsdRuntimeOptions {
+                        encoding,
+                        query_precision: precision,
+                        cache_bytes: 0,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let before = reader.stats();
+                let hits = reader.search(query, &config()).unwrap();
+                assert_eq!(
+                    hits.iter().map(|x| x.0).collect::<Vec<_>>(),
+                    [9, 9007199254740993, 40, 77]
+                );
+                for (hit, expected) in hits.iter().zip([1., 1., 0., -1.]) {
+                    assert!((hit.1 - expected).abs() < 1e-6);
+                }
+                let after = reader.stats();
+                assert_eq!(after.cold_read_calls - before.cold_read_calls, 4);
+                // 连续四行被完整预取并合并成一个缓冲位置读取，CPU派发能力独立于该契约。
+                assert_eq!(after.physical_read_calls - before.physical_read_calls, 1);
+            }
+            let held = reader.row(9).unwrap();
+            let prepared =
+                RerankQuery::new(query, QueryPrecision::Fp32, &held.center.values).unwrap();
+            reader.close();
+            std::fs::rename(&path, directory.0.join("moved.qssd")).unwrap();
+            assert!(reader.stats().reserved_bytes >= dimension * 4 + 512);
+            assert!((held.score_prepared(&prepared).unwrap() - 1.).abs() < 1e-6);
+            drop(held);
+            assert_eq!(reader.stats().reserved_bytes, 0);
+        }
+    }
+}
+
+#[test]
+fn centered_artifact_checks_shared_center_before_query_and_rejects_unknown_codecs() {
+    let directory = TestDir::new("quiver-center-crc");
+    let path = directory.0.join("sample.qssd");
+    let runtime = runtime();
+    let (index, vectors) = fixture(129);
+    let metadata = SsdQuiver::publish(
+        &index,
+        &path,
+        SOURCE,
+        SsdOptions {
+            encoding: RerankEncoding::CenteredInt4,
+            ..Default::default()
+        },
+        &runtime,
+        |slot, output| {
+            output.copy_from_slice(&vectors[slot]);
+            Ok(())
+        },
+    )
+    .unwrap();
+    let original = std::fs::read(&path).unwrap();
+    for offset in [
+        160 + metadata.hot_bytes as usize,
+        160 + metadata.hot_bytes as usize + 515,
+    ] {
+        let mut damaged = original.clone();
+        damaged[offset] ^= 1;
+        std::fs::write(&path, damaged).unwrap();
+        assert!(matches!(
+            SsdQuiver::open(&path, SOURCE, SsdOptions::default(), runtime.clone()),
+            Err(TriviumError::CorruptedFile(_))
+        ));
+    }
+    std::fs::write(&path, &original).unwrap();
+    let mut unknown = original.clone();
+    unknown[124..128].copy_from_slice(&99u32.to_le_bytes());
+    let layout_crc = crc32fast::hash(&unknown[112..148]);
+    unknown[148..152].copy_from_slice(&layout_crc.to_le_bytes());
+    let header_crc = crc32fast::hash(&unknown[..156]);
+    unknown[156..160].copy_from_slice(&header_crc.to_le_bytes());
+    std::fs::write(&path, unknown).unwrap();
+    assert!(matches!(
+        SsdQuiver::open(&path, SOURCE, SsdOptions::default(), runtime.clone()),
+        Err(TriviumError::CorruptedFile(_))
+    ));
+    std::fs::write(&path, &original).unwrap();
+    let mut reader = SsdQuiver::open(&path, SOURCE, SsdOptions::default(), runtime).unwrap();
+    assert_eq!(
+        reader.stats().metadata.encoding,
+        RerankEncoding::CenteredInt4
+    );
+    reader.close();
+}
+
+#[test]
+fn centered_publication_checks_foreign_targets_before_calibration_reads() {
+    let directory = TestDir::new("ssd_center_target");
+    let path = directory.0.join("foreign.qssd");
+    let original = b"fixture-foreign-content";
+    std::fs::write(&path, original).unwrap();
+    let (index, _) = fixture(129);
+    let runtime = runtime();
+    for encoding in [RerankEncoding::CenteredInt8, RerankEncoding::CenteredInt4] {
+        let mut calls = 0;
+        let error = SsdQuiver::publish(
+            &index,
+            &path,
+            SOURCE,
+            SsdOptions {
+                encoding,
+                ..Default::default()
+            },
+            &runtime,
+            |_, _| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "TDB_INVALID_INPUT");
+        assert_eq!(calls, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+    }
+}
+
 fn runtime() -> ResourceRuntime {
     ResourceRuntime::new(crate::ResourceLimits::default()).unwrap()
 }
@@ -402,6 +706,7 @@ fn independent_v1_fixture_decodes_complete_metadata_and_content() {
     assert_eq!(
         reader.metadata,
         SsdMetadata {
+            encoding: RerankEncoding::Int8,
             source: SOURCE,
             generation: [
                 0, 17, 34, 51, 68, 85, 70, 119, 136, 153, 170, 187, 204, 221, 238, 255
@@ -426,6 +731,68 @@ fn independent_v1_fixture_decodes_complete_metadata_and_content() {
     assert_eq!(reader.row(8).err().unwrap().code(), "TDB_NODE_NOT_FOUND");
     drop(reader);
     assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+}
+
+#[test]
+fn independent_v2_centered_fixtures_decode_and_check_every_byte() {
+    // 在冻结v1热图和身份上手工填写v2字段，单位向量减中心0.25后残差为常量0.75。
+    for (codec, encoding) in [
+        (2u32, RerankEncoding::CenteredInt8),
+        (3, RerankEncoding::CenteredInt4),
+    ] {
+        let directory = TestDir::new("ssd_v2_oracle");
+        let path = directory.0.join("unit.qssd");
+        let mut bytes = GOLDEN[..358].to_vec();
+        bytes.extend_from_slice(&0.25f32.to_le_bytes());
+        let mut record = GOLDEN[358..].to_vec();
+        record[37..41].copy_from_slice(&0.75f32.to_le_bytes());
+        let row_crc = crc32fast::hash(&record[32..45]);
+        record[45..49].copy_from_slice(&row_crc.to_le_bytes());
+        let mut checksum = crc32fast::Hasher::new();
+        checksum.update(&record[..28]);
+        checksum.update(&record[32..]);
+        record[28..32].copy_from_slice(&checksum.finalize().to_le_bytes());
+        bytes.extend_from_slice(&record);
+        bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
+        bytes[80..88].copy_from_slice(&362u64.to_le_bytes());
+        bytes[108..112].copy_from_slice(&crc32fast::hash(&0.25f32.to_le_bytes()).to_le_bytes());
+        bytes[124..128].copy_from_slice(&codec.to_le_bytes());
+        bytes[152..156].copy_from_slice(&4u32.to_le_bytes());
+        let layout_crc = crc32fast::hash(&bytes[112..148]);
+        bytes[148..152].copy_from_slice(&layout_crc.to_le_bytes());
+        let header_crc = crc32fast::hash(&bytes[..156]);
+        bytes[156..160].copy_from_slice(&header_crc.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let runtime = runtime();
+        let mut reader =
+            SsdQuiver::open(&path, SOURCE, SsdOptions::default(), runtime.clone()).unwrap();
+        assert_eq!(reader.stats().metadata.encoding, encoding);
+        assert_eq!(reader.search(&[1.], &config()).unwrap(), [(7, 1.)]);
+        let mut decoded = [0.];
+        reader.row(7).unwrap().decode_into(&mut decoded).unwrap();
+        assert_eq!(decoded, [1.]);
+        reader.close();
+        for offset in 0..bytes.len() {
+            std::fs::write(&path, &bytes[..offset]).unwrap();
+            assert!(
+                SsdQuiver::open(&path, SOURCE, SsdOptions::default(), runtime.clone()).is_err()
+            );
+            let mut damaged = bytes.clone();
+            damaged[offset] ^= 1;
+            std::fs::write(&path, damaged).unwrap();
+            if offset < 362 {
+                assert!(
+                    SsdQuiver::open(&path, SOURCE, SsdOptions::default(), runtime.clone()).is_err(),
+                    "头部、热图或中心损坏偏移{offset}"
+                );
+            } else {
+                let reader =
+                    SsdQuiver::open(&path, SOURCE, SsdOptions::default(), runtime.clone()).unwrap();
+                assert_eq!(reader.row(7).err().unwrap().code(), "TDB_CORRUPTED_FILE");
+            }
+        }
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+    }
 }
 
 #[test]
@@ -765,6 +1132,73 @@ fn tombstones_never_read_a_reused_slot_or_enter_results() {
 mod hooks {
     use super::*;
     use crate::test_hooks::{ConcurrencyPoint, IoPoint};
+
+    #[test]
+    fn cancelled_shared_open_releases_fixed_workspace_and_can_retry() {
+        let directory = TestDir::new("ssd-cancel-shared-open");
+        let path = directory.0.join("sample.qssd");
+        let runtime = runtime();
+        let (index, vectors) = fixture(129);
+        let index = Arc::new(index);
+        let metadata = publish(&path, &index, &vectors, SOURCE, &runtime);
+        let bytes = std::fs::read(&path).unwrap();
+        let binding = (
+            metadata.hot_bytes,
+            u32::from_le_bytes(bytes[104..108].try_into().unwrap()),
+        );
+        let context =
+            crate::request::RequestContext::new("ssd-shared-open", Default::default(), false)
+                .unwrap();
+        let gate = crate::test_hooks::pause_at_path(
+            ConcurrencyPoint::QuiverColdAfterHotRead,
+            path.to_str().unwrap(),
+        );
+        let worker_path = path.clone();
+        let worker_runtime = runtime.clone();
+        let worker_index = index.clone();
+        let worker_context = context.clone();
+        let worker = std::thread::spawn(move || {
+            worker_context.run(|| {
+                SsdQuiver::open_bound(
+                    &worker_path,
+                    SOURCE,
+                    SsdOptions::default(),
+                    worker_runtime,
+                    binding,
+                    &worker_index,
+                )
+            })
+        });
+        gate.wait_until_arrived();
+        assert!(runtime.stats().reserved_workspace_bytes > 0);
+        context.cancel();
+        drop(gate);
+        assert_eq!(
+            worker.join().unwrap().err().unwrap().code(),
+            "TDB_QUERY_CANCELLED"
+        );
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+        assert_eq!(runtime.stats().active_tasks, 0);
+        let moved = directory.0.join("released.qssd");
+        std::fs::rename(&path, &moved).unwrap();
+        let mut reader = SsdQuiver::open_bound(
+            &moved,
+            SOURCE,
+            SsdOptions::default(),
+            runtime.clone(),
+            binding,
+            &index,
+        )
+        .unwrap();
+        assert_eq!(
+            reader
+                .search_bound(&vectors[1], &config(), &|_| true, &index)
+                .unwrap(),
+            expected()
+        );
+        reader.close();
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+    }
 
     #[test]
     fn cancelled_open_releases_the_loaded_hot_buffer_and_file() {

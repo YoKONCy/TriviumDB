@@ -6,12 +6,16 @@ import triviumdb
 
 
 def run_documents(root: str) -> None:
+    from tql_documents_graphs import run_tql_documents_graphs
+    run_tql_documents_graphs(root)
     from document_ingestion import run_ingestion
     run_ingestion(root)
     run_retrieval(root)
     run_positions(root)
     run_fields(root)
     run_vectors(root)
+    from document_compressed import run_compressed
+    run_compressed(root)
     fixture = json.loads((Path(__file__).parent / "../contracts/document_cases.json").read_text(encoding="utf-8"))
     for dtype in ("f32", "f16", "u64"):
         path = str(Path(root) / f"documents-{dtype}.tdb")
@@ -236,7 +240,7 @@ def run_vectors(root: str) -> None:
             assert [group["document_id"] for group in result["groups"]] == case["documents"], case["name"]
             assert [[hit["node_id"] for hit in group["hits"]] for group in result["groups"]] == case["hits"], case["name"]
             assert result["matched_units"] == sum(len(hits) for hits in case["hits"])
-            assert result["retrieval"] == {"hybrid": case["operation"] == "search_hybrid", "strategy": "exact", "approximate": False, "eligible_units": case["eligible"], "vector_candidates": case.get("vector_candidates", case["eligible"]), "vector_scores": case["eligible"], "ann_visits": 0, "ann_rounds": 0, "stop": "exact_complete"}
+            assert result["retrieval"] == {"hybrid": case["operation"] == "search_hybrid", "strategy": "exact", "approximate": False, "rerank": "original", "compression": None, "eligible_units": case["eligible"], "vector_candidates": case.get("vector_candidates", case["eligible"]), "vector_scores": case["eligible"], "ann_visits": 0, "ann_rounds": 0, "stop": "exact_complete"}
             for group in result["groups"]:
                 snapshot = next(row for row in snapshots if row["document_id"] == group["document_id"])
                 document = next(row for row in source["documents"] if row["root"]["id"] == group["document_id"])

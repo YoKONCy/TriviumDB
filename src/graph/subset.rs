@@ -4,6 +4,7 @@
 
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
+use crate::graph::view::GraphRead;
 use crate::node::NodeId;
 use crate::storage::memtable::MemTable;
 use serde::Serialize;
@@ -53,6 +54,16 @@ pub struct SubsetPageRankResult {
 
 pub fn subset_pagerank<T: VectorType>(
     mt: &MemTable<T>,
+    nodes: &BTreeSet<NodeId>,
+    config: SubsetPageRankConfig,
+    label_filter: Option<&str>,
+    max_examined_edges: usize,
+) -> Result<SubsetPageRankResult> {
+    subset_pagerank_view(mt, nodes, config, label_filter, max_examined_edges)
+}
+
+pub(crate) fn subset_pagerank_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
     nodes: &BTreeSet<NodeId>,
     config: SubsetPageRankConfig,
     label_filter: Option<&str>,
@@ -165,6 +176,16 @@ pub fn subset_pagerank<T: VectorType>(
 
 pub fn subset_pagerank_parallel<T: VectorType>(
     mt: &MemTable<T>,
+    nodes: &BTreeSet<NodeId>,
+    config: SubsetPageRankConfig,
+    label_filter: Option<&str>,
+    max_examined_edges: usize,
+) -> Result<SubsetPageRankResult> {
+    subset_pagerank_parallel_view(mt, nodes, config, label_filter, max_examined_edges)
+}
+
+pub(crate) fn subset_pagerank_parallel_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
     nodes: &BTreeSet<NodeId>,
     config: SubsetPageRankConfig,
     label_filter: Option<&str>,
@@ -295,6 +316,15 @@ pub fn subset_degree_centrality<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<(Vec<SubsetDegreeCentrality>, usize)> {
+    subset_degree_centrality_view(mt, nodes, label_filter, max_examined_edges)
+}
+
+pub(crate) fn subset_degree_centrality_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
+    nodes: &BTreeSet<NodeId>,
+    label_filter: Option<&str>,
+    max_examined_edges: usize,
+) -> Result<(Vec<SubsetDegreeCentrality>, usize)> {
     let control = crate::request::control().unwrap_or_default();
     crate::graph::budget::check_control(&control)?;
     let mut in_degrees = BTreeMap::from_iter(nodes.iter().map(|&id| (id, 0usize)));
@@ -351,6 +381,15 @@ pub fn subset_degree_centrality<T: VectorType>(
 
 pub fn subset_degree_centrality_parallel<T: VectorType>(
     mt: &MemTable<T>,
+    nodes: &BTreeSet<NodeId>,
+    label_filter: Option<&str>,
+    max_examined_edges: usize,
+) -> Result<(Vec<SubsetDegreeCentrality>, usize)> {
+    subset_degree_centrality_parallel_view(mt, nodes, label_filter, max_examined_edges)
+}
+
+pub(crate) fn subset_degree_centrality_parallel_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
     nodes: &BTreeSet<NodeId>,
     label_filter: Option<&str>,
     max_examined_edges: usize,
@@ -431,6 +470,15 @@ pub fn subset_wcc<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<(Vec<Vec<NodeId>>, usize)> {
+    subset_wcc_view(mt, nodes, label_filter, max_examined_edges)
+}
+
+pub(crate) fn subset_wcc_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
+    nodes: &BTreeSet<NodeId>,
+    label_filter: Option<&str>,
+    max_examined_edges: usize,
+) -> Result<(Vec<Vec<NodeId>>, usize)> {
     let control = crate::request::control().unwrap_or_default();
     crate::graph::budget::check_control(&control)?;
     let mut adjacency = BTreeMap::from_iter(nodes.iter().map(|&id| (id, BTreeSet::new())));
@@ -485,6 +533,15 @@ pub fn subset_wcc<T: VectorType>(
 
 pub fn subset_wcc_parallel<T: VectorType>(
     mt: &MemTable<T>,
+    nodes: &BTreeSet<NodeId>,
+    label_filter: Option<&str>,
+    max_examined_edges: usize,
+) -> Result<(Vec<Vec<NodeId>>, usize)> {
+    subset_wcc_parallel_view(mt, nodes, label_filter, max_examined_edges)
+}
+
+pub(crate) fn subset_wcc_parallel_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
     nodes: &BTreeSet<NodeId>,
     label_filter: Option<&str>,
     max_examined_edges: usize,
@@ -584,6 +641,16 @@ pub struct SubsetBetweennessResult {
 
 pub fn subset_betweenness<T: VectorType>(
     mt: &MemTable<T>,
+    nodes: &BTreeSet<NodeId>,
+    label_filter: Option<&str>,
+    sample_size: Option<usize>,
+    max_examined_edges: usize,
+) -> Result<SubsetBetweennessResult> {
+    subset_betweenness_view(mt, nodes, label_filter, sample_size, max_examined_edges)
+}
+
+pub(crate) fn subset_betweenness_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
     nodes: &BTreeSet<NodeId>,
     label_filter: Option<&str>,
     sample_size: Option<usize>,
@@ -702,6 +769,16 @@ pub fn subset_betweenness<T: VectorType>(
 
 pub fn subset_betweenness_parallel<T: VectorType>(
     mt: &MemTable<T>,
+    nodes: &BTreeSet<NodeId>,
+    label_filter: Option<&str>,
+    sample_size: Option<usize>,
+    max_examined_edges: usize,
+) -> Result<SubsetBetweennessResult> {
+    subset_betweenness_parallel_view(mt, nodes, label_filter, sample_size, max_examined_edges)
+}
+
+pub(crate) fn subset_betweenness_parallel_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
     nodes: &BTreeSet<NodeId>,
     label_filter: Option<&str>,
     sample_size: Option<usize>,
@@ -846,6 +923,16 @@ pub fn deterministic_label_propagation<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
 ) -> Result<LabelPropagationResult> {
+    deterministic_label_propagation_view(mt, nodes, config, label_filter, max_examined_edges)
+}
+
+pub(crate) fn deterministic_label_propagation_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
+    nodes: &BTreeSet<NodeId>,
+    config: LabelPropagationConfig,
+    label_filter: Option<&str>,
+    max_examined_edges: usize,
+) -> Result<LabelPropagationResult> {
     let control = crate::request::control().unwrap_or_default();
     crate::graph::budget::check_control(&control)?;
     if config.max_iterations == 0 || config.min_community_size == 0 {
@@ -959,6 +1046,22 @@ pub fn deterministic_label_propagation<T: VectorType>(
 
 pub fn deterministic_label_propagation_parallel<T: VectorType>(
     mt: &MemTable<T>,
+    nodes: &BTreeSet<NodeId>,
+    config: LabelPropagationConfig,
+    label_filter: Option<&str>,
+    max_examined_edges: usize,
+) -> Result<LabelPropagationResult> {
+    deterministic_label_propagation_parallel_view(
+        mt,
+        nodes,
+        config,
+        label_filter,
+        max_examined_edges,
+    )
+}
+
+pub(crate) fn deterministic_label_propagation_parallel_view<T: VectorType>(
+    mt: &impl GraphRead<T>,
     nodes: &BTreeSet<NodeId>,
     config: LabelPropagationConfig,
     label_filter: Option<&str>,

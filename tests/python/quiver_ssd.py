@@ -62,6 +62,24 @@ def run_quiver_ssd(root: str) -> None:
         assert hot["io_alignment_bytes"] == 0
         assert request(search) == {"hits": fixture["expected_hits"]}
         assert request({"operation": "stats"})["cold_read_calls"] == hot["cold_read_calls"]
+        for encoding in fixture["encodings"]:
+            for precision in fixture["query_precisions"]:
+                for residency in ("ssd", "hot"):
+                    configured = request({"operation": "configure", "options": dict(
+                        fixture["options"], encoding=encoding, query_precision=precision,
+                        residency=residency, cache_bytes=0, use_for_ann=True)})
+                    assert configured["metadata"]["encoding"] == encoding
+                    assert configured["query_precision"] == precision
+                    assert configured["residency"] == residency
+                    assert configured["routing_shared"] is True
+                    assert request(search) == {"hits": fixture["expected_hits"]}
+        request({"operation": "configure", "options": fixture["options"]})
+        try:
+            request({"operation": "configure", "options": {"query_precision": "fp16"}})
+        except triviumdb.InvalidInputError as error:
+            assert error.code == "TDB_INVALID_INPUT"
+        else:
+            raise AssertionError("本期未开放的查询精度必须拒绝")
         for command in ({"operation": "configure", "options": {"io_depth": 0}}, {"operation": "stats", "unexpected": True}):
             try:
                 request(command)

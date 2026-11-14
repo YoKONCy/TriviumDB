@@ -1,0 +1,24 @@
+{
+  "dimension": 129,
+  "documents": [
+    {"id":"10","node_id":"11","root_direction":-1,"direction":1,"vault":"blue"},
+    {"id":"20","node_id":"21","root_direction":1,"direction":-1,"vault":"red"},
+    {"id":"30","node_id":"31","root_direction":0,"direction":0,"vault":"blue"}
+  ],
+  "encodings": ["int8", "centered_int8", "centered_int4"],
+  "precisions": ["fp32", "int8", "int4"],
+  "cases": [
+    {"operation":"search_vector","query":{},"documents":["10","30","20"],"nodes":["11","31","21"],"stop":"groups_satisfied"},
+    {"operation":"search_vector","query":{"document_filter":{"vault":"blue"},"block_filter":{"state":"ready"},"members":[{"scope":"block","field":"tags","mode":"any","values":["evidence"]}]},"documents":["10","30"],"nodes":["11","31"],"stop":"groups_satisfied"},
+    {"operation":"search_vector","query":{"kinds":["absent"]},"documents":[],"nodes":[],"stop":"index_exhausted"},
+    {"operation":"search_hybrid","query":{"text":"alpha"},"documents":["10","20","30"],"nodes":["11","21","31"],"stop":"groups_satisfied"},
+    {"operation":"search_vector","query":{"level":"document"},"documents":["20","30","10"],"nodes":["20","30","10"],"stop":"groups_satisfied"}
+  ],
+  "dense_ranks": {"11":1,"31":2,"21":3},
+  "text_ranks": {"11":1,"21":2,"31":3},
+  "signs": {"11":1,"21":-1,"31":0,"10":-1,"20":1,"30":0},
+  "positive_scores": {
+    "f32":{"fp32":0.9950371980667114,"int8":0.9948018193244934,"int4":0.9899494647979736},
+    "f16":{"fp32":0.9950395822525024,"int8":0.9948018193244934,"int4":0.9899494647979736}
+  }
+}

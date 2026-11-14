@@ -31,13 +31,13 @@ struct Hit {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Response {
-    Stats(Option<crate::index::quiver::ssd::SsdStats>),
+    Stats(Option<Box<crate::index::quiver::ssd::SsdStats>>),
     Hits { hits: Vec<Hit> },
     Collected { removed: usize },
     Closed,
 }
 
-/// 统一的INT8检索协议，NodeId以十进制字符串返回，避免JavaScript数值精度损失。
+/// 统一的压缩检索协议，NodeId以十进制字符串返回，避免JavaScript数值精度损失。
 pub fn request<T: VectorType + Serialize + DeserializeOwned>(
     db: &Database<T>,
     json: &str,
@@ -67,7 +67,9 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
     );
     let mut output_workspace = None;
     let response = match command {
-        Command::Configure { options } => Response::Stats(Some(db.configure_quiver_int8(options)?)),
+        Command::Configure { options } => {
+            Response::Stats(Some(Box::new(db.configure_quiver(options)?)))
+        }
         Command::Search {
             vector,
             top_k,
@@ -81,7 +83,7 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
                 }
             })?;
             output_workspace = Some(runtime.reserve_workspace(output_bytes)?);
-            let hits = db.search_quiver_int8(
+            let hits = db.search_quiver(
                 &vector,
                 &QuIVerSearchConfig {
                     top_k,
@@ -99,7 +101,7 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
                     .collect(),
             }
         }
-        Command::Stats {} => Response::Stats(db.quiver_int8_stats()?),
+        Command::Stats {} => Response::Stats(db.quiver_int8_stats()?.map(Box::new)),
         Command::Close {} => {
             db.close_quiver_int8()?;
             Response::Closed

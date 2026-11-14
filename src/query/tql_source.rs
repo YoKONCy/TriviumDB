@@ -81,6 +81,7 @@ impl TqlSource {
         let query = self.query();
         match selector {
             SourceSelector::Root => Some(&self.root),
+            SourceSelector::GraphScope => query.child("graph_scope", 0),
             SourceSelector::Entry => query.child("entry", 0).or_else(|| {
                 self.node(SourceSelector::Mutation)?
                     .child("mutation_source", 0)
@@ -145,6 +146,7 @@ impl<T> LocatedTql<T> {
 #[derive(Debug, Clone)]
 pub(crate) enum SourceSelector {
     Root,
+    GraphScope,
     Entry,
     Stage(usize),
     WithItem(usize, usize),

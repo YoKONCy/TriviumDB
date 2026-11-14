@@ -4,7 +4,7 @@
 //! 独占临时文件和原子替换，旧Reader继续访问原文件；打开过程只读取头和热区。
 
 use crate::error::{Result, TriviumError, WriteErrorInfo, WriteOutcome, WritePhase};
-use crate::index::quiver::cold::Int8Layout;
+use crate::index::quiver::cold::{ColdLayout, RerankEncoding};
 use crate::storage::fs::{robust_rename, sync_parent_directory};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -20,6 +20,7 @@ const VERSION: u32 = 1;
 /// 来源身份由宿主的不可变事实清单摘要提供，发布身份标识本次索引代际。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct SsdMetadata {
+    pub encoding: RerankEncoding,
     pub source: [u8; 32],
     pub generation: [u8; 16],
     pub dimension: usize,
@@ -38,35 +39,47 @@ pub(crate) struct RowIdentity {
 
 struct Header {
     metadata: SsdMetadata,
-    layout: Int8Layout,
+    layout: ColdLayout,
     hot_crc: u32,
+    center_crc: u32,
 }
 
 impl Header {
     fn cold_offset(&self) -> Result<u64> {
         (HEADER_BYTES as u64)
             .checked_add(self.metadata.hot_bytes)
+            .and_then(|offset| offset.checked_add(self.layout.center_bytes() as u64))
             .ok_or_else(|| corrupt("SSD热区长度溢出 (SSD hot section length overflow)"))
     }
 
     fn bytes(&self) -> [u8; HEADER_BYTES] {
         let mut bytes = [0u8; HEADER_BYTES];
         bytes[..8].copy_from_slice(MAGIC);
-        bytes[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        let version = if self.metadata.encoding.is_centered() {
+            2u32
+        } else {
+            VERSION
+        };
+        bytes[8..12].copy_from_slice(&version.to_le_bytes());
         bytes[12..16].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
         bytes[16..48].copy_from_slice(&self.metadata.source);
         bytes[48..64].copy_from_slice(&self.metadata.generation);
         for (offset, value) in [
             (64, HEADER_BYTES as u64),
             (72, self.metadata.hot_bytes),
-            (80, HEADER_BYTES as u64 + self.metadata.hot_bytes),
+            (
+                80,
+                HEADER_BYTES as u64 + self.metadata.hot_bytes + self.layout.center_bytes() as u64,
+            ),
             (88, self.metadata.rows as u64),
             (96, self.metadata.record_bytes as u64),
         ] {
             bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
         }
         bytes[104..108].copy_from_slice(&self.hot_crc.to_le_bytes());
+        bytes[108..112].copy_from_slice(&self.center_crc.to_le_bytes());
         bytes[112..152].copy_from_slice(&self.layout.to_header());
+        bytes[152..156].copy_from_slice(&(self.layout.center_bytes() as u32).to_le_bytes());
         let checksum = crc32fast::hash(&bytes[..156]);
         bytes[156..].copy_from_slice(&checksum.to_le_bytes());
         bytes
@@ -78,10 +91,8 @@ impl Header {
         expected_source: [u8; 32],
     ) -> Result<Self> {
         if &bytes[..8] != MAGIC
-            || word(bytes, 8) != VERSION
+            || ![VERSION, 2].contains(&word(bytes, 8))
             || word(bytes, 12) != HEADER_BYTES as u32
-            || word(bytes, 104 + 4) != 0
-            || word(bytes, 152) != 0
             || word(bytes, 156) != crc32fast::hash(&bytes[..156])
         {
             return Err(corrupt(
@@ -96,7 +107,20 @@ impl Header {
                 reason: "SSD索引来源代际不匹配 (SSD index source generation mismatch)".into(),
             });
         }
-        let layout = Int8Layout::from_header(&bytes[112..152])?;
+        let layout = ColdLayout::from_header(&bytes[112..152])?;
+        if word(bytes, 8)
+            != if layout.encoding().is_centered() {
+                2
+            } else {
+                1
+            }
+            || word(bytes, 152) as usize != layout.center_bytes()
+            || (!layout.encoding().is_centered() && word(bytes, 108) != 0)
+        {
+            return Err(corrupt(
+                "SSD中心区几何无效 (Invalid SSD center section geometry)",
+            ));
+        }
         let rows = usize::try_from(number(bytes, 88))
             .map_err(|_| corrupt("SSD行数超出平台范围 (SSD row count exceeds platform range)"))?;
         let record_bytes = layout
@@ -111,6 +135,7 @@ impl Header {
             .ok_or_else(|| corrupt("SSD冷区长度溢出 (SSD cold section length overflow)"))?;
         let header = Self {
             metadata: SsdMetadata {
+                encoding: layout.encoding(),
                 source,
                 generation,
                 dimension: layout.dimension(),
@@ -121,6 +146,7 @@ impl Header {
             },
             layout,
             hot_crc: word(bytes, 104),
+            center_crc: word(bytes, 108),
         };
         let cold_offset = header.cold_offset()?;
         if rows == 0
@@ -281,7 +307,8 @@ impl Write for HotWriter<'_> {
 pub(crate) fn publish(
     path: &Path,
     source: [u8; 32],
-    layout: Int8Layout,
+    layout: ColdLayout,
+    center: &[f32],
     rows: usize,
     write_hot: impl FnOnce(&mut dyn Write) -> Result<()>,
     mut fill: impl FnMut(usize, &mut [f32]) -> Result<RowIdentity>,
@@ -339,6 +366,12 @@ pub(crate) fn publish(
     result?;
     let hot_bytes = hot.bytes;
     let hot_crc = hot.checksum.finalize();
+    let mut center_checksum = crc32fast::Hasher::new();
+    for value in center {
+        let bytes = value.to_le_bytes();
+        center_checksum.update(&bytes);
+        writer.write_all(&bytes)?;
+    }
     for row in 0..rows {
         crate::request::check_current()?;
         vector.fill(f32::NAN);
@@ -350,7 +383,7 @@ pub(crate) fn publish(
         record[8..16].copy_from_slice(&identity.slot.to_le_bytes());
         record[16..24].copy_from_slice(&(row as u64).to_le_bytes());
         record[24..28].copy_from_slice(&u32::from(identity.deleted).to_le_bytes());
-        layout.encode(&vector, &mut record[RECORD_HEADER_BYTES..])?;
+        layout.encode(&vector, center, &mut record[RECORD_HEADER_BYTES..])?;
         let checksum = record_crc(&record);
         record[28..32].copy_from_slice(&checksum.to_le_bytes());
         #[cfg(feature = "test-hooks")]
@@ -362,6 +395,7 @@ pub(crate) fn publish(
         .ok_or_else(|| corrupt("SSD冷区长度溢出 (SSD cold section length overflow)"))?;
     let header = Header {
         metadata: SsdMetadata {
+            encoding: layout.encoding(),
             source,
             generation,
             dimension: layout.dimension(),
@@ -372,6 +406,11 @@ pub(crate) fn publish(
         },
         layout,
         hot_crc,
+        center_crc: if center.is_empty() {
+            0
+        } else {
+            center_checksum.finalize()
+        },
     };
     header
         .cold_offset()?
@@ -409,7 +448,7 @@ pub(crate) fn publish(
 }
 
 /// 只替换本格式的普通制品文件，防止错误目标路径覆盖事实文件或其他宿主数据。
-fn validate_target(path: &Path) -> Result<()> {
+pub(crate) fn validate_target(path: &Path) -> Result<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -499,8 +538,36 @@ impl ColdFile {
     pub fn metadata(&self) -> SsdMetadata {
         self.header.metadata
     }
-    pub fn layout(&self) -> Int8Layout {
+    pub fn layout(&self) -> ColdLayout {
         self.header.layout
+    }
+
+    /// 中心区长度由已校验头部限定，调用方在读取前准入驻留额度。
+    pub fn read_center(&self) -> Result<Vec<f32>> {
+        let mut bytes = zeroed(self.header.layout.center_bytes())?;
+        if bytes.is_empty() {
+            return Ok(Vec::new());
+        }
+        read_exact_at(
+            &self.file,
+            &mut bytes,
+            HEADER_BYTES as u64 + self.header.metadata.hot_bytes,
+            None,
+        )?;
+        if crc32fast::hash(&bytes) != self.header.center_crc {
+            return Err(corrupt("SSD中心CRC无效 (Invalid SSD center CRC)"));
+        }
+        let center = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect::<Vec<_>>();
+        self.header
+            .layout
+            .validate_center(&center)
+            .map_err(|_| corrupt("SSD中心无效 (Invalid SSD center)"))?;
+        Ok(center)
     }
 
     pub fn configure_io(
@@ -551,6 +618,29 @@ impl ColdFile {
         }
     }
 
+    /// 数据库已持有可信路由时流式核对绑定热区，工作区大小固定。
+    pub fn verify_hot(&self) -> Result<()> {
+        let mut buffer = zeroed(64 * 1024)?;
+        let mut checksum = crc32fast::Hasher::new();
+        let mut offset = 0u64;
+        while offset < self.header.metadata.hot_bytes {
+            crate::request::check_current()?;
+            let count = (self.header.metadata.hot_bytes - offset).min(buffer.len() as u64) as usize;
+            read_exact_at(
+                &self.file,
+                &mut buffer[..count],
+                HEADER_BYTES as u64 + offset,
+                None,
+            )?;
+            checksum.update(&buffer[..count]);
+            offset += count as u64;
+        }
+        if checksum.finalize() != self.header.hot_crc {
+            return Err(corrupt("SSD热区CRC无效 (Invalid SSD hot section CRC)"));
+        }
+        self.after_hot_read()
+    }
+
     pub fn read_hot(&self) -> Result<Vec<u8>> {
         let bytes = usize::try_from(self.header.metadata.hot_bytes)
             .map_err(|_| corrupt("SSD热区超出平台范围 (SSD hot section exceeds platform range)"))?;
@@ -560,19 +650,27 @@ impl ColdFile {
         if crc32fast::hash(&buffer) != self.header.hot_crc {
             return Err(corrupt("SSD热区CRC无效 (Invalid SSD hot section CRC)"));
         }
+        self.after_hot_read()?;
+        Ok(buffer)
+    }
+
+    fn after_hot_read(&self) -> Result<()> {
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit_for_path(
             crate::test_hooks::ConcurrencyPoint::QuiverColdAfterHotRead,
             &self.path.to_string_lossy(),
         );
-        crate::request::check_current()?;
-        Ok(buffer)
+        crate::request::check_current()
     }
 
     /// 批内相邻记录及重叠Direct I/O窗口合并读取，全部完成后按原顺序校验每条身份。
-    pub fn read_records(&self, requests: &[(usize, RowIdentity)]) -> Result<Vec<Vec<u8>>> {
+    pub fn read_records(
+        &self,
+        requests: &[(usize, RowIdentity)],
+        center: &[f32],
+    ) -> Result<Vec<Vec<u8>>> {
         let metadata = &self.header.metadata;
-        if requests.len() > 4 || requests.iter().any(|&(row, _)| row >= metadata.rows) {
+        if requests.len() > 64 || requests.iter().any(|&(row, _)| row >= metadata.rows) {
             return Err(TriviumError::InvalidInput(
                 "SSD读取批次或范围无效 (Invalid SSD read batch or range)".into(),
             ));
@@ -673,7 +771,9 @@ impl ColdFile {
                     "SSD记录身份或CRC无效 (Invalid SSD record identity or CRC)",
                 ));
             }
-            self.header.layout.row(&buffer[RECORD_HEADER_BYTES..])?;
+            self.header
+                .layout
+                .row(&buffer[RECORD_HEADER_BYTES..], center)?;
             let mut record = zeroed(metadata.record_bytes)?;
             record.copy_from_slice(buffer);
             records.push(record);

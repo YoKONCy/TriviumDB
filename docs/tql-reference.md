@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> 本文介绍 `0.9.0` 的 TQL 语法与执行语义，涵盖文档过滤、图模式匹配、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.0.md)。
+> 本文介绍 `0.9.1` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.1.md)。
 
 ---
 
@@ -9,6 +9,8 @@
 - [结构化查询诊断](#结构化查询诊断)
 - [概述](#概述)
 - [快速入门](#快速入门)
+- [DOCUMENTS — 文档来源](#documents--文档来源)
+- [GRAPH — 命名图作用域](#graph--命名图作用域)
 - [FIND — 文档过滤查询](#find--文档过滤查询)
 - [MATCH — 图模式匹配](#match--图模式匹配)
 - [SEARCH — 向量检索](#search--向量检索)
@@ -28,7 +30,7 @@
 
 ## 结构化查询诊断
 
-当前开发版本的数据库查询、Prepared TQL 准备和写语句解析共享结构化错误契约。错误保留原有 `code`、`schema_version`、`message` 与 `details`，并由实际检查点提供 `stage`。
+数据库查询、Prepared TQL 准备和写语句解析共享结构化错误契约，提供 `code`、`schema_version`、`message` 与 `details`，并由实际检查点提供 `stage`。
 
 | `stage` | 检查点 |
 | --- | --- |
@@ -94,6 +96,8 @@ TQL 是 TriviumDB 的统一查询语言，提供面向三模数据的 **自由 D
 | 入口 | 对应能力 |
 | ------ | --------- |
 | `FIND` | MongoDB 风格文档过滤与属性索引规划 |
+| `DOCUMENTS` | 文档文本、向量及混合召回，携带来源、修订和证据 |
+| `GRAPH` 前缀 | 所选命名图及默认图的成员、独立边与图计算作用域 |
 | `MATCH` / `OPTIONAL MATCH` | 图模式、可变长路径与 GraphFirst |
 | `SEARCH` | 向量源、确定性扩展与跨模管线 |
 | `TEXT` | BM25、Aho-Corasick 或两者混合的稀疏文本召回 |
@@ -166,6 +170,91 @@ RETURN doc, ref
 ```
 
 > **提醒**：TQL 支持行注释：以 `--` 开头的内容到行尾会被忽略。
+
+---
+
+## DOCUMENTS — 文档来源
+
+`DOCUMENTS` 将文档读取请求作为 TQL 数据源。配置使用对象、数组、JSON 标量及 Prepared 参数叶节点，字段复用[文档检索契约](documents.md#文档向量与混合召回)。操作可选 `search`、`search_vector` 或 `search_hybrid`，文档查询配置位于 `query`，向量及重排配置使用 `vector` 和 `options`。
+
+```sql
+DOCUMENTS {
+  operation: "search",
+  query: {text: "memory checkpoint", max_documents: 10, hits_per_document: 2}
+}
+RETURN _.id AS node_id, document.document_id AS document_id,
+       document.evidence AS evidence, document.score AS score
+```
+
+每个入选文档命中产生一行。`_` 绑定命中节点，`document` 绑定来源信息对象。来源过滤、块类型、字段权重、集合成员、位置条件、组内截断和原文证据由 Core 文档管线执行，后续 `WITH`、过滤、图扩展、重排、聚合及分页使用统一 TQL 管线。
+
+| `document` 字段 | 含义 |
+| --- | --- |
+| `document_id`、`revision` | 来源根 ID 的十进制字符串与数据库修订 |
+| `source_id`、`source_revision` | 宿主来源身份与输入版本 |
+| `score`、`group_score` | 当前命中分数与来源组最高分数 |
+| `group_rank`、`hit_rank` | 文档检索结果中的一基来源组和组内排名 |
+| `block_key`、`kind` | 入选结构身份与粒度 |
+| `evidence`、`matches` | 完整修订引用、原文及词项窗口 |
+| `scores`、`retrieval` | 两路分数／排名及实际路由、压缩配置、停止原因和工作计数 |
+
+来源行按文档得分降序及节点 ID 升序排列。需要来源分组顺序时可按 `document.group_rank`、`document.hit_rank` 排序。`similarity(_)` 提供向量路的实际相似度，`text_score(_)` 提供文本路的 BM25 分数，混合融合分数通过 `document.score` 读取。
+
+```sql
+DOCUMENTS {
+  operation: "search_hybrid",
+  query: {text: "checkpoint", max_documents: 10, hits_per_document: 2},
+  vector: [1, 0],
+  options: {vector: {strategy: "ann", rerank: "compressed"}, text_weight: 1}
+}
+WITH _ AS hit, document AS evidence
+WHERE evidence.score > 1
+RETURN hit, evidence.evidence AS source, evidence.retrieval AS retrieval
+ORDER BY evidence.group_rank, evidence.hit_rank
+```
+
+向量入口遵守数据库 dtype 和维度。`rerank="compressed"` 使用已配置的 QuIVer 编码、查询精度、Hot／SSD 与缓存策略。文档导航和评分配额由文档查询限制执行，向量评分次数同时计入 TQL 管线的原生向量宽度折算预算。
+
+> **调用提醒**　示例向量为二维，调用时使用实际维度。`document.matches` 提供词项窗口，投影别名可以使用 `windows`。来源信息在 `WITH` 中按普通对象显式传递。
+
+---
+
+## GRAPH — 命名图作用域
+
+只读查询可在入口之前使用 `GRAPH {graph_ids: [...], include_default: ..., expected_revisions: {...}}`。字段和错误复用[命名图作用域](named-graphs.md#作用域与遍历)。`graph_ids` 选择命名图，`include_default=true` 纳入默认图，`expected_revisions` 固定所选图的结构修订。
+
+```sql
+GRAPH {graph_ids: ["words", "events"]}
+MATCH (source)-[relation:related]->(target)
+RETURN source.id AS source, target.id AS target,
+       relation.graph_id AS graph, relation.weight AS weight,
+       relation.metadata AS metadata
+ORDER BY graph, source, target
+```
+
+`MATCH` 的节点域为所选图的成员并集，包含孤立成员。边按完整图身份参与匹配，跨图同键边分别产生结果。`relation.graph_id` 提供所属命名图，默认边为 `null`。节点、属性和向量按全库 `NodeId` 读取。省略 `GRAPH` 的图查询采用默认图。
+
+`RETURN node` 返回事实节点快照，其中 `edges` 使用节点的默认图边表示。所选命名图的边通过 `MATCH` 中的边变量读取，结果携带图身份。
+
+图作用域贯穿 `MATCH`、`OPTIONAL MATCH`、正反向及变长路径、`EXPAND`、路径算法和图算法。文档、属性、文本及向量来源按各自查询条件产生候选，图阶段选择其中属于作用域的输入节点。
+
+```sql
+GRAPH {graph_ids: ["events"]}
+DOCUMENTS {operation: "search", query: {text: $text, max_documents: 10}}
+WITH _ AS seed, document AS source
+EXPAND seed [:related*1..2] AS related
+RETURN related, source.document_id AS document_id, source.evidence AS evidence
+```
+
+请求在同一事实读视图中取得成员、边、节点和文档证据。请求内拓扑视图及其统计覆盖所选图，工作区在物化前准入，随执行结束归还。外部继续持有返回值时，结果使用独立所有权。
+
+`EXPLAIN` 提供 `graph_scope`、`graph_revisions`、`selected_graph_stats`、`named_graph_members` 访问路径和 Cascades 物理阶段。文档物理来源区分 `document_text_search`、`document_exact_search`、`document_ann_search`，通过 `document_source` 提供请求配置。`EXPLAIN ANALYZE` 执行相同管线并返回实际行数及算子观测。
+
+Prepared 支持图身份、预期修订、文档文字、过滤条件及向量分量等配置叶节点。同名参数共用必需参数目录和首个真实引用范围，缺参、额外参数及转换错误使用既有结构化错误。来源配置、图作用域和执行算子的错误携带对应 UTF-8 范围。
+
+Rust 直接构造 `TqlQuery` 时需提供 `graph_scope`，直接构造 `EdgeView` 时需提供 `graph_id`。默认图或省略作用域的结构字面量将对应字段设为 `None`。
+
+> **资源提醒**　拓扑视图物化所选图的成员、边和 Metadata，峰值随图规模增长。图身份的可访问范围由宿主鉴权确定。
 
 ---
 
@@ -826,10 +915,14 @@ Rust `NodeRow.provenance.property_origin` 记录物理计划当前保留的单�
 以下 EBNF 仅展示顶层骨架；WITH 图算法阶段和 Mongo 文档过滤的完整细节以 Parser 为准。
 
 ```ebnf
-Query       := Entry (WHERE Predicate)? (RankClause)? RETURN ReturnClause
+Query       := (EXPLAIN ANALYZE?)? GraphScope? Entry PipelineStages?
+               (WHERE Predicate)? (RankClause)? RETURN ReturnClause
                (ORDER BY OrderList)? (LIMIT Int)? (OFFSET Int)?
 
-Entry       := MatchEntry | FindEntry | SearchEntry | TextEntry
+Entry       := MatchEntry | FindEntry | SearchEntry | TextEntry | DocumentEntry
+GraphScope  := GRAPH SourceConfig
+DocumentEntry := DOCUMENTS SourceConfig
+SourceConfig := JSON 对象、数组、标量及 Prepared 参数叶节点
 
 MatchEntry  := MATCH Pattern
 FindEntry   := FIND DocFilter
@@ -929,7 +1022,7 @@ TQL 和 `search_advanced()` 共用底层数据、QuIVer、图与预算设施，�
 | 限制 | 说明 | 计划 |
 | ------ | ------ | ------ |
 | MATCH 模式方向 | MATCH 边模式仍以显式有向模式为主；SEARCH EXPAND 已支持 OUTGOING/INCOMING/BOTH | 后续扩展 |
-| 认知算子 Prepared 参数 | `TEXT` 参数、`RESIDUAL` 向量和认知算子参数当前使用字面量；Prepared 逐维参数目前只覆盖 `SEARCH VECTOR` | 后续扩展 |
+| 认知算子 Prepared 参数 | `TEXT` 参数、`RESIDUAL` 向量和认知算子参数当前使用字面量。`SEARCH VECTOR` 及 `DOCUMENTS`、`GRAPH` 配置提供各自参数入口 | 后续扩展 |
 | NMF 集合 artifact | `TOPICS` 投影逐节点主题与权重，不在阶段间传递 H 矩阵 | 按真实需求评估 |
 | 有状态疲劳算子 | Refractory Fatigue 会改变进程内状态，因此不进入普通确定性 TQL | 使用 `search_advanced()` |
 | RANK score 投影 | GraphFirst score 仅参与排序，不作为 RETURN 字段暴露 | 后续扩展 |

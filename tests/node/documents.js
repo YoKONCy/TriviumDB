@@ -4,11 +4,13 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 function runDocuments(root, { TriviumDB } = require('../..')) {
+  require('./tql_documents_graphs').runTqlDocumentsGraphs(root, TriviumDB)
   require('./document_ingestion').runIngestion(root, TriviumDB)
   runRetrieval(root, TriviumDB)
   runPositions(root, TriviumDB)
   runFields(root, TriviumDB)
   runVectors(root, TriviumDB)
+  require('./document_compressed').runCompressed(root, TriviumDB)
   const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '../contracts/document_cases.json'), 'utf8'))
   for (const dtype of ['f32', 'f16', 'u64']) {
     const file = path.join(root, `documents-${dtype}.tdb`)
@@ -273,7 +275,7 @@ function runVectors(root, TriviumDB) {
       assert.deepEqual(result.groups.map(group => group.document_id), testCase.documents, testCase.name)
       assert.deepEqual(result.groups.map(group => group.hits.map(hit => hit.node_id)), testCase.hits, testCase.name)
       assert.equal(result.matched_units, testCase.hits.reduce((count, hits) => count + hits.length, 0))
-      assert.deepEqual(result.retrieval, { hybrid: testCase.operation === 'search_hybrid', strategy: 'exact', approximate: false, eligible_units: testCase.eligible, vector_candidates: testCase.vector_candidates ?? testCase.eligible, vector_scores: testCase.eligible, ann_visits: 0, ann_rounds: 0, stop: 'exact_complete' })
+      assert.deepEqual(result.retrieval, { hybrid: testCase.operation === 'search_hybrid', strategy: 'exact', approximate: false, rerank: 'original', compression: null, eligible_units: testCase.eligible, vector_candidates: testCase.vector_candidates ?? testCase.eligible, vector_scores: testCase.eligible, ann_visits: 0, ann_rounds: 0, stop: 'exact_complete' })
       for (const group of result.groups) {
         const snapshot = snapshots.find(row => row.document_id === group.document_id)
         const document = source.documents.find(row => row.root.id === group.document_id)

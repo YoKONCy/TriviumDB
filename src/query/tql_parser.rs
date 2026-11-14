@@ -322,18 +322,37 @@ impl TqlParser {
             false
         };
 
+        let graph_scope = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("graph"))
+        {
+            let mark = self.source_mark();
+            self.advance();
+            let scope = self.parse_source_json()?;
+            self.finish_source("graph_scope", mark);
+            Some(Box::new(scope))
+        } else {
+            None
+        };
+
         // 1. 查询入口
         let entry = match self.peek() {
             TqlToken::Match => self.parse_match_entry()?,
             TqlToken::Optional => self.parse_optional_match_entry()?,
             TqlToken::Find => self.parse_find_entry()?,
             TqlToken::Search => self.parse_search_entry()?,
+            TqlToken::Ident(name) if name.eq_ignore_ascii_case("documents") => {
+                self.sourced("entry", |parser| {
+                    parser.advance();
+                    Ok(QueryEntry::Documents {
+                        request: parser.parse_source_json()?,
+                    })
+                })?
+            }
             TqlToken::Ident(name) if name.eq_ignore_ascii_case("text") => {
                 self.parse_text_entry()?
             }
             other => {
                 return Err(self.error_here(format!(
-                    "Expected MATCH, OPTIONAL MATCH, FIND, SEARCH, or TEXT, got {:?}",
+                    "期望 MATCH、OPTIONAL MATCH、FIND、SEARCH、TEXT 或 DOCUMENTS (Expected MATCH, OPTIONAL MATCH, FIND, SEARCH, TEXT, or DOCUMENTS), got {:?}",
                     other
                 )));
             }
@@ -397,6 +416,7 @@ impl TqlParser {
         };
 
         let query = TqlQuery {
+            graph_scope,
             explain,
             analyze,
             entry,
@@ -419,6 +439,68 @@ impl TqlParser {
             },
         )?;
         Ok(query)
+    }
+
+    fn parse_source_json(&mut self) -> Result<TqlJson, String> {
+        self.sourced("source_config", Self::parse_source_json_inner)
+    }
+
+    fn parse_source_json_inner(&mut self) -> Result<TqlJson, String> {
+        if self.depth >= MAX_TQL_NESTING {
+            return Err(
+                self.error_here("来源配置嵌套过深 (Source configuration nesting is too deep)")
+            );
+        }
+        self.depth += 1;
+        let result = (|| match self.peek().clone() {
+            TqlToken::DollarOp(name) => {
+                self.advance();
+                let name = name.trim_start_matches('$').to_owned();
+                self.record_parameter_reference(&name);
+                Ok(TqlJson::Parameter(name))
+            }
+            TqlToken::LBrace => {
+                self.advance();
+                let mut fields = std::collections::BTreeMap::new();
+                while !self.at(&TqlToken::RBrace) {
+                    let key = if self.at(&TqlToken::Vector) {
+                        self.advance();
+                        "vector".to_owned()
+                    } else {
+                        self.parse_field_name()?
+                    };
+                    self.expect(&TqlToken::Colon)?;
+                    let value = self.parse_source_json()?;
+                    if fields.insert(key, value).is_some() {
+                        return Err(self.error_previous(
+                            "来源配置字段重复 (Duplicate source configuration field)",
+                        ));
+                    }
+                    if !self.at(&TqlToken::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(&TqlToken::RBrace)?;
+                Ok(TqlJson::Object(fields))
+            }
+            TqlToken::LBracket => {
+                self.advance();
+                let mut values = Vec::new();
+                while !self.at(&TqlToken::RBracket) {
+                    values.push(self.parse_source_json()?);
+                    if !self.at(&TqlToken::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(&TqlToken::RBracket)?;
+                Ok(TqlJson::Array(values))
+            }
+            _ => self.parse_json_value().map(TqlJson::Literal),
+        })();
+        self.depth -= 1;
+        result
     }
 
     fn parse_text_entry(&mut self) -> Result<QueryEntry, String> {
@@ -2006,7 +2088,14 @@ impl TqlParser {
                 let ident = self.parse_ident()?;
                 if self.at(&TqlToken::Dot) {
                     self.advance();
-                    let field = self.parse_ident()?;
+                    let field = if self.at(&TqlToken::Matches) {
+                        let mark = self.source_mark();
+                        self.advance();
+                        self.finish_source("identifier", mark);
+                        "matches".to_owned()
+                    } else {
+                        self.parse_ident()?
+                    };
                     Ok(TqlExpr::Property { var: ident, field })
                 } else {
                     Ok(TqlExpr::Variable(ident))
@@ -2735,7 +2824,7 @@ fn validate_pipeline_scope_origin(
     query: &TqlQuery,
     origin: &mut Option<SourceSelector>,
 ) -> Result<(), String> {
-    if query.pipeline.is_empty() {
+    if query.pipeline.is_empty() && !matches!(query.entry, QueryEntry::Documents { .. }) {
         let pattern = match &query.entry {
             QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } => pattern,
             _ => return Ok(()),
@@ -2750,6 +2839,13 @@ fn validate_pipeline_scope_origin(
     }
     let mut scope = std::collections::BTreeSet::from(["_".to_owned()]);
     let mut scalar_aliases = std::collections::BTreeSet::new();
+    if matches!(query.entry, QueryEntry::Documents { .. }) {
+        scalar_aliases.insert("document".into());
+    }
+    if let QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } = &query.entry {
+        scope.extend(pattern.nodes.iter().filter_map(|node| node.var.clone()));
+        scalar_aliases.extend(pattern.edges.iter().filter_map(|edge| edge.var.clone()));
+    }
     for (stage_index, stage) in query.pipeline.iter().enumerate() {
         *origin = Some(SourceSelector::Stage(stage_index));
         match stage {

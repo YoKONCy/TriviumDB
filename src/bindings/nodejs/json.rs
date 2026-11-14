@@ -1,8 +1,12 @@
-//! Node JSON 边界统一转换：属性名使用带长度的 JS 字符串，保留 NUL 与自有属性。
+//! 宿主对象与 JSON 内容的无损转换。
 
 use napi::bindgen_prelude::{FromNapiValue, ToNapiValue, TypeName, ValidateNapiValue};
 use napi::{Env, JsObject, JsUnknown, NapiRaw, NapiValue, ValueType, sys};
 use serde_json::Value;
+
+pub(super) fn node_json_value(value: impl serde::Serialize) -> serde_json::Result<NodeJson> {
+    serde_json::to_value(value).map(NodeJson)
+}
 
 #[derive(Clone, Debug)]
 pub struct NodeJson(pub Value);
@@ -144,7 +148,7 @@ fn read_json(
     result.map_err(|error| match field {
         Some(field) if error.status == napi::Status::InvalidArg => {
             let input = crate::TriviumError::InvalidInput(error.reason).at_field(field);
-            crate::bindings::nodejs::nodejs::to_napi_error(
+            crate::bindings::nodejs::errors::to_napi_error(
                 env,
                 match write {
                     Some(write) => input.with_write_info(write),

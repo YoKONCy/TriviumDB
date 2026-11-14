@@ -1,6 +1,6 @@
 # TriviumDB Hook 开发指南
 
-> 本文介绍 `0.9.0` 的 `search*` 检索管线 Hook，覆盖 Rust、Python、Node.js 与 FFI ABI v2。TQL 的 Cascades/NodeSet 管线通过查询算子和 EXPLAIN 扩展。版本记录见[变更说明](changes/0.9.0.md)。
+> 本文介绍 `0.9.1` 的 `search*` 检索管线 Hook，覆盖 Rust、Python、Node.js 与 FFI ABI v2。TQL 的 Cascades/NodeSet 管线通过查询算子和 EXPLAIN 扩展。版本记录见[变更说明](changes/0.9.1.md)。
 
 ---
 

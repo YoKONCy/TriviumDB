@@ -41,6 +41,7 @@ fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8
         .collect()
 }
 
+#[track_caller]
 fn assert_hits(actual: Vec<(u64, f32)>, expected: &[(u64, f32)]) {
     assert_eq!(
         actual.iter().map(|hit| hit.0).collect::<Vec<_>>(),
@@ -51,6 +52,109 @@ fn assert_hits(actual: Vec<(u64, f32)>, expected: &[(u64, f32)]) {
             (hit.1 - expected.1).abs() < 1e-6,
             "实际{hit:?}，预期{expected:?}"
         );
+    }
+}
+
+#[test]
+fn centered_presets_share_public_precisions_normal_ann_and_readonly_reopen() {
+    use triviumdb::index::quiver::ssd::{QueryPrecision, RerankEncoding};
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../contracts/quiver_ssd_cases.json")).unwrap();
+    for encoding in [RerankEncoding::CenteredInt8, RerankEncoding::CenteredInt4] {
+        let root = directory();
+        let path = root.join("centered.tdb");
+        let dimension = fixture["dimension"].as_u64().unwrap() as usize;
+        let mut db = Database::<f32>::open_with_config(
+            path.to_str().unwrap(),
+            Config {
+                dim: dimension,
+                auto_build_quiver: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for node in fixture["nodes"].as_array().unwrap() {
+            let mut vector = vec![0.; dimension];
+            vector[dimension - 1] = node["direction"].as_i64().unwrap() as f32;
+            db.insert_with_id(
+                node["id"].as_str().unwrap().parse().unwrap(),
+                &vector,
+                serde_json::json!({"keep":true}),
+            )
+            .unwrap();
+        }
+        let mut vector = vec![0.; dimension];
+        vector[dimension - 1] = 1.;
+        let expected = [(9, 1.), (9007199254740993, 1.), (40, 0.), (77, -1.)];
+        // 更新会保留旧slot墓碑，完整覆盖这组数据需要候选宽度包含活跃行与墓碑。
+        let full = QuIVerSearchConfig {
+            ef_search: 32,
+            ..query()
+        };
+        let base = SsdRuntimeOptions {
+            encoding,
+            io_depth: 1,
+            cache_bytes: 0,
+            ..SsdRuntimeOptions::accuracy()
+        };
+        for precision in [
+            QueryPrecision::Fp32,
+            QueryPrecision::Int8,
+            QueryPrecision::Int4,
+        ] {
+            for residency in [Residency::Ssd, Residency::Hot] {
+                let opts = SsdRuntimeOptions {
+                    query_precision: precision,
+                    residency,
+                    ..base
+                };
+                assert!(db.configure_quiver(opts).unwrap().routing_shared);
+                assert_hits(db.search_quiver(&vector, &full).unwrap(), &expected);
+                assert_hits(
+                    db.search(&vector, 4, 0, -1.)
+                        .unwrap()
+                        .into_iter()
+                        .map(|hit| (hit.id, hit.score))
+                        .collect(),
+                    &expected,
+                );
+            }
+        }
+        db.update_vector(40, &vector).unwrap();
+        let changed = [(9, 1.), (40, 1.), (9007199254740993, 1.), (77, -1.)];
+        assert_hits(
+            db.search(&vector, 4, 0, -1.)
+                .unwrap()
+                .into_iter()
+                .map(|hit| (hit.id, hit.score))
+                .collect(),
+            &changed,
+        );
+        db.close().unwrap();
+        let before = snapshot(&root);
+        let mut reader =
+            Database::<f32>::open_read_only(path.to_str().unwrap(), dimension).unwrap();
+        assert!(reader.configure_quiver(base).unwrap().routing_shared);
+        assert_hits(reader.search_quiver(&vector, &full).unwrap(), &changed);
+        let other = if encoding == RerankEncoding::CenteredInt4 {
+            RerankEncoding::CenteredInt8
+        } else {
+            RerankEncoding::CenteredInt4
+        };
+        assert_eq!(
+            reader
+                .configure_quiver(SsdRuntimeOptions {
+                    encoding: other,
+                    ..base
+                })
+                .unwrap_err()
+                .code(),
+            "TDB_IMMUTABLE_ARTIFACT"
+        );
+        assert_hits(reader.search_quiver(&vector, &full).unwrap(), &changed);
+        reader.close().unwrap();
+        assert_eq!(snapshot(&root), before);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/YoKONCy/TriviumDB)
 
-The repository provides the ICDE evaluation archive and the production QuIVer runtime in TriviumDB `0.9.1-beta.1`. Each experiment retains its source, graph, query, metric, and hardware identities. Production interfaces and resource contracts are documented in the [QuIVer runtime guide](docs/quiver.md).
+The repository provides the ICDE evaluation archive and the production QuIVer runtime in TriviumDB `0.9.1`. Each experiment retains its source, graph, query, metric, and hardware identities. Production interfaces and resource contracts are documented in the [QuIVer runtime guide](docs/quiver.md).
 
 ---
 
@@ -69,4 +69,4 @@ Record the source revision, build identity, artifact digest, dataset and query i
 
 Current correctness entry points and their assertion scope are maintained in [testing practices](docs/testing.md) and the [QuIVer guide](docs/quiver.md#检查与复现入口). Coverage includes independent score expectations, persistence, malformed inputs, source identity, memory admission, cancellation, generation pinning, and release of files and worker threads. Each platform and sanitizer conclusion identifies the commit and actual execution scope.
 
-Use [CITATION.cff](evaluation/CITATION.cff) for the archive's title, authors, and source URL. The associated preprint is available on [arXiv](https://arxiv.org/abs/2605.02171). Version-specific production changes are recorded in the [bilingual release notes](docs/changes/0.9.1-beta.1.md).
+Use [CITATION.cff](evaluation/CITATION.cff) for the archive's title, authors, and source URL. The associated preprint is available on [arXiv](https://arxiv.org/abs/2605.02171). Version-specific production changes are recorded in the [bilingual release notes](docs/changes/0.9.1.md).

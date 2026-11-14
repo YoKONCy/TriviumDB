@@ -995,6 +995,8 @@ impl Default for PrefilterSlotCacheState {
 type PrefilterSlotCache = Mutex<PrefilterSlotCacheState>;
 
 pub struct QuIVer {
+    /// 运行期路由身份；Reader持有令牌，替换实例后旧令牌持续阻止地址复用造成误绑定。
+    routing_identity: std::sync::Arc<()>,
     dim: usize,
     n: usize,
     m: usize,
@@ -1090,6 +1092,7 @@ impl QuIVer {
         Self {
             dim,
             n: 0,
+            routing_identity: std::sync::Arc::new(()),
             m,
             m0,
             ef_construction: config.ef_construction,
@@ -3108,7 +3111,21 @@ impl QuIVer {
 
     /// 热路径使用常数时间计量；度数分布留给显式诊断接口。
     pub(crate) fn hot_memory_bytes(&self) -> usize {
-        self.bq_store.hot_bytes()
+        // 固定64字节覆盖运行期身份的Arc控制块与分配开销。
+        // 身份目录采用保守桶预算，溢出饱和后由调用方预算拒绝。
+        let routing_metadata = self
+            .ids
+            .capacity()
+            .saturating_mul(std::mem::size_of::<u64>())
+            .saturating_add(
+                self.slot_indices
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            )
+            .saturating_add(self.tombstones.capacity())
+            .saturating_add(self.id_to_internal.capacity().saturating_mul(64))
+            .saturating_add(64);
+        let hot = self.bq_store.hot_bytes()
             + self.layer0.data.len() * 4
             + self.upper_bytes
             + self.connectivity_parents.capacity() * std::mem::size_of::<u32>()
@@ -3119,7 +3136,8 @@ impl QuIVer {
             + self
                 .default_sm
                 .as_ref()
-                .map_or(0, |model| model.routing_owned_bytes())
+                .map_or(0, |model| model.routing_owned_bytes());
+        hot.saturating_add(routing_metadata)
     }
 
     pub fn stats(&self) -> QuIVerStats {
@@ -3693,6 +3711,7 @@ impl QuIVer {
         let mut index = Self {
             dim,
             n,
+            routing_identity: std::sync::Arc::new(()),
             m,
             m0,
             ef_construction,
@@ -4512,9 +4531,14 @@ mod tests {
                     .default_sm
                     .as_ref()
                     .map_or(0, |sm| sm.routing_owned_bytes());
-            let expected = index.bq_store.hot_bytes()
+            let expected = 64
+                + index.bq_store.hot_bytes()
                 + index.layer0.data.len() * 4
                 + upper
+                + index.ids.capacity() * 8
+                + index.slot_indices.capacity() * std::mem::size_of::<usize>()
+                + index.tombstones.capacity()
+                + index.id_to_internal.capacity() * 64
                 + index.connectivity_parents.capacity() * 4
                 + sm;
             assert_eq!(index.hot_memory_bytes(), expected);

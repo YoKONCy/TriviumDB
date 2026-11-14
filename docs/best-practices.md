@@ -1,6 +1,6 @@
 # TriviumDB 最佳实践
 
-> 本文介绍 TriviumDB `0.9.0` 的项目集成、数据建模、检索配置和资源管理。版本记录见[变更说明](changes/0.9.0.md)。
+> 本文介绍 TriviumDB `0.9.1` 的项目集成、数据建模、检索配置和资源管理。版本记录见[变更说明](changes/0.9.1.md)。
 
 ---
 
@@ -71,7 +71,7 @@ cargo add triviumdb
 
 ```toml
 [dependencies]
-triviumdb = "0.9.0"
+triviumdb = "0.9.1"
 ```
 
 ### 30 秒入门模板
@@ -768,7 +768,7 @@ db_b = triviumdb.TriviumDB("shared.tdb", dim=768)  # 💥 文件锁冲突!
 
 ### 数据库文件版本策略
 
-- 当前开发内核支持 v5–v11 主文件，历史来源的 dtype、检查点与 WAL 组合按对应校验规则打开。
+- `0.9.1` 内核支持 v5–v13 主文件，历史来源的 dtype、检查点与 WAL 组合按对应校验规则打开。
 - `0.7.0` 的 v5/32-chunk BQ 和 `0.7.1–0.8.x` 的 v5/48-chunk BQ 按历史布局识别，可写句柄在后续检查点发布当前 v11 格式。
 - ReadOnly 以原格式读取受支持的历史文件；Immutable 的 manifest 必须与现有文件字节匹配。
 - 当前主文件为 v11，WAL 为 v4，有界编辑回执与事实共用提交封条及检查点。Mmap 的 Payload generation 文件与 `.tdb/.vec/.flush_ok` 一同管理，ReadOnly/Immutable 保持原文件格式。早于 v5 的文件通过对应旧版导出迁移。

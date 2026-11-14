@@ -1,5 +1,7 @@
 {
   "dimension": 129,
+  "encodings": ["int8", "centered_int8", "centered_int4"],
+  "query_precisions": ["fp32", "int8", "int4"],
   "nodes": [
     {"id": "9007199254740993", "direction": 1},
     {"id": "9", "direction": 1},

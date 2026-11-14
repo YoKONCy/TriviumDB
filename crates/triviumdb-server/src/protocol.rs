@@ -704,14 +704,20 @@ pub fn encode_node(node: triviumdb::node::NodeView<f32>) -> serde_json::Value {
 fn encode_value(value: TqlValue<f32>) -> Result<serde_json::Value, ApiError> {
     Ok(match value {
         TqlValue::Node(node) => encode_node(node),
-        TqlValue::Edge(edge) => serde_json::json!({
-            "type": "edge",
-            "source": edge.source_id.to_string(),
-            "target": edge.target_id.to_string(),
-            "label": edge.label,
-            "weight": edge.weight,
-            "metadata": edge.metadata,
-        }),
+        TqlValue::Edge(edge) => {
+            let mut value = serde_json::json!({
+                "type": "edge",
+                "source": edge.source_id.to_string(),
+                "target": edge.target_id.to_string(),
+                "label": edge.label,
+                "weight": edge.weight,
+                "metadata": edge.metadata,
+            });
+            if let Some(graph_id) = &edge.graph_id {
+                value["graph_id"] = graph_id.clone().into();
+            }
+            value
+        }
         TqlValue::Int(value) => serde_json::json!({"type": "int", "value": value}),
         TqlValue::UInt(value) => serde_json::json!({"type":"uint","value":value.to_string()}),
         TqlValue::Float(value) => serde_json::json!({"type": "float", "value": value}),
@@ -730,6 +736,38 @@ fn encode_value(value: TqlValue<f32>) -> Result<serde_json::Value, ApiError> {
 #[cfg(test)]
 mod structured_error_tests {
     use super::*;
+
+    #[test]
+    fn 查询边编码保留图身份与完整整数() {
+        let edge = triviumdb::node::EdgeView {
+            graph_id: Some("events".into()),
+            source_id: u64::MAX - 1,
+            target_id: u64::MAX - 2,
+            label: "rel".into(),
+            weight: 2.0,
+            metadata: serde_json::json!({"owner":"event"}),
+        };
+        assert_eq!(
+            encode_value(TqlValue::Edge(edge.clone())).unwrap(),
+            serde_json::json!({
+                "type":"edge","source":"18446744073709551614",
+                "target":"18446744073709551613","label":"rel","weight":2.0,
+                "metadata":{"owner":"event"},"graph_id":"events"
+            })
+        );
+        let default = triviumdb::node::EdgeView {
+            graph_id: None,
+            ..edge
+        };
+        assert_eq!(
+            encode_value(TqlValue::Edge(default)).unwrap(),
+            serde_json::json!({
+                "type":"edge","source":"18446744073709551614",
+                "target":"18446744073709551613","label":"rel","weight":2.0,
+                "metadata":{"owner":"event"}
+            })
+        );
+    }
 
     #[tokio::test]
     async fn 普通字段上下文保留规范类别与请求结果() {

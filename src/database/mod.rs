@@ -11,7 +11,7 @@
 pub mod config;
 pub mod console;
 mod document_ingestion;
-mod document_query;
+pub(crate) mod document_query;
 mod documents;
 pub(crate) mod editing;
 mod named_graphs;
@@ -581,6 +581,10 @@ pub struct Database<T: VectorType> {
 
 pub(crate) struct SearchHandle<T: VectorType> {
     memtable: Arc<RwLock<MemTable<T>>>,
+    wal: Arc<Mutex<Wal>>,
+    db_path: String,
+    storage_mode: StorageMode,
+    access_mode: AccessMode,
     memory_limit: usize,
     resource_runtime: crate::resources::ResourceRuntime,
     hook: HookSlot,
@@ -594,6 +598,10 @@ impl<T: VectorType> Clone for SearchHandle<T> {
     fn clone(&self) -> Self {
         Self {
             memtable: Arc::clone(&self.memtable),
+            wal: Arc::clone(&self.wal),
+            db_path: self.db_path.clone(),
+            storage_mode: self.storage_mode,
+            access_mode: self.access_mode,
             memory_limit: self.memory_limit,
             resource_runtime: self.resource_runtime.clone(),
             hook: Arc::clone(&self.hook),
@@ -671,6 +679,18 @@ impl<T: VectorType> SearchHandle<T> {
                         .into(),
                 });
             }
+        }
+
+        if !search_config.force_brute_force {
+            quiver_ssd::prepare_configured_rerank(
+                &self.memtable,
+                &self.wal,
+                &self.db_path,
+                self.storage_mode,
+                self.access_mode,
+                self.memory_limit,
+                false,
+            )?;
         }
 
         let request = crate::request::current();
@@ -2587,6 +2607,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub(crate) fn search_handle(&self) -> SearchHandle<T> {
         SearchHandle {
             memtable: Arc::clone(&self.memtable),
+            wal: Arc::clone(&self.wal),
+            db_path: self.db_path.clone(),
+            storage_mode: self.storage_mode,
+            access_mode: self.access_mode,
             memory_limit: self.memory_limit,
             resource_runtime: self.resource_runtime.clone(),
             hook: Arc::clone(&self.hook),
@@ -2622,6 +2646,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ) -> Result<(Vec<SearchHit>, HookContext)> {
         self.require_reader_determinism(config)?;
         let _operation = self.enter_operation()?;
+        if query_vector.is_some() && !config.force_brute_force {
+            self.prepare_quiver_rerank(false)?;
+        }
         #[cfg(feature = "test-hooks")]
         if config.enable_refractory_fatigue {
             crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeStatefulSearchLock);
@@ -2659,6 +2686,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ) -> Result<Vec<SearchHit>> {
         self.require_reader_determinism(config)?;
         let _operation = self.enter_operation()?;
+        if query_vector.is_some() && !config.force_brute_force {
+            self.prepare_quiver_rerank(false)?;
+        }
         #[cfg(feature = "test-hooks")]
         if config.enable_refractory_fatigue {
             crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeStatefulSearchLock);
@@ -2692,6 +2722,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ) -> Result<crate::node::GroupedSearchResult> {
         self.require_reader_determinism(config)?;
         let _operation = self.enter_operation()?;
+        if query_vector.is_some() && !config.force_brute_force {
+            self.prepare_quiver_rerank(false)?;
+        }
         let _stateful_guard = config
             .enable_refractory_fatigue
             .then(|| lock_or_recover(&self.stateful_search));
@@ -2851,6 +2884,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         config: crate::tsng::TsngSearchConfig,
     ) -> Result<crate::tsng::TsngSearchResult> {
         let _operation = self.enter_operation()?;
+        if query.weights.property == 0.0 && query.weights.graph == 0.0 {
+            self.prepare_quiver_rerank(false)?;
+        }
         let mt = read_or_recover(&self.memtable);
         self.resource_runtime
             .pool(self.resource_runtime.parallelism())?
@@ -3357,6 +3393,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn tql(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
         let parsed = crate::query::tql_parser::parse_tql_located(input)?;
+        self.prepare_quiver_rerank_with_source(&parsed.ast, Some(&parsed.source))?;
         let mt = read_or_recover(&self.memtable);
         crate::query::tql_executor::execute_tql_values_with_source(
             &parsed.ast,
@@ -3373,6 +3410,16 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
         let parsed = crate::query::tql_parser::parse_tql_located(input)?;
+        let current = crate::request::current();
+        let context = crate::request::RequestContext::new(
+            current
+                .as_ref()
+                .map_or("quiver-rerank", |context| context.request_id()),
+            control.clone(),
+            false,
+        )?;
+        let _scope = context.enter()?;
+        self.prepare_quiver_rerank_with_source(&parsed.ast, Some(&parsed.source))?;
         let mt = read_or_recover(&self.memtable);
         let mut limits = self.tql_limits.clone();
         limits.query_control = Some(control);
@@ -3388,6 +3435,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn tql_nodes(&self, input: &str) -> Result<crate::query::tql_executor::TqlResult<T>> {
         let _operation = self.enter_operation()?;
         let parsed = crate::query::tql_parser::parse_tql_located(input)?;
+        self.prepare_quiver_rerank_with_source(&parsed.ast, Some(&parsed.source))?;
         let mt = read_or_recover(&self.memtable);
         crate::query::tql_executor::execute_tql_with_source(
             &parsed.ast,
@@ -3401,6 +3449,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     pub fn query(&self, input: &str) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
         let parsed = crate::query::tql_parser::parse_tql_located(input)?;
+        self.prepare_quiver_rerank_with_source(&parsed.ast, Some(&parsed.source))?;
         let mt = read_or_recover(&self.memtable);
         crate::query::tql_executor::execute_tql_values_with_source(
             &parsed.ast,
@@ -3430,6 +3479,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
         let query = prepared.bind(parameters)?;
+        self.prepare_quiver_rerank_with_source(&query, prepared.source().as_ref())?;
         let mt = read_or_recover(&self.memtable);
         crate::query::tql_executor::execute_tql_values_with_source(
             &query,
@@ -3457,6 +3507,16 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     ) -> Result<crate::query::tql_executor::TqlValueResult<T>> {
         let _operation = self.enter_operation()?;
         let query = prepared.bind(parameters)?;
+        let current = crate::request::current();
+        let context = crate::request::RequestContext::new(
+            current
+                .as_ref()
+                .map_or("quiver-rerank", |context| context.request_id()),
+            control.clone(),
+            false,
+        )?;
+        let _scope = context.enter()?;
+        self.prepare_quiver_rerank_with_source(&query, prepared.source().as_ref())?;
         let mt = read_or_recover(&self.memtable);
         let mut limits = self.tql_limits.clone();
         limits.query_control = Some(control);
