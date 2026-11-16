@@ -24,6 +24,16 @@ module.exports = function tqlSemantics(root, TriviumDB) {
     }
   } finally { db.close() }
 
+  const indexed = open('indexed-order')
+  try {
+    for (const row of contract.indexed_order.records) indexed.insertWithId(row.id, [1], row.payload)
+    for (const target of [2, 3]) indexed.link(1, target, 'related', 3.4028234663852886e38)
+    for (let phase = 0; phase <= contract.indexed_order.indexes.length; phase++) {
+      if (phase > 0) indexed.createOrderedIndex(contract.indexed_order.indexes[phase - 1])
+      for (const test of contract.indexed_order.cases) assert.deepEqual(indexed.tql(test.query), test.rows, test.query)
+    }
+  } finally { indexed.close() }
+
   const updates = open('set')
   try {
     updates.insertWithId(1, [1], { a: 0, b: 0, keep: true })

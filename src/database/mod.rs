@@ -968,6 +968,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         }
         let mut recovered_offset = None;
         if Wal::needs_recovery(path) {
+            memtable.document_publications.begin_replay();
             let mut entry_count = 0usize;
             let restored_bytes = std::cell::Cell::new(memtable.estimated_memory_bytes());
             let valid_offset =
@@ -994,6 +995,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 memtable.named_graphs.graphs.len(),
                 10_000,
             )?;
+            memtable.document_publications.finish_replay();
             memtable.document_publications.finish_restore()?;
             let unique_definitions = memtable.unique_index_definitions();
             memtable.restore_unique_index_definitions(&unique_definitions)?;

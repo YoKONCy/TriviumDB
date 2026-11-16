@@ -193,13 +193,17 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
             }
         }
         WalEntry::Delete { id } => {
-            if mt.contains(id) {
-                mt.delete(id)?;
+            mt.document_publications.replay_delete_node(id);
+            let previous_pause = mt.document_updates_paused;
+            mt.document_updates_paused = true;
+            let deleted = if mt.contains(id) {
+                mt.delete(id)
             } else {
                 // 已发布检查点可能已删除节点，较早图快照回放后仍需清理其引用。
-                mt.named_graphs.delete_node(id)?;
-                mt.document_publications.delete_node(id);
-            }
+                mt.named_graphs.delete_node(id)
+            };
+            mt.document_updates_paused = previous_pause;
+            deleted?;
         }
         WalEntry::Unlink { src, dst } => {
             if mt.contains(src) {

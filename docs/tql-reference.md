@@ -691,6 +691,8 @@ LIMIT 10 OFFSET 20    -- 跳过前 20 条，返回 10 条
 
 RETURN 别名在 ORDER BY 中可用，也可参与排序算术；WHERE 与 RETURN 表达式使用各自的输入作用域。WITH 承接实例的 `max_query_rows`、`row_overflow`、内存预算与取消控制。显式 LIMIT 可覆盖默认行数上限，OFFSET + LIMIT 继续接受内存准入；聚合、去重与完整排序要求完整输入。管线工作区在执行前按候选规模保守预留。
 
+`ORDER BY picked.rank` 在 `RETURN _.nested AS picked` 下读取投影对象的 `rank`。规划器按作用域核对索引等价性，投影排序完成后执行分页。排序键相等时，节点行按完整绑定名称和 NodeId、边行按图身份与端点和标签、管线行按节点与绑定及路径身份稳定比较；聚合行按分组键比较。该最终比较保持升序，`DESC` 作用于显式排序键。
+
 ---
 
 ## WITH 可组合管线
@@ -775,6 +777,8 @@ RETURN expanded, graph_score(expanded) AS score
 ```
 
 `DEPTH`、`ALPHA`、`MAX_EDGES`、`MIN_WEIGHT` 和可选的 `LABELS` 显式控制有限深度扩散。该算子采用 Depth-Bounded SA-PPR 语义；需要迭代收敛结果时使用 PageRank。
+
+种子节点、实际扫描边、前沿峰值和深度分别受遍历预算限制，`MAX_EDGES` 在检查扫描预算后选择各节点的传播边。管线按完整结果契约使用 Error 耗尽策略，超限返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`；临时内存和请求取消沿统一查询上下文执行。归一化分母使用 `f64` 累加，输出分数继续使用 `f32`。
 
 ### FISTA 残差召回
 

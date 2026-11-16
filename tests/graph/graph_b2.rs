@@ -46,6 +46,104 @@ fn generous_budget() -> TraversalBudget {
 }
 
 #[test]
+fn 双向初始状态和扩展前沿均在预算内准入() {
+    let mt = graph();
+    for (dimension, budget) in [
+        (
+            BudgetDimension::VisitedNodes,
+            TraversalBudget {
+                max_visited_nodes: 1,
+                ..generous_budget()
+            },
+        ),
+        (
+            BudgetDimension::FrontierSize,
+            TraversalBudget {
+                max_frontier_size: 1,
+                ..generous_budget()
+            },
+        ),
+        (
+            BudgetDimension::FrontierSize,
+            TraversalBudget {
+                max_frontier_size: 2,
+                ..generous_budget()
+            },
+        ),
+    ] {
+        let error =
+            triviumdb::graph::pathfinding::shortest_path_bidirectional(&mt, 1, 6, None, &budget)
+                .unwrap_err();
+        assert!(
+            matches!(error, TriviumError::TraversalBudgetExceeded { dimension: actual, .. } if actual == dimension),
+            "{error:?}"
+        );
+        let partial = TraversalBudget {
+            exhaustion_policy: BudgetExhaustionPolicy::Partial,
+            ..budget
+        };
+        let result =
+            triviumdb::graph::pathfinding::shortest_path_bidirectional(&mt, 1, 6, None, &partial)
+                .unwrap();
+        assert_eq!(result.path, None);
+        assert!(result.truncated);
+        assert!(result.bidirectional);
+        assert!(result.metrics.visited_nodes <= budget.max_visited_nodes);
+        assert!(result.metrics.peak_frontier_size <= budget.max_frontier_size);
+        assert!(result.metrics.examined_edges <= budget.max_examined_edges);
+    }
+    let budget = TraversalBudget {
+        max_visited_nodes: 1,
+        max_frontier_size: 1,
+        ..generous_budget()
+    };
+    let same = triviumdb::graph::pathfinding::shortest_path_bidirectional(&mt, 1, 1, None, &budget)
+        .unwrap();
+    assert_eq!(same.path, Some(vec![1]));
+    assert_eq!(same.metrics.visited_nodes, 1);
+    assert_eq!(same.metrics.peak_frontier_size, 1);
+    assert!(!same.truncated);
+}
+
+#[test]
+fn 最短路径只对实际存在的端点返回自身路径() {
+    let mt = graph();
+    for depth in [0, 1, 10] {
+        assert_eq!(shortest_path(&mt, 999, 999, depth, None), None);
+        assert_eq!(shortest_path(&mt, 1, 999, depth, None), None);
+        assert_eq!(shortest_path(&mt, 999, 1, depth, None), None);
+        assert_eq!(shortest_path(&mt, 1, 1, depth, None), Some(vec![1]));
+    }
+}
+
+#[test]
+fn 双向路径按实际扫描的平行边计量预算() {
+    let mut mt = MemTable::<f32>::new(DIM);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[1., 0.], json!({})).unwrap();
+    }
+    for label in ["a", "b", "c"] {
+        mt.link(1, 2, label.into(), 1.).unwrap();
+    }
+    let budget = TraversalBudget {
+        max_examined_edges: 1,
+        ..generous_budget()
+    };
+    let error =
+        triviumdb::graph::pathfinding::shortest_path_bidirectional(&mt, 1, 3, Some("c"), &budget)
+            .unwrap_err();
+    assert!(matches!(
+        error,
+        TriviumError::TraversalBudgetExceeded {
+            dimension: BudgetDimension::ExaminedEdges,
+            examined_edges: 1,
+            visited_nodes: 2,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn 双向_bfs_与单向_bfs最短长度一致且路径确定() {
     let mt = graph();
     let expected = shortest_path(&mt, 1, 6, 10, Some("road")).unwrap();

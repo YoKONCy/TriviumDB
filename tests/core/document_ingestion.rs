@@ -289,6 +289,237 @@ fn 大于单Payload限制的正文重开检索与再次持久化() {
 
 #[cfg(feature = "test-hooks")]
 #[test]
+fn 普通删除与分批归档在检查点重叠后保持完整文档() {
+    use triviumdb::test_hooks::{IoPoint, fail_io_at};
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        for transactional in [false, true] {
+            let dir = TestDir::new("document-delete-checkpoint-overlap");
+            let path = dir.file("data.tdb");
+            let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+            db.insert_with_id(1, &[0., 1.], json!({"old": true}))
+                .unwrap();
+            db.flush().unwrap();
+            if transactional {
+                let mut tx = db.begin_tx();
+                tx.delete(1);
+                tx.commit().unwrap();
+            } else {
+                db.delete(1).unwrap();
+            }
+            let id = "0484b56c-60dc-4327-b4ee-8a30dc0d61da";
+            request(&mut db, begin(id, "1", "new 猫", Value::Null));
+            request(
+                &mut db,
+                json!({"operation":"append_upload","upload_id":id,
+                "batch":{"sequence":0,"content":"new 猫","blocks":[{
+                    "key":"p","kind":"paragraph","start_byte":0,"end_byte":7,
+                    "node":{"id":"2","vector":[1,1],"payload":{"chunk":1}}
+                }]}}),
+            );
+            let published = request(
+                &mut db,
+                json!({"operation":"publish_upload","upload_id":id}),
+            );
+            assert_eq!(published["content"], "new 猫");
+            assert_eq!(published["source_id"], "note.txt");
+            assert_eq!(published["source_revision"], "file-2");
+            let nodes = [db.get(1).unwrap().unwrap(), db.get(2).unwrap().unwrap()];
+            assert_eq!(nodes[0].vector, [1., 0.]);
+            assert_eq!(nodes[0].payload["data"], json!({"title":"published"}));
+            assert_eq!(nodes[1].vector, [1., 1.]);
+            assert_eq!(nodes[1].payload["text"], "new 猫");
+            let failure = fail_io_at(IoPoint::CheckpointWalClear);
+            assert_eq!(db.flush().unwrap_err().code(), "TDB_IO");
+            drop(db);
+            drop(failure);
+            for _ in 0..2 {
+                let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+                assert_eq!(
+                    request(&mut db, json!({"operation":"get","document_id":"1"})),
+                    published
+                );
+                assert_eq!(db.all_node_ids().unwrap(), [1, 2]);
+                for expected in &nodes {
+                    let actual = db.get(expected.id).unwrap().unwrap();
+                    assert_eq!(actual.vector, expected.vector);
+                    assert_eq!(actual.payload, expected.payload);
+                    assert_eq!(actual.edges, expected.edges);
+                }
+                let uploads = db.list_document_uploads(None).unwrap();
+                assert_eq!(uploads.len(), 1);
+                assert_eq!(uploads[0].upload_id, id);
+                assert!(db.document_upload_status(id).unwrap().visible);
+                db.flush().unwrap();
+                db.close().unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn 检查点后普通删除仍清除归档且允许复用上传标识() {
+    use triviumdb::test_hooks::{IoPoint, fail_io_at};
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let dir = TestDir::new("document-delete-new-wal");
+        let path = dir.file("data.tdb");
+        let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+        let id = "0484b56c-60dc-4327-b4ee-8a30dc0d61da";
+        request(&mut db, begin(id, "1", "first", Value::Null));
+        request(
+            &mut db,
+            json!({"operation":"append_upload","upload_id":id,"batch":{"sequence":0,"content":"first"}}),
+        );
+        request(
+            &mut db,
+            json!({"operation":"publish_upload","upload_id":id}),
+        );
+        db.flush().unwrap();
+        db.delete(1).unwrap();
+        db.insert_with_id(1, &[0., 1.], json!({"ordinary":true}))
+            .unwrap();
+        // 在发布检查点前注入故障，保留旧归档与其后的真实删除日志。
+        let failure = fail_io_at(IoPoint::PropertySidecarWrite);
+        assert_eq!(db.flush().unwrap_err().code(), "TDB_IO");
+        drop(db);
+        drop(failure);
+        let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+        assert!(matches!(
+            db.get_document(1).unwrap_err().underlying(),
+            triviumdb::TriviumError::InvalidInput(_)
+        ));
+        assert_eq!(db.get_payload(1).unwrap(), Some(json!({"ordinary":true})));
+        assert!(db.list_document_uploads(None).unwrap().is_empty());
+        db.delete(1).unwrap();
+        request(&mut db, begin(id, "1", "second", Value::Null));
+        request(
+            &mut db,
+            json!({"operation":"append_upload","upload_id":id,"batch":{"sequence":0,"content":"second"}}),
+        );
+        let expected = request(
+            &mut db,
+            json!({"operation":"publish_upload","upload_id":id}),
+        );
+        db.close().unwrap();
+        let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+        assert_eq!(
+            request(&mut db, json!({"operation":"get","document_id":"1"})),
+            expected
+        );
+        db.close().unwrap();
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn 旧删除回放保留检查点内新候选的已确认批次() {
+    use triviumdb::test_hooks::{IoPoint, fail_io_at};
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let dir = TestDir::new("document-pending-delete-overlap");
+        let path = dir.file("data.tdb");
+        let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+        db.insert_with_id(1, &[1., 0.], json!({"old":true}))
+            .unwrap();
+        db.flush().unwrap();
+        db.delete(1).unwrap();
+        let id = "0484b56c-60dc-4327-b4ee-8a30dc0d61da";
+        request(&mut db, begin(id, "1", "candidate", Value::Null));
+        request(
+            &mut db,
+            json!({"operation":"append_upload","upload_id":id,"batch":{"sequence":0,"content":"candidate"}}),
+        );
+        let expected = serde_json::to_value(db.document_upload_status(id).unwrap()).unwrap();
+        assert_eq!(expected["next_sequence"], 1);
+        let failure = fail_io_at(IoPoint::CheckpointWalClear);
+        assert_eq!(db.flush().unwrap_err().code(), "TDB_IO");
+        drop(db);
+        drop(failure);
+        let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+        assert_eq!(
+            serde_json::to_value(db.document_upload_status(id).unwrap()).unwrap(),
+            expected
+        );
+        assert!(db.all_node_ids().unwrap().is_empty());
+        let published = request(
+            &mut db,
+            json!({"operation":"publish_upload","upload_id":id}),
+        );
+        assert_eq!(published["content"], "candidate");
+        assert_eq!(published["revision"], expected["revision"]);
+        db.close().unwrap();
+        let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+        assert_eq!(
+            request(&mut db, json!({"operation":"get","document_id":"1"})),
+            published
+        );
+        db.close().unwrap();
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn 检查点后复用上传标识的候选和发布均按新修订恢复() {
+    use triviumdb::test_hooks::{IoPoint, fail_io_at};
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        for publish in [false, true] {
+            let dir = TestDir::new("document-reused-upload-recovery");
+            let path = dir.file("data.tdb");
+            let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+            let id = "0484b56c-60dc-4327-b4ee-8a30dc0d61da";
+            request(&mut db, begin(id, "1", "old", Value::Null));
+            request(
+                &mut db,
+                json!({"operation":"append_upload","upload_id":id,"batch":{"sequence":0,"content":"old"}}),
+            );
+            let old = request(
+                &mut db,
+                json!({"operation":"publish_upload","upload_id":id}),
+            );
+            db.flush().unwrap();
+            db.delete(1).unwrap();
+            let status = request(&mut db, begin(id, "1", "new", Value::Null));
+            assert_ne!(status["revision"], old["revision"]);
+            request(
+                &mut db,
+                json!({"operation":"append_upload","upload_id":id,"batch":{"sequence":0,"content":"new"}}),
+            );
+            if publish {
+                request(
+                    &mut db,
+                    json!({"operation":"publish_upload","upload_id":id}),
+                );
+            }
+            let expected_status =
+                serde_json::to_value(db.document_upload_status(id).unwrap()).unwrap();
+            let failure = fail_io_at(IoPoint::PropertySidecarWrite);
+            assert_eq!(db.flush().unwrap_err().code(), "TDB_IO");
+            drop(db);
+            drop(failure);
+            let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+            assert_eq!(
+                serde_json::to_value(db.document_upload_status(id).unwrap()).unwrap(),
+                expected_status
+            );
+            let expected = request(
+                &mut db,
+                json!({"operation":"publish_upload","upload_id":id}),
+            );
+            assert_eq!(expected["content"], "new");
+            assert_eq!(expected["revision"], status["revision"]);
+            db.flush().unwrap();
+            db.close().unwrap();
+            let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+            assert_eq!(
+                request(&mut db, json!({"operation":"get","document_id":"1"})),
+                expected
+            );
+            db.close().unwrap();
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
 fn 检查点覆盖批次后旧日志重放保持最终发布和回收() {
     use triviumdb::test_hooks::{IoPoint, fail_io_at};
     let dir = TestDir::new("document-checkpoint-overlap");

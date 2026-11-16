@@ -51,6 +51,46 @@ fn plan(db: &Database<f32>, query: &str) -> serde_json::Value {
 }
 
 #[test]
+fn planner_投影排序和其他字段排序保留完整输入且解释一致() {
+    use triviumdb::query::tql_executor::execute_tql;
+    use triviumdb::query::tql_parser::parse_tql;
+    let mut mt = MemTable::<f32>::new(DIM);
+    for (id, rank, nested) in [(1, 1, 30), (2, 2, 20), (3, 3, 10)] {
+        mt.insert_with_id(
+            id,
+            &[1., 0., 0., 0.],
+            json!({"rank":rank, "nested":{"rank":nested}, "same":0}),
+        )
+        .unwrap();
+    }
+    mt.register_ordered_property_index("rank");
+    for order in ["picked.rank", "_.same"] {
+        let query = format!(
+            "EXPLAIN FIND {{rank: {{$gt:0}}}} RETURN _.nested AS picked ORDER BY {order} LIMIT 1"
+        );
+        let result = execute_tql(&parse_tql(&query).unwrap(), &mt).unwrap();
+        let plan = &result[0]["plan"].payload;
+        assert_eq!(plan["access_path"]["kind"], "ordered_property_index");
+        assert_eq!(plan["estimated_rows"], 3);
+        assert!(
+            !plan["optimizations"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("LIMIT early termination")),
+            "{query}: {plan}"
+        );
+    }
+    let query = "EXPLAIN FIND {rank: {$gt:0}} RETURN _.id AS id ORDER BY _.rank LIMIT 1";
+    let result = execute_tql(&parse_tql(query).unwrap(), &mt).unwrap();
+    assert!(
+        result[0]["plan"].payload["optimizations"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("LIMIT early termination"))
+    );
+}
+
+#[test]
 fn planner_稳定选择主键属性交集和标签索引() {
     let (path, mut db) = build("access_paths");
     db.create_index("group").unwrap();

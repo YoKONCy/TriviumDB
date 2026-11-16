@@ -2810,24 +2810,35 @@ fn plan_find_filter<T: VectorType>(
     plan_filter_with_limit(filter, candidate_limit, mt)
 }
 
+fn find_ordered_field(query: &TqlQuery) -> Option<(&str, bool)> {
+    if query.order_by.len() != 1 || query.rank.is_some() {
+        return None;
+    }
+    let order = &query.order_by[0];
+    let TqlExpr::Property { var, field } = &order.expr else {
+        return None;
+    };
+    // 返回别名先在投影作用域求值，事实字段的索引须先证明排序等价。
+    if let ReturnClause::Expressions(items) = &query.returns
+        && items.iter().any(|item| item.alias.as_ref() == Some(var))
+    {
+        return None;
+    }
+    if field == "id" {
+        return None;
+    }
+    Some((field, order.descending))
+}
+
 fn find_ordered_find_plan<T: VectorType>(
     query: &TqlQuery,
     filter: &Filter,
     mt: &MemTable<T>,
 ) -> Option<super::planner::NodeAccessPlan> {
-    if query.order_by.len() != 1 || query.rank.is_some() {
-        return None;
-    }
-    let order = &query.order_by[0];
-    let TqlExpr::Property { field, .. } = &order.expr else {
-        return None;
-    };
-    if field == "id" {
-        return None;
-    }
+    let (field, descending) = find_ordered_field(query)?;
     // ORDER BY 索引只能提供候选顺序；入口 Filter 和 WHERE 都可能继续淘汰候选。
     // 在过滤前按 OFFSET + LIMIT 截断会造成分页缺行，因此这里必须读取完整有序候选。
-    plan_filter_ordered(filter, field, order.descending, None, mt)
+    plan_filter_ordered(filter, field, descending, None, mt)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -4072,8 +4083,9 @@ fn generate_explain_plan<T: VectorType>(
         }
     }
     let ordered_find = matches!(&query.entry, QueryEntry::Find { .. })
-        && matches!(access_path, AccessPath::OrderedPropertyIndex { .. })
-        && query.order_by.len() == 1;
+        && matches!((&access_path, find_ordered_field(query)),
+            (AccessPath::OrderedPropertyIndex { field, descending }, Some((order_field, order_descending)))
+                if field == order_field && *descending == order_descending);
     if query.limit.is_some()
         && query.pipeline.is_empty()
         && !requires_full_input(query, ordered_find)

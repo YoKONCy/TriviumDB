@@ -58,7 +58,7 @@ impl BindingValue {
     }
 }
 
-fn compare_bindings(left: &NodeRow, right: &NodeRow) -> std::cmp::Ordering {
+pub(super) fn compare_bindings(left: &NodeRow, right: &NodeRow) -> std::cmp::Ordering {
     left.bindings
         .iter()
         .flat_map(|values| values.iter())
@@ -2763,41 +2763,112 @@ impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
     }
 
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let traversal = context.budget.traversal;
+        traversal.validate()?;
+        let graph_scope = context.graph_scope.clone();
+        let graph = crate::graph::view::GraphView {
+            facts: context.memtable,
+            scoped: graph_scope.as_deref(),
+        };
+        let control = context.graph_request()?.control().clone();
+        let mut admitted = crate::graph::budget::TraversalMetrics::default();
+        let row_bytes = std::mem::size_of::<NodeRow>()
+            .saturating_mul(2)
+            .saturating_add(256)
+            .saturating_add(input.len().saturating_mul(8));
+        let mut admit = |projected: crate::graph::budget::TraversalMetrics| -> Result<()> {
+            crate::graph::budget::check_control(&control)?;
+            let dimension = if projected.visited_nodes > traversal.max_visited_nodes {
+                Some(crate::graph::budget::BudgetDimension::VisitedNodes)
+            } else if projected.examined_edges > traversal.max_examined_edges {
+                Some(crate::graph::budget::BudgetDimension::ExaminedEdges)
+            } else if projected.peak_frontier_size > traversal.max_frontier_size {
+                Some(crate::graph::budget::BudgetDimension::FrontierSize)
+            } else if projected.depth_reached > traversal.max_depth {
+                Some(crate::graph::budget::BudgetDimension::Depth)
+            } else {
+                None
+            };
+            if let Some(dimension) = dimension {
+                // 管线沿用图扩展的完整结果错误策略。
+                crate::graph::budget::exhausted(
+                    &TraversalBudget {
+                        exhaustion_policy: BudgetExhaustionPolicy::Error,
+                        ..traversal
+                    },
+                    dimension,
+                    admitted,
+                )?;
+            }
+            if projected.visited_nodes > context.budget.max_nodes {
+                return Err(TriviumError::QueryRowBudgetExceeded {
+                    budget: context.budget.max_nodes,
+                });
+            }
+            let bytes = projected
+                .visited_nodes
+                .saturating_mul(row_bytes)
+                .saturating_add(projected.examined_edges.saturating_mul(96))
+                .saturating_add(input.len().saturating_mul(128));
+            let limit = if context.workspace_limit > 0 {
+                context
+                    .workspace_limit
+                    .min(context.budget.max_node_set_bytes)
+            } else {
+                context.budget.max_node_set_bytes
+            };
+            if bytes > limit {
+                return Err(TriviumError::ResourceBudgetExceeded {
+                    resource: "query_memory_bytes",
+                    requested: bytes,
+                    used: 0,
+                    limit,
+                });
+            }
+            if bytes > context.workspace_bytes {
+                context.reserve_row_workspace(
+                    bytes
+                        .max(context.workspace_bytes.saturating_mul(2))
+                        .min(limit),
+                )?;
+            }
+            admitted = projected;
+            Ok(())
+        };
+        admit(crate::graph::budget::TraversalMetrics::default())?;
         let seeds = input
             .rows
             .iter()
-            .filter_map(|row| {
-                let payload = (*context.memtable.get_payload(row.id)?).clone();
-                Some(crate::node::SearchHit {
-                    id: row.id,
-                    score: row
-                        .similarity
-                        .or(row.graph_score)
-                        .map_or(1.0, |score| score.value.max(0.0)),
-                    payload,
-                })
-            })
-            .collect();
-        let hits = crate::graph::traversal::expand_graph_with_labels_view(
-            &context.graph(),
+            .filter(|row| graph.contains(row.id))
+            .map(|row| crate::node::SearchHit {
+                id: row.id,
+                score: row
+                    .similarity
+                    .or(row.graph_score)
+                    .map_or(1.0, |score| score.value.max(0.0)),
+                payload: serde_json::Value::Null,
+            });
+        let hits = crate::graph::traversal::expand_graph_checked(
+            &graph,
             seeds,
-            self.max_depth.min(context.budget.traversal.max_depth),
+            self.max_depth,
             self.restart_alpha,
             false,
-            context.budget.max_nodes,
+            0,
             false,
             None,
             self.labels.as_deref(),
             self.max_edges_per_node,
             self.min_edge_weight,
             crate::database::EdgeDirection::Outgoing,
-        );
+            admit,
+        )?;
         Ok(NodeSet::from_rows(
             hits.into_iter()
-                .map(|hit| {
-                    let mut row = NodeRow::new(hit.id);
+                .map(|(id, score)| {
+                    let mut row = NodeRow::new(id);
                     let graph_score = ScoreValue {
-                        value: hit.score,
+                        value: score,
                         kind: ScoreKind::DepthBounded,
                     };
                     row.graph_score = Some(graph_score);

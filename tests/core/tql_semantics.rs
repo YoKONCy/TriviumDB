@@ -25,6 +25,7 @@ fn scalar(v: &TqlValue<f32>) -> Value {
         TqlValue::Bool(v) => json!(v),
         TqlValue::Null => Value::Null,
         TqlValue::List(v) => json!(v),
+        TqlValue::Object(v) => json!(v),
         other => panic!("此样本要求标量，实际为 {other:?}"),
     }
 }
@@ -529,6 +530,27 @@ fn 三端共享返回样例逐项验证完整结果() {
         }
     }
     db.close().unwrap();
+    let mut db =
+        Database::<f32>::open_with_config(&root.file("indexed.tdb"), config(StorageMode::Mmap))
+            .unwrap();
+    let indexed = &contract["indexed_order"];
+    for row in indexed["records"].as_array().unwrap() {
+        db.insert_with_id(row["id"].as_u64().unwrap(), &[1.], row["payload"].clone())
+            .unwrap();
+    }
+    for target in [2, 3] {
+        db.link(1, target, "related", f32::MAX).unwrap();
+    }
+    for phase in 0..=indexed["indexes"].as_array().unwrap().len() {
+        if phase > 0 {
+            db.create_ordered_index(indexed["indexes"][phase - 1].as_str().unwrap())
+                .unwrap();
+        }
+        for case in indexed["cases"].as_array().unwrap() {
+            expect(&db, case["query"].as_str().unwrap(), case["rows"].clone());
+        }
+    }
+    db.close().unwrap();
 }
 
 #[test]
@@ -655,5 +677,88 @@ fn set遇到非对象目标时整批拒绝并保留wal() {
     assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
     assert_eq!(db.get_payload(1).unwrap(), Some(json!({"a":0})));
     assert_eq!(db.get_payload(2).unwrap(), Some(json!([])));
+    db.close().unwrap();
+}
+
+#[test]
+fn 返回别名排序在同名事实索引存在时仍按投影求值() {
+    let dir = TestDir::new("tql_order_alias_identity");
+    let mut db =
+        Database::<f32>::open_with_config(&dir.file("data.tdb"), config(StorageMode::Rom)).unwrap();
+    for (id, rank, nested) in [(1, 1, 30), (2, 2, 20), (3, 3, 10)] {
+        db.insert_with_id(id, &[1.], json!({"rank":rank,"nested":{"rank":nested}}))
+            .unwrap();
+    }
+    for indexed in [false, true] {
+        if indexed {
+            db.create_ordered_index("rank").unwrap();
+        }
+        for alias in ["picked", "_"] {
+            for (direction, expected) in [("ASC", 10), ("DESC", 30)] {
+                let query = format!(
+                    "FIND {{rank: {{$gt: 0}}}} RETURN _.nested AS {alias} ORDER BY {alias}.rank {direction} LIMIT 1"
+                );
+                let result = db.tql(&query).unwrap();
+                assert_eq!(result.len(), 1, "{query}, indexed={indexed}");
+                assert!(
+                    matches!(&result[0][alias], TqlValue::Object(value) if value == json!({"rank":expected}).as_object().unwrap()),
+                    "{query}: {result:?}"
+                );
+            }
+        }
+        let result = db
+            .tql("FIND {rank: {$gt: 0}} RETURN _ AS picked ORDER BY picked.rank LIMIT 1")
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0]["picked"], TqlValue::Node(node) if node.id == 1));
+    }
+    db.close().unwrap();
+}
+
+#[test]
+fn 同分排序以节点身份分页且独立于范围索引和方向() {
+    let dir = TestDir::new("tql_order_stable_identity");
+    let mut db =
+        Database::<f32>::open_with_config(&dir.file("data.tdb"), config(StorageMode::Rom)).unwrap();
+    for (id, value) in [(1, 30), (2, 10), (3, 20)] {
+        db.insert_with_id(id, &[1.], json!({"v":value,"same":0}))
+            .unwrap();
+    }
+    for phase in 0..3 {
+        match phase {
+            1 => db.create_ordered_index("v").unwrap(),
+            2 => db.create_ordered_index("same").unwrap(),
+            _ => {}
+        }
+        for direction in ["ASC", "DESC"] {
+            let query =
+                format!("FIND {{v: {{$gt: 0}}}} RETURN _.id AS id ORDER BY _.same {direction}");
+            expect(&db, &query, json!([{"id":1},{"id":2},{"id":3}]));
+            expect(&db, &format!("{query} LIMIT 1"), json!([{"id":1}]));
+            expect(&db, &format!("{query} LIMIT 1 OFFSET 1"), json!([{"id":2}]));
+            let pipeline = format!(
+                "FIND {{v: {{$gt: 0}}}} AS n WITH n RETURN n.id AS id ORDER BY n.same {direction} LIMIT 1 OFFSET 1"
+            );
+            expect(&db, &pipeline, json!([{"id":2}]));
+        }
+    }
+    db.close().unwrap();
+}
+
+#[test]
+fn 大有限边权经公开扩散查询保留完整归一化分数() {
+    let dir = TestDir::new("tql_diffusion_finite_weights");
+    let mut db =
+        Database::<f32>::open_with_config(&dir.file("data.tdb"), config(StorageMode::Rom)).unwrap();
+    for id in 1..=3 {
+        db.insert_with_id(id, &[1.], json!({"seed":id==1})).unwrap();
+    }
+    db.link(1, 2, "related", f32::MAX).unwrap();
+    db.link(1, 3, "related", f32::MAX).unwrap();
+    expect(
+        &db,
+        "FIND {seed:true} WITH _ AS seed SA_PPR_CONFIG seed DEPTH 1 ALPHA 0 MAX_EDGES 10 MIN_WEIGHT 0 AS expanded WITH expanded RETURN expanded.id AS id, graph_score(expanded) AS score ORDER BY expanded.id",
+        json!([{"id":1,"score":1.0},{"id":2,"score":0.5},{"id":3,"score":0.5}]),
+    );
     db.close().unwrap();
 }
