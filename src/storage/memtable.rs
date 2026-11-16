@@ -490,46 +490,12 @@ impl GraphStatsState {
 
 /// 计算给定 JSON 对象的行级特征布隆签名（共 64 位）
 fn calculate_json_signature(value: &serde_json::Value) -> u64 {
-    let mut sig = 0u64;
-    flatten_and_hash_json("", value, &mut sig);
-    sig
-}
-
-fn flatten_and_hash_json(prefix: &str, value: &serde_json::Value, sig: &mut u64) {
-    use std::hash::{Hash, Hasher};
-    match value {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                let new_prefix = if prefix.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{}.{}", prefix, k)
-                };
-                flatten_and_hash_json(&new_prefix, v, sig);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                flatten_and_hash_json(prefix, v, sig);
-            }
-        }
-        serde_json::Value::String(s) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            format!("{}:{}", prefix, s).hash(&mut hasher);
-            *sig |= 1u64 << (hasher.finish() % 64);
-        }
-        serde_json::Value::Bool(b) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            format!("{}:{}", prefix, b).hash(&mut hasher);
-            *sig |= 1u64 << (hasher.finish() % 64);
-        }
-        serde_json::Value::Number(n) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            format!("{}:{}", prefix, n).hash(&mut hasher);
-            *sig |= 1u64 << (hasher.finish() % 64);
-        }
-        serde_json::Value::Null => {}
-    }
+    let Some(fields) = value.as_object() else {
+        return 0;
+    };
+    fields.iter().fold(0, |signature, (key, value)| {
+        signature | crate::filter::equality_mask(key, value)
+    })
 }
 
 pub(crate) struct QuiverBuildSnapshot {

@@ -515,7 +515,7 @@ WITH 保存每行的带类型投影，EXPAND 传递起点快照，多源汇合�
 TQL 的 FIND 入口底层采用三层加速策略：
 
 1. **属性二级索引**：执行器自动检测是否存在已建索引字段。命中时直接 O(1) 倒排查找，跳过全表扫描。
-2. **Parallel Bit-Tag Array（布隆特征拦截）**：节点插入时自动展平 JSON 键值对，合成 64 位特征标签 `fast_tags`。过滤时引擎编译出 Must-have Mask，通过位运算 `(fast_tags[i] & mask) == mask` 在几个时钟周期内截断 99% 的不匹配节点，仅少量漏网候选进入完整 JSON 解析。
+2. **Parallel Bit-Tag Array（布隆特征拦截）**：按顶层字段和完整 JSON 值合成 64 位特征标签 `fast_tags`。存储与查询共享 JSON 的等值及哈希规则，覆盖 null、数组、对象和正负零。过滤时通过 `(fast_tags[i] & mask) == mask` 筛选必要条件，候选继续执行完整 Payload 谓词校验。冷记录使用保守签名，后续更新重新计算签名。
 3. **JSON 精确验证**：对通过前两层的极少数候选节点，执行完整的 `$gt` / `$in` / `$exists` 等运算符语义验证。
 
 支持的过滤运算符：`$eq` / `$ne` / `$gt` / `$gte` / `$lt` / `$lte` / `$before` / `$beforeEq` / `$after` / `$afterEq` / `$in` / `$nin` / `$exists` / `$size` / `$all` / `$type`，以及 `$and` / `$or` 逻辑组合。普通范围支持数字和原始字符串字典序且不做跨类型强制转换；时间操作符严格解析 RFC3339 并按绝对时间比较。

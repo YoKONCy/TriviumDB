@@ -40,6 +40,8 @@ TriviumDB v0.6.0 引入的 Hook 系统提供了 **6 个管线关键阶段的自�
 
 每个回调结束后，Core 立即检查 `HookContext.error` 并通过 `TDB_HOOK_EXECUTION` 返回失败。空召回、普通返回及 DPP 最终返回执行相同契约，后续阶段在错误返回后结束。Python、Node 与 FFI 适配器通过 Core 传播回调失败。
 
+查询向量在 Hook 改写后以及目标 dtype 转换后分别校验维度与有限性。f32 有限值转为 f16 后溢出时，查询返回 `TDB_INVALID_VECTOR`。
+
 ---
 
 ## 管线架构与 6 个注入点
@@ -432,7 +434,9 @@ FFI 动态库随最后一个 Hook 所有者释放而卸载。只有数据库持�
 | 上下文·数据 | `ctx.custom_data` (dict) | `context.customData` (object) | `ctx.custom_data` (serde_json::Value) |
 | 上下文·终止 | `ctx.aborted` (bool) | `context.aborted` (bool) | `ctx.abort` (bool) |
 
-> **回调提醒**：原生 Python/JS Hook 的异常转换为结构化查询错误。Node 回调必须是同步函数，禁止返回 Promise。
+Node 的 `onCustomRecall` 返回 `null` 时执行内置召回，重排和后置命中回调返回 `null` 时保留当前命中。空数组显式替换为空命中。命中逐项校验字符串 ID、有效 u64 范围和有限 f32 分数，整批校验完成后应用替换。向量回调返回数值数组，维度和 dtype 边界由 Core 校验。
+
+> **回调提醒**　原生 Python／JS Hook 的失败通过结构化查询错误传播。Node Hook 同步执行，Promise 和格式错误返回 `TDB_HOOK_EXECUTION`。异步计算由宿主完成后，再以同步回调提供结果。
 
 ---
 

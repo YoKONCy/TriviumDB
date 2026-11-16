@@ -623,7 +623,7 @@ export class TriviumDB {
 
   // ── Hook 管理 ──
 
-  /** 注册同步 JavaScript 六阶段 Hook；回调不得返回 Promise */
+  /** 注册同步 JavaScript 六阶段 Hook。null 使用该阶段默认处理，空命中数组清空结果，Promise 和格式错误返回 TDB_HOOK_EXECUTION。 */
   setHook(hook: {
     onPreSearch?: (query: number[]) => number[] | null;
     onCustomRecall?: (query: number[]) => Array<{ id: string; score: number; payload?: unknown }> | null;

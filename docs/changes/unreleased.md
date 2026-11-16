@@ -6,6 +6,13 @@
 
 ## 中文说明
 
+### Payload 预过滤与 Hook 返回契约
+
+- 行级 64 位预过滤签名与查询掩码共享 JSON 的 `Eq/Hash` 规则，按顶层字段及完整值编码，覆盖 null、空及嵌套数组／对象、正负零、字面点号字段与空字段名。完整 Payload 谓词继续核对候选，写入、更新和重开使用一致的等值语义。
+- Hook 改写向量在转换为目标 dtype 后再次执行 Core 维度与有限性校验。`[70000, 0]` 转为 f16 后溢出时返回 `TDB_INVALID_VECTOR`，后续合法查询正常执行。
+- Node 重排及后置命中回调返回 `null` 时保留当前命中，自定义召回返回 `null` 时执行内置召回。空数组显式替换为空结果，与 Core／Python 的可选替换语义一致。
+- Node Hook 返回 Promise、非法向量表示或错误命中成员时返回 `TDB_HOOK_EXECUTION`。命中列表按 ID 与有限 f32 分数整批校验后替换，正常的 Promise 拒绝通知由适配器接收。公共声明补充返回语义，类型消费覆盖合法 nullable 返回及异步返回拒绝。
+
 ### 文本恢复、向量索引与检索回调
 
 - 检查点在文件组发布前同步 WAL v7 的唯一封条，TMET v2 将封条、主文件长度及 CRC、文本长度及 CRC 绑定并校验。恢复按封条区分检查点覆盖的旧删除与后续真实删除，覆盖节点 ID 复用、立即／延期加载、Rom／Mmap 和 Off 同步模式。历史 TMET v1 保留读取能力；旧文本缺少封条且恢复涉及已登记节点的删除及 ID 复用时，返回 `TDB_RECOVERY_REQUIRED`，定位字段为 `text_index.recovery_boundary`，保留原始文件供处理。
@@ -50,6 +57,13 @@
 ## English
 
 Subsequent development builds on `0.9.1`. See the [bilingual release notes](0.9.1.md) for delivered capabilities.
+
+### Payload prefiltering and Hook return contracts
+
+- Row-level 64-bit prefilter signatures and query masks share JSON's `Eq/Hash` rules for top-level fields and complete values. Coverage includes null, empty and nested arrays/objects, signed zero, literal dotted fields, and empty field names. Full Payload predicates verify candidates, with consistent equality across writes, updates, and reopening.
+- Hook-modified vectors undergo Core dimension and finiteness validation after conversion to the target dtype. Converting `[70000, 0]` to f16 returns `TDB_INVALID_VECTOR` on overflow, and subsequent valid queries continue normally.
+- Node reranking and post-recall hit callbacks preserve current hits when returning `null`. Custom recall returning `null` uses built-in recall. An empty array explicitly replaces hits with an empty result, matching Core/Python optional replacement semantics.
+- Node Hook Promises, invalid vector representations, and malformed hit members return `TDB_HOOK_EXECUTION`. Complete hit lists are validated for IDs and finite f32 scores before replacement, and the adapter receives ordinary Promise rejection notifications. Public declarations clarify return semantics, with type-consumption coverage for nullable returns and asynchronous-return rejection.
 
 ### Text recovery, vector indexes, and search callbacks
 

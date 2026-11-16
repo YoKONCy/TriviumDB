@@ -10,6 +10,12 @@ function check(condition: boolean, message: string): asserts condition {
 }
 
 export function inspectRequestContext(database: TriviumDB): void {
+  database.setHook({ onRerank: () => null });
+  database.setHook({ onRerank: hits => hits });
+  // @ts-expect-error 同步 Hook 拒绝 Promise 返回值。
+  database.setHook({ onPreSearch: async query => query });
+  // @ts-expect-error Hook 命中的 ID 使用十进制字符串。
+  database.setHook({ onCustomRecall: () => [{ id: 1, score: 1 }] });
   const context = new RequestContext('typed-request', 0);
   const identity: string = context.requestId;
   const node: JsNodeView | null = context.run(() => database.get(7));

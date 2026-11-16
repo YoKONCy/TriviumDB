@@ -6,6 +6,110 @@ use triviumdb::database::{Config, SearchConfig, StorageMode};
 use triviumdb::index::quiver::{BqNavigationScorer, QuIVer, QuIVerConfig, QuIVerSearchConfig};
 use triviumdb::{Database, VectorType};
 
+#[test]
+fn JSON等值预过滤在写入更新与重开后保留完整命中() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../contracts/search_filter_cases.json")).unwrap();
+    let records = fixture["records"].as_array().unwrap();
+    let root = support::TestDir::new("equality_prefilter");
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let path = root.file(&format!("{mode:?}.tdb"));
+        let cfg = Config {
+            dim: 2,
+            storage_mode: mode,
+            auto_build_quiver: false,
+            ..Default::default()
+        };
+        let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+        for record in records {
+            db.insert_with_id(
+                record["id"].as_u64().unwrap(),
+                &[1., 0.],
+                record["payload"].clone(),
+            )
+            .unwrap();
+        }
+        // 每轮独立检查期望集合，分别覆盖新签名、冷记录和重新计算后的签名。
+        for phase in 0..3 {
+            if phase == 1 {
+                db.close().unwrap();
+                db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+            }
+            if phase == 2 {
+                for record in records {
+                    db.update_payload(record["id"].as_u64().unwrap(), record["payload"].clone())
+                        .unwrap();
+                }
+            }
+            for case in fixture["cases"].as_array().unwrap() {
+                let expected: Vec<u64> = serde_json::from_value(case["ids"].clone()).unwrap();
+                let config = SearchConfig {
+                    top_k: records.len(),
+                    recall_k: records.len(),
+                    rerank_k: records.len(),
+                    expand_depth: 0,
+                    min_score: -1.,
+                    force_brute_force: true,
+                    payload_filter: Some(triviumdb::Filter::from_json(&case["filter"]).unwrap()),
+                    ..Default::default()
+                };
+                let hits = db.search_advanced(&[1., 0.], &config).unwrap();
+                assert_eq!(
+                    hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+                    expected,
+                    "{mode:?}/{phase}/{case}"
+                );
+                for hit in hits {
+                    let record = records
+                        .iter()
+                        .find(|record| record["id"] == hit.id)
+                        .unwrap();
+                    assert_eq!(hit.payload, record["payload"]);
+                    assert_eq!(hit.score, 1.);
+                }
+            }
+        }
+        db.close().unwrap();
+    }
+}
+
+struct RewriteQuery(Vec<f32>);
+impl triviumdb::hook::SearchHook for RewriteQuery {
+    fn on_pre_search(
+        &self,
+        query: &mut Vec<f32>,
+        _: &mut SearchConfig,
+        _: &mut triviumdb::hook::HookContext,
+    ) {
+        query.clone_from(&self.0);
+    }
+}
+
+#[test]
+fn Hook向量在f16转换后执行有限性校验且失败后可继续查询() {
+    let root = support::TestDir::new("hook_f16_overflow");
+    let mut db = Database::<half::f16>::open(&root.file("data.tdb"), 2).unwrap();
+    let query = [half::f16::ONE, half::f16::ZERO];
+    db.insert_with_id(1, &query, json!({"value":"kept"}))
+        .unwrap();
+    assert_eq!(
+        db.search(&[half::f16::from_f32(70000.), half::f16::ZERO], 1, 0, -1.)
+            .unwrap_err()
+            .code(),
+        "TDB_INVALID_VECTOR"
+    );
+    db.set_hook(RewriteQuery(vec![70000., 0.])).unwrap();
+    assert_eq!(
+        db.search(&query, 1, 0, -1.).unwrap_err().code(),
+        "TDB_INVALID_VECTOR"
+    );
+    db.set_hook(RewriteQuery(vec![60000., 0.])).unwrap();
+    let result = db.search(&query, 1, 0, -1.).unwrap();
+    assert_eq!(result.iter().map(|hit| hit.id).collect::<Vec<_>>(), [1]);
+    assert_eq!(result[0].payload, json!({"value":"kept"}));
+    db.close().unwrap();
+}
+
 struct StageErrorHook {
     stage: &'static str,
     calls: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,

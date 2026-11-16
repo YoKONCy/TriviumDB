@@ -263,6 +263,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             query_vec_f32.iter().map(|&x| T::from_f32(x)).collect()
         };
     let query_vector: Option<&[T]> = if query_vector.is_some() {
+        crate::vector::validate_query_vector(&hooked_query, dim)?;
         Some(&hooked_query)
     } else {
         None
