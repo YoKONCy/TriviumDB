@@ -181,6 +181,19 @@ pub fn dpp_greedy(
     k: usize,
     quality_weight: f32,
 ) -> Vec<usize> {
+    let scores = scores
+        .iter()
+        .map(|&score| f64::from(score))
+        .collect::<Vec<_>>();
+    dpp_greedy_wide(vecs, &scores, k, quality_weight)
+}
+
+pub(crate) fn dpp_greedy_wide(
+    vecs: &[Vec<f32>],
+    scores: &[f64],
+    k: usize,
+    quality_weight: f32,
+) -> Vec<usize> {
     let n = scores.len();
     if n <= k {
         return (0..n).collect();
@@ -190,37 +203,49 @@ pub fn dpp_greedy(
     let normed: Vec<Vec<f32>> = vecs
         .iter()
         .map(|v| {
-            let norm = l2_norm(v).max(1e-10);
+            let norm = v
+                .iter()
+                .map(|&x| f64::from(x).powi(2))
+                .sum::<f64>()
+                .sqrt()
+                .max(1e-10);
             let inv = 1.0 / norm;
-            v.iter().map(|&x| x * inv).collect()
+            v.iter().map(|&x| (f64::from(x) * inv) as f32).collect()
         })
         .collect();
 
-    // 质量因子 q_i = score_i ^ quality_weight
-    let q: Vec<f32> = scores
+    // 在对数域统一缩放核与正则项，保留行列式排序并限制所有质量因子的上界。
+    let log_q: Vec<f64> = scores
         .iter()
-        .map(|&s| s.max(1e-10).powf(quality_weight))
+        .map(|&s| s.max(1e-10).ln() * f64::from(quality_weight))
         .collect();
+    let log_scale = log_q.iter().copied().fold((1e-8f64).ln() / 2.0, f64::max);
+    let q: Vec<f64> = log_q
+        .iter()
+        .map(|&value| (value - log_scale).exp())
+        .collect();
+    let regularization = ((1e-8f64).ln() - 2.0 * log_scale).exp();
+    let stopping_variance = ((1e-10f64).ln() - 2.0 * log_scale).exp();
 
-    // d[i] = 当前条件方差 (初始 = L_ii = q_i^2 + 1e-8 微小正则防止坍缩)
-    let mut diag: Vec<f32> = q.iter().map(|&qi| qi * qi + 1e-8).collect();
+    // d[i] 保存缩放后的条件方差，正则项与质量核使用同一比例。
+    let mut diag: Vec<f64> = q.iter().map(|&qi| qi * qi + regularization).collect();
 
     // Cholesky 增量列: O(nk^2)
-    let mut c = vec![vec![0.0f32; n]; k];
+    let mut c = vec![vec![0.0f64; n]; k];
 
     let mut selected = Vec::with_capacity(k);
 
     for j in 0..k {
         // 找条件方差 d[i] 最大的（即边际极大化行列式的）
-        let mut best = 0usize;
-        let mut best_val = f32::NEG_INFINITY;
+        let mut best = None;
+        let mut best_val = f64::NEG_INFINITY;
         for i in 0..n {
             if diag[i] > best_val && !selected.contains(&i) {
                 best_val = diag[i];
-                best = i;
+                best = Some(i);
             }
         }
-
+        let Some(best) = best else { break };
         selected.push(best);
 
         if j == k - 1 {
@@ -228,13 +253,20 @@ pub fn dpp_greedy(
         }
 
         // 已经无法增加行列式总值（池子里剩下的全都是高度相似的冗余内容）
-        if diag[best] < 1e-10 {
+        if diag[best] <= stopping_variance {
             break;
         }
 
         // 惰性求值构建 L 矩阵
-        let l_best_row: Vec<f32> = (0..n)
-            .map(|i| q[best] * dot(&normed[best], &normed[i]) * q[i])
+        let l_best_row: Vec<f64> = (0..n)
+            .map(|i| {
+                let similarity = normed[best]
+                    .iter()
+                    .zip(&normed[i])
+                    .map(|(&a, &b)| f64::from(a) * f64::from(b))
+                    .sum::<f64>();
+                q[best] * similarity * q[i]
+            })
             .collect();
 
         // 增量消元: c[j, :] = L[best, :] - Σ_{i<j} c[i, best] * c[i, :]
@@ -283,34 +315,35 @@ pub fn nmf_multiplicative_update(
     max_iter: usize,
     tol: f32,
 ) -> (Vec<f32>, Vec<f32>) {
-    let eps = 1e-10f32;
+    let eps = 1e-10f64;
 
     // 绝对值截断保证非负
-    let mut v_abs = vec![0.0f32; m * d];
+    let mut v_abs = vec![0.0f64; m * d];
     for (i, &val) in v_flat.iter().enumerate() {
-        v_abs[i] = val.abs();
+        v_abs[i] = f64::from(val).abs();
     }
 
-    let v_mean = v_abs.iter().sum::<f32>() / (m * d) as f32;
-    let avg = (v_mean / k as f32).sqrt().max(0.01);
+    let v_mean = v_abs.iter().sum::<f64>() / (m * d) as f64;
+    let avg = (v_mean / k as f64).sqrt().max(0.01);
 
     // 极简实现的伪随机数，剥离 rand 依赖
     let mut seed: u64 = 42;
-    let mut next_rand = || -> f32 {
+    let mut next_rand = || -> f64 {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let val = ((seed >> 33) as f32) / (u32::MAX as f32);
+        let val = ((seed >> 33) as f64) / (u32::MAX as f64);
         (avg + avg * 0.5 * (val - 0.5)).abs() + eps
     };
 
-    let mut w: Vec<f32> = (0..m * k).map(|_| next_rand()).collect();
-    let mut h: Vec<f32> = (0..k * d).map(|_| next_rand()).collect();
+    // f32 事实输入使用 f64 工作区，容纳乘法更新与残差平方的中间量。
+    let mut w: Vec<f64> = (0..m * k).map(|_| next_rand()).collect();
+    let mut h: Vec<f64> = (0..k * d).map(|_| next_rand()).collect();
 
     for iter in 0..max_iter {
         // --- 1. 更新隐特征 H ---
-        let mut wtv = vec![0.0f32; k * d];
+        let mut wtv = vec![0.0f64; k * d];
         for ki in 0..k {
             for di in 0..d {
-                let mut sum = 0.0f32;
+                let mut sum = 0.0f64;
                 for mi in 0..m {
                     sum += w[mi * k + ki] * v_abs[mi * d + di];
                 }
@@ -318,10 +351,10 @@ pub fn nmf_multiplicative_update(
             }
         }
 
-        let mut wtw = vec![0.0f32; k * k];
+        let mut wtw = vec![0.0f64; k * k];
         for i in 0..k {
             for j in i..k {
-                let mut sum = 0.0f32;
+                let mut sum = 0.0f64;
                 for mi in 0..m {
                     sum += w[mi * k + i] * w[mi * k + j];
                 }
@@ -330,10 +363,10 @@ pub fn nmf_multiplicative_update(
             }
         }
 
-        let mut wtwh = vec![0.0f32; k * d];
+        let mut wtwh = vec![0.0f64; k * d];
         for i in 0..k {
             for di in 0..d {
-                let mut sum = 0.0f32;
+                let mut sum = 0.0f64;
                 for j in 0..k {
                     sum += wtw[i * k + j] * h[j * d + di];
                 }
@@ -347,10 +380,10 @@ pub fn nmf_multiplicative_update(
         }
 
         // --- 2. 更新权重基 W ---
-        let mut vht = vec![0.0f32; m * k];
+        let mut vht = vec![0.0f64; m * k];
         for mi in 0..m {
             for ki in 0..k {
-                let mut sum = 0.0f32;
+                let mut sum = 0.0f64;
                 for di in 0..d {
                     sum += v_abs[mi * d + di] * h[ki * d + di];
                 }
@@ -358,10 +391,10 @@ pub fn nmf_multiplicative_update(
             }
         }
 
-        let mut hht = vec![0.0f32; k * k];
+        let mut hht = vec![0.0f64; k * k];
         for i in 0..k {
             for j in i..k {
-                let mut sum = 0.0f32;
+                let mut sum = 0.0f64;
                 for di in 0..d {
                     sum += h[i * d + di] * h[j * d + di];
                 }
@@ -370,10 +403,10 @@ pub fn nmf_multiplicative_update(
             }
         }
 
-        let mut whht = vec![0.0f32; m * k];
+        let mut whht = vec![0.0f64; m * k];
         for mi in 0..m {
             for ki in 0..k {
-                let mut sum = 0.0f32;
+                let mut sum = 0.0f64;
                 for j in 0..k {
                     sum += w[mi * k + j] * hht[j * k + ki];
                 }
@@ -388,11 +421,11 @@ pub fn nmf_multiplicative_update(
 
         // 收敛残差
         if iter > 0 && iter % 10 == 0 {
-            let mut res_sq = 0.0f32;
-            let mut v_sq = 0.0f32;
+            let mut res_sq = 0.0f64;
+            let mut v_sq = 0.0f64;
             for mi in 0..m {
                 for di in 0..d {
-                    let mut wh = 0.0f32;
+                    let mut wh = 0.0f64;
                     for ki in 0..k {
                         wh += w[mi * k + ki] * h[ki * d + di];
                     }
@@ -401,13 +434,16 @@ pub fn nmf_multiplicative_update(
                     v_sq += v_abs[mi * d + di] * v_abs[mi * d + di];
                 }
             }
-            if v_sq > 0.0 && (res_sq / v_sq).sqrt() < tol {
+            if v_sq > 0.0 && (res_sq / v_sq).sqrt() < f64::from(tol) {
                 break;
             }
         }
     }
 
-    (w, h)
+    (
+        w.into_iter().map(|value| value as f32).collect(),
+        h.into_iter().map(|value| value as f32).collect(),
+    )
 }
 
 /// NMF 查询深度分析：评估原意图中的不均衡性与新领域

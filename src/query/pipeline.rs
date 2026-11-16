@@ -86,7 +86,8 @@ pub enum ScoreKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct ScoreValue {
-    pub value: f32,
+    /// 保留图算法的宽类型结果，供投影、排序、聚合与各语言绑定传递。
+    pub value: f64,
     pub kind: ScoreKind,
 }
 
@@ -173,6 +174,11 @@ impl NodeRow {
         }
     }
     pub fn set_graph_metric(&mut self, metric: GraphMetric, score: ScoreValue) -> Result<()> {
+        if !score.value.is_finite() {
+            return Err(TriviumError::QueryExecution(
+                "图分数超出有限范围 (Graph score exceeds the finite range)".into(),
+            ));
+        }
         self.graph_metrics.insert(metric, score);
         self.graph_score = Some(score);
         Ok(())
@@ -855,7 +861,7 @@ impl<T: VectorType> PipelineOperator<T> for ExactVectorSearch<T> {
                 .map(|(id, score)| {
                     let mut row = NodeRow::new(id);
                     row.similarity = Some(ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: ScoreKind::Exact,
                     });
                     row.provenance.source_ids.push(id);
@@ -935,7 +941,7 @@ impl<T: VectorType> PipelineOperator<T> for QuiverVectorSearch<T> {
                 .map(|(id, score)| {
                     let mut row = NodeRow::new(id);
                     row.similarity = Some(ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: if approximate {
                             ScoreKind::Approximate
                         } else {
@@ -1014,7 +1020,7 @@ impl<T: VectorType> PipelineOperator<T> for TextSearchSource {
                 .map(|(id, score)| {
                     let mut row = NodeRow::new(id);
                     row.text_score = Some(ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: ScoreKind::Exact,
                     });
                     row.provenance.source_ids.push(id);
@@ -1049,9 +1055,11 @@ impl<T: VectorType> PipelineOperator<T> for DppDiversify {
         let temp_cells = input
             .len()
             .checked_mul(self.top_k)
+            .and_then(|cells| cells.checked_add(input.len().checked_mul(6)?))
+            .and_then(|cells| cells.checked_add(input.len().checked_mul(context.memtable.dim())?))
             .ok_or_else(|| TriviumError::QueryExecution("DPP 临时预算溢出".into()))?;
         let temp_bytes = temp_cells
-            .checked_mul(std::mem::size_of::<f32>())
+            .checked_mul(std::mem::size_of::<f64>())
             .ok_or_else(|| TriviumError::QueryExecution("DPP 临时字节预算溢出".into()))?;
         if temp_bytes > context.budget.max_node_set_bytes {
             return Err(TriviumError::QueryExecution(
@@ -1081,12 +1089,12 @@ impl<T: VectorType> PipelineOperator<T> for DppDiversify {
             }
         }
         let selected =
-            crate::cognitive::dpp_greedy(&vectors, &scores, self.top_k, self.quality_weight);
+            crate::cognitive::dpp_greedy_wide(&vectors, &scores, self.top_k, self.quality_weight);
         let mut output = Vec::with_capacity(selected.len());
         for (rank, index) in selected.into_iter().enumerate() {
             if let Some(mut row) = valid.get(index).cloned() {
                 row.diversity_score = Some(ScoreValue {
-                    value: 1.0 / (rank + 1) as f32,
+                    value: 1.0 / (rank + 1) as f64,
                     kind: ScoreKind::Approximate,
                 });
                 output.push(row);
@@ -1197,7 +1205,7 @@ impl<T: VectorType> PipelineOperator<T> for FistaResidualRecall<T> {
                 .map(|(id, score)| {
                     let mut row = inherited.remove(&id).unwrap_or_else(|| NodeRow::new(id));
                     row.residual_score = Some(ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: ScoreKind::Exact,
                     });
                     row
@@ -1231,14 +1239,34 @@ impl<T: VectorType> PipelineOperator<T> for NmfTopics {
         {
             return Err(TriviumError::InvalidInput("NMF 参数或矩阵预算无效".into()));
         }
+        // 峰值包含 V、三份 m×k、三份 k×d 及两份 k×k 工作矩阵。
         let matrix_cells = input
             .len()
             .checked_mul(context.memtable.dim())
-            .and_then(|value| value.checked_add(input.len().checked_mul(self.topics)?))
-            .and_then(|value| value.checked_add(self.topics.checked_mul(context.memtable.dim())?))
+            .and_then(|value| {
+                value.checked_add(input.len().checked_mul(self.topics)?.checked_mul(3)?)
+            })
+            .and_then(|value| {
+                value.checked_add(
+                    self.topics
+                        .checked_mul(context.memtable.dim())?
+                        .checked_mul(3)?,
+                )
+            })
+            .and_then(|value| {
+                value.checked_add(self.topics.checked_mul(self.topics)?.checked_mul(2)?)
+            })
             .ok_or_else(|| TriviumError::QueryExecution("NMF 矩阵预算溢出".into()))?;
         let matrix_bytes = matrix_cells
-            .checked_mul(std::mem::size_of::<f32>())
+            .checked_mul(std::mem::size_of::<f64>())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    input
+                        .len()
+                        .checked_mul(context.memtable.dim())?
+                        .checked_mul(std::mem::size_of::<f32>())?,
+                )
+            })
             .ok_or_else(|| TriviumError::QueryExecution("NMF 矩阵字节预算溢出".into()))?;
         if matrix_bytes > context.budget.max_node_set_bytes {
             return Err(TriviumError::QueryExecution(
@@ -1260,7 +1288,7 @@ impl<T: VectorType> PipelineOperator<T> for NmfTopics {
                 .ok_or(TriviumError::NodeNotFound(row.id))?;
             flat.extend(vector.iter().map(|value| value.to_f32()));
         }
-        let (weights, _) = crate::cognitive::nmf_multiplicative_update(
+        let (weights, topics) = crate::cognitive::nmf_multiplicative_update(
             &flat,
             rows.len(),
             context.memtable.dim(),
@@ -1268,6 +1296,15 @@ impl<T: VectorType> PipelineOperator<T> for NmfTopics {
             self.iterations,
             1e-4,
         );
+        if weights
+            .iter()
+            .chain(&topics)
+            .any(|value| !value.is_finite())
+        {
+            return Err(TriviumError::QueryExecution(
+                "NMF 分解超出有限范围 (NMF factorization exceeds the finite range)".into(),
+            ));
+        }
         for (row_index, row) in rows.iter_mut().enumerate() {
             let start = row_index * self.topics;
             let topic_weights = &weights[start..start + self.topics];
@@ -1283,7 +1320,7 @@ impl<T: VectorType> PipelineOperator<T> for NmfTopics {
                 .unwrap_or((0, 0.0));
             row.topic_id = Some(topic as u64);
             row.topic_score = Some(ScoreValue {
-                value: score,
+                value: f64::from(score),
                 kind: ScoreKind::Approximate,
             });
         }
@@ -1361,7 +1398,7 @@ impl<T: VectorType> PipelineOperator<T> for ExactRerank<T> {
             if let Some(vector) = context.memtable.get_vector(row.id) {
                 row.document_score = None;
                 row.similarity = Some(ScoreValue {
-                    value: T::similarity(&self.query, vector),
+                    value: f64::from(T::similarity(&self.query, vector)),
                     kind: ScoreKind::Exact,
                 });
                 rows.push(row);
@@ -1405,12 +1442,12 @@ fn compare_similarity(left: &NodeRow, right: &NodeRow) -> std::cmp::Ordering {
     right
         .similarity
         .map(|score| score.value)
-        .unwrap_or(f32::NEG_INFINITY)
+        .unwrap_or(f64::NEG_INFINITY)
         .total_cmp(
             &left
                 .similarity
                 .map(|score| score.value)
-                .unwrap_or(f32::NEG_INFINITY),
+                .unwrap_or(f64::NEG_INFINITY),
         )
         .then_with(|| left.id.cmp(&right.id))
         .then_with(|| compare_bindings(left, right))
@@ -1669,7 +1706,7 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
                     row.provenance.source_ids = vec![hit.source_id];
                     row.provenance.min_depth = Some(hit.depth);
                     row.graph_score = Some(ScoreValue {
-                        value: 1.0 / hit.depth.max(1) as f32,
+                        value: 1.0 / hit.depth.max(1) as f64,
                         kind: ScoreKind::Exact,
                     });
                     expanded.push(row);
@@ -1696,7 +1733,7 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
             }
             row.provenance.min_depth = Some(min_depth);
             row.graph_score = Some(ScoreValue {
-                value: 1.0 / min_depth.max(1) as f32,
+                value: 1.0 / min_depth.max(1) as f64,
                 kind: ScoreKind::Exact,
             });
             expanded_rows.push(row);
@@ -1791,9 +1828,9 @@ impl<T: VectorType> PipelineOperator<T> for MultiAnchorExpand {
             }
             let anchor_weight = self.anchor_weights.get(&source.id).copied().unwrap_or(1.0);
             for target in reached.results {
-                let base = 1.0 / target.depth.max(1) as f32;
+                let base = 1.0 / target.depth.max(1) as f64;
                 let contribution = match self.aggregation {
-                    AnchorAggregation::WeightedSum => base * anchor_weight,
+                    AnchorAggregation::WeightedSum => base * f64::from(anchor_weight),
                     AnchorAggregation::Sum | AnchorAggregation::Max => base,
                 };
                 let row = output.entry(target.target_id).or_insert_with(|| {
@@ -1878,7 +1915,7 @@ impl<T: VectorType> PipelineOperator<T> for BatchShortestPaths {
                 let candidate = NodeRow {
                     id: target,
                     graph_score: Some(ScoreValue {
-                        value: 1.0 / depth.max(1) as f32,
+                        value: 1.0 / depth.max(1) as f64,
                         kind: ScoreKind::Exact,
                     }),
                     path_count: Some(1),
@@ -1960,7 +1997,7 @@ impl<T: VectorType> PipelineOperator<T> for WeightedShortestPathsOperator {
                 row.set_graph_metric(
                     GraphMetric::WeightedDistance,
                     ScoreValue {
-                        value: path.cost as f32,
+                        value: path.cost,
                         kind: ScoreKind::Exact,
                     },
                 )?;
@@ -2020,7 +2057,7 @@ impl<T: VectorType> PipelineOperator<T> for YenKShortestPathsOperator {
                     row.set_graph_metric(
                         GraphMetric::WeightedDistance,
                         ScoreValue {
-                            value: path.cost as f32,
+                            value: path.cost,
                             kind: ScoreKind::Exact,
                         },
                     )?;
@@ -2070,7 +2107,7 @@ impl<T: VectorType> PipelineOperator<T> for NodeSimilarityOperator {
             row.set_graph_metric(
                 GraphMetric::NodeSimilarity,
                 ScoreValue {
-                    value: pair.similarity as f32,
+                    value: pair.similarity,
                     kind: ScoreKind::Exact,
                 },
             )?;
@@ -2164,7 +2201,7 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
                 let candidate = NodeRow {
                     id: target,
                     path_strength: Some(ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: ScoreKind::Exact,
                     }),
                     path_count: Some(result.paths.len()),
@@ -2283,7 +2320,7 @@ impl<T: VectorType> PipelineOperator<T> for PageRankOperator {
             if output_ids.contains(&id) {
                 let row = rows.entry(id).or_insert_with(|| NodeRow::new(id));
                 let score = ScoreValue {
-                    value: score as f32,
+                    value: score,
                     kind: ScoreKind::Exact,
                 };
                 row.graph_score = Some(score);
@@ -2341,7 +2378,7 @@ impl<T: VectorType> PipelineOperator<T> for DegreeCentralityOperator {
                 .get(&score.id)
                 .map_or_else(|| NodeRow::new(score.id), |row| (*row).clone());
             row.graph_score = Some(ScoreValue {
-                value: score.normalized as f32,
+                value: score.normalized,
                 kind: ScoreKind::Exact,
             });
             Some(row)
@@ -2406,10 +2443,7 @@ impl<T: VectorType> PipelineOperator<T> for BetweennessOperator {
                 let mut row = old
                     .get(&id)
                     .map_or_else(|| NodeRow::new(id), |row| (*row).clone());
-                row.graph_score = Some(ScoreValue {
-                    value: score as f32,
-                    kind,
-                });
+                row.graph_score = Some(ScoreValue { value: score, kind });
                 row
             })
             .collect();
@@ -2650,7 +2684,7 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
                     row.set_graph_metric(
                         GraphMetric::CoreNumber,
                         ScoreValue {
-                            value: core.get(&row.id).copied().unwrap_or(0) as f32,
+                            value: core.get(&row.id).copied().unwrap_or(0) as f64,
                             kind: ScoreKind::Exact,
                         },
                     )?;
@@ -2671,14 +2705,14 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
                     row.set_graph_metric(
                         GraphMetric::TriangleCount,
                         ScoreValue {
-                            value: triangles as f32,
+                            value: triangles as f64,
                             kind: ScoreKind::Exact,
                         },
                     )?;
                     row.set_graph_metric(
                         GraphMetric::ClusteringCoefficient,
                         ScoreValue {
-                            value: coefficient as f32,
+                            value: coefficient,
                             kind: ScoreKind::Exact,
                         },
                     )?;
@@ -2696,14 +2730,14 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
                     row.set_graph_metric(
                         GraphMetric::Authority,
                         ScoreValue {
-                            value: authority as f32,
+                            value: authority,
                             kind: ScoreKind::Exact,
                         },
                     )?;
                     row.set_graph_metric(
                         GraphMetric::Hub,
                         ScoreValue {
-                            value: hub as f32,
+                            value: hub,
                             kind: ScoreKind::Exact,
                         },
                     )?;
@@ -2718,7 +2752,7 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
                     row.set_graph_metric(
                         GraphMetric::HarmonicCentrality,
                         ScoreValue {
-                            value: scores.get(&row.id).copied().unwrap_or_default() as f32,
+                            value: scores.get(&row.id).copied().unwrap_or_default(),
                             kind: ScoreKind::Exact,
                         },
                     )?;
@@ -2838,14 +2872,19 @@ impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
             .rows
             .iter()
             .filter(|row| graph.contains(row.id))
-            .map(|row| crate::node::SearchHit {
-                id: row.id,
-                score: row
+            .map(|row| {
+                let score = row
                     .similarity
                     .or(row.graph_score)
-                    .map_or(1.0, |score| score.value.max(0.0)),
-                payload: serde_json::Value::Null,
-            });
+                    .map_or(1.0, |score| score.value.max(0.0)) as f32;
+                if !score.is_finite() {
+                    return Err(TriviumError::QueryExecution(
+                        "SA-PPR 种子分数超出有限 f32 范围 (SA-PPR seed score exceeds the finite f32 range)".into(),
+                    ));
+                }
+                Ok(crate::node::SearchHit { id: row.id, score, payload: serde_json::Value::Null })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let hits = crate::graph::traversal::expand_graph_checked(
             &graph,
             seeds,
@@ -2866,7 +2905,7 @@ impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
                 .map(|(id, score)| {
                     let mut row = NodeRow::new(id);
                     let graph_score = ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: ScoreKind::DepthBounded,
                     };
                     row.graph_score = Some(graph_score);

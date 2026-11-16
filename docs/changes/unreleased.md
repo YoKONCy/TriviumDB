@@ -6,6 +6,16 @@
 
 ## 中文说明
 
+### 边版本失效与认知算子数值边界
+
+- Server 删除节点和批量删除时，收集实际入边、出边及全部标签，成功提交后更新关联边和端点版本。不带标签的 `unlink` 按实际存储边更新版本，覆盖 Server 打开前已持久化的边。携带旧边 ETag 的事务返回 `409 TDB_HTTP_PRECONDITION_FAILED`，保留 `legacyCode=WRITE_CONFLICT`。失败事务保留提交前版本，无关边沿用原 ETag。
+- DPP 在对数域统一缩放质量核与正则项，采用 `f64` Cholesky 工作区和宽类型范数计算。高质量分数、大有限向量与 `QUALITY_WEIGHT 10` 保持确定性选择，每个候选最多选择一次。高级检索与 TQL 共用实现，工作区按实际元素宽度准入。
+- NMF 的初始化、矩阵乘积、乘法更新和残差计算使用 `f64`，返回前检查分解因子的有限性。`[1e30, 0]` 等有限大向量可生成有限主题权重，矩阵预算计入输入、输出及各中间矩阵。
+- TQL 管线的 Rust `ScoreValue.value` 调整为 `f64`，图算法结果沿投影、排序、聚合及 HTTP 保留该精度。权重 `1e-40` 对应的约 `1e40` 调和中心性保持有限值。Python／Node 继续使用其浮点数类型。SA-PPR 的种子适配核对有限 `f32` 范围，越界返回结构化查询错误。
+- 编辑恢复用例更新为当前 WAL v7 头断言，继续验证封条完整性、未提交事务隔离和已确认回执恢复。
+
+> **Rust 调用提醒**　直接构造 `ScoreValue` 的调用方将 `f32` 分数显式转换为 `f64`。向量存储 dtype 与 `SearchHit.score` 沿各自公共契约使用。
+
 ### Payload 预过滤与 Hook 返回契约
 
 - 行级 64 位预过滤签名与查询掩码共享 JSON 的 `Eq/Hash` 规则，按顶层字段及完整值编码，覆盖 null、空及嵌套数组／对象、正负零、字面点号字段与空字段名。完整 Payload 谓词继续核对候选，写入、更新和重开使用一致的等值语义。
@@ -57,6 +67,16 @@
 ## English
 
 Subsequent development builds on `0.9.1`. See the [bilingual release notes](0.9.1.md) for delivered capabilities.
+
+### Edge version invalidation and cognitive numeric boundaries
+
+- Server node deletion and batch deletion collect actual incoming and outgoing edges across all labels, updating edge and endpoint versions after successful commit. Unlabeled `unlink` updates versions from stored edges, including edges persisted before Server startup. Transactions carrying stale edge ETags return `409 TDB_HTTP_PRECONDITION_FAILED` with `legacyCode=WRITE_CONFLICT`. Failed transactions retain their previous versions, and unrelated edges retain their ETags.
+- DPP jointly rescales its quality kernel and regularization in log space, with an `f64` Cholesky workspace and wider norm calculation. High quality scores, large finite vectors, and `QUALITY_WEIGHT 10` retain deterministic selection with each candidate selected at most once. Advanced search and TQL share the implementation, and workspace admission accounts for element widths.
+- NMF initialization, matrix products, multiplicative updates, and residual calculations use `f64`, with factor finiteness checked before returning query results. Large finite vectors such as `[1e30, 0]` produce finite topic weights. Matrix budgets include input, output, and intermediate matrices.
+- The Rust TQL pipeline changes `ScoreValue.value` to `f64`, retaining graph scores through projection, sorting, aggregation, and HTTP. Harmonic centrality near `1e40` from an edge weight of `1e-40` stays finite. Python and Node continue using their floating-point types. SA-PPR checks its seed adapter's finite `f32` range and returns a structured query error on overflow.
+- Editing recovery tests assert the current WAL v7 header and continue verifying complete seals, uncommitted transaction isolation, and acknowledged receipt recovery.
+
+> **Rust caller note**　Callers constructing `ScoreValue` directly should explicitly convert `f32` scores to `f64`. Vector storage dtypes and `SearchHit.score` follow their respective public contracts.
 
 ### Payload prefiltering and Hook return contracts
 

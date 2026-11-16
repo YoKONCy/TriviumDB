@@ -1048,6 +1048,212 @@ async fn 并发读与串行写在压力下保持完整结果和单调generation(
 }
 
 #[tokio::test]
+async fn 删除关联节点与整组解链使所有实际边版本冲突且保留无关边版本() {
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        for operation in ["transaction", "delete-many", "unlink"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("incident-edges.tdb");
+            let cfg = Config {
+                dim: 2,
+                storage_mode: mode,
+                auto_build_quiver: false,
+                ..Default::default()
+            };
+            let mut db =
+                triviumdb::Database::<f32>::open_with_config(path.to_str().unwrap(), cfg).unwrap();
+            for id in 1..=3 {
+                db.insert_with_id(id, &[1.0, 0.0], serde_json::json!({"state":"before"}))
+                    .unwrap();
+            }
+            for (source, target, label) in [
+                (1, 2, "rel"),
+                (1, 2, "alt"),
+                (2, 1, "reverse"),
+                (1, 3, "keep"),
+            ] {
+                db.link(source, target, label, 1.0).unwrap();
+            }
+            db.close().unwrap();
+            let (app, shutdown) = triviumdb_server::build_app_with_shutdown(ServerConfig {
+                database_path: path,
+                database: cfg,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let before = request(app.clone(), "GET", "/v1/nodes/1", None, &[]).await;
+            assert_eq!(before.status(), StatusCode::OK);
+            let node_etag = before.headers()[header::ETAG].to_str().unwrap().to_owned();
+            let before = json(before).await;
+            let reverse = json(request(app.clone(), "GET", "/v1/nodes/2", None, &[]).await).await;
+            let mut removed = before["edgeVersions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|edge| edge["targetId"] == "2")
+                .map(|edge| (1, edge.clone()))
+                .collect::<Vec<_>>();
+            if operation != "unlink" {
+                removed.extend(
+                    reverse["edgeVersions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|edge| (2, edge.clone())),
+                );
+            }
+            assert_eq!(removed.len(), if operation == "unlink" { 2 } else { 3 });
+            let keep = before["edgeVersions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|edge| edge["label"] == "keep")
+                .unwrap()
+                .clone();
+            let rejected = request(app.clone(), "POST", "/v1/transactions", Some(serde_json::json!({
+                "operations":[{"op":"delete","id":2},{"op":"updatePayload","id":999,"payload":{}}]
+            })), &[]).await;
+            assert_eq!(rejected.status(), StatusCode::NOT_FOUND);
+            let unchanged = request(app.clone(), "GET", "/v1/nodes/1", None, &[]).await;
+            assert_eq!(unchanged.headers()[header::ETAG], node_etag);
+            assert_eq!(
+                json(unchanged).await["edgeVersions"],
+                before["edgeVersions"]
+            );
+            let (route, body) = match operation {
+                "transaction" => (
+                    "/v1/transactions",
+                    serde_json::json!({"operations":[{"op":"delete","id":2}]}),
+                ),
+                "delete-many" => ("/v1/nodes/delete-many", serde_json::json!({"ids":[2]})),
+                _ => (
+                    "/v1/transactions",
+                    serde_json::json!({"operations":[{"op":"unlink","source":1,"target":2}]}),
+                ),
+            };
+            let response = request(app.clone(), "POST", route, Some(body), &[]).await;
+            assert_eq!(response.status(), StatusCode::OK, "{mode:?}, {operation}");
+            for (source, edge) in removed {
+                let target = edge["targetId"].as_str().unwrap().parse::<u64>().unwrap();
+                let response = request(app.clone(), "POST", "/v1/transactions", Some(serde_json::json!({
+                    "expectedEdges":[{"source":source,"target":target,"label":edge["label"],"etag":edge["etag"]}],
+                    "operations":[{"op":"updatePayload","id":1,"payload":{"state":"stale"}}]
+                })), &[]).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::CONFLICT,
+                    "{mode:?}, {operation}, {edge}"
+                );
+                let error = json(response).await;
+                assert_eq!(error["code"], "TDB_HTTP_PRECONDITION_FAILED");
+                assert_eq!(error["legacyCode"], "WRITE_CONFLICT");
+            }
+            let stale_node = request(
+                app.clone(),
+                "POST",
+                "/v1/transactions",
+                Some(serde_json::json!({
+                    "expectedNodes":{"1":node_etag},
+                    "operations":[{"op":"updatePayload","id":1,"payload":{"state":"stale"}}]
+                })),
+                &[],
+            )
+            .await;
+            assert_eq!(stale_node.status(), StatusCode::CONFLICT);
+            let current = json(request(app.clone(), "GET", "/v1/nodes/1", None, &[]).await).await;
+            assert_eq!(
+                current["node"]["payload"],
+                serde_json::json!({"state":"before"})
+            );
+            assert_eq!(current["edgeVersions"], serde_json::json!([keep.clone()]));
+            let fresh = request(
+                app,
+                "POST",
+                "/v1/transactions",
+                Some(serde_json::json!({
+                    "expectedEdges":[{"source":1,"target":3,"label":"keep","etag":keep["etag"]}],
+                    "operations":[{"op":"updatePayload","id":1,"payload":{"state":"fresh"}}]
+                })),
+                &[],
+            )
+            .await;
+            assert_eq!(fresh.status(), StatusCode::OK);
+            shutdown.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn 数值查询经http返回有限主题权重与完整调和中心性() {
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("numeric-scores.tdb");
+        let cfg = Config {
+            dim: 2,
+            storage_mode: mode,
+            auto_build_quiver: false,
+            ..Default::default()
+        };
+        let mut db =
+            triviumdb::Database::<f32>::open_with_config(path.to_str().unwrap(), cfg).unwrap();
+        for (id, vector) in [(1, [1e30, 0.0]), (2, [0.0, 1e30]), (3, [1e30, 1e30])] {
+            db.insert_with_id(id, &vector, serde_json::json!({}))
+                .unwrap();
+        }
+        let weight = 1e-40f32;
+        db.link(1, 2, "rel", weight).unwrap();
+        db.close().unwrap();
+        let (app, shutdown) = triviumdb_server::build_app_with_shutdown(ServerConfig {
+            database_path: path,
+            database: cfg,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        for (name, stage, expression) in [
+            ("NMF", "TOPICS seed K 2 ITERATIONS 8", "topic_score(ranked)"),
+            (
+                "调和中心性",
+                "HARMONIC_CENTRALITY seed LABEL rel",
+                "harmonic_centrality(ranked)",
+            ),
+        ] {
+            let query = format!(
+                "SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed {stage} AS ranked WITH ranked RETURN ranked.id AS id, {expression} AS score ORDER BY id"
+            );
+            let response = request(
+                app.clone(),
+                "POST",
+                "/v1/tql",
+                Some(serde_json::json!({"query":query})),
+                &[],
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json(response).await;
+            let rows = body["rows"].as_array().unwrap();
+            assert_eq!(rows.len(), 3);
+            for (index, row) in rows.iter().enumerate() {
+                assert_eq!(row["id"]["value"], index + 1);
+                let score = row["score"]["value"].as_f64().unwrap();
+                assert!(score.is_finite(), "{mode:?}, {name}, {row}");
+                if name == "NMF" {
+                    assert!(score > 0.0);
+                } else {
+                    let expected = if index == 0 {
+                        1.0 / f64::from(weight)
+                    } else {
+                        0.0
+                    };
+                    assert!((score - expected).abs() <= expected * 1e-14);
+                }
+            }
+        }
+        shutdown.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn tql写入保守失效此前签发的节点和边etag() {
     let (app, _directory) = app("tql_fine_grained_occ").await;
     let seed = request(

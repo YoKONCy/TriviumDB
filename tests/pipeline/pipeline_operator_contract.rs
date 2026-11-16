@@ -387,6 +387,71 @@ fn 并行预算小任务串行且线程上限生效() {
 }
 
 #[test]
+fn 扩散适配拒绝超出f32范围的宽类型种子分数() {
+    use triviumdb::query::pipeline::SaPprOperator;
+    let mt = graph();
+    let mut context = PipelineContext::new(&mt, budget());
+    let mut row = NodeRow::new(1);
+    row.graph_score = Some(ScoreValue {
+        value: 1e40,
+        kind: ScoreKind::Exact,
+    });
+    let operator = SaPprOperator {
+        max_depth: 1,
+        restart_alpha: 0.15,
+        labels: None,
+        max_edges_per_node: 4,
+        min_edge_weight: 0.0,
+    };
+    let error = operator
+        .apply(NodeSet::from_rows(vec![row]), &mut context)
+        .unwrap_err();
+    assert_eq!(error.code(), "TDB_QUERY_EXECUTION");
+}
+
+#[test]
+fn 认知矩阵按宽类型工作区预算拒绝并允许提高额度后重试() {
+    use triviumdb::query::pipeline::{DppDiversify, NmfTopics};
+    let mt = graph();
+    let operators: Vec<(Box<dyn PipelineOperator<f32>>, Vec<u64>)> = vec![
+        (
+            Box::new(DppDiversify {
+                top_k: 2,
+                quality_weight: 10.0,
+            }),
+            vec![1, 3],
+        ),
+        (
+            Box::new(NmfTopics {
+                topics: 2,
+                iterations: 8,
+            }),
+            vec![1, 2, 3],
+        ),
+    ];
+    for (operator, expected_ids) in operators {
+        // 三个四维候选的 f64 工作区超过 128 字节，512 KiB 可容纳完整计算。
+        let mut context = PipelineContext::new(
+            &mt,
+            PipelineBudget {
+                max_node_set_bytes: 128,
+                ..budget()
+            },
+        );
+        let error = operator
+            .apply(NodeSet::from_ids([1, 2, 3]), &mut context)
+            .unwrap_err();
+        assert_eq!(error.code(), "TDB_QUERY_EXECUTION");
+        context.budget.max_node_set_bytes = 512 * 1024;
+        let result = operator
+            .apply(NodeSet::from_ids([1, 2, 3]), &mut context)
+            .unwrap();
+        let ids = result.rows().iter().map(|row| row.id).collect::<Vec<_>>();
+        assert_eq!(ids, expected_ids);
+    }
+}
+
+#[test]
 fn nodeset_dedup_将后续行合并进保留行且加权距离与路径同源() {
     let mut rows = vec![NodeRow::new(9), NodeRow::new(9)];
     rows[0].path = Some(vec![1, 9]);

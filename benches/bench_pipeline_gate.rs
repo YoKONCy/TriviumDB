@@ -158,9 +158,7 @@ fn hash(set: &NodeSet) -> u64 {
     set.rows().iter().fold(0xcbf29ce484222325u64, |hash, row| {
         hash.wrapping_mul(0x100000001b3)
             ^ row.id
-            ^ row
-                .similarity
-                .map_or(0, |score| score.value.to_bits() as u64)
+            ^ row.similarity.map_or(0, |score| score.value.to_bits())
     })
 }
 

@@ -768,6 +768,8 @@ RETURN diverse, diversity_score(diverse) AS diversity
 
 DPP 从输入的 `similarity`、`text_score` 或 `graph_score` 中选择质量分数。候选池最多 512 个节点，`TOP` 不得超过输入候选数；向量读取和临时矩阵均计入预算。`diversity_score()` 表示确定性选择次序的边际排名分数，原质量分数保留在对应字段中。
 
+质量核与正则项在对数域统一缩放，Cholesky 中间量采用 `f64`。同分候选按稳定节点顺序选择，每个候选最多选取一次。
+
 ### 参数化 SA-PPR
 
 ```sql
@@ -780,7 +782,7 @@ RETURN expanded, graph_score(expanded) AS score
 
 `DEPTH`、`ALPHA`、`MAX_EDGES`、`MIN_WEIGHT` 和可选的 `LABELS` 显式控制有限深度扩散。该算子采用 Depth-Bounded SA-PPR 语义；需要迭代收敛结果时使用 PageRank。
 
-种子节点、实际扫描边、前沿峰值和深度分别受遍历预算限制，`MAX_EDGES` 在检查扫描预算后选择各节点的传播边。管线按完整结果契约使用 Error 耗尽策略，超限返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`；临时内存和请求取消沿统一查询上下文执行。归一化分母使用 `f64` 累加，输出分数继续使用 `f32`。
+种子节点、实际扫描边、前沿峰值和深度分别受遍历预算限制，`MAX_EDGES` 在检查扫描预算后选择各节点的传播边。管线按完整结果契约使用 Error 耗尽策略，超限返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`；临时内存和请求取消沿统一查询上下文执行。归一化分母使用 `f64` 累加，扩散内核生成 `f32` 分数后写入管线的 `f64` 分数字段。种子适配前校验有限 `f32` 范围，超出范围返回结构化查询错误。
 
 ### FISTA 残差召回
 
@@ -804,7 +806,11 @@ WITH clustered
 RETURN clustered, topic(clustered) AS topic_id, topic_score(clustered) AS confidence
 ```
 
-`TOPICS` 对候选向量执行确定性 NMF，并把 W 矩阵的主导主题映射回节点。候选最多 512、`K` 最大 32 且不得超过候选数、迭代最多 256；V/W/H 矩阵在分配前接受内存预算检查。当前输出逐节点主题编号与权重，不输出可跨阶段传递的 H 矩阵 artifact。
+`TOPICS` 对候选向量执行确定性 NMF，并把 W 矩阵的主导主题映射回节点。候选最多 512、`K` 最大 32 且不得超过候选数、迭代最多 256。初始化、矩阵更新和残差计算采用 `f64`，分配前按 V/W/H、输入输出和中间矩阵检查内存预算，查询输出前验证分解因子的有限性。结果提供逐节点主题编号与权重。
+
+开发内核的 `ScoreValue.value` 使用 `f64`，图算法的宽类型结果沿 `graph_score()`、图指标函数、排序和聚合保留。例如边权 `1e-40` 的倒数中心性约为 `1e40`，TQL 与 HTTP 返回有限浮点数。
+
+> **Rust 调用提醒**　直接构造 `ScoreValue` 时，将已有 `f32` 数值显式转换为 `f64`。向量与搜索命中的表示遵循各自 dtype 和 API 契约。
 
 ---
 

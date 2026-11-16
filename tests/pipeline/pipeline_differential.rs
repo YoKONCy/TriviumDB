@@ -119,9 +119,10 @@ fn reference_rank(candidates: &BTreeSet<u64>, top_k: usize) -> Vec<u64> {
     ranked
 }
 
-fn close_score(actual: f32, expected: f64) {
+fn close_score(actual: impl Into<f64>, expected: f64) {
+    let actual = actual.into();
     assert!(
-        (f64::from(actual) - expected).abs() < 2e-6,
+        (actual - expected).abs() < 2e-6,
         "分数偏差超限：实际={actual}，预期={expected}"
     );
 }

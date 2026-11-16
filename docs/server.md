@@ -271,6 +271,7 @@ Content-Type: application/vnd.triviumdb.vector+f32
 - 全局 ETag 为 `"<epoch>-g<n>"`，成功写入后递增；
 - `GET /v1/nodes/{id}` 返回节点和边 ETag；
 - `If-Match`、`expectedGeneration`、`expectedNodes` 和 `expectedEdges` 提供 OCC；
+- 删除节点和批量删除在提交成功后更新实际入边、出边及关联端点版本；不带标签的 `unlink` 更新该节点对的全部实际边版本。已持久化边按相同规则处理，无关边保留各自 ETag。失败事务保留提交前版本。
 - Core 版本不匹配返回 `409 TDB_WRITE_CONFLICT`，HTTP 前置头条件拒绝使用 `TDB_HTTP_PRECONDITION_FAILED` 并保留 `legacyCode=WRITE_CONFLICT`。
 - `Idempotency-Key` 同键同请求重放首次结果，同键不同请求返回 `409 TDB_IDEMPOTENCY_CONFLICT`，旧类别为 IDEMPOTENCY_KEY_REUSED。
 - 幂等缓存和 Server generation 是进程内状态，重启后 epoch 改变。

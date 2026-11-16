@@ -2,6 +2,7 @@
 //! 按领域聚合的集成测试入口。
 
 mod boundary;
+mod cognitive_boundaries;
 mod console_editing;
 mod console_host;
 mod database_advanced;

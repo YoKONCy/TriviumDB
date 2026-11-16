@@ -462,7 +462,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             let n = expanded.len().min(config.top_k.saturating_mul(3));
             let cells = n
                 .checked_mul(dim.saturating_add(config.top_k).saturating_add(8))
-                .and_then(|cells| cells.checked_mul(std::mem::size_of::<f32>()))
+                .and_then(|cells| cells.checked_mul(std::mem::size_of::<f64>()))
                 .ok_or_else(|| crate::error::TriviumError::CapacityAllocationFailed {
                     reason: "DPP 查询工作区估算溢出".into(),
                 })?;

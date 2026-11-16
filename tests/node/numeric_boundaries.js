@@ -5,6 +5,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 module.exports = async function numericBoundaries(root, TriviumDB) {
+  require('./cognitive_boundaries.js')(root, TriviumDB)
   await require('./search_boundaries.js')(root, TriviumDB)
   require('./query_numeric_indexes.js')(root, TriviumDB)
   require('./tql_semantics.js')(root, TriviumDB)

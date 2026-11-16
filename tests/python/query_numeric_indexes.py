@@ -5,6 +5,8 @@ import triviumdb
 
 
 def run_query_numeric_indexes(root: str) -> None:
+    from cognitive_boundaries import run_cognitive_boundaries
+    run_cognitive_boundaries(root)
     from search_boundaries import run_search_boundaries
     run_search_boundaries(root)
     file = Path(root) / "query-numeric.tdb"

@@ -143,7 +143,7 @@ impl<T: VectorType> PipelineOperator<T> for DocumentSource<T> {
                 crate::request::check_current()?;
                 let mut row = NodeRow::new(hit.node_id);
                 row.document_score = Some(ScoreValue {
-                    value: hit.score,
+                    value: f64::from(hit.score),
                     kind: if result
                         .retrieval
                         .as_ref()
@@ -159,7 +159,7 @@ impl<T: VectorType> PipelineOperator<T> for DocumentSource<T> {
                     .as_ref()
                     .and_then(|scores| scores.vector_score)
                     .map(|value| ScoreValue {
-                        value,
+                        value: f64::from(value),
                         kind: row
                             .document_score
                             .map_or(ScoreKind::Exact, |score| score.kind),
@@ -169,12 +169,12 @@ impl<T: VectorType> PipelineOperator<T> for DocumentSource<T> {
                     .as_ref()
                     .and_then(|scores| scores.text_score)
                     .map(|value| ScoreValue {
-                        value,
+                        value: f64::from(value),
                         kind: ScoreKind::Exact,
                     });
                 if matches!(self.request, DocumentRequest::Search { .. }) {
                     row.text_score = Some(ScoreValue {
-                        value: hit.score,
+                        value: f64::from(hit.score),
                         kind: ScoreKind::Exact,
                     });
                 }

@@ -2489,29 +2489,29 @@ fn eval_pipeline_row_expr<T: VectorType>(
         }
         TqlExpr::Similarity { .. } => row
             .similarity
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::GraphScore { .. } => row
             .graph_score
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::GraphMetric { metric, .. } => {
             crate::query::pipeline::graph_metric_from_name(metric)
                 .and_then(|metric| row.graph_metric(metric))
-                .map(|score| RuntimeValue::Float(score.value as f64))
+                .map(|score| RuntimeValue::Float(score.value))
                 .unwrap_or(RuntimeValue::Null)
         }
         TqlExpr::TextScore { .. } => row
             .text_score
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::DiversityScore { .. } => row
             .diversity_score
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::ResidualScore { .. } => row
             .residual_score
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::Topic { .. } => row
             .topic_id
@@ -2519,7 +2519,7 @@ fn eval_pipeline_row_expr<T: VectorType>(
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::TopicScore { .. } => row
             .topic_score
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::Depth { .. } => row
             .provenance
@@ -2528,7 +2528,7 @@ fn eval_pipeline_row_expr<T: VectorType>(
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::PathStrength { .. } => row
             .path_strength
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::PathCount { .. } => row
             .path_count
