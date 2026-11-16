@@ -480,6 +480,14 @@ enum Operation {
         #[serde(flatten)]
         record: EdgeRecord,
     },
+    LinkFromInsert {
+        insert_index: usize,
+        target: String,
+        label: String,
+        weight: f32,
+        #[serde(default)]
+        metadata: Value,
+    },
     Unlink {
         source: String,
         target: String,
@@ -1224,6 +1232,15 @@ fn append_operation<T: VectorType + serde::de::DeserializeOwned>(
             record.weight,
             record.metadata,
         ),
+        Operation::LinkFromInsert {
+            insert_index,
+            target,
+            label,
+            weight,
+            metadata,
+        } => {
+            builder.upsert_edge_from_insert(insert_index, id(&target)?, &label, weight, metadata);
+        }
         Operation::Unlink {
             source,
             target,

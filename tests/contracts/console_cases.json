@@ -6,6 +6,37 @@
   ],
   "cases": [
     {
+      "name":"插入序号连边与自动ID共享原子事务",
+      "options":{"readOnly":false},
+      "command":{"operation":"transaction","operations":[
+        {"op":"insert","vector":[1,0],"payload":{"kind":"auto"}},
+        {"op":"insert","id":"20","vector":[0,1],"payload":{"kind":"explicit"}},
+        {"op":"linkFromInsert","insertIndex":0,"target":"20","label":"future","weight":0.5,"metadata":{"rank":7,"source":"manual"}},
+        {"op":"linkFromInsert","insertIndex":1,"target":"2","label":"existing","weight":0.25}
+      ]},
+      "expected":{"createdIds":["3","20"]},
+      "verify":[
+        {"id":"1","vector":[1.0,0.0],"payload":{"kind":"alpha"},"edges":[]},
+        {"id":"2","vector":[0.0,1.0],"payload":{"kind":"beta"},"edges":[]},
+        {"id":"3","vector":[1.0,0.0],"payload":{"kind":"auto"},"edges":[{"target":"20","label":"future","weight":0.5,"metadata":{"rank":7,"source":"manual"}}]},
+        {"id":"20","vector":[0.0,1.0],"payload":{"kind":"explicit"},"edges":[{"target":"2","label":"existing","weight":0.25,"metadata":null}]}
+      ]
+    },
+    {
+      "name":"自动ID连边目标缺失时原子拒绝",
+      "options":{"readOnly":false},
+      "command":{"operation":"transaction","operations":[
+        {"op":"insert","vector":[1,0],"payload":{"kind":"rejected"}},
+        {"op":"linkFromInsert","insertIndex":0,"target":"999","label":"missing","weight":1}
+      ]},
+      "error":{"code":"TDB_NODE_NOT_FOUND","details":{"id":999}},
+      "absent":["3"],
+      "verify":[
+        {"id":"1","vector":[1.0,0.0],"payload":{"kind":"alpha"},"edges":[]},
+        {"id":"2","vector":[0.0,1.0],"payload":{"kind":"beta"},"edges":[]}
+      ]
+    },
+    {
       "name":"参数化查询",
       "options":{},
       "command":{"operation":"query","query":"FIND {kind: \"alpha\"} AS seed WITH seed RETURN $bonus + 1 AS score","parameters":{"bonus":4}},

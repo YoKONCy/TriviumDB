@@ -5,8 +5,7 @@
 //! 类型擦除成一个统一句柄，并通过 [`dispatch!`] 宏把方法调用转发到内部的
 //! 具体 `Database<T>` 实例。
 //!
-//! 所有对外暴露的查询结果都被转换成 dtype 无关的 [`CliNode`]（向量统一以
-//! `f32` 表示），这样上层的 `commands` / `repl` / `tui` 都无需关心泛型参数。
+//! 展示查询使用 dtype 无关的 [`CliNode`]，数据导出通过原始 dtype 编码 JSON 数值。
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -171,6 +170,23 @@ impl DbHandle {
         dispatch!(self, db => db.get(id).map(|node| node.map(CliNode::from_view)))
     }
 
+    /// 导出直接读取原始 dtype，整数指纹通过 JSON 整数保留完整位模式。
+    pub fn export_node(&self, id: NodeId) -> Result<Option<Value>> {
+        dispatch!(self, db => {
+            db.get(id)?.map(|node| {
+                let vector = node.vector.into_iter().map(VectorType::to_json_number)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(serde_json::json!({
+                    "id": node.id, "vector": vector, "payload": node.payload,
+                    "edges": node.edges.into_iter().map(|edge| serde_json::json!({
+                        "target": edge.target_id, "label": edge.label,
+                        "weight": edge.weight, "metadata": edge.metadata,
+                    })).collect::<Vec<_>>(),
+                }))
+            }).transpose()
+        })
+    }
+
     #[allow(dead_code)]
     pub fn get_payload(&self, id: NodeId) -> Result<Option<Value>> {
         dispatch!(self, db => db.get_payload(id))
@@ -191,6 +207,7 @@ impl DbHandle {
     }
 
     /// 插入节点，向量以 `f32` 给出并按 dtype 自动转换。
+    #[cfg(test)]
     pub fn insert_f32(&mut self, vector: &[f32], payload: Value) -> Result<NodeId> {
         dispatch!(self, db => {
             let v: Vec<_> = vector.iter().map(|x| VectorType::from_f32(*x)).collect();
@@ -198,15 +215,8 @@ impl DbHandle {
         })
     }
 
-    /// 以指定 ID 插入节点，向量以 `f32` 给出并按 dtype 自动转换。
-    pub fn insert_with_id_f32(&mut self, id: NodeId, vector: &[f32], payload: Value) -> Result<()> {
-        dispatch!(self, db => {
-            let v: Vec<_> = vector.iter().map(|x| VectorType::from_f32(*x)).collect();
-            db.insert_with_id(id, &v, payload)
-        })
-    }
-
     /// 创建一条有向带权边。
+    #[cfg(test)]
     pub fn link(&mut self, src: NodeId, dst: NodeId, label: &str, weight: f32) -> Result<()> {
         dispatch!(self, db => db.link(src, dst, label, weight))
     }

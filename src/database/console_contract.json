@@ -23,7 +23,7 @@
     "importNodes": ["records"],
     "importEdges": ["records"]
   },
-  "transactionOperations": ["insert", "updatePayload", "updateVector", "delete", "link", "unlink"],
+  "transactionOperations": ["insert", "updatePayload", "updateVector", "delete", "link", "linkFromInsert", "unlink"],
   "writeOperations": ["mutate", "manageIndex", "buildQuiver", "transaction", "guardedTransaction", "importNodes", "importEdges"],
   "completion": {
     "cancelAcknowledgement": "signal-issued",

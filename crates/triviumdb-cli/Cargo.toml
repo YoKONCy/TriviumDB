@@ -22,6 +22,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
 half = { version = "2.7.1", features = ["bytemuck", "serde"] }
+same-file = "1.0"
+tempfile = "3"
 
 # CLI 解析与输出
 clap = { version = "4", features = ["derive", "env"] }
@@ -38,6 +40,5 @@ ratatui = "0.29"
 crossterm = "0.28"
 
 [dev-dependencies]
-tempfile = "3"
 assert_cmd = "2"
 predicates = "3"

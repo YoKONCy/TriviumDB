@@ -334,6 +334,14 @@ pub enum TxOp<T> {
         weight: f32,
         metadata: serde_json::Value,
     },
+    /// 引用本事务中已缓冲插入的零起点序号，提交预检时解析为真实节点 ID。
+    LinkFromInsert {
+        insert_index: usize,
+        dst: NodeId,
+        label: String,
+        weight: f32,
+        metadata: serde_json::Value,
+    },
     Delete {
         id: NodeId,
     },
@@ -413,6 +421,24 @@ impl<'a, T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Transac
             src,
             dst,
             label: label.to_string(),
+            weight,
+            metadata,
+        });
+    }
+
+    /// 从此前插入操作的零起点序号建立边，提交时解析真实 ID 并验证端点及权重。
+    pub fn upsert_edge_from_insert(
+        &mut self,
+        insert_index: usize,
+        dst: NodeId,
+        label: &str,
+        weight: f32,
+        metadata: serde_json::Value,
+    ) {
+        self.ops.push(TxOp::LinkFromInsert {
+            insert_index,
+            dst,
+            label: label.to_owned(),
             weight,
             metadata,
         });
@@ -508,6 +534,24 @@ pub struct TxBuilder<T> {
 }
 
 impl<T: VectorType> TxBuilder<T> {
+    /// 从此前插入操作的零起点序号建立边，包含显式 ID 插入，提交时统一解析和校验。
+    pub fn upsert_edge_from_insert(
+        &mut self,
+        insert_index: usize,
+        dst: NodeId,
+        label: &str,
+        weight: f32,
+        metadata: serde_json::Value,
+    ) {
+        self.ops.push(TxOp::LinkFromInsert {
+            insert_index,
+            dst,
+            label: label.to_owned(),
+            weight,
+            metadata,
+        });
+    }
+
     /// 在同一节点事务中比较并交换命名图快照，提交时验证修订及成员引用。
     pub fn put_named_graph(
         &mut self,
@@ -741,7 +785,29 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             };
         }
 
+        let mut generated_ids: Vec<NodeId> = Vec::new();
         for op in &mut ops {
+            if let TxOp::LinkFromInsert {
+                insert_index,
+                dst,
+                label,
+                weight,
+                metadata,
+            } = op
+            {
+                let src = *generated_ids.get(*insert_index).ok_or_else(|| {
+                    TriviumError::InvalidInput(
+                        "插入序号必须引用本事务此前的插入操作 (Insert index must reference a preceding insert in this transaction)".into()
+                    ).at_field("insert_index")
+                })?;
+                *op = TxOp::Link {
+                    src,
+                    dst: *dst,
+                    label: std::mem::take(label),
+                    weight: *weight,
+                    metadata: std::mem::take(metadata),
+                };
+            }
             match op {
                 TxOp::DocumentPublication { bytes } => {
                     crate::document::budget(
@@ -808,6 +874,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         vector: std::mem::take(vector),
                         payload: std::mem::take(payload),
                     };
+                    generated_ids.push(id);
                 }
                 TxOp::InsertWithId { id, vector, .. } => {
                     if *id == 0 {
@@ -840,6 +907,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                             crate::error::TriviumError::InvalidInput("节点 ID 空间已耗尽".into())
                         })?;
                     }
+                    generated_ids.push(*id);
+                }
+                TxOp::LinkFromInsert { .. } => {
+                    return Err(TriviumError::InvalidInput(
+                        "事务边引用缺少预分配 ID (Transaction edge reference lacks a pre-assigned ID)".into()
+                    ));
                 }
                 TxOp::Link {
                     src, dst, weight, ..
@@ -1004,7 +1077,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         // ════════ 第二阶段：构建 WAL 条目（不触碰 memtable） ════════
         let mut wal_entries: Vec<WalEntry<T>> =
             Vec::with_capacity(ops.len() + usize::from(receipt.is_some()));
-        let mut generated_ids: Vec<NodeId> = Vec::new();
 
         for op in &ops {
             match op {
@@ -1033,7 +1105,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         snapshot,
                     });
                 }
-                TxOp::Insert { .. } => {
+                TxOp::Insert { .. } | TxOp::LinkFromInsert { .. } => {
                     return Err(TriviumError::InvalidInput(
                         "事务插入缺少预分配 ID (Transaction insert is missing a pre-assigned ID)"
                             .into(),
@@ -1052,7 +1124,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         });
                     }
                     validate_transaction_json(&payload_str)?;
-                    generated_ids.push(*id);
                     wal_entries.push(WalEntry::Insert {
                         id: *id,
                         vector: vector.clone(),
@@ -1197,7 +1268,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     TxOp::UpdateVector { id, vector } => {
                         application.mt.update_vector(id, &vector)?;
                     }
-                    TxOp::Insert { .. } => {
+                    TxOp::Insert { .. } | TxOp::LinkFromInsert { .. } => {
                         return Err(TriviumError::InvalidInput(
                         "事务插入缺少预分配 ID (Transaction insert is missing a pre-assigned ID)"
                             .into(),

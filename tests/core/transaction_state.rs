@@ -5,6 +5,116 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use triviumdb::database::{Config, StorageMode, TxBuilder};
 use triviumdb::{Database, TriviumError, VectorType};
 
+#[test]
+fn 插入序号连边在wal恢复及再次重开后保留真实ID与完整元数据() {
+    let root = TestDir::new();
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let source = root.file(&format!("source-{mode:?}.tdb"));
+        let replay = root.file(&format!("replay-{mode:?}.tdb"));
+        let cfg = Config {
+            dim: 2,
+            storage_mode: mode,
+            auto_build_quiver: false,
+            ..Default::default()
+        };
+        let mut db = Database::<f32>::open_with_config(&source, cfg).unwrap();
+        db.insert_with_id(9, &[0.0, 1.0], json!({"existing":true}))
+            .unwrap();
+        db.flush().unwrap();
+        let prefix = std::path::Path::new(&source)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let base = std::fs::read_dir(&root.0)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let suffix = name.to_str().unwrap().strip_prefix(prefix)?;
+                if suffix == ".wal" || suffix == ".lock" {
+                    return None;
+                }
+                Some((suffix.to_owned(), std::fs::read(entry.path()).unwrap()))
+            })
+            .collect::<Vec<_>>();
+        let metadata = json!({"rank":7,"source":"manual"});
+        let mut tx = db.begin_tx();
+        tx.insert(&[1.0, 0.0], json!({"kind":"auto"}));
+        tx.insert_with_id(20, &[1.0, 1.0], json!({"kind":"explicit"}));
+        tx.upsert_edge_from_insert(0, 20, "future", 0.5, metadata.clone());
+        tx.upsert_edge_from_insert(1, 9, "existing", 0.25, Value::Null);
+        assert_eq!(tx.commit().unwrap(), [10, 20]);
+        let wal = std::fs::read(format!("{source}.wal")).unwrap();
+        db.close().unwrap();
+        for (suffix, bytes) in base {
+            std::fs::write(format!("{replay}{suffix}"), bytes).unwrap();
+        }
+        std::fs::write(format!("{replay}.wal"), wal).unwrap();
+        for _ in 0..2 {
+            let mut recovered = Database::<f32>::open_with_config(&replay, cfg).unwrap();
+            assert_eq!(recovered.all_node_ids().unwrap(), [9, 10, 20]);
+            for (id, vector, payload) in [
+                (9, vec![0.0, 1.0], json!({"existing":true})),
+                (10, vec![1.0, 0.0], json!({"kind":"auto"})),
+                (20, vec![1.0, 1.0], json!({"kind":"explicit"})),
+            ] {
+                let node = recovered.get(id).unwrap().unwrap();
+                assert_eq!(node.vector, vector);
+                assert_eq!(node.payload, payload);
+            }
+            assert_eq!(
+                serde_json::to_value(recovered.get_edges(10).unwrap()).unwrap(),
+                json!([{"target_id":20,"label":"future","weight":0.5,"metadata":metadata}])
+            );
+            assert_eq!(
+                serde_json::to_value(recovered.get_edges(20).unwrap()).unwrap(),
+                json!([{"target_id":9,"label":"existing","weight":0.25,"metadata":null}])
+            );
+            recovered.close().unwrap();
+        }
+    }
+}
+
+#[test]
+fn 非法插入序号或已删除源拒绝整笔事务并保留编号水位() {
+    let root = TestDir::new();
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let path = root.file(&format!("invalid-{mode:?}.tdb"));
+        let cfg = Config {
+            dim: 2,
+            storage_mode: mode,
+            auto_build_quiver: false,
+            ..Default::default()
+        };
+        let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+        db.insert_with_id(9, &[0.0, 1.0], json!({"existing":true}))
+            .unwrap();
+        db.flush().unwrap();
+        let before = std::fs::read(format!("{path}.wal")).unwrap();
+        for (index, delete_source, code) in [
+            (1, false, "TDB_INVALID_INPUT"),
+            (usize::MAX, false, "TDB_INVALID_INPUT"),
+            (0, true, "TDB_NODE_NOT_FOUND"),
+        ] {
+            let mut builder = TxBuilder::new();
+            builder.insert(&[1.0, 0.0], json!({"rejected":true}));
+            if delete_source {
+                builder.delete(10);
+            }
+            builder.upsert_edge_from_insert(index, 9, "rel", 1.0, Value::Null);
+            let error = db.commit_tx(builder).unwrap_err();
+            assert_eq!(error.code(), code);
+            assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
+            assert_eq!(db.all_node_ids().unwrap(), [9]);
+            assert_eq!(db.get_payload(9).unwrap(), Some(json!({"existing":true})));
+            assert!(db.get_edges(9).unwrap().is_empty());
+        }
+        assert_eq!(db.insert(&[1.0, 0.0], Value::Null).unwrap(), 10);
+        db.close().unwrap();
+    }
+}
+
 struct TestDir(std::path::PathBuf);
 impl TestDir {
     fn new() -> Self {

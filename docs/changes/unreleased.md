@@ -6,6 +6,16 @@
 
 ## 中文说明
 
+### CLI JSONL 数据正确性
+
+- 导出按节点 ID 升序读取原始 dtype。u64 向量使用 JSON 无符号整数保留完整位模式，f32／f16 保留对应数值；每条边同时输出 `target`、`label`、`weight` 和 `metadata`。
+- 导出在数据库打开前检查主文件和关联制品名称族，覆盖 `.text`／`.text.meta`、Payload 代际、发布日志及 QuIVer SSD 制品，并通过实际文件身份检查路径别名。结果先写暂存文件并同步，再原子替换独立的导出目标。
+- JSONL 解析时按目标 dtype 的原生表示缓冲向量，完整文件的全部节点和边通过同一笔内核事务提交。维度、重复 ID、无效分量和缺失边端点等预检错误使整批请求失败，命令返回非零退出码，已存在记录与 WAL 保留原内容。
+- 事务通过插入序号解析自动分配的真实 ID，支持混合显式／自动编号、保留删除后的 ID 水位，以及指向本批后续节点的边。Rust `upsert_edge_from_insert()` 与 Rust／Python／Node 共用的 Console `linkFromInsert` 请求复用此能力；持久化继续使用现有 Insert／Link WAL 记录。
+- u64 JSONL 导入要求范围内的无符号整数字面量，拒绝浮点及指数表示，避免 JSON 浮点解析造成整数位模式舍入。边 `metadata` 缺省为 `null`，已有无 metadata 的 JSONL 记录按该默认值导入。
+
+> **数据交换提醒**　旧版经 f32 舍入的 u64 JSONL 文件需要从原始数据库或完整备份重新导出。完整数据库备份使用快照接口，保留文档正文、命名图、文本登记与索引定义。
+
 ### 边版本失效与认知算子数值边界
 
 - Server 删除节点和批量删除时，收集实际入边、出边及全部标签，成功提交后更新关联边和端点版本。不带标签的 `unlink` 按实际存储边更新版本，覆盖 Server 打开前已持久化的边。携带旧边 ETag 的事务返回 `409 TDB_HTTP_PRECONDITION_FAILED`，保留 `legacyCode=WRITE_CONFLICT`。失败事务保留提交前版本，无关边沿用原 ETag。
@@ -67,6 +77,16 @@
 ## English
 
 Subsequent development builds on `0.9.1`. See the [bilingual release notes](0.9.1.md) for delivered capabilities.
+
+### CLI JSONL data correctness
+
+- Exports read original vector dtypes in ascending node-ID order. u64 components retain their complete bit patterns as unsigned JSON integers, and f32/f16 retain their corresponding numeric values. Each edge includes `target`, `label`, `weight`, and `metadata`.
+- Export checks the main database and associated artifact name families before opening the database, covering `.text`/`.text.meta`, Payload generations, publication journals, and QuIVer SSD artifacts. File identity checks detect path aliases. Output is staged and synchronized before atomically replacing the independent export destination.
+- Parsing buffers vectors in the target dtype's native representation. All nodes and edges in the complete JSONL file commit through one Core transaction. Validation failures involving dimensions, duplicate IDs, invalid components, or missing edge endpoints reject the whole request with a nonzero exit status, preserving existing records and WAL contents.
+- Transactions resolve automatically assigned source IDs by insert ordinal, supporting mixed explicit/automatic IDs, ID high-water marks retained after deletion, and edges targeting later records in the same batch. Rust `upsert_edge_from_insert()` and the Console `linkFromInsert` request shared by Rust/Python/Node use this capability. Persistence continues to use existing Insert/Link WAL records.
+- u64 JSONL imports require unsigned integer literals within range and reject floating-point and exponent notation to avoid rounding integer bit patterns during JSON parsing. Missing edge `metadata` defaults to `null`, preserving support for existing JSONL records that omit it.
+
+> **Data exchange note**　Regenerate u64 JSONL files rounded through f32 by an older exporter from the original database or a complete backup. Full database backups use snapshots to retain document bodies, named graphs, registered text, and index definitions.
 
 ### Edge version invalidation and cognitive numeric boundaries
 

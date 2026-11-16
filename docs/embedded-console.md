@@ -202,7 +202,9 @@ Python/Node 提供同步 JSON 调用入口。HTTP 或 IPC 包装、端口监听�
 
 `query` 支持 `parameters` 对象，返回 `rows`、`rowCount` 和 `columns`；节点列包含 `id`、`vector`、`payload`、`edges`。`getNodes` 保持输入顺序，并以 `missingIds` 报告缺失项。查询中的 `UInt` 和超出 JavaScript 安全范围的 `Int` 标量返回十进制字符串，`Path` 的 ID 同样使用字符串。
 
-操作及参数见资源包 `console-contract.json`。`transaction` 的 `op` 包含 `insert`、`updatePayload`、`updateVector`、`delete`、`link`、`unlink`；`insert` 的 `id` 可省略，`link` 接收 `source`、`target`、`label`、`weight` 和可选 `metadata`，`unlink` 的 `label` 可省略。`importNodes` / `importEdges` 分别以同样的节点/边记录整请求原子提交。索引 `kind` 支持 `hash`、`ordered`、`bitmap`、`ngram`、`unique`、`composite`、`uniqueComposite`。
+操作及参数见资源包 `console-contract.json`。`transaction` 的 `op` 包含 `insert`、`updatePayload`、`updateVector`、`delete`、`link`、`linkFromInsert`、`unlink`；`insert` 的 `id` 可省略，`link` 接收 `source`、`target`、`label`、`weight` 和可选 `metadata`，`unlink` 的 `label` 可省略。`importNodes` / `importEdges` 分别以同样的节点/边记录整请求原子提交。索引 `kind` 支持 `hash`、`ordered`、`bitmap`、`ngram`、`unique`、`composite`、`uniqueComposite`。
+
+`linkFromInsert` 接收 `insertIndex`、`target`、`label`、`weight` 和可选 `metadata`。`insertIndex` 是本事务此前插入操作的零起点序号，包含显式 ID 和自动 ID 插入。Core 在事务写锁内解析真实源 ID，并按当前投影验证端点和权重；将节点插入放在连边之前，可引用本批后续记录。Rust 的 `Transaction`／`TxBuilder` 提供对应的 `upsert_edge_from_insert()`，Python／Node 通过相同的 Console 请求使用。非法序号返回 `TDB_INVALID_INPUT` 并定位到 `insert_index`，失败请求按原子事务规则处理。
 
 本协议复用内核默认排序、事务、持久化和关闭语义。读取行工作集预算取数据库与 maxOperations 的较小有效值，超限明确拒绝，不返回静默截断结果。写计划按模式每行的操作上界约束匹配集，在匹配集和写向量物化前准入，复杂模式可能需要拆分批次；确认响应预算在 WAL 前检查。TQL 读取与写计划可协作取消，已经开始的提交遵循原子完成语义。
 
