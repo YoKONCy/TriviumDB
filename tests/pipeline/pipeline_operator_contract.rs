@@ -15,6 +15,160 @@ use triviumdb::storage::memtable::MemTable;
 
 const DIM: usize = 4;
 
+struct ReadPair;
+impl PipelineOperator<f32> for ReadPair {
+    fn name(&self) -> &'static str {
+        "读取两条事实"
+    }
+    fn apply(
+        &self,
+        _: NodeSet,
+        context: &mut PipelineContext<'_, f32>,
+    ) -> triviumdb::Result<NodeSet> {
+        for id in [1, 2] {
+            let payload = context
+                .memtable
+                .get_payload(id)
+                .ok_or(triviumdb::TriviumError::NodeNotFound(id))?;
+            assert_eq!(*payload, json!({"v":id}));
+        }
+        Ok(NodeSet::from_ids([1, 2]))
+    }
+}
+
+struct PausedScan {
+    entered: std::sync::mpsc::SyncSender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+impl PipelineOperator<f32> for PausedScan {
+    fn name(&self) -> &'static str {
+        "屏障内扫描身份"
+    }
+    fn apply(
+        &self,
+        _: NodeSet,
+        context: &mut PipelineContext<'_, f32>,
+    ) -> triviumdb::Result<NodeSet> {
+        self.entered.send(()).unwrap();
+        self.resume.recv().unwrap();
+        Ok(NodeSet::from_ids(context.memtable.all_node_ids()))
+    }
+}
+
+#[test]
+fn 并发查询独立计量且复用上下文从本次执行开始统计() {
+    let mut mt = MemTable::<f32>::new(DIM);
+    mt.configure_payload_cache(0, 0);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[1., 0., 0., 0.], json!({"v":id}))
+            .unwrap();
+    }
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+    std::thread::scope(|scope| {
+        let facts = &mt;
+        let worker = scope.spawn(move || {
+            let mut context = PipelineContext::with_profile(
+                facts,
+                PipelineBudget {
+                    max_payload_lookups: 1,
+                    ..Default::default()
+                },
+                true,
+            );
+            let result = execute_pipeline(
+                &mut context,
+                &[Box::new(PausedScan {
+                    entered: entered_tx,
+                    resume: resume_rx,
+                })],
+            )
+            .unwrap();
+            assert_eq!(
+                result.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+                [1, 2, 3]
+            );
+            assert_eq!(context.metrics.len(), 1);
+            assert_eq!(context.metrics[0].payload_lookups, 0);
+            assert_eq!(context.metrics[0].payload_parsed_bytes, 0);
+        });
+        entered_rx.recv().unwrap();
+        let mut context = PipelineContext::with_profile(
+            &mt,
+            PipelineBudget {
+                max_payload_lookups: 2,
+                ..Default::default()
+            },
+            true,
+        );
+        for _ in 0..2 {
+            let result = execute_pipeline(&mut context, &[Box::new(ReadPair)]).unwrap();
+            assert_eq!(
+                result.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+                [1, 2]
+            );
+            assert_eq!(context.metrics.len(), 1);
+            assert_eq!(context.metrics[0].payload_lookups, 2);
+            assert_eq!(context.metrics[0].payload_parsed_bytes, 14);
+        }
+        // 外部读取也处于另一查询执行范围之外。
+        assert_eq!(*mt.get_payload(3).unwrap(), json!({"v":3}));
+        resume_tx.send(()).unwrap();
+        worker.join().unwrap();
+        context.budget.max_payload_lookups = 1;
+        assert!(matches!(
+            execute_pipeline(&mut context, &[Box::new(ReadPair)]).unwrap_err(),
+            triviumdb::TriviumError::PayloadQueryBudgetExceeded {
+                dimension: "lookups",
+                used: 2,
+                budget: 1
+            }
+        ));
+    });
+}
+
+#[test]
+fn 属性并行扫描将工作线程用量归入所属查询() {
+    let mut mt = MemTable::<f32>::new(DIM);
+    mt.configure_payload_cache(0, 0);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[1., 0., 0., 0.], json!({"v":id}))
+            .unwrap();
+    }
+    let mut context = PipelineContext::with_profile(
+        &mt,
+        PipelineBudget {
+            max_payload_lookups: 1,
+            parallelism: QueryParallelismBudget {
+                max_threads: 2,
+                min_parallel_rows: 1,
+            },
+            ..Default::default()
+        },
+        true,
+    );
+    let operators: Vec<Box<dyn PipelineOperator<f32>>> = vec![Box::new(PropertyLookup {
+        field: "v".into(),
+        value: json!(2),
+    })];
+    assert!(matches!(
+        execute_pipeline(&mut context, &operators).unwrap_err(),
+        triviumdb::TriviumError::PayloadQueryBudgetExceeded {
+            dimension: "lookups",
+            used: 3,
+            budget: 1
+        }
+    ));
+    context.budget.max_payload_lookups = 3;
+    let result = execute_pipeline(&mut context, &operators).unwrap();
+    assert_eq!(
+        result.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+        [2]
+    );
+    assert_eq!(context.metrics[0].payload_lookups, 3);
+    assert_eq!(context.metrics[0].payload_parsed_bytes, 21);
+}
+
 #[path = "../../benches/support/pipeline_results.rs"]
 mod pipeline_results;
 

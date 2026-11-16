@@ -2260,6 +2260,7 @@ impl<T: VectorType> MemTable<T> {
         self.payloads.memory_stats()
     }
 
+    #[cfg(test)]
     pub(crate) fn payload_access_counters(&self) -> (u64, u64) {
         self.payloads.access_counters()
     }
@@ -2412,12 +2413,16 @@ impl<T: VectorType> MemTable<T> {
             return self.find_nodes_by_field(field, value);
         }
         use rayon::prelude::*;
+        let payload_meter = crate::request::payload_meter();
         let mut ids = self
             .payloads
             .ids()
             .collect::<Vec<_>>()
             .into_par_iter()
             .filter(|&id| {
+                let _scope = payload_meter
+                    .as_ref()
+                    .map(crate::request::PayloadMeter::enter);
                 self.payloads
                     .get_value(id)
                     .is_some_and(|payload| payload.get(field) == Some(value))

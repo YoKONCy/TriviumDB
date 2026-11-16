@@ -6,6 +6,17 @@
 
 ## 中文说明
 
+### 查询计量、路径深度与文档解析
+
+- Payload 查询额度和 PROFILE 使用每次管线执行独立的账本。属性并行扫描及图工作线程继承所属查询的账本，实例累计统计继续由存储层维护。复用管线上下文时重新开始本次计量、阶段计数和 PROFILE。
+- 全路径枚举分别处理查询 `DEPTH` 与执行深度预算。预算阻止继续扩展时，Core 按 Error 策略返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`，按 Partial 策略返回 `truncated=true`。TQL 管线使用完整结果的 Error 策略，查询自身的深度及路径数量限制按各自语义执行。前沿容量在构造邻接工作区前准入。
+- Markdown 中的 HTML 按实际事件内容解析，正文逐段回映射至原文。引用符号和列表缩进保留其 Markdown 结构作用，HTML 实体转换保留对应来源范围。
+- Markdown 内嵌 `script`、`style`、`template` 按完整元素范围过滤，覆盖跨事件正文、模板嵌套及 raw-text 词法状态。行内代码、代码围栏和转义文本保留字面内容。
+- 路径内平均边权和多路径均值采用 `f64` 累加，再生成 `f32` 分数。两个 `f32::MAX` 边权的平均值返回 `f32::MAX`。TQL 路径聚合分数越出有限 `f32` 范围时返回结构化查询错误。
+- TQL `AVG` 使用补偿求和，在中间和溢出时按最大绝对值缩放，覆盖普通整数、同号大数、正负抵消、零值和极小有限数。两个 `1e308` 的平均值返回 `1e308`。
+
+> **解析更新提醒**　已入库文档通过宿主的重新解析与发布流程应用本轮正文及来源映射修正。
+
 ### 文档恢复、确定性排序与图遍历边界
 
 - 修复普通节点删除后复用相同 ID 发布分批文档，在检查点已发布、WAL 清理失败时，旧 Delete 重放清除新正文归档的问题。恢复按检查点水位和上传修订协调删除级联，保留新代正文、结构清单、片段与上传状态。检查点后的有效删除继续回收对应归档和候选。
@@ -29,6 +40,17 @@
 ## English
 
 Subsequent development builds on `0.9.1`. See the [bilingual release notes](0.9.1.md) for delivered capabilities.
+
+### Query accounting, path depth, and document parsing
+
+- Payload query budgets and PROFILE use a separate ledger for each pipeline execution. Parallel property scans and graph workers inherit the owning query's ledger, while the storage layer maintains instance-wide totals. Reusing a pipeline context starts fresh accounting, stage counts, and PROFILE data.
+- All-path enumeration handles query `DEPTH` and the execution depth budget independently. When the budget prevents further expansion, Core returns `TDB_TRAVERSAL_BUDGET_EXCEEDED` under Error policy or `truncated=true` under Partial policy. TQL pipelines use the complete-result Error policy, and query depth and path-count limits retain their specified semantics. Frontier capacity is admitted before constructing adjacency workspace.
+- Markdown HTML is parsed from actual event contents, with text mapped back to individual source segments. Quote markers and list indentation retain their Markdown structural role, and HTML entity decoding preserves its source ranges.
+- Inline Markdown `script`, `style`, and `template` elements are filtered over their full element ranges, covering text across events, nested templates, and raw-text tokenizer state. Inline code, fenced code, and escaped text retain their literal contents.
+- Per-path average weights and averages across paths accumulate in `f64` before producing `f32` scores. Two `f32::MAX` edge weights average to `f32::MAX`. TQL path aggregate scores outside the finite `f32` range return structured query errors.
+- TQL `AVG` uses compensated summation and scales by the maximum absolute value when intermediate accumulation overflows, covering ordinary integers, large same-sign inputs, signed cancellation, zeros, and tiny finite values. Two `1e308` values average to `1e308`.
+
+> **Parsing update note**　Apply the text and source-mapping corrections to stored documents through the host's reparse-and-publish workflow.
 
 ### Document recovery, deterministic sorting, and graph traversal boundaries
 

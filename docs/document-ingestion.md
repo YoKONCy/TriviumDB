@@ -31,6 +31,10 @@
 
 Markdown 使用 `pulldown-cmark` 的带字节范围事件。HTML 使用 `html5gum` 的带来源范围词法事件，块层级按实际标签开闭组织。HTML 输入由宿主提供 UTF-8 字符串，浏览器 DOM 树修正和版面信息由上层解析适配器提供。[Markdown 解析器](https://docs.rs/pulldown-cmark/latest/pulldown_cmark/struct.Parser.html)、[HTML 词法解析器](https://docs.rs/html5gum/0.9.1/html5gum/)
 
+Markdown 引用和列表中的 HTML 使用事件实际文本，并逐段记录原文偏移。实体转换及原文换行沿来源段生成映射。内嵌 `script`、`style`、`template` 按完整元素范围过滤，模板嵌套和 raw-text 词法状态随元素处理；行内代码、代码围栏及转义文本保留字面内容。
+
+> **解析更新提醒**　已有文档通过重新解析和发布应用正文及映射修正。
+
 `config` 的默认值如下。
 
 | 配置 | 默认值 | 作用 |

@@ -262,6 +262,8 @@ Rust 直接构造 `TqlQuery` 时需提供 `graph_scope`，直接构造 `EdgeView
 
 `FIND` 入口对全库节点的 JSON Payload 进行条件过滤，功能完全覆盖旧的 `db.filter()` 和 `db.filter_where()` API。无可用属性索引时，Planner 在 `EXPLAIN` 中标记 `cold_payload_scan`；执行器按 Payload 目录顺序访问冷数据，并受 lookup/parse 工作预算约束。高频字段应建立 Hash、Ordered ART、Composite ART、Bitmap 或 N-gram 索引，先缩小 NodeId 候选再执行必要的 residual predicate。
 
+管线的 Payload lookup 和实际解析字节按本次查询执行计量，工作线程继承所属查询的账本。PROFILE 中的 Payload 用量记录当前查询的累计值，实例统计维护独立的累计口径。复用执行上下文时重新建立本次账本和阶段统计。
+
 ### 基础语法
 
 ```
@@ -814,6 +816,8 @@ RETURN clustered, topic(clustered) AS topic_id, topic_score(clustered) AS confid
 
 整数之间的 `+ - *` 和整数 `SUM` 保留整数结果，超出整数域时返回 Null。含浮点操作数的算术、除法与 `AVG` 使用 binary64；除法仅将实际的正负零视为零分母，有限的小分母正常计算。`MIN/MAX` 保留选中数值的类型和值。
 
+`AVG` 使用补偿求和，在中间和溢出时按最大绝对值缩放，在同号大数及正负抵消时计算有限均值。例如两个 `1e308` 的平均值为 `1e308`。普通整数、零值与极小有限输入沿相同数值契约处理。
+
 Python 返回精确 `int`。Node 的整数标量在安全整数范围内返回 `number`，超范围时返回十进制字符串，`COLLECT` 等列表中的整数采用相同转换；整节点结果中的 ID 继续使用字符串。例如，`RETURN 18446744073709551613 AS value` 在 Python 中返回整数，在 Node 中返回字符串 `"18446744073709551613"`。
 
 数组和对象保留 JSON 形态，空数组与空对象同样是有效值。`COALESCE` 返回首个非 Null 值，`IS NULL` 根据实际空值判断；数组、对象按内容参与分组与 DISTINCT。Rust 对象结果使用 `TqlValue::Object`，Python 返回 dict，Node 返回 object 并递归保留大整数的十进制表示。节点和边作为实体值参与表达式，COUNT 可统计实体，SUM/AVG/MIN/MAX 处理数值输入。
@@ -876,6 +880,8 @@ Path 当前是一等 NodeId 序列；`path_length` 返回边数。`WEIGHTED_PATH
 `NODE_SIMILARITY input TOP n CUTOFF x [LABEL label] AS pairs` 在输入诱导无向图上计算邻居集合 Jaccard，相似节点对通过 `pair_left()`、`pair_right()` 与 `node_similarity()` 投影。PairSet 以 `(left,right)` 为行身份，两个节点共同参与去重；节点对数量、邻居交集工作量、结果数和临时字节均受硬预算约束。
 
 集合阶段公开 `UNION/INTERSECT/EXCEPT`，普通 NodeSet 仍按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。所有路径与集合算法均受节点数、字节和遍历预算约束。
+
+`ALL_PATHS` 的 `DEPTH` 限定查询范围。执行预算阻止继续扩展时返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`，TQL 管线采用完整结果的 Error 策略。Core `bounded_all_paths` 的 Partial 策略通过 `truncated` 标记部分结果。路径平均边权和多路径均值使用 `f64` 累加，输出为 `f32`；TQL 聚合分数超出有限表示范围时返回查询错误。
 
 Rust `NodeRow.provenance.property_origin` 记录物理计划当前保留的单个等值属性入口，用于成本估算与执行审计。合并行的该字段一致时保留，来源有差异时清除。直接属性召回后精排可以保留入口；先全量评分再与属性召回求交，会按合并规则得到相应来源。比较这类等价物理计划时，分别验证各自预期的 `property_origin`，再按原始顺序精确比较其余完整字段，包括其他 provenance、分数值与分数类别。
 

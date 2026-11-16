@@ -470,7 +470,7 @@ pub struct PipelineContext<'a, T: VectorType> {
     profile: bool,
     stages: usize,
     vector_read_bytes: usize,
-    payload_start: (u64, u64),
+    payload_meter: Arc<crate::request::PayloadMeter>,
     workspace_bytes: usize,
     workspaces: Vec<crate::resources::WorkspaceReservation>,
 }
@@ -492,7 +492,7 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
             profile,
             stages: 0,
             vector_read_bytes: 0,
-            payload_start: memtable.payload_access_counters(),
+            payload_meter: Arc::default(),
             workspace_bytes: 0,
             workspaces: Vec::new(),
         }
@@ -558,6 +558,7 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
             control,
             false,
         )
+        .map(|request| request.with_payload_meter(Arc::clone(&self.payload_meter)))
     }
 
     fn run_graph<R: Send>(
@@ -618,11 +619,7 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
     }
 
     fn payload_usage(&self) -> (u64, u64) {
-        let current = self.memtable.payload_access_counters();
-        (
-            current.0.saturating_sub(self.payload_start.0),
-            current.1.saturating_sub(self.payload_start.1),
-        )
+        self.payload_meter.usage()
     }
 
     fn validate_payload_budget(&self) -> Result<(u64, u64)> {
@@ -703,24 +700,12 @@ pub(crate) fn execute_pipeline_with_workspace<T: VectorType>(
     operators: &[Box<dyn PipelineOperator<T> + '_>],
 ) -> Result<(NodeSet, Vec<crate::resources::WorkspaceReservation>)> {
     let mut workspace = PipelineWorkspace(context);
-    let inherited = crate::request::current();
-    let request = workspace
-        .query_control
-        .as_ref()
-        .map(|control| {
-            crate::request::RequestContext::new(
-                inherited
-                    .as_ref()
-                    .map_or("pipeline", |request| request.request_id()),
-                control.clone(),
-                false,
-            )
-        })
-        .transpose()?;
-    let _scope = request
-        .as_ref()
-        .map(|request| request.enter())
-        .transpose()?;
+    workspace.metrics.clear();
+    workspace.stages = 0;
+    workspace.vector_read_bytes = 0;
+    workspace.payload_meter = Arc::default();
+    let request = workspace.graph_request()?;
+    let _scope = request.enter()?;
     let context = &mut *workspace;
     let rows = context.memtable.node_count().min(context.budget.max_nodes);
     let estimate = rows
@@ -1332,11 +1317,13 @@ impl<T: VectorType> PipelineOperator<T> for PropertyLookup {
                     .memtable
                     .find_nodes_by_field(&self.field, &self.value)
             } else {
-                query_pool(context.memtable.resource_runtime(), threads)?.install(|| {
-                    context
-                        .memtable
-                        .find_nodes_by_field_parallel(&self.field, &self.value, threads)
-                })
+                context.run_graph(threads, || {
+                    Ok(context.memtable.find_nodes_by_field_parallel(
+                        &self.field,
+                        &self.value,
+                        threads,
+                    ))
+                })?
             }
         };
         let mut output = NodeSet::from_ids(ids);
@@ -2118,7 +2105,10 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
                     source.id,
                     target,
                     &self.config,
-                    &context.budget.traversal,
+                    &TraversalBudget {
+                        exhaustion_policy: BudgetExhaustionPolicy::Error,
+                        ..context.budget.traversal
+                    },
                 )?;
                 consumed_nodes = consumed_nodes.saturating_add(result.metrics.visited_nodes);
                 consumed_edges = consumed_edges.saturating_add(result.metrics.examined_edges);
@@ -2139,18 +2129,26 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
                         .map(|path| path.strength_product)
                         .max_by(f32::total_cmp)
                         .unwrap_or(0.0),
-                    PathStrengthAggregation::SumProduct => {
-                        result.paths.iter().map(|path| path.strength_product).sum()
-                    }
+                    PathStrengthAggregation::SumProduct => result
+                        .paths
+                        .iter()
+                        .map(|path| f64::from(path.strength_product))
+                        .sum::<f64>()
+                        as f32,
                     PathStrengthAggregation::AverageWeight => {
-                        result
+                        (result
                             .paths
                             .iter()
-                            .map(|path| path.strength_average)
-                            .sum::<f32>()
-                            / result.paths.len() as f32
+                            .map(|path| f64::from(path.strength_average))
+                            .sum::<f64>()
+                            / result.paths.len() as f64) as f32
                     }
                 };
+                if !score.is_finite() {
+                    return Err(TriviumError::QueryExecution(
+                        "路径聚合分数超出有限 f32 范围 (Path aggregate score exceeds the finite f32 range)".into(),
+                    ));
+                }
                 let best_path = result
                     .paths
                     .iter()

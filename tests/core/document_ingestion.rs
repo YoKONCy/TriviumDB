@@ -102,6 +102,86 @@ fn begin(id: &str, document_id: &str, content: &str, expected: Value) -> Value {
 }
 
 #[test]
+fn Markdown引用与列表HTML逐段回映射正文和实体() {
+    let dir = TestDir::new("markdown-html-discontinuous-source");
+    let mut db =
+        Database::<f32>::open_with_config(&dir.file("data.tdb"), config(StorageMode::Rom)).unwrap();
+    for raw in [
+        "> <div>\n> 甲&amp;🐾\n> 乙\n> </div>\n",
+        "- <div>\n  甲&amp;🐾\n  乙\n  </div>\n",
+        "> > <div>\n> > 甲&amp;🐾\n> > 乙\n> > </div>\n",
+    ] {
+        let value = parse(&mut db, "note.md", raw);
+        let parsed: parsing::ParsedDocument = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.text, "\n甲&🐾\n乙\n\n", "{raw}");
+        parsed.validate().unwrap();
+        assert_eq!(parsed.source.original_text.as_deref(), Some(raw));
+        let covers = parsed
+            .source
+            .mappings
+            .iter()
+            .filter(|entry| entry.kind == SourceMapKind::Cover)
+            .map(|entry| &raw[entry.source_start..entry.source_end])
+            .collect::<Vec<_>>();
+        assert_eq!(covers, ["甲&amp;🐾\n"]);
+        for entry in &parsed.source.mappings {
+            if entry.kind == SourceMapKind::Exact {
+                assert_eq!(
+                    &parsed.text[entry.text_start..entry.text_end],
+                    &raw[entry.source_start..entry.source_end]
+                );
+            }
+        }
+    }
+    let compact = request(
+        &mut db,
+        json!({"operation":"parse","input":{"source_id":"compact.md","source_revision":"1","content":"<div>\n甲\n乙\n</div>","config":{"max_mappings":1}}}),
+    );
+    assert_eq!(compact["text"], "\n甲\n乙\n");
+    assert_eq!(compact["source"]["mappings"].as_array().unwrap().len(), 1);
+    db.close().unwrap();
+}
+
+#[test]
+fn Markdown隐藏HTML跨事件过滤且代码和转义文字保留() {
+    let dir = TestDir::new("markdown-hidden-html");
+    let mut db =
+        Database::<f32>::open_with_config(&dir.file("data.tdb"), config(StorageMode::Rom)).unwrap();
+    for raw in [
+        "前 <script>隐藏词</script> 后",
+        "前 <style>隐藏词</style> 后",
+        "前 <template>隐藏词<template>内层</template>尾</template> 后",
+        "前 <script>\"<template>隐藏词</template>\"</script> 后",
+    ] {
+        let parsed = parse(&mut db, "note.md", raw);
+        assert_eq!(parsed["text"], "前  后\n");
+    }
+    for raw in [
+        "前 `<script>保留</script>` 后",
+        "前 &lt;script&gt;保留&lt;/script&gt; 后",
+    ] {
+        assert_eq!(
+            parse(&mut db, "note.md", raw)["text"],
+            "前 <script>保留</script> 后\n"
+        );
+    }
+    for (raw, expected) in [
+        ("<template>\n隐藏词\n\n隐藏词\n</template>\n后\n", "\n后\n"),
+        (
+            "<div><template>\n隐藏词\n\n隐藏词\n</template>后</div>\n",
+            "后\n",
+        ),
+    ] {
+        assert_eq!(parse(&mut db, "note.md", raw)["text"], expected, "{raw}");
+    }
+    assert_eq!(
+        parse(&mut db, "note.md", "```html\n<script>保留</script>\n```\n")["text"],
+        "<script>保留</script>\n"
+    );
+    db.close().unwrap();
+}
+
+#[test]
 fn 分批候选跨重开幂等发布并保留旧版本可见性() {
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
         let dir = TestDir::new("document-upload");

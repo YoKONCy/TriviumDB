@@ -148,6 +148,8 @@ fn example() -> triviumdb::Result<()> {
 
 `SharedDatabase::try_read_with_context` 和 `try_write_with_context` 在借用前及取得实例后检查上下文，继续使用立即拒绝的共享锁和重入规则。业务闭包返回的内核错误保留原始阶段与结果。`commit_tx_with_context` 在上下文和内核准入后消费 builder，SDK 准入拒绝保留缓冲并返回 `transaction_consumed=false`，进入 Core 后按实际消费状态返回。事务预检完成、WAL 尚未追加时再次观察取消，拒绝提供 `validation/not_committed`。
 
+Payload 查询账本由 Core 为每次管线执行建立，存储读取入口记录 lookup 和实际解析字节，工作线程通过请求作用域继承所属账本。预算和 PROFILE 共用该账本，实例累计缓存统计由存储层单独维护。作用域 Guard 在执行线程退出时归还当前账本，SDK 负责传递请求身份与执行控制。
+
 ```rust
 use triviumdb::sdk::RequestContext;
 use triviumdb::query::tql_executor::QueryControl;

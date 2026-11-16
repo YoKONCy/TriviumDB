@@ -14,13 +14,14 @@
   ],
   "indexed_order": {
     "records": [
-      {"id":1,"payload":{"rank":1,"v":30,"same":0,"nested":{"rank":30},"seed":true}},
-      {"id":2,"payload":{"rank":2,"v":10,"same":0,"nested":{"rank":20},"seed":false}},
-      {"id":3,"payload":{"rank":3,"v":20,"same":0,"nested":{"rank":10},"seed":false}}
+      {"id":1,"payload":{"rank":1,"v":30,"same":0,"nested":{"rank":30},"seed":true,"huge":1e308}},
+      {"id":2,"payload":{"rank":2,"v":10,"same":0,"nested":{"rank":20},"seed":false,"huge":1e308}},
+      {"id":3,"payload":{"rank":3,"v":20,"same":0,"nested":{"rank":10},"seed":false,"huge":1e308}}
     ],
     "indexes": ["rank", "v", "same"],
     "cases": [
       {"query":"FIND {rank: {$gt:0}} RETURN _.nested AS picked ORDER BY picked.rank LIMIT 1", "rows":[{"picked":{"rank":10}}]},
+      {"query":"FIND {rank: {$gt:0}} RETURN AVG(_.huge) AS average", "rows":[{"average":1e308}]},
       {"query":"FIND {rank: {$gt:0}} RETURN _.nested AS _ ORDER BY _.rank DESC LIMIT 1 OFFSET 1", "rows":[{"_":{"rank":20}}]},
       {"query":"FIND {v: {$gt:0}} RETURN _.id AS id ORDER BY _.same LIMIT 1", "rows":[{"id":1}]},
       {"query":"FIND {v: {$gt:0}} RETURN _.id AS id ORDER BY _.same DESC LIMIT 1 OFFSET 1", "rows":[{"id":2}]},

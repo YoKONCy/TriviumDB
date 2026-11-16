@@ -29,6 +29,53 @@ fn scalar(v: &TqlValue<f32>) -> Value {
         other => panic!("此样本要求标量，实际为 {other:?}"),
     }
 }
+
+#[test]
+fn 平均值避免中间溢出并保留抵消后的有限分量() {
+    let dir = TestDir::new("tql-stable-average");
+    for (index, values, expected) in [
+        (0, vec![1e308, 1e308], 1e308),
+        (1, vec![-1e308, -1e308], -1e308),
+        (2, vec![1e308, -1e308], 0.0),
+        (3, vec![1e308, 1.0, -1e308], 1.0 / 3.0),
+        (4, vec![0.0, 0.0], 0.0),
+        (
+            5,
+            vec![f64::from_bits(1), f64::from_bits(1)],
+            f64::from_bits(1),
+        ),
+    ] {
+        let mut db = Database::<f32>::open_with_config(
+            &dir.file(&format!("{index}.tdb")),
+            config(StorageMode::Rom),
+        )
+        .unwrap();
+        for (index, value) in values.into_iter().enumerate() {
+            db.insert_with_id(index as u64 + 1, &[1.], json!({"v":value}))
+                .unwrap();
+        }
+        for query in [
+            "MATCH (n) RETURN AVG(n.v) AS average",
+            "FIND {v: {$exists:true}} AS n WITH n RETURN AVG(n.v) AS average",
+        ] {
+            let result = db.tql(query).unwrap();
+            assert_eq!(result.len(), 1);
+            let TqlValue::Float(actual) = result[0]["average"] else {
+                panic!("平均值类型错误：{result:?}")
+            };
+            assert!(actual.is_finite());
+            if expected == 0.0 || expected.abs() < f64::MIN_POSITIVE {
+                assert_eq!(actual, expected);
+            } else {
+                assert!(
+                    ((actual - expected) / expected).abs() < 1e-14,
+                    "{query}: {actual}, expected={expected}"
+                );
+            }
+        }
+        db.close().unwrap();
+    }
+}
 fn rows(db: &Database<f32>, query: &str) -> Vec<BTreeMap<String, Value>> {
     db.tql(query)
         .unwrap_or_else(|e| panic!("{query}: {e:?}"))

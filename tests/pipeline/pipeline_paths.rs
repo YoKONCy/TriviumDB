@@ -49,6 +49,161 @@ fn pipeline_budget() -> PipelineBudget {
 }
 
 #[test]
+fn 查询深度与预算深度分别决定完整结果错误和部分标记() {
+    use triviumdb::TriviumError;
+    use triviumdb::graph::budget::BudgetDimension;
+    let mut mt = MemTable::<f32>::new(2);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[1., 0.], json!({})).unwrap();
+    }
+    mt.link(1, 2, "a".into(), 1.).unwrap();
+    mt.link(2, 3, "a".into(), 1.).unwrap();
+    let config = BoundedPathConfig {
+        max_depth: 2,
+        max_paths: 10,
+        label_sequence: None,
+        forbidden_nodes: BTreeSet::new(),
+    };
+    let mut limited = TraversalBudget {
+        max_depth: 1,
+        ..budget()
+    };
+    assert!(matches!(
+        bounded_all_paths(&mt, 1, 3, &config, &limited).unwrap_err(),
+        TriviumError::TraversalBudgetExceeded {
+            dimension: BudgetDimension::Depth,
+            ..
+        }
+    ));
+    limited.exhaustion_policy = BudgetExhaustionPolicy::Partial;
+    let partial = bounded_all_paths(&mt, 1, 3, &config, &limited).unwrap();
+    assert!(partial.paths.is_empty());
+    assert!(partial.truncated);
+    assert_eq!(partial.metrics.depth_reached, 1);
+    let complete = bounded_all_paths(
+        &mt,
+        1,
+        3,
+        &BoundedPathConfig {
+            max_depth: 1,
+            ..config.clone()
+        },
+        &limited,
+    )
+    .unwrap();
+    assert!(complete.paths.is_empty());
+    assert!(!complete.truncated);
+    let mut context = PipelineContext::new(
+        &mt,
+        PipelineBudget {
+            traversal: limited,
+            ..pipeline_budget()
+        },
+    );
+    let error = BoundedAllPaths {
+        targets: vec![3],
+        config,
+        aggregation: PathStrengthAggregation::AverageWeight,
+    }
+    .apply(NodeSet::from_ids([1]), &mut context)
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        TriviumError::TraversalBudgetExceeded {
+            dimension: BudgetDimension::Depth,
+            ..
+        }
+    ));
+
+    let mut chain = MemTable::<f32>::new(2);
+    for id in 1..=66 {
+        chain.insert_with_id(id, &[1., 0.], json!({})).unwrap();
+    }
+    for id in 1..66 {
+        chain.link(id, id + 1, "a".into(), 1.).unwrap();
+    }
+    let query = triviumdb::query::tql_parser::parse_tql(
+        "SEARCH VECTOR [1,0] TOP 1 AS seed WITH seed \
+         ALL_PATHS seed TO [66] DEPTH 65 PATHS 10 AGGREGATE average_weight AS route \
+         WITH route RETURN path(route) AS nodes",
+    )
+    .unwrap();
+    let error = triviumdb::query::tql_executor::execute_tql_values(&query, &chain).unwrap_err();
+    assert!(matches!(
+        error.underlying(),
+        TriviumError::TraversalBudgetExceeded {
+            dimension: BudgetDimension::Depth,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn 路径内及路径间的大有限边权均值保持可表示结果() {
+    use triviumdb::query::tql_executor::{TqlValue, execute_tql_values};
+    use triviumdb::query::tql_parser::parse_tql;
+    let mut mt = MemTable::<f32>::new(2);
+    for id in 1..=4 {
+        mt.insert_with_id(id, &[1., 0.], json!({})).unwrap();
+    }
+    for (source, target) in [(1, 2), (2, 4), (1, 3), (3, 4)] {
+        mt.link(source, target, "a".into(), f32::MAX).unwrap();
+    }
+    let config = BoundedPathConfig {
+        max_depth: 2,
+        max_paths: 10,
+        label_sequence: None,
+        forbidden_nodes: BTreeSet::new(),
+    };
+    let paths = bounded_all_paths(&mt, 1, 4, &config, &budget()).unwrap();
+    assert_eq!(
+        paths
+            .paths
+            .iter()
+            .map(|path| path.nodes.clone())
+            .collect::<Vec<_>>(),
+        [vec![1, 2, 4], vec![1, 3, 4]]
+    );
+    assert_eq!(
+        paths
+            .paths
+            .iter()
+            .map(|path| path.strength_average)
+            .collect::<Vec<_>>(),
+        [f32::MAX, f32::MAX]
+    );
+    assert!(!paths.truncated);
+    let query = parse_tql(
+        "SEARCH VECTOR [1,0] TOP 1 AS seed WITH seed \
+         ALL_PATHS seed TO [4] DEPTH 2 PATHS 10 AGGREGATE average_weight AS route \
+         WITH route RETURN path_strength(route) AS score",
+    )
+    .unwrap();
+    let rows = execute_tql_values(&query, &mt).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(
+        rows[0]["score"],
+        TqlValue::Float(value) if value == f64::from(f32::MAX)
+    ));
+    for aggregation in [
+        PathStrengthAggregation::MaxProduct,
+        PathStrengthAggregation::SumProduct,
+    ] {
+        let error = BoundedAllPaths {
+            targets: vec![4],
+            config: config.clone(),
+            aggregation,
+        }
+        .apply(
+            NodeSet::from_ids([1]),
+            &mut PipelineContext::new(&mt, pipeline_budget()),
+        )
+        .unwrap_err();
+        assert!(matches!(error, triviumdb::TriviumError::QueryExecution(_)));
+    }
+}
+
+#[test]
 fn 有界路径确定性且强度与标签序列正确() {
     let mt = graph();
     let config = BoundedPathConfig {
