@@ -50,7 +50,7 @@ mod types;
 pub use batch_search::BatchSearchTask;
 pub use database::TriviumDB;
 pub use protocols::JsConsoleSession;
-pub use queries::JsPreparedTql;
+pub use queries::PreparedTql as JsPreparedTql;
 pub use requests::{JsRequestContext, call_argument_info, invoke_request, request_operation};
 pub use runtime::{JsResourceLimits, JsResourceRuntime};
 pub use snapshots::{restore_snapshot, verify_snapshot};

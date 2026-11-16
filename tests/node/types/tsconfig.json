@@ -8,7 +8,7 @@
     "lib": ["ES2022", "ESNext.Disposable"],
     "noEmit": true,
     "noEmitOnError": true,
-    "paths": { "triviumdb": ["../../../"] }
+    "paths": { "triviumdb": ["../../../triviumdb.d.ts"] }
   },
-  "files": ["consumer.ts"]
+  "files": ["consumer.ts", "module_exports.cts", "module_exports.mts"]
 }

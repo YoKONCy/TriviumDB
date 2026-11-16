@@ -1,6 +1,6 @@
 'use strict'
 
-// 将 npm 实际打包内容安装到独立消费项目，编译并运行同一份 TypeScript 样例。
+// 将 npm 实际打包内容安装到独立消费项目，编译并运行 CommonJS 与 ESM 消费样例。
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -27,9 +27,13 @@ try {
   fs.writeFileSync(path.join(consumer, 'package.json'), JSON.stringify({ name: 'tdb-consumer-test', private: true }))
   run([npmCli, 'install', '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false',
     path.join(sample, packed[0].filename)], consumer)
-  fs.copyFileSync(path.join(root, 'tests/node/types/consumer.ts'), path.join(consumer, 'consumer.ts'))
   const config = JSON.parse(fs.readFileSync(path.join(root, 'tests/node/types/tsconfig.json'), 'utf8'))
+  for (const filename of config.files) {
+    fs.copyFileSync(path.join(root, 'tests/node/types', filename), path.join(consumer, filename))
+  }
   delete config.compilerOptions.paths
+  config.compilerOptions.module = 'NodeNext'
+  config.compilerOptions.moduleResolution = 'NodeNext'
   config.compilerOptions.noEmit = false
   config.compilerOptions.outDir = './compiled'
   fs.writeFileSync(path.join(consumer, 'tsconfig.json'), JSON.stringify(config))
@@ -52,6 +56,10 @@ try {
   }
   run(['-e', 'process.exitCode = 1; require("./compiled/consumer.js").exercise(process.argv[1]).then(() => { process.exitCode = 0 }, error => { console.error(error) })',
     path.join(sample, 'typed-consumer.tdb')], consumer)
+  run(['-e', 'const consumer = require("./compiled/module_exports.cjs"); consumer.exercise(consumer.api, process.argv[1])',
+    path.join(sample, 'cjs-exports.tdb')], consumer)
+  run(['--input-type=module', '-e', 'import { exercise } from "./compiled/module_exports.mjs"; exercise(process.argv[1])',
+    path.join(sample, 'esm-exports.tdb')], consumer)
   const numericRoot = path.join(sample, 'numeric-boundaries')
   fs.mkdirSync(numericRoot)
   run(['-e', 'process.exitCode = 1; require(process.argv[1])(process.argv[2], require("triviumdb").TriviumDB).then(() => { process.exitCode = 0 }, error => { console.error(error) })',

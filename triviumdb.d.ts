@@ -570,6 +570,9 @@ export class PreparedTql {
   parameterNames(): string[];
 }
 
+/** PreparedTql 的兼容名称，引用同一构造器及类型。 */
+export { PreparedTql as JsPreparedTql };
+
 export interface PropertyIndexInfo {
   field: string;
   fields: string[];

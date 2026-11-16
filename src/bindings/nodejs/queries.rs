@@ -67,13 +67,14 @@ fn node_tql_row_to_json<T: crate::VectorType>(
     serde_json::Value::Object(obj).into()
 }
 
-#[napi]
-pub struct JsPreparedTql {
+// napi-rs 2 按无构造器实现块的 Rust 名称登记类，此处与公开 JS 名称保持一致。
+#[napi(js_name = "PreparedTql")]
+pub struct PreparedTql {
     inner: crate::query::tql_prepared::PreparedTql,
 }
 
 #[napi]
-impl JsPreparedTql {
+impl PreparedTql {
     #[napi]
     pub fn parameter_names(&self) -> Vec<String> {
         self.inner
@@ -182,10 +183,10 @@ impl TriviumDB {
         &self,
         env: Env,
         query: Either<String, JsUnknown>,
-    ) -> napi::Result<JsPreparedTql> {
+    ) -> napi::Result<PreparedTql> {
         let query = parse_string_argument(env, query, "query", None)?;
         dispatch!(self, db => db.prepare_tql(&query))
-            .map(|inner| JsPreparedTql { inner })
+            .map(|inner| PreparedTql { inner })
             .map_err(|error| to_napi_error(env, error))
     }
 
@@ -193,7 +194,7 @@ impl TriviumDB {
     pub fn execute_prepared_tql(
         &self,
         env: Env,
-        prepared: &JsPreparedTql,
+        prepared: &PreparedTql,
         parameters: JsUnknown,
     ) -> napi::Result<Vec<NodeJson>> {
         let values = collect_prepared_parameters(env, parameters, &prepared.inner)?;

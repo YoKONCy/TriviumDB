@@ -251,3 +251,14 @@ Object.defineProperty(NativeDatabase.prototype, 'constructor', { ...constructorD
 binding.TriviumDB = DatabaseConstructor
 
 module.exports = binding
+
+// 显式列出公共值，供 Node 的 CommonJS 静态分析提供 ESM 命名导出。
+module.exports.TriviumDB = binding.TriviumDB
+module.exports.PreparedTql = binding.PreparedTql
+module.exports.ResourceRuntime = binding.ResourceRuntime
+module.exports.ConsoleSession = binding.ConsoleSession
+module.exports.RequestContext = binding.RequestContext
+module.exports.verifySnapshot = binding.verifySnapshot
+module.exports.restoreSnapshot = binding.restoreSnapshot
+// 历史名称与规范名称共用同一构造器及原生句柄。
+module.exports.JsPreparedTql = binding.PreparedTql

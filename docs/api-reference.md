@@ -1317,6 +1317,8 @@ for row in &rows {
 
 ### prepare_tql / execute_prepared_tql
 
+Node 的 Prepared 句柄由 `db.prepareTql()` 创建，公开构造器名称为 `PreparedTql`。CommonJS 使用 `const { PreparedTql } = require('triviumdb')`，ESM 使用 `import { PreparedTql } from 'triviumdb'`，返回句柄可通过 `instanceof PreparedTql` 核对。兼容名称 `JsPreparedTql` 引用同一构造器及类型，导出修复见[未发布说明](changes/unreleased.md)。
+
 ```python
 prepared = db.prepare_tql(
     "FIND {kind: \"note\"} RETURN $bonus + 1 AS score"

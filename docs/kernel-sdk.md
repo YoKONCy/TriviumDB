@@ -79,6 +79,8 @@ Python 与 Node 的原生绑定分别位于 [`src/bindings/python/`](../src/bind
 
 Python 通过 PyO3 的 `multiple-pymethods` 特性，将同一类的公开方法按职责注册。每个 `#[pyclass]` 在所属模块定义一次，方法实现分布在对应职责文件。Node 的 `#[napi]` 方法实现采用相同的职责划分。Python 的 `.pyi` 从已安装 wheel 生成，npm 的公开声明由 `triviumdb.d.ts` 提供。
 
+Node 的 CommonJS 入口 `index.js` 在包装原生对象后显式导出 `TriviumDB`、`PreparedTql`、`ResourceRuntime`、`ConsoleSession`、`RequestContext`、`verifySnapshot` 和 `restoreSnapshot`，供 CommonJS 与 ESM 使用同一对象及构造器。`JsPreparedTql` 是 `PreparedTql` 的兼容别名。原生 Prepared 类型按公开名称注册，Rust 兼容路径继续导出 `JsPreparedTql`。后续变更见[未发布说明](changes/unreleased.md)。
+
 Node 原生注册在 napi-rs 2 装配类之前统一登记 `TriviumDB` 名称，将构造器及各职责实现块的属性装配到同一公开类。注册回调使用 Node 提供的当前环境，并随每个模块实例初始化执行。
 
 原 Rust 绑定路径 `bindings::python::python` 与 `bindings::nodejs::nodejs` 通过重导出提供原有公开对象。Python 模块入口在 `src/lib.rs` 连接到统一注册函数，Node 的原生导出由 napi-rs 注册。
