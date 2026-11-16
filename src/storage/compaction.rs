@@ -354,6 +354,9 @@ impl CompactionThread {
                     if !mt.needs_checkpoint() {
                         return Ok(true);
                     }
+                    mt.text_checkpoint_token = wal.seal_checkpoint(
+                        mt.text_index_is_deferred() || !mt.text_index().is_empty(),
+                    )?;
                     if let Err(error) =
                         file_format::save_with_write_info(&mut mt, &db_path, storage_mode, write)
                     {

@@ -1522,7 +1522,9 @@ print(info["property_index_format"])    # 8
 print(info["sidecars"])
 ```
 
-`tql_mut` 读查询、patch 普通对象简写、Node 数字构造参数分别返回迁移错误。Rust 同步配置通过 `Config.sync_mode` 提供。当前 WAL 为 v6，ReadWrite 按独立历史布局校验并原子升级 v2/v3/v4/v5，流式恢复完整提交前缀。ReadOnly/Immutable 采用物理零写契约，旧格式升级由 Writer 完成。无头、未知版本及非法迁移输入返回结构化错误。
+`tql_mut` 读查询、patch 普通对象简写、Node 数字构造参数分别返回迁移错误。Rust 同步配置通过 `Config.sync_mode` 提供。当前开发 WAL 为 v7，ReadWrite 按对应历史布局校验并原子升级 v2/v3/v4/v5/v6，流式恢复完整提交前缀。ReadOnly/Immutable 采用物理零写契约，旧格式升级由 Writer 完成。无头、未知版本及非法迁移输入返回结构化错误。
+
+`patch_payload`／`patchPayload` 先校验 `$set`、`$inc`、`$unset` 操作数为 JSON 对象，再预览整份修改并执行写入。非法操作数返回 `TDB_INVALID_INPUT`，目标字段为 `patch.<操作符>`，写入完成点为 `validation/not_committed`。`$inc` 成员继续执行数值类型、精确整数及溢出校验。
 
 ---
 
@@ -1690,6 +1692,12 @@ db.build_text_index()
 正文和关键词在分词、转换及索引增长前检查保守峰值，并向共享运行时预留临时工作区。预算拒绝保留原正文、关键词与 WAL。维护入口核对 WAL 可写性，已关闭的 writer 返回 `TDB_WAL_CLOSED`；权限和生命周期拒绝提供 `admission/not_committed`，输入及构建拒绝提供 `validation/not_committed`。
 
 历史 `.text`（TIDX v2）快照缺少 `.text.meta` 时，完整格式校验通过后可恢复正文与关键词，并在保存时补齐长度和 CRC。已有元数据中的文本长度和 CRC 用于校验内容；主文件长度随存储布局和节点变化更新。加载异常时保留原文本文件，错误消息区分长度、CRC、元数据格式与快照格式。
+
+开发版本的 TMET v2 同时保存主文件 CRC、WAL 检查点封条和元数据 CRC。恢复先核对封条与主检查点，再划分旧删除和检查点后删除。TMET v1 的无封条文本在 ID 删除及复用造成恢复歧义时，返回 `TDB_RECOVERY_REQUIRED`，字段为 `text_index.recovery_boundary`。历史文本的必要加载与校验遵守实例和共享工作区预算。
+
+无待恢复日志的历史文本检查点在 Writer 打开时补齐封条和 TMET v2。元数据更新沿用已有文本 CRC，并按主文件绑定和原子替换完成发布。旧 WAL 的升级采用帧级及事务暂存准入，日志总量与单次恢复工作区分别计量。
+
+> **恢复提醒**　历史文本恢复歧义通过完整数据库备份恢复，或由宿主事实创建新库后登记正文与关键词。升级前保留完整备份，旧版本环境使用对应备份恢复。
 
 ### rebuild_text_index — 按完整集合重建文本索引
 
@@ -1939,7 +1947,7 @@ WAL 追加、flush 或同步失败时返回原始错误并隔离该 writer。后
 ## 持久化类型、解析与打开准入
 
 - 文件头保存 dtype、元素宽度与 CRC32。ReadWrite/ReadOnly 使用其他 dtype 打开返回 `TDB_DTYPE_MISMATCH`，详情包含 `stored` 和 `requested`，取值为 `f32`、`f16`、`u64`。Rom 与 Mmap 共用此契约。
-- v5–v9 非空检查点通过完整向量块几何验证类型。无类型基础检查点的历史 WAL，以及空的无类型检查点附带非空 WAL，使用原版本、原 dtype 恢复并完成检查点或导出后再升级。当前 v13 检查点及 v6 WAL 由支持对应版本的内核处理，回退使用升级前的完整备份。
+- v5–v9 非空检查点通过完整向量块几何验证类型。无类型基础检查点的历史 WAL，以及空的无类型检查点附带非空 WAL，使用原版本、原 dtype 恢复并完成检查点或导出后再升级。当前 v13 检查点及 v7 WAL 由支持对应版本的内核处理，回退使用升级前的完整备份。
 - 发生向量文件替换或重映射失败时，原调用保留 I/O 错误。映射已经失效的实例及其共享句柄随后返回 `TDB_WAL_CLOSED`；释放这些实例后，重新以可写模式打开，恢复发布基础并回放 WAL。
 - TQL 字符串入口完整消费输入，语句尾部非法内容在生成写操作前返回 `TDB_QUERY_PARSE`。输入上限为 4 MiB、262,144 个 token、128 层括号嵌套和 128 个表达式运算符；已有递归预算共同约束表达式与谓词。向量及 JSON 字面量中的负号按字面量处理。
 - `memory_limit` 覆盖打开时的节点与图目录、Rom 向量堆副本、Payload 解码、派生索引恢复和 WAL 暂存。各阶段在分配前进行保守峰值准入，打开完成前核对总估算占用；预算不足返回 `TDB_CAPACITY_RESERVATION_REJECTED`，本次共享资源预留释放。原始 mmap 向量和 Payload 映射按文件映射管理，堆目录及解码工作区参与准入。

@@ -73,7 +73,7 @@ fn 四类属性索引和存储格式可结构化观测() {
     assert_eq!(storage.database_format_current, 13);
     assert_eq!(storage.property_index_format, 8);
     assert_eq!(storage.graph_index_format, 3);
-    assert_eq!(storage.wal_format, 6);
+    assert_eq!(storage.wal_format, 7);
     assert_eq!(storage.dim, 2);
     assert_eq!(storage.node_count, 1);
     cleanup(&path);

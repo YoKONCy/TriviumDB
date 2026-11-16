@@ -14,6 +14,83 @@ use triviumdb::storage::wal::SyncMode;
 
 const DIM: usize = 4;
 
+#[test]
+#[ignore = "由恢复父用例显式启动并提供专用路径"]
+fn WAL已确认新增节点子进程() {
+    let path = std::env::var("TDB_RECOVERY_QUIVER_PATH").unwrap();
+    let mode = match std::env::var("TDB_RECOVERY_STORAGE").unwrap().as_str() {
+        "rom" => StorageMode::Rom,
+        "mmap" => StorageMode::Mmap,
+        other => panic!("存储模式无效：{other}"),
+    };
+    let mut db = Database::<f32>::open_with_config(
+        &path,
+        Config {
+            dim: 2,
+            storage_mode: mode,
+            sync_mode: SyncMode::Full,
+            auto_build_quiver: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for id in 1..=10 {
+        db.insert_with_id(id, &[0., 1.], serde_json::json!({"id":id}))
+            .unwrap();
+    }
+    db.build_quiver_index(None).unwrap();
+    db.flush().unwrap();
+    db.insert_with_id(11, &[1., 0.], serde_json::json!({"id":11}))
+        .unwrap();
+    assert_eq!(db.search(&[1., 0.], 1, 0, -1.).unwrap()[0].id, 11);
+    // 确认日志持久化后直接结束子进程，绕过数据库关闭及 Drop 检查点。
+    std::process::exit(0);
+}
+
+#[test]
+fn WAL新增节点恢复后普通检索包含完整向量事实并可再次持久化() {
+    let root = super::support::TestDir::new("wal_quiver_recovery");
+    for (name, mode) in [("rom", StorageMode::Rom), ("mmap", StorageMode::Mmap)] {
+        for auto in [false, true] {
+            let path = root.file(&format!("{name}-{auto}.tdb"));
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "recovery::WAL已确认新增节点子进程",
+                    "--nocapture",
+                ])
+                .env("TDB_RECOVERY_QUIVER_PATH", &path)
+                .env("TDB_RECOVERY_STORAGE", name)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "子进程确认写入失败：{output:?}");
+            let cfg = Config {
+                dim: 2,
+                storage_mode: mode,
+                auto_build_quiver: auto,
+                ..Default::default()
+            };
+            let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+            assert_eq!(db.get(11).unwrap().unwrap().vector, [1., 0.]);
+            assert_eq!(db.search_exact(&[1., 0.], 1).unwrap()[0].id, 11);
+            for _ in 0..2 {
+                let hits = db.search(&[1., 0.], 11, 0, -1.).unwrap();
+                assert_eq!(
+                    hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+                    [11, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                );
+                assert_eq!(hits[0].payload, serde_json::json!({"id":11}));
+                assert_eq!(hits[0].score, 1.);
+            }
+            db.close().unwrap();
+            let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+            assert_eq!(db.search(&[1., 0.], 1, 0, -1.).unwrap()[0].id, 11);
+            db.close().unwrap();
+        }
+    }
+}
+
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();

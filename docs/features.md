@@ -571,7 +571,7 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 ```text
 1. ReadWrite 持有排他锁后检查 .publish；Mmap marker 或 Rom 日志尚未提交时恢复旧文件组
 2. 验证 .tdb/.vec/.pld/.flush_ok 同代；已提交的新代不得回滚
-3. 校验 WAL 的 TVWL + v6 版本头，Writer 按独立历史布局处理 v2/v3/v4/v5 的升级
+3. 校验 WAL 的 TVWL + v7 版本头，Writer 按对应历史布局处理 v2/v3/v4/v5/v6 的升级
 4. 逐条读取长度、记录体与 CRC32，只回放有效前缀中的已提交事务
 5. 遇到截断、非法长度、CRC 或反序列化错误时停止，不越过损坏边界
 ```
@@ -591,7 +591,7 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 
 ### WAL 记录类型
 
-WAL 文件以 `TVWL + u16 version` 版本头开场，当前为 v6。受保护事务的回执、命名图和文档批次分别作为记录置于同一事务封条内，恢复接纳完整事务中的全部事实。ReadWrite 持有排他锁时，v2 按独立历史布局校验并转换，v3/v4/v5 流式验证完整提交前缀并复制到 v6。完整帧损坏返回结构化错误。ReadOnly/Immutable 按物理零写契约处理历史文件，迁移及中断恢复由 Writer 完成。默认图写入提供 `(src,dst,label)` 唯一边的 weight upsert 和指定标签 `UnlinkLabel` 记录。
+WAL 文件以 `TVWL + u16 version` 版本头开场，当前开发为 v7。受保护事务的回执、命名图和文档批次分别作为记录置于同一事务封条内，恢复接纳完整事务中的全部事实。ReadWrite 持有排他锁时，v2 按独立历史布局校验并转换，v3/v4/v5/v6 流式验证完整提交前缀并复制到 v7。文本检查点在文件组发布前同步唯一封条，清理后的空日志保留基准封条；TMET v2 将其绑定至主文件与文本快照。完整帧损坏返回结构化错误。ReadOnly/Immutable 按物理零写契约处理历史文件，迁移及中断恢复由 Writer 完成。默认图写入提供 `(src,dst,label)` 唯一边的 weight upsert 和指定标签 `UnlinkLabel` 记录。
 
 | 类型 | 内容 |
 | ------ | ------ |

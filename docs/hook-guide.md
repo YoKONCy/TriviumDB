@@ -38,6 +38,8 @@ TriviumDB v0.6.0 引入的 Hook 系统提供了 **6 个管线关键阶段的自�
 | **FFI 友好** | `FfiHook` 支持运行时加载 C/C++ `.so/.dll/.dylib` 动态库 |
 | **类型安全** | `SearchHook: Send + Sync` 编译器强制线程安全 |
 
+每个回调结束后，Core 立即检查 `HookContext.error` 并通过 `TDB_HOOK_EXECUTION` 返回失败。空召回、普通返回及 DPP 最终返回执行相同契约，后续阶段在错误返回后结束。Python、Node 与 FFI 适配器通过 Core 传播回调失败。
+
 ---
 
 ## 管线架构与 6 个注入点

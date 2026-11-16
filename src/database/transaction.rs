@@ -168,6 +168,7 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
                 );
             } else {
                 mt.raw_insert(id, &vector, payload_val)?;
+                mt.discard_quiver();
             }
             // 无论是否跳过，都必须推进 next_id 防止后续 insert 复用已物化的 ID
             mt.advance_next_id(next_id);
@@ -272,6 +273,10 @@ pub(crate) fn replay_entry<T: VectorType>(mt: &mut MemTable<T>, entry: WalEntry<
         }
         WalEntry::EditReceipt { bytes } => {
             mt.editing.restore(&bytes)?;
+            mt.mark_checkpoint_dirty();
+        }
+        WalEntry::Checkpoint { token } => {
+            mt.replay_text_checkpoint(token);
             mt.mark_checkpoint_dirty();
         }
     }

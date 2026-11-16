@@ -586,7 +586,10 @@ pub struct MemTable<T: VectorType> {
     resource_reservation: Option<crate::resources::DatabaseReservation>,
     // 未加载的 sidecar 与待合并操作分开保存，避免把“未加载”解释为“空索引”。
     deferred_text_path: Option<String>,
-    deferred_text_meta: Option<[u8; 28]>,
+    deferred_text_meta: Option<crate::storage::file_format::TextIndexMetadata>,
+    pub(crate) text_checkpoint_token: Option<[u8; 16]>,
+    text_replay: bool,
+    text_replay_checkpoint_seen: bool,
     pending_text_mutations: Vec<PendingTextMutation>,
     pending_text_bytes: usize,
     text_memory_limit: usize,
@@ -699,6 +702,9 @@ impl<T: VectorType> MemTable<T> {
             resource_reservation: None,
             deferred_text_path: None,
             deferred_text_meta: None,
+            text_checkpoint_token: None,
+            text_replay: false,
+            text_replay_checkpoint_seen: false,
             pending_text_mutations: Vec::new(),
             pending_text_bytes: 0,
             text_memory_limit: 0,
@@ -763,6 +769,9 @@ impl<T: VectorType> MemTable<T> {
             resource_reservation: None,
             deferred_text_path: None,
             deferred_text_meta: None,
+            text_checkpoint_token: None,
+            text_replay: false,
+            text_replay_checkpoint_seen: false,
             pending_text_mutations: Vec::new(),
             pending_text_bytes: 0,
             text_memory_limit: 0,
@@ -3072,7 +3081,7 @@ impl<T: VectorType> MemTable<T> {
         }
 
         // 3. 元数据层
-        if self.deferred_text_path.is_some() {
+        if self.deferred_text_path.is_some() || self.text_replay {
             self.pending_text_mutations
                 .push(PendingTextMutation::Delete(id));
         } else {
@@ -3360,6 +3369,23 @@ impl<T: VectorType> MemTable<T> {
         id: NodeId,
         patch: &serde_json::Value,
     ) -> Result<serde_json::Value> {
+        let patch_obj = patch.as_object().ok_or_else(|| {
+            TriviumError::InvalidInput(
+                "patch 参数必须是 JSON 对象 (patch must be a JSON object)".into(),
+            )
+            .at_field("patch")
+        })?;
+        for operation in ["$set", "$inc", "$unset"] {
+            if patch_obj
+                .get(operation)
+                .is_some_and(|value| !value.is_object())
+            {
+                return Err(TriviumError::InvalidInput(format!(
+                    "补丁操作数必须是 JSON 对象 (Patch operand must be a JSON object): {operation}"
+                ))
+                .at_field(&format!("patch.{operation}")));
+            }
+        }
         let old_payload = self
             .get_payload(id)
             .map(|payload| (*payload).clone())
@@ -3372,51 +3398,42 @@ impl<T: VectorType> MemTable<T> {
             .as_object_mut()
             .ok_or_else(|| TriviumError::InvalidInput("Payload 不是 JSON 对象".into()))?;
 
-        if let Some(patch_obj) = patch.as_object() {
-            // $set: 设置字段值
-            if let Some(set_val) = patch_obj.get("$set")
-                && let Some(set_map) = set_val.as_object()
-            {
-                for (k, v) in set_map {
-                    obj.insert(k.clone(), v.clone());
-                }
+        // $set: 设置字段值。
+        if let Some(set_map) = patch_obj.get("$set").and_then(serde_json::Value::as_object) {
+            for (k, v) in set_map {
+                obj.insert(k.clone(), v.clone());
             }
+        }
 
-            // $inc: 数值递增
-            if let Some(inc_val) = patch_obj.get("$inc")
-                && let Some(inc_map) = inc_val.as_object()
-            {
-                for (k, v) in inc_map {
-                    let current = obj
-                        .get(k)
-                        .unwrap_or(&serde_json::Value::Number(0.into()))
-                        .clone();
-                    obj.insert(k.clone(), increment_json_number(&current, v)?);
-                }
+        // $inc: 数值递增。
+        if let Some(inc_map) = patch_obj.get("$inc").and_then(serde_json::Value::as_object) {
+            for (k, v) in inc_map {
+                let current = obj
+                    .get(k)
+                    .unwrap_or(&serde_json::Value::Number(0.into()))
+                    .clone();
+                obj.insert(k.clone(), increment_json_number(&current, v)?);
             }
+        }
 
-            // $unset: 删除字段
-            if let Some(unset_val) = patch_obj.get("$unset")
-                && let Some(unset_map) = unset_val.as_object()
-            {
-                for k in unset_map.keys() {
-                    obj.remove(k);
-                }
+        // $unset: 删除字段。
+        if let Some(unset_map) = patch_obj
+            .get("$unset")
+            .and_then(serde_json::Value::as_object)
+        {
+            for k in unset_map.keys() {
+                obj.remove(k);
             }
+        }
 
-            if !patch_obj.contains_key("$set")
-                && !patch_obj.contains_key("$inc")
-                && !patch_obj.contains_key("$unset")
-            {
-                return Err(TriviumError::ApiMigrationRequired {
-                    removed_api: "patch_payload(普通对象简写)",
-                    replacement: "patch_payload({\"$set\": {...}}) 或 update_payload()",
-                });
-            }
-        } else {
-            return Err(TriviumError::InvalidInput(
-                "patch_payload 的 patch 参数必须是 JSON 对象".into(),
-            ));
+        if !patch_obj.contains_key("$set")
+            && !patch_obj.contains_key("$inc")
+            && !patch_obj.contains_key("$unset")
+        {
+            return Err(TriviumError::ApiMigrationRequired {
+                removed_api: "patch_payload(普通对象简写)",
+                replacement: "patch_payload({\"$set\": {...}}) 或 update_payload()",
+            });
         }
 
         Ok(new_payload)
@@ -3844,12 +3861,67 @@ impl<T: VectorType> MemTable<T> {
         !self.pending_text_mutations.is_empty()
     }
 
-    pub(crate) fn deferred_text_metadata(&self) -> Option<[u8; 28]> {
+    pub(crate) fn deferred_text_metadata(
+        &self,
+    ) -> Option<crate::storage::file_format::TextIndexMetadata> {
         self.deferred_text_meta
     }
 
-    pub(crate) fn update_deferred_text_metadata(&mut self, metadata: [u8; 28]) {
+    pub(crate) fn update_deferred_text_metadata(
+        &mut self,
+        metadata: crate::storage::file_format::TextIndexMetadata,
+    ) {
         self.deferred_text_meta = Some(metadata);
+    }
+
+    pub(crate) fn begin_text_replay(&mut self, token: Option<[u8; 16]>) {
+        self.text_checkpoint_token = token;
+        self.text_replay = true;
+        self.text_replay_checkpoint_seen = false;
+    }
+
+    pub(crate) fn replay_text_checkpoint(&mut self, token: [u8; 16]) {
+        if self.text_checkpoint_token == Some(token) {
+            self.text_replay_checkpoint_seen = true;
+            self.pending_text_mutations.clear();
+            self.pending_text_bytes = 0;
+        }
+    }
+
+    pub(crate) fn finish_text_replay(&mut self, path: &str) -> Result<()> {
+        if self.text_checkpoint_token.is_some() && !self.text_replay_checkpoint_seen {
+            return Err(TriviumError::RecoveryRequired {
+                wal_path: format!("{path}.wal"),
+            }
+            .at_field("text_index.recovery_boundary"));
+        }
+        if self.text_checkpoint_token.is_none()
+            && self.pending_text_mutations.iter().any(|mutation| {
+                matches!(mutation, PendingTextMutation::Delete(id)
+                    if self.contains(*id) && self.text_index.contains_node(*id))
+            })
+        {
+            // 历史快照缺少封条，节点复用时无法证明删除属于哪次文本登记。
+            return Err(TriviumError::RecoveryRequired {
+                wal_path: format!("{path}.wal"),
+            }
+            .at_field("text_index.recovery_boundary"));
+        }
+        self.text_replay = false;
+        if self.deferred_text_path.is_none() {
+            for mutation in self.pending_text_mutations.drain(..) {
+                if let PendingTextMutation::Delete(id) = mutation {
+                    self.text_index.remove_node(id);
+                }
+            }
+            self.pending_text_bytes = 0;
+        }
+        Ok(())
+    }
+
+    /// 恢复后的冷数据事实变化通过重建或精确回退重新建立向量路由。
+    pub(crate) fn discard_quiver(&mut self) {
+        self.quiver_index = None;
     }
 
     pub(crate) fn set_text_memory_limit(&mut self, limit: usize) {
@@ -3894,7 +3966,7 @@ impl<T: VectorType> MemTable<T> {
 
     /// 提交 WAL 前预留延期删除记录，避免事务应用期间再做可失败分配。
     pub(crate) fn reserve_text_deletes(&mut self, count: usize) -> Result<()> {
-        if self.deferred_text_path.is_none() || count == 0 {
+        if (self.deferred_text_path.is_none() && !self.text_replay) || count == 0 {
             return Ok(());
         }
         let len = self.pending_text_mutations.len();

@@ -606,6 +606,9 @@ fn 历史元数据缺失与主库长度变化均可加载合并和清理() {
                     std::fs::remove_file(&meta_path).unwrap();
                 } else {
                     let mut bytes = std::fs::read(&meta_path).unwrap();
+                    // 独立构造 v1 元数据，保留历史长度变化的兼容输入。
+                    bytes.truncate(28);
+                    bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
                     bytes[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
                     std::fs::write(&meta_path, bytes).unwrap();
                 }
@@ -652,7 +655,9 @@ fn 显式加载历史文本后关闭补齐元数据且只读打开保持原文�
         let mut db = open(&path, mode, true);
         db.close().unwrap();
         let bytes = std::fs::read(&meta).unwrap();
-        assert_eq!(bytes.len(), 28);
+        assert_eq!(bytes.len(), 52);
+        assert_eq!(&bytes[..8], b"TMET\x02\x00\x00\x00");
+        assert_eq!(&bytes[48..52], &crc32fast::hash(&bytes[..48]).to_le_bytes());
         assert_eq!(
             &bytes[8..16],
             &std::fs::metadata(&path).unwrap().len().to_le_bytes()

@@ -647,15 +647,38 @@ fn text_index_meta_path_from_db(db_path: &str) -> String {
     format!("{}.text.meta", db_path)
 }
 
-fn write_text_index_meta(db_path: &str) -> std::io::Result<()> {
+#[derive(Clone, Copy)]
+pub(crate) struct TextIndexMetadata {
+    main_size: u64,
+    text_size: u64,
+    text_crc: u32,
+    main_crc: Option<u32>,
+    pub(crate) checkpoint_token: Option<[u8; 16]>,
+}
+
+fn write_text_index_meta(db_path: &str, checkpoint_token: Option<[u8; 16]>) -> std::io::Result<()> {
     let text_path = text_index_path_from_db(db_path);
     let text_size = std::fs::metadata(&text_path)?.len();
-    let mut bytes = Vec::with_capacity(28);
+    let metadata = TextIndexMetadata {
+        main_size: std::fs::metadata(db_path)?.len(),
+        text_size,
+        text_crc: file_crc32(&text_path)?,
+        main_crc: Some(file_crc32(db_path)?),
+        checkpoint_token,
+    };
+    write_text_index_metadata(db_path, metadata)
+}
+
+fn write_text_index_metadata(db_path: &str, metadata: TextIndexMetadata) -> std::io::Result<()> {
+    let mut bytes = Vec::with_capacity(52);
     bytes.extend_from_slice(b"TMET");
-    bytes.extend_from_slice(&1u32.to_le_bytes());
-    bytes.extend_from_slice(&std::fs::metadata(db_path)?.len().to_le_bytes());
-    bytes.extend_from_slice(&text_size.to_le_bytes());
-    bytes.extend_from_slice(&file_crc32(&text_path)?.to_le_bytes());
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&metadata.main_size.to_le_bytes());
+    bytes.extend_from_slice(&metadata.text_size.to_le_bytes());
+    bytes.extend_from_slice(&metadata.text_crc.to_le_bytes());
+    bytes.extend_from_slice(&metadata.main_crc.unwrap_or_default().to_le_bytes());
+    bytes.extend_from_slice(&metadata.checkpoint_token.unwrap_or_default());
+    bytes.extend_from_slice(&crc32fast::hash(&bytes).to_le_bytes());
     write_text_index_meta_bytes(db_path, &bytes)
 }
 
@@ -670,15 +693,95 @@ fn write_text_index_meta_bytes(db_path: &str, bytes: &[u8]) -> std::io::Result<(
     robust_rename_and_sync(Path::new(&tmp), Path::new(&meta_path))
 }
 
-pub(crate) fn deferred_text_metadata(db_path: &str) -> Option<[u8; 28]> {
+pub(crate) fn deferred_text_metadata(db_path: &str) -> Option<TextIndexMetadata> {
     use std::io::Read;
     let mut file = File::open(text_index_meta_path_from_db(db_path)).ok()?;
-    if file.metadata().ok()?.len() != 28 {
+    let size = file.metadata().ok()?.len();
+    if !matches!(size, 28 | 52) {
         return None;
     }
-    let mut meta = [0u8; 28];
-    file.read_exact(&mut meta).ok()?;
-    (meta[..4] == *b"TMET" && meta[4..8] == 1u32.to_le_bytes()).then_some(meta)
+    let mut meta = [0u8; 52];
+    file.read_exact(&mut meta[..size as usize]).ok()?;
+    if meta[..4] != *b"TMET" {
+        return None;
+    }
+    let version = read_u32_le(&meta, 4, "text metadata version").ok()?;
+    if !matches!((version, size), (1, 28) | (2, 52)) {
+        return None;
+    }
+    if version == 2
+        && crc32fast::hash(&meta[..48]) != read_u32_le(&meta, 48, "text metadata CRC").ok()?
+    {
+        return None;
+    }
+    let token: [u8; 16] = meta[32..48].try_into().ok()?;
+    Some(TextIndexMetadata {
+        main_size: read_u64_le(&meta, 8, "text main size").ok()?,
+        text_size: read_u64_le(&meta, 16, "text size").ok()?,
+        text_crc: read_u32_le(&meta, 24, "text CRC").ok()?,
+        main_crc: (version == 2)
+            .then(|| read_u32_le(&meta, 28, "text main CRC").ok())
+            .flatten(),
+        checkpoint_token: (token != [0; 16]).then_some(token),
+    })
+}
+
+/// 恢复封条只在元数据校验及主检查点绑定均成立时生效。
+pub(crate) fn text_checkpoint_token(db_path: &str) -> Result<Option<[u8; 16]>> {
+    let Some(metadata) = deferred_text_metadata(db_path) else {
+        if Path::new(&text_index_meta_path_from_db(db_path)).exists() {
+            return Err(TriviumError::CorruptedFile(
+                "文本检查点元数据无效 (Invalid text checkpoint metadata)".into(),
+            ));
+        }
+        return Ok(None);
+    };
+    if metadata.checkpoint_token.is_some()
+        && (std::fs::metadata(db_path)?.len() != metadata.main_size
+            || Some(file_crc32(db_path)?) != metadata.main_crc)
+    {
+        return Err(TriviumError::CorruptedFile(
+            "文本恢复封条与主检查点失配 (Text recovery seal does not match the main checkpoint)"
+                .into(),
+        ));
+    }
+    Ok(metadata.checkpoint_token)
+}
+
+/// 无待恢复事实的历史文本检查点在 Writer 准入前取得可持久恢复的边界。
+pub(crate) fn upgrade_text_checkpoint_boundary<T: VectorType>(
+    memtable: &mut MemTable<T>,
+    wal: &mut crate::storage::wal::Wal,
+    path: &str,
+) -> Result<()> {
+    let Some(mut metadata) = deferred_text_metadata(path) else {
+        return Ok(());
+    };
+    if metadata.checkpoint_token.is_some() || !Path::new(&text_index_path_from_db(path)).is_file() {
+        return Ok(());
+    }
+    let main_size = std::fs::metadata(path)?.len();
+    let main_crc = file_crc32(path)?;
+    if metadata.main_crc.is_some()
+        && (metadata.main_size != main_size || metadata.main_crc != Some(main_crc))
+    {
+        return Err(TriviumError::CorruptedFile(
+            "文本元数据与主检查点失配 (Text metadata does not match the main checkpoint)".into(),
+        ));
+    }
+    metadata.main_size = main_size;
+    metadata.main_crc = Some(main_crc);
+    metadata.checkpoint_token = wal.seal_checkpoint(true)?;
+    // 原文本 CRC 沿用历史证据，原子更新的元数据只绑定新增恢复边界。
+    write_text_index_metadata(path, metadata)?;
+    #[cfg(feature = "test-hooks")]
+    crate::test_hooks::io_result(crate::test_hooks::IoPoint::CheckpointWalClear)?;
+    wal.clear()?;
+    memtable.text_checkpoint_token = metadata.checkpoint_token;
+    if memtable.text_index_is_deferred() {
+        memtable.update_deferred_text_metadata(metadata);
+    }
+    Ok(())
 }
 
 pub fn save<T: VectorType>(
@@ -810,14 +913,16 @@ fn save_inner<T: VectorType>(
     let mut updated_text_meta = None;
     if memtable.text_index_is_deferred() {
         if let Some(mut meta) = preserved_text_meta {
-            meta[8..16].copy_from_slice(&std::fs::metadata(path)?.len().to_le_bytes());
-            write_text_index_meta_bytes(path, &meta)?;
+            meta.main_size = std::fs::metadata(path)?.len();
+            meta.main_crc = Some(file_crc32(path)?);
+            meta.checkpoint_token = memtable.text_checkpoint_token;
+            write_text_index_metadata(path, meta)?;
             updated_text_meta = Some(meta);
         }
     } else {
         memtable.text_index().save_to_file(Path::new(&text_path))?;
         if Path::new(&text_path).exists() {
-            write_text_index_meta(path)?;
+            write_text_index_meta(path, memtable.text_checkpoint_token)?;
         } else {
             match std::fs::remove_file(text_index_meta_path_from_db(path)) {
                 Ok(()) => {}
@@ -1250,7 +1355,7 @@ pub(crate) fn load_with_memory_limit<T: VectorType>(
         && !memtable.text_index_is_deferred()
         && Path::new(&text_index_path_from_db(path)).exists()
         && deferred_text_metadata(path).is_none_or(|meta| {
-            std::fs::metadata(path).is_ok_and(|main| meta[8..16] != main.len().to_le_bytes())
+            std::fs::metadata(path).is_ok_and(|main| meta.main_size != main.len())
         });
     if version == CURRENT_VERSION && !text_metadata_needs_repair {
         memtable.mark_checkpoint_clean();
@@ -1284,6 +1389,9 @@ pub(crate) fn checkpoint_with_write_info<T: VectorType>(
     memtable.ensure_readable()?;
     wal.ensure_writable()?;
     if !skip_clean || memtable.needs_checkpoint() {
+        memtable.text_checkpoint_token = wal.seal_checkpoint(
+            memtable.text_index_is_deferred() || !memtable.text_index().is_empty(),
+        )?;
         if let Err(error) = save_with_write_info(memtable, path, mode, write) {
             if memtable.ensure_readable().is_err() {
                 // 关闭 writer，拦住失效前已准入、仍在等待 MemTable 锁的写操作。
@@ -2177,7 +2285,7 @@ fn load_property_indexes<T: VectorType>(
 
 pub(crate) fn read_deferred_text_index(
     db_path: &str,
-    metadata: Option<[u8; 28]>,
+    metadata: Option<TextIndexMetadata>,
 ) -> Result<crate::index::text::TextIndex> {
     let text_path = text_index_path_from_db(db_path);
     let invalid = |reason: String| TriviumError::ImmutableArtifactInvalid { reason };
@@ -2185,13 +2293,13 @@ pub(crate) fn read_deferred_text_index(
         .map_err(|error| invalid(format!("文本索引文件不可读取：{text_path}：{error}")))?
         .len();
     if let Some(meta) = metadata {
-        let expected_size = read_u64_le(&meta, 16, "文本索引长度")?;
+        let expected_size = meta.text_size;
         if text_size != expected_size {
             return Err(invalid(format!(
                 "文本索引长度不匹配：期望 {expected_size}，实际 {text_size}"
             )));
         }
-        let expected_crc = read_u32_le(&meta, 24, "文本索引 CRC")?;
+        let expected_crc = meta.text_crc;
         let actual_crc = file_crc32(&text_path)?;
         if actual_crc != expected_crc {
             return Err(invalid(format!(

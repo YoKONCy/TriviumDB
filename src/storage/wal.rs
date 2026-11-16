@@ -3,7 +3,7 @@
 //! 每条记录采用 `len + bincode + CRC32`，事务通过 Begin/Commit 封条过滤未提交操作。
 //! 物理未写完的尾帧只恢复完整前缀；完整帧的 CRC、长度或解码损坏返回错误并保留日志。
 //! 恢复不跨过损坏边界猜测后续字节。旧版本头只允许持有 Writer 排他锁的打开流程升级；
-//! WAL v2/v3/v4 通过独立历史布局校验并原子转写为 v5，未知非空版本始终 fail-closed。
+//! WAL v2 至 v6 按对应历史布局校验并原子转写为 v7，未知非空版本返回结构化错误。
 
 use crate::error::{Result, TriviumError};
 use crate::node::NodeId;
@@ -14,8 +14,24 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 const WAL_MAGIC: &[u8; 4] = b"TVWL";
-pub const WAL_VERSION: u16 = 6;
+pub const WAL_VERSION: u16 = 7;
 const LEGACY_WAL_VERSION_V2: u16 = 2;
+
+fn checkpoint_base(bytes: &[u8]) -> Option<[u8; 16]> {
+    // 长度字段、枚举判别值、UUID 与 CRC 共同组成 28 字节封条帧。
+    if bytes.len() != 34
+        || &bytes[..4] != WAL_MAGIC
+        || bytes[4..6] != WAL_VERSION.to_le_bytes()
+        || bytes[6..10] != 20u32.to_le_bytes()
+        || crc32fast::hash(&bytes[10..30]) != u32::from_le_bytes(bytes[30..34].try_into().ok()?)
+    {
+        return None;
+    }
+    match bincode::deserialize::<WalEntry<u8>>(&bytes[10..30]).ok()? {
+        WalEntry::Checkpoint { token } if token != [0; 16] => Some(token),
+        _ => None,
+    }
+}
 
 /// WAL v3 的独立历史布局，保留带 Metadata 的边记录。
 #[derive(Debug, Deserialize)]
@@ -342,6 +358,10 @@ pub enum WalEntry<T> {
     DocumentPublication {
         bytes: String,
     },
+    /// 检查点发布前同步的唯一封条，绑定文本事实与已覆盖的删除前缀。
+    Checkpoint {
+        token: [u8; 16],
+    },
 }
 
 /// WAL v2 的精确磁盘枚举布局；仅用于迁移，禁止用于新写入。
@@ -538,6 +558,7 @@ pub struct Wal {
     group_commit_active: bool,
     group_commit_pending: bool,
     cumulative_sync_count: u64,
+    checkpoint_token: Option<[u8; 16]>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -584,12 +605,13 @@ impl Wal {
             group_commit_active: false,
             group_commit_pending: false,
             cumulative_sync_count: 0,
+            checkpoint_token: None,
         }
     }
     /// 将受支持的旧 WAL 原子迁移到当前版本。
     ///
     /// v2 按独立布局完整校验并转换边 Metadata。v3/v4 按原帧流式校验，
-    /// 保留完整提交前缀并丢弃不完整尾部，通过同步临时文件原子发布 v5，
+    /// 保留完整提交前缀并丢弃不完整尾部，通过同步临时文件原子发布 v7，
     /// 完整帧 CRC 或解码失败时保留原文件。
     pub fn upgrade_legacy_wal<T>(db_path: &str) -> Result<bool>
     where
@@ -615,11 +637,11 @@ impl Wal {
         if found == WAL_VERSION {
             return Ok(false);
         }
-        if !matches!(found, LEGACY_WAL_VERSION_V2 | 3 | 4 | 5) {
+        if !matches!(found, LEGACY_WAL_VERSION_V2 | 3 | 4 | 5 | 6) {
             return Ok(false);
         }
         let mut entry_count = 0usize;
-        let (entries, prefix, mut source) = if matches!(found, 3..=5) {
+        let (entries, prefix, mut source) = if matches!(found, 3..=6) {
             let prefix = Self::replay_entries_from_reader_limited::<T>(
                 BufReader::new(&mut file),
                 |_| {
@@ -725,6 +747,7 @@ impl Wal {
             group_commit_active: false,
             group_commit_pending: false,
             cumulative_sync_count: 0,
+            checkpoint_token: None,
         })
     }
 
@@ -972,16 +995,17 @@ impl Wal {
             && &header[..4] == WAL_MAGIC
             && matches!(
                 u16::from_le_bytes([header[4], header[5]]),
-                LEGACY_WAL_VERSION_V2 | 3 | 4 | 5
+                LEGACY_WAL_VERSION_V2 | 3 | 4 | 5 | 6
             )
         {
-            if u16::from_le_bytes([header[4], header[5]]) == 3 {
+            let version = u16::from_le_bytes([header[4], header[5]]);
+            if matches!(version, 3..=6) {
                 Self::replay_entries_from_reader_limited::<T>(
                     BufReader::new(file),
                     |_| Ok(()),
                     limit,
                     &std::cell::Cell::new(current),
-                    3,
+                    version,
                 )?;
                 return Ok(());
             }
@@ -1030,7 +1054,7 @@ impl Wal {
             }
             let version = u16::from_le_bytes([prefix[4], prefix[5]]);
             // v2 继续由持有写锁的显式迁移路径处理，普通读取保留原拒绝契约。
-            if !matches!(version, 3 | 4 | 5 | WAL_VERSION) {
+            if !matches!(version, 3 | 4 | 5 | 6 | WAL_VERSION) {
                 return Err(TriviumError::UnsupportedWalVersion {
                     found: version,
                     supported: WAL_VERSION,
@@ -1193,6 +1217,18 @@ impl Wal {
                     "WAL 完整帧无法解码，记录 {record_count} (Cannot decode complete WAL frame): {error}"
                 )))?;
             record_count = record_count.saturating_add(1);
+            if version < 7 && matches!(entry, WalEntry::Checkpoint { .. }) {
+                return Err(TriviumError::CorruptedFile(
+                    "旧版 WAL 包含检查点封条 (Legacy WAL contains a checkpoint seal)".into(),
+                ));
+            }
+            if let WalEntry::Checkpoint { token } = &entry
+                && (*token == [0; 16] || current_tx_id.is_some())
+            {
+                return Err(TriviumError::CorruptedFile(
+                    "检查点封条身份或事务位置无效 (Invalid checkpoint seal identity or transaction position)".into(),
+                ));
+            }
             match entry {
                 WalEntry::TxBegin { tx_id } => {
                     current_tx_id = Some(tx_id);
@@ -1251,6 +1287,57 @@ impl Wal {
         self.cumulative_logical_bytes
     }
 
+    /// 封条先于文件组发布持久化，Off 模式也须满足检查点的跨文件提交顺序。
+    pub(crate) fn seal_checkpoint(&mut self, has_text: bool) -> Result<Option<[u8; 16]>> {
+        if !has_text {
+            self.checkpoint_token = None;
+            return Ok(None);
+        }
+        let token = *uuid::Uuid::new_v4().as_bytes();
+        self.write_checkpoint_seal(token)?;
+        Ok(Some(token))
+    }
+
+    pub(crate) fn ensure_checkpoint_base(&mut self, token: Option<[u8; 16]>) -> Result<()> {
+        if let Some(token) = token {
+            match std::fs::metadata(&self.wal_path)?.len() {
+                WAL_HEADER_SIZE => self.write_checkpoint_seal(token)?,
+                34 => {
+                    let mut bytes = [0; 34];
+                    File::open(&self.wal_path)?.read_exact(&mut bytes)?;
+                    if checkpoint_base(&bytes).is_some_and(|base| base != token) {
+                        return Err(TriviumError::CorruptedFile(
+                            "WAL 基准封条与文本检查点失配 (WAL base seal does not match the text checkpoint)".into(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn write_checkpoint_seal(&mut self, token: [u8; 16]) -> Result<()> {
+        self.append(&WalEntry::<u8>::Checkpoint { token })?;
+        let result = (|| -> Result<()> {
+            let writer = self.writer.as_mut().ok_or(TriviumError::WalClosed)?;
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalFlush)?;
+            writer.flush()?;
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalSync)?;
+            writer.get_ref().sync_data()?;
+            self.cumulative_sync_count = self.cumulative_sync_count.saturating_add(1);
+            Ok(())
+        })();
+        if result.is_err() {
+            self.release_writer();
+        }
+        result?;
+        self.checkpoint_token = Some(token);
+        Ok(())
+    }
+
     /// flush 成功后清除 WAL 文件
     ///
     /// 使用 truncate（截断）语义而非 remove + create：
@@ -1271,6 +1358,9 @@ impl Wal {
                 .open(&self.wal_path)?;
             file.write_all(WAL_MAGIC)?;
             file.write_all(&WAL_VERSION.to_le_bytes())?;
+            if let Some(token) = self.checkpoint_token {
+                write_framed_entry(&mut file, &WalEntry::<u8>::Checkpoint { token })?;
+            }
             file.sync_all()?;
         }
 
@@ -1309,6 +1399,13 @@ impl Wal {
         if meta.len() == 0 {
             return false;
         }
+        // 空日志可携带已发布检查点的基准封条，后续追加从该边界继续。
+        if meta.len() == WAL_HEADER_SIZE + 28 {
+            let Ok(bytes) = std::fs::read(&wal_path) else {
+                return true;
+            };
+            return checkpoint_base(&bytes).is_none();
+        }
         if meta.len() != WAL_HEADER_SIZE {
             return true;
         }
@@ -1319,7 +1416,7 @@ impl Wal {
             || &bytes[0..4] != WAL_MAGIC
             || !matches!(
                 u16::from_le_bytes([bytes[4], bytes[5]]),
-                3 | 4 | 5 | WAL_VERSION
+                3 | 4 | 5 | 6 | WAL_VERSION
             )
     }
 }

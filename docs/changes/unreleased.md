@@ -6,6 +6,16 @@
 
 ## 中文说明
 
+### 文本恢复、向量索引与检索回调
+
+- 检查点在文件组发布前同步 WAL v7 的唯一封条，TMET v2 将封条、主文件长度及 CRC、文本长度及 CRC 绑定并校验。恢复按封条区分检查点覆盖的旧删除与后续真实删除，覆盖节点 ID 复用、立即／延期加载、Rom／Mmap 和 Off 同步模式。历史 TMET v1 保留读取能力；旧文本缺少封条且恢复涉及已登记节点的删除及 ID 复用时，返回 `TDB_RECOVERY_REQUIRED`，定位字段为 `text_index.recovery_boundary`，保留原始文件供处理。
+- WAL 回放实际插入新向量后使已有 QuIVer 路由失效，后续普通搜索按配置重建或精确回退，恢复后的当前实例可检索全部已确认节点。
+- 已有文本检查点在无待恢复日志时，由 Writer 打开流程补齐封条及 TMET v2，覆盖元数据发布后、日志清理前失败的重试。旧 WAL 升级按帧与事务暂存执行内存准入，长日志中反复更新少量节点时按实际恢复峰值处理。
+- 自定义召回、召回后、图扩散前和 DPP 最终回调结束时立即检查 Hook 错误，统一返回 `TDB_HOOK_EXECUTION`。空召回和普通返回沿相同错误传播契约执行。
+- `$set`、`$inc`、`$unset` 的操作数在应用整份补丁前验证为 JSON 对象。非法操作数返回 `TDB_INVALID_INPUT` 及 `patch.<操作符>` 字段定位，Payload 与 WAL 保持提交前内容。
+
+> **升级与恢复提醒**　升级前保留完整文件组备份。当前开发内核写入 WAL v7 与 TMET v2，历史 WAL v2–v6 由 Writer 按对应布局校验并升级。旧版本环境从升级前备份恢复。遗留恢复歧义通过完整备份恢复数据库，或由宿主保留的事实创建新库并登记正文与关键词。已被旧版本清除的文本按备份或来源重建。
+
 ### 查询计量、路径深度与文档解析
 
 - Payload 查询额度和 PROFILE 使用每次管线执行独立的账本。属性并行扫描及图工作线程继承所属查询的账本，实例累计统计继续由存储层维护。复用管线上下文时重新开始本次计量、阶段计数和 PROFILE。
@@ -40,6 +50,16 @@
 ## English
 
 Subsequent development builds on `0.9.1`. See the [bilingual release notes](0.9.1.md) for delivered capabilities.
+
+### Text recovery, vector indexes, and search callbacks
+
+- Checkpoints synchronize a unique WAL v7 seal before publishing their file group. TMET v2 binds and checks the seal, main-file size and CRC, and text-file size and CRC. Recovery distinguishes checkpoint-covered deletions from subsequent deletions, covering node ID reuse, eager/deferred loading, Rom/Mmap, and Off synchronization. TMET v1 remains readable. When legacy text has no seal and recovery deletes and reuses an indexed node ID, opening returns `TDB_RECOVERY_REQUIRED` with target `text_index.recovery_boundary` and preserves the original files for recovery.
+- Actual vector insertion during WAL replay invalidates existing QuIVer routing. Subsequent ordinary searches rebuild or use exact fallback according to configuration, making all acknowledged nodes searchable in the recovered instance.
+- Writers add a seal and TMET v2 to an existing text checkpoint when opening with no pending recovery log, including retries after metadata publication succeeds before WAL cleanup fails. Legacy WAL upgrades admit memory for individual frames and pending transactions, accounting for the actual recovery peak when a long log repeatedly updates a small set of nodes.
+- Custom recall, post-recall, pre-graph, and final DPP callbacks immediately propagate Hook errors as `TDB_HOOK_EXECUTION`. Empty recall and ordinary returns follow the same error contract.
+- `$set`, `$inc`, and `$unset` operands are validated as JSON objects before applying a patch. Invalid operands return `TDB_INVALID_INPUT` with a `patch.<operator>` target, retaining the pre-commit Payload and WAL contents.
+
+> **Upgrade and recovery note**　Retain a complete file-group backup before upgrading. Development builds write WAL v7 and TMET v2. Writers validate and upgrade historical WAL v2–v6 using their corresponding layouts. Restore the pre-upgrade backup when returning to an older engine. For ambiguous legacy recovery, restore a full database backup or create a new database from the host's retained facts and register its text and keywords. Rebuild text already removed by an older engine from a backup or retained source.
 
 ### Query accounting, path depth, and document parsing
 

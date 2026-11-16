@@ -293,6 +293,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             hook.on_custom_recall(&query_vec_f32, config, ctx)
         })?;
         ctx.record_timing("hook_custom_recall", t0.elapsed());
+        check_hook_error(ctx)?;
         result
     };
 
@@ -376,6 +377,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         let t0 = std::time::Instant::now();
         call_hook(memtable, || hook.on_post_recall(&mut anchor_hits, ctx))?;
         ctx.record_timing("hook_post_recall", t0.elapsed());
+        check_hook_error(ctx)?;
     }
 
     if anchor_hits.is_empty() {
@@ -398,6 +400,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         let t0 = std::time::Instant::now();
         call_hook(memtable, || hook.on_pre_graph_expand(&mut seeds, ctx))?;
         ctx.record_timing("hook_pre_graph_expand", t0.elapsed());
+        check_hook_error(ctx)?;
     }
 
     let mut semantic_hits = seeds.clone();
@@ -476,6 +479,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             let t0 = std::time::Instant::now();
             call_hook(memtable, || hook.on_post_search(&mut final_results, ctx))?;
             ctx.record_timing("hook_post_search", t0.elapsed());
+            check_hook_error(ctx)?;
         }
         return Ok(PipelineOutput {
             combined_hits: final_results,

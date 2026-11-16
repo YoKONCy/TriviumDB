@@ -969,6 +969,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let mut recovered_offset = None;
         if Wal::needs_recovery(path) {
             memtable.document_publications.begin_replay();
+            let text_token = file_format::text_checkpoint_token(path)?;
+            if text_token.is_none() {
+                // 历史索引在应用删除前完成校验，保留节点复用的歧义检测证据。
+                memtable.prepare_text_index()?;
+            }
+            memtable.begin_text_replay(text_token);
             let mut entry_count = 0usize;
             let restored_bytes = std::cell::Cell::new(memtable.estimated_memory_bytes());
             let valid_offset =
@@ -996,6 +1002,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 10_000,
             )?;
             memtable.document_publications.finish_replay();
+            memtable.finish_text_replay(path)?;
             memtable.document_publications.finish_restore()?;
             let unique_definitions = memtable.unique_index_definitions();
             memtable.restore_unique_index_definitions(&unique_definitions)?;
@@ -1061,10 +1068,22 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             );
         }
 
-        let wal = match config.access_mode {
+        let mut wal = match config.access_mode {
             AccessMode::ReadWrite => Wal::open_with_sync(path, config.sync_mode)?,
             AccessMode::ReadOnly | AccessMode::Immutable => Wal::disabled(path, config.sync_mode),
         };
+        if config.access_mode == AccessMode::ReadWrite {
+            if recovered_offset.is_none() {
+                file_format::upgrade_text_checkpoint_boundary(&mut memtable, &mut wal, path)?;
+            }
+            if memtable.text_checkpoint_token.is_none()
+                && file_format::deferred_text_metadata(path)
+                    .is_some_and(|metadata| metadata.checkpoint_token.is_some())
+            {
+                memtable.text_checkpoint_token = file_format::text_checkpoint_token(path)?;
+            }
+            wal.ensure_checkpoint_base(memtable.text_checkpoint_token)?;
+        }
         let recovery_required = memtable.recovery_latch();
         Ok(Self {
             db_path: normalized_path.to_string_lossy().into_owned(),
@@ -1726,6 +1745,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 write.phase = WritePhase::Validation;
                 #[cfg(feature = "test-hooks")]
                 crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeCompactionSave);
+                mt.text_checkpoint_token =
+                    w.seal_checkpoint(mt.text_index_is_deferred() || !mt.text_index().is_empty())?;
                 file_format::save_with_write_info(
                     &mut mt,
                     &self.db_path,

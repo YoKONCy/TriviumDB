@@ -6,6 +6,103 @@ use triviumdb::database::{Config, SearchConfig, StorageMode};
 use triviumdb::index::quiver::{BqNavigationScorer, QuIVer, QuIVerConfig, QuIVerSearchConfig};
 use triviumdb::{Database, VectorType};
 
+struct StageErrorHook {
+    stage: &'static str,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+impl StageErrorHook {
+    fn enter(&self, stage: &'static str, ctx: &mut triviumdb::hook::HookContext) {
+        self.calls.lock().unwrap().push(stage);
+        if self.stage == stage {
+            ctx.error = Some("受控回调错误 (Controlled callback error)".into());
+        }
+    }
+}
+
+impl triviumdb::hook::SearchHook for StageErrorHook {
+    fn on_custom_recall(
+        &self,
+        _: &[f32],
+        _: &SearchConfig,
+        ctx: &mut triviumdb::hook::HookContext,
+    ) -> Option<Vec<triviumdb::SearchHit>> {
+        self.enter("custom", ctx);
+        None
+    }
+    fn on_post_recall(
+        &self,
+        _: &mut Vec<triviumdb::SearchHit>,
+        ctx: &mut triviumdb::hook::HookContext,
+    ) {
+        self.enter("post_recall", ctx);
+    }
+    fn on_pre_graph_expand(
+        &self,
+        _: &mut Vec<triviumdb::SearchHit>,
+        ctx: &mut triviumdb::hook::HookContext,
+    ) {
+        self.enter("pre_graph", ctx);
+    }
+    fn on_post_search(
+        &self,
+        _: &mut Vec<triviumdb::SearchHit>,
+        ctx: &mut triviumdb::hook::HookContext,
+    ) {
+        self.enter("post_search", ctx);
+    }
+}
+
+#[test]
+fn Hook错误在空召回普通返回与DPP返回处一致传播() {
+    let root = support::TestDir::new("hook_errors");
+    let mut db = Database::<f32>::open(&root.file("data.tdb"), 2).unwrap();
+    for populated in [false, true] {
+        if populated {
+            db.insert_with_id(1, &[1., 0.], json!({"id":1})).unwrap();
+            db.insert_with_id(2, &[0., 1.], json!({"id":2})).unwrap();
+        }
+        for dpp in [false, true] {
+            let stages: &[&str] = if populated {
+                &["custom", "post_recall", "pre_graph", "post_search"]
+            } else {
+                &["custom", "post_recall"]
+            };
+            for &stage in stages {
+                let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                db.set_hook(StageErrorHook {
+                    stage,
+                    calls: calls.clone(),
+                })
+                .unwrap();
+                let config = SearchConfig {
+                    top_k: 1,
+                    recall_k: 2,
+                    min_score: -1.,
+                    enable_advanced_pipeline: true,
+                    enable_dpp: dpp,
+                    ..Default::default()
+                };
+                let error = db
+                    .search_hybrid_with_context(None, Some(&[1., 0.]), &config)
+                    .unwrap_err();
+                assert_eq!(error.code(), "TDB_HOOK_EXECUTION");
+                assert!(matches!(
+                    error,
+                    triviumdb::TriviumError::HookExecutionError(_)
+                ));
+                let expected = ["custom", "post_recall", "pre_graph", "post_search"]
+                    .into_iter()
+                    .take_while(|current| *current != stage)
+                    .chain(std::iter::once(stage))
+                    .collect::<Vec<_>>();
+                assert_eq!(*calls.lock().unwrap(), expected);
+            }
+        }
+    }
+    db.close().unwrap();
+}
+
 fn slot_ties<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>() {
     let root = support::TestDir::new("slot_ties");
     let vector = [T::from_f32(1.), T::from_f32(0.)];

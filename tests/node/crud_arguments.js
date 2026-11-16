@@ -66,6 +66,15 @@ function runCrudArguments(root, { TriviumDB }) {
       db.upsertEdge(7, 11, 'route', 0.5, { part: '前段' })
       assert.deepEqual(facts(db), before)
       const wal = fs.readFileSync(file + '.wal')
+      for (const operator of ['$set', '$inc', '$unset']) {
+        for (const value of fixture.invalid_patch_operands) {
+          const patch = { $set: { name: '变化' }, $inc: { count: 1 }, $unset: { absent: true } }
+          patch[operator] = value
+          assert.throws(() => db.patchPayload(7, patch), invalid(`patch.${operator}`))
+          assert.deepEqual(facts(db), before)
+          assert.deepEqual(fs.readFileSync(file + '.wal'), wal)
+        }
+      }
       for (const operation of fixture.operations) {
         for (const entry of operation.fields) {
           for (const [value, field] of rejectedValues(entry.kind, entry.field)) {

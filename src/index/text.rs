@@ -77,6 +77,10 @@ pub struct TextIndex {
 }
 
 impl TextIndex {
+    pub(crate) fn contains_node(&self, id: NodeId) -> bool {
+        self.doc_lengths.contains_key(&id) || self.keyword_nodes.contains(&id)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
