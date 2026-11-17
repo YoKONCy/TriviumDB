@@ -224,6 +224,41 @@ fn 有界路径确定性且强度与标签序列正确() {
 }
 
 #[test]
+fn 全路径乘积在大指数抵消后保留最终有限值() {
+    use triviumdb::query::tql_executor::{TqlValue, execute_tql_values};
+    use triviumdb::query::tql_parser::parse_tql;
+
+    let high = 2.0f32.powi(100);
+    let low = 2.0f32.powi(-100);
+    for (a, b) in [(high, low), (low, high)] {
+        let mut mt = MemTable::<f32>::new(2);
+        // 十次连续累乘足以接近 f64 指数上限；十二次会超出 f64，即使最终乘积可表示。
+        let weights = [vec![a; 12], vec![b; 11]].concat();
+        let target = weights.len() as u64 + 1;
+        for id in 1..=target {
+            let vector = if id == 1 { [1., 0.] } else { [0., 1.] };
+            mt.insert_with_id(id, &vector, json!({})).unwrap();
+        }
+        for (index, weight) in weights.iter().enumerate() {
+            let from = index as u64 + 1;
+            mt.link(from, from + 1, "hop".into(), *weight).unwrap();
+        }
+        let query = parse_tql(&format!(
+            "SEARCH VECTOR [1,0] TOP 1 AS seed WITH seed \
+             ALL_PATHS seed TO [{target}] DEPTH 23 PATHS 10 AGGREGATE max_product AS route \
+             WITH route RETURN path_strength(route) AS score, path(route) AS path"
+        ))
+        .unwrap();
+        let rows = execute_tql_values(&query, &mt).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0]["score"], TqlValue::Float(value) if value == f64::from(a)));
+        assert!(
+            matches!(&rows[0]["path"], TqlValue::Path(path) if path == &(1..=target).collect::<Vec<_>>())
+        );
+    }
+}
+
+#[test]
 fn 禁经节点与最大路径数严格生效() {
     let mt = graph();
     let restricted = bounded_all_paths(

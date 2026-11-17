@@ -9,9 +9,8 @@ use crate::error::{Result, TriviumError};
 use crate::filter::Filter;
 use crate::graph::budget::{BudgetExhaustionPolicy, TraversalBudget};
 use crate::graph::reachability::{
-    ReachabilityConfig, ReachabilityDirection,
-    traverse_compact_parallel_view as traverse_compact_parallel,
-    traverse_compact_view as traverse_compact,
+    EdgeScanBudget, ReachabilityConfig, ReachabilityDirection,
+    traverse_compact_parallel_view as traverse_compact_parallel, traverse_compact_with_edge_budget,
 };
 use crate::graph::view::GraphRead;
 use crate::node::NodeId;
@@ -1606,8 +1605,16 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
             exhaustion_policy: BudgetExhaustionPolicy::Error,
         };
         let request = context.graph_request()?;
+        let edge_budget = EdgeScanBudget::new(config.max_edges);
         let traverse_source = |&source_id: &NodeId| -> Result<ExpandSourceOutput> {
-            let reached = request.run(|| traverse_compact(&context.graph(), source_id, &config))?;
+            let reached = request.run(|| {
+                traverse_compact_with_edge_budget(
+                    &context.graph(),
+                    source_id,
+                    &config,
+                    &edge_budget,
+                )
+            })?;
             Ok(ExpandSourceOutput {
                 hits: reached
                     .results
@@ -1801,8 +1808,9 @@ impl<T: VectorType> PipelineOperator<T> for MultiAnchorExpand {
         let mut output = BTreeMap::<NodeId, NodeRow>::new();
         let mut visited_nodes = 0usize;
         let mut examined_edges = 0usize;
+        let edge_budget = EdgeScanBudget::new(context.budget.traversal.max_examined_edges);
         for source in input.rows {
-            let reached = traverse_compact(
+            let reached = traverse_compact_with_edge_budget(
                 &context.graph(),
                 source.id,
                 &ReachabilityConfig {
@@ -1816,6 +1824,7 @@ impl<T: VectorType> PipelineOperator<T> for MultiAnchorExpand {
                     max_frontier_size: context.budget.traversal.max_frontier_size,
                     exhaustion_policy: BudgetExhaustionPolicy::Error,
                 },
+                &edge_budget,
             )?;
             visited_nodes = visited_nodes.saturating_add(reached.visited_nodes);
             examined_edges = examined_edges.saturating_add(reached.traversed_edges);

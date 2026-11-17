@@ -714,6 +714,8 @@ const paths = db.reachable(1, {
 
 `labels=None` 或省略表示全部 label，空列表表示禁止遍历。`min_depth=0` 可让源节点作为深度 0 结果返回。三个预算分别限制访问节点、结果和扫描边；详细接口在超限时保留已完成结果并设置 `truncated=true`。
 
+`max_edges` 在读取邻接表时扣减，`traversed_edges` 包含因标签、端点或去重而舍弃的扫描记录。出边按目标 ID 和标签扫描，反向来源按源 ID 扫描。详细结果只包含预算范围内已发现的路径。
+
 - Rust：`reachable_detailed()`、`query_subgraph()`
 - Python：`reachable_detailed()`、`query_subgraph()`
 - Node.js：`reachableDetailed()`、`querySubgraph()`
@@ -1462,7 +1464,7 @@ ReturnList := Ident (',' Ident)* | '*'
 | Composite ART | `create_composite_index` | `createCompositeIndex` | `create_composite_index` |
 | Roaring Bitmap | `create_bitmap_index` | `createBitmapIndex` | `create_bitmap_index` |
 
-删除接口使用对应 `drop_*` 名称。`index_info/indexInfo` 返回 kind、完整 fields、entry/distinct/null 计数并稳定排序。
+删除接口使用对应 `drop_*` 名称。`index_info/indexInfo` 返回稳定排序的索引描述列表，每项包含 kind、完整 fields、unique 标记以及 entry/distinct/null 计数。
 
 Ordered 索引提供完整排序候选时要求字段覆盖全部活动节点、类型统一为数字或字符串，并满足数值精度边界；其他情况按 Payload 排序。复合索引的前缀与范围访问检查后续字段的覆盖情况，缺失字段或容器值使访问路径回退到完整候选扫描。完整标量等值条件继续使用复合索引并执行事实复核。复合唯一约束使用保持 JSON 标量类型和值的完整键，精确区分相邻大整数；打开数据库时从 Payload 事实恢复约束映射。
 
@@ -1816,7 +1818,7 @@ Mmap 只读打开在采用 `.gidx` 前校验所有边块、派生目录与主文
 
 **返回值：** 所有已迁移节点的 ID 列表（`list[int]`）
 
-目标库在发布前重建并验证源库的单字段和组合唯一约束。
+目标库在发布前复制正文词频、文档长度和关键词登记，重建源库的普通属性索引与单字段、组合唯一约束。源库以延迟加载方式打开时，迁移仍读取已持久化的文本事实。
 
 迁移在公开目标前预留最终实例配额。错误中的最外层 `write` 描述目标发布结果，提交前回滚清理完成为 `publish/not_committed`，标记重命名后的同步失败为 `publish/unknown`，耐久提交后的清理失败为 `publish/committed`。原始类别和错误链继续保留，Rust 使用 `underlying()` 匹配原始变体。完整边界见[公共错误契约](error-contracts.md)。
 

@@ -1445,32 +1445,36 @@ impl<T: VectorType> MemTable<T> {
         let incoming_before = self.incoming_entry_bytes(dst);
         let label_before = self.label_entry_bytes(&label);
         let outgoing = self.edges.entry(src).or_default();
-        if let Some(edge) = outgoing
-            .iter_mut()
-            .find(|edge| edge.target_id == dst && edge.label == label)
-        {
-            let mut changed = false;
-            if edge.weight != weight {
-                edge.weight = weight;
-                changed = true;
+        // 邻接表与映射图使用相同顺序，扫描预算截断时重开前后取得同一前缀。
+        let position = match outgoing.binary_search_by(|edge| {
+            (edge.target_id, edge.label.as_str()).cmp(&(dst, label.as_str()))
+        }) {
+            Ok(position) => {
+                let edge = &mut outgoing[position];
+                let mut changed = false;
+                if edge.weight != weight {
+                    edge.weight = weight;
+                    changed = true;
+                }
+                if edge.metadata != metadata {
+                    self.edge_heap_bytes = self
+                        .edge_heap_bytes
+                        .saturating_sub(edge_dynamic_bytes(edge));
+                    edge.metadata = metadata;
+                    self.edge_heap_bytes = self
+                        .edge_heap_bytes
+                        .saturating_add(edge_dynamic_bytes(edge));
+                    changed = true;
+                }
+                if changed {
+                    self.checkpoint_dirty = true;
+                    self.generation = self.generation.wrapping_add(1);
+                    self.editing.changed();
+                }
+                return Ok(());
             }
-            if edge.metadata != metadata {
-                self.edge_heap_bytes = self
-                    .edge_heap_bytes
-                    .saturating_sub(edge_dynamic_bytes(edge));
-                edge.metadata = metadata;
-                self.edge_heap_bytes = self
-                    .edge_heap_bytes
-                    .saturating_add(edge_dynamic_bytes(edge));
-                changed = true;
-            }
-            if changed {
-                self.checkpoint_dirty = true;
-                self.generation = self.generation.wrapping_add(1);
-                self.editing.changed();
-            }
-            return Ok(());
-        }
+            Err(position) => position,
+        };
 
         let slots_before = outgoing.capacity() * std::mem::size_of::<Edge>();
         let edge = Edge {
@@ -1480,14 +1484,15 @@ impl<T: VectorType> MemTable<T> {
             metadata,
         };
         self.edge_heap_bytes += edge_dynamic_bytes(&edge);
-        outgoing.push(edge);
+        outgoing.insert(position, edge);
         self.edge_heap_bytes = self
             .edge_heap_bytes
             .saturating_sub(slots_before)
             .saturating_add(outgoing.capacity() * std::mem::size_of::<Edge>());
         *self.in_degrees.entry(dst).or_insert(0) += 1;
-        if !self.incoming_edges.entry(dst).or_default().contains(&src) {
-            self.incoming_edges.entry(dst).or_default().push(src);
+        let incoming = self.incoming_edges.entry(dst).or_default();
+        if let Err(position) = incoming.binary_search(&src) {
+            incoming.insert(position, src);
         }
         self.label_index
             .entry(label.clone())
@@ -3950,9 +3955,31 @@ impl<T: VectorType> MemTable<T> {
 
     /// 在显式文本操作或发布待清理记录前加载，I/O 错误不丢弃待合并操作。
     pub(crate) fn prepare_text_index(&mut self) -> Result<()> {
-        let Some(path) = self.deferred_text_path.as_deref() else {
-            return Ok(());
+        if let Some(path) = self.deferred_text_path.as_deref() {
+            let (index, _workspace) = self.load_deferred_text_index(path, self)?;
+            self.set_text_index(index);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn copy_text_index_from(&mut self, source: &Self) -> Result<()> {
+        let (index, _workspace) = if let Some(path) = source.deferred_text_path.as_deref() {
+            source.load_deferred_text_index(path, self)?
+        } else {
+            let bytes = source.text_index.estimated_memory_bytes();
+            self.check_text_memory_budget(bytes)?;
+            let workspace = self.resource_runtime.reserve_workspace(bytes)?;
+            (source.text_index.clone_facts(), workspace)
         };
+        self.set_text_index(index);
+        Ok(())
+    }
+
+    fn load_deferred_text_index(
+        &self,
+        path: &str,
+        destination: &Self,
+    ) -> Result<(TextIndex, crate::resources::WorkspaceReservation)> {
         let bytes = crate::storage::index_container::required(path, ".text")?.length;
         // 解码前同时执行实例预算和共享运行时工作区准入。
         let estimate = usize::try_from(bytes)
@@ -3962,9 +3989,9 @@ impl<T: VectorType> MemTable<T> {
             .ok_or_else(|| TriviumError::CapacityAllocationFailed {
                 reason: "文本索引加载峰值估算溢出".into(),
             })?;
-        self.check_text_memory_budget(estimate)?;
-        let runtime = self.resource_runtime.clone();
-        let _workspace = if runtime.is_maintenance_task() {
+        destination.check_text_memory_budget(estimate)?;
+        let runtime = &destination.resource_runtime;
+        let workspace = if runtime.is_maintenance_task() {
             runtime.reserve_maintenance_workspace(estimate)?
         } else {
             runtime.reserve_workspace(estimate)?
@@ -3978,8 +4005,7 @@ impl<T: VectorType> MemTable<T> {
                 PendingTextMutation::Delete(id) => index.remove_node(*id),
             }
         }
-        self.set_text_index(index);
-        Ok(())
+        Ok((index, workspace))
     }
 
     pub(crate) fn text_index(&self) -> &TextIndex {

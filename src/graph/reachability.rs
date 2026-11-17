@@ -15,6 +15,26 @@ use crate::storage::memtable::MemTable;
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub(crate) struct EdgeScanBudget(AtomicUsize);
+
+impl EdgeScanBudget {
+    pub(crate) fn new(max_edges: usize) -> Self {
+        Self(AtomicUsize::new(max_edges))
+    }
+
+    fn admit(&self, count: usize) -> usize {
+        // 每个邻接表先取得实际能读取的前缀，所有并行 worker 共用余额。
+        let remaining = self
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                Some(remaining.saturating_sub(count))
+            })
+            .unwrap_or_else(|remaining| remaining);
+        count.min(remaining)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReachabilityDirection {
@@ -182,6 +202,7 @@ fn traverse_leased<T: VectorType>(
     let mut best_depth = HashMap::from([(source_id, 0usize)]);
     let mut results = vec![];
     let mut traversed_edges = 0;
+    let scans = EdgeScanBudget::new(config.max_edges);
     let mut peak_frontier_size = 1;
     let mut depth_reached = 0;
     let mut truncated = false;
@@ -207,23 +228,10 @@ fn traverse_leased<T: VectorType>(
         if depth >= config.max_depth {
             continue;
         }
-        let (neighbors, _neighbor_lease) = collect_steps(db, state.node, config)?;
-        for step in neighbors {
+        let collected = collect_steps(db, state.node, config, &scans)?;
+        traversed_edges += collected.scanned;
+        for step in collected.steps {
             crate::graph::budget::check_control(&control)?;
-            if traversed_edges >= config.max_edges {
-                truncated = exhausted(
-                    &budget,
-                    BudgetDimension::ExaminedEdges,
-                    TraversalMetrics {
-                        visited_nodes: best_depth.len(),
-                        examined_edges: traversed_edges,
-                        peak_frontier_size,
-                        depth_reached,
-                    },
-                )?;
-                break 'walk;
-            }
-            traversed_edges += 1;
             let next_depth = depth + 1;
             if best_depth
                 .get(&step.to)
@@ -306,6 +314,19 @@ fn traverse_leased<T: VectorType>(
             });
             peak_frontier_size = peak_frontier_size.max(queue.len());
         }
+        if collected.truncated {
+            truncated = exhausted(
+                &budget,
+                BudgetDimension::ExaminedEdges,
+                TraversalMetrics {
+                    visited_nodes: best_depth.len(),
+                    examined_edges: traversed_edges,
+                    peak_frontier_size,
+                    depth_reached,
+                },
+            )?;
+            break;
+        }
     }
     results.sort_by(|a, b| (a.depth, a.target_id, &a.path).cmp(&(b.depth, b.target_id, &b.path)));
     Ok((
@@ -335,6 +356,20 @@ pub(crate) fn traverse_compact_view<T: VectorType>(
     source_id: NodeId,
     config: &ReachabilityConfig,
 ) -> Result<CompactReachabilityOutput> {
+    traverse_compact_with_edge_budget(
+        db,
+        source_id,
+        config,
+        &EdgeScanBudget::new(config.max_edges),
+    )
+}
+
+pub(crate) fn traverse_compact_with_edge_budget<T: VectorType>(
+    db: &impl GraphRead<T>,
+    source_id: NodeId,
+    config: &ReachabilityConfig,
+    scans: &EdgeScanBudget,
+) -> Result<CompactReachabilityOutput> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
     validate(db, source_id, config)?;
@@ -356,15 +391,10 @@ pub(crate) fn traverse_compact_view<T: VectorType>(
         if depth >= config.max_depth {
             continue;
         }
-        let (targets, _targets_lease) = collect_targets(db, current, config)?;
+        let (targets, _targets_lease, scanned) = collect_targets(db, current, config, scans)?;
+        traversed_edges += scanned;
         for target in targets {
             crate::graph::budget::check_control(&control)?;
-            if traversed_edges >= config.max_edges {
-                return Err(TriviumError::QueryExecution(
-                    "图扩展检查边数超过预算 (Graph expansion examined-edge budget exceeded)".into(),
-                ));
-            }
-            traversed_edges += 1;
             let next_depth = depth + 1;
             if best_depth
                 .get(&target)
@@ -420,18 +450,19 @@ fn collect_target_slots<T: VectorType>(
     db: &impl GraphRead<T>,
     current: NodeId,
     config: &ReachabilityConfig,
+    scans: &EdgeScanBudget,
     words: &mut [u64],
 ) -> Result<usize> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
-    let (targets, _targets_lease) = collect_targets(db, current, config)?;
+    let (targets, _targets_lease, scanned) = collect_targets(db, current, config, scans)?;
     for target in &targets {
         crate::graph::budget::check_control(&control)?;
         if let Some(slot) = db.internal_slot_of(*target) {
             set_bit(words, slot);
         }
     }
-    Ok(targets.len())
+    Ok(scanned)
 }
 
 /// 使用稳定 internal slot 位图执行全确定性分层并行 BFS。
@@ -472,6 +503,7 @@ pub(crate) fn traverse_compact_parallel_view<T: VectorType>(
         });
     }
     let mut traversed_edges = 0usize;
+    let scans = EdgeScanBudget::new(config.max_edges);
     for depth in 0..config.max_depth {
         crate::graph::budget::check_control(&control)?;
         let workers = rayon::current_num_threads().min(frontier.len()).max(1);
@@ -482,8 +514,13 @@ pub(crate) fn traverse_compact_parallel_view<T: VectorType>(
             for &slot in &frontier {
                 crate::graph::budget::check_control(&control)?;
                 if let Some(id) = db.active_id_at_slot(slot) {
-                    edges =
-                        edges.saturating_add(collect_target_slots(db, id, config, &mut bitmap)?);
+                    edges = edges.saturating_add(collect_target_slots(
+                        db,
+                        id,
+                        config,
+                        &scans,
+                        &mut bitmap,
+                    )?);
                 }
             }
             vec![(bitmap, edges)]
@@ -501,6 +538,7 @@ pub(crate) fn traverse_compact_parallel_view<T: VectorType>(
                                 db,
                                 id,
                                 config,
+                                &scans,
                                 &mut bitmap,
                             )?);
                         }
@@ -513,11 +551,6 @@ pub(crate) fn traverse_compact_parallel_view<T: VectorType>(
             .iter()
             .fold(0usize, |total, (_, count)| total.saturating_add(*count));
         traversed_edges = traversed_edges.saturating_add(layer_edges);
-        if traversed_edges > config.max_edges {
-            return Err(TriviumError::QueryExecution(
-                "图扩展检查边数超过预算 (Graph expansion examined-edge budget exceeded)".into(),
-            ));
-        }
         let mut merged = vec![0u64; word_count];
         for (bitmap, _) in partials {
             crate::graph::budget::check_control(&control)?;
@@ -594,10 +627,21 @@ fn collect_targets<T: VectorType>(
     db: &impl GraphRead<T>,
     current: NodeId,
     config: &ReachabilityConfig,
-) -> Result<(Vec<NodeId>, crate::resources::WorkspaceReservation)> {
+    scans: &EdgeScanBudget,
+) -> Result<(Vec<NodeId>, crate::resources::WorkspaceReservation, usize)> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
-    let (steps, mut lease) = collect_steps(db, current, config)?;
+    let CollectedSteps {
+        steps,
+        mut lease,
+        scanned,
+        truncated,
+    } = collect_steps(db, current, config, scans)?;
+    if truncated {
+        return Err(TriviumError::QueryExecution(
+            "图扩展检查边数超过预算 (Graph expansion examined-edge budget exceeded)".into(),
+        ));
+    }
     let bytes = steps
         .len()
         .max(4)
@@ -607,7 +651,7 @@ fn collect_targets<T: VectorType>(
     let mut targets = steps.iter().map(|step| step.to).collect::<Vec<_>>();
     targets.sort_unstable();
     targets.dedup();
-    Ok((targets, lease))
+    Ok((targets, lease, scanned))
 }
 
 pub fn query_subgraph<T: VectorType>(
@@ -730,18 +774,35 @@ fn state_bytes(nodes: usize, detailed: bool, bitmap_words: usize, workers: usize
     bytes.checked_add(bitmaps).ok_or_else(workspace_overflow)
 }
 
+struct CollectedSteps<'a> {
+    steps: Vec<BorrowedStep<'a>>,
+    lease: crate::resources::WorkspaceReservation,
+    scanned: usize,
+    truncated: bool,
+}
+
 fn collect_steps<'a, T: VectorType>(
     db: &'a impl GraphRead<T>,
     current: NodeId,
     c: &ReachabilityConfig,
-) -> Result<(
-    Vec<BorrowedStep<'a>>,
-    crate::resources::WorkspaceReservation,
-)> {
+    budget: &EdgeScanBudget,
+) -> Result<CollectedSteps<'a>> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
     let mut steps = Vec::new();
     let mut lease = db.resource_runtime().reserve_workspace(0)?;
+    let mut scanned = 0;
+    let mut truncated = false;
+
+    if c.labels.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(CollectedSteps {
+            steps,
+            lease,
+            scanned,
+            truncated,
+        });
+    }
+
     let mut add = |source, edge: &'a crate::node::Edge| -> Result<()> {
         if !allowed(&edge.label, c.labels.as_deref()) {
             return Ok(());
@@ -767,20 +828,31 @@ fn collect_steps<'a, T: VectorType>(
         });
         Ok(())
     };
-    if c.direction != ReachabilityDirection::Incoming {
-        for edge in db.get_edges(current).unwrap_or(&[]) {
+    let mut scan = |source, incoming: bool| -> Result<bool> {
+        let edges = db.get_edges(source).unwrap_or_default();
+        let allowed_count = budget.admit(edges.len());
+        scanned += allowed_count;
+        for edge in &edges[..allowed_count] {
             crate::graph::budget::check_control(&control)?;
-            add(current, edge)?;
+            if !incoming || edge.target_id == current {
+                add(source, edge)?;
+            }
         }
+        Ok(allowed_count < edges.len())
+    };
+    if c.direction != ReachabilityDirection::Incoming {
+        truncated = scan(current, false)?;
     }
-    if c.direction != ReachabilityDirection::Outgoing {
+    if !truncated && c.direction != ReachabilityDirection::Outgoing {
         for &source in db.get_incoming_sources(current) {
             crate::graph::budget::check_control(&control)?;
-            for edge in db.get_edges(source).unwrap_or(&[]) {
-                crate::graph::budget::check_control(&control)?;
-                if edge.target_id == current {
-                    add(source, edge)?;
-                }
+            // 双向查询的自环已经在出边表中处理。
+            if source == current && c.direction == ReachabilityDirection::Both {
+                continue;
+            }
+            if scan(source, true)? {
+                truncated = true;
+                break;
             }
         }
     }
@@ -798,7 +870,12 @@ fn collect_steps<'a, T: VectorType>(
             && a.edge_source == b.edge_source
             && a.edge.target_id == b.edge.target_id
     });
-    Ok((steps, lease))
+    Ok(CollectedSteps {
+        steps,
+        lease,
+        scanned,
+        truncated,
+    })
 }
 fn allowed(label: &str, labels: Option<&[String]>) -> bool {
     labels.is_none_or(|items| items.iter().any(|item| item == label))

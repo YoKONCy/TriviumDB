@@ -523,6 +523,37 @@ struct BoundedPathState {
     truncated: bool,
 }
 
+fn path_product(weights: &[f32]) -> f32 {
+    let mut significand = 1.0;
+    let mut exponent = 0i128;
+    let mut negative = false;
+    let mut zero = false;
+    for &weight in weights {
+        negative ^= weight.is_sign_negative();
+        if weight == 0.0 {
+            zero = true;
+            continue;
+        }
+        // 有限的非零 f32 扩宽后均为正规 f64。分开累乘尾数和二进制指数。
+        let bits = f64::from(weight.abs()).to_bits();
+        exponent += i128::from(bits >> 52) - 1023;
+        significand *= f64::from_bits((bits & ((1 << 52) - 1)) | (1023 << 52));
+        if significand >= 2.0 {
+            significand *= 0.5;
+            exponent += 1;
+        }
+    }
+    // 完成累乘后再收窄到 f32，包含次正规值及其舍入边界。
+    let magnitude = if zero || exponent < -150 {
+        0.0
+    } else if exponent > 127 {
+        f32::INFINITY
+    } else {
+        (significand * 2.0f64.powi(exponent as i32)) as f32
+    };
+    if negative { -magnitude } else { magnitude }
+}
+
 fn bounded_path_dfs<T: VectorType>(
     mt: &impl GraphRead<T>,
     current: NodeId,
@@ -539,12 +570,11 @@ fn bounded_path_dfs<T: VectorType>(
     let depth = state.weights.len();
     state.metrics.depth_reached = state.metrics.depth_reached.max(depth);
     if current == dst {
-        let product = state.weights.iter().copied().product::<f32>();
         state.results.push(BoundedPath {
             nodes: state.nodes.clone(),
             edge_weights: state.weights.clone(),
             labels: state.labels.clone(),
-            strength_product: product,
+            strength_product: path_product(&state.weights),
             strength_average: if state.weights.is_empty() {
                 1.0
             } else {

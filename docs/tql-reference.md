@@ -697,6 +697,8 @@ RETURN 别名在 ORDER BY 中可用，也可参与排序算术；WHERE 与 RETUR
 
 `ORDER BY picked.rank` 在 `RETURN _.nested AS picked` 下读取投影对象的 `rank`。规划器按作用域核对索引等价性，投影排序完成后执行分页。排序键相等时，节点行按完整绑定名称和 NodeId、边行按图身份与端点和标签、管线行按节点与绑定及路径身份稳定比较；聚合行按分组键比较。该最终比较保持升序，`DESC` 作用于显式排序键。
 
+有序索引键无法保留完整的数值顺序时，范围索引仍可筛选候选，执行器按原始值精确排序后再执行 `OFFSET` 和 `LIMIT`。
+
 ---
 
 ## WITH 可组合管线
@@ -892,6 +894,8 @@ Path 当前是一等 NodeId 序列；`path_length` 返回边数。`WEIGHTED_PATH
 集合阶段公开 `UNION/INTERSECT/EXCEPT`，普通 NodeSet 仍按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。所有路径与集合算法均受节点数、字节和遍历预算约束。
 
 `ALL_PATHS` 的 `DEPTH` 限定查询范围。执行预算阻止继续扩展时返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`，TQL 管线采用完整结果的 Error 策略。Core `bounded_all_paths` 的 Partial 策略通过 `truncated` 标记部分结果。路径平均边权和多路径均值使用 `f64` 累加，输出为 `f32`；TQL 聚合分数超出有限表示范围时返回查询错误。
+
+路径乘积分开累乘尾数和二进制指数，在整条路径完成后转换为 `f32`。SCC 的 `community()` 保留分量节点标识的完整无符号范围。
 
 Rust `NodeRow.provenance.property_origin` 记录物理计划当前保留的单个等值属性入口，用于成本估算与执行审计。合并行的该字段一致时保留，来源有差异时清除。直接属性召回后精排可以保留入口；先全量评分再与属性召回求交，会按合并规则得到相应来源。比较这类等价物理计划时，分别验证各自预期的 `property_origin`，再按原始顺序精确比较其余完整字段，包括其他 provenance、分数值与分数类别。
 

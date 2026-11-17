@@ -7,7 +7,7 @@
 
 from collections.abc import Mapping, Sequence
 from inspect import Signature
-from typing import Any, ClassVar, Literal, final
+from typing import Any, ClassVar, Literal, TypedDict, final
 
 Vector = Sequence[float | int]
 DType = Literal["f32", "f16", "u64"]
@@ -17,6 +17,16 @@ MissingIndexPolicy = Literal["fallback", "build_in_memory", "error"]
 RowOverflowPolicy = Literal["throw", "break"]
 EdgeDirection = Literal["out", "in", "both"]
 ReachabilityDirection = Literal["outgoing", "incoming", "both"]
+
+
+class _PropertyIndexInfo(TypedDict):
+    field: str
+    fields: list[str]
+    kind: Literal["hash", "ordered", "composite", "bitmap", "ngram"]
+    unique: bool
+    entry_count: int
+    distinct_count: int
+    null_count: int
 
 
 __all__ = [
@@ -264,7 +274,7 @@ class TriviumDB:
     def get_payload(self, id: int) -> Any | None: ...
     def graph_request(self, request_json: str) -> str: ...
     def graph_stats(self) -> dict[str, Any]: ...
-    def index_info(self) -> dict[str, Any]: ...
+    def index_info(self) -> list[_PropertyIndexInfo]: ...
     def index_keyword(self, id: int, keyword: str) -> None: ...
     def index_text(self, id: int, text: str) -> None: ...
     def indexed_lookup(self, equalities: dict[str, Any], max_results: int = 10000) -> list[int]: ...

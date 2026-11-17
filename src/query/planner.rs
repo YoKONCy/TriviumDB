@@ -76,6 +76,10 @@ pub fn plan_filter_ordered<T: VectorType>(
     if let Some((field, op, inclusive, value)) = ordered_range(filter)
         && field == order_field
     {
+        // 范围索引可筛选候选，但只有精确顺序才能用于最终排序及分页。
+        if !mt.property_indexes().has_exact_ordered_index(field) {
+            return None;
+        }
         let candidates =
             mt.find_by_property_range(field, op, inclusive, &value, descending, limit)?;
         return Some(NodeAccessPlan {

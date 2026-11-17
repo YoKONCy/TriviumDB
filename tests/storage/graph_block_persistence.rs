@@ -52,6 +52,50 @@ fn 图块_readonly_mmap_与_rw_结果差分一致() {
 }
 
 #[test]
+fn 图扫描预算部分结果在内存与映射重开间一致() {
+    use triviumdb::graph::budget::BudgetExhaustionPolicy;
+    use triviumdb::graph::reachability::{ReachabilityConfig, ReachabilityDirection};
+
+    let path = path("reachability_prefix");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    for id in 1..=5 {
+        db.insert_with_id(id, &[1., 0., 0., 0.], json!({})).unwrap();
+    }
+    for (source, target) in [(1, 4), (1, 2), (3, 5), (2, 5)] {
+        db.link(source, target, "route", 1.).unwrap();
+    }
+    let check = |db: &Database<f32>| {
+        for (source, direction) in [
+            (1, ReachabilityDirection::Outgoing),
+            (5, ReachabilityDirection::Incoming),
+        ] {
+            let output = db
+                .reachable_detailed(
+                    source,
+                    &ReachabilityConfig {
+                        direction,
+                        max_edges: 1,
+                        exhaustion_policy: BudgetExhaustionPolicy::Partial,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(output.results.len(), 1);
+            assert_eq!(output.results[0].path, [source, 2]);
+            assert_eq!(output.traversed_edges, 1);
+            assert!(output.truncated);
+        }
+    };
+    check(&db);
+    db.close().unwrap();
+    let mut reader = Database::<f32>::open_read_only(&path, DIM).unwrap();
+    check(&reader);
+    reader.close().unwrap();
+    cleanup(&path);
+}
+
+#[test]
 fn 图块_crc_与逐字节截断全部_fail_closed() {
     let path = path("corruption");
     cleanup(&path);

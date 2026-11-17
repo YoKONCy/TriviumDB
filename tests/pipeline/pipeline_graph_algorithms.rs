@@ -8,6 +8,7 @@ use triviumdb::graph::analytics::{
 use triviumdb::graph::budget::{BudgetExhaustionPolicy, TraversalBudget};
 use triviumdb::graph::reachability::{
     ReachabilityConfig, ReachabilityDirection, traverse_compact, traverse_compact_parallel,
+    traverse_detailed,
 };
 use triviumdb::graph::subset::{
     LabelPropagationConfig, SubsetPageRankConfig, deterministic_label_propagation,
@@ -21,6 +22,60 @@ use triviumdb::query::pipeline::{
     ScoreKind, StructuralAlgorithm, StructuralGraphOperator, WccOperator,
 };
 use triviumdb::storage::memtable::MemTable;
+
+#[test]
+fn 可达性在筛选和去重前按实际扫描边数耗尽预算() {
+    use triviumdb::TriviumError;
+    use triviumdb::graph::budget::BudgetDimension;
+
+    let mut mt = MemTable::<f32>::new(1);
+    for id in 1..=5 {
+        mt.insert_with_id(id, &[1.], json!({})).unwrap();
+    }
+    for id in (2..=5).rev() {
+        let label = if id == 5 { "only-last" } else { "other" };
+        mt.link(1, id, label.into(), 1.).unwrap();
+    }
+    for label in ["missing", "only-last"] {
+        let mut config = ReachabilityConfig {
+            labels: Some(vec![label.into()]),
+            max_edges: 1,
+            exhaustion_policy: BudgetExhaustionPolicy::Partial,
+            ..Default::default()
+        };
+        let partial = traverse_detailed(&mt, 1, &config).unwrap();
+        assert!(partial.results.is_empty());
+        assert_eq!(partial.traversed_edges, 1);
+        assert!(partial.truncated);
+        config.exhaustion_policy = BudgetExhaustionPolicy::Error;
+        assert!(matches!(
+            traverse_detailed(&mt, 1, &config),
+            Err(TriviumError::TraversalBudgetExceeded {
+                dimension: BudgetDimension::ExaminedEdges,
+                examined_edges: 1,
+                ..
+            })
+        ));
+        assert!(traverse_compact(&mt, 1, &config).is_err());
+        assert!(traverse_compact_parallel(&mt, 1, &config).is_err());
+    }
+    let config = ReachabilityConfig {
+        direction: ReachabilityDirection::Incoming,
+        max_edges: 4,
+        ..Default::default()
+    };
+    let incoming = traverse_detailed(&mt, 5, &config).unwrap();
+    assert_eq!(incoming.traversed_edges, 4);
+    assert!(!incoming.truncated);
+    assert_eq!(
+        incoming
+            .results
+            .iter()
+            .map(|hit| hit.target_id)
+            .collect::<Vec<_>>(),
+        [1]
+    );
+}
 
 fn graph() -> MemTable<f32> {
     let mut mt = MemTable::new(2);

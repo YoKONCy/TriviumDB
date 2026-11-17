@@ -2536,7 +2536,7 @@ fn eval_pipeline_row_expr<T: VectorType>(
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::Community { .. } => row
             .community_id
-            .map(|community| RuntimeValue::Int(community as i64))
+            .map(runtime_u64)
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::Path { .. } => row
             .path

@@ -175,6 +175,10 @@ assert_type(db.drop_ngram_index("text"), None)
 assert_type(db.create_unique_index("key"), None)
 assert_type(db.create_unique_composite_index(["scope", "key"]), None)
 assert_type(db.list_unique_indexes(), list[list[str]])
+assert_type(db.index_info()[0]["fields"], list[str])
+assert_type(db.index_info()[0]["unique"], bool)
+assert_type(db.index_info()[0]["entry_count"], int)
+db.index_info().items()  # type: ignore[attr-defined]
 
 # 资源异常保留内核预算字段。
 def check_resource_error(error: triviumdb.ResourceBudgetError) -> None:

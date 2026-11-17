@@ -1,6 +1,7 @@
 //! 维度迁移在独占暂存库中构建，通过目标租约和发布日志安装全新文件组。
 
 use super::{Config, Database, read_or_recover};
+use crate::index::property::PropertyIndexKind;
 use crate::{Result, TriviumError, VectorType};
 use fs2::FileExt;
 use std::ffi::OsString;
@@ -237,15 +238,14 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
         }
         {
             let mut target = super::write_or_recover(&stage.memtable);
-            for fields in mt.unique_index_definitions() {
-                use crate::index::property::PropertyIndexKind;
-                let kind = if fields.len() == 1 {
-                    PropertyIndexKind::Hash
-                } else {
-                    PropertyIndexKind::Composite
-                };
-                target.build_property_index(kind, &fields, true, config.memory_limit)?;
+            let unique = mt.unique_index_definitions();
+            for (kind, fields) in mt.property_indexes().index_definitions() {
+                let is_unique =
+                    matches!(kind, PropertyIndexKind::Hash | PropertyIndexKind::Composite)
+                        && unique.binary_search(&fields).is_ok();
+                target.build_property_index(kind, &fields, is_unique, config.memory_limit)?;
             }
+            target.copy_text_index_from(&mt)?;
             let bytes = mt
                 .named_graphs
                 .projection_bytes()

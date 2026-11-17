@@ -650,3 +650,21 @@ fn 旧_tql_语法保持无_pipeline() {
     let rows = execute_tql(&query, &graph()).unwrap();
     assert_eq!(rows.len(), 2);
 }
+#[test]
+fn SCC投影保留高位无符号分量标识() {
+    use triviumdb::query::tql_executor::{TqlValue, execute_tql_values};
+    use triviumdb::query::tql_parser::parse_tql;
+    let id = (1u64 << 63) + 1;
+    let mut mt = triviumdb::storage::memtable::MemTable::<f32>::new(2);
+    mt.insert_with_id(id, &[1., 0.], serde_json::json!({}))
+        .unwrap();
+    let query = parse_tql(
+        "SEARCH VECTOR [1,0] TOP 1 AS seed WITH seed SCC seed MODE INDUCED AS c \
+         WITH c RETURN c.id AS id, community(c) AS component",
+    )
+    .unwrap();
+    let rows = execute_tql_values(&query, &mt).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0]["id"], TqlValue::UInt(value) if value == id));
+    assert!(matches!(rows[0]["component"], TqlValue::UInt(value) if value == id));
+}
