@@ -192,6 +192,22 @@ impl DbHandle {
         Self::open(path, dim, dtype)
     }
 
+    pub fn open_read_only(path: &str, dim: Option<usize>, dtype: DType) -> Result<Self> {
+        let dim = match dim {
+            Some(dim) => dim,
+            None => sniff_header(path)?.dim,
+        };
+        Ok(match dtype {
+            DType::F32 => DbHandle::F32(Database::<f32>::open_read_only(path, dim)?),
+            DType::F16 => DbHandle::F16(Database::<f16>::open_read_only(path, dim)?),
+            DType::U64 => DbHandle::U64(Database::<u64>::open_read_only(path, dim)?),
+        })
+    }
+
+    pub fn has_persisted_quiver(&self) -> Result<bool> {
+        dispatch!(self, db => db.has_persisted_quiver())
+    }
+
     /// 当前句柄的 dtype。
     pub fn dtype(&self) -> DType {
         match self {

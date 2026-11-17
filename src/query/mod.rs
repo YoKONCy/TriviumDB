@@ -4,7 +4,6 @@
 //! 一等值结果。Prepared 只替换已验证参数，所有阶段共享预算、确定性和 EXPLAIN 语义。
 
 pub mod cascades;
-mod numeric;
 pub mod parallel;
 pub mod pipeline;
 pub mod planner;

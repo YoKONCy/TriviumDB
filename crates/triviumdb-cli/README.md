@@ -20,6 +20,10 @@ cargo build -p triviumdb-cli --release
 
 `tdb exec` 按 TQL 投影返回指定列，列名使用 `AS` 别名。JSON 输出保留数值、布尔值、空值、对象与列表。CSV 输出完整单元格并转义逗号、引号及换行。写入成功后，`--mutate --format json` 在 stdout 返回 `{"affected":1,"created_ids":[3]}` 形式的确认结果。CSV 使用 `affected,created_ids` 两列，后者为 JSON 数组。
 
+`info`、`export` 和未指定 `--mutate` 的 `exec` 使用共享读锁，保持源文件组零写。CSV 查询即使返回零行也输出投影列名。`info` 从 `.idx` 目录读取已持久化的 QuIVer 组件状态。
+
+`repair check` 和 `repair dump` 需要存在主库或 WAL。`repair dump --format json` 在 stdout 按节点 ID 升序输出 JSON 数组，挂载诊断写入 stderr。
+
 ```bash
 # 查看数据库元信息
 tdb info mydata.tdb

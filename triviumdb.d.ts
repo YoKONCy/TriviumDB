@@ -687,7 +687,10 @@ export class TriviumDB {
   /** 使用自定义 ID 插入或原子覆盖节点 */
   upsertWithId(id: number, vector: Vector, payload: any): void;
 
-  /** 原子提交一组异构写操作，返回事务内插入节点的 ID */
+  /**
+   * 原子提交一组异构写操作，返回事务内插入节点的 ID。
+   * 节点 ID、向量分量和边权使用 number，updatePayload 显式提供 payload。
+   */
   commitTransaction(operations: TransactionOperation[]): number[];
 
   /** 返回图节点、边、孤立节点及标签统计 */

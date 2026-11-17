@@ -732,7 +732,7 @@ SDK 在重入或借用争用时拒绝直接 CRUD 请求，错误提供 `write.ph
 
 ### 自定义 ID Upsert 与 Node.js 原子事务
 
-`upsert_with_id/upsertWithId` 在 ID 不存在时插入，存在时原子覆盖向量和 Payload。Node.js 的 `commitTransaction(operations)` 可在同一个 WAL-first 事务中混合 `insert`、`insertWithId`、`delete`、`updatePayload`、`updateVector`、`link/upsertEdge`、`unlink` 和 `unlinkLabel`；预检失败时整笔事务拒绝，原数据保持不变。
+`upsert_with_id/upsertWithId` 在 ID 不存在时插入，存在时原子覆盖向量和 Payload。Node.js 的 `commitTransaction(operations)` 可在同一个 WAL-first 事务中混合 `insert`、`insertWithId`、`delete`、`updatePayload`、`updateVector`、`link/upsertEdge`、`unlink` 和 `unlinkLabel`。预检失败时整笔事务拒绝，原数据保持不变。`updatePayload` 必须提供自有可枚举 `payload` 字段，显式 `null` 会保存为 JSON null。事务的 ID、向量分量及权重采用与对应直接调用相同的 JS 数值类型。
 
 ---
 
@@ -1375,7 +1375,7 @@ Python 的参数容器接受字符串键 `Mapping`，包括 `dict`、`MappingPro
 
 `tql`、`prepare_tql` 和 `tql_mut` 的查询文本类型拒绝定位 `query`，发生在解析之前，阶段省略。Python 保留原类型及编码异常。写入口类型拒绝提供 `validation/not_committed`，回调重入提供 `admission/not_committed`，读取入口省略写入结果。
 
-Node Prepared 对 NaN、无穷、undefined、BigInt、Symbol、函数及复合值提供具名绑定错误。数组和对象参数在标量边界拒绝。属性枚举与 getter 抛出的宿主异常保留原对象与 cause；有效标量沿用原有数值和字符串转换规则。
+Node Prepared 只绑定参数对象的自有可枚举字符串键。NaN、无穷、undefined、BigInt、Symbol、函数及复合值返回具名绑定错误。属性枚举与 getter 抛出的宿主异常保留原对象与 cause，有效标量沿用原有数值和字符串转换规则。
 
 命名参数转换及绑定错误提供 `stage=bind` 和 `target.parameter`。缺参、多参与类型错误保留各自错误码和详情，Python 保留原异常继承关系。映射协议产生的宿主异常保留原对象与 cause。Rust 使用 `TriviumError::underlying()` 取得带定位错误的原始变体。覆盖边界见[公共错误契约](error-contracts.md)。
 
@@ -1973,6 +1973,8 @@ Python 的直接写入、批量与事务按 dtype 提取向量，`u64` 分量保
 Rust 和 Python 的节点 ID 写入范围为 `1..=u64::MAX-1`；`0` 与 `u64::MAX` 为保留边界，自动分配耗尽时在写 WAL 前返回参数错误。JSON Payload 的整数保留完整 `i64/u64` 范围。
 
 Node 的数值节点 ID 输入与输出使用 `0..=Number.MAX_SAFE_INTEGER` 内的整数；插入 ID 遵守内核的非零约束。搜索、批量搜索、节点、图遍历与索引查询遇到超范围结果时，整个调用返回 `TDB_INVALID_INPUT`。TQL 查询使用十进制字符串返回完整 `u64` ID。自动插入、批量、事务与 TQL CREATE 在写 WAL 前检查待分配 ID；迁移在创建目标文件前检查返回 ID。
+
+JSON Payload 的有限浮点数在持久化、重开和 WAL 恢复时保留原有 binary64 位模式。旧构建已经写出的精确十进制字节可由当前解码器直接读取。
 
 Node 的 Payload 对象按自有、可枚举的字符串键转换。输入 `bigint` 在 `i64::MIN..=u64::MAX` 范围内保存为精确 JSON 整数。Payload 读取把超出安全整数范围的整数返回为 `bigint`，可直接用于后续的 Payload 更新。
 

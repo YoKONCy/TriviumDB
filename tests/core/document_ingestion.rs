@@ -31,6 +31,37 @@ fn parse(db: &mut Database<f32>, name: &str, content: &str) -> Value {
 }
 
 #[test]
+fn 扩展名缺失时按纯文本解析并保留CR对应的段落与行证据() {
+    let raw = "甲\r\r乙\r丙";
+    for source in ["json", "pdf", "nested.json/text"] {
+        let parsed = parsing::parse(
+            &serde_json::from_value(json!({
+                "source_id": source, "source_revision":"1","content":raw,
+                "config":{"normalize_newlines":false,"include_lines":true}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.text, raw);
+        assert!(parsed.source.original_text.is_none());
+        assert_eq!(parsed.source.media_type, "text/plain");
+        for (kind, expected) in [
+            ("paragraph", &[(0, 3), (5, 12)][..]),
+            ("line", &[(0, 3), (5, 8), (9, 12)][..]),
+        ] {
+            let actual = parsed
+                .blocks
+                .iter()
+                .filter(|block| block.kind == kind)
+                .map(|block| (block.start_byte, block.end_byte))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{source} {kind}");
+        }
+    }
+}
+
+#[test]
 fn 内置五种解析保留完整正文与独立预期来源范围() {
     let dir = TestDir::new("document-parsers");
     let mut db =

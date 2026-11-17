@@ -16,6 +16,11 @@
 - Yen 路径行保留起点绑定。全路径查询去除重复目的地，禁经集合覆盖起终点，标签匹配完整序列，跨路径强度聚合保留可表示的结果。
 - Payload 补丁在写入前拒绝未知操作符。字段过滤拒绝空运算符对象，时间比较覆盖宽范围 RFC3339 日期。维度迁移保留节点 ID 的分配高水位。
 - Node Payload 使用自有可枚举字符串键，支持写回读出的 `bigint`。CLI 按投影返回真实列和值，CSV 保留完整单元格，JSON 写入确认包含影响行数及新建 ID。
+- Payload 重开和 WAL 解码精确保留 binary64 浮点数，使相邻浮点唯一键、索引命中及条件更新保持一致。修复前生成的 Rom 和 Mmap 检查点可直接重开。
+- TQL 拒绝空字段运算符对象和未知 CREATE 边属性，支持显式对象等值。匿名 CREATE 节点拥有独立身份，具名边按模式顺序确定默认谓词节点。
+- 文本召回按分数降序返回，简写 SEARCH 保留相似度。组合管线按变量读取相似度和路径，路径查询去除重复目标，全路径按目标汇总所有来源的强度与计数，单条路径均值保留抵消尾项。
+- CLI 只读查询、信息和导出可与其他读者共享源库。缺失转储路径返回错误，JSON 转储的数据与诊断分流，空 CSV 保留列名，QuIVer 状态从统一索引容器获取。
+- Node 事务严格校验必要的 Payload 字段和数值类型，Prepared 参数只读取自有可枚举字符串键。文档解析将无后缀来源按纯文本处理，并识别 CR、CRLF 和 LF 定界。
 
 ---
 
@@ -33,3 +38,8 @@ Subsequent development builds on `0.9.2-beta.1`. Delivered changes are recorded 
 - Yen path rows retain the bindings of the path origin. All-paths queries deduplicate destinations, apply the exclusion set to both endpoints, match the full label sequence, and preserve representable aggregates across paths.
 - Payload patches reject unknown operators before writing. Field filters reject empty operator objects, and time filters compare dates across the wider RFC3339 range. Dimension migration preserves the node ID allocation high-water mark.
 - Node Payloads use own enumerable string keys and accept `bigint` values read back from the database. The CLI emits projected columns and values, preserves complete CSV cells, and returns affected rows and created IDs in JSON mutation acknowledgments.
+- Payload reopen and WAL decoding preserve binary64 values exactly, including adjacent unique index keys, indexed lookups, and conditional updates. Rom and Mmap checkpoints produced before the fix can be reopened directly.
+- TQL rejects empty field operator objects and unknown CREATE edge attributes and supports explicit object equality. Anonymous CREATE nodes have separate identities, and named-edge predicates use the first bound node in pattern order.
+- Text retrieval returns descending scores, and shorthand SEARCH preserves similarity. Composable queries read similarity and path values from the addressed variable. Path operators deduplicate targets, all-paths aggregation combines strength and counts across origins, and single-path averages preserve residuals after cancellation.
+- CLI read queries, info, and export share the source database with other readers. A missing dump source returns an error, JSON dump data and diagnostics use separate streams, empty CSV results retain column names, and QuIVer presence comes from the unified index container.
+- Node transactions validate required Payload fields and numeric argument types. Prepared parameters use own enumerable string keys. Document ingestion treats extensionless sources as plain text and recognizes CR, CRLF, and LF line boundaries.

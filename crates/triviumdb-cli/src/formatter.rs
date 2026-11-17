@@ -96,17 +96,11 @@ fn collect_columns(rows: &CliRows) -> Vec<String> {
 
 /// 渲染 TQL 查询结果。
 pub fn format_rows(rows: &CliRows, format: OutputFormat) -> String {
-    if rows.is_empty() {
-        return match format {
-            OutputFormat::Json => "[]".to_string(),
-            _ => "(0 rows)".to_string(),
-        };
-    }
-
     match format {
         OutputFormat::Json => rows_to_json(rows),
+        OutputFormat::Table if rows.is_empty() => "(0 rows)".to_string(),
         OutputFormat::Table => rows_to_table(rows),
-        OutputFormat::Csv => rows_to_csv(rows),
+        OutputFormat::Csv => format_csv(rows, collect_columns(rows)),
     }
 }
 
@@ -171,19 +165,16 @@ fn rows_to_table(rows: &CliRows) -> String {
     format!("{table}\n{} row(s)", rows.len())
 }
 
-fn rows_to_csv(rows: &CliRows) -> String {
-    let cols = collect_columns(rows);
+pub fn format_csv(rows: &CliRows, mut cols: Vec<String>) -> String {
+    cols.sort();
     let mut out = String::new();
 
     // header
-    out.push_str("#,");
-    out.push_str(
-        &cols
-            .iter()
-            .map(|c| csv_escape(c))
-            .collect::<Vec<_>>()
-            .join(","),
-    );
+    out.push('#');
+    for column in &cols {
+        out.push(',');
+        out.push_str(&csv_escape(column));
+    }
     out.push('\n');
 
     for (i, row) in rows.iter().enumerate() {
@@ -244,7 +235,7 @@ mod tests {
 
     #[test]
     fn empty_rows_csv() {
-        assert_eq!(format_rows(&vec![], OutputFormat::Csv), "(0 rows)");
+        assert_eq!(format_csv(&vec![], vec!["id".into()]), "#,id\n");
     }
 
     // ── format_rows non-empty ──────────────────────────────────

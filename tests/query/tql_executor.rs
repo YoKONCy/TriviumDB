@@ -20,6 +20,99 @@ fn cleanup(path: &str) {
     crate::cleanup_files::database(path);
 }
 
+#[test]
+fn 简写向量搜索保留过滤与投影所用的相似度() {
+    use triviumdb::query::{
+        tql_executor::{TqlValue, execute_tql_values},
+        tql_parser::parse_tql,
+    };
+    let mut table = triviumdb::storage::memtable::MemTable::<f32>::new(2);
+    table
+        .insert_with_id(1, &[1., 0.], serde_json::json!({}))
+        .unwrap();
+    for query in [
+        "SEARCH VECTOR [1,0] TOP 1 WHERE similarity(_) > 0.5 RETURN _.id AS id, similarity(_) AS score",
+        "SEARCH VECTOR [1,0] TOP 1 AS n WITH n WHERE similarity(n) > 0.5 RETURN n.id AS id, similarity(n) AS score",
+    ] {
+        let rows = execute_tql_values(&parse_tql(query).unwrap(), &table).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0]["id"], TqlValue::Int(1)));
+        assert!(matches!(rows[0]["score"], TqlValue::Float(1.0)));
+    }
+}
+
+#[test]
+fn 扩展与路径阶段保留各自变量的相似度及路径() {
+    use triviumdb::query::{
+        tql_executor::{TqlValue, execute_tql_values},
+        tql_parser::parse_tql,
+    };
+    let mut table = triviumdb::storage::memtable::MemTable::<f32>::new(2);
+    table
+        .insert_with_id(1, &[1., 0.], serde_json::json!({}))
+        .unwrap();
+    table
+        .insert_with_id(2, &[0., 1.], serde_json::json!({}))
+        .unwrap();
+    table.link(1, 2, "r".into(), 1.).unwrap();
+    let rows = execute_tql_values(&parse_tql(
+        "SEARCH VECTOR [1,0] TOP 1 AS seed WITH seed EXPAND seed [:r*1..1] AS child \
+         WITH seed AS anchor, child RETURN similarity(anchor) AS initial, similarity(child) AS expanded"
+    ).unwrap(),&table).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0]["initial"], TqlValue::Float(1.0)));
+    assert!(matches!(rows[0]["expanded"], TqlValue::Float(0.0)));
+    let rows = execute_tql_values(
+        &parse_tql(
+            "MATCH (seed {id:1}) WITH seed YEN_PATHS seed TO [2] K 2 AS route \
+         WITH seed, route RETURN path(seed) AS before, path(route) AS after",
+        )
+        .unwrap(),
+        &table,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0]["before"], TqlValue::Null));
+    assert!(matches!(&rows[0]["after"], TqlValue::Path(path) if path == &[1,2]));
+}
+
+#[test]
+fn 文本召回按分数降序和节点ID取首条() {
+    use triviumdb::query::tql_executor::TqlValue;
+    let path = tmp_db("text_default_rank");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    for (id, body, term) in [
+        (1, "alpha other other other", "alpha"),
+        (2, "alpha alpha other", "beta"),
+        (3, "alpha alpha alpha", "beta"),
+    ] {
+        db.insert_with_id(id, &[1., 0.], serde_json::json!({}))
+            .unwrap();
+        db.index_text(id, body).unwrap();
+        db.index_keyword(id, term).unwrap();
+    }
+    db.build_text_index().unwrap();
+    for (method, text, expected) in [
+        ("BM25", "alpha", 3),
+        ("AC", "alpha beta beta", 2),
+        ("HYBRID", "alpha beta beta", 3),
+    ] {
+        let rows = db
+            .tql(&format!(
+                "TEXT {method} \"{text}\" TOP 3 AS t WITH t RETURN t.id AS id LIMIT 1"
+            ))
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{method}");
+        assert!(
+            matches!(rows[0]["id"], TqlValue::Int(id) if id == expected),
+            "{method}"
+        );
+    }
+    db.close().unwrap();
+    cleanup(&path);
+}
+
 fn build_test_db(name: &str) -> (Database<f32>, String) {
     let path = tmp_db(name);
     cleanup(&path);

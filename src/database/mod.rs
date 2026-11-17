@@ -3322,6 +3322,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         })
     }
 
+    /// 检查当前检查点的统一索引容器是否登记 QuIVer 索引。
+    pub fn has_persisted_quiver(&self) -> Result<bool> {
+        let _operation = self.enter_operation()?;
+        Ok(crate::storage::index_container::open(&self.db_path, ".quiver")?.is_some())
+    }
+
     /// 返回当前数据库格式、模式和 sidecar 存在状态；该操作只读且不会修复文件。
     pub fn storage_info(&self) -> StorageInfo {
         let mt = read_or_recover(&self.memtable);

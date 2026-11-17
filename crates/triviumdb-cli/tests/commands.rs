@@ -581,21 +581,109 @@ fn repair_check_nonexistent() {
             "never",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("不存在"));
+        .failure()
+        .stderr(predicate::str::contains("不存在"));
 }
 
 #[test]
 fn repair_dump_outputs_nodes() {
     let (_dir, path) = seed_db();
-    tdb()
+    let result = tdb()
         .args([
             "repair", "dump", &path, "--format", "json", "--color", "never",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Alice"))
-        .stdout(predicate::str::contains("Bob"));
+        .success();
+    let rows: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    assert_eq!(rows[0]["node"]["payload"]["name"], "Alice");
+    assert_eq!(rows[1]["node"]["payload"]["name"], "Bob");
+}
+
+#[test]
+fn 修复转储拒绝缺失路径且保持目录为空() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("nope.tdb");
+    let output = tdb()
+        .args(["repair", "dump", path.to_str().unwrap(), "--format=json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["code"], "TDB_IO");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn 只读命令与已有读者并行且报告持久化_quiver_组件() {
+    let (dir, path) = seed_db();
+    let mut writer = triviumdb::Database::<f32>::open(&path, 4).unwrap();
+    writer.build_quiver_index(None).unwrap();
+    writer.close().unwrap();
+    let database_files = || {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = database_files();
+    let mut reader = triviumdb::Database::<f32>::open_read_only(&path, 4).unwrap();
+    let info = tdb()
+        .args(["info", &path, "--format=json"])
+        .assert()
+        .success();
+    let info: serde_json::Value = serde_json::from_slice(&info.get_output().stdout).unwrap();
+    assert_eq!(info["files"]["quiver_present"], true);
+    assert_eq!(info["node_count"], 2);
+    let output = tdb()
+        .args([
+            "exec",
+            &path,
+            "MATCH (n) RETURN n.id AS id ORDER BY id",
+            "--format=json",
+        ])
+        .assert()
+        .success();
+    let rows: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(rows, json!([{"id":1},{"id":2}]));
+    let external = TempDir::new().unwrap();
+    let output = external.path().join("data.jsonl");
+    tdb()
+        .args(["export", &path, output.to_str().unwrap()])
+        .assert()
+        .success();
+    let contents = std::fs::read_to_string(output).unwrap();
+    let rows = contents
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["payload"]["name"], "Alice");
+    assert_eq!(rows[1]["payload"]["name"], "Bob");
+    reader.close().unwrap();
+    assert_eq!(database_files(), before);
+}
+
+#[test]
+fn 零行_csv_保留投影定义的完整表头() {
+    let (_dir, path) = seed_db();
+    for (query, header) in [
+        (
+            "MATCH (n {id:0}) RETURN n.id AS id, n.name",
+            "#,id,n.name\n",
+        ),
+        ("MATCH (n {id:0}) WITH n AS renamed RETURN *", "#,renamed\n"),
+    ] {
+        let output = tdb()
+            .args(["exec", &path, query, "--format=csv"])
+            .assert()
+            .success();
+        assert_eq!(output.get_output().stdout, header.as_bytes());
+    }
 }
 
 // ── error cases ────────────────────────────────────────────────

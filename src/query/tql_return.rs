@@ -251,6 +251,7 @@ pub(super) fn matches_predicate<T: VectorType>(
     predicate: &Predicate,
     input: &Input<'_, T>,
     scope: &Scope<'_, T>,
+    default_node: Option<&Node<T>>,
 ) -> bool {
     match predicate {
         Predicate::Compare { left, op, right } => compare_runtime(
@@ -259,12 +260,14 @@ pub(super) fn matches_predicate<T: VectorType>(
             &expression(right, input, scope),
         ),
         Predicate::And(a, b) => {
-            matches_predicate(a, input, scope) && matches_predicate(b, input, scope)
+            matches_predicate(a, input, scope, default_node)
+                && matches_predicate(b, input, scope, default_node)
         }
         Predicate::Or(a, b) => {
-            matches_predicate(a, input, scope) || matches_predicate(b, input, scope)
+            matches_predicate(a, input, scope, default_node)
+                || matches_predicate(b, input, scope, default_node)
         }
-        Predicate::Not(value) => !matches_predicate(value, input, scope),
+        Predicate::Not(value) => !matches_predicate(value, input, scope, default_node),
         Predicate::DocFilter { var, filter } => {
             let Input::Nodes(nodes, edge) = input else {
                 return false;
@@ -274,16 +277,10 @@ pub(super) fn matches_predicate<T: VectorType>(
             {
                 return filter.matches(&edge_json(edge));
             }
-            let node = var.as_ref().and_then(|var| nodes.get(var)).or_else(|| {
-                if var.is_none() {
-                    nodes
-                        .iter()
-                        .min_by_key(|(name, _)| *name)
-                        .map(|(_, node)| node)
-                } else {
-                    None
-                }
-            });
+            let node = match var {
+                Some(var) => nodes.get(var),
+                None => default_node,
+            };
             node.is_some_and(|node| filter.matches(&node.payload))
         }
     }

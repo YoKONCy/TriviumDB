@@ -6,16 +6,16 @@ use colored::Colorize;
 
 use crate::CliResult;
 use crate::db_handle::DbHandle;
-use crate::formatter::{OutputFormat, format_mutation, format_rows};
+use crate::formatter::{OutputFormat, format_csv, format_mutation, format_rows};
 
 pub fn run(handle: &mut DbHandle, query: &str, mutate: bool, format: OutputFormat) -> CliResult {
     let start = Instant::now();
 
     // 文本模式提供位置诊断；JSON 模式交给统一错误出口序列化。
     let parsed = if mutate {
-        triviumdb::query::tql_parser::parse_tql_statement_diagnostic(query).map(|_| ())
+        triviumdb::query::tql_parser::parse_tql_statement_diagnostic(query).map(|_| None)
     } else {
-        triviumdb::query::tql_parser::parse_tql_diagnostic(query).map(|_| ())
+        triviumdb::query::tql_parser::parse_tql_diagnostic(query).map(Some)
     };
     if let Err(error) = parsed {
         if format != OutputFormat::Json
@@ -63,7 +63,14 @@ pub fn run(handle: &mut DbHandle, query: &str, mutate: bool, format: OutputForma
     } else {
         let rows = handle.tql(query)?;
         let n = rows.len();
-        println!("{}", format_rows(&rows, format).trim_end_matches('\n'));
+        let output = match (format, parsed?) {
+            (OutputFormat::Csv, Some(query)) if rows.is_empty() => format_csv(
+                &rows,
+                triviumdb::query::tql_executor::result_columns(&query),
+            ),
+            _ => format_rows(&rows, format),
+        };
+        println!("{}", output.trim_end_matches('\n'));
         let elapsed = start.elapsed();
         // 计时信息走 stderr，避免污染管道 / JSON 输出
         eprintln!(

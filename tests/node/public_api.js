@@ -61,6 +61,47 @@ function runTransactionContract(root) {
   }
 }
 
+function runTransactionArgumentBoundaries(root) {
+  const file = path.join(root, 'transaction-argument-boundaries.tdb')
+  const options = { dim: 2, autoBuildQuiver: false }
+  const db = new TriviumDB(file, options)
+  try {
+    db.insertWithId(1, [1, 0], { tag: 'original' })
+    db.insertWithId(2, [0, 1], { tag: 'other' })
+    const wal = fs.readFileSync(file + '.wal')
+    const valid = { type: 'updatePayload', id: 2, payload: { tag: 'changed' } }
+    for (const [operation, field] of [
+      [{ type: 'updatePayload', id: 1 }, 'payload'],
+      [{ type: 'updatePayload', id: 1n, payload: null }, 'id'],
+      [{ type: 'updateVector', id: 1, vector: [2n, 4n] }, 'vector/0'],
+    ]) {
+      assert.throws(() => db.commitTransaction([valid, operation]), error => {
+        assert.equal(error.code, 'TDB_INVALID_INPUT')
+        assert.deepEqual(error.target, { field: '/operations/1/' + field })
+        assert.equal(error.write.outcome, 'not_committed')
+        return true
+      })
+      assert.deepEqual(fs.readFileSync(file + '.wal'), wal)
+      assert.deepEqual(db.getPayload(1), { tag: 'original' })
+      assert.deepEqual(db.getPayload(2), { tag: 'other' })
+    }
+    db.commitTransaction([
+      { type: 'updatePayload', id: 1, payload: null },
+      { type: 'updatePayload', id: 2, payload: { n: 9007199254740993n } },
+    ])
+  } finally { db.close() }
+  const reader = new TriviumDB(file, options)
+  try {
+    assert.equal(reader.get(1).payload, null)
+    assert.deepEqual(reader.getPayload(2), { n: 9007199254740993n })
+    const prepared = reader.prepareTql('MATCH (n {id:1}) RETURN $key AS v')
+    assert.throws(() => reader.executePreparedTql(prepared, Object.create({ key: 1 })),
+      error => error.code === 'TDB_MISSING_QUERY_PARAMETER')
+    const params = Object.assign(Object.create({ unused: 42 }), { key: 7 })
+    assert.deepEqual(reader.executePreparedTql(prepared, params), [{ v: 7 }])
+  } finally { reader.close() }
+}
+
 function runTextRecoveryContract(root) {
   for (const storageMode of ['rom', 'mmap']) {
     const target = path.join(root, `text-rebuild-${storageMode}.tdb`)
@@ -372,6 +413,7 @@ async function main() {
     await require('./request_contexts')(root)
     runKernelBoundaries(root)
     runTransactionContract(root)
+    runTransactionArgumentBoundaries(root)
     await require('./write_boundaries.js')(root, TriviumDB)
     await require('./numeric_boundaries.js')(root, TriviumDB)
     runTextRecoveryContract(root)

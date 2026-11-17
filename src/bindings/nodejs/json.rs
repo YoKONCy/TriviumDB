@@ -78,7 +78,7 @@ fn bigint_from_js(value: JsUnknown) -> napi::Result<Value> {
     ))
 }
 
-fn enumerable_own_keys(object: &JsObject) -> napi::Result<JsObject> {
+pub(super) fn enumerable_own_keys(object: &JsObject) -> napi::Result<JsObject> {
     object.get_all_property_names(
         napi::KeyCollectionMode::OwnOnly,
         napi::KeyFilter::Enumerable,

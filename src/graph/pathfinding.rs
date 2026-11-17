@@ -592,12 +592,11 @@ fn bounded_path_dfs<T: VectorType>(
             strength_average: if state.weights.is_empty() {
                 1.0
             } else {
-                (state
-                    .weights
-                    .iter()
-                    .map(|weight| f64::from(*weight))
-                    .sum::<f64>()
-                    / state.weights.len() as f64) as f32
+                let mut sum = crate::numeric::ExactSum::default();
+                for weight in &state.weights {
+                    sum.push_float(f64::from(*weight));
+                }
+                sum.into_f32(state.weights.len())
             },
         });
         if state.results.len() >= config.max_paths {

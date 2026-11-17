@@ -49,6 +49,88 @@ fn pipeline_budget() -> PipelineBudget {
 }
 
 #[test]
+fn 全路径跨起点聚合强度并返回相符的代表路径() {
+    let mut mt = MemTable::<f32>::new(2);
+    for id in 1..=5 {
+        mt.insert_with_id(id, &[1., 0.], json!({})).unwrap();
+    }
+    for (src, dst, weight) in [(1, 3, 2.), (3, 5, 4.), (2, 5, 1.)] {
+        mt.link(src, dst, "r".into(), weight).unwrap();
+    }
+    for (aggregation, expected) in [
+        (PathStrengthAggregation::MaxProduct, 8.),
+        (PathStrengthAggregation::SumProduct, 9.),
+        (PathStrengthAggregation::AverageWeight, 2.),
+    ] {
+        let mut context = PipelineContext::new(&mt, pipeline_budget());
+        let output = BoundedAllPaths {
+            targets: vec![5],
+            config: BoundedPathConfig {
+                max_depth: 3,
+                max_paths: 8,
+                label_sequence: None,
+                forbidden_nodes: BTreeSet::new(),
+            },
+            aggregation,
+        }
+        .apply(NodeSet::from_ids([2, 1]), &mut context)
+        .unwrap();
+        assert_eq!(output.rows().len(), 1);
+        let row = &output.rows()[0];
+        assert_eq!(row.path.as_deref(), Some(&[1, 3, 5][..]));
+        assert_eq!(row.path_count, Some(2));
+        assert_eq!(row.path_strength.unwrap().value, expected);
+        assert_eq!(row.provenance.source_ids, [1, 2]);
+    }
+}
+
+#[test]
+fn 单条路径平均权重保留极大值抵消后的尾项() {
+    let mut mt = MemTable::<f32>::new(2);
+    for id in 1..=4 {
+        mt.insert_with_id(id, &[1., 0.], json!({})).unwrap();
+    }
+    let big = 2f32.powi(100);
+    for (src, weight) in [(1, big), (2, 1.), (3, -big)] {
+        mt.link(src, src + 1, "r".into(), weight).unwrap();
+    }
+    let config = BoundedPathConfig {
+        max_depth: 3,
+        max_paths: 8,
+        label_sequence: None,
+        forbidden_nodes: BTreeSet::new(),
+    };
+    let paths = bounded_all_paths(&mt, 1, 4, &config, &budget())
+        .unwrap()
+        .paths;
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].nodes, [1, 2, 3, 4]);
+    assert_eq!(paths[0].strength_average, 1.0f32 / 3.0);
+}
+
+#[test]
+fn 三种最短路径查询中的重复目标只计算一次() {
+    use triviumdb::query::{
+        tql_executor::{TqlValue, execute_tql_values},
+        tql_parser::parse_tql,
+    };
+    let mt = graph();
+    for (operator, tail) in [
+        ("SHORTEST_PATHS", ""),
+        ("WEIGHTED_PATHS", ""),
+        ("YEN_PATHS", " K 2"),
+    ] {
+        let query = parse_tql(&format!(
+            "MATCH (a {{id:1}}) WITH a {operator} a TO [2,2]{tail} AS r WITH r RETURN path(r) AS p, path_count(r) AS n"
+        )).unwrap();
+        let rows = execute_tql_values(&query, &mt).unwrap();
+        assert_eq!(rows.len(), 1, "{operator}");
+        assert!(matches!(&rows[0]["p"], TqlValue::Path(path) if path == &[1,2]));
+        assert!(matches!(rows[0]["n"], TqlValue::Int(1)));
+    }
+}
+
+#[test]
 fn 路径别名从路径首节点继承即使终点也是起点() {
     use triviumdb::query::{
         tql_executor::{TqlValue, execute_tql_values},

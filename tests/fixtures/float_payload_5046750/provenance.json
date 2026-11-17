@@ -1,0 +1,13 @@
+{
+  "source_commit": "5046750c0156eda9a4c98baf2ae32f7fc8fce42a",
+  "producer": "Windows Node.js native binding built from the source commit",
+  "dimension": 2,
+  "dtype": "f32",
+  "setup": [
+    "Create a unique index on key before inserting nodes",
+    "Insert node 1 with vector [1, 0] and Payload {key: 0.9837942006357281}",
+    "Insert node 2 with vector [0, 1] and Payload {key: 0.983794200635728}",
+    "Close the database normally"
+  ],
+  "source_reopen_error": "TDB_UNIQUE_CONSTRAINT"
+}

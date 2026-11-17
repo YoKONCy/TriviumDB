@@ -31,7 +31,7 @@ use crate::filter::Filter;
 use crate::graph::view::GraphRead;
 use crate::node::{EdgeView, Node, NodeId};
 use crate::storage::memtable::MemTable;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -589,9 +589,7 @@ fn execute_tql_context_inner<T: VectorType>(
             let mut executable = query.clone();
             executable.explain = false;
             executable.analyze = false;
-            if !executable.pipeline.is_empty()
-                || matches!(executable.entry, QueryEntry::Documents { .. })
-            {
+            if uses_pipeline(&executable) {
                 let (set, name, aliases, profile, workspaces) =
                     execute_pipeline_set(&executable, memtable, true, &limits)?;
                 limits.compose_memory(&executable, memtable, &memory, &workspaces);
@@ -639,7 +637,7 @@ fn execute_tql_context_inner<T: VectorType>(
             query, memtable, None, find_plan, &limits,
         ));
     }
-    if !query.pipeline.is_empty() || matches!(query.entry, QueryEntry::Documents { .. }) {
+    if uses_pipeline(query) {
         return execute_pipeline_node_query(query, memtable, limits, &memory);
     }
     limits.compose_memory(query, memtable, &memory, &[]);
@@ -747,28 +745,9 @@ fn execute_binding_rows_inner<T: VectorType>(
             )?,
             false,
         ),
-        QueryEntry::Search {
-            vector,
-            top_k,
-            expand,
-            ..
-        } => (
-            execute_search(
-                vector,
-                *top_k,
-                expand.as_ref(),
-                query,
-                memtable,
-                scan_limit,
-                memory,
-                limits,
-            )?,
-            false,
-        ),
-        QueryEntry::Text { .. } | QueryEntry::Documents { .. } => {
+        QueryEntry::Search { .. } | QueryEntry::Text { .. } | QueryEntry::Documents { .. } => {
             return Err(TriviumError::QueryExecution(
-                "TEXT 入口必须通过可组合管线执行 (TEXT entry requires composable pipeline execution)"
-                    .into(),
+                "检索入口需要管线执行 (Retrieval entry requires pipeline execution)".into(),
             ));
         }
     };
@@ -843,6 +822,14 @@ type PipelineSetResult = (
     Vec<crate::resources::WorkspaceReservation>,
 );
 
+fn uses_pipeline(query: &TqlQuery) -> bool {
+    !query.pipeline.is_empty()
+        || matches!(
+            query.entry,
+            QueryEntry::Search { .. } | QueryEntry::Text { .. } | QueryEntry::Documents { .. }
+        )
+}
+
 fn execute_pipeline_set<T: VectorType>(
     query: &TqlQuery,
     mt: &MemTable<T>,
@@ -875,6 +862,8 @@ fn execute_pipeline_set<T: VectorType>(
     let document_vector_budget = document_request
         .as_ref()
         .map_or(0, |request| request.query().limits.max_vector_scores);
+    let shorthand_search =
+        query.pipeline.is_empty() && matches!(query.entry, QueryEntry::Search { .. });
     let plan = crate::query::cascades::optimize_pipeline_scoped(
         query,
         mt,
@@ -889,6 +878,9 @@ fn execute_pipeline_set<T: VectorType>(
                     &query.entry,
                     plan.stages.first().map(|stage| &stage.operator),
                 ) {
+                    (QueryEntry::Search { vector, top_k, expand, .. }, _) if shorthand_search => {
+                        lower_shorthand_search(vector, *top_k, expand.as_ref(), query, mt)?
+                    }
                     (
                         QueryEntry::Search {
                             vector,
@@ -1052,6 +1044,35 @@ fn execute_pipeline_set<T: VectorType>(
             .map(|stage| &stage.operator)
     };
     let mut operator_origins = vec![limits.origin(SourceSelector::Entry); operators.len()];
+    if shorthand_search {
+        if let Some(predicate) = &query.predicate {
+            operators.push(Box::new(PipelinePredicateFilter {
+                predicate: predicate.clone(),
+            }));
+            operator_origins.push(limits.origin(SourceSelector::Predicate));
+        }
+        if let Some(rank) = &query.rank {
+            if rank.var != "_" {
+                return Err(limits.error(
+                    TriviumError::QueryExecution(format!(
+                        "SEARCH RANK 引用了未绑定变量 {} (SEARCH RANK references unbound variable {})",
+                        rank.var, rank.var,
+                    )),
+                    QueryErrorStage::Plan,
+                    SourceSelector::Rank,
+                ));
+            }
+            operators.push(Box::new(crate::query::pipeline::ExactRerank {
+                query: rank
+                    .vector
+                    .iter()
+                    .map(T::from_json_number)
+                    .collect::<Result<_, _>>()?,
+                top_k: Some(rank.top_k),
+            }));
+            operator_origins.push(limits.origin(SourceSelector::Rank));
+        }
+    }
     let mut skip_filter_stage = None;
     for (stage_index, stage) in query.pipeline.iter().enumerate() {
         if skip_filter_stage == Some(stage_index) {
@@ -1064,6 +1085,8 @@ fn execute_pipeline_set<T: VectorType>(
             continue;
         }
         let stage_plan = (|| {
+            let mut after_binding: Option<Box<dyn crate::query::pipeline::PipelineOperator<T>>> =
+                None;
             match stage {
                 PipelineStage::With(with) => {
                     let preferred = query
@@ -1144,7 +1167,7 @@ fn execute_pipeline_set<T: VectorType>(
                                 "当前管线没有查询向量，不能计算 similarity() (Pipeline has no query vector for similarity())".into(),
                             )
                         })?;
-                            operators.push(Box::new(crate::query::pipeline::ExactRerank {
+                            after_binding = Some(Box::new(crate::query::pipeline::ExactRerank {
                                 query: vector
                                     .iter()
                                     .map(T::from_json_number)
@@ -1532,6 +1555,7 @@ fn execute_pipeline_set<T: VectorType>(
                     name: current_name.clone(),
                 }));
             }
+            operators.extend(after_binding);
             Ok(())
         })();
         stage_plan.map_err(|error| {
@@ -1587,7 +1611,13 @@ fn execute_pipeline_set<T: VectorType>(
                 max_visited_nodes: MAX_BUDGET,
                 max_examined_edges: MAX_BUDGET,
                 max_frontier_size: MAX_BUDGET,
-                max_depth: 64,
+                max_depth: match &query.entry {
+                    QueryEntry::Search {
+                        expand: Some(expand),
+                        ..
+                    } if shorthand_search => expand.max_depth,
+                    _ => 64,
+                },
                 exhaustion_policy: crate::graph::budget::BudgetExhaustionPolicy::Error,
             },
             parallelism: test_parallelism_budget(),
@@ -1620,7 +1650,8 @@ fn execute_pipeline_node_query<T: VectorType>(
     limits: ExecutionContext,
     memory: &QueryMemory,
 ) -> Result<TqlResult<T>, TriviumError> {
-    if matches!(&query.returns, ReturnClause::Expressions(items) if items.iter().any(|item| matches!(item.kind, ReturnExprKind::Scalar(_))))
+    if !(query.pipeline.is_empty() && matches!(query.entry, QueryEntry::Search { .. }))
+        && matches!(&query.returns, ReturnClause::Expressions(items) if items.iter().any(|item| matches!(item.kind, ReturnExprKind::Scalar(_))))
     {
         return Err(TriviumError::QueryExecution(
             "节点结果 API 无法承载标量列，请使用 tql_values (Node-only result API cannot carry scalar columns; use tql_values)".into(),
@@ -1738,7 +1769,7 @@ fn execute_tql_values_context_inner<T: VectorType>(
                 .collect()
         });
     }
-    if query.pipeline.is_empty() && !matches!(query.entry, QueryEntry::Documents { .. }) {
+    if !uses_pipeline(query) {
         limits.compose_memory(query, mt, &memory, &[]);
         let (rows, _) = execute_binding_rows(query, mt, &limits, &memory)?;
         let inputs = rows
@@ -1973,11 +2004,14 @@ fn collect_single_edge_rows_inner<T: VectorType>(
                 metadata: edge.metadata.clone(),
             };
             let input = returning::Input::Nodes(&nodes, Some((edge_var, &view)));
-            if query
-                .predicate
-                .as_ref()
-                .is_some_and(|predicate| !returning::matches_predicate(predicate, &input, &scope))
-            {
+            let default_node = pattern
+                .nodes
+                .iter()
+                .filter_map(|node| node.var.as_ref())
+                .find_map(|var| nodes.get(var));
+            if query.predicate.as_ref().is_some_and(|predicate| {
+                !returning::matches_predicate(predicate, &input, &scope, default_node)
+            }) {
                 continue;
             }
             matched = true;
@@ -2062,6 +2096,131 @@ fn pipeline_kind_value<T: VectorType>(
 struct TqlScopeProjection {
     projection: WithStage,
     primary: Option<String>,
+}
+
+// 作用域内部的指标键独立于用户变量，和绑定快照共用内存计量及行身份。
+const CURRENT_BINDING: &str = "\0current";
+
+#[derive(Clone, Copy, Debug)]
+enum BoundMetric {
+    Similarity,
+    SimilarityApproximate,
+    Path,
+    PathStrength,
+    PathCount,
+    PathRank,
+}
+
+impl BoundMetric {
+    const ALL: [Self; 6] = [
+        Self::Similarity,
+        Self::SimilarityApproximate,
+        Self::Path,
+        Self::PathStrength,
+        Self::PathCount,
+        Self::PathRank,
+    ];
+
+    fn key(self, var: &str) -> String {
+        format!("\0{self:?}:{var}")
+    }
+
+    fn clear_snapshot(var: &str, values: &mut BTreeMap<String, RuntimeValue>) {
+        for metric in Self::ALL {
+            values.remove(&metric.key(var));
+        }
+    }
+
+    fn value(self, row: &crate::query::pipeline::NodeRow, var: &str) -> RuntimeValue {
+        if var != current_binding(row) {
+            return row
+                .bindings
+                .as_ref()
+                .and_then(|values| values.get(&self.key(var)))
+                .cloned()
+                .unwrap_or(RuntimeValue::Null);
+        }
+        use crate::query::pipeline::ScoreKind;
+        match self {
+            Self::Similarity => row.similarity.map(|score| RuntimeValue::Float(score.value)),
+            Self::SimilarityApproximate => row
+                .similarity
+                .map(|score| RuntimeValue::Bool(score.kind == ScoreKind::Approximate)),
+            Self::Path => row.path.clone().map(RuntimeValue::Path),
+            Self::PathStrength => row
+                .path_strength
+                .map(|score| RuntimeValue::Float(score.value)),
+            Self::PathCount => row.path_count.map(|count| runtime_u64(count as u64)),
+            Self::PathRank => row.path_rank.map(|rank| runtime_u64(rank as u64)),
+        }
+        .unwrap_or(RuntimeValue::Null)
+    }
+
+    fn copy_all(
+        row: &crate::query::pipeline::NodeRow,
+        from: &str,
+        to: &str,
+        values: &mut BTreeMap<String, RuntimeValue>,
+    ) {
+        for metric in Self::ALL {
+            let key = metric.key(to);
+            let value = metric.value(row, from);
+            if matches!(value, RuntimeValue::Null) {
+                values.remove(&key);
+            } else {
+                values.insert(key, value);
+            }
+        }
+    }
+}
+
+fn current_binding(row: &crate::query::pipeline::NodeRow) -> &str {
+    match row
+        .bindings
+        .as_ref()
+        .and_then(|values| values.get(CURRENT_BINDING))
+    {
+        Some(RuntimeValue::Str(name)) => name,
+        _ => "_",
+    }
+}
+
+fn activate_projected_metrics(
+    row: &mut crate::query::pipeline::NodeRow,
+    primary: &str,
+    values: &BTreeMap<String, RuntimeValue>,
+) {
+    use crate::query::pipeline::{ScoreKind, ScoreValue};
+    let number = |metric: BoundMetric| match values.get(&metric.key(primary)) {
+        Some(RuntimeValue::Float(value)) => Some(*value),
+        _ => None,
+    };
+    let count = |metric: BoundMetric| match values.get(&metric.key(primary)) {
+        Some(RuntimeValue::Int(value)) => usize::try_from(*value).ok(),
+        Some(RuntimeValue::UInt(value)) => usize::try_from(*value).ok(),
+        _ => None,
+    };
+    row.similarity = number(BoundMetric::Similarity).map(|value| ScoreValue {
+        value,
+        kind: if matches!(
+            values.get(&BoundMetric::SimilarityApproximate.key(primary)),
+            Some(RuntimeValue::Bool(true))
+        ) {
+            ScoreKind::Approximate
+        } else {
+            ScoreKind::Exact
+        },
+    });
+    row.path = match values.get(&BoundMetric::Path.key(primary)) {
+        Some(RuntimeValue::Path(path)) => Some(path.clone()),
+        _ => None,
+    };
+    row.path_strength = number(BoundMetric::PathStrength).map(|value| ScoreValue {
+        value,
+        kind: ScoreKind::Exact,
+    });
+    row.path_count = count(BoundMetric::PathCount);
+    row.path_rank = count(BoundMetric::PathRank);
 }
 
 struct TqlMatchSource {
@@ -2159,7 +2318,7 @@ impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlScopeProj
         let mut rows = Vec::with_capacity(input.len());
         for mut row in input.into_rows() {
             // 同一 WITH 的所有右值读取进入阶段时的环境，再同时安装新作用域。
-            let values: BTreeMap<_, _> = self
+            let mut values: BTreeMap<_, _> = self
                 .projection
                 .items
                 .iter()
@@ -2170,10 +2329,20 @@ impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlScopeProj
                     )
                 })
                 .collect();
-            if let Some(RuntimeValue::Node(id)) =
-                self.primary.as_ref().and_then(|name| values.get(name))
+            for item in &self.projection.items {
+                if let TqlExpr::Variable(var) = &item.expr
+                    && matches!(values.get(&item.alias), Some(RuntimeValue::Node(_)))
+                {
+                    BoundMetric::copy_all(&row, var, &item.alias, &mut values);
+                }
+            }
+            if let Some(primary) = &self.primary
+                && let Some(RuntimeValue::Node(id)) = values.get(primary)
             {
                 row.id = *id;
+                activate_projected_metrics(&mut row, primary, &values);
+                BoundMetric::clear_snapshot(primary, &mut values);
+                values.insert(CURRENT_BINDING.into(), RuntimeValue::Str(primary.clone()));
             }
             row.bindings = Some(Arc::new(values));
             rows.push(row);
@@ -2205,12 +2374,21 @@ impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlOutputBin
         context: &mut crate::query::pipeline::PipelineContext<'_, T>,
     ) -> Result<crate::query::pipeline::NodeSet, TriviumError> {
         let mut origins = BTreeMap::<NodeId, Vec<_>>::new();
-        for row in input.rows() {
+        let mut input_rows = input.into_rows();
+        for row in &mut input_rows {
             if let Some(bindings) = &row.bindings {
+                let mut bindings = bindings.as_ref().clone();
+                let active = current_binding(row);
+                BoundMetric::copy_all(row, active, active, &mut bindings);
+                let bindings = Arc::new(bindings);
                 origins.entry(row.id).or_default().push(bindings.clone());
+                row.bindings = Some(bindings);
             }
         }
-        let output = self.inner.apply(input, context)?;
+        let output = self.inner.apply(
+            crate::query::pipeline::NodeSet::from_rows(input_rows),
+            context,
+        )?;
         let mut output_counts = BTreeMap::<NodeId, usize>::new();
         for row in output.rows() {
             *output_counts.entry(row.id).or_default() += 1;
@@ -2255,7 +2433,10 @@ impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlOutputBin
                 let bindings = row
                     .bindings
                     .get_or_insert_with(|| Arc::new(BTreeMap::new()));
-                Arc::make_mut(bindings).insert(self.name.clone(), RuntimeValue::Node(row.id));
+                let bindings = Arc::make_mut(bindings);
+                BoundMetric::clear_snapshot(&self.name, bindings);
+                bindings.insert(self.name.clone(), RuntimeValue::Node(row.id));
+                bindings.insert(CURRENT_BINDING.into(), RuntimeValue::Str(self.name.clone()));
                 rows.push(row);
             }
         }
@@ -2488,10 +2669,7 @@ fn eval_pipeline_row_expr<T: VectorType>(
                     .unwrap_or(RuntimeValue::Null)
             }
         }
-        TqlExpr::Similarity { .. } => row
-            .similarity
-            .map(|score| RuntimeValue::Float(score.value))
-            .unwrap_or(RuntimeValue::Null),
+        TqlExpr::Similarity { var } => BoundMetric::Similarity.value(row, var),
         TqlExpr::GraphScore { .. } => row
             .graph_score
             .map(|score| RuntimeValue::Float(score.value))
@@ -2527,32 +2705,18 @@ fn eval_pipeline_row_expr<T: VectorType>(
             .min_depth
             .map(|depth| RuntimeValue::Int(depth as i64))
             .unwrap_or(RuntimeValue::Null),
-        TqlExpr::PathStrength { .. } => row
-            .path_strength
-            .map(|score| RuntimeValue::Float(score.value))
-            .unwrap_or(RuntimeValue::Null),
-        TqlExpr::PathCount { .. } => row
-            .path_count
-            .map(|count| RuntimeValue::Int(count as i64))
-            .unwrap_or(RuntimeValue::Null),
+        TqlExpr::PathStrength { var } => BoundMetric::PathStrength.value(row, var),
+        TqlExpr::PathCount { var } => BoundMetric::PathCount.value(row, var),
         TqlExpr::Community { .. } => row
             .community_id
             .map(runtime_u64)
             .unwrap_or(RuntimeValue::Null),
-        TqlExpr::Path { .. } => row
-            .path
-            .clone()
-            .map(RuntimeValue::Path)
-            .unwrap_or(RuntimeValue::Null),
-        TqlExpr::PathLength { .. } => row
-            .path
-            .as_ref()
-            .map(|path| RuntimeValue::Int(path.len().saturating_sub(1) as i64))
-            .unwrap_or(RuntimeValue::Null),
-        TqlExpr::PathRank { .. } => row
-            .path_rank
-            .map(|rank| RuntimeValue::Int(rank as i64))
-            .unwrap_or(RuntimeValue::Null),
+        TqlExpr::Path { var } => BoundMetric::Path.value(row, var),
+        TqlExpr::PathLength { var } => match BoundMetric::Path.value(row, var) {
+            RuntimeValue::Path(path) => runtime_u64(path.len().saturating_sub(1) as u64),
+            _ => RuntimeValue::Null,
+        },
+        TqlExpr::PathRank { var } => BoundMetric::PathRank.value(row, var),
         TqlExpr::PairLeft { .. } => row
             .pair
             .map(|(left, _)| runtime_u64(left))
@@ -2591,18 +2755,15 @@ fn eval_pipeline_row_predicate<T: VectorType>(
             &eval_pipeline_row_expr(right, row, mt),
         ),
         Predicate::DocFilter { var, filter } => {
-            let bound = var
-                .as_ref()
-                .and_then(|var| row.bindings.as_ref().and_then(|bindings| bindings.get(var)));
+            let bound = var.as_ref().map_or(RuntimeValue::Node(row.id), |var| {
+                eval_pipeline_row_expr(&TqlExpr::Variable(var.clone()), row, mt)
+            });
             match bound {
-                Some(RuntimeValue::Node(id)) => mt
-                    .get_payload(*id)
+                RuntimeValue::Node(id) => mt
+                    .get_payload(id)
                     .is_some_and(|payload| filter.matches(&payload)),
-                Some(RuntimeValue::Json(value)) => filter.matches(value),
-                Some(_) => false,
-                None => mt
-                    .get_payload(row.id)
-                    .is_some_and(|payload| filter.matches(&payload)),
+                RuntimeValue::Json(value) => filter.matches(&value),
+                _ => false,
             }
         }
         Predicate::And(left, right) => {
@@ -2957,24 +3118,22 @@ fn execute_match<T: VectorType>(
 //  SEARCH 执行路径 (桥接到向量管线)
 // ═══════════════════════════════════════════════════════════════════════
 
-fn execute_search<T: VectorType>(
+fn lower_shorthand_search<T: VectorType>(
     vector: &[serde_json::Number],
     top_k: usize,
     expand: Option<&ExpandClause>,
     query: &TqlQuery,
     mt: &MemTable<T>,
-    row_limit: usize,
-    memory: &QueryMemory,
-    limits: &ExecutionContext,
-) -> Result<TqlResult<T>, TriviumError> {
-    let mut operators = crate::query::pipeline::lower_search_entry(vector, top_k, expand)
-        .map_err(|error| limits.error(error, QueryErrorStage::Plan, SourceSelector::Entry))?;
+) -> Result<Vec<Box<dyn crate::query::pipeline::PipelineOperator<T>>>, TriviumError> {
     let indexed_filter = if expand.is_none() {
         query
             .predicate
             .as_ref()
             .and_then(|predicate| match predicate {
-                Predicate::DocFilter { filter, .. } if filter_is_equality_conjunction(filter) => {
+                Predicate::DocFilter { var, filter }
+                    if var.as_deref().is_none_or(|var| var == "_")
+                        && filter_is_equality_conjunction(filter) =>
+                {
                     let mut equalities = Vec::new();
                     collect_filter_equalities(filter, &mut equalities);
                     let candidates = if equalities.len() == 1 {
@@ -2992,7 +3151,7 @@ fn execute_search<T: VectorType>(
         None
     };
     if let Some((filter, candidates)) = indexed_filter {
-        operators = vec![
+        return Ok(vec![
             Box::new(crate::query::pipeline::NodeIdsSource { ids: candidates }),
             Box::new(crate::query::pipeline::PayloadFilter { filter }),
             Box::new(crate::query::pipeline::ExactRerank {
@@ -3002,63 +3161,9 @@ fn execute_search<T: VectorType>(
                     .collect::<Result<Vec<_>, _>>()?,
                 top_k: Some(top_k),
             }),
-        ];
+        ]);
     }
-    let mut context = crate::query::pipeline::PipelineContext::new(
-        mt,
-        crate::query::pipeline::PipelineBudget {
-            max_nodes: MAX_BUDGET,
-            max_node_set_bytes: MAX_BUDGET
-                .saturating_mul(std::mem::size_of::<crate::query::pipeline::NodeRow>()),
-            max_vector_read_bytes: mt
-                .node_count()
-                .saturating_mul(mt.dim())
-                .saturating_mul(std::mem::size_of::<T>()),
-            traversal: crate::graph::budget::TraversalBudget {
-                max_visited_nodes: MAX_BUDGET,
-                max_examined_edges: MAX_BUDGET,
-                max_frontier_size: MAX_BUDGET,
-                max_depth: expand.map_or(1, |clause| clause.max_depth),
-                exhaustion_policy: crate::graph::budget::BudgetExhaustionPolicy::Error,
-            },
-            ..crate::query::pipeline::PipelineBudget::default()
-        },
-    );
-    context.query_control = limits.query_control.clone();
-    context.graph_scope = limits.graph.clone();
-    if limits.graph.is_some() {
-        context.workspace_limit = limits.memory_limit;
-        context.database_memory_limit = limits.memory_limit;
-    }
-    let operators = operators
-        .into_iter()
-        .map(|inner| match limits.origin(SourceSelector::Entry) {
-            Some(origin) => Box::new(SourcedOperator { inner, origin })
-                as Box<dyn crate::query::pipeline::PipelineOperator<T>>,
-            None => inner,
-        })
-        .collect::<Vec<_>>();
-    let candidates = crate::query::pipeline::execute_pipeline(&mut context, &operators)?;
-
-    let mut results = Vec::new();
-    for row_data in candidates.rows() {
-        if results.len() >= row_limit {
-            break;
-        }
-        let id = row_data.id;
-        if let Some(pred) = &query.predicate
-            && !eval_predicate_single(pred, id, mt)
-        {
-            continue;
-        }
-        {
-            let node = memory.snapshot(id, mt)?;
-            let mut row = HashMap::new();
-            row.insert("_".into(), node);
-            results.push(row);
-        }
-    }
-    Ok(results)
+    crate::query::pipeline::lower_search_entry(vector, top_k, expand)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3772,7 +3877,7 @@ fn aggregate_numbers(
             _ => serde_json::Value::Null,
         };
     }
-    let mut sum = super::numeric::ExactSum::default();
+    let mut sum = crate::numeric::ExactSum::default();
     for value in &values {
         sum.push_number(value);
     }
@@ -4290,6 +4395,39 @@ pub(crate) fn return_column_name(item: &ReturnExpr) -> String {
     item.alias
         .clone()
         .unwrap_or_else(|| format_return_expr_kind(&item.kind))
+}
+
+/// 从投影和作用域取得结果列，即使查询没有命中也可用于输出表头。
+pub fn result_columns(query: &TqlQuery) -> Vec<String> {
+    if query.explain {
+        return vec!["plan".into()];
+    }
+    match &query.returns {
+        ReturnClause::Variables(names) => return names.clone(),
+        ReturnClause::Expressions(items) => return items.iter().map(return_column_name).collect(),
+        ReturnClause::All => {}
+    }
+    let mut columns = BTreeSet::new();
+    if let QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } = &query.entry {
+        if !query.pipeline.is_empty() {
+            columns.insert("_".into());
+        }
+        columns.extend(pattern.nodes.iter().filter_map(|node| node.var.clone()));
+        columns.extend(pattern.edges.iter().filter_map(|edge| edge.var.clone()));
+    } else {
+        columns.insert("_".into());
+        if matches!(query.entry, QueryEntry::Documents { .. }) {
+            columns.insert("document".into());
+        }
+    }
+    for stage in &query.pipeline {
+        if let PipelineStage::With(with) = stage {
+            columns = with.items.iter().map(|item| item.alias.clone()).collect();
+        } else if let Some(name) = stage.node_output() {
+            columns.insert(name.to_owned());
+        }
+    }
+    columns.into_iter().collect()
 }
 
 pub(crate) fn validate_return_columns(returns: &ReturnClause) -> Result<(), TriviumError> {

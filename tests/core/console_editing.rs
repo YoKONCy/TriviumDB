@@ -367,7 +367,16 @@ fn 各业务写入入口与删除重建均使旧编辑版本失效() {
 fn 回执淘汰及无事实变化的事务都不能使旧请求重新执行() {
     let root = TestDir::new("edit-eviction");
     let path = root.0.join("sample.tdb");
-    let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+    let runtime = triviumdb::ResourceRuntime::new(Default::default()).unwrap();
+    let mut db = Database::<f32>::open_with_runtime(
+        path.to_str().unwrap(),
+        Config {
+            dim: 2,
+            ..Default::default()
+        },
+        runtime,
+    )
+    .unwrap();
     db.insert_with_id(1, &[1., 0.], json!({"value":"original"}))
         .unwrap();
     let session = ConsoleSession::from_json(r#"{"readOnly":false}"#).unwrap();
