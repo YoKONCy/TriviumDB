@@ -1,7 +1,7 @@
 //! 宿主对象与 JSON 内容的无损转换。
 
 use napi::bindgen_prelude::{FromNapiValue, ToNapiValue, TypeName, ValidateNapiValue};
-use napi::{Env, JsObject, JsUnknown, NapiRaw, NapiValue, ValueType, sys};
+use napi::{Env, JsNumber, JsObject, JsUnknown, NapiRaw, NapiValue, ValueType, sys};
 use serde_json::Value;
 
 pub(super) fn node_json_value(value: impl serde::Serialize) -> serde_json::Result<NodeJson> {
@@ -43,6 +43,22 @@ pub(super) fn string_from_js(value: JsUnknown) -> napi::Result<String> {
             "字符串包含孤立 surrogate (String contains an isolated surrogate)",
         )
     })
+}
+
+fn number_from_js(value: JsUnknown) -> napi::Result<Value> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let number = JsNumber::try_from(value)?.get_double()?;
+    if number.fract() == 0.0 && number.abs() <= MAX_SAFE_INTEGER {
+        return Ok(Value::from(number as i64));
+    }
+    serde_json::Number::from_f64(number)
+        .map(Value::Number)
+        .ok_or_else(|| {
+            napi::Error::new(
+                napi::Status::InvalidArg,
+                "JSON 数值必须有限 (JSON numbers must be finite)",
+            )
+        })
 }
 
 impl From<Value> for NodeJson {
@@ -138,7 +154,7 @@ fn read_json(
                 "Payload BigInt 请使用十进制字符串 (Represent Payload BigInt as a decimal string)",
             )),
             ValueType::String => string_from_js(value).map(Value::String),
-            // 标量沿用 napi 既有数值与非法值边界，避免经 JSON.stringify 改写 NaN 等输入。
+            ValueType::Number => number_from_js(value),
             _ => unsafe {
                 // SAFETY: 句柄类型已由 napi 检测，标量转换不持有跨作用域引用。
                 Value::from_napi_value(env.raw(), value.raw())

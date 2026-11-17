@@ -325,7 +325,7 @@ fn 底层wal隔离禁止clear追加和group重启() {
 }
 
 #[test]
-fn group同步和事务中途序列化失败同样隔离writer() {
+fn group同步和事务序列化失败同样隔离writer() {
     let root = support::TestDir::new("wal_batch_partial");
     for point in [IoPoint::WalFlush, IoPoint::WalSync] {
         let path = root.file(&format!("group_{point:?}.tdb"));
@@ -356,6 +356,7 @@ fn group同步和事务中途序列化失败同样隔离writer() {
     let path = root.file("partial.tdb");
     let mut wal = Wal::open_with_sync(&path, SyncMode::Full).unwrap();
     wal.append(&WalEntry::Delete::<f32> { id: 10 }).unwrap();
+    let before = std::fs::read(format!("{path}.wal")).unwrap();
     let result = wal.append_batch(
         2,
         &[WalEntry::Insert {
@@ -371,6 +372,7 @@ fn group同步和事务中途序列化失败同样隔离writer() {
     ));
     assert!(matches!(wal.clear(), Err(TriviumError::WalClosed)));
     drop(wal);
+    assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
     let (entries, _) = Wal::read_entries::<f32>(&path).unwrap();
     assert_eq!(entries.len(), 1);
     assert!(matches!(entries[0], WalEntry::Delete { id: 10 }));

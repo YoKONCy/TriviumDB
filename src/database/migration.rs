@@ -237,6 +237,15 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
         }
         {
             let mut target = super::write_or_recover(&stage.memtable);
+            for fields in mt.unique_index_definitions() {
+                use crate::index::property::PropertyIndexKind;
+                let kind = if fields.len() == 1 {
+                    PropertyIndexKind::Hash
+                } else {
+                    PropertyIndexKind::Composite
+                };
+                target.build_property_index(kind, &fields, true, config.memory_limit)?;
+            }
             let bytes = mt
                 .named_graphs
                 .projection_bytes()

@@ -124,7 +124,10 @@ impl GenerationStore {
         self.ensure_path()?;
         std::fs::create_dir_all(&self.root)?;
         let _management = self.lock_management_exclusive()?;
-        let database_path = self.database_path(generation_id, database_file)?;
+        validate_component(database_file, "database_file")?;
+        let database_path = self
+            .canonical_generation_dir(generation_id)?
+            .join(database_file);
         let manifest = crate::storage::snapshot::validate_manifest_for_generation(
             &database_path.to_string_lossy(),
             generation_id,
@@ -213,8 +216,8 @@ impl GenerationStore {
     {
         let _management = self.lock_management_shared()?;
         let current = self.resolve_current()?;
-        let directory = self.generation_dir(&current.generation_id)?;
-        let lease_path = self.reader_lock_path(&current.generation_id)?;
+        let directory = self.canonical_generation_dir(&current.generation_id)?;
+        let lease_path = self.reader_lock_path(&directory)?;
         std::fs::create_dir_all(self.runtime_directory()?)?;
         let lease = std::fs::OpenOptions::new()
             .create(true)
@@ -249,6 +252,7 @@ impl GenerationStore {
     }
 
     pub fn reclaim_generation(&self, generation_id: &str) -> Result<()> {
+        validate_component(generation_id, "generation_id")?;
         let _management = self.lock_management_exclusive()?;
         let current = self.resolve_current()?;
         if current.generation_id == generation_id {
@@ -256,11 +260,21 @@ impl GenerationStore {
                 generation_id: generation_id.to_string(),
             });
         }
-        let directory = self.generation_dir(generation_id)?;
-        if !directory.exists() {
-            return Ok(());
+        let directory = match self.canonical_generation_dir(generation_id) {
+            Err(TriviumError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            result => result?,
+        };
+        let current_directory = self.canonical_generation_dir(&current.generation_id)?;
+        if directory == current_directory
+            || same_file::is_same_file(&directory, &current_directory)?
+        {
+            return Err(TriviumError::GenerationBusy {
+                generation_id: generation_id.to_string(),
+            });
         }
-        let lease_path = self.reader_lock_path(generation_id)?;
+        let lease_path = self.reader_lock_path(&directory)?;
         std::fs::create_dir_all(self.runtime_directory()?)?;
         let lease = std::fs::OpenOptions::new()
             .create(true)
@@ -300,12 +314,38 @@ impl GenerationStore {
         Ok(file)
     }
 
-    fn reader_lock_path(&self, generation_id: &str) -> Result<PathBuf> {
-        validate_component(generation_id, "generation_id")?;
+    fn canonical_generation_dir(&self, generation_id: &str) -> Result<PathBuf> {
+        let directory = self.generation_dir(generation_id)?;
+        // symlink_metadata 保留符号链接和 Windows 目录联接的入口类型。
+        if !std::fs::symlink_metadata(&directory)?.is_dir() {
+            return Err(TriviumError::InvalidInput(
+                "代际路径必须是实际目录 (Generation path must be a physical directory)".into(),
+            ));
+        }
+        let canonical = directory.canonicalize()?;
+        let root = self.root.canonicalize()?;
+        if canonical.parent() != Some(root.as_path()) {
+            return Err(TriviumError::InvalidInput(
+                "代际目录必须位于库根目录下 (Generation directory must be a direct child of the store root)".into(),
+            ));
+        }
+        Ok(canonical)
+    }
+
+    fn reader_lock_path(&self, directory: &Path) -> Result<PathBuf> {
+        let name = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                TriviumError::InvalidInput(
+                    "代际目录名称无效 (Invalid generation directory name)".into(),
+                )
+            })?;
+        // 规范目录名让同一目录的不同拼写共享租约，也沿用常规目录名的租约键。
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(self.root.canonicalize()?.to_string_lossy().as_bytes());
         hasher.update(&[0]);
-        hasher.update(generation_id.as_bytes());
+        hasher.update(name.as_bytes());
         Ok(self
             .runtime_directory()?
             .join(format!("reader-{:08x}.lock", hasher.finalize())))
@@ -340,6 +380,7 @@ fn validate_component(value: &str, field: &str) -> Result<()> {
     let path = Path::new(value);
     let mut components = path.components();
     let valid = !value.is_empty()
+        && !value.contains(['/', '\\'])
         && components
             .next()
             .is_some_and(|component| matches!(component, Component::Normal(_)))

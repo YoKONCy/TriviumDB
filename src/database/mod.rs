@@ -122,6 +122,32 @@ fn normalized_database_path(path: &str) -> Result<PathBuf> {
     normalized_database_parent_path(path)
 }
 
+fn cas_value_matches(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (actual, expected) {
+        // JS 读出的 number 不携带 JSON 整数与浮点的编码区别。
+        (Value::Number(actual), Value::Number(expected)) => {
+            crate::filter::numeric_ordering(actual, expected).is_eq()
+        }
+        (Value::Array(actual), Value::Array(expected)) => {
+            actual.len() == expected.len()
+                && actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| cas_value_matches(a, b))
+        }
+        (Value::Object(actual), Value::Object(expected)) => {
+            actual.len() == expected.len()
+                && actual.iter().all(|(key, value)| {
+                    expected
+                        .get(key)
+                        .is_some_and(|expected| cas_value_matches(value, expected))
+                })
+        }
+        _ => actual == expected,
+    }
+}
+
 fn normalized_database_parent_path(path: &str) -> Result<PathBuf> {
     let requested = Path::new(path);
     let file_name = requested.file_name().ok_or_else(|| {
@@ -1813,9 +1839,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::DirectWriteWalLockAcquired);
         crate::request::check_current()?;
+        wal.validate_entry(&entry)?;
         write.phase = WritePhase::Wal;
         write.outcome = WriteOutcome::Unknown;
-        wal.append(&entry)?;
+        wal.append_validated(&entry)?;
         drop(wal);
         write.phase = WritePhase::Apply;
         let guard = transaction::ApplicationGuard::direct(mt, &self.wal, &self.lifecycle.0);
@@ -2153,7 +2180,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 .get_payload(id)
                 .map(|payload| (*payload).clone())
                 .ok_or(TriviumError::NodeNotFound(id))?;
-            if payload.get(field) != Some(expected) {
+            if !payload
+                .get(field)
+                .is_some_and(|actual| cas_value_matches(actual, expected))
+            {
                 return Err(TriviumError::ConditionalUpdateNotMatched { id });
             }
             let object = payload.as_object_mut().ok_or_else(|| {

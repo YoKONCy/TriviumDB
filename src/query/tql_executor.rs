@@ -3747,6 +3747,39 @@ fn compensated_sum(values: impl Iterator<Item = f64>) -> (f64, f64) {
     (sum, correction)
 }
 
+fn sum_floats(values: &[serde_json::Number]) -> f64 {
+    let numbers = || values.iter().filter_map(serde_json::Number::as_f64);
+    let (sum, correction) = compensated_sum(numbers());
+    let result = sum + correction;
+    if result.is_finite() {
+        return result;
+    }
+
+    // 优先取与部分和异号的项，避免可抵消的大数溢出，同时保留原尺度上的微小项。
+    let mut positive = numbers().filter(|number| *number >= 0.0);
+    let mut negative = numbers().filter(|number| *number < 0.0);
+    let mut balance = 0.0;
+    let (sum, correction) = compensated_sum(std::iter::from_fn(|| {
+        let number = if balance > 0.0 {
+            negative.next().or_else(|| positive.next())
+        } else {
+            positive.next().or_else(|| negative.next())
+        }?;
+        balance += number;
+        Some(number)
+    }));
+    let balanced = sum + correction;
+    if balanced.is_finite() {
+        return balanced;
+    }
+
+    // 靠近浮点上限时，已积累的补偿可能使最终结果回到有限范围。
+    // 用二的幂缩放后再合并补偿，避免下结论前再次发生中间溢出。
+    let scale = values.len().next_power_of_two() as f64;
+    let (sum, correction) = compensated_sum(numbers().map(|number| number / scale));
+    (sum + correction) * scale
+}
+
 fn aggregate_numbers(
     func: AggFunc,
     values: impl Iterator<Item = serde_json::Number>,
@@ -3807,10 +3840,7 @@ fn aggregate_numbers(
             ((sum + correction) / count).clamp(-1.0, 1.0) * scale
         }
     } else {
-        values
-            .iter()
-            .filter_map(serde_json::Number::as_f64)
-            .sum::<f64>()
+        sum_floats(&values)
     };
     serde_json::Number::from_f64(result).map_or(serde_json::Value::Null, serde_json::Value::Number)
 }

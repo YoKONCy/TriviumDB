@@ -67,11 +67,10 @@ fn verify(directory: &Path) -> Result<GenerationManifest> {
     let declared: GenerationManifest =
         serde_json::from_slice(&read_manifest_bytes(&manifest_path)?)
             .map_err(|error| invalid(format!("快照 manifest 无效：{error}")))?;
-    if declared.generation_id.trim().is_empty()
-        || declared.generation_id.len() > 256
-        || !["f32", std::any::type_name::<half::f16>(), "u64"].contains(&declared.dtype.as_str())
-    {
-        return Err(invalid("快照 generation_id 或 dtype 无效"));
+    if declared.generation_id.trim().is_empty() || declared.generation_id.len() > 256 {
+        return Err(invalid(
+            "快照 generation_id 无效 (Invalid snapshot generation_id)",
+        ));
     }
     // 先校验受支持的后缀，再按声明访问文件，避免由 manifest 指定任意路径。
     let manifest = validate_manifest(&database.to_string_lossy(), &declared.dtype, declared.dim)?;
@@ -85,7 +84,8 @@ fn verify(directory: &Path) -> Result<GenerationManifest> {
         return Err(invalid("快照包含未声明文件、WAL 或临时制品"));
     }
     crate::storage::file_format::validate_snapshot_metadata(
-        &database,
+        &database.to_string_lossy(),
+        &manifest.dtype,
         manifest.dim,
         manifest.node_count,
     )?;

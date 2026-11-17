@@ -29,7 +29,7 @@ pub(crate) fn publish_new_database<T: VectorType>(
     target: &str,
     write: &mut WriteErrorInfo,
 ) -> Result<()> {
-    validate_checkpoint_type::<T>(source, &vec_path_from_db(source), source)?;
+    validate_checkpoint_type::<T>(source, &vec_path_from_db(source))?;
     let generation = read_marker_generation(&flush_ok_path_from_db(source)).ok_or_else(|| {
         TriviumError::CorruptedFile(
             "迁移暂存库缺少提交标记 (Migration staging database has no commit marker)".into(),
@@ -151,17 +151,15 @@ pub(crate) fn initialize<T: VectorType>(path: &str, memtable: &mut MemTable<T>) 
     save(&mut checkpoint, path, StorageMode::Rom)
 }
 
-fn validate_vector_identity<T: VectorType>(
+fn validate_vector_identity(
     bytes: &[u8],
-    _version: u16,
+    (requested_tag, requested): (u16, &'static str),
     dim: usize,
     count: usize,
     vector_offset: usize,
     edge_offset: usize,
-    _path: &str,
     vec_path: &str,
 ) -> Result<()> {
-    let (requested_tag, requested) = vector_dtype::<T>()?;
     let elements = count.checked_mul(dim).ok_or_else(|| {
         TriviumError::CorruptedFile("向量几何溢出 (Vector geometry overflow)".into())
     })?;
@@ -223,30 +221,33 @@ fn validate_vector_identity<T: VectorType>(
 }
 
 /// 发布恢复写入前核对可信基础文件的类型；备份向量使用独立路径。
-fn validate_checkpoint_type<T: VectorType>(
-    main: &str,
-    vectors: &str,
-    wal_base: &str,
-) -> Result<()> {
+fn validate_checkpoint_type<T: VectorType>(main: &str, vectors: &str) -> Result<()> {
     use std::io::Read;
     let mut bytes = [0u8; HEADER_SIZE as usize];
     let mut file = File::open(main)?;
     file.read_exact(&mut bytes)?;
     let version = read_u16_le(&bytes, 4, "version")?;
     crate::storage::format::require("database", version.into(), CURRENT_VERSION.into())?;
-    validate_vector_identity::<T>(
-        &bytes,
-        version,
-        read_u32_le(&bytes, 6, "dim")? as usize,
-        usize::try_from(read_u64_le(&bytes, 18, "slots")?).map_err(|_| {
+    validate_checkpoint_vector_identity(&bytes, vector_dtype::<T>()?, vectors)
+}
+
+fn validate_checkpoint_vector_identity(
+    bytes: &[u8],
+    dtype: (u16, &'static str),
+    vectors: &str,
+) -> Result<()> {
+    validate_vector_identity(
+        bytes,
+        dtype,
+        read_u32_le(bytes, 6, "dim")? as usize,
+        usize::try_from(read_u64_le(bytes, 18, "slots")?).map_err(|_| {
             TriviumError::CorruptedFile("槽位数量溢出 (Slot count overflow)".into())
         })?,
-        usize::try_from(read_u64_le(&bytes, 34, "vectors")?).map_err(|_| {
+        usize::try_from(read_u64_le(bytes, 34, "vectors")?).map_err(|_| {
             TriviumError::CorruptedFile("向量偏移溢出 (Vector offset overflow)".into())
         })?,
-        usize::try_from(read_u64_le(&bytes, 42, "edges")?)
+        usize::try_from(read_u64_le(bytes, 42, "edges")?)
             .map_err(|_| TriviumError::CorruptedFile("边偏移溢出 (Edge offset overflow)".into()))?,
-        wal_base,
         vectors,
     )
 }
@@ -1314,14 +1315,13 @@ fn load_inner<T: VectorType>(
             "文件块几何无效 (Invalid file block geometry)".into(),
         ));
     }
-    validate_vector_identity::<T>(
+    validate_vector_identity(
         bytes,
-        version,
+        vector_dtype::<T>()?,
         dim,
         node_count,
         vector_offset,
         edge_offset,
-        path,
         &vec_path_from_db(path),
     )?;
 
@@ -2200,7 +2200,8 @@ fn load_quiver_index<T: VectorType>(
 
 /// 复用正式头部常量与解析函数，核对快照声明的基础事实，不物化数据库。
 pub(crate) fn validate_snapshot_metadata(
-    path: &std::path::Path,
+    path: &str,
+    expected_dtype: &str,
     expected_dim: usize,
     expected_nodes: usize,
 ) -> Result<()> {
@@ -2218,8 +2219,28 @@ pub(crate) fn validate_snapshot_metadata(
         || dim > 65536
     {
         return Err(TriviumError::ImmutableArtifactInvalid {
-            reason: "快照主文件头与 manifest 不匹配".into(),
+            reason: "快照主文件头与 manifest 不匹配 (Snapshot header does not match the manifest)"
+                .into(),
         });
     }
-    Ok(())
+    let dtype = match expected_dtype {
+        "f32" => vector_dtype::<f32>(),
+        "u64" => vector_dtype::<u64>(),
+        name if name == std::any::type_name::<half::f16>() => vector_dtype::<half::f16>(),
+        _ => {
+            return Err(TriviumError::ImmutableArtifactInvalid {
+                reason: "快照 dtype 不受支持 (Unsupported snapshot dtype)".into(),
+            });
+        }
+    }?;
+    validate_checkpoint_vector_identity(&bytes, dtype, &vec_path_from_db(path)).map_err(|error| {
+        match error {
+            TriviumError::Io(_) => error,
+            _ => TriviumError::ImmutableArtifactInvalid {
+                reason: format!(
+                    "快照向量身份校验失败 (Snapshot vector identity validation failed): {error}"
+                ),
+            },
+        }
+    })
 }

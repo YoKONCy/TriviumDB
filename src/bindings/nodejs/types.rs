@@ -25,10 +25,6 @@ pub struct JsGroupedSearchResult {
     pub graph_hits: Vec<JsSearchHit>,
 }
 
-pub(super) fn round_api_f32(value: f32) -> f64 {
-    ((value as f64) * 1_000_000.0).round() / 1_000_000.0
-}
-
 pub(super) fn search_hit_to_js(env: Env, hit: crate::node::SearchHit) -> napi::Result<JsSearchHit> {
     Ok(JsSearchHit {
         id: node_id_to_js(env, hit.id)?,
@@ -202,7 +198,7 @@ pub(super) fn to_js_reachability(
                     from: node_id_to_js(env, step.from)?,
                     to: node_id_to_js(env, step.to)?,
                     label: step.label,
-                    weight: round_api_f32(step.weight),
+                    weight: f64::from(step.weight),
                     metadata: step.metadata.into(),
                 })
             })

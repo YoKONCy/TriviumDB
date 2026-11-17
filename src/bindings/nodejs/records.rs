@@ -7,7 +7,7 @@ use super::arguments::{
 use super::database::{DbBackend, TriviumDB};
 use super::errors::{to_napi_error, write_input_error};
 use super::json::NodeJson;
-use super::types::{JsEdge, JsNodeView, round_api_f32};
+use super::types::{JsEdge, JsNodeView};
 use napi::bindgen_prelude::Either;
 use napi::{Env, JsUnknown};
 use napi_derive::napi;
@@ -270,7 +270,7 @@ impl TriviumDB {
                                 Ok(JsEdge {
                                     target_id: node_id_to_js(env, e.target_id)?,
                                     label: e.label.clone(),
-                                    weight: round_api_f32(e.weight),
+                                    weight: f64::from(e.weight),
                                     metadata: e.metadata.clone().into(),
                                 })
                             })
@@ -296,7 +296,7 @@ impl TriviumDB {
                                 Ok(JsEdge {
                                     target_id: node_id_to_js(env, e.target_id)?,
                                     label: e.label.clone(),
-                                    weight: round_api_f32(e.weight),
+                                    weight: f64::from(e.weight),
                                     metadata: e.metadata.clone().into(),
                                 })
                             })
@@ -322,7 +322,7 @@ impl TriviumDB {
                                 Ok(JsEdge {
                                     target_id: node_id_to_js(env, e.target_id)?,
                                     label: e.label.clone(),
-                                    weight: round_api_f32(e.weight),
+                                    weight: f64::from(e.weight),
                                     metadata: e.metadata.clone().into(),
                                 })
                             })

@@ -10,7 +10,7 @@ use super::json::{NodeJson, node_json_value};
 use super::options::parse_reachability_options;
 use super::types::{
     JsClusterResult, JsEdge, JsIncomingEdge, JsReachabilityOutput, JsReachabilityResult,
-    JsSubgraphEdge, JsSubgraphNode, JsSubgraphResult, round_api_f32, to_js_reachability,
+    JsSubgraphEdge, JsSubgraphNode, JsSubgraphResult, to_js_reachability,
 };
 use napi::bindgen_prelude::Either;
 use napi::{Env, JsUnknown};
@@ -82,7 +82,7 @@ impl TriviumDB {
             dispatch!(self, db => db.get_edge(src, dst, &label).map_err(|error| to_napi_error(env, error))?).map(|edge| Ok::<_,napi::Error>(JsEdge {
                 target_id: node_id_to_js(env, edge.target_id)?,
                 label: edge.label,
-                weight: round_api_f32(edge.weight),
+                weight: f64::from(edge.weight),
                 metadata: edge.metadata.into(),
             })).transpose()?
         })
@@ -257,7 +257,7 @@ impl TriviumDB {
                         source_id: node_id_to_js(env, edge.source_id)?,
                         target_id: node_id_to_js(env, edge.target_id)?,
                         label: edge.label,
-                        weight: round_api_f32(edge.weight),
+                        weight: f64::from(edge.weight),
                         metadata: edge.metadata.into(),
                     })
                 })
@@ -354,7 +354,7 @@ impl TriviumDB {
                     Ok(JsEdge {
                         target_id: node_id_to_js(env, e.target_id)?,
                         label: e.label,
-                        weight: round_api_f32(e.weight),
+                        weight: f64::from(e.weight),
                         metadata: e.metadata.into(),
                     })
                 })
@@ -381,7 +381,7 @@ impl TriviumDB {
                     source_id: node_id_to_js(env, edge.source_id)?,
                     target_id: node_id_to_js(env, edge.target_id)?,
                     label: edge.label,
-                    weight: round_api_f32(edge.weight),
+                    weight: f64::from(edge.weight),
                     metadata: edge.metadata.into(),
                 })).collect::<napi::Result<_>>()?
         })

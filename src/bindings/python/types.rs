@@ -20,7 +20,7 @@ pub(super) fn to_py_reachability(
                     from_id: step.from,
                     to_id: step.to,
                     label: step.label,
-                    weight: round_api_f32(step.weight),
+                    weight: f64::from(step.weight),
                     metadata: json_to_pyobject(py, &step.metadata)?,
                 })
             })
@@ -122,10 +122,6 @@ pub struct PyIncomingEdge {
     pub weight: f64,
     #[pyo3(get)]
     pub metadata: PyObject,
-}
-
-pub(super) fn round_api_f32(value: f32) -> f64 {
-    ((value as f64) * 1_000_000.0).round() / 1_000_000.0
 }
 
 pub(super) fn search_hit_to_python(

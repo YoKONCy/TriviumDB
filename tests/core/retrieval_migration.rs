@@ -385,3 +385,50 @@ fn 新库迁移完整保存payload边元数据并可再次打开() {
     );
     source.close().unwrap();
 }
+
+#[test]
+fn 维度迁移及再次打开保留单字段和组合唯一约束() {
+    let root = TestDir::new("migration_unique");
+    let mut source = Database::<f32>::open(&root.file("source.tdb"), 1).unwrap();
+    source
+        .insert_with_id(1, &[1.], json!({"email":"one", "tenant":"t", "key":"k"}))
+        .unwrap();
+    source.create_unique_index("email").unwrap();
+    source
+        .create_unique_composite_index(&["tenant".into(), "key".into()])
+        .unwrap();
+
+    let path = root.file("target.tdb");
+    let (mut target, ids) = source.migrate_to(&path, 2).unwrap();
+    assert_eq!(ids, [1]);
+    let check = |db: &mut Database<f32>| {
+        assert_eq!(
+            db.list_unique_indexes().unwrap(),
+            [
+                vec!["email".to_owned()],
+                vec!["tenant".into(), "key".into()],
+            ]
+        );
+        for payload in [
+            json!({"email":"one", "tenant":"other", "key":"k"}),
+            json!({"email":"two", "tenant":"t", "key":"k"}),
+        ] {
+            let error = db.insert_with_id(2, &[0., 1.], payload).unwrap_err();
+            assert_eq!(error.code(), "TDB_UNIQUE_CONSTRAINT");
+        }
+        assert_eq!(db.all_node_ids().unwrap(), [1]);
+    };
+    check(&mut target);
+    target.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, 2).unwrap();
+    check(&mut reopened);
+    reopened
+        .insert_with_id(
+            3,
+            &[0., 1.],
+            json!({"email":"three", "tenant":"t", "key":"new"}),
+        )
+        .unwrap();
+    reopened.close().unwrap();
+    source.close().unwrap();
+}

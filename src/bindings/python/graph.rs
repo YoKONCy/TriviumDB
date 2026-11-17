@@ -7,9 +7,7 @@ use super::arguments::{
 use super::database::{PyTriviumDB, database_read, database_write};
 use super::errors::{attach_error_info, to_py_error, write_admission_error};
 use super::json::{json_to_pyobject, write_json};
-use super::types::{
-    PyEdge, PyIncomingEdge, PyReachabilityResult, round_api_f32, to_py_reachability,
-};
+use super::types::{PyEdge, PyIncomingEdge, PyReachabilityResult, to_py_reachability};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -50,7 +48,7 @@ impl PyTriviumDB {
                     Ok(PyEdge {
                         target_id: edge.target_id,
                         label: edge.label,
-                        weight: round_api_f32(edge.weight),
+                        weight: f64::from(edge.weight),
                         metadata: json_to_pyobject(py, &edge.metadata)?,
                     })
                 })
@@ -145,7 +143,7 @@ impl PyTriviumDB {
                     Ok(PyEdge {
                         target_id: e.target_id,
                         label: e.label,
-                        weight: round_api_f32(e.weight),
+                        weight: f64::from(e.weight),
                         metadata: json_to_pyobject(py, &e.metadata)?,
                     })
                 })
@@ -174,7 +172,7 @@ impl PyTriviumDB {
                         source_id: edge.source_id,
                         target_id: edge.target_id,
                         label: edge.label,
-                        weight: round_api_f32(edge.weight),
+                        weight: f64::from(edge.weight),
                         metadata: json_to_pyobject(py, &edge.metadata)?,
                     })
                 })
