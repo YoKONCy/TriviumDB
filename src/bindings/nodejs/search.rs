@@ -1,8 +1,8 @@
 //! 向量、图优先、混合及高级检索入口。
 
 use super::arguments::{
-    optional_number, parse_search_usize, parse_u64_vector, read_array, read_id, read_json,
-    read_string, read_vector,
+    optional_bool, optional_number, parse_search_usize, parse_u64_vector, read_array, read_id,
+    read_json, read_string, read_vector,
 };
 use super::database::{DbBackend, TriviumDB};
 use super::errors::to_napi_error;
@@ -175,6 +175,7 @@ impl TriviumDB {
         expand_depth: Option<Either<f64, JsUnknown>>,
         min_score: Option<JsUnknown>,
         payload_filter: Option<JsUnknown>,
+        exact: Option<JsUnknown>,
     ) -> napi::Result<Vec<JsSearchHit>> {
         let query_vector = read_vector(env, query_vector, "queryVector", &self.dtype)?;
         let payload_filter = payload_filter
@@ -183,7 +184,8 @@ impl TriviumDB {
         let top_k = parse_search_usize(env, top_k, 5.0, "topK", true)?;
 
         let expand_depth = parse_search_usize(env, expand_depth, 0.0, "expandDepth", false)?;
-        let min_score = optional_number(env, min_score, 0.5, "minScore")? as f32;
+        let min_score = optional_number(env, min_score, 0.0, "minScore")? as f32;
+        let exact = optional_bool(env, exact, false, "exact")?;
         let payload_filter = parse_payload_filter(env, payload_filter)?;
 
         let search_config = crate::database::SearchConfig {
@@ -193,7 +195,8 @@ impl TriviumDB {
             enable_advanced_pipeline: false,
             payload_filter,
             ..Default::default()
-        };
+        }
+        .with_exact(exact);
 
         let hits = match &self.inner {
             DbBackend::F32(db) => {
@@ -228,6 +231,7 @@ impl TriviumDB {
         expand_depth: Option<Either<f64, JsUnknown>>,
         min_score: Option<JsUnknown>,
         payload_filter: Option<JsUnknown>,
+        exact: Option<JsUnknown>,
     ) -> napi::Result<JsGroupedSearchResult> {
         let query_vector = read_vector(env, query_vector, "queryVector", &self.dtype)?;
         let payload_filter = payload_filter
@@ -238,10 +242,11 @@ impl TriviumDB {
         let config = crate::database::SearchConfig {
             top_k,
             expand_depth: parse_search_usize(env, expand_depth, 2.0, "expandDepth", false)?,
-            min_score: optional_number(env, min_score, 0.1, "minScore")? as f32,
+            min_score: optional_number(env, min_score, 0.0, "minScore")? as f32,
             payload_filter,
             ..Default::default()
-        };
+        }
+        .with_exact(optional_bool(env, exact, false, "exact")?);
         let result = match &self.inner {
             DbBackend::F32(db) => {
                 let vector: Vec<f32> = query_vector.iter().map(|&value| value as f32).collect();
@@ -323,6 +328,7 @@ impl TriviumDB {
         min_score: Option<JsUnknown>,
         hybrid_alpha: Option<JsUnknown>,
         payload_filter: Option<JsUnknown>,
+        exact: Option<JsUnknown>,
     ) -> napi::Result<Vec<JsSearchHit>> {
         let query_vector = read_vector(env, query_vector, "queryVector", &self.dtype)?;
         let payload_filter = payload_filter
@@ -332,7 +338,7 @@ impl TriviumDB {
         let top_k = parse_search_usize(env, top_k, 5.0, "topK", true)?;
 
         let expand_depth = parse_search_usize(env, expand_depth, 2.0, "expandDepth", false)?;
-        let min_score = optional_number(env, min_score, 0.1, "minScore")? as f32;
+        let min_score = optional_number(env, min_score, 0.0, "minScore")? as f32;
         let alpha = optional_number(env, hybrid_alpha, 0.7, "hybridAlpha")? as f32;
         let payload_filter = parse_payload_filter(env, payload_filter)?;
         // 简单的启发式权重换算
@@ -347,7 +353,8 @@ impl TriviumDB {
             text_boost: boost,
             payload_filter,
             ..Default::default()
-        };
+        }
+        .with_exact(optional_bool(env, exact, false, "exact")?);
 
         let hits = match &self.inner {
             DbBackend::F32(db) => {

@@ -14,6 +14,83 @@ use triviumdb::storage::wal::SyncMode;
 
 const DIM: usize = 4;
 
+#[test]
+#[ignore = "由恢复父用例显式启动并提供专用路径"]
+fn WAL已确认新增节点子进程() {
+    let path = std::env::var("TDB_RECOVERY_QUIVER_PATH").unwrap();
+    let mode = match std::env::var("TDB_RECOVERY_STORAGE").unwrap().as_str() {
+        "rom" => StorageMode::Rom,
+        "mmap" => StorageMode::Mmap,
+        other => panic!("存储模式无效：{other}"),
+    };
+    let mut db = Database::<f32>::open_with_config(
+        &path,
+        Config {
+            dim: 2,
+            storage_mode: mode,
+            sync_mode: SyncMode::Full,
+            auto_build_quiver: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for id in 1..=10 {
+        db.insert_with_id(id, &[0., 1.], serde_json::json!({"id":id}))
+            .unwrap();
+    }
+    db.build_quiver_index(None).unwrap();
+    db.flush().unwrap();
+    db.insert_with_id(11, &[1., 0.], serde_json::json!({"id":11}))
+        .unwrap();
+    assert_eq!(db.search(&[1., 0.], 1, 0, -1.).unwrap()[0].id, 11);
+    // 确认日志持久化后直接结束子进程，绕过数据库关闭及 Drop 检查点。
+    std::process::exit(0);
+}
+
+#[test]
+fn WAL新增节点恢复后普通检索包含完整向量事实并可再次持久化() {
+    let root = super::support::TestDir::new("wal_quiver_recovery");
+    for (name, mode) in [("rom", StorageMode::Rom), ("mmap", StorageMode::Mmap)] {
+        for auto in [false, true] {
+            let path = root.file(&format!("{name}-{auto}.tdb"));
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "recovery::WAL已确认新增节点子进程",
+                    "--nocapture",
+                ])
+                .env("TDB_RECOVERY_QUIVER_PATH", &path)
+                .env("TDB_RECOVERY_STORAGE", name)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "子进程确认写入失败：{output:?}");
+            let cfg = Config {
+                dim: 2,
+                storage_mode: mode,
+                auto_build_quiver: auto,
+                ..Default::default()
+            };
+            let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+            assert_eq!(db.get(11).unwrap().unwrap().vector, [1., 0.]);
+            assert_eq!(db.search_exact(&[1., 0.], 1).unwrap()[0].id, 11);
+            for _ in 0..2 {
+                let hits = db.search(&[1., 0.], 11, 0, -1.).unwrap();
+                assert_eq!(
+                    hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+                    [11, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                );
+                assert_eq!(hits[0].payload, serde_json::json!({"id":11}));
+                assert_eq!(hits[0].score, 1.);
+            }
+            db.close().unwrap();
+            let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+            assert_eq!(db.search(&[1., 0.], 1, 0, -1.).unwrap()[0].id, 11);
+            db.close().unwrap();
+        }
+    }
+}
+
 fn tmp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("triviumdb_test");
     std::fs::create_dir_all(&dir).ok();
@@ -23,19 +100,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &[
-        "",
-        ".wal",
-        ".vec",
-        ".lock",
-        ".flush_ok",
-        ".quiver",
-        ".quiver.meta",
-        ".text",
-        ".text.meta",
-    ] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 // ════════ 基本持久化往返 ════════
@@ -90,7 +155,7 @@ fn P0_TextIndex精确持久化_重启后不从Payload猜测重建() {
         db.build_text_index().unwrap();
         db.flush().unwrap();
     }
-    assert!(Path::new(&format!("{}.text", path)).exists());
+    assert!(crate::artifact::exists(format!("{}.text", path)));
 
     let config = Config {
         dim: DIM,
@@ -124,16 +189,25 @@ fn TextIndex_sidecar损坏时保留原文件并支持显式重建() {
         db.build_text_index().unwrap();
         db.flush().unwrap();
     }
-    std::fs::write(format!("{}.text", path), b"corrupt").unwrap();
-    let original_meta = std::fs::read(format!("{path}.text.meta")).unwrap();
+    crate::artifact::write(format!("{}.text", path), b"corrupt").unwrap();
+    let original_meta = crate::artifact::read(format!("{path}.text.meta")).unwrap();
     let config = Config {
         dim: DIM,
         load_text_index: true,
         ..Default::default()
     };
-    let result = std::panic::catch_unwind(|| Database::<f32>::open_with_config(&path, config));
-    assert!(result.is_ok());
-    let mut db = result.unwrap().unwrap();
+    let error = Database::<f32>::open_with_config(&path, config)
+        .err()
+        .expect("损坏正文必须拒绝加载");
+    assert_eq!(error.code(), "TDB_IMMUTABLE_ARTIFACT");
+    let mut db = Database::<f32>::open_with_config(
+        &path,
+        Config {
+            load_text_index: false,
+            ..config
+        },
+    )
+    .unwrap();
     let search_config = triviumdb::database::SearchConfig {
         top_k: 5,
         expand_depth: 0,
@@ -141,14 +215,12 @@ fn TextIndex_sidecar损坏时保留原文件并支持显式重建() {
         enable_text_hybrid_search: true,
         ..Default::default()
     };
-    assert!(
-        db.search_hybrid(Some("安全目标词"), None, &search_config)
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), b"corrupt");
     assert_eq!(
-        std::fs::read(format!("{path}.text.meta")).unwrap(),
+        crate::artifact::read(format!("{path}.text")).unwrap(),
+        b"corrupt"
+    );
+    assert_eq!(
+        crate::artifact::read(format!("{path}.text.meta")).unwrap(),
         original_meta
     );
     assert!(db.build_text_index().is_err());
@@ -193,7 +265,7 @@ fn P0_TextIndex缺失时打开不扫描Payload自动重建() {
         .unwrap();
         db.flush().unwrap();
     }
-    assert!(!Path::new(&format!("{}.text", path)).exists());
+    assert!(!crate::artifact::exists(format!("{}.text", path)));
     let db = Database::<f32>::open(&path, DIM).unwrap();
     let config = triviumdb::database::SearchConfig {
         top_k: 10,
@@ -277,11 +349,11 @@ fn P0_关闭自动QuIVer构建时_flush不生成sidecar() {
             .unwrap();
     }
     db.flush().unwrap();
-    assert!(!Path::new(&format!("{}.quiver", path)).exists());
+    assert!(!crate::artifact::exists(format!("{}.quiver", path)));
     db.build_quiver_index(None).unwrap();
     db.flush().unwrap();
-    assert!(Path::new(&format!("{}.quiver", path)).exists());
-    assert!(Path::new(&format!("{}.quiver.meta", path)).exists());
+    assert!(crate::artifact::exists(format!("{}.quiver", path)));
+    assert!(crate::artifact::exists(format!("{}.quiver.meta", path)));
     cleanup(&path);
 }
 
@@ -318,7 +390,7 @@ fn Rom模式_持久化后重新加载_数据完整() {
 }
 
 #[test]
-fn QuIVer_sidecar错配主数据时_拒绝加载并清理() {
+fn QuIVer组件错配主数据时回退事实检索且保留源件() {
     let source_path = tmp_db("quiver_sidecar_source");
     let target_path = tmp_db("quiver_sidecar_target");
     cleanup(&source_path);
@@ -343,10 +415,14 @@ fn QuIVer_sidecar错配主数据时_拒绝加载并清理() {
 
     let source_sidecar = format!("{}.quiver", source_path);
     let target_sidecar = format!("{}.quiver", target_path);
-    std::fs::copy(&source_sidecar, &target_sidecar).unwrap();
+    crate::artifact::copy(&source_sidecar, &target_sidecar).unwrap();
 
     let target = Database::<f32>::open(&target_path, DIM).unwrap();
-    assert!(!Path::new(&target_sidecar).exists());
+    assert!(crate::artifact::exists(&target_sidecar));
+    assert_eq!(
+        target.search(&[0., 1., 0., 0.], 1, 0, -1.).unwrap()[0].id,
+        1
+    );
     let node = target.get(1).unwrap().unwrap();
     assert_eq!(node.payload["db"], "target");
 
@@ -526,7 +602,7 @@ fn 删除后持久化再加载_节点确实消失() {
 // ════════ 回归测试：flush marker 加固 ════════
 
 #[test]
-fn flush_marker_v2检测_tdb和vec等长位翻转() {
+fn 当前提交标记检测主文件和向量的等长位翻转() {
     for target in ["tdb", "vec"] {
         let path = tmp_db(&format!("marker_crc_{target}"));
         cleanup(&path);
@@ -541,10 +617,10 @@ fn flush_marker_v2检测_tdb和vec等长位翻转() {
         } else {
             format!("{path}.vec")
         };
-        let mut bytes = std::fs::read(&damaged).unwrap();
+        let mut bytes = crate::artifact::read(&damaged).unwrap();
         let index = if target == "tdb" { 58 } else { 0 };
         bytes[index] ^= 0x01;
-        std::fs::write(&damaged, bytes).unwrap();
+        crate::artifact::write(&damaged, bytes).unwrap();
 
         let reader = triviumdb::database::Database::<f32>::open_read_only(&path, DIM);
         assert!(reader.is_err(), "ReadOnly 必须拒绝 {target} 的等长损坏");
@@ -567,14 +643,14 @@ fn 回归_marker_magic被篡改时fail_closed() {
 
     // 篡改 marker 的 magic 字节，使其无效
     let marker_path = format!("{}.flush_ok", path);
-    let mut marker = std::fs::read(&marker_path).unwrap();
+    let mut marker = crate::artifact::read(&marker_path).unwrap();
     marker[0..4].copy_from_slice(b"XXXX");
-    std::fs::write(&marker_path, &marker).unwrap();
+    crate::artifact::write(&marker_path, &marker).unwrap();
 
     let error = Database::<f32>::open(&path, DIM)
         .err()
         .expect("marker magic 损坏时必须 fail-closed");
-    assert!(error.to_string().contains("generation"));
+    assert_eq!(error.code(), "TDB_CORRUPTED_FILE");
 
     cleanup(&path);
 }
@@ -594,14 +670,14 @@ fn 回归_marker_version不匹配时拒绝加载vec() {
 
     // 篡改 marker 的 version 字节，使其不匹配
     let marker_path = format!("{}.flush_ok", path);
-    let mut marker = std::fs::read(&marker_path).unwrap();
+    let mut marker = crate::artifact::read(&marker_path).unwrap();
     marker[4] = 255; // 不支持的版本号
-    std::fs::write(&marker_path, &marker).unwrap();
+    crate::artifact::write(&marker_path, &marker).unwrap();
 
     let error = Database::<f32>::open(&path, DIM)
         .err()
         .expect("marker version 不支持时必须 fail-closed");
-    assert!(error.to_string().contains("generation"));
+    assert_eq!(error.code(), "TDB_UNSUPPORTED_SIDECAR_VERSION");
 
     cleanup(&path);
 }
@@ -621,7 +697,7 @@ fn 回归_marker_generation单调递增() {
 
     // 第一次 flush 后读取 generation
     let marker_path = format!("{}.flush_ok", path);
-    let marker_bytes = std::fs::read(&marker_path).unwrap();
+    let marker_bytes = crate::artifact::read(&marker_path).unwrap();
     assert_eq!(marker_bytes.len(), 53, "marker v3 应为 53 字节");
     let gen1 = u64::from_le_bytes(marker_bytes[5..13].try_into().unwrap());
     assert_eq!(gen1, 1, "首次 flush 的 generation 应为 1");
@@ -634,7 +710,7 @@ fn 回归_marker_generation单调递增() {
         db.flush().unwrap();
     }
 
-    let marker_bytes = std::fs::read(&marker_path).unwrap();
+    let marker_bytes = crate::artifact::read(&marker_path).unwrap();
     let gen2 = u64::from_le_bytes(marker_bytes[5..13].try_into().unwrap());
     assert_eq!(gen2, 2, "第二次 flush 的 generation 应为 2（单调递增）");
 
@@ -646,7 +722,7 @@ fn 回归_marker_generation单调递增() {
         db.flush().unwrap();
     }
 
-    let marker_bytes = std::fs::read(&marker_path).unwrap();
+    let marker_bytes = crate::artifact::read(&marker_path).unwrap();
     let gen3 = u64::from_le_bytes(marker_bytes[5..13].try_into().unwrap());
     assert_eq!(gen3, 3, "第三次 flush 的 generation 应为 3（单调递增）");
 

@@ -168,7 +168,8 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         if let Some(query) = query_vector {
             crate::vector::validate_query_vector(query, mt.dim())?;
         }
-        if mt.auto_quiver_build_needed() {
+        // 精确请求直接扫描存储向量，自动建图仅服务当前需要 ANN 的向量请求。
+        if query_vector.is_some() && !config.force_brute_force && mt.auto_quiver_build_needed() {
             let projected = mt
                 .estimated_memory_bytes()
                 .saturating_add(mt.quiver_build_peak_bytes(&quiver_config));
@@ -263,6 +264,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             query_vec_f32.iter().map(|&x| T::from_f32(x)).collect()
         };
     let query_vector: Option<&[T]> = if query_vector.is_some() {
+        crate::vector::validate_query_vector(&hooked_query, dim)?;
         Some(&hooked_query)
     } else {
         None
@@ -293,6 +295,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             hook.on_custom_recall(&query_vec_f32, config, ctx)
         })?;
         ctx.record_timing("hook_custom_recall", t0.elapsed());
+        check_hook_error(ctx)?;
         result
     };
 
@@ -376,6 +379,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         let t0 = std::time::Instant::now();
         call_hook(memtable, || hook.on_post_recall(&mut anchor_hits, ctx))?;
         ctx.record_timing("hook_post_recall", t0.elapsed());
+        check_hook_error(ctx)?;
     }
 
     if anchor_hits.is_empty() {
@@ -398,6 +402,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         let t0 = std::time::Instant::now();
         call_hook(memtable, || hook.on_pre_graph_expand(&mut seeds, ctx))?;
         ctx.record_timing("hook_pre_graph_expand", t0.elapsed());
+        check_hook_error(ctx)?;
     }
 
     let mut semantic_hits = seeds.clone();
@@ -458,7 +463,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             let n = expanded.len().min(config.top_k.saturating_mul(3));
             let cells = n
                 .checked_mul(dim.saturating_add(config.top_k).saturating_add(8))
-                .and_then(|cells| cells.checked_mul(std::mem::size_of::<f32>()))
+                .and_then(|cells| cells.checked_mul(std::mem::size_of::<f64>()))
                 .ok_or_else(|| crate::error::TriviumError::CapacityAllocationFailed {
                     reason: "DPP 查询工作区估算溢出".into(),
                 })?;
@@ -476,6 +481,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             let t0 = std::time::Instant::now();
             call_hook(memtable, || hook.on_post_search(&mut final_results, ctx))?;
             ctx.record_timing("hook_post_search", t0.elapsed());
+            check_hook_error(ctx)?;
         }
         return Ok(PipelineOutput {
             combined_hits: final_results,

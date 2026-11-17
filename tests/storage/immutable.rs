@@ -11,21 +11,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for suffix in [
-        "",
-        ".vec",
-        ".wal",
-        ".lock",
-        ".flush_ok",
-        ".quiver",
-        ".quiver.meta",
-        ".text",
-        ".text.meta",
-        ".manifest.json",
-        ".manifest.json.tmp",
-    ] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 fn publish(path: &str) -> u64 {
@@ -122,7 +108,10 @@ fn 不可变模式拒绝待恢复wal且不修改() {
     let path = tmp_db("wal");
     publish(&path);
     let wal_path = format!("{path}.wal");
-    std::fs::write(&wal_path, b"pending-wal").unwrap();
+    let mut wal = triviumdb::storage::wal::Wal::open(&path).unwrap();
+    wal.append(&triviumdb::storage::wal::WalEntry::<f32>::Delete { id: 1 })
+        .unwrap();
+    drop(wal);
     let before = std::fs::read(&wal_path).unwrap();
     assert!(matches!(
         Database::<f32>::open_immutable(&path, 2),

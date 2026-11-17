@@ -91,7 +91,7 @@ for _t, _names in {
            "dtype sync_mode access_mode missing_index_policy row_overflow direction label custom_query_text",
     "bool": "load_text_index auto_build_quiver enabled compute_centroids "
             "enable_advanced_pipeline enable_sparse_residual enable_dpp "
-            "enable_refractory_fatigue enable_text_hybrid_search force_brute_force",
+            "enable_refractory_fatigue enable_text_hybrid_search force_brute_force exact",
 }.items():
     PARAM_TYPES.update(dict.fromkeys(_names.split(), _t))
 
@@ -211,6 +211,8 @@ def render_params(qual: str, sig: inspect.Signature, receiver: str) -> str:
               if p.name not in ("self", "cls")
               and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)]
     for i, p in enumerate(params):
+        if p.kind == p.KEYWORD_ONLY and (i == 0 or params[i - 1].kind != p.KEYWORD_ONLY):
+            parts.append("*")
         piece = f"{p.name}: {param_type(qual, p.name, p.default)}"
         if p.default is not _EMPTY:
             piece += f" = {p.default!r}"

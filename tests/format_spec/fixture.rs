@@ -16,6 +16,8 @@ pub const ALL_ROLES: &[FileRole] = &[
     FileRole::Text,
     FileRole::TextMeta,
     FileRole::Manifest,
+    FileRole::IndexContainer,
+    FileRole::Lock,
 ];
 
 pub fn path(name: &str) -> String {
@@ -27,29 +29,13 @@ pub fn path(name: &str) -> String {
 }
 
 fn payload_generation_path(path: &str) -> Option<String> {
-    let marker = std::fs::read(format!("{path}.flush_ok")).ok()?;
+    let marker = crate::artifact::read(format!("{path}.flush_ok")).ok()?;
     let generation = u64::from_le_bytes(marker.get(5..13)?.try_into().ok()?);
     Some(format!("{path}.pld.{generation}"))
 }
 
 pub fn cleanup(path: &str) {
-    if let Some(payload) = payload_generation_path(path) {
-        std::fs::remove_file(payload).ok();
-    }
-    for role in ALL_ROLES {
-        std::fs::remove_file(format!("{path}{}", role.suffix())).ok();
-    }
-    for suffix in [
-        ".lock",
-        ".tmp",
-        ".vec.tmp",
-        ".pld.tmp",
-        ".pidx.tmp",
-        ".gidx.tmp",
-        ".ready",
-    ] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 pub fn seed(name: &str) -> String {
@@ -83,15 +69,24 @@ pub fn copy_roles(source: &str, target: &str, roles: &[FileRole]) {
     for role in roles {
         if *role == FileRole::Payload {
             if let Some(source_file) = payload_generation_path(source) {
-                let marker = std::fs::read(format!("{source}.flush_ok")).unwrap();
+                let marker = crate::artifact::read(format!("{source}.flush_ok")).unwrap();
                 let generation = u64::from_le_bytes(marker[5..13].try_into().unwrap());
-                std::fs::copy(source_file, format!("{target}.pld.{generation}")).unwrap();
+                crate::artifact::copy(source_file, format!("{target}.pld.{generation}")).unwrap();
             }
             continue;
         }
         let source_file = format!("{source}{}", role.suffix());
         if std::path::Path::new(&source_file).exists() {
-            std::fs::copy(source_file, format!("{target}{}", role.suffix())).unwrap();
+            crate::artifact::copy(source_file, format!("{target}{}", role.suffix())).unwrap();
+        }
+    }
+    {
+        std::fs::copy(format!("{source}.lock"), format!("{target}.lock")).unwrap();
+        std::fs::copy(format!("{source}.idx"), format!("{target}.idx")).unwrap();
+        if let Some(source_file) = payload_generation_path(source) {
+            let marker = std::fs::read(format!("{source}.flush_ok")).unwrap();
+            let generation = u64::from_le_bytes(marker[5..13].try_into().unwrap());
+            std::fs::copy(source_file, format!("{target}.pld.{generation}")).unwrap();
         }
     }
 }
@@ -102,11 +97,11 @@ pub fn directory_snapshot(path: &str) -> BTreeMap<String, Vec<u8>> {
         .filter(|role| **role != FileRole::Payload)
         .filter_map(|role| {
             let file = format!("{path}{}", role.suffix());
-            std::fs::read(&file).ok().map(|bytes| (file, bytes))
+            crate::artifact::read(&file).ok().map(|bytes| (file, bytes))
         })
         .collect::<BTreeMap<_, _>>();
     if let Some(file) = payload_generation_path(path)
-        && let Ok(bytes) = std::fs::read(&file)
+        && let Ok(bytes) = crate::artifact::read(&file)
     {
         snapshot.insert(file, bytes);
     }

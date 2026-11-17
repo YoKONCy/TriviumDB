@@ -13,8 +13,6 @@
 
 # TriviumDB
 
-The current stable release is **0.9.1**, with document evidence retrieval, parsing and staged publication, unified document and named-graph TQL, QuIVer centered INT8/INT4 compressed reranking, Hot/SSD residency, and engineering hardening. See the [bilingual release notes](docs/changes/0.9.1.md) and the [ICDE evaluation archive](evaluation/README.md).
-
 **Vector × Graph × Document — A Trinity AI-Native Embedded Database**
 
 **Battle-tested in mission-critical, air-gapped environments.**
@@ -31,20 +29,28 @@ The current stable release is **0.9.1**, with document evidence retrieval, parsi
 
 [**中文文档**](README.md) | **English**
 
+The current prerelease is **0.9.2-beta.1**, with a unified `.idx` index container, current-format admission, external migration, exact-search switches across the three SDKs, and data-correctness hardening. Python uses `0.9.2b1`, and npm uses the `beta` channel. See the [bilingual release notes](docs/changes/0.9.2-beta.1.md) for changes and upgrade steps.
+
+The current stable release is **0.9.1**, with document evidence retrieval, parsing and staged publication, unified document and named-graph TQL, QuIVer centered INT8/INT4 compressed reranking, Hot/SSD residency, and engineering hardening. See the [bilingual release notes](docs/changes/0.9.1.md) and the [ICDE evaluation archive](evaluation/README.md).
+
+The development branch documents its [SDK contract inventory](docs/sdk-contract.md) and uses an [external migration tool](docs/migration.md) for database upgrades.
+
+See [QuIVer applicability](#quiver-applicability) for vector workload selection and exact-search entry points.
+
 </div>
 
 ---
 
 ## What is TriviumDB?
 
-TriviumDB is an **embedded tri-model database engine** written in pure Rust, natively fusing **vector retrieval**, **property graph**, and **document-style metadata** within one storage kernel. Rom mode preserves single-`*.tdb` portability; default Mmap mode uses split sidecars protected by one generation protocol.
+TriviumDB is an **embedded tri-model database engine** written in pure Rust, natively fusing **vector retrieval**, **property graph**, and **document-style metadata** within one storage kernel. Rom embeds vectors and Payload in the main file; default Mmap mode separates them. The development version stores indexes and registered text in `.idx`, with the file group protected by one publication protocol.
 
 Our goal: **SQLite for AI applications.**
 
 - 🧪 **DIY hybrid query pipelines** — TQL turns vector recall, property indexes, graph expansion, graph algorithms, paths, set algebra, iteration, aggregation, and reranking into freely composable operators, planned by a deterministic Cascades optimizer
 - 📊 **Four persistent property indexes** — Hash / Ordered ART / Composite ART / Roaring Bitmap: equality, range, prefix, composite predicates, and low-cardinality set operations all index-accelerated
 - 🧮 **Built-in graph algorithm library** — PageRank / WCC / SCC / K-Core / Articulation Points / Triangle Count / Local Clustering Coefficient / HITS / Harmonic Centrality / Node Similarity / Leiden / Betweenness / Degree / Label Propagation / SA-PPR callable inside queries, plus Weighted Dijkstra, Yen K-Shortest Paths, bounded PairSet, path, and set operators
-- 🗃️ **Dual storage modes** — Rom keeps portable single-file `*.tdb`; Mmap separates vectors and published Payload into `.vec` and generation-scoped `.pld.<generation>` files
+- 🗃️ **Dual storage modes** — Rom embeds vectors and Payload; Mmap maps `.vec` and generation-scoped `.pld.<generation>` files on demand. Use the snapshot API for complete backups
 - ❄️ **Tiered Payload storage** — Published raw JSON stays in an mmap cold base, writes/updates enter an in-memory delta, and parsed values use a byte-bounded LRU cache; ANN/BQ/Exact candidate generation performs zero Payload parsing
 - 🔗 **Node = everything** — Each node natively holds a dense vector, sparse text index, JSON metadata, and graph edges under one globally unique ID
 - 🧠 **AI-native** — Optional hybrid recall (AC-automaton BM25 + dense vector) triggers graph spreading activation, with built-in cognitive pipelines (FISTA / DPP / PPR)
@@ -109,7 +115,7 @@ flowchart TD
     subgraph Solution ["✨ TriviumDB: One Engine Rules All"]
         direction TB
         App2((Agent App)):::app
-        TV[(TriviumDB<br/>single engine / single file / single ID space)]:::new
+        TV[(TriviumDB<br/>single engine / atomic file group / single ID space)]:::new
 
         App2 ==insert vector+text+metadata+edges atomically==> TV
         TV ==search_hybrid returns hybrid recall + graph diffusion==> App2
@@ -129,7 +135,7 @@ Suppose you're building an **AI conversation memory system** and the user says "
 | ② Store metadata  | Call SQLite to write time, scene  | ↑ Same step — payload is JSON        |
 | ③ Store relations | Call Neo4j: user→café→person      | `db.link(user, cafe, "went_to")`     |
 | ④ Recall later    | 3 cross-DB queries + manual merge | `db.search(vec, expand_depth=2)`     |
-| ⑤ Migrate data    | Export 3 files + write scripts    | Copy one `.tdb` in Rom, or one committed `.tdb/.vec/.pld/.flush_ok` generation in Mmap |
+| ⑤ Migrate data    | Export 3 files + write scripts    | Capture, verify and restore the complete file group through snapshot APIs |
 
 ### Use Cases
 
@@ -148,6 +154,14 @@ Suppose you're building an **AI conversation memory system** and the user says "
 **QuIVer** (Quantized Index for Vector Retrieval) is TriviumDB's in-house ANN graph index. QuIVer combines **fast BQ graph construction, training-free SM-L2 navigation, and cosine reranking of original vectors**. Navigation uses two-bit codes and per-vector magnitudes to score reconstructed squared L2; recall and throughput depend on the workload, parameters, and reranking budget.
 
 > 📖 [QuIVer architecture and configuration](docs/quiver.md) · [Benchmark guide](benches/README.md) · [0.9.0 changes](docs/changes/0.9.0.md)
+
+### QuIVer Applicability
+
+QuIVer ANN targets real semantic vectors produced by mainstream embedding models for text, code and image similarity retrieval. Query and database vectors should share the matching retrieval space defined by the model. The published evaluation covers data produced by Cohere, BGE-M3, MiniLM, Nomic and Jina models, with recall, throughput and parameters recorded separately for each dataset. [Evaluation data and paper](evaluation/README.md)
+
+For randomly synthesized vectors, handcrafted or concatenated features, and traditional non-negative descriptors, use full-scan exact retrieval. TriviumDB provides storage and exact queries for vectors satisfying its dtype and dimensionality contracts through `search_exact` in Python/Rust and `searchExact` in Node. Version `0.9.2-beta.1` also provides Python `exact=True`, Rust `SearchConfig::with_exact(true)` and the corresponding Node `exact` argument. [Exact-search API](docs/api-reference.md#search--纯向量图扩散检索-基础)
+
+> **Recall guidance**　QuIVer recall depends on vector distribution, retrieval task and search budgets. Evaluate cross-model retrieval, cross-modal retrieval and custom vector transformations separately. Validate Recall@K on your own real workload and select suitable parameters or the exact-search route.
 
 > ⚠️ **Dimension guidance: keeping database vectors at or below 3072 dimensions is strongly recommended.** TriviumDB storage and exact BruteForce retrieval support higher dimensions, but QuIVer's BQ signature safety limit is 3072 dimensions. Above this limit, automatic QuIVer construction is disabled and search safely falls back to BruteForce; manual QuIVer construction returns an explicit error. Higher-dimensional databases use exact retrieval; plan memory and compute capacity for that path.
 
@@ -173,43 +187,13 @@ For example, 384/768 dimensions trigger at 834 nodes, 1024 at 652, 1536 at 435, 
 - ✅ **Incremental Update**: soft_delete + incremental_insert, atomic replacement
 - ✅ **Transaction-safe**: Separated timeline architecture — transaction commit cannot fail, QuIVer sync needs no rollback
 
-**Independent persistence**: The graph is stored in `.tdb.quiver`. Loading a valid graph streams original vectors to restore default SM state without retaining a second full FP32 copy; cold-vector reads contribute to startup cost. Rebuild older indexes to adopt the current construction rules. Disconnected indexes follow the existing rebuild/reject policy; topology repair takes place during rebuilding.
+**Persistence and reload**: The development version stores the QuIVer graph and compact default-SM routing snapshot in the unified `.idx` container. Opening validates checkpoint identity, component checksums, and fact bindings, then loads routing and reranking data according to runtime configuration. See [storage layout](docs/storage-format.md) and [QuIVer reload](docs/quiver.md#增量维护重载与内存) for file groups, backups, and resource requirements.
 
 ---
 
-## Research Frontier: TSNG Tri-Signal Navigation
+## Hybrid retrieval and research boundaries
 
-**TSNG (Tri-Signal Navigation Graph)** is TriviumDB's hybrid-retrieval research track: a single query declares **vector, property, and graph signals** together, with `TsngWeights` controlling the three-way mix, producing a unified scored candidate set — "semantically similar, filter-compliant, and structurally reachable".
-
-```rust
-use triviumdb::tsng::{TsngQuery, TsngWeights, GraphSignalQuery};
-
-let query = TsngQuery {
-    vector: &query_embedding,
-    payload_filter: Some(&Filter::eq("kind", "note")),   // property signal
-    graph: Some(GraphSignalQuery {                        // graph signal
-        anchor_id: seed_id,
-        direction: ReachabilityDirection::Outgoing,
-        labels: Some(vec!["cites".into()]),
-        min_edge_weight: 0.2,
-        max_hops: 2,
-    }),
-    top_k: 10,
-    weights: TsngWeights { vector: 1.0, property: 1.0, graph: 0.5 },
-    budget: Default::default(),
-};
-
-let result = db.search_tsng(&query, config)?;   // every hit carries the signal breakdown
-```
-
-Its research value lies in **measurable retrieval quality**:
-
-- **Multiple execution strategies**: `search_tsng_post_filter` / `search_tsng_graph_union` / `search_tsng_industrial` — six hybrid-search access paths selected by budget and statistics
-- **Explainable signals**: `TsngHit` returns `vector_similarity` / `property_signal` / `graph_signal` decompositions
-- **Built-in ground truth**: `tsng_ground_truth` produces exact answers with Recall@K / NDCG@K quality metrics — paper-grade experiments are directly reproducible
-- **Bounded budgets**: candidates, visited nodes, examined edges, and frontier size all fail closed
-
-> TSNG is an **experimental research track**, with APIs evolving alongside research findings. TQL and the `search*` family provide the default query entry points.
+Applications combine vector, property, text and graph queries through TQL/Planner and the supported `search*` APIs, sharing Core budgets, errors and lifecycle contracts. See the [TQL reference](docs/tql-reference.md). TSNG algorithm comparisons and historical construction ablations are preserved in separate research snapshots. Research results enter the production executor after contract and algorithm validation. The [QuIVer evaluation archive](evaluation/README.md) retains published measurements and their source identities.
 
 ```toml
 # Enable Python bindings
@@ -231,13 +215,13 @@ maturin develop --features python
 Recommended: use the blazing-fast [uv](https://github.com/astral-sh/uv) (millisecond install):
 
 ```bash
-uv pip install triviumdb
+uv pip install "triviumdb==0.9.2b1"
 ```
 
 Or traditional pip:
 
 ```bash
-pip install triviumdb
+pip install "triviumdb==0.9.2b1"
 ```
 
 ### 🌐 Node.js / Frontend Users
@@ -245,9 +229,9 @@ pip install triviumdb
 Cross-platform package includes pre-compiled `*.node` native extensions with full TypeScript completions:
 
 ```bash
-npm install triviumdb
+npm install triviumdb@0.9.2-beta.1
 # or
-pnpm add triviumdb
+pnpm add triviumdb@0.9.2-beta.1
 ```
 
 ### 🦀 Rust Native Users
@@ -255,18 +239,10 @@ pnpm add triviumdb
 Use as a library dependency:
 
 ```bash
-cargo add triviumdb
+cargo add triviumdb@0.9.2-beta.1
 ```
 
-`0.9.0` is the stable release: Rust, Python and Node.js share the native tri-model core, Cascades query planning, atomic transactions, resource budgets and controlled shutdown. Console v1 adds a host interface that reuses an already-open instance, alongside stronger file-group recovery, migration publication and Windows file-lock boundaries. Server and WebUI retain the nightly channel.
-
-```bash
-pip install "triviumdb==0.9.0"
-npm install triviumdb@0.9.0
-cargo add triviumdb@0.9.0
-```
-
-See the bilingual [0.9.0 release notes](docs/changes/0.9.0.md).
+The API examples on this page target `0.9.2-beta.1`. Upgrade existing databases through the [external migration entry point](docs/migration.md) into a current-format destination. See the [release notes](docs/changes/0.9.2-beta.1.md) for complete upgrade conditions.
 
 To add a management frontend to an embedded application, follow [Console host integration](docs/embedded-console.md) to reuse the same instance and file lock. The existing HTML still needs frontend-owned transport adaptation; the resource bundle declares that requirement and its CDN dependencies.
 
@@ -401,7 +377,7 @@ Rust, Python, and Node.js share the same TQL, Prepared queries, four property-in
 | Feature                          | Description                                                                                                                |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | 🧪 **DIY hybrid queries**        | TQL `WITH`: freely compose vectors / BM25 / AC / properties / graph expansion / FISTA / DPP / NMF / paths / sets / aggregation, with deterministic Cascades and transparent `EXPLAIN` |
-| 📊 **Four property indexes**     | Hash / Ordered ART / Composite ART / Roaring Bitmap persisted to `.pidx`; equality / range / prefix / composite / low-cardinality set operations all accelerated |
+| 📊 **Four property indexes**     | Hash / Ordered ART / Composite ART / Roaring Bitmap persisted in `.idx`; equality / range / prefix / composite / low-cardinality set operations |
 | 🧮 **Built-in graph algorithms** | PageRank / WCC / Leiden / Betweenness / Degree / Label Propagation / SA-PPR callable inside queries                        |
 | 🛰️ **Paths & set algebra**      | `ALL_PATHS` / `SHORTEST_PATHS` / `UNION` / `INTERSECT` / `EXCEPT` / `ITERATE`, plus Prepared TQL across three languages     |
 | 🔍 **Hybrid retrieval**          | Vector anchor → Top-K → Graph spreading activation → Final ranking                                                         |
@@ -409,7 +385,7 @@ Rust, Python, and Node.js share the same TQL, Prepared queries, four property-in
 | 🔌 **Hook system**               | 6-stage pipeline injection points with C/C++ FFI dynamic library plugin support                                            |
 | 📦 **O(1) operations**           | FreeList tombstone reuse + Reverse Hash Net for O(1) reverse edge lookup                                                   |
 | ⚡ **QuIVer ANN index**          | BQ graph construction + default SM-L2 navigation + cosine reranking for f32/f16 embeddings, hot/cold separation, incremental maintenance         |
-| 💾 **Dual storage**              | Mmap (zero-copy cold start) / Rom (SQLite-style single-file portability)                                                   |
+| 💾 **Dual storage**              | Mmap (separate mapped vectors and Payload) / Rom (embedded vectors and Payload), switched through checkpoints                                                   |
 | 🛡️ **4-layer disaster recovery** | WAL + atomic replacement + dry-run validation + OS-level COW isolation                                                     |
 | 🔄 **Atomic transactions**    | `begin_tx()` validates operations and capacity before WAL submission, then atomically applies facts and related indexes                                                        |
 | 🔎 **Advanced filtering**        | MongoDB-style operators: `$eq/$ne/$gt/$lt/$in/$and/$or/$startsWith/$contains` + Parallel Bit-Tag Array                     |
@@ -469,8 +445,8 @@ See [Shared Resources and Diagnostics](docs/resource-runtime.md) and [Shutdown, 
 | Concurrent multi-writer | ⚠️ Single-writer (WAL) | ✅ MVCC multi-writer | ⚠️ Single-process writer | ✅ Server-side concurrent writes | ✅ Concurrent tx writes | ✅ Distributed write nodes | ✅ MVCC+OCC concurrent writes | ⚠️ Single-writer + shared-read/immutable generations |
 | Document data        | ✅ SQL       | ✅ SQL+JSONB  | ⚠️ Fixed table schema | ❌ Filter only | ⚠️ Property KV    | ✅ SurrealQL    | ✅ Arrow schema | ✅ Free JSON + full `$op` suite                 |
 | Vector search        | ⚠️ Extension | ✅ HNSW/IVFFlat | ✅ HNSW ext.  | ✅ HNSW          | ✅ Native HNSW     | ✅ MTree/HNSW   | ✅ IVF+quant    | ✅ QuIVer (BQ construction + SM-L2)             |
-| Graph traversal      | ⚠️ JOIN      | ⚠️ Recursive CTE | ✅ Cypher    | ❌ No graph ops  | ✅ Cypher          | ✅ Graph        | ❌ No graph ops | ✅ Native adjacency + `.gidx`                   |
-| Embedded portable storage | ✅ One file  | ❌ PG server  | ✅ One file     | ⚠️ Memory/dir embedded | ❌ JVM        | ✅ Switchable   | ⚠️ Dir embedded | ✅ Single `.tdb` in Rom / committed file set in Mmap |
+| Graph traversal      | ⚠️ JOIN      | ⚠️ Recursive CTE | ✅ Cypher    | ❌ No graph ops  | ✅ Cypher          | ✅ Graph        | ❌ No graph ops | ✅ Native adjacency + graph directory                   |
+| Embedded portable storage | ✅ One file  | ❌ PG server  | ✅ One file     | ⚠️ Memory/dir embedded | ❌ JVM        | ✅ Switchable   | ⚠️ Dir embedded | ✅ Rom / Mmap file groups and snapshots |
 | Hybrid query freedom | ❌           | ⚠️ SQL JOINs  | ⚠️ Filtered ANN | ❌ Vector-only  | ⚠️ SEARCH-filtered | ⚠️ Manual       | ⚠️ Vec+FTS+SQL | ✅ WITH pipeline composition                    |
 | Property index suite | ✅ B+Tree    | ✅ B/GIN/BRIN | ⚠️ In-schema indexes | ⚠️ Payload indexes | ⚠️ Label+prop Range/Text | ⚠️ Unique/FTS/ANN-centric | ⚠️ Scalar idx | ✅ Hash / ART / Composite / Bitmap              |
 | Query optimizer      | ✅           | ✅            | ✅              | ❌ API-call based | ✅                 | ⚠️ EXPLAIN limited | ⚠️ DataFusion SQL | ✅ Cascades + EXPLAIN                        |
@@ -501,7 +477,6 @@ TriviumDB/
 │   ├── node.rs             # Node / Edge / SearchHit data structures
 │   ├── vector.rs           # VectorType Trait (f32 / f16 / u64)
 │   ├── filter.rs           # Advanced filter engine ($gt/$lt/$in/$and/$or/$startsWith/$contains)
-│   ├── tsng.rs             # 🔬 TSNG tri-signal hybrid retrieval research track (6 access paths + ground truth)
 │   ├── error.rs            # Unified error types (incl. ApiMigrationRequired / sidecar version gates)
 │   ├── resources.rs        # 共享配额、工作线程池与资源统计
 │   ├── query/              # 🧪 TQL query subsystem (v0.8 query engine refactor)
@@ -515,7 +490,7 @@ TriviumDB/
 │   ├── storage/
 │   │   ├── memtable.rs     # In-memory workspace (SoA vector pool + HashMap + QuIVer integration)
 │   │   ├── wal.rs          # Write-Ahead Log (crash recovery)
-│   │   ├── file_format.rs  # .tdb single-file reader/writer (BQ metadata + QuIVer persistence)
+│   │   ├── file_format.rs  # Main-file reader/writer and file-group checkpoint publication
 │   │   ├── vec_pool.rs     # Layered vector pool (mmap base + delta incremental)
 │   │   ├── snapshot.rs     # 代际清单与快照入口
 │   │   ├── snapshot/      # 目录快照创建、校验与恢复
@@ -526,7 +501,7 @@ TriviumDB/
 │   │   ├── quiver.rs       # 🚀 BQ 构图、默认 SM-L2 导航与冷热分离
 │   │   ├── property.rs     # 📊 Four property indexes (Hash / Ordered ART / Composite ART / Roaring Bitmap)
 │   │   ├── text.rs         # 📝 TextIndex (Aho-Corasick + BM25 2-Gram persistence)
-│   │   └── graph_blocks.rs # 🔗 Business graph block index .gidx (edge blocks / in-edge / label directories)
+│   │   └── graph_blocks.rs # 🔗 Business graph component (edge blocks / in-edge / label directories)
 │   ├── graph/
 │   │   ├── traversal.rs    # PPR graph diffusion (Spreading Activation)
 │   │   ├── reachability.rs # Deterministic reachability (direction / labels / depth / budget)
@@ -550,7 +525,7 @@ TriviumDB/
 │   │       ├── repl/               # REPL mode (rustyline + Tab completion + multi-line input)
 │   │       └── tui/                # TUI mode (ratatui + crossterm full-screen visualization)
 │   └── triviumdb-server/   # 🌐 HTTP Server (concurrent reads, Writer Actor, OCC, Group Commit)
-├── benches/                # Benchmark suites (queries / index & graph baselines / memory pressure / TSNG / Cohere1M)
+├── benches/                # Benchmark suites (queries / index & graph baselines / memory pressure / Cohere1M)
 ├── tests/
 │   ├── unit/               # Unit tests (~311 cases)
 │   ├── proptest_core.rs    # Property-based tests (~2650 random cases)
@@ -615,7 +590,7 @@ TriviumDB/
 
 - [x] In-house **QuIVer** ANN graph index (BQ signatures + Vamana graph + hot/cold separation)
 - [x] Incremental graph maintenance: Insert / Delete (Tombstone) / Update — no full rebuild
-- [x] QuIVer independent persistence (`.tdb.quiver` file, POD memcpy serialization)
+- [x] QuIVer persistence and compact routing reload, unified in `.idx` in the development version
 - [x] Transaction-safe separated timeline architecture (Phase 5 QuIVer Sync)
 - [x] CLI tool `triviumdb-cli` (command `tdb`): non-interactive commands + REPL (Tab completion / syntax highlighting / multi-line input) + config file
 - [x] Database visualization: terminal TUI (`tdb ui`, force-directed graph layout / k-hop expand / vector search playground)
@@ -624,7 +599,7 @@ TriviumDB/
 
 - [x] **Unified TQL query system**: `FIND` / `MATCH` / `SEARCH`, composable `WITH`, Prepared parameters, expressions/aggregates/paths/set algebra, scientific notation, and atomic `SET VECTOR`
 - [x] **Bounded Cascades and graph computing**: deterministic statistics-aware physical plans, built-in graph algorithms, and estimated/actual metrics through `EXPLAIN ANALYZE`
-- [x] **Complete persistent index suite**: Hash / Ordered ART / Composite ART / Bitmap, graph blocks, AC+BM25, and QuIVer sidecars; dynamic QuIVer thresholds select between 209 and 834 nodes by vector workload
+- [x] **Complete persistent index suite**: Hash / Ordered ART / Composite ART / Bitmap, graph blocks, AC+BM25, and QuIVer components; dynamic QuIVer thresholds select between 209 and 834 nodes by vector workload
 - [x] **Production-grade storage and safety**: `.flush_ok` v3 binds `.tdb/.vec/.pld` generation, sizes, and CRCs; no production-reachable panic, byte-level zero writes in ReadOnly/Immutable modes, WAL/generation atomicity, fail-closed query/traversal/memory/Payload budgets, and bounded real fault injection
 - [x] **Payload tiering phase 1**: generation-scoped `.pld` mmap raw base, in-memory delta/tombstones, bounded LRU parsed cache, late materialization, `ColdPayloadScan`, and cross-language cache configuration
 - [x] **Aligned Rust/Python/Node capabilities**: first-class TQL values, four property indexes, Prepared TQL, six-stage Hooks, FFI ABI v2, and explicit migration errors instead of silent legacy compatibility
@@ -640,7 +615,7 @@ TriviumDB/
 2. **Embedded-first** — The database runs as a library inside the host process. Rust, Python, and Node.js APIs manage data and instance lifecycles.
 3. **Auto performance routing** — Uses an approximately 0.667M-component workload to select a dynamic threshold between 209 and 834 nodes; exact BruteForce runs below it and QuIVer builds automatically once reached.
 4. **Predictable performance** — Sequential I/O only (WAL append + compaction sequential rewrite). SSD-safe.
-5. **Index as acceleration layer** — QuIVer is disposable derived data (`.tdb.quiver` file); auto-rebuilds on first query if missing.
+5. **Index as acceleration layer** — QuIVer rebuilds from original vectors and node identities. The unified `.idx` also stores registered text and index definitions as durable content. Maintain derived indexes through their APIs and use snapshots for complete backups.
 6. **Rust safety contracts** — mmap, SIMD, raw-pointer, and manual `Send/Sync` paths are reviewed for length, alignment, lifetime, and concurrency requirements, with ASan, TSan, and Miri validation. See [security design](docs/security.md) and [testing scope](docs/testing.md).
 7. **Zero-panic policy** — No `panic!` / `unreachable!()` in the engine. Thousands of test cases (unit / property / fuzz / mutation / three-language public API alignment), with an enforced 80% line-coverage CI gate (see coverage artifacts for measured values).
 

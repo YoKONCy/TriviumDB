@@ -6,6 +6,14 @@
 
 use serde_json::Value;
 
+/// 等值查询与行签名共享 JSON 的 Eq／Hash 契约，包括容器、空值及正负零。
+pub(crate) fn equality_mask(key: &str, value: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (key, value).hash(&mut hasher);
+    1u64 << (hasher.finish() % 64)
+}
+
 #[derive(Debug, Clone)]
 pub enum ComparableValue {
     Number(serde_json::Number),
@@ -166,20 +174,10 @@ impl Filter {
     }
 
     /// 提取出本查询必然要求的特征哈希位掩码（布隆过滤掩码）
-    /// 用于在查询图谱全量数组时，实现超音速 O(N) 一级降维打击
+    /// 用于在读取完整 Payload 前按必要等值条件筛选候选。
     pub fn extract_must_have_mask(&self) -> u64 {
         match self {
-            Filter::Eq(key, val) => {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                use std::hash::{Hash, Hasher};
-                // Consistent with how fast_tags hashes values
-                let val_str = match val {
-                    Value::String(s) => s.clone(),
-                    v => v.to_string(),
-                };
-                format!("{}:{}", key, val_str).hash(&mut hasher);
-                1u64 << (hasher.finish() % 64)
-            }
+            Filter::Eq(key, val) => equality_mask(key, val),
             Filter::And(filters) => {
                 let mut mask = 0u64;
                 for f in filters {

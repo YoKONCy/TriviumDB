@@ -1,0 +1,3238 @@
+//! TQL 递归下降语法分析器
+//!
+//! 将 TqlToken 流解析为 TqlQuery AST。
+//! 支持查询入口：MATCH / OPTIONAL MATCH / FIND / SEARCH
+//! 支持聚合函数、DISTINCT、AS 别名
+
+use super::tql_ast::*;
+use super::tql_lexer::{ParseErrorAt, TqlToken};
+use super::tql_source::{LocatedTql, SourceSelector, TqlSource, TqlSourceNode};
+use crate::error::{QueryErrorStage, QuerySpan, TriviumError};
+use crate::filter::Filter;
+use std::sync::Arc;
+
+pub const MAX_TQL_NESTING: usize = 128;
+pub const MAX_TQL_OPERATORS: usize = 128;
+
+pub struct TqlParser {
+    tokens: Vec<TqlToken>,
+    pos: usize,
+    depth: usize,
+    input_checked: bool,
+    /// 与 tokens 平行的字节起始位置（用于错误诊断）
+    positions: Option<Vec<usize>>,
+    ends: Option<Vec<usize>>,
+    parameter_references: ParameterReferences,
+    /// 仅在能够确定失败 token 的检查处登记，语义校验保持空值。
+    error_position: Option<usize>,
+    source_nodes: Vec<TqlSourceNode>,
+    error_stage: QueryErrorStage,
+    error_selector: Option<SourceSelector>,
+    error_range: Option<std::ops::Range<usize>>,
+}
+
+#[derive(Clone, Copy)]
+struct SourceMark {
+    token: usize,
+    child: usize,
+}
+
+impl TqlParser {
+    pub fn new(tokens: Vec<TqlToken>) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+            input_checked: false,
+            positions: None,
+            ends: None,
+            parameter_references: ParameterReferences::new(),
+            error_position: None,
+            source_nodes: Vec::new(),
+            error_stage: QueryErrorStage::Parse,
+            error_selector: None,
+            error_range: None,
+        }
+    }
+
+    /// 构造带位置信息的 parser（错误时可定位到字节偏移）
+    pub fn new_with_positions(tokens: Vec<TqlToken>, positions: Vec<usize>) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+            input_checked: false,
+            positions: Some(positions),
+            ends: None,
+            parameter_references: ParameterReferences::new(),
+            error_position: None,
+            source_nodes: Vec::new(),
+            error_stage: QueryErrorStage::Parse,
+            error_selector: None,
+            error_range: None,
+        }
+    }
+
+    fn source_mark(&self) -> SourceMark {
+        SourceMark {
+            token: self.pos,
+            child: self.source_nodes.len(),
+        }
+    }
+
+    fn source_range(&self, mark: SourceMark) -> Option<std::ops::Range<usize>> {
+        self.positions.as_ref().and_then(|positions| {
+            let start = *positions.get(mark.token)?;
+            let end = *self.ends.as_ref()?.get(self.pos.checked_sub(1)?)?;
+            (self.pos > mark.token).then_some(start..end)
+        })
+    }
+
+    fn finish_source(&mut self, kind: &'static str, mark: SourceMark) {
+        if self.ends.is_none() {
+            return;
+        }
+        let range = self.source_range(mark);
+        let children = self.source_nodes.split_off(mark.child);
+        self.source_nodes.push(TqlSourceNode {
+            kind,
+            range,
+            children,
+        });
+    }
+
+    fn finish_group(&mut self, kind: &'static str, mark: SourceMark, grouped: bool) {
+        if grouped && self.source_nodes.len() == mark.child + 1 {
+            let range = self.source_range(mark);
+            if let Some(node) = self.source_nodes.last_mut() {
+                node.range = range;
+            }
+        } else {
+            self.finish_source(kind, mark);
+        }
+    }
+
+    fn sourced<R>(
+        &mut self,
+        kind: &'static str,
+        parse: fn(&mut Self) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let mark = self.source_mark();
+        let result = parse(self);
+        if result.is_err() && self.error_position.is_none() && self.error_range.is_none() {
+            self.error_range = self.source_range(mark);
+        }
+        self.finish_source(kind, mark);
+        result
+    }
+
+    fn synthetic_source(&mut self, kind: &'static str) {
+        if self.ends.is_some() {
+            self.source_nodes.push(TqlSourceNode {
+                kind,
+                range: None,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    fn push_stage(
+        &mut self,
+        stages: &mut Vec<PipelineStage>,
+        mark: &mut SourceMark,
+        stage: PipelineStage,
+    ) {
+        stages.push(stage);
+        self.finish_source("stage", *mark);
+        *mark = self.source_mark();
+    }
+
+    /// 当前 token 在原始输入中的字节起始位置；若未提供位置信息则返回 None
+    pub fn current_byte_pos(&self) -> Option<usize> {
+        let positions = self.positions.as_ref()?;
+        positions
+            .get(self.pos)
+            .or_else(|| positions.last())
+            .copied()
+    }
+
+    /// 只登记已被 AST 消费为参数的 token，文档过滤操作符沿原语义处理。
+    fn record_parameter_reference(&mut self, name: &str) {
+        let index = self.pos.saturating_sub(1);
+        if let (Some(positions), Some(ends)) = (&self.positions, &self.ends)
+            && let (Some(start), Some(end)) = (positions.get(index), ends.get(index))
+        {
+            self.parameter_references
+                .entry(name.to_owned())
+                .or_insert(*start..*end);
+        }
+    }
+
+    fn peek(&self) -> &TqlToken {
+        self.tokens.get(self.pos).unwrap_or(&TqlToken::Eof)
+    }
+
+    fn advance(&mut self) -> TqlToken {
+        let tok = self.tokens.get(self.pos).cloned().unwrap_or(TqlToken::Eof);
+        self.pos += 1;
+        tok
+    }
+
+    fn expect(&mut self, expected: &TqlToken) -> Result<(), String> {
+        let tok = self.advance();
+        if &tok == expected {
+            Ok(())
+        } else {
+            Err(self.error_previous(format!("Expected {:?}, got {:?}", expected, tok)))
+        }
+    }
+
+    fn error_here(&mut self, message: impl Into<String>) -> String {
+        self.error_position = self.current_byte_pos();
+        message.into()
+    }
+
+    fn error_previous(&mut self, message: impl Into<String>) -> String {
+        self.error_position = self.positions.as_ref().and_then(|positions| {
+            positions
+                .get(self.pos.saturating_sub(1))
+                .or_else(|| positions.last())
+                .copied()
+        });
+        message.into()
+    }
+
+    fn at(&self, expected: &TqlToken) -> bool {
+        self.peek() == expected
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  顶层入口
+    // ═══════════════════════════════════════════════════════════════
+
+    fn validate_input(&mut self) -> Result<(), String> {
+        if self.input_checked {
+            return Ok(());
+        }
+        if self.tokens.len() > super::tql_lexer::MAX_TQL_TOKENS {
+            return Err("TQL token 数量超过限制 (TQL token limit exceeded)".into());
+        }
+        let mut delimiters = Vec::new();
+        let mut literal_depth = 0usize;
+        let mut operators = 0usize;
+        for (index, token) in self.tokens.iter().enumerate() {
+            let opening = match token {
+                TqlToken::LParen => Some(0),
+                TqlToken::LBracket => Some(1),
+                TqlToken::LBrace => Some(2),
+                _ => None,
+            };
+            if let Some(kind) = opening {
+                if delimiters.len() == MAX_TQL_NESTING {
+                    self.error_position =
+                        self.positions.as_ref().and_then(|p| p.get(index)).copied();
+                    return Err(format!(
+                        "TQL 嵌套超过 {MAX_TQL_NESTING} 层 (TQL nesting limit exceeded)"
+                    ));
+                }
+                delimiters.push(kind);
+                literal_depth += usize::from(kind != 0);
+                continue;
+            }
+            let closing = match token {
+                TqlToken::RParen => Some(0),
+                TqlToken::RBracket => Some(1),
+                TqlToken::RBrace => Some(2),
+                _ => None,
+            };
+            if let Some(kind) = closing {
+                if delimiters.pop() != Some(kind) {
+                    self.error_position =
+                        self.positions.as_ref().and_then(|p| p.get(index)).copied();
+                    return Err("TQL 括号不匹配 (Unmatched TQL delimiter)".into());
+                }
+                literal_depth -= usize::from(kind != 0);
+                continue;
+            }
+            // 字面量中的负号和通配符不生成递归表达式；向量维度保持原有范围。
+            if literal_depth == 0
+                && matches!(
+                    token,
+                    TqlToken::Not
+                        | TqlToken::And
+                        | TqlToken::Or
+                        | TqlToken::Plus
+                        | TqlToken::Dash
+                        | TqlToken::Star
+                        | TqlToken::Slash
+                )
+            {
+                operators += 1;
+                if operators > MAX_TQL_OPERATORS {
+                    self.error_position =
+                        self.positions.as_ref().and_then(|p| p.get(index)).copied();
+                    return Err(format!(
+                        "TQL 运算复杂度超过 {MAX_TQL_OPERATORS} (TQL operator limit exceeded)"
+                    ));
+                }
+            }
+        }
+        if !delimiters.is_empty() {
+            self.error_position = self.positions.as_ref().and_then(|p| p.last()).copied();
+            return Err("TQL 括号未闭合 (Unclosed TQL delimiter)".into());
+        }
+        self.input_checked = true;
+        Ok(())
+    }
+
+    fn expect_end(&mut self) -> Result<(), String> {
+        if self.pos == self.tokens.len()
+            || (self.at(&TqlToken::Eof) && self.pos + 1 == self.tokens.len())
+        {
+            Ok(())
+        } else {
+            Err(self.error_here(format!(
+                "TQL 语句尾部存在多余输入 (Unexpected trailing TQL input): {:?}",
+                self.peek()
+            )))
+        }
+    }
+
+    pub fn parse_query(&mut self) -> Result<TqlQuery, String> {
+        self.sourced("query", Self::parse_query_source_inner)
+    }
+
+    fn parse_query_source_inner(&mut self) -> Result<TqlQuery, String> {
+        self.error_position = None;
+        self.error_range = None;
+        self.error_selector = None;
+        self.error_stage = QueryErrorStage::Parse;
+        self.validate_input()?;
+        // 0. EXPLAIN 前缀（可选）
+        let explain = if self.at(&TqlToken::Explain) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        let analyze = if explain && self.at(&TqlToken::Analyze) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        let graph_scope = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("graph"))
+        {
+            let mark = self.source_mark();
+            self.advance();
+            let scope = self.parse_source_json()?;
+            self.finish_source("graph_scope", mark);
+            Some(Box::new(scope))
+        } else {
+            None
+        };
+
+        // 1. 查询入口
+        let entry = match self.peek() {
+            TqlToken::Match => self.parse_match_entry()?,
+            TqlToken::Optional => self.parse_optional_match_entry()?,
+            TqlToken::Find => self.parse_find_entry()?,
+            TqlToken::Search => self.parse_search_entry()?,
+            TqlToken::Ident(name) if name.eq_ignore_ascii_case("documents") => {
+                self.sourced("entry", |parser| {
+                    parser.advance();
+                    Ok(QueryEntry::Documents {
+                        request: parser.parse_source_json()?,
+                    })
+                })?
+            }
+            TqlToken::Ident(name) if name.eq_ignore_ascii_case("text") => {
+                self.parse_text_entry()?
+            }
+            other => {
+                return Err(self.error_here(format!(
+                    "期望 MATCH、OPTIONAL MATCH、FIND、SEARCH、TEXT 或 DOCUMENTS (Expected MATCH, OPTIONAL MATCH, FIND, SEARCH, TEXT, or DOCUMENTS), got {:?}",
+                    other
+                )));
+            }
+        };
+
+        // 2. WITH 管线阶段
+        let pipeline = self.parse_pipeline_stages()?;
+
+        // 3. WHERE (可选)
+        let predicate = if self.at(&TqlToken::Where) {
+            self.advance();
+            Some(self.parse_predicate()?)
+        } else {
+            None
+        };
+
+        let rank = if self.at(&TqlToken::Rank) {
+            Some(self.parse_rank_clause()?)
+        } else {
+            None
+        };
+
+        // 3. RETURN
+        let return_mark = self.source_mark();
+        self.expect(&TqlToken::Return)?;
+        let returns = self.parse_return_clause()?;
+        let return_range = self.source_range(return_mark);
+        if let Some(node) = self.source_nodes.last_mut() {
+            node.range = return_range;
+        }
+
+        // 4. ORDER BY (可选)
+        let order_by = if self.at(&TqlToken::Order) {
+            self.advance();
+            self.expect(&TqlToken::By)?;
+            self.parse_order_by_list()?
+        } else {
+            Vec::new()
+        };
+
+        // 5. LIMIT (可选)
+        let limit = if self.at(&TqlToken::Limit) {
+            let mark = self.source_mark();
+            self.advance();
+            let value = self.parse_positive_int()?;
+            self.finish_source("limit", mark);
+            Some(value)
+        } else {
+            None
+        };
+
+        // 6. OFFSET (可选)
+        let offset = if self.at(&TqlToken::Offset) {
+            let mark = self.source_mark();
+            self.advance();
+            let value = self.parse_positive_int()?;
+            self.finish_source("offset", mark);
+            Some(value)
+        } else {
+            None
+        };
+
+        let query = TqlQuery {
+            graph_scope,
+            explain,
+            analyze,
+            entry,
+            pipeline,
+            predicate,
+            rank,
+            returns,
+            order_by,
+            limit,
+            offset,
+        };
+        self.expect_end()?;
+        self.error_stage = QueryErrorStage::Plan;
+        validate_pipeline_scope_origin(&query, &mut self.error_selector)?;
+        self.error_selector = Some(SourceSelector::Return);
+        super::tql_executor::validate_return_columns_at(&query.returns).map_err(
+            |(index, error)| {
+                self.error_selector = Some(SourceSelector::ReturnItem(index));
+                error.to_string()
+            },
+        )?;
+        Ok(query)
+    }
+
+    fn parse_source_json(&mut self) -> Result<TqlJson, String> {
+        self.sourced("source_config", Self::parse_source_json_inner)
+    }
+
+    fn parse_source_json_inner(&mut self) -> Result<TqlJson, String> {
+        if self.depth >= MAX_TQL_NESTING {
+            return Err(
+                self.error_here("来源配置嵌套过深 (Source configuration nesting is too deep)")
+            );
+        }
+        self.depth += 1;
+        let result = (|| match self.peek().clone() {
+            TqlToken::DollarOp(name) => {
+                self.advance();
+                let name = name.trim_start_matches('$').to_owned();
+                self.record_parameter_reference(&name);
+                Ok(TqlJson::Parameter(name))
+            }
+            TqlToken::LBrace => {
+                self.advance();
+                let mut fields = std::collections::BTreeMap::new();
+                while !self.at(&TqlToken::RBrace) {
+                    let key = if self.at(&TqlToken::Vector) {
+                        self.advance();
+                        "vector".to_owned()
+                    } else {
+                        self.parse_field_name()?
+                    };
+                    self.expect(&TqlToken::Colon)?;
+                    let value = self.parse_source_json()?;
+                    if fields.insert(key, value).is_some() {
+                        return Err(self.error_previous(
+                            "来源配置字段重复 (Duplicate source configuration field)",
+                        ));
+                    }
+                    if !self.at(&TqlToken::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(&TqlToken::RBrace)?;
+                Ok(TqlJson::Object(fields))
+            }
+            TqlToken::LBracket => {
+                self.advance();
+                let mut values = Vec::new();
+                while !self.at(&TqlToken::RBracket) {
+                    values.push(self.parse_source_json()?);
+                    if !self.at(&TqlToken::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(&TqlToken::RBracket)?;
+                Ok(TqlJson::Array(values))
+            }
+            _ => self.parse_json_value().map(TqlJson::Literal),
+        })();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_text_entry(&mut self) -> Result<QueryEntry, String> {
+        self.sourced("entry", Self::parse_text_entry_source_inner)
+    }
+
+    fn parse_text_entry_source_inner(&mut self) -> Result<QueryEntry, String> {
+        self.expect_ident_keyword("text")?;
+        let kind = match self.parse_ident()?.to_ascii_lowercase().as_str() {
+            "bm25" => TextSearchKind::Bm25,
+            "ac" => TextSearchKind::Ac,
+            "hybrid" => TextSearchKind::Hybrid,
+            other => {
+                return Err(format!(
+                    "未知文本召回类型 {other} (Unknown text search kind)"
+                ));
+            }
+        };
+        let query = match self.advance() {
+            TqlToken::StringLit(value) => value,
+            other => return Err(format!("TEXT 查询需要字符串，收到 {other:?}")),
+        };
+        self.expect(&TqlToken::Top)?;
+        let top_k = self.parse_positive_int()?;
+        let mut k1 = 1.2f32;
+        let mut b = 0.75f32;
+        let mut ac_weight = 1.0f32;
+        while let TqlToken::Ident(name) = self.peek().clone() {
+            let target = match name.to_ascii_lowercase().as_str() {
+                "k1" => &mut k1,
+                "b" => &mut b,
+                "ac_weight" => &mut ac_weight,
+                _ => break,
+            };
+            self.advance();
+            *target = self.parse_finite_f32()?;
+        }
+        Ok(QueryEntry::Text {
+            clause: TextSearchClause {
+                kind,
+                query,
+                top_k,
+                k1,
+                b,
+                ac_weight,
+            },
+        })
+    }
+
+    fn parse_finite_f32(&mut self) -> Result<f32, String> {
+        let value = match self.advance() {
+            TqlToken::FloatLit(value) => value,
+            TqlToken::IntLit(value) => value as f64,
+            TqlToken::UIntLit(value) => value as f64,
+            other => return Err(format!("Expected finite number, got {other:?}")),
+        };
+        if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
+            return Err("参数必须是有限 f32 数值 (Parameter must be finite f32)".into());
+        }
+        Ok(value as f32)
+    }
+
+    fn parse_rank_clause(&mut self) -> Result<RankClause, String> {
+        self.sourced("rank", Self::parse_rank_clause_source_inner)
+    }
+
+    fn parse_rank_clause_source_inner(&mut self) -> Result<RankClause, String> {
+        self.expect(&TqlToken::Rank)?;
+        let var = self.parse_ident()?;
+        self.expect(&TqlToken::By)?;
+        self.expect(&TqlToken::Vector)?;
+        let vector = self.parse_numeric_vector()?;
+        self.expect(&TqlToken::Top)?;
+        let top_k = self.parse_positive_int()?;
+        Ok(RankClause { var, vector, top_k })
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  MATCH 入口
+    // ═══════════════════════════════════════════════════════════════
+
+    fn parse_match_entry(&mut self) -> Result<QueryEntry, String> {
+        self.sourced("entry", Self::parse_match_entry_source_inner)
+    }
+
+    fn parse_match_entry_source_inner(&mut self) -> Result<QueryEntry, String> {
+        self.expect(&TqlToken::Match)?;
+        let pattern = self.parse_pattern()?;
+        Ok(QueryEntry::Match { pattern })
+    }
+
+    fn parse_optional_match_entry(&mut self) -> Result<QueryEntry, String> {
+        self.sourced("entry", Self::parse_optional_match_entry_source_inner)
+    }
+
+    fn parse_optional_match_entry_source_inner(&mut self) -> Result<QueryEntry, String> {
+        self.expect(&TqlToken::Optional)?;
+        self.expect(&TqlToken::Match)?;
+        let pattern = self.parse_pattern()?;
+        Ok(QueryEntry::OptionalMatch { pattern })
+    }
+
+    fn parse_pattern(&mut self) -> Result<TqlPattern, String> {
+        self.sourced("pattern", Self::parse_pattern_source_inner)
+    }
+
+    fn parse_pattern_source_inner(&mut self) -> Result<TqlPattern, String> {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+
+        nodes.push(self.parse_node_pattern()?);
+
+        while self.at(&TqlToken::Dash) || self.at(&TqlToken::LeftArrow) {
+            edges.push(self.parse_edge_pattern()?);
+            let next_node = self.parse_node_pattern()?;
+            nodes.push(next_node);
+        }
+
+        let named_single =
+            edges.len() == 1 && edges[0].var.is_some() && edges[0].hop_range.is_none();
+        if !named_single && !edges.is_empty() && nodes.iter().any(|node| node.var.is_none()) {
+            return Err(
+                "此路径的节点需要具名绑定 (Nodes in this path require named bindings)".into(),
+            );
+        }
+        let pattern = TqlPattern { nodes, edges };
+        super::tql_executor::validate_pattern(&pattern).map_err(|error| error.to_string())?;
+        Ok(pattern)
+    }
+
+    /// 节点模式: (var {doc_filter})
+    fn parse_node_pattern(&mut self) -> Result<TqlNodePattern, String> {
+        self.sourced("node_pattern", Self::parse_node_pattern_source_inner)
+    }
+
+    fn parse_node_pattern_source_inner(&mut self) -> Result<TqlNodePattern, String> {
+        self.expect(&TqlToken::LParen)?;
+
+        // 变量名（可选）
+        let var = if let TqlToken::Ident(_) = self.peek() {
+            if let TqlToken::Ident(name) = self.advance() {
+                Some(name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 内联文档过滤 {key: val, ...} (Q1: 支持 Mongo 操作符)
+        // 空 {} 视为无条件（与旧 Cypher 兼容）
+        let filter = if self.at(&TqlToken::LBrace) {
+            // 探测是否为空 {}
+            let saved_pos = self.pos;
+            self.advance(); // consume {
+            if self.at(&TqlToken::RBrace) {
+                self.advance(); // consume }
+                None // 空 {} = 无条件
+            } else {
+                self.pos = saved_pos; // 回溯
+                Some(self.parse_doc_filter()?)
+            }
+        } else {
+            None
+        };
+
+        self.expect(&TqlToken::RParen)?;
+
+        Ok(TqlNodePattern { var, filter })
+    }
+
+    /// 边模式，支持三种方向：
+    /// - 正向: -[:label]->
+    /// - 反向: <-[:label]-
+    /// - 双向: -[:label]-
+    fn parse_edge_pattern(&mut self) -> Result<TqlEdgePattern, String> {
+        self.sourced("edge_pattern", Self::parse_edge_pattern_source_inner)
+    }
+
+    fn parse_edge_pattern_source_inner(&mut self) -> Result<TqlEdgePattern, String> {
+        // 判断起始方向
+        let starts_with_left_arrow = self.at(&TqlToken::LeftArrow);
+        if starts_with_left_arrow {
+            self.advance(); // consume <-
+        } else {
+            self.expect(&TqlToken::Dash)?; // consume -
+        }
+
+        self.expect(&TqlToken::LBracket)?;
+
+        let mut labels = Vec::new();
+        let mut hop_range = None;
+        let var = if matches!(self.peek(), TqlToken::Ident(_)) {
+            Some(self.parse_ident()?)
+        } else {
+            None
+        };
+
+        // 标签部分（可选）
+        if self.at(&TqlToken::Colon) {
+            self.advance();
+            // 第一个标签
+            labels.push(self.parse_ident()?);
+            // 管道符分隔的后续标签 (Q2: 多标签 OR)
+            while self.at(&TqlToken::Pipe) {
+                self.advance();
+                labels.push(self.parse_ident()?);
+            }
+        }
+
+        // 可变长跳数范围（可选）
+        if self.at(&TqlToken::Star) {
+            let mark = self.source_mark();
+            self.advance();
+            let min = self.parse_positive_int()?;
+            self.expect(&TqlToken::DotDot)?;
+            let max = self.parse_positive_int()?;
+            if min > max {
+                return Err(format!("Hop range min ({}) > max ({})", min, max));
+            }
+            hop_range = Some(HopRange { min, max });
+            self.finish_source("hop_range", mark);
+        }
+
+        self.expect(&TqlToken::RBracket)?;
+
+        // 判断结束方向
+        let direction = if starts_with_left_arrow {
+            // <-[...]-  反向（期望尾部是 -）
+            self.expect(&TqlToken::Dash)?;
+            EdgeDirection::Backward
+        } else if self.at(&TqlToken::Arrow) {
+            // -[...]->  正向
+            self.advance();
+            EdgeDirection::Forward
+        } else if self.at(&TqlToken::Dash) {
+            // -[]- 双向
+            self.advance();
+            EdgeDirection::Both
+        } else {
+            return Err(format!(
+                "Expected '->' or '-' after edge pattern, got {:?}",
+                self.peek()
+            ));
+        };
+
+        Ok(TqlEdgePattern {
+            var,
+            labels,
+            hop_range,
+            direction,
+        })
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  FIND 入口
+    // ═══════════════════════════════════════════════════════════════
+
+    fn parse_find_entry(&mut self) -> Result<QueryEntry, String> {
+        self.sourced("entry", Self::parse_find_entry_source_inner)
+    }
+
+    fn parse_find_entry_source_inner(&mut self) -> Result<QueryEntry, String> {
+        self.expect(&TqlToken::Find)?;
+        let filter = self.parse_doc_filter()?;
+        Ok(QueryEntry::Find { filter })
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  SEARCH 入口
+    // ═══════════════════════════════════════════════════════════════
+
+    fn parse_search_entry(&mut self) -> Result<QueryEntry, String> {
+        self.sourced("entry", Self::parse_search_entry_source_inner)
+    }
+
+    fn parse_search_entry_source_inner(&mut self) -> Result<QueryEntry, String> {
+        self.expect(&TqlToken::Search)?;
+        self.expect(&TqlToken::Vector)?;
+
+        // 向量元素支持数字字面量或 Prepared 标量参数。
+        let vector_mark = self.source_mark();
+        self.expect(&TqlToken::LBracket)?;
+        let mut vector = Vec::new();
+        let mut vector_parameters = Vec::new();
+        loop {
+            if self.at(&TqlToken::RBracket) {
+                break;
+            }
+            let index = vector.len();
+            let element_mark = self.source_mark();
+            let value = match self.advance() {
+                TqlToken::DollarOp(name) => {
+                    let name = name.trim_start_matches('$').to_owned();
+                    self.record_parameter_reference(&name);
+                    vector_parameters.push((index, name));
+                    0.into()
+                }
+                token => Self::numeric_token(token)?,
+            };
+            vector.push(value);
+            self.finish_source("vector_element", element_mark);
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            }
+        }
+        self.expect(&TqlToken::RBracket)?;
+        self.finish_source("vector", vector_mark);
+
+        // TOP k
+        self.expect(&TqlToken::Top)?;
+        let top_k = self.parse_positive_int()?;
+
+        // EXPAND (可选, Q3: Phase 2 只做 EXPAND)
+        let expand = if self.at(&TqlToken::Expand) {
+            self.advance();
+            Some(self.parse_expand_clause()?)
+        } else {
+            None
+        };
+
+        Ok(QueryEntry::Search {
+            vector,
+            vector_parameters,
+            top_k,
+            expand,
+        })
+    }
+
+    fn parse_pipeline_stages(&mut self) -> Result<Vec<PipelineStage>, String> {
+        self.sourced("pipeline", Self::parse_pipeline_stages_source_inner)
+    }
+
+    fn parse_pipeline_stages_source_inner(&mut self) -> Result<Vec<PipelineStage>, String> {
+        let mut stages = Vec::new();
+        let mut stage_mark = self.source_mark();
+        while self.at(&TqlToken::As) || self.at(&TqlToken::With) {
+            // Source AS name 是首个作用域绑定，不单独形成执行阶段。
+            if self.at(&TqlToken::As) {
+                let item_mark = self.source_mark();
+                self.advance();
+                let alias = self.parse_ident()?;
+                self.synthetic_source("expression");
+                self.finish_source("with_item", item_mark);
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::With(WithStage {
+                        items: vec![WithItem {
+                            expr: TqlExpr::Variable("_".into()),
+                            alias,
+                        }],
+                    }),
+                );
+                continue;
+            }
+            self.expect(&TqlToken::With)?;
+            let mut items = Vec::new();
+            loop {
+                let item_mark = self.source_mark();
+                let expr = self.parse_expr()?;
+                let alias = if self.at(&TqlToken::As) {
+                    self.advance();
+                    self.parse_ident()?
+                } else if let TqlExpr::Variable(var) = &expr {
+                    var.clone()
+                } else {
+                    return Err("WITH 标量表达式必须使用 AS 别名 (WITH scalar expression requires AS alias)".into());
+                };
+                items.push(WithItem { expr, alias });
+                self.finish_source("with_item", item_mark);
+                if self.at(&TqlToken::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.push_stage(
+                &mut stages,
+                &mut stage_mark,
+                PipelineStage::With(WithStage { items }),
+            );
+
+            if self.at(&TqlToken::Expand) {
+                self.advance();
+                let input = self.parse_ident()?;
+                let expand = self.parse_expand_clause()?;
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::Expand(PipelineExpandStage {
+                        input,
+                        output,
+                        expand,
+                    }),
+                );
+            }
+            if let TqlToken::Ident(name) = self.peek().clone()
+                && matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "pagerank"
+                        | "wcc"
+                        | "degree"
+                        | "label_propagation"
+                        | "leiden"
+                        | "sa_ppr"
+                        | "scc"
+                        | "k_core"
+                        | "articulation_points"
+                        | "triangle_count"
+                        | "hits"
+                        | "harmonic_centrality"
+                )
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                let subset_mark = self.source_mark();
+                let subset = if matches!(self.peek(), TqlToken::Ident(value) if value.eq_ignore_ascii_case("mode"))
+                {
+                    self.advance();
+                    let mode = match self.advance() {
+                        TqlToken::Expand => "expand".to_owned(),
+                        TqlToken::Ident(mode) => mode.to_ascii_lowercase(),
+                        other => return Err(format!("Expected graph subset mode, got {other:?}")),
+                    };
+                    match mode.as_str() {
+                        "induced" => GraphSubsetSpec::Induced,
+                        mode @ ("expand" | "boundary") => {
+                            self.expect_ident_keyword("hops")?;
+                            let hops = self.parse_positive_int()?;
+                            let direction = if matches!(self.peek(), TqlToken::Outgoing) {
+                                self.advance();
+                                EdgeDirection::Forward
+                            } else if matches!(self.peek(), TqlToken::Incoming) {
+                                self.advance();
+                                EdgeDirection::Backward
+                            } else if matches!(self.peek(), TqlToken::Both) {
+                                self.advance();
+                                EdgeDirection::Both
+                            } else {
+                                EdgeDirection::Forward
+                            };
+                            let labels = if matches!(self.peek(), TqlToken::Ident(value) if value.eq_ignore_ascii_case("labels"))
+                            {
+                                self.advance();
+                                Some(self.parse_ident_list()?)
+                            } else {
+                                None
+                            };
+                            if mode == "expand" {
+                                GraphSubsetSpec::Expand {
+                                    hops,
+                                    labels,
+                                    direction,
+                                }
+                            } else {
+                                GraphSubsetSpec::Boundary {
+                                    hops,
+                                    labels,
+                                    direction,
+                                }
+                            }
+                        }
+                        mode => {
+                            return Err(format!(
+                                "未知图子集模式 {mode} (Unknown graph subset mode)"
+                            ));
+                        }
+                    }
+                } else {
+                    GraphSubsetSpec::Induced
+                };
+                self.finish_source("graph_subset", subset_mark);
+                let label_filter = if matches!(self.peek(), TqlToken::Ident(value) if value.eq_ignore_ascii_case("label"))
+                {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                let algorithm = match name.to_ascii_lowercase().as_str() {
+                    "pagerank" => GraphAlgorithmKind::PageRank,
+                    "wcc" => GraphAlgorithmKind::Wcc,
+                    "degree" => GraphAlgorithmKind::Degree,
+                    "label_propagation" => GraphAlgorithmKind::LabelPropagation,
+                    "leiden" => GraphAlgorithmKind::Leiden,
+                    "sa_ppr" => GraphAlgorithmKind::SaPpr,
+                    "scc" => GraphAlgorithmKind::Scc,
+                    "k_core" => GraphAlgorithmKind::KCore,
+                    "articulation_points" => GraphAlgorithmKind::ArticulationPoints,
+                    "triangle_count" => GraphAlgorithmKind::TriangleCount,
+                    "hits" => GraphAlgorithmKind::Hits,
+                    "harmonic_centrality" => GraphAlgorithmKind::HarmonicCentrality,
+                    _ => return Err(format!("未知图算法: {name}")),
+                };
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::GraphAlgorithm(GraphAlgorithmStage {
+                        input,
+                        output,
+                        algorithm,
+                        subset,
+                        label_filter,
+                    }),
+                );
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("all_paths"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("to")?;
+                let targets = self.parse_u64_list()?;
+                self.expect_ident_keyword("depth")?;
+                let max_depth = self.parse_positive_int()?;
+                self.expect_ident_keyword("paths")?;
+                let max_paths = self.parse_positive_int()?;
+                self.expect_ident_keyword("aggregate")?;
+                let aggregation = match self.parse_ident()?.to_ascii_lowercase().as_str() {
+                    "max_product" => PathAggregation::MaxProduct,
+                    "sum_product" => PathAggregation::SumProduct,
+                    "average_weight" => PathAggregation::AverageWeight,
+                    other => {
+                        return Err(format!(
+                            "未知路径聚合方式 {other} (Unknown path aggregation {other})"
+                        ));
+                    }
+                };
+                let label_sequence = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("labels"))
+                {
+                    self.advance();
+                    Some(self.parse_ident_list()?)
+                } else {
+                    None
+                };
+                let forbidden_nodes = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("avoid"))
+                {
+                    self.advance();
+                    self.parse_u64_list()?
+                } else {
+                    Vec::new()
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::AllPaths(AllPathsStage {
+                        input,
+                        output,
+                        targets,
+                        max_depth,
+                        max_paths,
+                        aggregation,
+                        label_sequence,
+                        forbidden_nodes,
+                    }),
+                );
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("shortest_paths"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("to")?;
+                let targets = self.parse_u64_list()?;
+                let label = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("label"))
+                {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::ShortestPaths(ShortestPathsStage {
+                        input,
+                        output,
+                        targets,
+                        label,
+                    }),
+                );
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("weighted_paths"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("to")?;
+                let targets = self.parse_u64_list()?;
+                let label = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("label"))
+                {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::WeightedPaths(WeightedPathsStage {
+                        input,
+                        output,
+                        targets,
+                        label,
+                    }),
+                );
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("yen_paths"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("to")?;
+                let targets = self.parse_u64_list()?;
+                self.expect_ident_keyword("k")?;
+                let k = self.parse_positive_int()?;
+                let label = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("label"))
+                {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::YenPaths(YenPathsStage {
+                        input,
+                        output,
+                        targets,
+                        k,
+                        label,
+                    }),
+                );
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("node_similarity"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect(&TqlToken::Top)?;
+                let top_k = self.parse_positive_int()?;
+                self.expect_ident_keyword("cutoff")?;
+                let cutoff = self.parse_json_number()?;
+                let label = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("label"))
+                {
+                    self.advance();
+                    Some(self.parse_ident()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::NodeSimilarity(NodeSimilarityStage {
+                        input,
+                        output,
+                        top_k,
+                        cutoff,
+                        label,
+                    }),
+                );
+            }
+            if let TqlToken::Ident(name) = self.peek().clone()
+                && matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "union" | "intersect" | "except"
+                )
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("ids")?;
+                let other_ids = self.parse_u64_list()?;
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                let operation = match name.to_ascii_lowercase().as_str() {
+                    "union" => TqlSetOperation::Union,
+                    "intersect" => TqlSetOperation::Intersect,
+                    "except" => TqlSetOperation::Except,
+                    _ => return Err(format!("未知集合运算: {name}")),
+                };
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::SetCombine(SetCombineStage {
+                        input,
+                        other_ids,
+                        output,
+                        operation,
+                    }),
+                );
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("iterate"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect(&TqlToken::Expand)?;
+                let expand = self.parse_expand_clause()?;
+                self.expect_ident_keyword("times")?;
+                let max_iterations = self.parse_positive_int()?;
+                let stop_on_fixed_point = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("fixed"))
+                {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::Iterate(IterateStage {
+                        input,
+                        output,
+                        expand,
+                        max_iterations,
+                        stop_on_fixed_point,
+                    }),
+                );
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("diversify"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect(&TqlToken::Top)?;
+                let top_k = self.parse_positive_int()?;
+                let quality_weight = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("quality_weight"))
+                {
+                    self.advance();
+                    self.parse_finite_f32()?
+                } else {
+                    1.0
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::Diversify(DiversifyStage {
+                        input,
+                        output,
+                        top_k,
+                        quality_weight,
+                    }),
+                );
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("residual"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect(&TqlToken::By)?;
+                self.expect(&TqlToken::Vector)?;
+                let vector = self.parse_numeric_vector()?;
+                self.expect(&TqlToken::Top)?;
+                let top_k = self.parse_positive_int()?;
+                self.expect_ident_keyword("lambda")?;
+                let lambda = self.parse_finite_f32()?;
+                self.expect_ident_keyword("threshold")?;
+                let threshold = self.parse_finite_f32()?;
+                self.expect_ident_keyword("iterations")?;
+                let iterations = self.parse_positive_int()?;
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::Residual(ResidualStage {
+                        input,
+                        output,
+                        vector,
+                        top_k,
+                        lambda,
+                        threshold,
+                        iterations,
+                    }),
+                );
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("topics")) {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("k")?;
+                let topics = self.parse_positive_int()?;
+                self.expect_ident_keyword("iterations")?;
+                let iterations = self.parse_positive_int()?;
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::Topics(TopicsStage {
+                        input,
+                        output,
+                        topics,
+                        iterations,
+                    }),
+                );
+            }
+            if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("sa_ppr_config"))
+            {
+                self.advance();
+                let input = self.parse_ident()?;
+                self.expect_ident_keyword("depth")?;
+                let max_depth = self.parse_positive_int()?;
+                self.expect_ident_keyword("alpha")?;
+                let restart_alpha = self.parse_finite_f32()?;
+                self.expect_ident_keyword("max_edges")?;
+                let max_edges_per_node = self.parse_positive_int()?;
+                self.expect_ident_keyword("min_weight")?;
+                let min_edge_weight = self.parse_finite_f32()?;
+                let labels = if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("labels"))
+                {
+                    self.advance();
+                    Some(self.parse_ident_list()?)
+                } else {
+                    None
+                };
+                self.expect(&TqlToken::As)?;
+                let output = self.parse_ident()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::SaPpr(SaPprStage {
+                        input,
+                        output,
+                        max_depth,
+                        restart_alpha,
+                        max_edges_per_node,
+                        min_edge_weight,
+                        labels,
+                    }),
+                );
+            }
+            if self.at(&TqlToken::Where) {
+                self.advance();
+                let predicate = self.parse_predicate()?;
+                self.push_stage(
+                    &mut stages,
+                    &mut stage_mark,
+                    PipelineStage::Filter(predicate),
+                );
+            }
+            if self.at(&TqlToken::Rank) {
+                let rank = self.parse_rank_clause()?;
+                self.push_stage(&mut stages, &mut stage_mark, PipelineStage::Rank(rank));
+            }
+        }
+        Ok(stages)
+    }
+
+    fn expect_ident_keyword(&mut self, expected: &str) -> Result<(), String> {
+        match self.advance() {
+            TqlToken::Ident(value) if value.eq_ignore_ascii_case(expected) => Ok(()),
+            other => Err(self.error_previous(format!("Expected {expected}, got {other:?}"))),
+        }
+    }
+
+    fn parse_u64_list(&mut self) -> Result<Vec<u64>, String> {
+        self.expect(&TqlToken::LBracket)?;
+        let mut values = Vec::new();
+        while !self.at(&TqlToken::RBracket) {
+            match self.advance() {
+                TqlToken::IntLit(value) if value > 0 => values.push(value as u64),
+                TqlToken::UIntLit(value) => values.push(value),
+                other => {
+                    return Err(format!(
+                        "节点 ID 必须为正整数 (Node ID must be positive), got {other:?}"
+                    ));
+                }
+            }
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(&TqlToken::RBracket)?;
+        if values.is_empty() {
+            return Err("节点 ID 列表不能为空 (Node ID list cannot be empty)".into());
+        }
+        Ok(values)
+    }
+
+    fn parse_ident_list(&mut self) -> Result<Vec<String>, String> {
+        self.expect(&TqlToken::LBracket)?;
+        let mut values = Vec::new();
+        while !self.at(&TqlToken::RBracket) {
+            values.push(self.parse_ident()?);
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(&TqlToken::RBracket)?;
+        if values.is_empty() {
+            return Err("标签列表不能为空 (Label list cannot be empty)".into());
+        }
+        Ok(values)
+    }
+
+    /// EXPAND [OUTGOING|INCOMING|BOTH] [:label*min..max]
+    fn parse_expand_clause(&mut self) -> Result<ExpandClause, String> {
+        self.sourced("expand", Self::parse_expand_clause_source_inner)
+    }
+
+    fn parse_expand_clause_source_inner(&mut self) -> Result<ExpandClause, String> {
+        let direction = match self.peek() {
+            TqlToken::Outgoing => {
+                self.advance();
+                EdgeDirection::Forward
+            }
+            TqlToken::Incoming => {
+                self.advance();
+                EdgeDirection::Backward
+            }
+            TqlToken::Both => {
+                self.advance();
+                EdgeDirection::Both
+            }
+            _ => EdgeDirection::Forward,
+        };
+        self.expect(&TqlToken::LBracket)?;
+
+        let mut labels = Vec::new();
+        if self.at(&TqlToken::Colon) {
+            self.advance();
+            labels.push(self.parse_ident()?);
+            while self.at(&TqlToken::Pipe) {
+                self.advance();
+                labels.push(self.parse_ident()?);
+            }
+        }
+
+        // *min..max（必须）
+        self.expect(&TqlToken::Star)?;
+        let min_depth = self.parse_positive_int()?;
+        self.expect(&TqlToken::DotDot)?;
+        let max_depth = self.parse_positive_int()?;
+        if min_depth > max_depth {
+            return Err(format!(
+                "EXPAND min depth ({min_depth}) > max depth ({max_depth})"
+            ));
+        }
+
+        self.expect(&TqlToken::RBracket)?;
+
+        Ok(ExpandClause {
+            labels,
+            min_depth,
+            max_depth,
+            direction,
+        })
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  文档过滤 (MongoDB 风格)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 解析 {key: value, ...} 形式的文档过滤
+    fn parse_doc_filter(&mut self) -> Result<Filter, String> {
+        self.sourced("filter", Self::parse_doc_filter_source_inner)
+    }
+
+    fn parse_doc_filter_source_inner(&mut self) -> Result<Filter, String> {
+        self.depth += 1;
+        if self.depth > 128 {
+            self.depth -= 1;
+            return Err("Parser recursion depth exceeded (doc filter nesting too deep)".into());
+        }
+        let result = self.parse_doc_filter_inner();
+        self.depth -= 1;
+        result
+    }
+
+    /// parse_doc_filter 的内部实现，深度限制由外层 parse_doc_filter 统一守护
+    fn parse_doc_filter_inner(&mut self) -> Result<Filter, String> {
+        self.expect(&TqlToken::LBrace)?;
+
+        let mut filters = Vec::new();
+
+        while !self.at(&TqlToken::RBrace) {
+            let filter_mark = self.source_mark();
+            match self.peek().clone() {
+                TqlToken::DollarOp(op) if op == "$and" || op == "$or" => {
+                    let op = op.clone();
+                    self.advance(); // $and / $or
+                    self.expect(&TqlToken::Colon)?;
+                    self.expect(&TqlToken::LBracket)?;
+
+                    let mut sub_filters = Vec::new();
+                    while !self.at(&TqlToken::RBracket) {
+                        sub_filters.push(self.parse_doc_filter()?);
+                        if self.at(&TqlToken::Comma) {
+                            self.advance();
+                        }
+                    }
+                    self.expect(&TqlToken::RBracket)?;
+
+                    let combined = if op == "$and" {
+                        Filter::And(sub_filters)
+                    } else {
+                        Filter::Or(sub_filters)
+                    };
+                    filters.push(combined);
+                    self.finish_source("filter", filter_mark);
+                }
+
+                TqlToken::Ident(_) | TqlToken::StringLit(_) | TqlToken::Rank => {
+                    let field = self.parse_field_name()?;
+                    self.expect(&TqlToken::Colon)?;
+
+                    if self.at(&TqlToken::LBrace) {
+                        // 操作符对象: {$gt: 18}
+                        self.advance();
+                        while !self.at(&TqlToken::RBrace) {
+                            let operator_mark = self.source_mark();
+                            let op = match self.advance() {
+                                TqlToken::DollarOp(s) => s,
+                                other => {
+                                    return Err(format!("Expected $operator, got {:?}", other));
+                                }
+                            };
+                            self.expect(&TqlToken::Colon)?;
+
+                            let f = self.parse_filter_op_value(&field, &op)?;
+                            filters.push(f);
+                            self.finish_source("filter", operator_mark);
+
+                            if self.at(&TqlToken::Comma) {
+                                self.advance();
+                            }
+                        }
+                        self.expect(&TqlToken::RBrace)?;
+                        self.finish_source("filter_field", filter_mark);
+                    } else {
+                        // 隐式 $eq: {name: "Alice"}
+                        let val = self.parse_json_value()?;
+                        filters.push(Filter::Eq(field, val));
+                        self.finish_source("filter", filter_mark);
+                    }
+                }
+
+                _ => return Err(format!("Unexpected token in doc filter: {:?}", self.peek())),
+            }
+
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            }
+        }
+
+        self.expect(&TqlToken::RBrace)?;
+
+        match filters.len() {
+            0 => Err("文档过滤不能为空".into()),
+            1 => Ok(filters
+                .into_iter()
+                .next()
+                .expect("BUG: len==1 but next() returned None")),
+            _ => Ok(Filter::And(filters)),
+        }
+    }
+
+    /// 解析操作符值: $gt → Filter::Gt, $in → Filter::In, etc.
+    fn parse_filter_op_value(&mut self, field: &str, op: &str) -> Result<Filter, String> {
+        match op {
+            "$eq" => Ok(Filter::Eq(field.into(), self.parse_json_value()?)),
+            "$ne" => Ok(Filter::Ne(field.into(), self.parse_json_value()?)),
+            "$gt" | "$gte" | "$lt" | "$lte" | "$before" | "$beforeEq" | "$after" | "$afterEq" => {
+                let value = self.parse_json_value()?;
+                let json = serde_json::json!({field: {op: value}});
+                Filter::from_json(&json)
+            }
+            "$in" => Ok(Filter::In(field.into(), self.parse_json_array()?)),
+            "$nin" => Ok(Filter::Nin(field.into(), self.parse_json_array()?)),
+            "$exists" => {
+                let b = match self.advance() {
+                    TqlToken::BoolLit(b) => b,
+                    other => return Err(format!("$exists expects boolean, got {:?}", other)),
+                };
+                Ok(Filter::Exists(field.into(), b))
+            }
+            "$size" => {
+                let n = self.parse_positive_int()?;
+                Ok(Filter::Size(field.into(), n))
+            }
+            "$all" => Ok(Filter::All(field.into(), self.parse_json_array()?)),
+            "$type" => {
+                let t = match self.advance() {
+                    TqlToken::StringLit(s) => s,
+                    other => return Err(format!("$type expects string, got {:?}", other)),
+                };
+                Ok(Filter::TypeMatch(field.into(), t))
+            }
+            "$startsWith" => {
+                let prefix = match self.advance() {
+                    TqlToken::StringLit(s) => s,
+                    other => return Err(format!("$startsWith expects string, got {:?}", other)),
+                };
+                Ok(Filter::StartsWith(field.into(), prefix))
+            }
+            "$contains" => {
+                let substr = match self.advance() {
+                    TqlToken::StringLit(s) => s,
+                    other => return Err(format!("$contains expects string, got {:?}", other)),
+                };
+                Ok(Filter::Contains(field.into(), substr))
+            }
+            unknown => Err(format!("Unknown operator: {}", unknown)),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  统一谓词 (WHERE 子句)
+    // ═══════════════════════════════════════════════════════════════
+
+    fn parse_predicate(&mut self) -> Result<Predicate, String> {
+        self.depth += 1;
+        if self.depth > 128 {
+            self.depth -= 1;
+            return Err("Parser recursion depth exceeded".into());
+        }
+        let result = self.parse_predicate_or();
+        self.depth -= 1;
+        result
+    }
+
+    /// OR 层
+    fn parse_predicate_or(&mut self) -> Result<Predicate, String> {
+        let mark = self.source_mark();
+        let mut left = self.parse_predicate_and()?;
+        while self.at(&TqlToken::Or) {
+            self.advance();
+            let right = self.parse_predicate_and()?;
+            left = Predicate::Or(Box::new(left), Box::new(right));
+            self.finish_source("predicate", mark);
+        }
+        Ok(left)
+    }
+
+    /// AND 层
+    fn parse_predicate_and(&mut self) -> Result<Predicate, String> {
+        let mark = self.source_mark();
+        let mut left = self.parse_predicate_atom()?;
+        while self.at(&TqlToken::And) {
+            self.advance();
+            let right = self.parse_predicate_atom()?;
+            left = Predicate::And(Box::new(left), Box::new(right));
+            self.finish_source("predicate", mark);
+        }
+        Ok(left)
+    }
+
+    /// 原子谓词
+    fn parse_predicate_atom(&mut self) -> Result<Predicate, String> {
+        let mark = self.source_mark();
+        let grouped = self.at(&TqlToken::LParen);
+        let result = self.parse_predicate_atom_inner();
+        self.finish_group("predicate", mark, grouped);
+        result
+    }
+
+    fn parse_predicate_atom_inner(&mut self) -> Result<Predicate, String> {
+        // NOT
+        if self.at(&TqlToken::Not) {
+            self.advance();
+            let inner = self.parse_predicate_atom()?;
+            return Ok(Predicate::Not(Box::new(inner)));
+        }
+
+        // 括号
+        if self.at(&TqlToken::LParen) {
+            self.advance();
+            let inner = self.parse_predicate()?;
+            self.expect(&TqlToken::RParen)?;
+            return Ok(inner);
+        }
+
+        // 文档过滤: {field: {$op: val}}
+        if self.at(&TqlToken::LBrace) {
+            let filter = self.parse_doc_filter()?;
+            return Ok(Predicate::DocFilter { var: None, filter });
+        }
+
+        // 表达式比较或 var MATCHES 文档过滤
+        if matches!(
+            self.peek(),
+            TqlToken::Ident(_) | TqlToken::Rank | TqlToken::DollarOp(_)
+        ) {
+            let checkpoint = self.pos;
+            let left = self.parse_expr()?;
+            if let TqlExpr::Variable(ident) = &left
+                && self.at(&TqlToken::Matches)
+            {
+                self.advance();
+                let filter = self.parse_doc_filter()?;
+                return Ok(Predicate::DocFilter {
+                    var: Some(ident.clone()),
+                    filter,
+                });
+            }
+            if matches!(
+                self.peek(),
+                TqlToken::Eq
+                    | TqlToken::Ne
+                    | TqlToken::Gt
+                    | TqlToken::Gte
+                    | TqlToken::Lt
+                    | TqlToken::Lte
+            ) {
+                let op = self.parse_comp_op()?;
+                let right = self.parse_expr()?;
+                return Ok(Predicate::Compare { left, op, right });
+            }
+            self.pos = checkpoint;
+            let ident = self.parse_ident()?;
+            return Err(format!(
+                "Unexpected token after identifier '{}': {:?}",
+                ident,
+                self.peek()
+            ));
+        }
+
+        Err(format!("Unexpected token in predicate: {:?}", self.peek()))
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  RETURN / ORDER BY
+    // ═══════════════════════════════════════════════════════════════
+
+    fn parse_return_clause(&mut self) -> Result<ReturnClause, String> {
+        self.sourced("return", Self::parse_return_clause_source_inner)
+    }
+
+    fn parse_return_clause_source_inner(&mut self) -> Result<ReturnClause, String> {
+        if self.at(&TqlToken::Star) {
+            self.advance();
+            return Ok(ReturnClause::All);
+        }
+
+        // 尝试解析为表达式列表（支持聚合、DISTINCT、属性访问、AS）
+        let mut exprs = Vec::new();
+        exprs.push(self.parse_return_expr()?);
+        while self.at(&TqlToken::Comma) {
+            self.advance();
+            exprs.push(self.parse_return_expr()?);
+        }
+
+        // 如果所有项都是纯变量引用（无聚合、无 DISTINCT、无属性访问、无 alias），降级为 Variables
+        let all_simple = exprs
+            .iter()
+            .all(|e| matches!(&e.kind, ReturnExprKind::Var(_)) && e.alias.is_none() && !e.distinct);
+
+        if all_simple {
+            let mut vars = Vec::with_capacity(exprs.len());
+            for e in exprs {
+                match e.kind {
+                    ReturnExprKind::Var(v) => vars.push(v),
+                    _ => return Err("BUG: expected Var in all_simple path".into()),
+                }
+            }
+            Ok(ReturnClause::Variables(vars))
+        } else {
+            Ok(ReturnClause::Expressions(exprs))
+        }
+    }
+
+    /// 解析单个 RETURN 表达式项
+    ///
+    /// 支持格式：
+    /// - `a` — 变量引用
+    /// - `a.name` — 属性访问
+    /// - `DISTINCT a` / `DISTINCT a.name` — 去重
+    /// - `count(b)` / `avg(b.age)` — 聚合函数
+    /// - `... AS alias` — 别名
+    fn parse_return_expr(&mut self) -> Result<ReturnExpr, String> {
+        self.sourced("return_item", Self::parse_return_expr_source_inner)
+    }
+
+    fn parse_return_expr_source_inner(&mut self) -> Result<ReturnExpr, String> {
+        // DISTINCT 前缀
+        let distinct = if self.at(&TqlToken::Distinct) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        // 聚合函数: count(...), sum(...), etc.
+        let kind_mark = self.source_mark();
+        let kind = if let Some(func) = self.try_parse_agg_func() {
+            self.expect(&TqlToken::LParen)?;
+            let inner = if self.at(&TqlToken::Star) {
+                let mark = self.source_mark();
+                self.advance();
+                self.finish_source("return_kind", mark);
+                ReturnExprKind::Var("*".to_owned())
+            } else {
+                self.parse_return_expr_kind()?
+            };
+            self.expect(&TqlToken::RParen)?;
+            self.finish_source("return_kind", kind_mark);
+            ReturnExprKind::Aggregate(func, Box::new(inner))
+        } else {
+            self.parse_return_expr_kind()?
+        };
+
+        // AS 别名
+        let alias = if self.at(&TqlToken::As) {
+            self.advance();
+            Some(self.parse_ident()?)
+        } else {
+            None
+        };
+
+        Ok(ReturnExpr {
+            kind,
+            alias,
+            distinct,
+        })
+    }
+
+    /// 解析 RETURN 表达式内部类型（变量或属性访问）
+    fn parse_return_expr_kind(&mut self) -> Result<ReturnExprKind, String> {
+        self.sourced("return_kind", Self::parse_return_expr_kind_source_inner)
+    }
+
+    fn parse_return_expr_kind_source_inner(&mut self) -> Result<ReturnExprKind, String> {
+        let expr = self.parse_expr()?;
+        match expr {
+            TqlExpr::Variable(var) => Ok(ReturnExprKind::Var(var)),
+            TqlExpr::Property { var, field } => Ok(ReturnExprKind::Property(var, field)),
+            scalar => Ok(ReturnExprKind::Scalar(scalar)),
+        }
+    }
+
+    /// 尝试解析聚合函数关键字，不消耗 token（使用探测）
+    fn try_parse_agg_func(&mut self) -> Option<AggFunc> {
+        match self.peek() {
+            TqlToken::Count => {
+                self.advance();
+                Some(AggFunc::Count)
+            }
+            TqlToken::Sum => {
+                self.advance();
+                Some(AggFunc::Sum)
+            }
+            TqlToken::Avg => {
+                self.advance();
+                Some(AggFunc::Avg)
+            }
+            TqlToken::Min => {
+                self.advance();
+                Some(AggFunc::Min)
+            }
+            TqlToken::Max => {
+                self.advance();
+                Some(AggFunc::Max)
+            }
+            TqlToken::Collect => {
+                self.advance();
+                Some(AggFunc::Collect)
+            }
+            _ => None,
+        }
+    }
+
+    fn parse_order_by_list(&mut self) -> Result<Vec<OrderExpr>, String> {
+        let mut items = Vec::new();
+        items.push(self.parse_order_expr()?);
+        while self.at(&TqlToken::Comma) {
+            self.advance();
+            items.push(self.parse_order_expr()?);
+        }
+        Ok(items)
+    }
+
+    fn parse_order_expr(&mut self) -> Result<OrderExpr, String> {
+        self.sourced("order", Self::parse_order_expr_source_inner)
+    }
+
+    fn parse_order_expr_source_inner(&mut self) -> Result<OrderExpr, String> {
+        let expr = self.parse_expr()?;
+        let descending = if self.at(&TqlToken::Desc) {
+            self.advance();
+            true
+        } else if self.at(&TqlToken::Asc) {
+            self.advance();
+            false
+        } else {
+            false // 默认升序
+        };
+        Ok(OrderExpr { expr, descending })
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  表达式 & 辅助方法
+    // ═══════════════════════════════════════════════════════════════
+
+    fn parse_expr(&mut self) -> Result<TqlExpr, String> {
+        // 括号和 coalesce 共用递归预算，避免表达式绕过谓词等外层的深度限制。
+        self.depth += 1;
+        if self.depth > 128 {
+            self.depth -= 1;
+            return Err("解析器递归深度超过限制（表达式嵌套最多 128 层）".into());
+        }
+        let result = self.parse_expr_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<TqlExpr, String> {
+        let mark = self.source_mark();
+        let expr = self.parse_additive_expr()?;
+        if !self.at(&TqlToken::Is) {
+            return Ok(expr);
+        }
+        self.advance();
+        let negated = if self.at(&TqlToken::Not) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        self.expect(&TqlToken::Null)?;
+        self.finish_source("expression", mark);
+        Ok(TqlExpr::IsNull {
+            expr: Box::new(expr),
+            negated,
+        })
+    }
+
+    fn parse_additive_expr(&mut self) -> Result<TqlExpr, String> {
+        let mark = self.source_mark();
+        let mut left = self.parse_multiplicative_expr()?;
+        while self.at(&TqlToken::Plus) || self.at(&TqlToken::Dash) {
+            let op = if self.at(&TqlToken::Plus) {
+                TqlBinaryOp::Add
+            } else {
+                TqlBinaryOp::Subtract
+            };
+            self.advance();
+            let right = self.parse_multiplicative_expr()?;
+            left = TqlExpr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+            self.finish_source("expression", mark);
+        }
+        Ok(left)
+    }
+
+    fn parse_multiplicative_expr(&mut self) -> Result<TqlExpr, String> {
+        let mark = self.source_mark();
+        let mut left = self.parse_primary_expr()?;
+        while self.at(&TqlToken::Star) || self.at(&TqlToken::Slash) {
+            let op = if self.at(&TqlToken::Star) {
+                TqlBinaryOp::Multiply
+            } else {
+                TqlBinaryOp::Divide
+            };
+            self.advance();
+            let right = self.parse_primary_expr()?;
+            left = TqlExpr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+            self.finish_source("expression", mark);
+        }
+        Ok(left)
+    }
+
+    fn parse_primary_expr(&mut self) -> Result<TqlExpr, String> {
+        let mark = self.source_mark();
+        let grouped = self.at(&TqlToken::LParen);
+        let result = self.parse_primary_expr_inner();
+        self.finish_group("expression", mark, grouped);
+        result
+    }
+
+    fn parse_primary_expr_inner(&mut self) -> Result<TqlExpr, String> {
+        match self.peek().clone() {
+            TqlToken::Ident(name)
+                if matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "similarity"
+                        | "graph_score"
+                        | "core_number"
+                        | "triangle_count"
+                        | "clustering_coefficient"
+                        | "authority_score"
+                        | "hub_score"
+                        | "harmonic_centrality"
+                        | "weighted_distance"
+                        | "node_similarity"
+                        | "path_rank"
+                        | "pair_left"
+                        | "pair_right"
+                        | "text_score"
+                        | "diversity_score"
+                        | "residual_score"
+                        | "topic"
+                        | "topic_score"
+                        | "depth"
+                        | "path_strength"
+                        | "path_count"
+                        | "community"
+                        | "path"
+                        | "path_length"
+                        | "id"
+                ) && self.tokens.get(self.pos.saturating_add(1)) == Some(&TqlToken::LParen) =>
+            {
+                self.advance();
+                self.expect(&TqlToken::LParen)?;
+                let var = self.parse_ident()?;
+                self.expect(&TqlToken::RParen)?;
+                match name.to_ascii_lowercase().as_str() {
+                    "similarity" => Ok(TqlExpr::Similarity { var }),
+                    "graph_score" => Ok(TqlExpr::GraphScore { var }),
+                    "core_number"
+                    | "triangle_count"
+                    | "clustering_coefficient"
+                    | "authority_score"
+                    | "hub_score"
+                    | "harmonic_centrality"
+                    | "weighted_distance"
+                    | "node_similarity" => Ok(TqlExpr::GraphMetric {
+                        var,
+                        metric: name.to_ascii_lowercase(),
+                    }),
+                    "path_rank" => Ok(TqlExpr::PathRank { var }),
+                    "pair_left" => Ok(TqlExpr::PairLeft { var }),
+                    "pair_right" => Ok(TqlExpr::PairRight { var }),
+                    "text_score" => Ok(TqlExpr::TextScore { var }),
+                    "diversity_score" => Ok(TqlExpr::DiversityScore { var }),
+                    "residual_score" => Ok(TqlExpr::ResidualScore { var }),
+                    "topic" => Ok(TqlExpr::Topic { var }),
+                    "topic_score" => Ok(TqlExpr::TopicScore { var }),
+                    "depth" => Ok(TqlExpr::Depth { var }),
+                    "path_strength" => Ok(TqlExpr::PathStrength { var }),
+                    "path_count" => Ok(TqlExpr::PathCount { var }),
+                    "community" => Ok(TqlExpr::Community { var }),
+                    "path" => Ok(TqlExpr::Path { var }),
+                    "path_length" => Ok(TqlExpr::PathLength { var }),
+                    "id" => Ok(TqlExpr::Property {
+                        var,
+                        field: "id".to_owned(),
+                    }),
+                    _ => Err(format!("未知标量函数: {name}")),
+                }
+            }
+            TqlToken::DollarOp(name) => {
+                self.advance();
+                let name = name.trim_start_matches('$').to_owned();
+                self.record_parameter_reference(&name);
+                Ok(TqlExpr::Parameter(name))
+            }
+            TqlToken::Ident(name)
+                if name.eq_ignore_ascii_case("coalesce")
+                    && self.tokens.get(self.pos.saturating_add(1)) == Some(&TqlToken::LParen) =>
+            {
+                self.advance();
+                self.expect(&TqlToken::LParen)?;
+                let mut values = vec![self.parse_expr()?];
+                while self.at(&TqlToken::Comma) {
+                    self.advance();
+                    values.push(self.parse_expr()?);
+                }
+                self.expect(&TqlToken::RParen)?;
+                Ok(TqlExpr::Coalesce(values))
+            }
+            TqlToken::Ident(_) | TqlToken::Rank => {
+                let ident = self.parse_ident()?;
+                if self.at(&TqlToken::Dot) {
+                    self.advance();
+                    let field = if self.at(&TqlToken::Matches) {
+                        let mark = self.source_mark();
+                        self.advance();
+                        self.finish_source("identifier", mark);
+                        "matches".to_owned()
+                    } else {
+                        self.parse_ident()?
+                    };
+                    Ok(TqlExpr::Property { var: ident, field })
+                } else {
+                    Ok(TqlExpr::Variable(ident))
+                }
+            }
+            TqlToken::LParen => {
+                self.advance();
+                let expr = self.parse_expr()?;
+                self.expect(&TqlToken::RParen)?;
+                Ok(expr)
+            }
+            TqlToken::IntLit(_)
+            | TqlToken::UIntLit(_)
+            | TqlToken::FloatLit(_)
+            | TqlToken::StringLit(_)
+            | TqlToken::BoolLit(_)
+            | TqlToken::Null => {
+                let lit = self.parse_tql_literal()?;
+                Ok(TqlExpr::Literal(lit))
+            }
+            other => Err(self.error_here(format!("Expected expression, got {:?}", other))),
+        }
+    }
+
+    fn parse_comp_op(&mut self) -> Result<TqlCompOp, String> {
+        match self.advance() {
+            TqlToken::Eq => Ok(TqlCompOp::Eq),
+            TqlToken::Ne => Ok(TqlCompOp::Ne),
+            TqlToken::Gt => Ok(TqlCompOp::Gt),
+            TqlToken::Gte => Ok(TqlCompOp::Gte),
+            TqlToken::Lt => Ok(TqlCompOp::Lt),
+            TqlToken::Lte => Ok(TqlCompOp::Lte),
+            other => {
+                Err(self.error_previous(format!("Expected comparison operator, got {:?}", other)))
+            }
+        }
+    }
+
+    fn parse_tql_literal(&mut self) -> Result<TqlLiteral, String> {
+        self.sourced("literal", Self::parse_tql_literal_source_inner)
+    }
+
+    fn parse_tql_literal_source_inner(&mut self) -> Result<TqlLiteral, String> {
+        match self.advance() {
+            TqlToken::IntLit(n) => Ok(TqlLiteral::Int(n)),
+            TqlToken::UIntLit(n) => Ok(TqlLiteral::UInt(n)),
+            TqlToken::FloatLit(f) => Ok(TqlLiteral::Float(f)),
+            TqlToken::StringLit(s) => Ok(TqlLiteral::Str(s)),
+            TqlToken::BoolLit(b) => Ok(TqlLiteral::Bool(b)),
+            TqlToken::Null => Ok(TqlLiteral::Null),
+            other => Err(self.error_previous(format!("Expected literal, got {:?}", other))),
+        }
+    }
+
+    fn parse_ident(&mut self) -> Result<String, String> {
+        self.sourced("identifier", Self::parse_ident_source_inner)
+    }
+
+    fn parse_ident_source_inner(&mut self) -> Result<String, String> {
+        match self.advance() {
+            TqlToken::Ident(s) => Ok(s),
+            TqlToken::Rank => Ok("rank".into()),
+            other => Err(self.error_previous(format!("Expected identifier, got {:?}", other))),
+        }
+    }
+
+    fn parse_positive_int(&mut self) -> Result<usize, String> {
+        self.sourced("integer", Self::parse_positive_int_source_inner)
+    }
+
+    fn parse_positive_int_source_inner(&mut self) -> Result<usize, String> {
+        match self.advance() {
+            TqlToken::IntLit(n) if n >= 0 => usize::try_from(n)
+                .map_err(|_| "数量超出平台范围 (Quantity exceeds platform range)".into()),
+            TqlToken::UIntLit(n) => usize::try_from(n)
+                .map_err(|_| "数量超出平台范围 (Quantity exceeds platform range)".into()),
+            other => {
+                Err(self.error_previous(format!("Expected positive integer, got {:?}", other)))
+            }
+        }
+    }
+
+    fn parse_field_name(&mut self) -> Result<String, String> {
+        self.sourced("field", Self::parse_field_name_source_inner)
+    }
+
+    fn parse_field_name_source_inner(&mut self) -> Result<String, String> {
+        match self.advance() {
+            TqlToken::Ident(s) => Ok(s),
+            TqlToken::StringLit(s) => Ok(s),
+            TqlToken::Rank => Ok("rank".into()),
+            other => Err(self.error_previous(format!("Expected field name, got {:?}", other))),
+        }
+    }
+
+    /// 解析 JSON 值（用于文档过滤的值部分）
+    fn parse_json_value(&mut self) -> Result<serde_json::Value, String> {
+        self.sourced("json", Self::parse_json_value_source_inner)
+    }
+
+    fn parse_json_value_source_inner(&mut self) -> Result<serde_json::Value, String> {
+        match self.peek().clone() {
+            TqlToken::UIntLit(value) => {
+                self.advance();
+                Ok(serde_json::json!(value))
+            }
+            TqlToken::IntLit(_) => {
+                if let TqlToken::IntLit(n) = self.advance() {
+                    Ok(serde_json::json!(n))
+                } else {
+                    Err("BUG: peek() was IntLit but advance() returned different token".into())
+                }
+            }
+            TqlToken::FloatLit(_) => {
+                if let TqlToken::FloatLit(f) = self.advance() {
+                    Ok(serde_json::json!(f))
+                } else {
+                    Err("BUG: peek() was FloatLit but advance() returned different token".into())
+                }
+            }
+            TqlToken::StringLit(_) => {
+                if let TqlToken::StringLit(s) = self.advance() {
+                    Ok(serde_json::json!(s))
+                } else {
+                    Err("BUG: peek() was StringLit but advance() returned different token".into())
+                }
+            }
+            TqlToken::BoolLit(_) => {
+                if let TqlToken::BoolLit(b) = self.advance() {
+                    Ok(serde_json::json!(b))
+                } else {
+                    Err("BUG: peek() was BoolLit but advance() returned different token".into())
+                }
+            }
+            TqlToken::Null => {
+                self.advance();
+                Ok(serde_json::Value::Null)
+            }
+            TqlToken::LBracket => {
+                self.depth += 1;
+                if self.depth > 128 {
+                    self.depth -= 1;
+                    return Err("Parser recursion depth exceeded (JSON nesting too deep)".into());
+                }
+                let result = self.parse_json_array().map(serde_json::Value::Array);
+                self.depth -= 1;
+                result
+            }
+            other => Err(self.error_here(format!("Expected JSON value, got {:?}", other))),
+        }
+    }
+
+    fn parse_json_number(&mut self) -> Result<f64, String> {
+        match self.advance() {
+            TqlToken::IntLit(n) => Ok(n as f64),
+            TqlToken::UIntLit(n) => Ok(n as f64),
+            TqlToken::FloatLit(f) => Ok(f),
+            other => Err(self.error_previous(format!("Expected number, got {:?}", other))),
+        }
+    }
+
+    fn parse_json_array(&mut self) -> Result<Vec<serde_json::Value>, String> {
+        self.sourced("array", Self::parse_json_array_source_inner)
+    }
+
+    fn parse_json_array_source_inner(&mut self) -> Result<Vec<serde_json::Value>, String> {
+        self.expect(&TqlToken::LBracket)?;
+        let mut items = Vec::new();
+        while !self.at(&TqlToken::RBracket) {
+            items.push(self.parse_json_value()?);
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            }
+        }
+        self.expect(&TqlToken::RBracket)?;
+        Ok(items)
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  DML 解析（写操作）
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 顶层语句解析：判断是读查询还是写操作
+    pub fn parse_statement(&mut self) -> Result<TqlStatement, String> {
+        self.sourced("statement", Self::parse_statement_source_inner)
+    }
+
+    fn parse_statement_source_inner(&mut self) -> Result<TqlStatement, String> {
+        self.error_position = None;
+        self.validate_input()?;
+        let statement = match self.peek() {
+            // 写操作入口
+            TqlToken::Create => {
+                let mutation = self.parse_create()?;
+                Ok(TqlStatement::Mutation(mutation))
+            }
+            TqlToken::Set | TqlToken::Delete | TqlToken::Detach => {
+                // 无 MATCH 前缀的 SET/DELETE → 语法错误
+                Err("SET/DELETE requires a preceding MATCH clause".to_string())
+            }
+            TqlToken::Match if self.is_dml_after_match() => {
+                let mutation = self.parse_match_then_dml()?;
+                Ok(TqlStatement::Mutation(mutation))
+            }
+            // 读查询
+            _ => {
+                let query = self.parse_query()?;
+                Ok(TqlStatement::Query(query))
+            }
+        }?;
+        self.expect_end()?;
+        Ok(statement)
+    }
+
+    /// 探测 MATCH 之后是否跟着 DML（SET/DELETE/CREATE）
+    fn is_dml_after_match(&self) -> bool {
+        // 扫描后续 token，跳过 MATCH 模式和 WHERE，看是否碰到 SET/DELETE/CREATE（而非 RETURN）
+        let mut depth = 0;
+        for i in self.pos..self.tokens.len() {
+            match &self.tokens[i] {
+                TqlToken::LParen | TqlToken::LBracket | TqlToken::LBrace => depth += 1,
+                TqlToken::RParen | TqlToken::RBracket | TqlToken::RBrace => depth -= 1,
+                TqlToken::Return if depth == 0 => return false,
+                TqlToken::Set | TqlToken::Delete | TqlToken::Detach if depth == 0 => return true,
+                TqlToken::Create if depth == 0 => return true,
+                TqlToken::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// 解析 CREATE 语句（无前置 MATCH）
+    ///
+    /// 语法：
+    /// ```text
+    /// CREATE (var {payload})
+    /// CREATE (var {payload}), (var2 {payload2})
+    /// ```
+    fn parse_create(&mut self) -> Result<TqlMutation, String> {
+        self.sourced("mutation", Self::parse_create_source_inner)
+    }
+
+    fn parse_create_source_inner(&mut self) -> Result<TqlMutation, String> {
+        let action_mark = self.source_mark();
+        self.expect(&TqlToken::Create)?;
+        let action = self.parse_create_action()?;
+        self.finish_source("action", action_mark);
+        Ok(TqlMutation {
+            source: None,
+            action: MutationAction::Create(action),
+        })
+    }
+
+    /// 解析 CREATE 动作内容（节点和边列表）
+    fn parse_create_action(&mut self) -> Result<CreateAction, String> {
+        self.sourced("create", Self::parse_create_action_source_inner)
+    }
+
+    fn parse_create_action_source_inner(&mut self) -> Result<CreateAction, String> {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+
+        loop {
+            let node_mark = self.source_mark();
+            self.expect(&TqlToken::LParen)?;
+            let mut current_var = if let TqlToken::Ident(name) = self.peek().clone() {
+                self.advance();
+                name
+            } else {
+                format!("_auto_{}", nodes.len())
+            };
+            let payload = if self.at(&TqlToken::LBrace) {
+                self.parse_create_payload()?
+            } else {
+                self.synthetic_source("payload");
+                serde_json::json!({})
+            };
+            self.expect(&TqlToken::RParen)?;
+            merge_create_node(&mut nodes, current_var.clone(), payload)?;
+            self.finish_source("create_node", node_mark);
+
+            while self.at(&TqlToken::Dash) {
+                let edge_mark = self.source_mark();
+                self.expect(&TqlToken::Dash)?;
+                self.expect(&TqlToken::LBracket)?;
+                let mut label = String::new();
+                let mut weight = 1.0f32;
+                if self.at(&TqlToken::Colon) {
+                    self.advance();
+                    label = self.parse_ident()?;
+                }
+                // 可选权重: {weight: 0.5}
+                if self.at(&TqlToken::LBrace) {
+                    self.advance();
+                    // 简单解析 weight 字段
+                    loop {
+                        if self.at(&TqlToken::RBrace) {
+                            break;
+                        }
+                        let key = self.parse_field_name()?;
+                        self.expect(&TqlToken::Colon)?;
+                        if key == "weight" {
+                            weight = self.parse_json_number()? as f32;
+                        } else {
+                            let _ = self.parse_json_value()?;
+                        }
+                        if self.at(&TqlToken::Comma) {
+                            self.advance();
+                        }
+                    }
+                    self.expect(&TqlToken::RBrace)?;
+                }
+                self.expect(&TqlToken::RBracket)?;
+                self.expect(&TqlToken::Arrow)?;
+                let node_mark = self.source_mark();
+                self.expect(&TqlToken::LParen)?;
+                let dst_var = if let TqlToken::Ident(_) = self.peek() {
+                    if let TqlToken::Ident(name) = self.advance() {
+                        name
+                    } else {
+                        format!("_auto_{}", nodes.len())
+                    }
+                } else {
+                    format!("_auto_{}", nodes.len())
+                };
+                let dst_payload = if self.at(&TqlToken::LBrace) {
+                    self.parse_create_payload()?
+                } else {
+                    self.synthetic_source("payload");
+                    serde_json::json!({})
+                };
+                self.expect(&TqlToken::RParen)?;
+                merge_create_node(&mut nodes, dst_var.clone(), dst_payload)?;
+                self.finish_source("create_node", node_mark);
+                edges.push(CreateEdge {
+                    src_var: current_var,
+                    dst_var: dst_var.clone(),
+                    label,
+                    weight,
+                });
+                self.finish_source("create_edge", edge_mark);
+                current_var = dst_var;
+            }
+
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+
+        Ok(CreateAction { nodes, edges })
+    }
+
+    /// 解析 CREATE 节点的 payload: {key: val, ...} → serde_json::Value
+    fn parse_create_payload(&mut self) -> Result<serde_json::Value, String> {
+        self.sourced("payload", Self::parse_create_payload_source_inner)
+    }
+
+    fn parse_create_payload_source_inner(&mut self) -> Result<serde_json::Value, String> {
+        self.expect(&TqlToken::LBrace)?;
+        let mut map = serde_json::Map::new();
+        while !self.at(&TqlToken::RBrace) {
+            let key = self.parse_field_name()?;
+            self.expect(&TqlToken::Colon)?;
+            let val = self.parse_json_value()?;
+            map.insert(key, val);
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            }
+        }
+        self.expect(&TqlToken::RBrace)?;
+        Ok(serde_json::Value::Object(map))
+    }
+
+    /// 解析 MATCH ... WHERE ... SET/DELETE/CREATE
+    fn parse_match_then_dml(&mut self) -> Result<TqlMutation, String> {
+        self.sourced("mutation", Self::parse_match_then_dml_source_inner)
+    }
+
+    fn parse_match_then_dml_source_inner(&mut self) -> Result<TqlMutation, String> {
+        let source_mark = self.source_mark();
+        self.expect(&TqlToken::Match)?;
+        let pattern = self.parse_pattern()?;
+
+        let predicate = if self.at(&TqlToken::Where) {
+            self.advance();
+            Some(self.parse_predicate()?)
+        } else {
+            None
+        };
+
+        let source = Some(MutationSource { pattern, predicate });
+        self.finish_source("mutation_source", source_mark);
+
+        let action_mark = self.source_mark();
+        let action = match self.peek() {
+            TqlToken::Set => {
+                self.advance();
+                if self.at(&TqlToken::Vector) {
+                    self.advance();
+                    self.expect(&TqlToken::LParen)?;
+                    let var = self.parse_ident()?;
+                    self.expect(&TqlToken::RParen)?;
+                    self.expect(&TqlToken::Eq)?;
+                    MutationAction::SetVector {
+                        var,
+                        vector: self.parse_numeric_vector()?,
+                    }
+                } else {
+                    let assignments = self.parse_set_assignments()?;
+                    MutationAction::Set(assignments)
+                }
+            }
+            TqlToken::Delete => {
+                self.advance();
+                let vars = self.parse_delete_vars()?;
+                MutationAction::Delete {
+                    vars,
+                    detach: false,
+                }
+            }
+            TqlToken::Detach => {
+                self.advance();
+                self.expect(&TqlToken::Delete)?;
+                let vars = self.parse_delete_vars()?;
+                MutationAction::Delete { vars, detach: true }
+            }
+            TqlToken::Create => {
+                self.advance();
+                // MATCH ... CREATE (a)-[:r]->(b) — 创建边
+                let create_action = self.parse_create_action()?;
+                MutationAction::Create(create_action)
+            }
+            other => {
+                return Err(format!(
+                    "Expected SET, DELETE, DETACH DELETE, or CREATE after MATCH, got {:?}",
+                    other
+                ));
+            }
+        };
+
+        self.finish_source("action", action_mark);
+        Ok(TqlMutation { source, action })
+    }
+
+    /// 向量字面量保持 JSON 数值域，由目标 dtype 统一检查转换。
+    fn numeric_token(token: TqlToken) -> Result<serde_json::Number, String> {
+        match token {
+            TqlToken::IntLit(value) => Ok(value.into()),
+            TqlToken::UIntLit(value) => Ok(value.into()),
+            TqlToken::FloatLit(value) => serde_json::Number::from_f64(value).ok_or_else(|| {
+                "向量分量必须为有限数值 (Vector components must be finite)".to_owned()
+            }),
+            other => Err(format!(
+                "向量分量要求数值 (Expected a numeric vector component): {other:?}"
+            )),
+        }
+    }
+
+    fn parse_numeric_vector(&mut self) -> Result<Vec<serde_json::Number>, String> {
+        self.sourced("vector", Self::parse_numeric_vector_source_inner)
+    }
+
+    fn parse_numeric_vector_source_inner(&mut self) -> Result<Vec<serde_json::Number>, String> {
+        self.expect(&TqlToken::LBracket)?;
+        let mut vector = Vec::new();
+        while !self.at(&TqlToken::RBracket) {
+            let mark = self.source_mark();
+            let value = Self::numeric_token(self.advance())?;
+            vector.push(value);
+            self.finish_source("vector_element", mark);
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            } else if !self.at(&TqlToken::RBracket) {
+                return Err(format!("Expected comma in vector, got {:?}", self.peek()));
+            }
+        }
+        self.expect(&TqlToken::RBracket)?;
+        if vector.is_empty() {
+            return Err("Vector must not be empty".into());
+        }
+        Ok(vector)
+    }
+
+    /// 解析 SET 赋值列表: a.name = "Alice", a.age = 30
+    fn parse_set_assignments(&mut self) -> Result<Vec<SetAssignment>, String> {
+        self.sourced("assignments", Self::parse_set_assignments_source_inner)
+    }
+
+    fn parse_set_assignments_source_inner(&mut self) -> Result<Vec<SetAssignment>, String> {
+        let mut assignments = Vec::new();
+        loop {
+            let mark = self.source_mark();
+            let var = self.parse_ident()?;
+            self.expect(&TqlToken::Dot)?;
+            let field = self.parse_ident()?;
+            // = 号
+            if self.peek() == &TqlToken::Eq {
+                self.advance(); // ==
+            } else {
+                return Err(format!(
+                    "Expected '==' in SET assignment, got {:?}",
+                    self.peek()
+                ));
+            }
+            let value = self.parse_json_value()?;
+            assignments.push(SetAssignment { var, field, value });
+            self.finish_source("assignment", mark);
+            if self.at(&TqlToken::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Ok(assignments)
+    }
+
+    /// 解析 DELETE 变量列表: a, b
+    fn parse_delete_vars(&mut self) -> Result<Vec<String>, String> {
+        self.sourced("delete_variables", Self::parse_delete_vars_source_inner)
+    }
+
+    fn parse_delete_vars_source_inner(&mut self) -> Result<Vec<String>, String> {
+        let mut vars = Vec::new();
+        vars.push(self.parse_ident()?);
+        while self.at(&TqlToken::Comma) {
+            self.advance();
+            vars.push(self.parse_ident()?);
+        }
+        Ok(vars)
+    }
+}
+
+fn merge_create_node(
+    nodes: &mut Vec<CreateNode>,
+    var: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    if let Some(existing) = nodes
+        .iter_mut()
+        .find(|node| node.var.as_deref() == Some(var.as_str()))
+    {
+        let has_existing_payload = existing
+            .payload
+            .as_object()
+            .is_some_and(|object| !object.is_empty());
+        let has_new_payload = payload.as_object().is_some_and(|object| !object.is_empty());
+        if has_existing_payload && has_new_payload && existing.payload != payload {
+            return Err(format!("CREATE 变量 {var} 定义了冲突的 payload"));
+        }
+        if !has_existing_payload && has_new_payload {
+            existing.payload = payload;
+        }
+        return Ok(());
+    }
+
+    nodes.push(CreateNode {
+        var: Some(var),
+        payload,
+    });
+    Ok(())
+}
+
+fn collect_return_kind_vars(kind: &ReturnExprKind, output: &mut Vec<String>) {
+    match kind {
+        ReturnExprKind::Var(var) if var != "*" => output.push(var.clone()),
+        ReturnExprKind::Property(var, _) => output.push(var.clone()),
+        ReturnExprKind::Scalar(expr) => collect_expr_vars(expr, output),
+        ReturnExprKind::Aggregate(_, inner) => collect_return_kind_vars(inner, output),
+        ReturnExprKind::Var(_) => {}
+    }
+}
+
+fn collect_expr_vars(expr: &TqlExpr, output: &mut Vec<String>) {
+    match expr {
+        TqlExpr::Variable(var)
+        | TqlExpr::Property { var, .. }
+        | TqlExpr::Similarity { var }
+        | TqlExpr::GraphScore { var }
+        | TqlExpr::GraphMetric { var, .. }
+        | TqlExpr::TextScore { var }
+        | TqlExpr::DiversityScore { var }
+        | TqlExpr::ResidualScore { var }
+        | TqlExpr::Topic { var }
+        | TqlExpr::TopicScore { var }
+        | TqlExpr::Depth { var }
+        | TqlExpr::PathStrength { var }
+        | TqlExpr::PathCount { var }
+        | TqlExpr::Community { var }
+        | TqlExpr::Path { var }
+        | TqlExpr::PathLength { var }
+        | TqlExpr::PathRank { var }
+        | TqlExpr::PairLeft { var }
+        | TqlExpr::PairRight { var } => output.push(var.clone()),
+        TqlExpr::Binary { left, right, .. } => {
+            collect_expr_vars(left, output);
+            collect_expr_vars(right, output);
+        }
+        TqlExpr::Coalesce(values) => {
+            for value in values {
+                collect_expr_vars(value, output);
+            }
+        }
+        TqlExpr::IsNull { expr, .. } => collect_expr_vars(expr, output),
+        TqlExpr::Parameter(_) | TqlExpr::Literal(_) => {}
+    }
+}
+
+fn predicate_vars(predicate: &Predicate, output: &mut Vec<String>) {
+    match predicate {
+        Predicate::Compare { left, right, .. } => {
+            collect_expr_vars(left, output);
+            collect_expr_vars(right, output);
+        }
+        Predicate::DocFilter { var: Some(var), .. } => output.push(var.clone()),
+        Predicate::DocFilter { var: None, .. } => {}
+        Predicate::And(left, right) | Predicate::Or(left, right) => {
+            predicate_vars(left, output);
+            predicate_vars(right, output);
+        }
+        Predicate::Not(inner) => predicate_vars(inner, output),
+    }
+}
+
+pub(crate) fn validate_pipeline_scope(query: &TqlQuery) -> Result<(), String> {
+    validate_pipeline_scope_origin(query, &mut None)
+}
+
+type SourcePath = Vec<(&'static str, usize)>;
+
+fn prepend_source(
+    kind: &'static str,
+    index: usize,
+    path: Option<SourcePath>,
+) -> Option<SourcePath> {
+    path.map(|mut path| {
+        path.insert(0, (kind, index));
+        path
+    })
+}
+
+/// 变量来自 AST 校验结果，路径按节点结构构造，与错误文案无关。
+fn expression_reference(expr: &TqlExpr, variable: &str) -> Option<SourcePath> {
+    match expr {
+        TqlExpr::Binary { left, right, .. } => {
+            prepend_source("expression", 0, expression_reference(left, variable))
+                .or_else(|| prepend_source("expression", 1, expression_reference(right, variable)))
+        }
+        TqlExpr::Coalesce(items) => items.iter().enumerate().find_map(|(index, item)| {
+            prepend_source("expression", index, expression_reference(item, variable))
+        }),
+        TqlExpr::IsNull { expr, .. } => {
+            prepend_source("expression", 0, expression_reference(expr, variable))
+        }
+        _ => {
+            let mut variables = Vec::new();
+            collect_expr_vars(expr, &mut variables);
+            variables.iter().any(|name| name == variable).then(Vec::new)
+        }
+    }
+}
+
+fn predicate_reference(predicate: &Predicate, variable: &str) -> Option<SourcePath> {
+    match predicate {
+        Predicate::Compare { left, right, .. } => {
+            prepend_source("expression", 0, expression_reference(left, variable))
+                .or_else(|| prepend_source("expression", 1, expression_reference(right, variable)))
+        }
+        Predicate::And(left, right) | Predicate::Or(left, right) => {
+            prepend_source("predicate", 0, predicate_reference(left, variable))
+                .or_else(|| prepend_source("predicate", 1, predicate_reference(right, variable)))
+        }
+        Predicate::Not(inner) => {
+            prepend_source("predicate", 0, predicate_reference(inner, variable))
+        }
+        Predicate::DocFilter { var, .. } => (var.as_deref() == Some(variable)).then(Vec::new),
+    }
+}
+
+fn return_reference(kind: &ReturnExprKind, variable: &str) -> Option<SourcePath> {
+    match kind {
+        ReturnExprKind::Aggregate(_, inner) => {
+            prepend_source("return_kind", 0, return_reference(inner, variable))
+        }
+        ReturnExprKind::Scalar(expr) => {
+            prepend_source("expression", 0, expression_reference(expr, variable))
+        }
+        ReturnExprKind::Var(name) | ReturnExprKind::Property(name, _) => {
+            (name == variable).then(|| vec![("expression", 0)])
+        }
+    }
+}
+
+fn final_reference(
+    query: &TqlQuery,
+    selector: &SourceSelector,
+    variable: &str,
+) -> Option<SourceSelector> {
+    let (mut path, tail) = match selector {
+        SourceSelector::Predicate => (
+            vec![("predicate", 0)],
+            predicate_reference(query.predicate.as_ref()?, variable)?,
+        ),
+        SourceSelector::ReturnItem(index) => {
+            let tail = match &query.returns {
+                ReturnClause::Expressions(items) => {
+                    return_reference(&items.get(*index)?.kind, variable)?
+                }
+                ReturnClause::Variables(_) => vec![("expression", 0)],
+                ReturnClause::All => return None,
+            };
+            (
+                vec![("return", 0), ("return_item", *index), ("return_kind", 0)],
+                tail,
+            )
+        }
+        _ => return None,
+    };
+    path.extend(tail);
+    Some(SourceSelector::Path(path))
+}
+
+fn validate_pipeline_scope_origin(
+    query: &TqlQuery,
+    origin: &mut Option<SourceSelector>,
+) -> Result<(), String> {
+    if query.pipeline.is_empty() && !matches!(query.entry, QueryEntry::Documents { .. }) {
+        let pattern = match &query.entry {
+            QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } => pattern,
+            _ => return Ok(()),
+        };
+        let scope = pattern
+            .nodes
+            .iter()
+            .filter_map(|node| node.var.clone())
+            .chain(pattern.edges.iter().filter_map(|edge| edge.var.clone()))
+            .collect();
+        return validate_final_scope(query, scope, std::collections::BTreeSet::new(), origin);
+    }
+    let mut scope = std::collections::BTreeSet::from(["_".to_owned()]);
+    let mut scalar_aliases = std::collections::BTreeSet::new();
+    if matches!(query.entry, QueryEntry::Documents { .. }) {
+        scalar_aliases.insert("document".into());
+    }
+    if let QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } = &query.entry {
+        scope.extend(pattern.nodes.iter().filter_map(|node| node.var.clone()));
+        scalar_aliases.extend(pattern.edges.iter().filter_map(|edge| edge.var.clone()));
+    }
+    for (stage_index, stage) in query.pipeline.iter().enumerate() {
+        *origin = Some(SourceSelector::Stage(stage_index));
+        match stage {
+            PipelineStage::With(with) => {
+                let mut next = std::collections::BTreeSet::new();
+                let mut next_scalars = std::collections::BTreeSet::new();
+                for (item_index, item) in with.items.iter().enumerate() {
+                    *origin = Some(SourceSelector::WithItem(stage_index, item_index));
+                    let mut variables = Vec::new();
+                    collect_expr_vars(&item.expr, &mut variables);
+                    if let Some(var) = variables
+                        .iter()
+                        .find(|var| !scope.contains(*var) && !scalar_aliases.contains(*var))
+                    {
+                        if let Some(tail) = expression_reference(&item.expr, var) {
+                            let mut path = vec![
+                                ("pipeline", 0),
+                                ("stage", stage_index),
+                                ("with_item", item_index),
+                                ("expression", 0),
+                            ];
+                            path.extend(tail);
+                            *origin = Some(SourceSelector::Path(path));
+                        }
+                        return Err(format!(
+                            "WITH 引用了未定义变量 {var} (WITH references undefined variable {var})"
+                        ));
+                    }
+                    let is_node =
+                        matches!(&item.expr, TqlExpr::Variable(var) if scope.contains(var));
+                    let inserted = if is_node {
+                        next.insert(item.alias.clone())
+                    } else {
+                        next_scalars.insert(item.alias.clone())
+                    };
+                    if !inserted || next.contains(&item.alias) && next_scalars.contains(&item.alias)
+                    {
+                        return Err(format!(
+                            "WITH 重复定义别名 {} (Duplicate WITH alias {})",
+                            item.alias, item.alias
+                        ));
+                    }
+                }
+                scalar_aliases = next_scalars;
+                scope = next;
+            }
+            PipelineStage::Expand(expand) => {
+                if !scope.contains(&expand.input) {
+                    return Err(format!(
+                        "EXPAND 引用了未定义变量 {} (EXPAND references undefined variable {})",
+                        expand.input, expand.input
+                    ));
+                }
+                scope.insert(expand.output.clone());
+            }
+            PipelineStage::GraphAlgorithm(graph) => {
+                if !scope.contains(&graph.input) {
+                    return Err(format!(
+                        "图算法引用了未定义变量 {} (Graph algorithm references undefined variable {})",
+                        graph.input, graph.input
+                    ));
+                }
+                scope.insert(graph.output.clone());
+            }
+            PipelineStage::AllPaths(paths) => {
+                if !scope.contains(&paths.input) {
+                    return Err(format!(
+                        "ALL_PATHS 引用了未定义变量 {} (ALL_PATHS references undefined variable {})",
+                        paths.input, paths.input
+                    ));
+                }
+                scope.insert(paths.output.clone());
+            }
+            PipelineStage::ShortestPaths(paths) => {
+                if !scope.contains(&paths.input) {
+                    return Err(format!(
+                        "SHORTEST_PATHS 引用了未定义变量 {} (SHORTEST_PATHS references undefined variable {})",
+                        paths.input, paths.input
+                    ));
+                }
+                scope.insert(paths.output.clone());
+            }
+            PipelineStage::WeightedPaths(paths) => {
+                if !scope.contains(&paths.input) {
+                    return Err(format!("WEIGHTED_PATHS 引用了未定义变量 {}", paths.input));
+                }
+                scope.insert(paths.output.clone());
+            }
+            PipelineStage::YenPaths(paths) => {
+                if !scope.contains(&paths.input) {
+                    return Err(format!("YEN_PATHS 引用了未定义变量 {}", paths.input));
+                }
+                scope.insert(paths.output.clone());
+            }
+            PipelineStage::NodeSimilarity(stage) => {
+                if !scope.contains(&stage.input) {
+                    return Err(format!("NODE_SIMILARITY 引用了未定义变量 {}", stage.input));
+                }
+                scope.insert(stage.output.clone());
+            }
+            PipelineStage::SetCombine(combine) => {
+                if !scope.contains(&combine.input) {
+                    return Err(format!(
+                        "集合运算引用了未定义变量 {} (Set operation references undefined variable {})",
+                        combine.input, combine.input
+                    ));
+                }
+                scope.insert(combine.output.clone());
+            }
+            PipelineStage::Iterate(iterate) => {
+                if !scope.contains(&iterate.input) {
+                    return Err(format!(
+                        "ITERATE 引用了未定义变量 {} (ITERATE references undefined variable {})",
+                        iterate.input, iterate.input
+                    ));
+                }
+                scope.insert(iterate.output.clone());
+            }
+            PipelineStage::Diversify(stage) => {
+                if !scope.contains(&stage.input) {
+                    return Err(format!("DIVERSIFY 引用了未定义变量 {}", stage.input));
+                }
+                scope.insert(stage.output.clone());
+            }
+            PipelineStage::Residual(stage) => {
+                if !scope.contains(&stage.input) {
+                    return Err(format!("RESIDUAL 引用了未定义变量 {}", stage.input));
+                }
+                scope.insert(stage.output.clone());
+            }
+            PipelineStage::Topics(stage) => {
+                if !scope.contains(&stage.input) {
+                    return Err(format!("TOPICS 引用了未定义变量 {}", stage.input));
+                }
+                scope.insert(stage.output.clone());
+            }
+            PipelineStage::SaPpr(stage) => {
+                if !scope.contains(&stage.input) {
+                    return Err(format!("SA_PPR_CONFIG 引用了未定义变量 {}", stage.input));
+                }
+                scope.insert(stage.output.clone());
+            }
+            PipelineStage::Filter(predicate) => {
+                let mut vars = Vec::new();
+                predicate_vars(predicate, &mut vars);
+                if let Some(var) = vars
+                    .into_iter()
+                    .find(|var| !scope.contains(var) && !scalar_aliases.contains(var))
+                {
+                    if let Some(tail) = predicate_reference(predicate, &var) {
+                        let mut path =
+                            vec![("pipeline", 0), ("stage", stage_index), ("predicate", 0)];
+                        path.extend(tail);
+                        *origin = Some(SourceSelector::Path(path));
+                    }
+                    return Err(format!(
+                        "WHERE 引用了作用域外变量 {var} (WHERE references out-of-scope variable {var})"
+                    ));
+                }
+            }
+            PipelineStage::Rank(rank) => {
+                if !scope.contains(&rank.var) {
+                    return Err(format!(
+                        "RANK 引用了未定义变量 {} (RANK references undefined variable {})",
+                        rank.var, rank.var
+                    ));
+                }
+            }
+        }
+    }
+    validate_final_scope(query, scope, scalar_aliases, origin)
+}
+
+fn validate_final_scope(
+    query: &TqlQuery,
+    final_scope: std::collections::BTreeSet<String>,
+    scalar_aliases: std::collections::BTreeSet<String>,
+    origin: &mut Option<SourceSelector>,
+) -> Result<(), String> {
+    if let Some(rank) = &query.rank {
+        let edge_variable = match &query.entry {
+            QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } => pattern
+                .edges
+                .iter()
+                .any(|edge| edge.var.as_deref() == Some(rank.var.as_str())),
+            _ => false,
+        };
+        if !final_scope.contains(&rank.var) || edge_variable || scalar_aliases.contains(&rank.var) {
+            *origin = Some(SourceSelector::Rank);
+            return Err(format!(
+                "RANK 输入 {} 必须是已绑定的节点变量 (RANK input {} must be a bound node variable)",
+                rank.var, rank.var
+            ));
+        }
+    }
+    let mut check = |referenced: Vec<String>, selector: SourceSelector| {
+        *origin = Some(selector.clone());
+        if let Some(var) = referenced
+            .into_iter()
+            .find(|var| !final_scope.contains(var) && !scalar_aliases.contains(var))
+        {
+            if let Some(reference) = final_reference(query, &selector, &var) {
+                *origin = Some(reference);
+            }
+            return Err(format!(
+                "RETURN/WHERE/ORDER BY 引用了作用域外变量 {var} (Final clause references out-of-scope variable {var})"
+            ));
+        }
+        Ok(())
+    };
+    if let Some(predicate) = &query.predicate {
+        let mut referenced = Vec::new();
+        predicate_vars(predicate, &mut referenced);
+        check(referenced, SourceSelector::Predicate)?;
+    }
+    match &query.returns {
+        ReturnClause::Variables(vars) => {
+            for (index, var) in vars.iter().enumerate() {
+                check(vec![var.clone()], SourceSelector::ReturnItem(index))?;
+            }
+        }
+        ReturnClause::Expressions(expressions) => {
+            for (index, expression) in expressions.iter().enumerate() {
+                let mut referenced = Vec::new();
+                match &expression.kind {
+                    ReturnExprKind::Var(var) | ReturnExprKind::Property(var, _) => {
+                        referenced.push(var.clone());
+                    }
+                    ReturnExprKind::Scalar(expr) => collect_expr_vars(expr, &mut referenced),
+                    ReturnExprKind::Aggregate(_, inner) => {
+                        collect_return_kind_vars(inner, &mut referenced);
+                    }
+                }
+                check(referenced, SourceSelector::ReturnItem(index))?;
+            }
+        }
+        ReturnClause::All => {}
+    }
+    // RETURN 的别名在排序阶段可见，WHERE 与 RETURN 求值仍使用输入作用域。
+    let return_aliases = match &query.returns {
+        ReturnClause::Expressions(items) => items
+            .iter()
+            .filter_map(|item| item.alias.as_ref())
+            .collect::<std::collections::BTreeSet<_>>(),
+        _ => std::collections::BTreeSet::new(),
+    };
+    for (index, order) in query.order_by.iter().enumerate() {
+        *origin = Some(SourceSelector::Order(index));
+        let mut ordered = Vec::new();
+        collect_expr_vars(&order.expr, &mut ordered);
+        if let Some(var) = ordered.into_iter().find(|var| {
+            !final_scope.contains(var)
+                && !scalar_aliases.contains(var)
+                && !return_aliases.contains(var)
+        }) {
+            if let Some(tail) = expression_reference(&order.expr, &var) {
+                let mut path = vec![("order", index), ("expression", 0)];
+                path.extend(tail);
+                *origin = Some(SourceSelector::Path(path));
+            }
+            return Err(format!(
+                "ORDER BY 引用了作用域外变量 {var} (ORDER BY references out-of-scope variable {var})"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 便捷入口：TQL 字符串 → TqlQuery AST（仅读查询）
+pub fn parse_tql(input: &str) -> Result<TqlQuery, String> {
+    let mut lexer = super::tql_lexer::TqlLexer::new(input);
+    let tokens = lexer.tokenize()?;
+    let mut parser = TqlParser::new(tokens);
+    parser.parse_query()
+}
+
+/// 便捷入口：TQL 字符串 → TqlStatement（读查询 或 写操作）
+pub fn parse_tql_statement(input: &str) -> Result<TqlStatement, String> {
+    let mut lexer = super::tql_lexer::TqlLexer::new(input);
+    let tokens = lexer.tokenize()?;
+    let mut parser = TqlParser::new(tokens);
+    parser.parse_statement()
+}
+
+/// 带位置诊断的 TQL 解析（仅读查询）。错误中包含字节偏移，便于上层 CLI/IDE 高亮。
+pub fn parse_tql_with_pos(input: &str) -> Result<TqlQuery, ParseErrorAt> {
+    parse_tql_diagnostic(input).map_err(|error| legacy_position(error, input.len()))
+}
+
+/// 带位置诊断的 TQL 解析（读 / 写均可）。错误中包含字节偏移。
+pub fn parse_tql_statement_with_pos(input: &str) -> Result<TqlStatement, ParseErrorAt> {
+    parse_tql_statement_diagnostic(input).map_err(|error| legacy_position(error, input.len()))
+}
+
+fn legacy_position(error: TriviumError, fallback: usize) -> ParseErrorAt {
+    match error {
+        TriviumError::QuerySyntax { reason, span, .. } => {
+            ParseErrorAt::new(reason, span.map_or(fallback, |span| span.start_byte))
+        }
+        error => ParseErrorAt::new(error.to_string(), fallback),
+    }
+}
+
+/// 结构化诊断入口；数据库与各适配层共享同一词法、语法及位置事实。
+pub fn parse_tql_diagnostic(input: &str) -> crate::Result<TqlQuery> {
+    parse_tql_located(input).map(|parsed| parsed.ast)
+}
+
+/// 写入解析在返回 AST 前完成，语法拒绝尚未执行任何操作。
+pub fn parse_tql_statement_diagnostic(input: &str) -> crate::Result<TqlStatement> {
+    parse_tql_statement_located(input).map(|parsed| parsed.ast)
+}
+
+/// 返回公开 AST 及完整源码树，两者分别拥有独立于数据库的生命周期。
+pub fn parse_tql_located(input: &str) -> crate::Result<LocatedTql<TqlQuery>> {
+    parse_diagnostic_located(input, TqlParser::parse_query)
+}
+
+/// 读写语句共用来源收集，写入规划在事务准入前使用同一来源树。
+pub fn parse_tql_statement_located(input: &str) -> crate::Result<LocatedTql<TqlStatement>> {
+    parse_diagnostic_located(input, TqlParser::parse_statement)
+}
+
+/// Prepared 保存解析器确认的首个参数引用；字符串与注释中的同名文本不参与定位。
+pub(crate) fn prepare_tql_diagnostic(
+    input: &str,
+) -> crate::Result<super::tql_prepared::PreparedTql> {
+    Ok(super::tql_prepared::PreparedTql::from_located(
+        parse_tql_located(input)?,
+    ))
+}
+
+type ParameterReferences = std::collections::BTreeMap<String, std::ops::Range<usize>>;
+
+fn parse_diagnostic_located<R>(
+    input: &str,
+    parse: fn(&mut TqlParser) -> Result<R, String>,
+) -> crate::Result<LocatedTql<R>> {
+    let mut lexer = super::tql_lexer::TqlLexer::new(input);
+    let tokens_with_pos =
+        lexer
+            .tokenize_with_spans()
+            .map_err(|error| TriviumError::QuerySyntax {
+                reason: error.msg,
+                stage: QueryErrorStage::Lex,
+                span: (input.len() <= super::tql_lexer::MAX_TQL_INPUT_BYTES)
+                    .then(|| QuerySpan::range(input, error.byte_pos, lexer.error_byte_end()))
+                    .flatten(),
+            })?;
+    let mut tokens = Vec::with_capacity(tokens_with_pos.len());
+    let mut positions = Vec::with_capacity(tokens_with_pos.len());
+    let mut ends = Vec::with_capacity(tokens_with_pos.len());
+    for pt in tokens_with_pos {
+        tokens.push(pt.token);
+        positions.push(pt.byte_start);
+        ends.push(pt.byte_end);
+    }
+    let mut parser = TqlParser::new_with_positions(tokens, positions);
+    parser.ends = Some(ends);
+    let parsed = parse(&mut parser);
+    let root = parser.source_nodes.pop().unwrap_or(TqlSourceNode {
+        kind: "statement",
+        range: None,
+        children: Vec::new(),
+    });
+    let source = Arc::new(TqlSource::new(input, root, parser.parameter_references));
+    let ast = parsed.map_err(|reason| {
+        let span = parser.error_position.and_then(|byte| {
+            let index = parser.positions.as_ref()?.binary_search(&byte).ok()?;
+            QuerySpan::range(input, byte, *parser.ends.as_ref()?.get(index)?)
+        });
+        let span = parser
+            .error_selector
+            .and_then(|selector| source.node(selector))
+            .and_then(|node| source.span(node))
+            .or(span)
+            .or_else(|| {
+                parser
+                    .error_range
+                    .as_ref()
+                    .and_then(|range| QuerySpan::range(input, range.start, range.end))
+            });
+        TriviumError::QuerySyntax {
+            reason,
+            stage: parser.error_stage,
+            span,
+        }
+    })?;
+    Ok(LocatedTql { ast, source })
+}

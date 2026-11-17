@@ -10,7 +10,7 @@ fn mutate_sidecar(
     repair_crc: bool,
     prefix: &str,
 ) {
-    let original = std::fs::read(format!("{source}{}", role.suffix())).unwrap();
+    let original = crate::artifact::read(format!("{source}{}", role.suffix())).unwrap();
     let mutations = field_boundary_mutations(header)
         .into_iter()
         .chain(truncation_mutations(original.len(), header))
@@ -37,7 +37,7 @@ fn mutate_sidecar(
         if repair_crc && !matches!(mutation, Mutation::TruncateAt(_)) {
             changed = Mutation::RepairTrailingCrc.apply(&changed);
         }
-        std::fs::write(format!("{candidate}{}", role.suffix()), changed).unwrap();
+        crate::artifact::write(format!("{candidate}{}", role.suffix()), changed).unwrap();
         let _ = Database::<f32>::open_read_only(&candidate, DIM);
         assert_read_only_zero_write(&candidate);
         cleanup(&candidate);
@@ -91,7 +91,7 @@ fn sidecar未知版本与恶意计数不得触发危险分配() {
         (FileRole::PropertyIndex, PROPERTY_HEADER),
         (FileRole::GraphIndex, GRAPH_HEADER),
     ] {
-        let original = std::fs::read(format!("{source}{}", role.suffix())).unwrap();
+        let original = crate::artifact::read(format!("{source}{}", role.suffix())).unwrap();
         for field_name in [
             "version",
             "format_version",
@@ -124,7 +124,7 @@ fn sidecar未知版本与恶意计数不得触发危险分配() {
                 }
                 .apply(&original),
             );
-            std::fs::write(format!("{candidate}{}", role.suffix()), changed).unwrap();
+            crate::artifact::write(format!("{candidate}{}", role.suffix()), changed).unwrap();
             let _ = Database::<f32>::open_read_only(&candidate, DIM);
             assert_read_only_zero_write(&candidate);
             cleanup(&candidate);

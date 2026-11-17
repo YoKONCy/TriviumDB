@@ -14,6 +14,59 @@ use triviumdb::test_hooks::{ConcurrencyPoint, hit, pause_at};
 
 const DIM: usize = 4;
 
+#[test]
+fn 扩散执行中取消归还工作区并允许新请求完整重试() {
+    use triviumdb::query::tql_executor::{QueryControl, TqlValue};
+    let _serial = test_serial_guard();
+    let dir = super::support::TestDir::new("sa-ppr-controlled-cancel");
+    let runtime = triviumdb::ResourceRuntime::new(triviumdb::ResourceLimits::default()).unwrap();
+    let mut db = Database::<f32>::open_with_runtime(
+        &dir.file("data.tdb"),
+        triviumdb::database::Config {
+            dim: 2,
+            auto_build_quiver: false,
+            ..Default::default()
+        },
+        runtime.clone(),
+    )
+    .unwrap();
+    for id in 1..=3 {
+        db.insert_with_id(id, &[1., 0.], json!({"seed":id==1}))
+            .unwrap();
+    }
+    db.link(1, 2, "edge", 1.).unwrap();
+    db.link(1, 3, "edge", 1.).unwrap();
+    let control = QueryControl::default();
+    let worker_control = control.clone();
+    let gate = pause_at(ConcurrencyPoint::GraphAlgorithmStep);
+    let worker = std::thread::spawn(move || {
+        let query = "FIND {seed:true} WITH _ AS seed SA_PPR_CONFIG seed DEPTH 1 ALPHA 0 MAX_EDGES 10 MIN_WEIGHT 0 AS expanded WITH expanded RETURN expanded.id AS id, graph_score(expanded) AS score ORDER BY expanded.id";
+        let error = db.tql_with_control(query, worker_control).unwrap_err();
+        assert_eq!(error.code(), "TDB_QUERY_CANCELLED");
+        assert_eq!(db.resource_stats().reserved_workspace_bytes, 0);
+        let output = db.tql(query).unwrap();
+        let contents = output
+            .iter()
+            .map(|row| {
+                let (TqlValue::Int(id), TqlValue::Float(score)) = (&row["id"], &row["score"])
+                else {
+                    panic!("扩散结果类型错误：{row:?}")
+                };
+                (*id, *score)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contents, [(1, 1.), (2, 0.5), (3, 0.5)]);
+        assert_eq!(db.resource_stats().reserved_workspace_bytes, 0);
+        db.close().unwrap();
+    });
+    gate.wait_until_arrived();
+    assert!(runtime.stats().reserved_workspace_bytes > 0);
+    control.cancel();
+    gate.release();
+    worker.join().unwrap();
+    assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+}
+
 fn test_serial_guard() -> MutexGuard<'static, ()> {
     static SERIAL: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
     SERIAL
@@ -31,19 +84,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &[
-        "",
-        ".wal",
-        ".vec",
-        ".lock",
-        ".flush_ok",
-        ".quiver",
-        ".quiver.meta",
-        ".text",
-        ".text.meta",
-    ] {
-        std::fs::remove_file(format!("{path}{ext}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 #[test]

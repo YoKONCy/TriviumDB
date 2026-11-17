@@ -5,6 +5,44 @@ use serde_json::{Value, json};
 use triviumdb::database::{Config, StorageMode, TxBuilder};
 use triviumdb::{Database, TriviumError, VectorType};
 
+#[test]
+fn 补丁操作数类型错误在写入前整体拒绝() {
+    let root = support::TestDir::new("patch_operands");
+    let fixture: Value =
+        serde_json::from_str(include_str!("../contracts/crud_arguments.json")).unwrap();
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let path = root.file(&format!("{mode:?}.tdb"));
+        let cfg = config(mode, 0);
+        let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+        let original = json!({"a":1,"b":2});
+        db.insert_with_id(1, &[1., 0.], original.clone()).unwrap();
+        for operation in ["$set", "$inc", "$unset"] {
+            for invalid in fixture["invalid_patch_operands"].as_array().unwrap() {
+                let mut patch = json!({"$set":{"a":3},"$inc":{"b":2},"$unset":{"absent":true}});
+                patch[operation] = invalid.clone();
+                let before = std::fs::read(format!("{path}.wal")).unwrap();
+                let error = db.patch_payload(1, patch).unwrap_err();
+                assert_eq!(error.code(), "TDB_INVALID_INPUT");
+                assert_eq!(
+                    serde_json::to_value(error.info()).unwrap()["target"],
+                    json!({"field":format!("patch.{operation}")})
+                );
+                assert_eq!(db.get_payload(1).unwrap(), Some(original.clone()));
+                assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
+            }
+        }
+        db.patch_payload(
+            1,
+            json!({"$set":{"c":3},"$inc":{"a":2},"$unset":{"b":false}}),
+        )
+        .unwrap();
+        db.close().unwrap();
+        let mut reopened = Database::<f32>::open_with_config(&path, cfg).unwrap();
+        assert_eq!(reopened.get_payload(1).unwrap(), Some(json!({"a":3,"c":3})));
+        reopened.close().unwrap();
+    }
+}
+
 fn nested(depth: usize) -> Value {
     (0..depth).fold(Value::Null, |v, _| Value::Array(vec![v]))
 }
@@ -88,6 +126,7 @@ fn json_boundaries<T: VectorType + serde::Serialize + serde::de::DeserializeOwne
             // 独立空库只靠 WAL 恢复同一合法值，避免 close 的检查点掩盖回放路径。
             let replay_path = root.file(&format!("replay_{mode:?}_{cache}.tdb"));
             std::fs::copy(&path, &replay_path).unwrap();
+            std::fs::copy(format!("{path}.idx"), format!("{replay_path}.idx")).unwrap();
             std::fs::copy(format!("{path}.wal"), format!("{replay_path}.wal")).unwrap();
             let mut replay = Database::<T>::open_with_config(&replay_path, cfg).unwrap();
             assert_eq!(replay.get_payload(3).unwrap(), Some(accepted.clone()));

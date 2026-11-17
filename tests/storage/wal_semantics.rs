@@ -28,7 +28,7 @@ impl TestDir {
                 let entry = entry.unwrap();
                 (
                     entry.file_name().into_string().unwrap(),
-                    std::fs::read(entry.path()).unwrap(),
+                    crate::artifact::read(entry.path()).unwrap(),
                 )
             })
             .collect()
@@ -367,14 +367,17 @@ fn last_valid_node_id_recovers_without_wrapping_allocator() {
             wal.append(&insert::<f32>(u64::MAX - 1, "null")).unwrap();
         }
         let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
-        let before = std::fs::read(format!("{path}.wal")).unwrap();
+        let before = crate::artifact::read(format!("{path}.wal")).unwrap();
         let mut tx = db.begin_tx();
         tx.insert(&[1., 0., 0., 0.], serde_json::Value::Null);
         assert!(matches!(
             tx.commit().unwrap_err().underlying(),
             TriviumError::InvalidInput(_)
         ));
-        assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
+        assert_eq!(
+            crate::artifact::read(format!("{path}.wal")).unwrap(),
+            before
+        );
         assert_eq!(db.node_count().unwrap(), 1);
         let node = db.get(u64::MAX - 1).unwrap().unwrap();
         assert_eq!(node.id, u64::MAX - 1);

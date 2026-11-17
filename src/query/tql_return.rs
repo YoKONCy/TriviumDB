@@ -22,6 +22,36 @@ pub(super) struct Scope<'a, T: VectorType> {
 pub(super) struct Row<T> {
     pub source: Option<usize>,
     pub values: HashMap<String, TqlValue<T>>,
+    group_key: Option<Vec<String>>,
+}
+
+// 同分行按完整绑定身份比较，保持不同访问路径和 HashMap 顺序下的分页一致。
+fn compare_input_identity<T>(left: &Input<'_, T>, right: &Input<'_, T>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Input::Nodes(_, Some((left_name, left))), Input::Nodes(_, Some((right_name, right)))) => (
+            left_name,
+            &left.graph_id,
+            left.source_id,
+            left.target_id,
+            &left.label,
+        )
+            .cmp(&(
+                right_name,
+                &right.graph_id,
+                right.source_id,
+                right.target_id,
+                &right.label,
+            )),
+        (Input::Nodes(_, left), Input::Nodes(_, right)) => left.is_some().cmp(&right.is_some()),
+        (Input::Pipeline(left), Input::Pipeline(right)) => left
+            .id
+            .cmp(&right.id)
+            .then_with(|| left.pair.cmp(&right.pair))
+            .then_with(|| crate::query::pipeline::compare_bindings(left, right))
+            .then_with(|| left.path_rank.cmp(&right.path_rank))
+            .then_with(|| left.path.cmp(&right.path)),
+        _ => std::cmp::Ordering::Equal,
+    }
 }
 
 use super::return_column_name as column_name;
@@ -564,7 +594,7 @@ fn finish_inner<T: VectorType>(
         if inputs.is_empty() && group_items.is_empty() {
             groups.insert(Vec::new(), Vec::new());
         }
-        for group in groups.into_values() {
+        for (group_key, group) in groups {
             let source = group.first().copied();
             let mut values = HashMap::new();
             for (item_index, item) in items.iter().enumerate() {
@@ -588,7 +618,11 @@ fn finish_inner<T: VectorType>(
                 })?;
                 values.insert(column_name(item), value);
             }
-            rows.push(Row { source, values });
+            rows.push(Row {
+                source,
+                values,
+                group_key: Some(group_key),
+            });
         }
     } else {
         let distinct = expressions
@@ -611,6 +645,7 @@ fn finish_inner<T: VectorType>(
             rows.push(Row {
                 source: Some(index),
                 values: HashMap::new(),
+                group_key: None,
             });
         }
     }
@@ -633,10 +668,18 @@ fn finish_inner<T: VectorType>(
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok((row, keys))
+                let mut identity = match row.source.map(|index| &inputs[index]) {
+                    Some(Input::Nodes(nodes, _)) => nodes
+                        .iter()
+                        .map(|(name, node)| (name.as_str(), node.id))
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+                identity.sort_unstable();
+                Ok((row, keys, identity))
             })
             .collect::<Result<Vec<_>, TriviumError>>()?;
-        sorted.sort_by(|(left, a), (right, b)| {
+        sorted.sort_by(|(left, a, left_identity), (right, b, right_identity)| {
             for ((a, b), order) in a.iter().zip(b).zip(&scope.query.order_by) {
                 let cmp = compare_for_sort(a, b);
                 let cmp = if order.descending { cmp.reverse() } else { cmp };
@@ -644,9 +687,17 @@ fn finish_inner<T: VectorType>(
                     return cmp;
                 }
             }
-            left.source.cmp(&right.source)
+            left.group_key
+                .cmp(&right.group_key)
+                .then_with(|| left_identity.cmp(right_identity))
+                .then_with(|| match (left.source, right.source) {
+                    (Some(left), Some(right)) => {
+                        compare_input_identity(&inputs[left], &inputs[right])
+                    }
+                    _ => std::cmp::Ordering::Equal,
+                })
         });
-        rows = sorted.into_iter().map(|(row, _)| row).collect();
+        rows = sorted.into_iter().map(|(row, _, _)| row).collect();
     }
     apply_offset_limit(&mut rows, scope.query.offset, scope.query.limit);
     if !has_agg {
@@ -762,9 +813,10 @@ fn admit_return_workspace<T: VectorType>(
     for input in inputs {
         match input {
             Input::Nodes(nodes, edge) => {
-                for node in nodes.values() {
+                for (name, node) in *nodes {
                     bytes = bytes
                         .checked_add(memory::snapshot_bytes(node)?)
+                        .and_then(|bytes| bytes.checked_add(name.len().saturating_add(32)))
                         .ok_or_else(memory::overflow)?;
                 }
                 if let Some((_, edge)) = edge {

@@ -1,0 +1,29 @@
+[workspace]
+members = ["source"]
+default-members = ["."]
+resolver = "2"
+
+[package]
+name = "triviumdb-migrate"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+triviumdb = { path = "../.." }
+legacy = { package = "triviumdb-migration-source", path = "source" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+fs2 = "0.4.3"
+half = { version = "2.7.1", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+rayon = "1.10"
+crc32fast = "1.5"
+
+[dev-dependencies]
+tempfile = "3"
+bytemuck = "1"
+
+[features]
+test-hooks = ["triviumdb/test-hooks", "legacy/test-hooks"]

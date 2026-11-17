@@ -1,7 +1,7 @@
 //! 图算法的只读拓扑视图，事实节点和资源始终借用同一存储内核。
 
 use crate::named_graph::{NamedGraphLimits, NamedGraphScope};
-use crate::node::{Edge, IncomingEdge, NodeId};
+use crate::node::{Edge, NodeId};
 use crate::storage::memtable::MemTable;
 use crate::{Result, TriviumError, VectorType};
 use std::collections::BTreeMap;
@@ -38,41 +38,9 @@ pub(crate) trait GraphRead<T: VectorType>: Sync {
             })
             .sum()
     }
-    fn get_incoming_edges(&self, id: NodeId, label: Option<&str>) -> Vec<IncomingEdge> {
-        collect_incoming(self, id, label)
-    }
     fn edge_graph_id(&self, _source: NodeId, _edge: &Edge) -> Option<&str> {
         None
     }
-}
-
-fn collect_incoming<T: VectorType, G: GraphRead<T> + ?Sized>(
-    graph: &G,
-    id: NodeId,
-    label: Option<&str>,
-) -> Vec<IncomingEdge> {
-    let mut edges: Vec<_> = graph
-        .get_incoming_sources(id)
-        .iter()
-        .flat_map(|source| {
-            graph
-                .get_edges(*source)
-                .unwrap_or_default()
-                .iter()
-                .filter(move |edge| {
-                    edge.target_id == id && label.is_none_or(|label| edge.label == label)
-                })
-                .map(move |edge| IncomingEdge {
-                    source_id: *source,
-                    target_id: id,
-                    label: edge.label.clone(),
-                    weight: edge.weight,
-                    metadata: edge.metadata.clone(),
-                })
-        })
-        .collect();
-    edges.sort_by(|a, b| a.source_id.cmp(&b.source_id).then(a.label.cmp(&b.label)));
-    edges
 }
 
 impl<T: VectorType> GraphRead<T> for MemTable<T> {
@@ -105,9 +73,6 @@ impl<T: VectorType> GraphRead<T> for MemTable<T> {
     }
     fn get_in_degree(&self, id: NodeId) -> usize {
         self.get_in_degree(id)
-    }
-    fn get_incoming_edges(&self, id: NodeId, label: Option<&str>) -> Vec<IncomingEdge> {
-        self.get_incoming_edges(id, label)
     }
 }
 
@@ -396,13 +361,6 @@ impl<T: VectorType> GraphRead<T> for GraphView<'_, T> {
             || self.facts.get_in_degree(id),
             |view| view.in_degrees.get(&id).copied().unwrap_or(0),
         )
-    }
-    fn get_incoming_edges(&self, id: NodeId, label: Option<&str>) -> Vec<IncomingEdge> {
-        if self.scoped.is_none() {
-            self.facts.get_incoming_edges(id, label)
-        } else {
-            collect_incoming(self, id, label)
-        }
     }
     fn edge_graph_id(&self, source: NodeId, edge: &Edge) -> Option<&str> {
         let view = self.scoped?;

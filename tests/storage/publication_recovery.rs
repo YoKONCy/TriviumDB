@@ -66,26 +66,42 @@ impl Fixture {
     }
 
     fn stage_old_generation(&self) -> Vec<u8> {
-        // TPUB v1 独立规格 oracle：固定 56 字节，文件顺序为主文件、向量、marker。
+        // 按 TPUB 当前规格独立构造十项撤销目录，包含统一索引容器。
         let generation = std::fs::read(format!("{}.flush_ok", self.path))
             .ok()
             .map(|marker| u64::from_le_bytes(marker[5..13].try_into().unwrap()) + 1)
             .unwrap_or(1);
-        let mut bytes = vec![0u8; 56];
-        bytes[..5].copy_from_slice(b"TPUB\x01");
-        bytes[5..13].copy_from_slice(&generation.to_le_bytes());
-        for (index, suffix) in ["", ".vec", ".flush_ok"].iter().enumerate() {
+        let mut bytes = vec![0u8; 149];
+        bytes[..5].copy_from_slice(b"TPUB\x03");
+        bytes[5] = u8::from(!std::path::Path::new(&format!("{}.flush_ok", self.path)).exists());
+        bytes[7..15].copy_from_slice(&generation.to_le_bytes());
+        for (index, suffix) in [
+            "",
+            ".vec",
+            ".flush_ok",
+            ".quiver",
+            ".quiver.meta",
+            ".text",
+            ".text.meta",
+            ".pidx",
+            ".gidx",
+            ".idx",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let offset = 15 + index * 13;
+            bytes[offset] = 1;
             if let Ok(data) = std::fs::read(format!("{}{suffix}", self.path)) {
                 std::fs::write(format!("{}.publish.{index}", self.path), &data).unwrap();
-                let offset = 13 + index * 13;
-                bytes[offset] = 1;
+                bytes[offset] = 2;
                 bytes[offset + 1..offset + 9].copy_from_slice(&(data.len() as u64).to_le_bytes());
                 bytes[offset + 9..offset + 13]
                     .copy_from_slice(&crc32fast::hash(&data).to_le_bytes());
             }
         }
-        let crc = crc32fast::hash(&bytes[..52]);
-        bytes[52..].copy_from_slice(&crc.to_le_bytes());
+        let crc = crc32fast::hash(&bytes[..145]);
+        bytes[145..].copy_from_slice(&crc.to_le_bytes());
         std::fs::write(format!("{}.publish", self.path), &bytes).unwrap();
         bytes
     }

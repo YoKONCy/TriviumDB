@@ -455,20 +455,7 @@ fn assert_matches_model(db: &Database<f32>, model: &ReferenceDb, context: &str) 
 }
 
 fn cleanup(path: &str) {
-    for suffix in [
-        "",
-        ".wal",
-        ".vec",
-        ".lock",
-        ".flush_ok",
-        ".propidx",
-        ".graph",
-        ".textidx",
-        ".textidx.meta",
-        ".quiver",
-    ] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 fn run_state_machine(seed: u64, mode: StorageMode) {
@@ -520,3 +507,6 @@ fn 阶段A_固定种子状态机覆盖_Mmap与Rom() {
         }
     }
 }
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

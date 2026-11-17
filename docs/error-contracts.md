@@ -1,6 +1,6 @@
 # 公共错误与请求完成契约
 
-> 本文记录 `0.9.1` 的公共字段、查询控制、写入结果与传输完成点。错误定义见 `src/error.rs`，SDK 职责见[内核 SDK 与存储内核](kernel-sdk.md)，版本记录见[变更说明](changes/0.9.1.md)。
+> 本文记录 `0.9.2-beta.1` 的公共字段、查询控制、写入结果与传输完成点。错误定义见 `src/error.rs`，SDK 职责见[内核 SDK 与存储内核](kernel-sdk.md)，版本记录见[变更说明](changes/0.9.2-beta.1.md)。
 
 ---
 
@@ -25,6 +25,8 @@
 ---
 
 ## 公共表示
+
+历史磁盘身份通过 `TDB_MIGRATION_REQUIRED` 返回 `details.component`、`found`、`current`、`migration_entrypoint`，入口为 `scripts/migrate.py`。普通打开在创建协调文件前执行格式准入，并在获得租约后重新核对；历史身份拒绝保持来源文件组。未来主文件与 WAL 身份分别沿 `TDB_UNSUPPORTED_DATABASE_VERSION`、`TDB_UNSUPPORTED_WAL_VERSION` 处理。完整操作见[外部迁移工具](migration.md)。
 
 | 字段 | 当前契约 |
 | --- | --- |

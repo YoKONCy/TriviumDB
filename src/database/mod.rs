@@ -15,8 +15,11 @@ pub(crate) mod document_query;
 mod documents;
 pub(crate) mod editing;
 mod named_graphs;
-pub(crate) mod quiver_ssd;
+pub(crate) mod quiver_runtime;
 pub use crate::sdk::facade;
+/// 离线工具使用的内核检查边界；应用侧 SDK 支持范围见正式接口清单。
+#[doc(hidden)]
+pub mod inspection;
 mod lifecycle;
 mod migration;
 pub use lifecycle::{InstanceMemoryStats, InstanceStats, ShutdownPhase, ShutdownStatus};
@@ -204,6 +207,45 @@ fn resolve_database_path(
         return Err(original);
     }
     Ok((normalized, Some(lock)))
+}
+
+fn lock_database(file: &std::fs::File, mode: AccessMode, path: &str) -> Result<()> {
+    let result = match mode {
+        AccessMode::ReadWrite => FileExt::try_lock_exclusive(file),
+        AccessMode::ReadOnly => FileExt::try_lock_shared(file),
+        AccessMode::Immutable => return Ok(()),
+    };
+    result.map_err(|error| {
+        let contended = fs2::lock_contended_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock
+            || error
+                .raw_os_error()
+                .is_some_and(|code| Some(code) == contended.raw_os_error())
+        {
+            TriviumError::DatabaseLocked(format!(
+                "数据库已有不兼容的访问租约 (Database has an incompatible access lease): {path}"
+            ))
+        } else {
+            error.into()
+        }
+    })
+}
+
+fn existing_database_lock(path: &str, mode: AccessMode) -> Result<Option<std::fs::File>> {
+    if mode == AccessMode::Immutable {
+        return Ok(None);
+    }
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(mode == AccessMode::ReadWrite)
+        .open(format!("{path}.lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    lock_database(&file, mode, path)?;
+    Ok(Some(file))
 }
 
 #[cfg(unix)]
@@ -682,7 +724,7 @@ impl<T: VectorType> SearchHandle<T> {
         }
 
         if !search_config.force_brute_force {
-            quiver_ssd::prepare_configured_rerank(
+            quiver_runtime::prepare_configured_rerank(
                 &self.memtable,
                 &self.wal,
                 &self.db_path,
@@ -891,44 +933,39 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         // ═══ 文件锁：防止多进程并发写同一个数据库 ═══
         let lock_path = format!("{}.lock", path);
+        let mut lock_file = match reserved_lock {
+            Some(lock) => Some(lock),
+            None => existing_database_lock(path, config.access_mode)?,
+        };
         if config.access_mode != AccessMode::ReadWrite && !std::path::Path::new(path).exists() {
             return Err(TriviumError::InvalidInput(format!(
                 "只读模式要求数据库文件已存在: {path}"
             )));
         }
-        let reserved_lock_held = reserved_lock.is_some();
-        let lock_file = if let Some(lock) = reserved_lock {
-            Some(lock)
-        } else {
-            match config.access_mode {
-                AccessMode::ReadWrite => Some(
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .read(true)
-                        .write(true)
-                        .open(&lock_path)?,
-                ),
-                AccessMode::ReadOnly => {
-                    Some(std::fs::OpenOptions::new().read(true).open(&lock_path)?)
+        if lock_file.is_none() && config.access_mode != AccessMode::Immutable {
+            // 缺少协调文件时先检查格式，历史来源的拒绝路径保持物理零写。
+            if let Err(error) = crate::storage::format::admit(path) {
+                // 其他 Writer 可能刚建立租约；取得该租约后由下方重新核对格式。
+                lock_file = existing_database_lock(path, config.access_mode)?;
+                if lock_file.is_none() {
+                    return Err(error);
                 }
-                AccessMode::Immutable => None,
             }
-        };
-        let locked = reserved_lock_held
-            || match (config.access_mode, lock_file.as_ref()) {
-                (AccessMode::ReadWrite, Some(file)) => file.try_lock_exclusive().is_ok(),
-                (AccessMode::ReadOnly, Some(file)) => file.try_lock_shared().is_ok(),
-                (AccessMode::Immutable, None) => true,
-                _ => false,
-            };
-        if !locked {
-            return Err(TriviumError::DatabaseLocked(format!(
-                "Database '{}' is already opened with an incompatible access mode",
-                path
-            )));
+            if lock_file.is_none() {
+                let lock = std::fs::OpenOptions::new()
+                    .create(config.access_mode == AccessMode::ReadWrite)
+                    .read(true)
+                    .write(config.access_mode == AccessMode::ReadWrite)
+                    .open(&lock_path)?;
+                lock_database(&lock, config.access_mode, path)?;
+                lock_file = Some(lock);
+            }
         }
 
+        // 可变文件头由同一租约保护，关闭或发布过程中的瞬态内容由锁冲突隔离。
+        crate::storage::format::admit(path)?;
         file_format::recover_publication::<T>(path, config.access_mode == AccessMode::ReadWrite)?;
+        crate::storage::format::admit(path)?;
 
         if config.access_mode == AccessMode::Immutable {
             crate::storage::snapshot::validate_manifest(path, std::any::type_name::<T>(), dim)?;
@@ -968,6 +1005,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         }
         let mut recovered_offset = None;
         if Wal::needs_recovery(path) {
+            memtable.document_publications.begin_replay();
+            let text_token = file_format::text_checkpoint_token(path)?;
+            if text_token.is_none() {
+                // 历史索引在应用删除前完成校验，保留节点复用的歧义检测证据。
+                memtable.prepare_text_index()?;
+            }
+            memtable.begin_text_replay(text_token);
             let mut entry_count = 0usize;
             let restored_bytes = std::cell::Cell::new(memtable.estimated_memory_bytes());
             let valid_offset =
@@ -994,6 +1038,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 memtable.named_graphs.graphs.len(),
                 10_000,
             )?;
+            memtable.document_publications.finish_replay();
+            memtable.finish_text_replay(path)?;
             memtable.document_publications.finish_restore()?;
             let unique_definitions = memtable.unique_index_definitions();
             memtable.restore_unique_index_definitions(&unique_definitions)?;
@@ -1030,21 +1076,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         memtable.check_load_allocation(0)?;
         memtable.finish_loading(config.payload_cache_bytes, config.payload_cache_entry_bytes)?;
-        // 所有加载、恢复与容量准入完成后才修改 WAL 尾部或迁移空检查点。
-        if config.access_mode == AccessMode::ReadWrite {
-            if std::path::Path::new(path).exists() {
-                file_format::upgrade_empty_checkpoint(&mut memtable, path, config.storage_mode)?;
-            } else {
-                file_format::initialize::<T>(path, dim)?;
-            }
-        }
-        if config.access_mode == AccessMode::ReadWrite {
-            Wal::admit_legacy_migration::<T>(
-                path,
-                config.memory_limit,
-                memtable.estimated_memory_bytes(),
-            )?;
-            Wal::upgrade_legacy_wal::<T>(path)?;
+        // 所有加载、恢复与容量准入完成后才修改 WAL 尾部或初始化空检查点。
+        if config.access_mode == AccessMode::ReadWrite && !std::path::Path::new(path).exists() {
+            file_format::initialize(path, &mut memtable)?;
         }
         if let Some((offset, entry_count)) = recovered_offset {
             let file = std::fs::OpenOptions::new()
@@ -1059,10 +1093,19 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             );
         }
 
-        let wal = match config.access_mode {
+        let mut wal = match config.access_mode {
             AccessMode::ReadWrite => Wal::open_with_sync(path, config.sync_mode)?,
             AccessMode::ReadOnly | AccessMode::Immutable => Wal::disabled(path, config.sync_mode),
         };
+        if config.access_mode == AccessMode::ReadWrite {
+            if memtable.text_checkpoint_token.is_none()
+                && file_format::deferred_text_metadata(path)
+                    .is_some_and(|metadata| metadata.checkpoint_token.is_some())
+            {
+                memtable.text_checkpoint_token = file_format::text_checkpoint_token(path)?;
+            }
+            wal.ensure_checkpoint_base(memtable.text_checkpoint_token)?;
+        }
         let recovery_required = memtable.recovery_latch();
         Ok(Self {
             db_path: normalized_path.to_string_lossy().into_owned(),
@@ -1724,6 +1767,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 write.phase = WritePhase::Validation;
                 #[cfg(feature = "test-hooks")]
                 crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeCompactionSave);
+                mt.text_checkpoint_token =
+                    w.seal_checkpoint(mt.text_index_is_deferred() || !mt.text_index().is_empty())?;
                 file_format::save_with_write_info(
                     &mut mt,
                     &self.db_path,
@@ -2866,85 +2911,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         crate::graph::reachability::query_subgraph(&read_or_recover(&self.memtable), id, config)
     }
 
-    pub fn tsng_ground_truth(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-    ) -> Result<crate::tsng::TsngGroundTruth> {
-        let _operation = self.enter_operation()?;
-        let mt = read_or_recover(&self.memtable);
-        self.resource_runtime
-            .pool(self.resource_runtime.parallelism())?
-            .install(|| crate::tsng::exact_ground_truth(&mt, query))
-    }
-
-    /// 实验性 TSNG 联合导航。纯向量权重会显式退化到原始 QuIVer scorer。
-    pub fn search_tsng(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-        config: crate::tsng::TsngSearchConfig,
-    ) -> Result<crate::tsng::TsngSearchResult> {
-        let _operation = self.enter_operation()?;
-        if query.weights.property == 0.0 && query.weights.graph == 0.0 {
-            self.prepare_quiver_rerank(false)?;
-        }
-        let mt = read_or_recover(&self.memtable);
-        self.resource_runtime
-            .pool(self.resource_runtime.parallelism())?
-            .install(|| crate::tsng::approximate_search(&mt, query, config))
-    }
-
-    /// TSNG 串行对照：原始 QuIVer ANN 后执行完整属性/图过滤和联合精排。
-    pub fn search_tsng_post_filter(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-        config: crate::tsng::TsngSearchConfig,
-    ) -> Result<crate::tsng::TsngSearchResult> {
-        let _operation = self.enter_operation()?;
-        let mt = read_or_recover(&self.memtable);
-        self.resource_runtime
-            .pool(self.resource_runtime.parallelism())?
-            .install(|| crate::tsng::post_filter_search(&mt, query, config))
-    }
-
-    /// 图候选并集对照：原始 ANN 候选与精确图候选直接合并后联合精排。
-    pub fn search_tsng_graph_union(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-        config: crate::tsng::TsngSearchConfig,
-    ) -> Result<crate::tsng::TsngSearchResult> {
-        let _operation = self.enter_operation()?;
-        let mt = read_or_recover(&self.memtable);
-        self.resource_runtime
-            .pool(self.resource_runtime.parallelism())?
-            .install(|| crate::tsng::graph_union_search(&mt, query, config))
-    }
-
-    /// BQ 预筛强基线：属性候选仅以 BQ2 粗排，随后读取有限原始向量精排。
-    pub fn search_tsng_bq_prefilter(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-        config: crate::tsng::IndustrialSearchConfig,
-    ) -> Result<crate::tsng::TsngSearchResult> {
-        let _operation = self.enter_operation()?;
-        let mt = read_or_recover(&self.memtable);
-        self.resource_runtime
-            .pool(self.resource_runtime.parallelism())?
-            .install(|| crate::tsng::bq_prefilter_search(&mt, query, config))
-    }
-
-    /// 工业混合查询：按选择性自动使用属性/图优先、候选并集或 ANN 后过滤。
-    pub fn search_tsng_industrial(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-        config: crate::tsng::IndustrialSearchConfig,
-    ) -> Result<crate::tsng::TsngSearchResult> {
-        let _operation = self.enter_operation()?;
-        let mt = read_or_recover(&self.memtable);
-        self.resource_runtime
-            .pool(self.resource_runtime.parallelism())?
-            .install(|| crate::tsng::industrial_search(&mt, query, config))
-    }
-
     pub fn index_memory_stats(&self) -> crate::observability::IndexMemoryStats {
         read_or_recover(&self.memtable).index_memory_stats()
     }
@@ -2962,7 +2928,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         let wal = lock_or_recover(&self.wal);
         crate::observability::StorageWriteStats {
             wal_bytes: wal.cumulative_written_bytes(),
-            sidecar_bytes: file_len(".pidx")
+            sidecar_bytes: file_len(".idx")
+                .saturating_add(file_len(".pidx"))
                 .saturating_add(file_len(".quiver"))
                 .saturating_add(file_len(".text"))
                 .saturating_add(file_len(".gidx")),
@@ -3328,20 +3295,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
     /// 返回当前数据库格式、模式和 sidecar 存在状态；该操作只读且不会修复文件。
     pub fn storage_info(&self) -> StorageInfo {
         let mt = read_or_recover(&self.memtable);
-        let suffixes = [
-            ".vec",
-            ".wal",
-            ".flush_ok",
-            ".quiver",
-            ".quiver.meta",
-            ".text",
-            ".text.meta",
-            ".pidx",
-            ".gidx",
-            ".manifest.json",
-        ];
+        let suffixes = crate::storage::artifacts::RESERVED_SUFFIXES;
         let sidecars = suffixes
-            .into_iter()
+            .iter()
+            .copied()
             .map(|suffix| {
                 (
                     suffix.to_owned(),
@@ -3352,7 +3309,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         StorageInfo {
             package_version: env!("CARGO_PKG_VERSION"),
             database_format_current: crate::storage::file_format::CURRENT_VERSION,
-            database_format_minimum: crate::storage::file_format::MINIMUM_SUPPORTED_VERSION,
+            database_format_minimum: crate::storage::file_format::CURRENT_VERSION,
             wal_format: crate::storage::wal::WAL_VERSION,
             property_index_format: crate::index::property::FORMAT_VERSION,
             graph_index_format: crate::storage::graph_blocks::VERSION,

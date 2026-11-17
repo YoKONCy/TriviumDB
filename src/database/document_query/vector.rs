@@ -281,7 +281,7 @@ fn ann<'a, T: VectorType>(
             }
             active
                 .reader
-                .set_database_capacity(super::super::quiver_ssd::database_capacity(
+                .set_database_capacity(super::super::quiver_runtime::database_capacity(
                     work.memory_limit,
                     work.mt.base_memory_bytes(),
                 )?);
@@ -295,10 +295,12 @@ fn ann<'a, T: VectorType>(
                 quiver,
                 &|id| eligible.contains(&id),
                 &|stage| match stage {
-                    crate::index::quiver::ssd::SearchStage::Navigation => {
+                    crate::index::quiver::runtime::SearchStage::Navigation => {
                         control.borrow_mut().navigation()
                     }
-                    crate::index::quiver::ssd::SearchStage::Score => control.borrow_mut().score(),
+                    crate::index::quiver::runtime::SearchStage::Score => {
+                        control.borrow_mut().score()
+                    }
                 },
                 work.workspace.bytes(),
             )?

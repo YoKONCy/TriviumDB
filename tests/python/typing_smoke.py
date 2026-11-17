@@ -11,7 +11,10 @@ hits: list[SearchHit] = db.search_advanced(
     max_edges_per_node=10,
     min_edge_weight=0.25,
     edge_direction=direction,
+    exact=True,
 )
+exact_hits: list[SearchHit] = db.search([1.0, 0.0], exact=True)
+exact_batch: list[list[SearchHit]] = db.search_batch([[1.0, 0.0]], exact=True)
 transaction: Transaction = db.transaction()
 transaction.rollback()
 state: dict[str, Any] = db.shutdown_status()

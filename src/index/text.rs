@@ -77,6 +77,32 @@ pub struct TextIndex {
 }
 
 impl TextIndex {
+    pub(crate) fn write_facts(&self, writer: &mut impl std::io::Write) -> crate::Result<()> {
+        use crate::database::inspection::record;
+        let mut keywords = self.keyword_to_nodes.iter().collect::<Vec<_>>();
+        keywords.sort_unstable_by_key(|(word, _)| *word);
+        record(writer, &keywords.len())?;
+        for (word, ids) in keywords {
+            let mut ids = ids.clone();
+            ids.sort_unstable();
+            record(writer, &(word, ids))?;
+        }
+        let mut terms = self.bm25_tf.iter().collect::<Vec<_>>();
+        terms.sort_unstable_by_key(|(term, _)| *term);
+        record(writer, &terms.len())?;
+        for (term, posting) in terms {
+            let mut posting = posting.iter().collect::<Vec<_>>();
+            posting.sort_unstable_by_key(|(id, _)| **id);
+            record(writer, &(term, posting))?;
+        }
+        let mut lengths = self.doc_lengths.iter().collect::<Vec<_>>();
+        lengths.sort_unstable_by_key(|(id, _)| **id);
+        record(writer, &lengths)
+    }
+    pub(crate) fn contains_node(&self, id: NodeId) -> bool {
+        self.doc_lengths.contains_key(&id) || self.keyword_nodes.contains(&id)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -347,11 +373,15 @@ impl TextIndex {
     }
 
     pub fn load_from_file(path: &Path) -> std::io::Result<Self> {
-        use bincode::Options;
-        use std::io::Read;
         let file = std::fs::File::open(path)?;
         let limit = file.metadata()?.len();
-        let mut reader = BufReader::new(file);
+        Self::load_from_reader(file, limit)
+    }
+
+    pub(crate) fn load_from_reader(input: impl std::io::Read, limit: u64) -> std::io::Result<Self> {
+        use bincode::Options;
+        use std::io::Read;
+        let mut reader = BufReader::new(input);
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
         if &magic != TEXT_INDEX_MAGIC {

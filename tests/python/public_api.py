@@ -79,6 +79,7 @@ def run_transaction_contract(root: str) -> None:
                 replay_file = file + ".replay"
                 shutil.copyfile(file, replay_file)
                 shutil.copyfile(file + ".wal", replay_file + ".wal")
+                shutil.copyfile(file + ".idx", replay_file + ".idx")
                 replay = triviumdb.TriviumDB(replay_file, **options)
                 try:
                     check(replay)
@@ -95,40 +96,28 @@ def run_transaction_contract(root: str) -> None:
 
 
 def run_text_recovery_contract(root: str) -> None:
-    source = os.path.join(os.path.dirname(__file__), "..", "fixtures", "v0810_text_mmap")
-    for missing in [False, True]:
-        target = os.path.join(root, f"text-upgrade-{missing}.tdb")
-        for suffix in ["", ".vec", ".flush_ok", ".pld.2", ".text", ".text.meta", ".wal"]:
-            if missing and suffix == ".text.meta":
-                continue
-            shutil.copyfile(os.path.join(source, "sample.tdb" + suffix), target + suffix)
-        db = triviumdb.TriviumDB(target, dim=4, auto_build_quiver=False)
-        db.insert_with_id(5, [0, 0, 1, 0], {})
-        db.flush()
-        db.build_text_index()
-        assert sorted(row.row["hits"]["id"] for row in db.tql(
-            'TEXT BM25 "alpha" TOP 10 AS hits WITH hits RETURN hits')) == [1, 2, 3, 4]
-        db.close()
-        with open(target + ".text", "wb") as output:
-            output.write(b"corrupt")
-        db = triviumdb.TriviumDB(target, dim=4, load_text_index=True, auto_build_quiver=False)
-        with open(target + ".text", "rb") as original:
-            assert original.read() == b"corrupt"
-        try:
-            db.build_text_index()
-        except triviumdb.ImmutableArtifactError:
-            pass
-        else:
-            raise AssertionError("损坏文本应返回结构化校验错误")
-        db.rebuild_text_index([{"id": 1, "text": "restoredtoken", "keywords": ["restoredanchor"]}])
-        db.close()
-        reader = triviumdb.TriviumDB(target, dim=4, load_text_index=True, access_mode="read_only")
-        assert reader.node_count() == 5
-        assert [row.row["hits"]["id"] for row in reader.tql(
-            'TEXT BM25 "restoredtoken" TOP 10 AS hits WITH hits RETURN hits')] == [1]
-        assert [row.row["hits"]["id"] for row in reader.tql(
-            'TEXT AC "restoredanchor" TOP 10 AS hits WITH hits RETURN hits')] == [1]
-        reader.close()
+    target = os.path.join(root, "text-rebuild-mmap.tdb")
+    db = triviumdb.TriviumDB(target, dim=4, auto_build_quiver=False)
+    for node_id in range(1, 6):
+        db.insert_with_id(node_id, [0, 0, 1, 0], {})
+    db.rebuild_text_index([
+        {"id": node_id, "text": "alpha", "keywords": []} for node_id in range(1, 5)
+    ])
+    db.flush()
+    db.build_text_index()
+    assert sorted(row.row["hits"]["id"] for row in db.tql(
+        'TEXT BM25 "alpha" TOP 10 AS hits WITH hits RETURN hits')) == [1, 2, 3, 4]
+    db.close()
+    db = triviumdb.TriviumDB(target, dim=4, load_text_index=True, auto_build_quiver=False)
+    db.rebuild_text_index([{"id": 1, "text": "restoredtoken", "keywords": ["restoredanchor"]}])
+    db.close()
+    reader = triviumdb.TriviumDB(target, dim=4, load_text_index=True, access_mode="read_only")
+    assert reader.node_count() == 5
+    assert [row.row["hits"]["id"] for row in reader.tql(
+        'TEXT BM25 "restoredtoken" TOP 10 AS hits WITH hits RETURN hits')] == [1]
+    assert [row.row["hits"]["id"] for row in reader.tql(
+        'TEXT AC "restoredanchor" TOP 10 AS hits WITH hits RETURN hits')] == [1]
+    reader.close()
 
 
 def run_lifecycle_contract(root: str) -> None:
@@ -495,7 +484,7 @@ def main() -> None:
         ]
 
         storage = db.storage_info()
-        assert storage["database_format_current"] == 13
+        assert storage["database_format_current"] == 15
         assert storage["property_index_format"] == 8
         assert storage["node_count"] == 2
 

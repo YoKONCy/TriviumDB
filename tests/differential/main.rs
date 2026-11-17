@@ -22,3 +22,6 @@ mod replay;
 mod shrinker;
 #[path = "../support/mod.rs"]
 mod support;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

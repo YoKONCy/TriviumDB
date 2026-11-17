@@ -26,18 +26,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    let root = std::path::Path::new(path).parent().unwrap();
-    assert_eq!(
-        root.parent().unwrap(),
-        std::env::temp_dir().join("triviumdb_test")
-    );
-    assert!(
-        root.file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("soak_")
-    );
-    std::fs::remove_dir_all(root).unwrap();
+    crate::cleanup_files::database(path);
 }
 
 /// 读取操作系统进程观测；采样失败和零值都使验收失败。

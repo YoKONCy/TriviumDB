@@ -2489,29 +2489,29 @@ fn eval_pipeline_row_expr<T: VectorType>(
         }
         TqlExpr::Similarity { .. } => row
             .similarity
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::GraphScore { .. } => row
             .graph_score
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::GraphMetric { metric, .. } => {
             crate::query::pipeline::graph_metric_from_name(metric)
                 .and_then(|metric| row.graph_metric(metric))
-                .map(|score| RuntimeValue::Float(score.value as f64))
+                .map(|score| RuntimeValue::Float(score.value))
                 .unwrap_or(RuntimeValue::Null)
         }
         TqlExpr::TextScore { .. } => row
             .text_score
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::DiversityScore { .. } => row
             .diversity_score
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::ResidualScore { .. } => row
             .residual_score
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::Topic { .. } => row
             .topic_id
@@ -2519,7 +2519,7 @@ fn eval_pipeline_row_expr<T: VectorType>(
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::TopicScore { .. } => row
             .topic_score
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::Depth { .. } => row
             .provenance
@@ -2528,7 +2528,7 @@ fn eval_pipeline_row_expr<T: VectorType>(
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::PathStrength { .. } => row
             .path_strength
-            .map(|score| RuntimeValue::Float(score.value as f64))
+            .map(|score| RuntimeValue::Float(score.value))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::PathCount { .. } => row
             .path_count
@@ -2810,24 +2810,35 @@ fn plan_find_filter<T: VectorType>(
     plan_filter_with_limit(filter, candidate_limit, mt)
 }
 
+fn find_ordered_field(query: &TqlQuery) -> Option<(&str, bool)> {
+    if query.order_by.len() != 1 || query.rank.is_some() {
+        return None;
+    }
+    let order = &query.order_by[0];
+    let TqlExpr::Property { var, field } = &order.expr else {
+        return None;
+    };
+    // 返回别名先在投影作用域求值，事实字段的索引须先证明排序等价。
+    if let ReturnClause::Expressions(items) = &query.returns
+        && items.iter().any(|item| item.alias.as_ref() == Some(var))
+    {
+        return None;
+    }
+    if field == "id" {
+        return None;
+    }
+    Some((field, order.descending))
+}
+
 fn find_ordered_find_plan<T: VectorType>(
     query: &TqlQuery,
     filter: &Filter,
     mt: &MemTable<T>,
 ) -> Option<super::planner::NodeAccessPlan> {
-    if query.order_by.len() != 1 || query.rank.is_some() {
-        return None;
-    }
-    let order = &query.order_by[0];
-    let TqlExpr::Property { field, .. } = &order.expr else {
-        return None;
-    };
-    if field == "id" {
-        return None;
-    }
+    let (field, descending) = find_ordered_field(query)?;
     // ORDER BY 索引只能提供候选顺序；入口 Filter 和 WHERE 都可能继续淘汰候选。
     // 在过滤前按 OFFSET + LIMIT 截断会造成分页缺行，因此这里必须读取完整有序候选。
-    plan_filter_ordered(filter, field, order.descending, None, mt)
+    plan_filter_ordered(filter, field, descending, None, mt)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3717,6 +3728,25 @@ fn first_var_from_kind(kind: &ReturnExprKind) -> Option<String> {
     }
 }
 
+fn compensated_sum(values: impl Iterator<Item = f64>) -> (f64, f64) {
+    let mut sum = 0.0f64;
+    let mut correction = 0.0f64;
+    for value in values {
+        let next = sum + value;
+        if !next.is_finite() {
+            // 调用方按输入尺度重算，保留中间和溢出的明确状态。
+            return (next, 0.0);
+        }
+        correction += if sum.abs() >= value.abs() {
+            (sum - next) + value
+        } else {
+            (value - next) + sum
+        };
+        sum = next;
+    }
+    (sum, correction)
+}
+
 fn aggregate_numbers(
     func: AggFunc,
     values: impl Iterator<Item = serde_json::Number>,
@@ -3755,14 +3785,32 @@ fn aggregate_numbers(
             _ => serde_json::Value::Null,
         };
     }
-    let sum = values
-        .iter()
-        .filter_map(serde_json::Number::as_f64)
-        .sum::<f64>();
     let result = if func == AggFunc::Avg {
-        sum / values.len() as f64
+        let count = values.len() as f64;
+        let (sum, correction) =
+            compensated_sum(values.iter().filter_map(serde_json::Number::as_f64));
+        if sum.is_finite() && correction.is_finite() {
+            sum / count + correction / count
+        } else {
+            // 缩放仅用于中间和溢出的输入，普通整数均值沿原数值尺度计算。
+            let scale = values
+                .iter()
+                .filter_map(serde_json::Number::as_f64)
+                .map(f64::abs)
+                .fold(0.0f64, f64::max);
+            let (sum, correction) = compensated_sum(
+                values
+                    .iter()
+                    .filter_map(serde_json::Number::as_f64)
+                    .map(|value| value / scale),
+            );
+            ((sum + correction) / count).clamp(-1.0, 1.0) * scale
+        }
     } else {
-        sum
+        values
+            .iter()
+            .filter_map(serde_json::Number::as_f64)
+            .sum::<f64>()
     };
     serde_json::Number::from_f64(result).map_or(serde_json::Value::Null, serde_json::Value::Number)
 }
@@ -3994,7 +4042,7 @@ fn generate_explain_plan<T: VectorType>(
             .saturating_mul(std::mem::size_of::<T>())
             .div_ceil(4096);
         plan.insert(
-            "industrial_access_path".into(),
+            "vector_access_path".into(),
             serde_json::json!(if mt.quiver().is_some() {
                 "ann_post_filter"
             } else {
@@ -4072,8 +4120,9 @@ fn generate_explain_plan<T: VectorType>(
         }
     }
     let ordered_find = matches!(&query.entry, QueryEntry::Find { .. })
-        && matches!(access_path, AccessPath::OrderedPropertyIndex { .. })
-        && query.order_by.len() == 1;
+        && matches!((&access_path, find_ordered_field(query)),
+            (AccessPath::OrderedPropertyIndex { field, descending }, Some((order_field, order_descending)))
+                if field == order_field && *descending == order_descending);
     if query.limit.is_some()
         && query.pipeline.is_empty()
         && !requires_full_input(query, ordered_find)

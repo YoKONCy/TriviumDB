@@ -58,7 +58,7 @@ impl BindingValue {
     }
 }
 
-fn compare_bindings(left: &NodeRow, right: &NodeRow) -> std::cmp::Ordering {
+pub(super) fn compare_bindings(left: &NodeRow, right: &NodeRow) -> std::cmp::Ordering {
     left.bindings
         .iter()
         .flat_map(|values| values.iter())
@@ -86,7 +86,8 @@ pub enum ScoreKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct ScoreValue {
-    pub value: f32,
+    /// 保留图算法的宽类型结果，供投影、排序、聚合与各语言绑定传递。
+    pub value: f64,
     pub kind: ScoreKind,
 }
 
@@ -173,6 +174,11 @@ impl NodeRow {
         }
     }
     pub fn set_graph_metric(&mut self, metric: GraphMetric, score: ScoreValue) -> Result<()> {
+        if !score.value.is_finite() {
+            return Err(TriviumError::QueryExecution(
+                "图分数超出有限范围 (Graph score exceeds the finite range)".into(),
+            ));
+        }
         self.graph_metrics.insert(metric, score);
         self.graph_score = Some(score);
         Ok(())
@@ -470,7 +476,7 @@ pub struct PipelineContext<'a, T: VectorType> {
     profile: bool,
     stages: usize,
     vector_read_bytes: usize,
-    payload_start: (u64, u64),
+    payload_meter: Arc<crate::request::PayloadMeter>,
     workspace_bytes: usize,
     workspaces: Vec<crate::resources::WorkspaceReservation>,
 }
@@ -492,7 +498,7 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
             profile,
             stages: 0,
             vector_read_bytes: 0,
-            payload_start: memtable.payload_access_counters(),
+            payload_meter: Arc::default(),
             workspace_bytes: 0,
             workspaces: Vec::new(),
         }
@@ -558,6 +564,7 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
             control,
             false,
         )
+        .map(|request| request.with_payload_meter(Arc::clone(&self.payload_meter)))
     }
 
     fn run_graph<R: Send>(
@@ -618,11 +625,7 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
     }
 
     fn payload_usage(&self) -> (u64, u64) {
-        let current = self.memtable.payload_access_counters();
-        (
-            current.0.saturating_sub(self.payload_start.0),
-            current.1.saturating_sub(self.payload_start.1),
-        )
+        self.payload_meter.usage()
     }
 
     fn validate_payload_budget(&self) -> Result<(u64, u64)> {
@@ -703,24 +706,12 @@ pub(crate) fn execute_pipeline_with_workspace<T: VectorType>(
     operators: &[Box<dyn PipelineOperator<T> + '_>],
 ) -> Result<(NodeSet, Vec<crate::resources::WorkspaceReservation>)> {
     let mut workspace = PipelineWorkspace(context);
-    let inherited = crate::request::current();
-    let request = workspace
-        .query_control
-        .as_ref()
-        .map(|control| {
-            crate::request::RequestContext::new(
-                inherited
-                    .as_ref()
-                    .map_or("pipeline", |request| request.request_id()),
-                control.clone(),
-                false,
-            )
-        })
-        .transpose()?;
-    let _scope = request
-        .as_ref()
-        .map(|request| request.enter())
-        .transpose()?;
+    workspace.metrics.clear();
+    workspace.stages = 0;
+    workspace.vector_read_bytes = 0;
+    workspace.payload_meter = Arc::default();
+    let request = workspace.graph_request()?;
+    let _scope = request.enter()?;
     let context = &mut *workspace;
     let rows = context.memtable.node_count().min(context.budget.max_nodes);
     let estimate = rows
@@ -870,7 +861,7 @@ impl<T: VectorType> PipelineOperator<T> for ExactVectorSearch<T> {
                 .map(|(id, score)| {
                     let mut row = NodeRow::new(id);
                     row.similarity = Some(ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: ScoreKind::Exact,
                     });
                     row.provenance.source_ids.push(id);
@@ -950,7 +941,7 @@ impl<T: VectorType> PipelineOperator<T> for QuiverVectorSearch<T> {
                 .map(|(id, score)| {
                     let mut row = NodeRow::new(id);
                     row.similarity = Some(ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: if approximate {
                             ScoreKind::Approximate
                         } else {
@@ -1029,7 +1020,7 @@ impl<T: VectorType> PipelineOperator<T> for TextSearchSource {
                 .map(|(id, score)| {
                     let mut row = NodeRow::new(id);
                     row.text_score = Some(ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: ScoreKind::Exact,
                     });
                     row.provenance.source_ids.push(id);
@@ -1064,9 +1055,11 @@ impl<T: VectorType> PipelineOperator<T> for DppDiversify {
         let temp_cells = input
             .len()
             .checked_mul(self.top_k)
+            .and_then(|cells| cells.checked_add(input.len().checked_mul(6)?))
+            .and_then(|cells| cells.checked_add(input.len().checked_mul(context.memtable.dim())?))
             .ok_or_else(|| TriviumError::QueryExecution("DPP 临时预算溢出".into()))?;
         let temp_bytes = temp_cells
-            .checked_mul(std::mem::size_of::<f32>())
+            .checked_mul(std::mem::size_of::<f64>())
             .ok_or_else(|| TriviumError::QueryExecution("DPP 临时字节预算溢出".into()))?;
         if temp_bytes > context.budget.max_node_set_bytes {
             return Err(TriviumError::QueryExecution(
@@ -1096,12 +1089,12 @@ impl<T: VectorType> PipelineOperator<T> for DppDiversify {
             }
         }
         let selected =
-            crate::cognitive::dpp_greedy(&vectors, &scores, self.top_k, self.quality_weight);
+            crate::cognitive::dpp_greedy_wide(&vectors, &scores, self.top_k, self.quality_weight);
         let mut output = Vec::with_capacity(selected.len());
         for (rank, index) in selected.into_iter().enumerate() {
             if let Some(mut row) = valid.get(index).cloned() {
                 row.diversity_score = Some(ScoreValue {
-                    value: 1.0 / (rank + 1) as f32,
+                    value: 1.0 / (rank + 1) as f64,
                     kind: ScoreKind::Approximate,
                 });
                 output.push(row);
@@ -1212,7 +1205,7 @@ impl<T: VectorType> PipelineOperator<T> for FistaResidualRecall<T> {
                 .map(|(id, score)| {
                     let mut row = inherited.remove(&id).unwrap_or_else(|| NodeRow::new(id));
                     row.residual_score = Some(ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: ScoreKind::Exact,
                     });
                     row
@@ -1246,14 +1239,34 @@ impl<T: VectorType> PipelineOperator<T> for NmfTopics {
         {
             return Err(TriviumError::InvalidInput("NMF 参数或矩阵预算无效".into()));
         }
+        // 峰值包含 V、三份 m×k、三份 k×d 及两份 k×k 工作矩阵。
         let matrix_cells = input
             .len()
             .checked_mul(context.memtable.dim())
-            .and_then(|value| value.checked_add(input.len().checked_mul(self.topics)?))
-            .and_then(|value| value.checked_add(self.topics.checked_mul(context.memtable.dim())?))
+            .and_then(|value| {
+                value.checked_add(input.len().checked_mul(self.topics)?.checked_mul(3)?)
+            })
+            .and_then(|value| {
+                value.checked_add(
+                    self.topics
+                        .checked_mul(context.memtable.dim())?
+                        .checked_mul(3)?,
+                )
+            })
+            .and_then(|value| {
+                value.checked_add(self.topics.checked_mul(self.topics)?.checked_mul(2)?)
+            })
             .ok_or_else(|| TriviumError::QueryExecution("NMF 矩阵预算溢出".into()))?;
         let matrix_bytes = matrix_cells
-            .checked_mul(std::mem::size_of::<f32>())
+            .checked_mul(std::mem::size_of::<f64>())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    input
+                        .len()
+                        .checked_mul(context.memtable.dim())?
+                        .checked_mul(std::mem::size_of::<f32>())?,
+                )
+            })
             .ok_or_else(|| TriviumError::QueryExecution("NMF 矩阵字节预算溢出".into()))?;
         if matrix_bytes > context.budget.max_node_set_bytes {
             return Err(TriviumError::QueryExecution(
@@ -1275,7 +1288,7 @@ impl<T: VectorType> PipelineOperator<T> for NmfTopics {
                 .ok_or(TriviumError::NodeNotFound(row.id))?;
             flat.extend(vector.iter().map(|value| value.to_f32()));
         }
-        let (weights, _) = crate::cognitive::nmf_multiplicative_update(
+        let (weights, topics) = crate::cognitive::nmf_multiplicative_update(
             &flat,
             rows.len(),
             context.memtable.dim(),
@@ -1283,6 +1296,15 @@ impl<T: VectorType> PipelineOperator<T> for NmfTopics {
             self.iterations,
             1e-4,
         );
+        if weights
+            .iter()
+            .chain(&topics)
+            .any(|value| !value.is_finite())
+        {
+            return Err(TriviumError::QueryExecution(
+                "NMF 分解超出有限范围 (NMF factorization exceeds the finite range)".into(),
+            ));
+        }
         for (row_index, row) in rows.iter_mut().enumerate() {
             let start = row_index * self.topics;
             let topic_weights = &weights[start..start + self.topics];
@@ -1298,7 +1320,7 @@ impl<T: VectorType> PipelineOperator<T> for NmfTopics {
                 .unwrap_or((0, 0.0));
             row.topic_id = Some(topic as u64);
             row.topic_score = Some(ScoreValue {
-                value: score,
+                value: f64::from(score),
                 kind: ScoreKind::Approximate,
             });
         }
@@ -1332,11 +1354,13 @@ impl<T: VectorType> PipelineOperator<T> for PropertyLookup {
                     .memtable
                     .find_nodes_by_field(&self.field, &self.value)
             } else {
-                query_pool(context.memtable.resource_runtime(), threads)?.install(|| {
-                    context
-                        .memtable
-                        .find_nodes_by_field_parallel(&self.field, &self.value, threads)
-                })
+                context.run_graph(threads, || {
+                    Ok(context.memtable.find_nodes_by_field_parallel(
+                        &self.field,
+                        &self.value,
+                        threads,
+                    ))
+                })?
             }
         };
         let mut output = NodeSet::from_ids(ids);
@@ -1374,7 +1398,7 @@ impl<T: VectorType> PipelineOperator<T> for ExactRerank<T> {
             if let Some(vector) = context.memtable.get_vector(row.id) {
                 row.document_score = None;
                 row.similarity = Some(ScoreValue {
-                    value: T::similarity(&self.query, vector),
+                    value: f64::from(T::similarity(&self.query, vector)),
                     kind: ScoreKind::Exact,
                 });
                 rows.push(row);
@@ -1418,12 +1442,12 @@ fn compare_similarity(left: &NodeRow, right: &NodeRow) -> std::cmp::Ordering {
     right
         .similarity
         .map(|score| score.value)
-        .unwrap_or(f32::NEG_INFINITY)
+        .unwrap_or(f64::NEG_INFINITY)
         .total_cmp(
             &left
                 .similarity
                 .map(|score| score.value)
-                .unwrap_or(f32::NEG_INFINITY),
+                .unwrap_or(f64::NEG_INFINITY),
         )
         .then_with(|| left.id.cmp(&right.id))
         .then_with(|| compare_bindings(left, right))
@@ -1682,7 +1706,7 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
                     row.provenance.source_ids = vec![hit.source_id];
                     row.provenance.min_depth = Some(hit.depth);
                     row.graph_score = Some(ScoreValue {
-                        value: 1.0 / hit.depth.max(1) as f32,
+                        value: 1.0 / hit.depth.max(1) as f64,
                         kind: ScoreKind::Exact,
                     });
                     expanded.push(row);
@@ -1709,7 +1733,7 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
             }
             row.provenance.min_depth = Some(min_depth);
             row.graph_score = Some(ScoreValue {
-                value: 1.0 / min_depth.max(1) as f32,
+                value: 1.0 / min_depth.max(1) as f64,
                 kind: ScoreKind::Exact,
             });
             expanded_rows.push(row);
@@ -1804,9 +1828,9 @@ impl<T: VectorType> PipelineOperator<T> for MultiAnchorExpand {
             }
             let anchor_weight = self.anchor_weights.get(&source.id).copied().unwrap_or(1.0);
             for target in reached.results {
-                let base = 1.0 / target.depth.max(1) as f32;
+                let base = 1.0 / target.depth.max(1) as f64;
                 let contribution = match self.aggregation {
-                    AnchorAggregation::WeightedSum => base * anchor_weight,
+                    AnchorAggregation::WeightedSum => base * f64::from(anchor_weight),
                     AnchorAggregation::Sum | AnchorAggregation::Max => base,
                 };
                 let row = output.entry(target.target_id).or_insert_with(|| {
@@ -1891,7 +1915,7 @@ impl<T: VectorType> PipelineOperator<T> for BatchShortestPaths {
                 let candidate = NodeRow {
                     id: target,
                     graph_score: Some(ScoreValue {
-                        value: 1.0 / depth.max(1) as f32,
+                        value: 1.0 / depth.max(1) as f64,
                         kind: ScoreKind::Exact,
                     }),
                     path_count: Some(1),
@@ -1973,7 +1997,7 @@ impl<T: VectorType> PipelineOperator<T> for WeightedShortestPathsOperator {
                 row.set_graph_metric(
                     GraphMetric::WeightedDistance,
                     ScoreValue {
-                        value: path.cost as f32,
+                        value: path.cost,
                         kind: ScoreKind::Exact,
                     },
                 )?;
@@ -2033,7 +2057,7 @@ impl<T: VectorType> PipelineOperator<T> for YenKShortestPathsOperator {
                     row.set_graph_metric(
                         GraphMetric::WeightedDistance,
                         ScoreValue {
-                            value: path.cost as f32,
+                            value: path.cost,
                             kind: ScoreKind::Exact,
                         },
                     )?;
@@ -2083,7 +2107,7 @@ impl<T: VectorType> PipelineOperator<T> for NodeSimilarityOperator {
             row.set_graph_metric(
                 GraphMetric::NodeSimilarity,
                 ScoreValue {
-                    value: pair.similarity as f32,
+                    value: pair.similarity,
                     kind: ScoreKind::Exact,
                 },
             )?;
@@ -2118,7 +2142,10 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
                     source.id,
                     target,
                     &self.config,
-                    &context.budget.traversal,
+                    &TraversalBudget {
+                        exhaustion_policy: BudgetExhaustionPolicy::Error,
+                        ..context.budget.traversal
+                    },
                 )?;
                 consumed_nodes = consumed_nodes.saturating_add(result.metrics.visited_nodes);
                 consumed_edges = consumed_edges.saturating_add(result.metrics.examined_edges);
@@ -2139,18 +2166,26 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
                         .map(|path| path.strength_product)
                         .max_by(f32::total_cmp)
                         .unwrap_or(0.0),
-                    PathStrengthAggregation::SumProduct => {
-                        result.paths.iter().map(|path| path.strength_product).sum()
-                    }
+                    PathStrengthAggregation::SumProduct => result
+                        .paths
+                        .iter()
+                        .map(|path| f64::from(path.strength_product))
+                        .sum::<f64>()
+                        as f32,
                     PathStrengthAggregation::AverageWeight => {
-                        result
+                        (result
                             .paths
                             .iter()
-                            .map(|path| path.strength_average)
-                            .sum::<f32>()
-                            / result.paths.len() as f32
+                            .map(|path| f64::from(path.strength_average))
+                            .sum::<f64>()
+                            / result.paths.len() as f64) as f32
                     }
                 };
+                if !score.is_finite() {
+                    return Err(TriviumError::QueryExecution(
+                        "路径聚合分数超出有限 f32 范围 (Path aggregate score exceeds the finite f32 range)".into(),
+                    ));
+                }
                 let best_path = result
                     .paths
                     .iter()
@@ -2166,7 +2201,7 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
                 let candidate = NodeRow {
                     id: target,
                     path_strength: Some(ScoreValue {
-                        value: score,
+                        value: f64::from(score),
                         kind: ScoreKind::Exact,
                     }),
                     path_count: Some(result.paths.len()),
@@ -2285,7 +2320,7 @@ impl<T: VectorType> PipelineOperator<T> for PageRankOperator {
             if output_ids.contains(&id) {
                 let row = rows.entry(id).or_insert_with(|| NodeRow::new(id));
                 let score = ScoreValue {
-                    value: score as f32,
+                    value: score,
                     kind: ScoreKind::Exact,
                 };
                 row.graph_score = Some(score);
@@ -2343,7 +2378,7 @@ impl<T: VectorType> PipelineOperator<T> for DegreeCentralityOperator {
                 .get(&score.id)
                 .map_or_else(|| NodeRow::new(score.id), |row| (*row).clone());
             row.graph_score = Some(ScoreValue {
-                value: score.normalized as f32,
+                value: score.normalized,
                 kind: ScoreKind::Exact,
             });
             Some(row)
@@ -2408,10 +2443,7 @@ impl<T: VectorType> PipelineOperator<T> for BetweennessOperator {
                 let mut row = old
                     .get(&id)
                     .map_or_else(|| NodeRow::new(id), |row| (*row).clone());
-                row.graph_score = Some(ScoreValue {
-                    value: score as f32,
-                    kind,
-                });
+                row.graph_score = Some(ScoreValue { value: score, kind });
                 row
             })
             .collect();
@@ -2652,7 +2684,7 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
                     row.set_graph_metric(
                         GraphMetric::CoreNumber,
                         ScoreValue {
-                            value: core.get(&row.id).copied().unwrap_or(0) as f32,
+                            value: core.get(&row.id).copied().unwrap_or(0) as f64,
                             kind: ScoreKind::Exact,
                         },
                     )?;
@@ -2673,14 +2705,14 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
                     row.set_graph_metric(
                         GraphMetric::TriangleCount,
                         ScoreValue {
-                            value: triangles as f32,
+                            value: triangles as f64,
                             kind: ScoreKind::Exact,
                         },
                     )?;
                     row.set_graph_metric(
                         GraphMetric::ClusteringCoefficient,
                         ScoreValue {
-                            value: coefficient as f32,
+                            value: coefficient,
                             kind: ScoreKind::Exact,
                         },
                     )?;
@@ -2698,14 +2730,14 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
                     row.set_graph_metric(
                         GraphMetric::Authority,
                         ScoreValue {
-                            value: authority as f32,
+                            value: authority,
                             kind: ScoreKind::Exact,
                         },
                     )?;
                     row.set_graph_metric(
                         GraphMetric::Hub,
                         ScoreValue {
-                            value: hub as f32,
+                            value: hub,
                             kind: ScoreKind::Exact,
                         },
                     )?;
@@ -2720,7 +2752,7 @@ impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
                     row.set_graph_metric(
                         GraphMetric::HarmonicCentrality,
                         ScoreValue {
-                            value: scores.get(&row.id).copied().unwrap_or_default() as f32,
+                            value: scores.get(&row.id).copied().unwrap_or_default(),
                             kind: ScoreKind::Exact,
                         },
                     )?;
@@ -2763,41 +2795,117 @@ impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
     }
 
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let traversal = context.budget.traversal;
+        traversal.validate()?;
+        let graph_scope = context.graph_scope.clone();
+        let graph = crate::graph::view::GraphView {
+            facts: context.memtable,
+            scoped: graph_scope.as_deref(),
+        };
+        let control = context.graph_request()?.control().clone();
+        let mut admitted = crate::graph::budget::TraversalMetrics::default();
+        let row_bytes = std::mem::size_of::<NodeRow>()
+            .saturating_mul(2)
+            .saturating_add(256)
+            .saturating_add(input.len().saturating_mul(8));
+        let mut admit = |projected: crate::graph::budget::TraversalMetrics| -> Result<()> {
+            crate::graph::budget::check_control(&control)?;
+            let dimension = if projected.visited_nodes > traversal.max_visited_nodes {
+                Some(crate::graph::budget::BudgetDimension::VisitedNodes)
+            } else if projected.examined_edges > traversal.max_examined_edges {
+                Some(crate::graph::budget::BudgetDimension::ExaminedEdges)
+            } else if projected.peak_frontier_size > traversal.max_frontier_size {
+                Some(crate::graph::budget::BudgetDimension::FrontierSize)
+            } else if projected.depth_reached > traversal.max_depth {
+                Some(crate::graph::budget::BudgetDimension::Depth)
+            } else {
+                None
+            };
+            if let Some(dimension) = dimension {
+                // 管线沿用图扩展的完整结果错误策略。
+                crate::graph::budget::exhausted(
+                    &TraversalBudget {
+                        exhaustion_policy: BudgetExhaustionPolicy::Error,
+                        ..traversal
+                    },
+                    dimension,
+                    admitted,
+                )?;
+            }
+            if projected.visited_nodes > context.budget.max_nodes {
+                return Err(TriviumError::QueryRowBudgetExceeded {
+                    budget: context.budget.max_nodes,
+                });
+            }
+            let bytes = projected
+                .visited_nodes
+                .saturating_mul(row_bytes)
+                .saturating_add(projected.examined_edges.saturating_mul(96))
+                .saturating_add(input.len().saturating_mul(128));
+            let limit = if context.workspace_limit > 0 {
+                context
+                    .workspace_limit
+                    .min(context.budget.max_node_set_bytes)
+            } else {
+                context.budget.max_node_set_bytes
+            };
+            if bytes > limit {
+                return Err(TriviumError::ResourceBudgetExceeded {
+                    resource: "query_memory_bytes",
+                    requested: bytes,
+                    used: 0,
+                    limit,
+                });
+            }
+            if bytes > context.workspace_bytes {
+                context.reserve_row_workspace(
+                    bytes
+                        .max(context.workspace_bytes.saturating_mul(2))
+                        .min(limit),
+                )?;
+            }
+            admitted = projected;
+            Ok(())
+        };
+        admit(crate::graph::budget::TraversalMetrics::default())?;
         let seeds = input
             .rows
             .iter()
-            .filter_map(|row| {
-                let payload = (*context.memtable.get_payload(row.id)?).clone();
-                Some(crate::node::SearchHit {
-                    id: row.id,
-                    score: row
-                        .similarity
-                        .or(row.graph_score)
-                        .map_or(1.0, |score| score.value.max(0.0)),
-                    payload,
-                })
+            .filter(|row| graph.contains(row.id))
+            .map(|row| {
+                let score = row
+                    .similarity
+                    .or(row.graph_score)
+                    .map_or(1.0, |score| score.value.max(0.0)) as f32;
+                if !score.is_finite() {
+                    return Err(TriviumError::QueryExecution(
+                        "SA-PPR 种子分数超出有限 f32 范围 (SA-PPR seed score exceeds the finite f32 range)".into(),
+                    ));
+                }
+                Ok(crate::node::SearchHit { id: row.id, score, payload: serde_json::Value::Null })
             })
-            .collect();
-        let hits = crate::graph::traversal::expand_graph_with_labels_view(
-            &context.graph(),
+            .collect::<Result<Vec<_>>>()?;
+        let hits = crate::graph::traversal::expand_graph_checked(
+            &graph,
             seeds,
-            self.max_depth.min(context.budget.traversal.max_depth),
+            self.max_depth,
             self.restart_alpha,
             false,
-            context.budget.max_nodes,
+            0,
             false,
             None,
             self.labels.as_deref(),
             self.max_edges_per_node,
             self.min_edge_weight,
             crate::database::EdgeDirection::Outgoing,
-        );
+            admit,
+        )?;
         Ok(NodeSet::from_rows(
             hits.into_iter()
-                .map(|hit| {
-                    let mut row = NodeRow::new(hit.id);
+                .map(|(id, score)| {
+                    let mut row = NodeRow::new(id);
                     let graph_score = ScoreValue {
-                        value: hit.score,
+                        value: f64::from(score),
                         kind: ScoreKind::DepthBounded,
                     };
                     row.graph_score = Some(graph_score);

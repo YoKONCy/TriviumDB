@@ -611,7 +611,6 @@ pub struct PropertyIndexRegistry {
     unique_composite_indexes: HashSet<CompositeDefinition>,
     mapped: Option<Arc<MappedPostingStore>>,
     key_encoding_version: u16,
-    pub(crate) fact_bound: bool,
 }
 
 impl Default for PropertyIndexRegistry {
@@ -627,7 +626,6 @@ impl Default for PropertyIndexRegistry {
             unique_composite_indexes: HashSet::new(),
             mapped: None,
             key_encoding_version: KEY_ENCODING_VERSION,
-            fact_bound: true,
         }
     }
 }
@@ -2040,14 +2038,53 @@ pub fn load_sidecar(
     prefer_mmap_postings: bool,
     payload_fingerprint: (u64, u32),
 ) -> Result<Option<PropertyIndexRegistry>> {
-    let sidecar_path = format!("{db_path}.pidx");
-    let path = Path::new(&sidecar_path);
-    if !path.exists() {
+    let part = crate::storage::index_container::standalone(std::path::Path::new(&format!(
+        "{db_path}.pidx"
+    )))?;
+    load_part(
+        db_path,
+        expected_node_count,
+        prefer_mmap_postings,
+        payload_fingerprint,
+        part,
+    )
+}
+
+pub(crate) fn load_container(
+    db_path: &str,
+    expected_node_count: usize,
+    prefer_mmap_postings: bool,
+    payload_fingerprint: (u64, u32),
+) -> Result<Option<PropertyIndexRegistry>> {
+    let part = crate::storage::index_container::open(db_path, ".pidx")?;
+    load_part(
+        db_path,
+        expected_node_count,
+        prefer_mmap_postings,
+        payload_fingerprint,
+        part,
+    )
+}
+
+#[allow(clippy::needless_borrow)]
+fn load_part(
+    db_path: &str,
+    expected_node_count: usize,
+    prefer_mmap_postings: bool,
+    payload_fingerprint: (u64, u32),
+    part: Option<crate::storage::index_container::Part>,
+) -> Result<Option<PropertyIndexRegistry>> {
+    let Some(part) = part else {
         return Ok(None);
-    }
-    let file = std::fs::File::open(path)?;
-    // SAFETY: 文件句柄在映射创建期间有效，映射仅以只读方式访问且生命周期由 registry 持有。
-    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(TriviumError::Io)?;
+    };
+    let mmap = part.map().map_err(|error| match error.kind() {
+        std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof => {
+            TriviumError::CorruptedFile(format!(
+                "属性索引组件损坏 (Corrupt property index component): {error}"
+            ))
+        }
+        _ => TriviumError::Io(error),
+    })?;
     let bytes = &mmap[..];
     if bytes.len() < HEADER_SIZE + 4 {
         return Err(TriviumError::CorruptedFile(
@@ -2074,19 +2111,18 @@ pub fn load_sidecar(
     }
     let version = read_u16(&bytes, &mut offset, "format_version")?;
     let key_version = read_u16(&bytes, &mut offset, "key_encoding_version")?;
-    if !(1..=FORMAT_VERSION).contains(&version)
-        || !(1..=KEY_ENCODING_VERSION).contains(&key_version)
-    {
-        return Err(TriviumError::CorruptedFile(format!(
-            "不支持的属性索引版本 (Unsupported property index version): {version}/{key_version}"
-        )));
-    }
+    crate::storage::format::require("property_index", version.into(), FORMAT_VERSION.into())?;
+    crate::storage::format::require(
+        "property_key",
+        key_version.into(),
+        KEY_ENCODING_VERSION.into(),
+    )?;
     let main_size = read_u64(&bytes, &mut offset, "main_size")?;
     let main_crc = read_u32(&bytes, &mut offset, "main_crc")?;
     let node_count = read_u64(&bytes, &mut offset, "node_count")?;
     let field_count = read_u32(&bytes, &mut offset, "field_count")? as usize;
     let _reserved = read_u32(&bytes, &mut offset, "reserved")?;
-    if version >= 7 {
+    {
         let payload_bytes = read_u64(&bytes, &mut offset, "payload_bytes")?;
         let payload_crc = read_u32(&bytes, &mut offset, "payload_crc")?;
         if (payload_bytes, payload_crc) != payload_fingerprint {
@@ -2114,25 +2150,22 @@ pub fn load_sidecar(
 
     let mut registry = PropertyIndexRegistry {
         key_encoding_version: key_version,
-        fact_bound: version >= 7,
         ..Default::default()
     };
     let mut all_mapped_blocks = BTreeMap::new();
     let mut all_mapped_posting_entries = 0usize;
     for _ in 0..field_count {
-        let kind = if version >= 2 {
+        let kind = {
             *read_exact(&bytes, &mut offset, 1, "index_kind")?
                 .first()
                 .ok_or_else(|| TriviumError::CorruptedFile("属性索引 kind 缺失".into()))?
-        } else {
-            0
         };
-        if kind > 4 || version < 4 && kind > 1 || version < 6 && kind > 3 {
+        if kind > 4 {
             return Err(TriviumError::CorruptedFile(
                 "属性索引 kind 无效 (Invalid property index kind)".into(),
             ));
         }
-        let unique = if version >= 5 {
+        let unique = {
             match *read_exact(&bytes, &mut offset, 1, "index_flags")?
                 .first()
                 .ok_or_else(|| TriviumError::CorruptedFile("属性索引 flags 缺失".into()))?
@@ -2145,8 +2178,6 @@ pub fn load_sidecar(
                     ));
                 }
             }
-        } else {
-            false
         };
         if unique && !matches!(kind, 0 | 2) {
             return Err(TriviumError::CorruptedFile(
@@ -2155,7 +2186,7 @@ pub fn load_sidecar(
             ));
         }
         let field_len = read_u32(&bytes, &mut offset, "field_len")? as usize;
-        let field_limit = if kind == 2 && version >= 8 {
+        let field_limit = if kind == 2 {
             MAX_COMPOSITE_DEFINITION_BYTES
         } else {
             MAX_FIELD_BYTES
@@ -2169,14 +2200,12 @@ pub fn load_sidecar(
             .map_err(|_| TriviumError::CorruptedFile("属性索引字段名不是 UTF-8".into()))?
             .to_owned();
         let composite_fields = if kind == 2 {
-            let fields = if version >= 8 {
+            let fields = {
                 serde_json::from_str::<Vec<String>>(&field).map_err(|error| {
                     TriviumError::CorruptedFile(format!(
                         "复合字段列表无效 (Invalid composite field list): {error}"
                     ))
                 })?
-            } else {
-                field.split('\0').map(str::to_owned).collect()
             };
             validate_index_fields(&fields, true).map_err(|_| {
                 TriviumError::CorruptedFile("复合字段列表越界、为空或重复 (Composite field list is out of bounds, empty or duplicated)".into())
@@ -2243,7 +2272,7 @@ pub fn load_sidecar(
                     "属性索引 ID 数量不合理 (Unreasonable property index ID count)".into(),
                 ));
             }
-            let posting_range = if version >= 3 {
+            let posting_range = {
                 let block_len = read_u64(&bytes, &mut offset, "posting_block_len")? as usize;
                 let expected_block_len = id_count.checked_mul(8).ok_or_else(|| {
                     TriviumError::CorruptedFile("属性索引 posting 长度溢出".into())
@@ -2265,11 +2294,9 @@ pub fn load_sidecar(
                     ));
                 }
                 Some(start..offset)
-            } else {
-                None
             };
             let raw_ids = posting_range.as_ref().map(|range| &bytes[range.clone()]);
-            let mut ids = if prefer_mmap_postings && version >= 3 && kind == 0 {
+            let mut ids = if prefer_mmap_postings && kind == 0 {
                 Vec::new()
             } else {
                 Vec::with_capacity(id_count)
@@ -2293,11 +2320,11 @@ pub fn load_sidecar(
                 if matches!(kind, 1 | 2) && !covered_nodes.insert(id) {
                     return Err(TriviumError::CorruptedFile("有序或复合索引存在重复节点 posting (Duplicate node posting in ordered/composite index)".into()));
                 }
-                if !(prefer_mmap_postings && version >= 3 && kind == 0) {
+                if !(prefer_mmap_postings && kind == 0) {
                     ids.push(id);
                 }
             }
-            if prefer_mmap_postings && version >= 3 && kind == 0 {
+            if prefer_mmap_postings && kind == 0 {
                 mapped_blocks.insert(
                     (field.clone(), key.clone()),
                     posting_range.expect("v3 posting 必须有范围"),
@@ -2312,10 +2339,6 @@ pub fn load_sidecar(
         all_mapped_blocks.extend(mapped_blocks);
         all_mapped_posting_entries =
             all_mapped_posting_entries.saturating_add(mapped_posting_entries);
-        // 历史分隔符格式无法证明原始字段边界；唯一定义由主文件恢复，普通复合索引显式重建。
-        if kind == 2 && version < 8 {
-            continue;
-        }
         if unique {
             if kind == 0 {
                 registry.unique_indexes.insert(field.clone());
@@ -2326,7 +2349,7 @@ pub fn load_sidecar(
             }
         }
         // 没有 posting 的 Hash 索引也保留字段定义，供只读目录与规划器使用。
-        if kind == 0 && (entry_count == 0 || !(prefer_mmap_postings && version >= 3)) {
+        if kind == 0 && (entry_count == 0 || !(prefer_mmap_postings)) {
             registry.indexes.insert(
                 field,
                 HashPropertyIndex {

@@ -490,7 +490,7 @@ impl FfiHook {
 }
 
 impl FfiHook {
-    fn invoke_v2(
+    fn invoke_stage(
         &self,
         stage: u32,
         query: &[f32],
@@ -519,12 +519,14 @@ impl FfiHook {
             )
         };
         if code != 0 {
-            ctx.error = Some(format!("FFI Hook v2 阶段 {stage} 返回错误码 {code}"));
+            ctx.error = Some(format!(
+                "FFI Hook 阶段返回错误码 (FFI Hook stage returned an error): stage={stage}, code={code}"
+            ));
             return true;
         }
         if count > capacity {
             ctx.error = Some(format!(
-                "FFI Hook v2 阶段 {stage} 返回数量 {count} 超过容量 {capacity}"
+                "FFI Hook 阶段返回数量超过容量 (FFI Hook stage returned count exceeds capacity): stage={stage}, count={count}, capacity={capacity}"
             ));
             return true;
         }
@@ -549,7 +551,7 @@ impl SearchHook for FfiHook {
         ctx: &mut HookContext,
     ) {
         let mut hits = Vec::new();
-        self.invoke_v2(FFI_STAGE_PRE_SEARCH, query_vector, &mut hits, 1, ctx);
+        self.invoke_stage(FFI_STAGE_PRE_SEARCH, query_vector, &mut hits, 1, ctx);
     }
 
     fn on_custom_recall(
@@ -561,7 +563,7 @@ impl SearchHook for FfiHook {
         if self.stage_fn.is_some() {
             let mut hits = Vec::new();
             let capacity = config.top_k.saturating_mul(2);
-            self.invoke_v2(
+            self.invoke_stage(
                 FFI_STAGE_CUSTOM_RECALL,
                 query_vector,
                 &mut hits,
@@ -612,12 +614,12 @@ impl SearchHook for FfiHook {
 
     fn on_post_recall(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
         let capacity = hits.len();
-        self.invoke_v2(FFI_STAGE_POST_RECALL, &[], hits, capacity, ctx);
+        self.invoke_stage(FFI_STAGE_POST_RECALL, &[], hits, capacity, ctx);
     }
 
     fn on_pre_graph_expand(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
         let capacity = hits.len();
-        self.invoke_v2(FFI_STAGE_PRE_GRAPH_EXPAND, &[], hits, capacity, ctx);
+        self.invoke_stage(FFI_STAGE_PRE_GRAPH_EXPAND, &[], hits, capacity, ctx);
     }
 
     fn on_rerank(
@@ -627,7 +629,7 @@ impl SearchHook for FfiHook {
     ) -> Option<Vec<SearchHit>> {
         if self.stage_fn.is_some() {
             let capacity = hits.len();
-            self.invoke_v2(FFI_STAGE_RERANK, &[], hits, capacity, _ctx);
+            self.invoke_stage(FFI_STAGE_RERANK, &[], hits, capacity, _ctx);
             return Some(hits.clone());
         }
         let rerank_fn = self.rerank_fn?;
@@ -676,7 +678,7 @@ impl SearchHook for FfiHook {
 
     fn on_post_search(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
         let capacity = hits.len();
-        self.invoke_v2(FFI_STAGE_POST_SEARCH, &[], hits, capacity, ctx);
+        self.invoke_stage(FFI_STAGE_POST_SEARCH, &[], hits, capacity, ctx);
     }
 }
 

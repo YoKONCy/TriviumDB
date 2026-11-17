@@ -35,6 +35,175 @@ fn seed(id: u64, score: f32) -> SearchHit {
 }
 
 #[test]
+fn 扩散管线逐项执行遍历预算且失败后可重试() {
+    use triviumdb::TriviumError;
+    use triviumdb::graph::budget::{BudgetDimension, BudgetExhaustionPolicy, TraversalBudget};
+    use triviumdb::query::pipeline::{
+        NodeSet, PipelineBudget, PipelineContext, PipelineOperator, SaPprOperator,
+    };
+    let mt = build_graph();
+    let operator = SaPprOperator {
+        max_depth: 2,
+        restart_alpha: 0.,
+        labels: None,
+        max_edges_per_node: 0,
+        min_edge_weight: 0.,
+    };
+    for (dimension, budget) in [
+        (
+            BudgetDimension::VisitedNodes,
+            TraversalBudget {
+                max_visited_nodes: 1,
+                ..Default::default()
+            },
+        ),
+        (
+            BudgetDimension::ExaminedEdges,
+            TraversalBudget {
+                max_examined_edges: 1,
+                ..Default::default()
+            },
+        ),
+        (
+            BudgetDimension::FrontierSize,
+            TraversalBudget {
+                max_frontier_size: 1,
+                ..Default::default()
+            },
+        ),
+        (
+            BudgetDimension::Depth,
+            TraversalBudget {
+                max_depth: 0,
+                ..Default::default()
+            },
+        ),
+    ] {
+        for exhaustion_policy in [
+            BudgetExhaustionPolicy::Error,
+            BudgetExhaustionPolicy::Partial,
+        ] {
+            let mut context = PipelineContext::new(
+                &mt,
+                PipelineBudget {
+                    traversal: TraversalBudget {
+                        exhaustion_policy,
+                        ..budget
+                    },
+                    ..Default::default()
+                },
+            );
+            let error = operator
+                .apply(NodeSet::from_ids([1]), &mut context)
+                .unwrap_err();
+            assert!(
+                matches!(error, TriviumError::TraversalBudgetExceeded {dimension: actual, ..} if actual == dimension),
+                "{budget:?}: {error:?}"
+            );
+            context.budget.traversal = TraversalBudget::default();
+            let output = operator
+                .apply(NodeSet::from_ids([1]), &mut context)
+                .unwrap();
+            assert_eq!(
+                output.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+                [1, 2, 3, 4, 5]
+            );
+            for row in output.rows() {
+                assert!(row.graph_score.unwrap().value.is_finite());
+                assert_eq!(row.provenance.source_ids, [1]);
+            }
+        }
+    }
+}
+
+#[test]
+fn 零深度扩散也约束种子准入并响应请求取消() {
+    use triviumdb::graph::budget::TraversalBudget;
+    use triviumdb::query::pipeline::{
+        NodeSet, PipelineBudget, PipelineContext, PipelineOperator, SaPprOperator,
+    };
+    use triviumdb::query::tql_executor::QueryControl;
+    let mt = build_graph();
+    let operator = SaPprOperator {
+        max_depth: 0,
+        restart_alpha: 0.,
+        labels: None,
+        max_edges_per_node: 0,
+        min_edge_weight: 0.,
+    };
+    let mut context = PipelineContext::new(
+        &mt,
+        PipelineBudget {
+            traversal: TraversalBudget {
+                max_visited_nodes: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        operator
+            .apply(NodeSet::from_ids([1, 2]), &mut context)
+            .unwrap_err()
+            .code(),
+        "TDB_TRAVERSAL_BUDGET_EXCEEDED"
+    );
+    context.budget.traversal = TraversalBudget::default();
+    let control = QueryControl::default();
+    control.cancel();
+    context.query_control = Some(control);
+    assert_eq!(
+        operator
+            .apply(NodeSet::from_ids([1]), &mut context)
+            .unwrap_err()
+            .code(),
+        "TDB_QUERY_CANCELLED"
+    );
+}
+
+#[test]
+fn 大有限边权在所有方向保持归一化内容() {
+    let mut mt = MemTable::new(DIM);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[1., 0.], json!({"id":id})).unwrap();
+    }
+    for direction in [
+        EdgeDirection::Outgoing,
+        EdgeDirection::Incoming,
+        EdgeDirection::Both,
+    ] {
+        for weight in [1., f32::MAX] {
+            mt.link(1, 2, "equal".into(), weight).unwrap();
+            mt.link(1, 3, "equal".into(), weight).unwrap();
+            let seeds = match direction {
+                EdgeDirection::Incoming => vec![seed(2, 1.), seed(3, 1.)],
+                _ => vec![seed(1, 1.)],
+            };
+            let output = expand_graph_with_labels(
+                &mt, seeds, 1, 0., false, 0, false, None, None, 0, 0., direction,
+            );
+            let contents = output
+                .iter()
+                .map(|hit| (hit.id, hit.score, hit.payload.clone()))
+                .collect::<Vec<_>>();
+            let expected = match direction {
+                EdgeDirection::Incoming => vec![
+                    (1, 2., json!({"id":1})),
+                    (2, 1., json!({"id":2})),
+                    (3, 1., json!({"id":3})),
+                ],
+                _ => vec![
+                    (1, 1., json!({"id":1})),
+                    (2, 0.5, json!({"id":2})),
+                    (3, 0.5, json!({"id":3})),
+                ],
+            };
+            assert_eq!(contents, expected);
+        }
+    }
+}
+
+#[test]
 fn expand_depth0_返回原始seeds() {
     let mt = build_graph();
     let seeds = vec![seed(1, 1.0)];

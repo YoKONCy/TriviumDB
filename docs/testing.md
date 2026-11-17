@@ -1,11 +1,12 @@
 # TriviumDB 测试实践
 
-> 本文说明 TriviumDB `0.9.1` 的测试组织、契约设计、故障注入与验收证据。版本记录见[变更说明](changes/0.9.1.md)，后续进展见[未发布变更](changes/unreleased.md)。
+> 本文说明 TriviumDB `0.9.2-beta.1` 的测试组织、契约设计、故障注入与验收证据。版本记录见[变更说明](changes/0.9.2-beta.1.md)，后续进展见[未发布变更](changes/unreleased.md)。
 
 ---
 
 ## 目录
 
+- [外部迁移与单格式准入](#外部迁移与单格式准入)
 - [近期契约验收](#近期契约验收)
 - [测试体系概览](#测试体系概览)
 - [用例设计与验收证据](#用例设计与验收证据)
@@ -32,15 +33,37 @@
 
 ---
 
+## 外部迁移与单格式准入
+
+SDK 应用边界见[正式接口清单](sdk-contract.md)，独立离线转换与格式拒绝按本节验收。
+
+迁移执行器使用独立 workspace 和锁文件：
+
+```bash
+cargo fmt --manifest-path crates/triviumdb-migrate/Cargo.toml --all -- --check
+cargo clippy --locked --manifest-path crates/triviumdb-migrate/Cargo.toml --target-dir target/migration --all-targets -- -D warnings
+cargo test --locked --manifest-path crates/triviumdb-migrate/Cargo.toml --target-dir target/migration -- --test-threads=1
+```
+
+`tests/fixtures/release_090` 由不可变 `v0.9.0` 源码生成，记录逐文件 SHA-256 与独立内容预期；`release_091` 使用 `v0.9.1` 源码生成解析文档、来源映射、命名图和持久回执。离线用例核对三种 dtype、Rom/Mmap、已确认 WAL、未提交事务与截断尾帧、文本、唯一约束、边元数据、源文件零写、目标冲突、预算和发布前后进程退出后的重试。当前 SDK 的三端错误契约检查历史身份返回 `TDB_MIGRATION_REQUIRED`，且打开拒绝保留源文件、无需创建锁；混合组件用例在三种访问模式下检查相同准入边界。
+
+历史独立样本作为迁移 oracle 保留。普通内核的恢复测试使用当前布局，继续验证损坏拒绝、发布原子性、跨代绑定和资源释放。各平台实际通过范围按 CI 对应提交记录。
+
+`pre_named_graph_format11` 和 `pre_document_publication_format12` 保存命名图及文档分批发布实装前的原生 wheel 样本及逐文件 SHA-256。独立迁移套件的 `historical_formats` 验证格式 11/WAL 4、格式 12/WAL 5，覆盖三种 dtype、Rom/Mmap 目标、检查模式零写、同源重试、完整节点与边、命名图修订、旧回执确认及幂等重试。迁移后的只读访问保持目标文件组，后续自动 ID 分配和唯一约束经再次重开核对。`tests/tools/test_migrate.py` 调用真实执行器核对这两种来源的脚本入口。
+
+`untyped_formats` 使用独立字节布局验证格式 5–9 的三种 dtype、Rom/Mmap 目标、边元数据及整数位模式，旧空检查点覆盖 dtype 缺参拒绝与已确认 WAL。真实 `v0810_text_mmap` 样本验证正文和关键词保全。`document_schema1` 样本由 `v0.9.1` 原始源码生成，`pre_externalization_format14` 使用本轮格式 15 实施前的独立源码快照生成。迁移用例核对结构 2 的正文、片段、修订、业务字段、唯一约束及原事务幂等确认。
+
+---
+
 ## 近期契约验收
 
-`cargo test --features test-hooks --lib index::quiver::ssd -- --test-threads=1` 验证 SSD 单文件制品。独立 QVSSD v1／QUIV v2／QDSM v1 样例核对完整元数据、节点和分数，覆盖逐字节损坏、所有截断、重算 CRC 后的恶意字段、完整冷行交换、墓碑 slot 复用、只读字节、并发位置读取、旧 Reader 跨代读取、局部及共享配额、持有行后关闭和 Windows 文件释放。受控 Hook 覆盖读取前后取消、在途额度、发布前取消、写入／同步／重命名失败及目录同步后的未知完成点。提交点强杀父用例显式运行隔离子进程，核对旧制品或完整新制品的查询内容，并再次发布和重新打开；子进程入口按专用环境运行。
+`cargo test --features test-hooks --lib index::quiver::runtime -- --test-threads=1` 验证压缩冷热运行时与 SSD 单文件制品。独立 QVSSD 2／QUIV 2／QDSM 1 样例核对完整元数据、节点和分数，覆盖逐字节损坏、所有截断、重算 CRC 后的恶意字段、完整冷行交换、墓碑 slot 复用、只读字节、并发位置读取、旧 Reader 跨代读取、局部及共享配额、持有行后关闭和 Windows 文件释放。受控 Hook 覆盖读取前后取消、在途额度、发布前取消、写入／同步／重命名失败及目录同步后的未知完成点。提交点强杀父用例显式运行隔离子进程，核对旧制品或完整新制品的查询内容，并再次发布和重新打开；子进程入口按专用环境运行。
 
 `cargo test --features test-hooks --test core quiver_ssd -- --test-threads=1` 验证数据库自动来源绑定、写入后的刷新、关闭 checkpoint、只读物理零写和 SDK 结构化拒绝。SSD lib 套件另验证缓存淘汰与继续持有行、零缓存在途合并、Hot／SSD 往返、预热预算失败重试、真实严格 Direct I/O 尾记录与 Windows 文件释放。严格 Direct I/O 用例要求本次运行环境提供对应后端，能力缺失按失败报告。Python／Node 公共 API 和实际 npm 制品使用 `tests/contracts/quiver_ssd_cases.json` 的独立方向样例核对完整 ID、分数、缓存与重开结果。
 
 `cargo test --lib index::quiver::cold` 检查 SSD 编码基底。独立小端字节与 CRC 样例核对完整头、编码行和重建内容，已知重建向量的余弦定义独立验证整数评分。覆盖动态维度、尾组偏置、查询 ties-even、f32／f16、零及极端有限幅值、参数拒绝时的输出缓冲、编号溢出、逐字节损坏、截断和重算 CRC 后的非法字段。
 
-`tests/contracts/named_graph_cases.json`维护命名图的共享成员与跨图同键独立边样例。Core及实际Python／Node制品核对完整成员和边、显式联合、批量编辑、修订冲突及跨重开数据。内核验收覆盖混合节点／图事务、全库删除级联、受控取消、WAL应用故障、检查点发布后日志重叠恢复、只读文件组字节及Windows文件释放。历史v11检查点和v4日志具有三种dtype独立fixture，格式用例验证截断、逐字节损坏与恶意计数。具体执行结果以本次平台记录为准。
+`tests/contracts/named_graph_cases.json` 维护命名图的共享成员与跨图同键独立边样例。Core 及实际 Python／Node 制品核对完整成员和边、显式联合、批量编辑、修订冲突及跨重开数据。内核验收覆盖混合节点／图事务、全库删除级联、受控取消、WAL 应用故障、检查点发布后日志重叠恢复、只读文件组字节及 Windows 文件释放。格式用例验证当前布局的截断、逐字节损坏与恶意计数。历史 fixture 保留供独立迁移工具使用，具体执行结果以本次平台记录为准。
 
 `tests/contracts/document_cases.json` 提供含 CRLF、Unicode、结构目录及超过 JavaScript 安全整数范围 ID 的独立文档样例。Core 核对三种 dtype、Rom／Mmap、完整正文／范围／向量／边、修订保护、只读零写、取消、预算、节点争用、增量更新后的严格索引重开和 WAL 同步失败恢复。Python／Node 公共 API 套件复用该样例，类型消费验证字符串请求与返回值。验收入口和数据契约见[文档来源与结构](documents.md)。
 
@@ -160,7 +183,7 @@ TriviumDB 采用 **五层防御式测试体系**，从函数级正确性到系�
 
 `pipeline_differential` 为十四类管线分别建立用例：可达集合由样例边关系计算，精排使用解析余弦，PageRank 解线性方程，标签传播和 SA-PPR 使用独立矩阵，路径用例核对枚举数量、强度和具体路径。完整 ID 集合与顺序先于每行分数检查，两个物理计划分别接受同一独立预期校验。
 
-Node 类型验收有两个入口：`npm run test:types` 严格检查公共声明与消费样例；`npm run test:package` 将实际 npm tarball 安装到独立项目，编译正向调用与错误输入样例，再加载原生模块检查事务、Prepared TQL、向量分数、关键词关联和重新打开。制品验收同时注入一个未定义的公共类型，要求编译失败。普通 CI 使用制品入口，发布质量门禁先检查类型，npm 发布前再验收装配完成的制品。
+Node 类型验收通过 `npm run test:types` 检查公共声明、CommonJS／ESM 消费及错误输入样例。`npm run test:package` 将实际 npm tarball 安装到独立项目，以 NodeNext 编译并执行 `.cts`／`.mts` 消费入口，核对各公共值的跨模块身份、Prepared 兼容别名、参数目录及完整查询结果。既有消费样例继续检查事务、向量分数、关键词关联和重新打开。制品验收还注入一个未定义的公共类型，要求编译失败。普通 CI 使用制品入口，发布质量门禁先检查类型，npm 发布前验收装配完成的制品。
 
 定时浸泡使用一百条存活记录的有界负载，要求每次查询成功并返回存活节点的完整 Payload。五分钟用例配置 8 MiB 内核预算及其中的 256 KiB Payload 解析缓存，在维护完成点核对内存估算、缓存占用及工作区／任务归还，关闭后检查数据库配额与附着计数归零。最终逐项验证节点、向量、Payload 与边，再完成可写重开、再次持久化及只读重开；工作负载异常退出时先释放对象并清理文件，再传播原失败。文件用例执行五百轮维护并统计完整文件组，上限为基线的五倍。
 
@@ -306,12 +329,12 @@ tests/
 │
 ├── core/                        # L2: 内核集成（CRUD/事务/搜索/dtype/公共 API 对齐）
 ├── query/                       # L2: TQL 全链路（parser/executor/DML/索引/planner）
-├── pipeline/                    # L2: NodeSet 管线、Cascades 优化器与 TSNG
+├── pipeline/                    # L2: NodeSet 管线、Cascades 优化器与图算子
 ├── graph/                       # L2: 图算法、路径与反向边一致性
 ├── storage/                     # L2: 恢复/压缩/格式迁移/四类属性索引持久化
 ├── model/                       # L2: 独立 Reference Model 状态机（随机 CRUD/事务/索引/flush/reopen）
 ├── differential/                # L3: 差分测试（Direct=Prepared、索引=扫描、Mmap=Rom、串行=并行、fusion=split）
-├── contracts/                   # L3: 三语言公共 API 对齐与 FFI Hook ABI v2 契约
+├── contracts/                   # L3: 三语言公共 API 对齐与 FFI Hook 公共 ABI 契约
 ├── concurrency/                 # L3: 确定性交错与并发不变量
 ├── hardening/                   # L3: 安全防御
 ├── long_running/                # L3: soak / 压力
@@ -357,8 +380,9 @@ tests/
 | `Database`  | `unit/database.rs`  | open/close、CRUD、search、TQL、事务（全 7 种 TxOp）、Hook 管理 |
 | `Filter`    | `unit/filter.rs`    | 数字/字符串范围、RFC3339 时区、错误路径、bloom mask             |
 | `Vector`    | `unit/vector.rs`    | 余弦相似度、SIMD 尾部处理、标量回退、多 dtype                  |
-| `WAL`       | `unit/wal.rs`       | v4 显式头、v2 显式迁移、v3 兼容读取、无头拒绝、未来版本门禁、CRC、SyncMode、崩溃恢复 |
-| `.tdb` 格式 | `storage/format_migration.rs` | v5 32/48-chunk 自动迁移、v6 自描述布局、未来/过旧版本门禁与损坏拒绝 |
+| `WAL`       | `unit/wal.rs`       | 当前格式头、无头拒绝、未知版本拒绝、CRC、SyncMode、事务与崩溃恢复 |
+| `.tdb` 格式 | `storage/format_admission.rs` | 当前自描述布局、完整事实重开、未知版本拒绝与文件组零写 |
+| 统一索引容器 | `storage/index_container.rs`、`fault_io/text_publication.rs` | 完整文本／关键词／图／索引往返、数据库身份、目录边界、发布失败恢复与重试 |
 | 图扩散参数 | `unit/traversal.rs` | 出/入/双向、强边上限、绝对权重阈值、稳定排序、自环去重与组合过滤 |
 | Python 类型 | `python/typing_smoke.py` | Wheel 内 `py.typed/.pyi`、mypy strict 与 pyright 双门禁 |
 | `Traversal` | `unit/traversal.rs` | PPR 扩散、Reachability 方向/最短路径/环/预算、GraphFirst 参数门禁 |
@@ -813,7 +837,7 @@ cargo test --test contracts 共享json契约由rust适配器完整执行
 - `tests/node/write_boundaries.js` 与 `tests/python/write_boundaries.py` 由各端公共 API 入口执行，覆盖直接/批量/事务、查询、完整整数边界、合法容器往返，以及无效输入拒绝后的内容和 WAL。
 
 - `tests/core/index_graph_boundaries.rs` 验证唯一约束删除、部分覆盖索引的完整结果、复合唯一大整数、UTF-8 标签边界、图堆准入、零入度清理、三种 dtype 的 ID 分配耗尽、WAL 回放和只读零写。内核单元测试独立核对图容器容量、字符串分配和复合唯一映射账本。
-- `tests/fixtures/numeric_ids/wal_v3.bin` 提供固定完整 u64 ID 跨端样本；Rust 核对完整记录、向量与边，Python 安装制品核对精确整数，Node 安装制品核对字符串 ID 与数字输出拒绝。`tests/node/numeric_boundaries.js` 覆盖数量转换、同步/异步检索、遍历、索引查询及自动分配的 WAL 原子拒绝；`tests/python/index_graph_boundaries.py` 覆盖绑定的索引与图持久化行为。两者均接入现有公共 API CI 入口。
+- `tests/fixtures/numeric_ids/wal.bin` 提供固定完整 u64 ID 跨端样本；Rust 核对完整记录、向量与边，Python 安装制品核对精确整数，Node 安装制品核对字符串 ID 与数字输出拒绝。`tests/node/numeric_boundaries.js` 覆盖数量转换、同步/异步检索、遍历、索引查询及自动分配的 WAL 原子拒绝；`tests/python/index_graph_boundaries.py` 覆盖绑定的索引与图持久化行为。两者均接入现有公共 API CI 入口。
 
 - `tests/core/query_numeric_indexes.rs` 使用独立固定结果验证临时唯一键冲突、原键恢复、删除与 WAL 回放，混合类型范围的 LIMIT/OFFSET，完整 u64 投影/参数/比较/聚合，以及正规数、次正规数和正负零。索引 DDL 覆盖七类入口的预算拒绝、定义保留、配额调整重试与只读重开；唯一构建失败继续保留已有非唯一索引。
 - `tests/node/query_numeric_indexes.js` 与 `tests/python/query_numeric_indexes.py` 在实际绑定中执行最终唯一键、数值精度与构建预算断言；Node 用例同时接入独立安装的 npm 制品验收。差分参考模型使用自身的有界整数运算，完整 u64 域由独立常量样例验收。
@@ -855,7 +879,7 @@ cargo test --test contracts 共享json契约由rust适配器完整执行
 
 - `cargo test --features test-hooks --test core shared_sdk -- --test-threads=1` 验证同一请求控制器贯通 SDK 准入和内核 WAL 前检查。受控 Hook 在事务预检完成后取消，核对固定错误码、写入阶段、builder 消费状态、WAL 字节、空事实及后续有效提交与完整重开。准入拒绝单独验证 builder 保留和回调执行次数。
 - `tests/core/console_editing.rs` 使用真实完整 WAL 与缺少提交封条的 WAL 两组恢复样本，分别核对完整节点、Payload、边、创建 ID、原事务版本及回执。已封条事务支持幂等重放且 WAL 字节保持，未封条事务与回执共同不可见，随后检查持久化及只读再次打开。容量用例填满 64 条后重开追加无事实变化事务，核对首条淘汰、正常关闭及 WAL 恢复后的关闭保存新回执，随后只读重开核对全部事实。既有用例覆盖 Rom／Mmap、WAL／应用故障与资源释放。
-- `tests/storage/receipt_history.rs` 读取 `tests/fixtures/v0900_format10/` 的独立历史制品样本。三种 dtype 分别覆盖 v10 检查点、v3 WAL 和物理截断尾帧，核对只读零写或恢复拒绝、全部事实、格式升级及再次只读打开。样本来源、生产制品身份与内容预期由 `provenance.json` 记录。
+- `tests/fixtures/v0900_format10/` 等独立历史制品样本保留来源、生产制品身份和 `provenance.json` 内容预期，供独立迁移工具维护。正常内核验收聚焦当前格式及结构化拒绝，自动升级旧格式的用例已移除。
 - `storage::edit_receipts` 单元用例使用独立编码样例验证完整 u64、每个截断前缀、过量 ID、回执数量及尾块长度／CRC。Python、Node 和实际安装 npm 包的 Console 公共契约核对跨重开确认及完整原事务重放。
 
 ### 类型化作用域与宿主桥接
@@ -867,7 +891,7 @@ cargo test --test contracts 共享json契约由rust适配器完整执行
 
 ### 工程收口的定向验证
 
-QuIVer SSD 使用 `cargo test --features test-hooks --lib index::quiver::ssd -- --test-threads=1` 和 `cargo test --features test-hooks --test core quiver_ssd -- --test-threads=1` 验证单文件、来源、预算、缓存、驻留、批内合并、重复候选、取消排空、故障重试及文件释放。`cargo test --features test-hooks --lib storage::quiver_io -- --test-threads=1` 通过独立字节样例核对实际原生对齐、跨界和尾部读取、窗口复用、短读失效重试及路径替换后的文件代际。SSD 运行时另覆盖零行缓存下的有界窗口、请求线程／工作线程后端、Hot 释放及外部行租约。原生 Direct I/O 用例在 Windows／Linux 执行，缓冲路径参与跨平台验证。CI 平台矩阵执行这些入口，TSan 另执行运行时交错子集。云端结论对应实际提交和运行状态。
+QuIVer 压缩运行时使用 `cargo test --features test-hooks --lib index::quiver::runtime -- --test-threads=1` 和 `cargo test --features test-hooks --test core quiver_ssd -- --test-threads=1` 验证单文件、来源、预算、缓存、驻留、批内合并、重复候选、取消排空、故障重试及文件释放。`cargo test --features test-hooks --lib storage::quiver_io -- --test-threads=1` 通过独立字节样例核对实际原生对齐、跨界和尾部读取、窗口复用、短读失效重试及路径替换后的文件代际。运行时另覆盖零行缓存下的有界窗口、请求线程／工作线程后端、Hot 释放及外部行租约。原生 Direct I/O 用例在 Windows／Linux 执行，缓冲路径参与跨平台验证。CI 平台矩阵执行这些入口，TSan 另执行运行时交错子集。云端结论对应实际提交和运行状态。
 
 生产 SSD 测量入口为 `cargo bench --bench bench_quiver_ssd`，参数和报告范围见[基准说明](../benches/README.md#生产-quiver-ssd-测量)。测量记录独立于正确性验收。
 

@@ -4,7 +4,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use triviumdb::database::{Config, StorageMode};
 use triviumdb::document::*;
-use triviumdb::index::quiver::ssd::SsdRuntimeOptions;
+use triviumdb::index::quiver::runtime::QuiverRuntimeOptions;
 use triviumdb::{Database, ResourceRuntime, VectorType};
 
 fn fixture() -> Value {
@@ -159,7 +159,7 @@ fn 文档压缩矩阵核对原生类型过滤分组混合排名与证据() {
         for encoding in fixture["encodings"].as_array().unwrap() {
             for precision in fixture["precisions"].as_array().unwrap() {
                 for residency in ["ssd", "hot"] {
-                    let runtime: SsdRuntimeOptions = serde_json::from_value(json!({
+                    let runtime: QuiverRuntimeOptions = serde_json::from_value(json!({
                         "encoding": encoding, "query_precision": precision,
                         "residency": residency, "cache_bytes": 64 * 1024,
                         "io_depth": 1, "use_for_ann": false
@@ -233,10 +233,10 @@ fn 文档压缩矩阵核对原生类型过滤分组混合排名与证据() {
 fn 文档压缩的预算拒绝发生于取数前并可完整重试() {
     let root = TestDir::new("document-compressed-budget");
     let (mut db, snapshots) = database::<f32>(&root.file("data.tdb"));
-    db.configure_quiver(SsdRuntimeOptions {
+    db.configure_quiver(QuiverRuntimeOptions {
         io_depth: 1,
         use_for_ann: false,
-        ..SsdRuntimeOptions::compact()
+        ..QuiverRuntimeOptions::compact()
     })
     .unwrap();
     let case = &fixture()["cases"][0];
@@ -309,10 +309,10 @@ fn 文档压缩更新自动刷新重开后只读查询零写() {
     let root = TestDir::new("document-compressed-reopen");
     let file = root.file("data.tdb");
     let (mut db, _) = database::<f32>(&file);
-    let runtime = SsdRuntimeOptions {
+    let runtime = QuiverRuntimeOptions {
         io_depth: 1,
         use_for_ann: false,
-        ..SsdRuntimeOptions::compact()
+        ..QuiverRuntimeOptions::compact()
     };
     db.configure_quiver(runtime).unwrap();
     db.update_vector(11, &direction::<f32>(0.)).unwrap();
@@ -377,10 +377,10 @@ fn 文档压缩扩展候选以覆盖完整来源组并解释分数阈值() {
     }
     db.put_document(changed, Some(&snapshots[0].revision))
         .unwrap();
-    db.configure_quiver(SsdRuntimeOptions {
+    db.configure_quiver(QuiverRuntimeOptions {
         io_depth: 1,
         use_for_ann: false,
-        ..SsdRuntimeOptions::compact()
+        ..QuiverRuntimeOptions::compact()
     })
     .unwrap();
     let query = DocumentSearchQuery {
@@ -441,8 +441,9 @@ fn 文档压缩显式拒绝缺失运行时和精确策略且原始模式独立�
         serde_json::to_value(error.info().target).unwrap(),
         json!({"field":"options.rerank"})
     );
-    db.configure_quiver(SsdRuntimeOptions::compact()).unwrap();
-    let artifact = std::fs::read(format!("{}.qssd", root.file("data.tdb"))).unwrap();
+    db.configure_quiver(QuiverRuntimeOptions::compact())
+        .unwrap();
+    let artifact = crate::artifact::read(format!("{}.qssd", root.file("data.tdb"))).unwrap();
     db.update_vector(11, &direction::<f32>(0.)).unwrap();
     let error = db
         .search_documents_hybrid(
@@ -483,7 +484,7 @@ fn 文档压缩显式拒绝缺失运行时和精确策略且原始模式独立�
         [(10, 0.), (30, 0.), (20, -1.)]
     );
     assert_eq!(
-        std::fs::read(format!("{}.qssd", root.file("data.tdb"))).unwrap(),
+        crate::artifact::read(format!("{}.qssd", root.file("data.tdb"))).unwrap(),
         artifact
     );
     db.close().unwrap();
@@ -508,10 +509,10 @@ fn 文档压缩取消归还组合额度并保持原文与重试结果() {
     ] {
         let root = TestDir::new("document-compressed-cancel");
         let (db, _) = database::<f32>(&root.file("data.tdb"));
-        db.configure_quiver(SsdRuntimeOptions {
+        db.configure_quiver(QuiverRuntimeOptions {
             io_depth: 1,
             use_for_ann: false,
-            ..SsdRuntimeOptions::compact()
+            ..QuiverRuntimeOptions::compact()
         })
         .unwrap();
         let query = DocumentSearchQuery {
@@ -570,10 +571,10 @@ fn 文档压缩取消归还组合额度并保持原文与重试结果() {
 fn 文档压缩读取失败归还额度且完整重试保留证据() {
     let root = TestDir::new("document-compressed-io");
     let (mut db, snapshots) = database::<f32>(&root.file("data.tdb"));
-    db.configure_quiver(SsdRuntimeOptions {
+    db.configure_quiver(QuiverRuntimeOptions {
         io_depth: 1,
         use_for_ann: false,
-        ..SsdRuntimeOptions::compact()
+        ..QuiverRuntimeOptions::compact()
     })
     .unwrap();
     let query = DocumentSearchQuery {

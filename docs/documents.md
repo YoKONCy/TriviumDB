@@ -1,6 +1,6 @@
 # TriviumDB 文档来源与结构
 
-> 本文说明 `0.9.1` 的文档身份、修订、UTF-8 证据范围、结构清单与原子更新。文档事实由 Rust Core 管理，Python 和 Node 通过共享 SDK JSON 适配调用。版本说明见[变更说明](changes/0.9.1.md)。
+> 本文说明 `0.9.2-beta.1` 的文档身份、修订、UTF-8 证据范围、结构清单与原子更新。文档事实由 Rust Core 管理，Python 和 Node 通过共享 SDK JSON 适配调用。版本说明见[变更说明](changes/0.9.2-beta.1.md)。
 
 ---
 
@@ -27,6 +27,8 @@
 ## 数据模型
 
 文档以根节点的 `NodeId` 为数据库内身份，根节点拥有一个真实向量和调用方提供的 Payload。`source_id` 记录宿主的稳定来源键，`source_revision` 记录宿主的输入版本，`parser_id` 标识解析配置。根节点 Payload 的 `_tdb_document` 保存内联快照或版本化归档引用，`data` 保存调用方的 Payload。归档中的正文、清单与来源映射参与同一主文件发布。
+
+当前普通文档、解析文档及片段标签统一使用 `schema_version: 2`。已有结构 1 数据通过[外部迁移工具](migration.md)升级，迁移保留正文、范围、NodeId、文档修订和持久回执。
 
 每次成功创建或替换都会生成独立的文档 `revision`。该修订随普通 Payload 进入同一 WAL 事务，检查点与重开后保持原值。其他文档和普通节点的更新沿各自身份执行。
 

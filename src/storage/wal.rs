@@ -2,290 +2,37 @@
 //!
 //! 每条记录采用 `len + bincode + CRC32`，事务通过 Begin/Commit 封条过滤未提交操作。
 //! 物理未写完的尾帧只恢复完整前缀；完整帧的 CRC、长度或解码损坏返回错误并保留日志。
-//! 恢复不跨过损坏边界猜测后续字节。旧版本头只允许持有 Writer 排他锁的打开流程升级；
-//! WAL v2/v3/v4 通过独立历史布局校验并原子转写为 v5，未知非空版本始终 fail-closed。
+//! 普通恢复只解释当前记录布局；历史布局由外部迁移工具在副本中恢复。
 
 use crate::error::{Result, TriviumError};
 use crate::node::NodeId;
-use crate::storage::fs::robust_rename_and_sync;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 
 const WAL_MAGIC: &[u8; 4] = b"TVWL";
-pub const WAL_VERSION: u16 = 6;
-const LEGACY_WAL_VERSION_V2: u16 = 2;
-
-/// WAL v3 的独立历史布局，保留带 Metadata 的边记录。
-#[derive(Debug, Deserialize)]
-enum WalEntryV3<T> {
-    TxBegin {
-        tx_id: u64,
-    },
-    TxCommit {
-        tx_id: u64,
-    },
-    Insert {
-        id: NodeId,
-        vector: Vec<T>,
-        payload: String,
-    },
-    Link {
-        src: NodeId,
-        dst: NodeId,
-        label: String,
-        weight: f32,
-        metadata: String,
-    },
-    Delete {
-        id: NodeId,
-    },
-    Unlink {
-        src: NodeId,
-        dst: NodeId,
-    },
-    UpdatePayload {
-        id: NodeId,
-        payload: String,
-    },
-    UpdateVector {
-        id: NodeId,
-        vector: Vec<T>,
-    },
-    UnlinkLabel {
-        src: NodeId,
-        dst: NodeId,
-        label: String,
-    },
-}
-
-impl<T> From<WalEntryV3<T>> for WalEntry<T> {
-    fn from(entry: WalEntryV3<T>) -> Self {
-        match entry {
-            WalEntryV3::TxBegin { tx_id } => Self::TxBegin { tx_id },
-            WalEntryV3::TxCommit { tx_id } => Self::TxCommit { tx_id },
-            WalEntryV3::Insert {
-                id,
-                vector,
-                payload,
-            } => Self::Insert {
-                id,
-                vector,
-                payload,
-            },
-            WalEntryV3::Link {
-                src,
-                dst,
-                label,
-                weight,
-                metadata,
-            } => Self::Link {
-                src,
-                dst,
-                label,
-                weight,
-                metadata,
-            },
-            WalEntryV3::Delete { id } => Self::Delete { id },
-            WalEntryV3::Unlink { src, dst } => Self::Unlink { src, dst },
-            WalEntryV3::UpdatePayload { id, payload } => Self::UpdatePayload { id, payload },
-            WalEntryV3::UpdateVector { id, vector } => Self::UpdateVector { id, vector },
-            WalEntryV3::UnlinkLabel { src, dst, label } => Self::UnlinkLabel { src, dst, label },
-        }
-    }
-}
+pub const WAL_VERSION: u16 = 7;
 const WAL_HEADER_SIZE: u64 = 6;
 const MAX_WAL_ENTRY_SIZE: usize = 256 * 1024 * 1024;
 
-/// WAL 条目：记录每一次变更操作
-///
-/// 注意：payload 使用 String（JSON 字符串）而非 serde_json::Value，
-/// 因为 bincode 不支持 serde_json::Value 的 deserialize_any 方法。
-/// WAL v4的独立历史布局，保留编辑回执。
-#[derive(Debug, Deserialize)]
-enum WalEntryV4<T> {
-    TxBegin {
-        tx_id: u64,
-    },
-    TxCommit {
-        tx_id: u64,
-    },
-    Insert {
-        id: NodeId,
-        vector: Vec<T>,
-        payload: String, // JSON 字符串
-    },
-    Link {
-        src: NodeId,
-        dst: NodeId,
-        label: String,
-        weight: f32,
-        #[serde(default)]
-        metadata: String,
-    },
-    Delete {
-        id: NodeId,
-    },
-    Unlink {
-        src: NodeId,
-        dst: NodeId,
-    },
-    UpdatePayload {
-        id: NodeId,
-        payload: String, // JSON 字符串
-    },
-    UpdateVector {
-        id: NodeId,
-        vector: Vec<T>,
-    },
-    /// 仅删除指定标签边；追加在旧变体之后，保持历史 discriminant。
-    UnlinkLabel {
-        src: NodeId,
-        dst: NodeId,
-        label: String,
-    },
-    /// 与事实操作共用事务封条的持久回执。
-    EditReceipt {
-        bytes: Vec<u8>,
-    },
-}
-
-impl<T> From<WalEntryV4<T>> for WalEntry<T> {
-    fn from(entry: WalEntryV4<T>) -> Self {
-        match entry {
-            WalEntryV4::TxBegin { tx_id } => Self::TxBegin { tx_id },
-            WalEntryV4::TxCommit { tx_id } => Self::TxCommit { tx_id },
-            WalEntryV4::Insert {
-                id,
-                vector,
-                payload,
-            } => Self::Insert {
-                id,
-                vector,
-                payload,
-            },
-            WalEntryV4::Link {
-                src,
-                dst,
-                label,
-                weight,
-                metadata,
-            } => Self::Link {
-                src,
-                dst,
-                label,
-                weight,
-                metadata,
-            },
-            WalEntryV4::Delete { id } => Self::Delete { id },
-            WalEntryV4::Unlink { src, dst } => Self::Unlink { src, dst },
-            WalEntryV4::UpdatePayload { id, payload } => Self::UpdatePayload { id, payload },
-            WalEntryV4::UpdateVector { id, vector } => Self::UpdateVector { id, vector },
-            WalEntryV4::UnlinkLabel { src, dst, label } => Self::UnlinkLabel { src, dst, label },
-            WalEntryV4::EditReceipt { bytes } => Self::EditReceipt { bytes },
-        }
+fn checkpoint_base(bytes: &[u8]) -> Option<[u8; 16]> {
+    // 长度字段、枚举判别值、UUID 与 CRC 共同组成 28 字节封条帧。
+    if bytes.len() != 34
+        || &bytes[..4] != WAL_MAGIC
+        || bytes[4..6] != WAL_VERSION.to_le_bytes()
+        || bytes[6..10] != 20u32.to_le_bytes()
+        || crc32fast::hash(&bytes[10..30]) != u32::from_le_bytes(bytes[30..34].try_into().ok()?)
+    {
+        return None;
+    }
+    match bincode::deserialize::<WalEntry<u8>>(&bytes[10..30]).ok()? {
+        WalEntry::Checkpoint { token } if token != [0; 16] => Some(token),
+        _ => None,
     }
 }
-#[derive(Debug, Deserialize)]
-enum WalEntryV5<T> {
-    TxBegin {
-        tx_id: u64,
-    },
-    TxCommit {
-        tx_id: u64,
-    },
-    Insert {
-        id: NodeId,
-        vector: Vec<T>,
-        payload: String, // JSON 字符串
-    },
-    Link {
-        src: NodeId,
-        dst: NodeId,
-        label: String,
-        weight: f32,
-        #[serde(default)]
-        metadata: String,
-    },
-    Delete {
-        id: NodeId,
-    },
-    Unlink {
-        src: NodeId,
-        dst: NodeId,
-    },
-    UpdatePayload {
-        id: NodeId,
-        payload: String, // JSON 字符串
-    },
-    UpdateVector {
-        id: NodeId,
-        vector: Vec<T>,
-    },
-    /// 仅删除指定标签边；追加在旧变体之后，保持历史 discriminant。
-    UnlinkLabel {
-        src: NodeId,
-        dst: NodeId,
-        label: String,
-    },
-    /// 与事实操作共用事务封条的持久回执。
-    EditReceipt {
-        bytes: Vec<u8>,
-    },
-    /// 命名图替换与节点事务共享封条。
-    NamedGraph {
-        graph_id: String,
-        expected_revision: Option<String>,
-        snapshot: Option<String>,
-    },
-}
 
-impl<T> From<WalEntryV5<T>> for WalEntry<T> {
-    fn from(entry: WalEntryV5<T>) -> Self {
-        match entry {
-            WalEntryV5::TxBegin { tx_id } => Self::TxBegin { tx_id },
-            WalEntryV5::TxCommit { tx_id } => Self::TxCommit { tx_id },
-            WalEntryV5::Insert {
-                id,
-                vector,
-                payload,
-            } => Self::Insert {
-                id,
-                vector,
-                payload,
-            },
-            WalEntryV5::Link {
-                src,
-                dst,
-                label,
-                weight,
-                metadata,
-            } => Self::Link {
-                src,
-                dst,
-                label,
-                weight,
-                metadata,
-            },
-            WalEntryV5::Delete { id } => Self::Delete { id },
-            WalEntryV5::Unlink { src, dst } => Self::Unlink { src, dst },
-            WalEntryV5::UpdatePayload { id, payload } => Self::UpdatePayload { id, payload },
-            WalEntryV5::UpdateVector { id, vector } => Self::UpdateVector { id, vector },
-            WalEntryV5::UnlinkLabel { src, dst, label } => Self::UnlinkLabel { src, dst, label },
-            WalEntryV5::EditReceipt { bytes } => Self::EditReceipt { bytes },
-            WalEntryV5::NamedGraph {
-                graph_id,
-                expected_revision,
-                snapshot,
-            } => Self::NamedGraph {
-                graph_id,
-                expected_revision,
-                snapshot,
-            },
-        }
-    }
-}
+/// 当前 WAL 的事务、节点、图、文档和回执记录。
 #[derive(Debug, Serialize, Deserialize)]
 pub enum WalEntry<T> {
     TxBegin {
@@ -342,141 +89,13 @@ pub enum WalEntry<T> {
     DocumentPublication {
         bytes: String,
     },
-}
-
-/// WAL v2 的精确磁盘枚举布局；仅用于迁移，禁止用于新写入。
-#[derive(Debug, Deserialize)]
-enum WalEntryV2<T> {
-    TxBegin {
-        tx_id: u64,
-    },
-    TxCommit {
-        tx_id: u64,
-    },
-    Insert {
-        id: NodeId,
-        vector: Vec<T>,
-        payload: String,
-    },
-    Link {
-        src: NodeId,
-        dst: NodeId,
-        label: String,
-        weight: f32,
-    },
-    Delete {
-        id: NodeId,
-    },
-    Unlink {
-        src: NodeId,
-        dst: NodeId,
-    },
-    UpdatePayload {
-        id: NodeId,
-        payload: String,
-    },
-    UpdateVector {
-        id: NodeId,
-        vector: Vec<T>,
-    },
-    UnlinkLabel {
-        src: NodeId,
-        dst: NodeId,
-        label: String,
+    /// 检查点发布前同步的唯一封条，绑定文本事实与已覆盖的删除前缀。
+    Checkpoint {
+        token: [u8; 16],
     },
 }
 
-impl<T> From<WalEntryV2<T>> for WalEntry<T> {
-    fn from(entry: WalEntryV2<T>) -> Self {
-        match entry {
-            WalEntryV2::TxBegin { tx_id } => Self::TxBegin { tx_id },
-            WalEntryV2::TxCommit { tx_id } => Self::TxCommit { tx_id },
-            WalEntryV2::Insert {
-                id,
-                vector,
-                payload,
-            } => Self::Insert {
-                id,
-                vector,
-                payload,
-            },
-            WalEntryV2::Link {
-                src,
-                dst,
-                label,
-                weight,
-            } => Self::Link {
-                src,
-                dst,
-                label,
-                weight,
-                metadata: "null".into(),
-            },
-            WalEntryV2::Delete { id } => Self::Delete { id },
-            WalEntryV2::Unlink { src, dst } => Self::Unlink { src, dst },
-            WalEntryV2::UpdatePayload { id, payload } => Self::UpdatePayload { id, payload },
-            WalEntryV2::UpdateVector { id, vector } => Self::UpdateVector { id, vector },
-            WalEntryV2::UnlinkLabel { src, dst, label } => Self::UnlinkLabel { src, dst, label },
-        }
-    }
-}
-
-fn decode_legacy_v2_frames<T: serde::de::DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<Vec<WalEntry<T>>> {
-    let mut offset = 0usize;
-    let mut entries = Vec::new();
-    while offset < bytes.len() {
-        let len_end = offset
-            .checked_add(4)
-            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 帧偏移溢出".into()))?;
-        let len_bytes = bytes
-            .get(offset..len_end)
-            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 尾部长度字段被截断".into()))?;
-        let len = u32::from_le_bytes(
-            len_bytes
-                .try_into()
-                .map_err(|_| TriviumError::CorruptedFile("WAL v2 长度字段无效".into()))?,
-        ) as usize;
-        if len > MAX_WAL_ENTRY_SIZE {
-            return Err(TriviumError::CorruptedFile(format!(
-                "WAL v2 单条记录超过上限：{} 字节",
-                len
-            )));
-        }
-        let data_end = len_end
-            .checked_add(len)
-            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 数据长度溢出".into()))?;
-        let crc_end = data_end
-            .checked_add(4)
-            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 CRC 偏移溢出".into()))?;
-        let data = bytes
-            .get(len_end..data_end)
-            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 记录数据被截断".into()))?;
-        let crc_bytes = bytes
-            .get(data_end..crc_end)
-            .ok_or_else(|| TriviumError::CorruptedFile("WAL v2 记录 CRC 被截断".into()))?;
-        let stored_crc = u32::from_le_bytes(
-            crc_bytes
-                .try_into()
-                .map_err(|_| TriviumError::CorruptedFile("WAL v2 CRC 字段无效".into()))?,
-        );
-        if crc32fast::hash(data) != stored_crc {
-            return Err(TriviumError::CorruptedFile(
-                "WAL v2 记录 CRC 不匹配，拒绝迁移".into(),
-            ));
-        }
-        let entry: WalEntry<T> = bincode::deserialize::<WalEntryV2<T>>(data)
-            .map(Into::into)
-            .map_err(|error| {
-                TriviumError::CorruptedFile(format!("WAL v2 记录无法解码，拒绝迁移：{error}"))
-            })?;
-        entries.push(entry);
-        offset = crc_end;
-    }
-    Ok(entries)
-}
-
+/// 写入当前格式的完整封条帧。
 fn write_framed_entry<T: serde::Serialize>(
     writer: &mut impl Write,
     entry: &WalEntry<T>,
@@ -538,6 +157,7 @@ pub struct Wal {
     group_commit_active: bool,
     group_commit_pending: bool,
     cumulative_sync_count: u64,
+    checkpoint_token: Option<[u8; 16]>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -584,112 +204,8 @@ impl Wal {
             group_commit_active: false,
             group_commit_pending: false,
             cumulative_sync_count: 0,
+            checkpoint_token: None,
         }
-    }
-    /// 将受支持的旧 WAL 原子迁移到当前版本。
-    ///
-    /// v2 按独立布局完整校验并转换边 Metadata。v3/v4 按原帧流式校验，
-    /// 保留完整提交前缀并丢弃不完整尾部，通过同步临时文件原子发布 v5，
-    /// 完整帧 CRC 或解码失败时保留原文件。
-    pub fn upgrade_legacy_wal<T>(db_path: &str) -> Result<bool>
-    where
-        T: serde::de::DeserializeOwned + serde::Serialize,
-    {
-        let wal_path = PathBuf::from(format!("{}.wal", db_path));
-        let mut file = match File::open(&wal_path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error.into()),
-        };
-        // 当前版本只需检查固定头部，避免每次开库先把整份 WAL 复制入堆。
-        let mut header = [0; WAL_HEADER_SIZE as usize];
-        match file.read_exact(&mut header) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
-            Err(error) => return Err(error.into()),
-        }
-        if &header[..4] != WAL_MAGIC {
-            return Ok(false);
-        }
-        let found = u16::from_le_bytes([header[4], header[5]]);
-        if found == WAL_VERSION {
-            return Ok(false);
-        }
-        if !matches!(found, LEGACY_WAL_VERSION_V2 | 3 | 4 | 5) {
-            return Ok(false);
-        }
-        let mut entry_count = 0usize;
-        let (entries, prefix, mut source) = if matches!(found, 3..=5) {
-            let prefix = Self::replay_entries_from_reader_limited::<T>(
-                BufReader::new(&mut file),
-                |_| {
-                    entry_count = entry_count.saturating_add(1);
-                    Ok(())
-                },
-                0,
-                &std::cell::Cell::new(0),
-                found,
-            )?;
-            file.seek(SeekFrom::Start(WAL_HEADER_SIZE))?;
-            (Vec::new(), Some(prefix), Some(file))
-        } else {
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
-            let entries = decode_legacy_v2_frames::<T>(&bytes)?;
-            entry_count = entries.len();
-            drop(file);
-            (entries, None, None)
-        };
-        let tmp_path = PathBuf::from(format!("{}.upgrade.tmp", wal_path.to_string_lossy()));
-        let write_result = (|| -> Result<()> {
-            #[cfg(feature = "test-hooks")]
-            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalMigrationCreate)?;
-            let mut tmp = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp_path)?;
-            #[cfg(feature = "test-hooks")]
-            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalMigrationWrite)?;
-            tmp.write_all(WAL_MAGIC)?;
-            tmp.write_all(&WAL_VERSION.to_le_bytes())?;
-            if let (Some(source), Some(prefix)) = (source.take(), prefix) {
-                // v3 帧布局保持字节兼容，仅复制已验证的完整提交前缀。
-                std::io::copy(&mut source.take(prefix), &mut tmp)?;
-            } else {
-                for entry in &entries {
-                    write_framed_entry(&mut tmp, entry)?;
-                }
-            }
-            #[cfg(feature = "test-hooks")]
-            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalMigrationSync)?;
-            tmp.sync_all()?;
-            #[cfg(feature = "test-hooks")]
-            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalMigrationRename)?;
-            robust_rename_and_sync(&tmp_path, &wal_path)?;
-            Ok(())
-        })();
-        if let Err(error) = write_result {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(error);
-        }
-        tracing::info!(
-            found_version = found,
-            current_version = WAL_VERSION,
-            entry_count,
-            wal_path = %wal_path.display(),
-            "已原子迁移旧 WAL (Atomically migrated legacy WAL)"
-        );
-        Ok(true)
-    }
-
-    /// 兼容旧调用名；只处理历史空 WAL，非空迁移必须携带真实向量类型。
-    pub fn upgrade_empty_legacy_wal(db_path: &str) -> Result<bool> {
-        let wal_path = PathBuf::from(format!("{}.wal", db_path));
-        if std::fs::metadata(&wal_path).map(|meta| meta.len()).ok() != Some(WAL_HEADER_SIZE) {
-            return Ok(false);
-        }
-        Self::upgrade_legacy_wal::<u8>(db_path)
     }
 
     /// 创建或打开 WAL 文件（追加模式）
@@ -700,9 +216,33 @@ impl Wal {
     /// 创建或打开 WAL 文件，指定同步模式
     pub fn open_with_sync(db_path: &str, sync_mode: SyncMode) -> Result<Self> {
         let wal_path = PathBuf::from(format!("{}.wal", db_path));
-        let existing_len = std::fs::metadata(&wal_path)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let existing_len = match File::open(&wal_path) {
+            Ok(mut existing) => {
+                let length = existing.metadata()?.len();
+                let mut header = [0; WAL_HEADER_SIZE as usize];
+                existing.read_exact(&mut header).map_err(|error| {
+                    TriviumError::CorruptedFile(format!(
+                        "WAL 头不完整 (Incomplete WAL header): {error}"
+                    ))
+                })?;
+                if &header[..4] != WAL_MAGIC {
+                    return Err(TriviumError::CorruptedFile(
+                        "WAL 魔数无效 (Invalid WAL magic)".into(),
+                    ));
+                }
+                let found = u16::from_le_bytes([header[4], header[5]]);
+                if found == 0 || found > WAL_VERSION {
+                    return Err(TriviumError::UnsupportedWalVersion {
+                        found,
+                        supported: WAL_VERSION,
+                    });
+                }
+                crate::storage::format::require("wal", u32::from(found), u32::from(WAL_VERSION))?;
+                length
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -725,6 +265,7 @@ impl Wal {
             group_commit_active: false,
             group_commit_pending: false,
             cumulative_sync_count: 0,
+            checkpoint_token: None,
         })
     }
 
@@ -923,81 +464,14 @@ impl Wal {
         Self::replay_entries_limited(db_path, 0, &std::cell::Cell::new(0), visit)
     }
 
-    /// 旧 WAL 先在预算内转换并回放；持久化迁移由打开流程全部准入后执行。
+    /// 当前 WAL 在预算内恢复，成功准入后才截断无效尾部。
     pub(crate) fn replay_for_open<T: serde::de::DeserializeOwned + serde::Serialize>(
         db_path: &str,
         limit: usize,
         current: &std::cell::Cell<usize>,
         visit: impl FnMut(WalEntry<T>) -> Result<()>,
     ) -> Result<u64> {
-        let path = format!("{db_path}.wal");
-        let mut file = File::open(&path)?;
-        let mut header = [0u8; WAL_HEADER_SIZE as usize];
-        if file.read_exact(&mut header).is_ok()
-            && &header[..4] == WAL_MAGIC
-            && u16::from_le_bytes([header[4], header[5]]) == LEGACY_WAL_VERSION_V2
-        {
-            Self::admit_legacy_migration::<T>(db_path, limit, current.get())?;
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
-            let entries = decode_legacy_v2_frames::<T>(&bytes)?;
-            let mut converted = Vec::new();
-            for entry in &entries {
-                write_framed_entry(&mut converted, entry)?;
-            }
-            return Self::replay_entries_from_reader_limited(
-                std::io::Cursor::new(converted),
-                visit,
-                limit,
-                current,
-                WAL_VERSION,
-            )
-            .map(|offset| offset.saturating_add(WAL_HEADER_SIZE));
-        }
         Self::replay_entries_limited(db_path, limit, current, visit)
-    }
-
-    pub(crate) fn admit_legacy_migration<T: serde::de::DeserializeOwned>(
-        db_path: &str,
-        limit: usize,
-        current: usize,
-    ) -> Result<()> {
-        let mut file = match File::open(format!("{db_path}.wal")) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e.into()),
-        };
-        let mut header = [0u8; WAL_HEADER_SIZE as usize];
-        if file.read_exact(&mut header).is_ok()
-            && &header[..4] == WAL_MAGIC
-            && matches!(
-                u16::from_le_bytes([header[4], header[5]]),
-                LEGACY_WAL_VERSION_V2 | 3 | 4 | 5
-            )
-        {
-            if u16::from_le_bytes([header[4], header[5]]) == 3 {
-                Self::replay_entries_from_reader_limited::<T>(
-                    BufReader::new(file),
-                    |_| Ok(()),
-                    limit,
-                    &std::cell::Cell::new(current),
-                    3,
-                )?;
-                return Ok(());
-            }
-            let extra = usize::try_from(file.metadata()?.len())
-                .unwrap_or(usize::MAX)
-                .saturating_mul(64);
-            if limit > 0 && current.saturating_add(extra) > limit {
-                return Err(TriviumError::CapacityReservationRejected {
-                    requested_nodes: 0,
-                    estimated_bytes: extra,
-                    current_bytes: current,
-                    memory_limit: limit,
-                });
-            }
-        }
-        Ok(())
     }
 
     pub(crate) fn replay_entries_limited<T: serde::de::DeserializeOwned>(
@@ -1029,8 +503,8 @@ impl Wal {
                 ));
             }
             let version = u16::from_le_bytes([prefix[4], prefix[5]]);
-            // v2 继续由持有写锁的显式迁移路径处理，普通读取保留原拒绝契约。
-            if !matches!(version, 3 | 4 | 5 | WAL_VERSION) {
+            // 普通恢复只接受当前记录布局。
+            if version != WAL_VERSION {
                 return Err(TriviumError::UnsupportedWalVersion {
                     found: version,
                     supported: WAL_VERSION,
@@ -1088,7 +562,7 @@ impl Wal {
         mut visit: impl FnMut(WalEntry<T>) -> Result<()>,
         limit: usize,
         current: &std::cell::Cell<usize>,
-        version: u16,
+        _version: u16,
     ) -> Result<u64> {
         let admit = |extra: usize| -> Result<()> {
             if limit > 0 && current.get().saturating_add(extra) > limit {
@@ -1182,17 +656,18 @@ impl Wal {
             let options = bincode::DefaultOptions::new()
                 .with_fixint_encoding()
                 .with_limit(len as u64);
-            let entry: WalEntry<T> = match version {
-                2 => options.deserialize::<WalEntryV2<T>>(&data).map(Into::into),
-                3 => options.deserialize::<WalEntryV3<T>>(&data).map(Into::into),
-                4 => options.deserialize::<WalEntryV4<T>>(&data).map(Into::into),
-                5 => options.deserialize::<WalEntryV5<T>>(&data).map(Into::into),
-                _ => options.deserialize::<WalEntry<T>>(&data),
-            }
+            let entry: WalEntry<T> = options.deserialize::<WalEntry<T>>(&data)
                 .map_err(|error| TriviumError::CorruptedFile(format!(
                     "WAL 完整帧无法解码，记录 {record_count} (Cannot decode complete WAL frame): {error}"
                 )))?;
             record_count = record_count.saturating_add(1);
+            if let WalEntry::Checkpoint { token } = &entry
+                && (*token == [0; 16] || current_tx_id.is_some())
+            {
+                return Err(TriviumError::CorruptedFile(
+                    "检查点封条身份或事务位置无效 (Invalid checkpoint seal identity or transaction position)".into(),
+                ));
+            }
             match entry {
                 WalEntry::TxBegin { tx_id } => {
                     current_tx_id = Some(tx_id);
@@ -1251,6 +726,57 @@ impl Wal {
         self.cumulative_logical_bytes
     }
 
+    /// 封条先于文件组发布持久化，Off 模式也须满足检查点的跨文件提交顺序。
+    pub(crate) fn seal_checkpoint(&mut self, has_text: bool) -> Result<Option<[u8; 16]>> {
+        if !has_text {
+            self.checkpoint_token = None;
+            return Ok(None);
+        }
+        let token = *uuid::Uuid::new_v4().as_bytes();
+        self.write_checkpoint_seal(token)?;
+        Ok(Some(token))
+    }
+
+    pub(crate) fn ensure_checkpoint_base(&mut self, token: Option<[u8; 16]>) -> Result<()> {
+        if let Some(token) = token {
+            match std::fs::metadata(&self.wal_path)?.len() {
+                WAL_HEADER_SIZE => self.write_checkpoint_seal(token)?,
+                34 => {
+                    let mut bytes = [0; 34];
+                    File::open(&self.wal_path)?.read_exact(&mut bytes)?;
+                    if checkpoint_base(&bytes).is_some_and(|base| base != token) {
+                        return Err(TriviumError::CorruptedFile(
+                            "WAL 基准封条与文本检查点失配 (WAL base seal does not match the text checkpoint)".into(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn write_checkpoint_seal(&mut self, token: [u8; 16]) -> Result<()> {
+        self.append(&WalEntry::<u8>::Checkpoint { token })?;
+        let result = (|| -> Result<()> {
+            let writer = self.writer.as_mut().ok_or(TriviumError::WalClosed)?;
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalFlush)?;
+            writer.flush()?;
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::WalSync)?;
+            writer.get_ref().sync_data()?;
+            self.cumulative_sync_count = self.cumulative_sync_count.saturating_add(1);
+            Ok(())
+        })();
+        if result.is_err() {
+            self.release_writer();
+        }
+        result?;
+        self.checkpoint_token = Some(token);
+        Ok(())
+    }
+
     /// flush 成功后清除 WAL 文件
     ///
     /// 使用 truncate（截断）语义而非 remove + create：
@@ -1269,8 +795,16 @@ impl Wal {
                 .write(true)
                 .truncate(true)
                 .open(&self.wal_path)?;
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::hit_for_path(
+                crate::test_hooks::ConcurrencyPoint::AfterWalTruncate,
+                &self.wal_path.to_string_lossy(),
+            );
             file.write_all(WAL_MAGIC)?;
             file.write_all(&WAL_VERSION.to_le_bytes())?;
+            if let Some(token) = self.checkpoint_token {
+                write_framed_entry(&mut file, &WalEntry::<u8>::Checkpoint { token })?;
+            }
             file.sync_all()?;
         }
 
@@ -1309,6 +843,13 @@ impl Wal {
         if meta.len() == 0 {
             return false;
         }
+        // 空日志可携带已发布检查点的基准封条，后续追加从该边界继续。
+        if meta.len() == WAL_HEADER_SIZE + 28 {
+            let Ok(bytes) = std::fs::read(&wal_path) else {
+                return true;
+            };
+            return checkpoint_base(&bytes).is_none();
+        }
         if meta.len() != WAL_HEADER_SIZE {
             return true;
         }
@@ -1317,10 +858,7 @@ impl Wal {
         };
         bytes.len() != WAL_HEADER_SIZE as usize
             || &bytes[0..4] != WAL_MAGIC
-            || !matches!(
-                u16::from_le_bytes([bytes[4], bytes[5]]),
-                3 | 4 | 5 | WAL_VERSION
-            )
+            || u16::from_le_bytes([bytes[4], bytes[5]]) != WAL_VERSION
     }
 }
 

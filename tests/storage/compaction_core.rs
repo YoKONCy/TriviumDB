@@ -129,19 +129,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &[
-        "",
-        ".wal",
-        ".vec",
-        ".pld",
-        ".lock",
-        ".flush_ok",
-        ".tmp",
-        ".vec.tmp",
-        ".pld.tmp",
-    ] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -371,7 +359,10 @@ fn COV_04F_compact成功_wal已清空_快照完整恢复() {
     db.flush().unwrap();
     drop(db);
 
-    std::fs::write(format!("{}.wal", path), b"").unwrap();
+    triviumdb::storage::wal::Wal::open(&path)
+        .unwrap()
+        .clear()
+        .unwrap();
 
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert_committed_graph(&db, &expected);

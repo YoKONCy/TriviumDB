@@ -490,46 +490,12 @@ impl GraphStatsState {
 
 /// 计算给定 JSON 对象的行级特征布隆签名（共 64 位）
 fn calculate_json_signature(value: &serde_json::Value) -> u64 {
-    let mut sig = 0u64;
-    flatten_and_hash_json("", value, &mut sig);
-    sig
-}
-
-fn flatten_and_hash_json(prefix: &str, value: &serde_json::Value, sig: &mut u64) {
-    use std::hash::{Hash, Hasher};
-    match value {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                let new_prefix = if prefix.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{}.{}", prefix, k)
-                };
-                flatten_and_hash_json(&new_prefix, v, sig);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                flatten_and_hash_json(prefix, v, sig);
-            }
-        }
-        serde_json::Value::String(s) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            format!("{}:{}", prefix, s).hash(&mut hasher);
-            *sig |= 1u64 << (hasher.finish() % 64);
-        }
-        serde_json::Value::Bool(b) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            format!("{}:{}", prefix, b).hash(&mut hasher);
-            *sig |= 1u64 << (hasher.finish() % 64);
-        }
-        serde_json::Value::Number(n) => {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            format!("{}:{}", prefix, n).hash(&mut hasher);
-            *sig |= 1u64 << (hasher.finish() % 64);
-        }
-        serde_json::Value::Null => {}
-    }
+    let Some(fields) = value.as_object() else {
+        return 0;
+    };
+    fields.iter().fold(0, |signature, (key, value)| {
+        signature | crate::filter::equality_mask(key, value)
+    })
 }
 
 pub(crate) struct QuiverBuildSnapshot {
@@ -538,7 +504,7 @@ pub(crate) struct QuiverBuildSnapshot {
     pub signatures: Bq2Store,
     pub ids: Vec<u64>,
     pub slots: Vec<usize>,
-    pub sm: crate::index::quiver::corrected_sm::CorrectedSmIndex,
+    pub sm: crate::index::quiver::sm::SmIndex,
 }
 
 type CrossModalCacheKey = (String, Vec<u8>);
@@ -558,6 +524,7 @@ pub struct MemTable<T: VectorType> {
     /// 最近一次完整检查点之后是否发生了需要持久化的变更。
     checkpoint_dirty: bool,
     pub(crate) editing: crate::database::editing::EditState,
+    pub(crate) storage_id: [u8; 16],
     pub(crate) document_publications: crate::storage::document_publications::PublicationStore,
     pub(crate) document_updates_paused: bool,
     pub(crate) named_graphs: crate::storage::named_graphs::NamedGraphStore,
@@ -586,7 +553,10 @@ pub struct MemTable<T: VectorType> {
     resource_reservation: Option<crate::resources::DatabaseReservation>,
     // 未加载的 sidecar 与待合并操作分开保存，避免把“未加载”解释为“空索引”。
     deferred_text_path: Option<String>,
-    deferred_text_meta: Option<[u8; 28]>,
+    deferred_text_meta: Option<crate::storage::file_format::TextIndexMetadata>,
+    pub(crate) text_checkpoint_token: Option<[u8; 16]>,
+    text_replay: bool,
+    text_replay_checkpoint_seen: bool,
     pending_text_mutations: Vec<PendingTextMutation>,
     pending_text_bytes: usize,
     text_memory_limit: usize,
@@ -646,7 +616,7 @@ pub struct MemTable<T: VectorType> {
     //    冷热分离：QuIVer 内部 BQ sigs + 图拓扑 = hot，f32 向量 = cold
     //    事务安全：事务 commit 期间暂停 QuIVer 同步，commit 后由事务层统一同步
     quiver_index: Option<QuIVer>,
-    pub(crate) quiver_ssd: Option<crate::database::quiver_ssd::DatabaseSsd>,
+    pub(crate) quiver_ssd: Option<crate::database::quiver_runtime::DatabaseQuiverRuntime>,
     auto_build_quiver: bool,
     /// 事务同步暂停标记：为 true 时 insert/delete/update_vector 不触发 QuIVer 增量操作
     quiver_sync_paused: bool,
@@ -681,6 +651,7 @@ impl<T: VectorType> MemTable<T> {
             generation: 0,
             checkpoint_dirty: true,
             editing: Default::default(),
+            storage_id: *uuid::Uuid::new_v4().as_bytes(),
             named_graphs: Default::default(),
             document_publications: Default::default(),
             document_updates_paused: false,
@@ -699,6 +670,9 @@ impl<T: VectorType> MemTable<T> {
             resource_reservation: None,
             deferred_text_path: None,
             deferred_text_meta: None,
+            text_checkpoint_token: None,
+            text_replay: false,
+            text_replay_checkpoint_seen: false,
             pending_text_mutations: Vec::new(),
             pending_text_bytes: 0,
             text_memory_limit: 0,
@@ -745,6 +719,7 @@ impl<T: VectorType> MemTable<T> {
             generation: 0,
             checkpoint_dirty: true,
             editing: Default::default(),
+            storage_id: *uuid::Uuid::new_v4().as_bytes(),
             named_graphs: Default::default(),
             document_publications: Default::default(),
             document_updates_paused: false,
@@ -763,6 +738,9 @@ impl<T: VectorType> MemTable<T> {
             resource_reservation: None,
             deferred_text_path: None,
             deferred_text_meta: None,
+            text_checkpoint_token: None,
+            text_replay: false,
+            text_replay_checkpoint_seen: false,
             pending_text_mutations: Vec::new(),
             pending_text_bytes: 0,
             text_memory_limit: 0,
@@ -1837,15 +1815,6 @@ impl<T: VectorType> MemTable<T> {
         &self.fast_tags
     }
 
-    /// 按 NodeId 获取 Fast Tag，供查询时导航做近似属性信号判断。
-    #[inline]
-    pub(crate) fn fast_tag_for_id(&self, id: NodeId) -> Option<u64> {
-        self.ids_to_indices
-            .get(&id)
-            .and_then(|&slot| self.fast_tags.get(slot))
-            .copied()
-    }
-
     /// 从持久化文件恢复 BQ 签名数组（跳过重建）
     pub fn set_bq_signatures(&mut self, sigs: Vec<BqSignature>) {
         self.checkpoint_dirty = true;
@@ -1903,9 +1872,9 @@ impl<T: VectorType> MemTable<T> {
     /// 同一独占借用内分离主路由与Reader，运行时切换完整复用当前绑定代际。
     pub(crate) fn configure_quiver_ssd_runtime(
         &mut self,
-        options: crate::index::quiver::ssd::SsdRuntimeOptions,
+        options: crate::index::quiver::runtime::QuiverRuntimeOptions,
         capacity: usize,
-    ) -> Result<Option<crate::index::quiver::ssd::SsdStats>> {
+    ) -> Result<Option<crate::index::quiver::runtime::QuiverRuntimeStats>> {
         let generation = self.vector_generation();
         let Some((index, active)) = self.quiver_index.as_ref().zip(self.quiver_ssd.as_mut()) else {
             return Ok(None);
@@ -2032,8 +2001,7 @@ impl<T: VectorType> MemTable<T> {
         signatures.reserve(self.payloads.len());
         let mut ids = Vec::with_capacity(self.payloads.len());
         let mut slots = Vec::with_capacity(self.payloads.len());
-        let mut sm =
-            crate::index::quiver::corrected_sm::CorrectedSmIndex::empty_routing(self.dim).ok()?;
+        let mut sm = crate::index::quiver::sm::SmIndex::empty_routing(self.dim).ok()?;
         sm.reserve_routing(self.payloads.len());
         let mut buffer = Vec::with_capacity(self.dim);
         for (slot, &node_id) in self.indices_to_ids.iter().enumerate() {
@@ -2123,7 +2091,7 @@ impl<T: VectorType> MemTable<T> {
         }
 
         let mut index = QuIVer::new(dim, config);
-        index.batch_build_experimental_v2(&vecs_f32, &ids, &slot_idxs);
+        index.batch_build(&vecs_f32, &ids, &slot_idxs);
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverPublish);
         self.quiver_index = Some(index);
@@ -2260,6 +2228,7 @@ impl<T: VectorType> MemTable<T> {
         self.payloads.memory_stats()
     }
 
+    #[cfg(test)]
     pub(crate) fn payload_access_counters(&self) -> (u64, u64) {
         self.payloads.access_counters()
     }
@@ -2412,12 +2381,16 @@ impl<T: VectorType> MemTable<T> {
             return self.find_nodes_by_field(field, value);
         }
         use rayon::prelude::*;
+        let payload_meter = crate::request::payload_meter();
         let mut ids = self
             .payloads
             .ids()
             .collect::<Vec<_>>()
             .into_par_iter()
             .filter(|&id| {
+                let _scope = payload_meter
+                    .as_ref()
+                    .map(crate::request::PayloadMeter::enter);
                 self.payloads
                     .get_value(id)
                     .is_some_and(|payload| payload.get(field) == Some(value))
@@ -3067,7 +3040,7 @@ impl<T: VectorType> MemTable<T> {
         }
 
         // 3. 元数据层
-        if self.deferred_text_path.is_some() {
+        if self.deferred_text_path.is_some() || self.text_replay {
             self.pending_text_mutations
                 .push(PendingTextMutation::Delete(id));
         } else {
@@ -3355,6 +3328,23 @@ impl<T: VectorType> MemTable<T> {
         id: NodeId,
         patch: &serde_json::Value,
     ) -> Result<serde_json::Value> {
+        let patch_obj = patch.as_object().ok_or_else(|| {
+            TriviumError::InvalidInput(
+                "patch 参数必须是 JSON 对象 (patch must be a JSON object)".into(),
+            )
+            .at_field("patch")
+        })?;
+        for operation in ["$set", "$inc", "$unset"] {
+            if patch_obj
+                .get(operation)
+                .is_some_and(|value| !value.is_object())
+            {
+                return Err(TriviumError::InvalidInput(format!(
+                    "补丁操作数必须是 JSON 对象 (Patch operand must be a JSON object): {operation}"
+                ))
+                .at_field(&format!("patch.{operation}")));
+            }
+        }
         let old_payload = self
             .get_payload(id)
             .map(|payload| (*payload).clone())
@@ -3367,51 +3357,42 @@ impl<T: VectorType> MemTable<T> {
             .as_object_mut()
             .ok_or_else(|| TriviumError::InvalidInput("Payload 不是 JSON 对象".into()))?;
 
-        if let Some(patch_obj) = patch.as_object() {
-            // $set: 设置字段值
-            if let Some(set_val) = patch_obj.get("$set")
-                && let Some(set_map) = set_val.as_object()
-            {
-                for (k, v) in set_map {
-                    obj.insert(k.clone(), v.clone());
-                }
+        // $set: 设置字段值。
+        if let Some(set_map) = patch_obj.get("$set").and_then(serde_json::Value::as_object) {
+            for (k, v) in set_map {
+                obj.insert(k.clone(), v.clone());
             }
+        }
 
-            // $inc: 数值递增
-            if let Some(inc_val) = patch_obj.get("$inc")
-                && let Some(inc_map) = inc_val.as_object()
-            {
-                for (k, v) in inc_map {
-                    let current = obj
-                        .get(k)
-                        .unwrap_or(&serde_json::Value::Number(0.into()))
-                        .clone();
-                    obj.insert(k.clone(), increment_json_number(&current, v)?);
-                }
+        // $inc: 数值递增。
+        if let Some(inc_map) = patch_obj.get("$inc").and_then(serde_json::Value::as_object) {
+            for (k, v) in inc_map {
+                let current = obj
+                    .get(k)
+                    .unwrap_or(&serde_json::Value::Number(0.into()))
+                    .clone();
+                obj.insert(k.clone(), increment_json_number(&current, v)?);
             }
+        }
 
-            // $unset: 删除字段
-            if let Some(unset_val) = patch_obj.get("$unset")
-                && let Some(unset_map) = unset_val.as_object()
-            {
-                for k in unset_map.keys() {
-                    obj.remove(k);
-                }
+        // $unset: 删除字段。
+        if let Some(unset_map) = patch_obj
+            .get("$unset")
+            .and_then(serde_json::Value::as_object)
+        {
+            for k in unset_map.keys() {
+                obj.remove(k);
             }
+        }
 
-            if !patch_obj.contains_key("$set")
-                && !patch_obj.contains_key("$inc")
-                && !patch_obj.contains_key("$unset")
-            {
-                return Err(TriviumError::ApiMigrationRequired {
-                    removed_api: "patch_payload(普通对象简写)",
-                    replacement: "patch_payload({\"$set\": {...}}) 或 update_payload()",
-                });
-            }
-        } else {
-            return Err(TriviumError::InvalidInput(
-                "patch_payload 的 patch 参数必须是 JSON 对象".into(),
-            ));
+        if !patch_obj.contains_key("$set")
+            && !patch_obj.contains_key("$inc")
+            && !patch_obj.contains_key("$unset")
+        {
+            return Err(TriviumError::ApiMigrationRequired {
+                removed_api: "patch_payload(普通对象简写)",
+                replacement: "patch_payload({\"$set\": {...}}) 或 update_payload()",
+            });
         }
 
         Ok(new_payload)
@@ -3839,12 +3820,67 @@ impl<T: VectorType> MemTable<T> {
         !self.pending_text_mutations.is_empty()
     }
 
-    pub(crate) fn deferred_text_metadata(&self) -> Option<[u8; 28]> {
+    pub(crate) fn deferred_text_metadata(
+        &self,
+    ) -> Option<crate::storage::file_format::TextIndexMetadata> {
         self.deferred_text_meta
     }
 
-    pub(crate) fn update_deferred_text_metadata(&mut self, metadata: [u8; 28]) {
+    pub(crate) fn update_deferred_text_metadata(
+        &mut self,
+        metadata: crate::storage::file_format::TextIndexMetadata,
+    ) {
         self.deferred_text_meta = Some(metadata);
+    }
+
+    pub(crate) fn begin_text_replay(&mut self, token: Option<[u8; 16]>) {
+        self.text_checkpoint_token = token;
+        self.text_replay = true;
+        self.text_replay_checkpoint_seen = false;
+    }
+
+    pub(crate) fn replay_text_checkpoint(&mut self, token: [u8; 16]) {
+        if self.text_checkpoint_token == Some(token) {
+            self.text_replay_checkpoint_seen = true;
+            self.pending_text_mutations.clear();
+            self.pending_text_bytes = 0;
+        }
+    }
+
+    pub(crate) fn finish_text_replay(&mut self, path: &str) -> Result<()> {
+        if self.text_checkpoint_token.is_some() && !self.text_replay_checkpoint_seen {
+            return Err(TriviumError::RecoveryRequired {
+                wal_path: format!("{path}.wal"),
+            }
+            .at_field("text_index.recovery_boundary"));
+        }
+        if self.text_checkpoint_token.is_none()
+            && self.pending_text_mutations.iter().any(|mutation| {
+                matches!(mutation, PendingTextMutation::Delete(id)
+                    if self.contains(*id) && self.text_index.contains_node(*id))
+            })
+        {
+            // 缺少恢复封条时，节点复用的文本删除无法证明归属，要求显式恢复。
+            return Err(TriviumError::RecoveryRequired {
+                wal_path: format!("{path}.wal"),
+            }
+            .at_field("text_index.recovery_boundary"));
+        }
+        self.text_replay = false;
+        if self.deferred_text_path.is_none() {
+            for mutation in self.pending_text_mutations.drain(..) {
+                if let PendingTextMutation::Delete(id) = mutation {
+                    self.text_index.remove_node(id);
+                }
+            }
+            self.pending_text_bytes = 0;
+        }
+        Ok(())
+    }
+
+    /// 恢复后的冷数据事实变化通过重建或精确回退重新建立向量路由。
+    pub(crate) fn discard_quiver(&mut self) {
+        self.quiver_index = None;
     }
 
     pub(crate) fn set_text_memory_limit(&mut self, limit: usize) {
@@ -3889,7 +3925,7 @@ impl<T: VectorType> MemTable<T> {
 
     /// 提交 WAL 前预留延期删除记录，避免事务应用期间再做可失败分配。
     pub(crate) fn reserve_text_deletes(&mut self, count: usize) -> Result<()> {
-        if self.deferred_text_path.is_none() || count == 0 {
+        if (self.deferred_text_path.is_none() && !self.text_replay) || count == 0 {
             return Ok(());
         }
         let len = self.pending_text_mutations.len();
@@ -3917,7 +3953,7 @@ impl<T: VectorType> MemTable<T> {
         let Some(path) = self.deferred_text_path.as_deref() else {
             return Ok(());
         };
-        let bytes = std::fs::metadata(format!("{path}.text"))?.len();
+        let bytes = crate::storage::index_container::required(path, ".text")?.length;
         // 解码前同时执行实例预算和共享运行时工作区准入。
         let estimate = usize::try_from(bytes)
             .ok()

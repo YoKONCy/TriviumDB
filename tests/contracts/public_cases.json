@@ -67,7 +67,7 @@
   ],
   "ffi_cases": [
     {
-      "name": "hook_abi_v2",
+      "name": "hook_abi",
       "operation": "ffi_hook_abi",
       "expected": {
         "abi_version": 2,

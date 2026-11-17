@@ -6,6 +6,321 @@ use triviumdb::database::{Config, SearchConfig, StorageMode};
 use triviumdb::index::quiver::{BqNavigationScorer, QuIVer, QuIVerConfig, QuIVerSearchConfig};
 use triviumdb::{Database, VectorType};
 
+#[test]
+fn 精确开关与默认阈值遵守跨语言搜索契约() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../contracts/search_entry_cases.json")).unwrap();
+    let root = support::TestDir::new("search_entry");
+    let records = fixture["records"].as_array().unwrap();
+    let query: Vec<f32> = serde_json::from_value(fixture["query"].clone()).unwrap();
+    for storage_mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let path = root.file(&format!("{storage_mode:?}.tdb"));
+        let config = Config {
+            dim: 2,
+            storage_mode,
+            ..Default::default()
+        };
+        let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
+        for record in records {
+            let vector: Vec<f32> = serde_json::from_value(record["vector"].clone()).unwrap();
+            db.insert_with_id(
+                record["id"].as_u64().unwrap(),
+                &vector,
+                record["payload"].clone(),
+            )
+            .unwrap();
+        }
+        for reopened in [false, true] {
+            if reopened {
+                db.close().unwrap();
+                db = Database::<f32>::open_with_config(&path, config).unwrap();
+            }
+            for case in fixture["cases"].as_array().unwrap() {
+                let mut search = SearchConfig {
+                    top_k: case["top_k"].as_u64().unwrap_or(records.len() as u64) as usize,
+                    expand_depth: 0,
+                    payload_filter: case
+                        .get("filter")
+                        .map(|f| triviumdb::Filter::from_json(f).unwrap()),
+                    ..Default::default()
+                }
+                .with_exact(case["exact"].as_bool().unwrap());
+                if let Some(score) = case["min_score"].as_f64() {
+                    search.min_score = score as f32;
+                }
+                let hits = db.search_advanced(&query, &search).unwrap();
+                let expected: Vec<u64> = serde_json::from_value(case["ids"].clone()).unwrap();
+                assert_eq!(
+                    hits.iter().map(|h| h.id).collect::<Vec<_>>(),
+                    expected,
+                    "{case}"
+                );
+                for hit in &hits {
+                    let record = records.iter().find(|r| r["id"] == hit.id).unwrap();
+                    assert_eq!(hit.payload, record["payload"]);
+                    assert!((hit.score as f64 - record["score"].as_f64().unwrap()).abs() < 1e-6);
+                }
+                let batch = db
+                    .search_batch(std::slice::from_ref(&query), &search, &Default::default())
+                    .unwrap();
+                assert_eq!(batch.len(), 1);
+                assert_eq!(batch[0].iter().map(|h| h.id).collect::<Vec<_>>(), expected);
+                for hit in &batch[0] {
+                    let record = records.iter().find(|r| r["id"] == hit.id).unwrap();
+                    assert_eq!(hit.payload, record["payload"]);
+                    assert!((hit.score as f64 - record["score"].as_f64().unwrap()).abs() < 1e-6);
+                }
+            }
+        }
+        db.close().unwrap();
+    }
+    assert_eq!(SearchConfig::default().min_score, 0.0);
+    assert!(SearchConfig::default().with_exact(true).force_brute_force);
+    assert!(
+        !SearchConfig::default()
+            .with_exact(true)
+            .with_exact(false)
+            .force_brute_force
+    );
+}
+
+#[test]
+fn 精确开关跳过自动建图并绕过已有索引() {
+    let root = support::TestDir::new("exact_route");
+    let mut db = Database::<f32>::open(&root.file("data.tdb"), 2).unwrap();
+    // 超过当前维度的自动建图阈值，用同分集合独立约定最小 ID 的 Top-K。
+    let count = triviumdb::storage::memtable::auto_quiver_node_threshold(2);
+    for id in (1..=count as u64).rev() {
+        db.insert_with_id(id, &[1., 0.], json!({"id":id})).unwrap();
+    }
+    let exact = SearchConfig {
+        top_k: 3,
+        expand_depth: 0,
+        ..Default::default()
+    }
+    .with_exact(true);
+    for indexed in [false, true] {
+        if indexed {
+            db.build_quiver_index(None).unwrap();
+        }
+        let (hits, ctx) = db
+            .search_hybrid_with_context(None, Some(&[1., 0.]), &exact)
+            .unwrap();
+        assert!(
+            ctx.observations
+                .contains(&("vector_route_quiver".into(), 0))
+        );
+        assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), [1, 2, 3]);
+        for hit in hits {
+            assert_eq!(hit.score, 1.);
+            assert_eq!(hit.payload, json!({"id":hit.id}));
+        }
+        assert_eq!(db.prepare_auto_quiver_build().unwrap().is_some(), !indexed);
+    }
+    db.close().unwrap();
+}
+
+#[test]
+fn JSON等值预过滤在写入更新与重开后保留完整命中() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../contracts/search_filter_cases.json")).unwrap();
+    let records = fixture["records"].as_array().unwrap();
+    let root = support::TestDir::new("equality_prefilter");
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let path = root.file(&format!("{mode:?}.tdb"));
+        let cfg = Config {
+            dim: 2,
+            storage_mode: mode,
+            auto_build_quiver: false,
+            ..Default::default()
+        };
+        let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+        for record in records {
+            db.insert_with_id(
+                record["id"].as_u64().unwrap(),
+                &[1., 0.],
+                record["payload"].clone(),
+            )
+            .unwrap();
+        }
+        // 每轮独立检查期望集合，分别覆盖新签名、冷记录和重新计算后的签名。
+        for phase in 0..3 {
+            if phase == 1 {
+                db.close().unwrap();
+                db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+            }
+            if phase == 2 {
+                for record in records {
+                    db.update_payload(record["id"].as_u64().unwrap(), record["payload"].clone())
+                        .unwrap();
+                }
+            }
+            for case in fixture["cases"].as_array().unwrap() {
+                let expected: Vec<u64> = serde_json::from_value(case["ids"].clone()).unwrap();
+                let config = SearchConfig {
+                    top_k: records.len(),
+                    recall_k: records.len(),
+                    rerank_k: records.len(),
+                    expand_depth: 0,
+                    min_score: -1.,
+                    force_brute_force: true,
+                    payload_filter: Some(triviumdb::Filter::from_json(&case["filter"]).unwrap()),
+                    ..Default::default()
+                };
+                let hits = db.search_advanced(&[1., 0.], &config).unwrap();
+                assert_eq!(
+                    hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+                    expected,
+                    "{mode:?}/{phase}/{case}"
+                );
+                for hit in hits {
+                    let record = records
+                        .iter()
+                        .find(|record| record["id"] == hit.id)
+                        .unwrap();
+                    assert_eq!(hit.payload, record["payload"]);
+                    assert_eq!(hit.score, 1.);
+                }
+            }
+        }
+        db.close().unwrap();
+    }
+}
+
+struct RewriteQuery(Vec<f32>);
+impl triviumdb::hook::SearchHook for RewriteQuery {
+    fn on_pre_search(
+        &self,
+        query: &mut Vec<f32>,
+        _: &mut SearchConfig,
+        _: &mut triviumdb::hook::HookContext,
+    ) {
+        query.clone_from(&self.0);
+    }
+}
+
+#[test]
+fn Hook向量在f16转换后执行有限性校验且失败后可继续查询() {
+    let root = support::TestDir::new("hook_f16_overflow");
+    let mut db = Database::<half::f16>::open(&root.file("data.tdb"), 2).unwrap();
+    let query = [half::f16::ONE, half::f16::ZERO];
+    db.insert_with_id(1, &query, json!({"value":"kept"}))
+        .unwrap();
+    assert_eq!(
+        db.search(&[half::f16::from_f32(70000.), half::f16::ZERO], 1, 0, -1.)
+            .unwrap_err()
+            .code(),
+        "TDB_INVALID_VECTOR"
+    );
+    db.set_hook(RewriteQuery(vec![70000., 0.])).unwrap();
+    assert_eq!(
+        db.search(&query, 1, 0, -1.).unwrap_err().code(),
+        "TDB_INVALID_VECTOR"
+    );
+    db.set_hook(RewriteQuery(vec![60000., 0.])).unwrap();
+    let result = db.search(&query, 1, 0, -1.).unwrap();
+    assert_eq!(result.iter().map(|hit| hit.id).collect::<Vec<_>>(), [1]);
+    assert_eq!(result[0].payload, json!({"value":"kept"}));
+    db.close().unwrap();
+}
+
+struct StageErrorHook {
+    stage: &'static str,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+impl StageErrorHook {
+    fn enter(&self, stage: &'static str, ctx: &mut triviumdb::hook::HookContext) {
+        self.calls.lock().unwrap().push(stage);
+        if self.stage == stage {
+            ctx.error = Some("受控回调错误 (Controlled callback error)".into());
+        }
+    }
+}
+
+impl triviumdb::hook::SearchHook for StageErrorHook {
+    fn on_custom_recall(
+        &self,
+        _: &[f32],
+        _: &SearchConfig,
+        ctx: &mut triviumdb::hook::HookContext,
+    ) -> Option<Vec<triviumdb::SearchHit>> {
+        self.enter("custom", ctx);
+        None
+    }
+    fn on_post_recall(
+        &self,
+        _: &mut Vec<triviumdb::SearchHit>,
+        ctx: &mut triviumdb::hook::HookContext,
+    ) {
+        self.enter("post_recall", ctx);
+    }
+    fn on_pre_graph_expand(
+        &self,
+        _: &mut Vec<triviumdb::SearchHit>,
+        ctx: &mut triviumdb::hook::HookContext,
+    ) {
+        self.enter("pre_graph", ctx);
+    }
+    fn on_post_search(
+        &self,
+        _: &mut Vec<triviumdb::SearchHit>,
+        ctx: &mut triviumdb::hook::HookContext,
+    ) {
+        self.enter("post_search", ctx);
+    }
+}
+
+#[test]
+fn Hook错误在空召回普通返回与DPP返回处一致传播() {
+    let root = support::TestDir::new("hook_errors");
+    let mut db = Database::<f32>::open(&root.file("data.tdb"), 2).unwrap();
+    for populated in [false, true] {
+        if populated {
+            db.insert_with_id(1, &[1., 0.], json!({"id":1})).unwrap();
+            db.insert_with_id(2, &[0., 1.], json!({"id":2})).unwrap();
+        }
+        for dpp in [false, true] {
+            let stages: &[&str] = if populated {
+                &["custom", "post_recall", "pre_graph", "post_search"]
+            } else {
+                &["custom", "post_recall"]
+            };
+            for &stage in stages {
+                let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                db.set_hook(StageErrorHook {
+                    stage,
+                    calls: calls.clone(),
+                })
+                .unwrap();
+                let config = SearchConfig {
+                    top_k: 1,
+                    recall_k: 2,
+                    min_score: -1.,
+                    enable_advanced_pipeline: true,
+                    enable_dpp: dpp,
+                    ..Default::default()
+                };
+                let error = db
+                    .search_hybrid_with_context(None, Some(&[1., 0.]), &config)
+                    .unwrap_err();
+                assert_eq!(error.code(), "TDB_HOOK_EXECUTION");
+                assert!(matches!(
+                    error,
+                    triviumdb::TriviumError::HookExecutionError(_)
+                ));
+                let expected = ["custom", "post_recall", "pre_graph", "post_search"]
+                    .into_iter()
+                    .take_while(|current| *current != stage)
+                    .chain(std::iter::once(stage))
+                    .collect::<Vec<_>>();
+                assert_eq!(*calls.lock().unwrap(), expected);
+            }
+        }
+    }
+    db.close().unwrap();
+}
+
 fn slot_ties<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>() {
     let root = support::TestDir::new("slot_ties");
     let vector = [T::from_f32(1.), T::from_f32(0.)];
@@ -63,7 +378,7 @@ fn 三种dtype在墓碑复用后同分截断选择最小nodeid() {
 }
 
 #[test]
-fn quiver完整候选池三条公开路径在同分和软删除后保持nodeid顺序() {
+fn quiver完整候选池公开路径在同分和软删除后保持nodeid顺序() {
     for dim in [3, 384, 768] {
         let n = 48;
         let vectors = vec![1f32; n * dim];
@@ -77,7 +392,7 @@ fn quiver完整候选池三条公开路径在同分和软删除后保持nodeid�
                 alpha: 1.2,
             },
         );
-        index.batch_build_experimental_v2_checked(&vectors, &ids, &slots);
+        index.batch_build(&vectors, &ids, &slots);
         for deleted in [false, true] {
             if deleted {
                 index.soft_delete(1);
@@ -100,7 +415,6 @@ fn quiver完整候选池三条公开路径在同分和软删除后保持nodeid�
                 let outputs = [
                     index.search(&query, fill, &config),
                     index.search_with_scorer(&query, fill, &config, &mut BqNavigationScorer),
-                    index.search_dual_queue(&query, fill, &config, &mut BqNavigationScorer, 0, &[]),
                 ];
                 for hits in outputs {
                     assert_eq!(
@@ -122,7 +436,7 @@ fn quiver完整候选池三条公开路径在同分和软删除后保持nodeid�
 fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
     for dim in [3, 384] {
         let mut index = QuIVer::new(dim, &QuIVerConfig::default());
-        index.batch_build_experimental_v2_checked(&vec![1.; 4 * dim], &[4, 3, 2, 1], &[0, 1, 2, 3]);
+        index.batch_build(&vec![1.; 4 * dim], &[4, 3, 2, 1], &[0, 1, 2, 3]);
         let config = QuIVerSearchConfig {
             top_k: 3,
             ef_search: 4,
@@ -146,11 +460,6 @@ fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
                     .search_with_scorer(&query, fill, &config, &mut BqNavigationScorer)
                     .is_empty()
             );
-            assert!(
-                index
-                    .search_dual_queue(&query, fill, &config, &mut BqNavigationScorer, 0, &[])
-                    .is_empty()
-            );
         }
         let query = vec![1.; dim];
         let zero = QuIVerSearchConfig {
@@ -161,11 +470,6 @@ fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
         assert!(
             index
                 .search_with_scorer(&query, fill, &zero, &mut BqNavigationScorer)
-                .is_empty()
-        );
-        assert!(
-            index
-                .search_dual_queue(&query, fill, &zero, &mut BqNavigationScorer, 0, &[])
                 .is_empty()
         );
         for invalid in [f32::NAN, f32::INFINITY] {
@@ -179,11 +483,6 @@ fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
                     .search_with_scorer(&query, fill, &config, &mut BqNavigationScorer)
                     .is_empty()
             );
-            assert!(
-                index
-                    .search_dual_queue(&query, fill, &config, &mut BqNavigationScorer, 0, &[])
-                    .is_empty()
-            );
         }
         let fill = |_: usize, out: &mut Vec<f32>| {
             out.clear();
@@ -195,11 +494,6 @@ fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
                 .search_with_scorer(&query, fill, &config, &mut BqNavigationScorer)
                 .is_empty()
         );
-        assert!(
-            index
-                .search_dual_queue(&query, fill, &config, &mut BqNavigationScorer, 0, &[])
-                .is_empty()
-        );
     }
 }
 
@@ -207,7 +501,7 @@ fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
 fn quiver精排名额由有效冷向量占用且同分在截断前处理() {
     for dim in [3, 384] {
         let mut index = QuIVer::new(dim, &QuIVerConfig::default());
-        index.batch_build_experimental_v2_checked(&vec![1.; 4 * dim], &[4, 3, 2, 1], &[0, 1, 2, 3]);
+        index.batch_build(&vec![1.; 4 * dim], &[4, 3, 2, 1], &[0, 1, 2, 3]);
         index.soft_delete(1);
         let cfg = QuIVerSearchConfig {
             top_k: 1,
@@ -220,15 +514,10 @@ fn quiver精排名额由有效冷向量占用且同分在截断前处理() {
             true
         };
         let query = vec![1.; dim];
-        let outputs = [
-            index.search_with_scorer(&query, fill, &cfg, &mut BqNavigationScorer),
-            index.search_dual_queue(&query, fill, &cfg, &mut BqNavigationScorer, 0, &[]),
-        ];
+        let hits = index.search_with_scorer(&query, fill, &cfg, &mut BqNavigationScorer);
         // ID 1 已删除，ID 2 回调含非法分量，剩余同分中 ID 3 优先。
-        for hits in outputs {
-            assert_eq!(hits.iter().map(|h| h.0).collect::<Vec<_>>(), [3]);
-            assert!((hits[0].1 - 1.).abs() < 1e-5);
-        }
+        assert_eq!(hits.iter().map(|h| h.0).collect::<Vec<_>>(), [3]);
+        assert!((hits[0].1 - 1.).abs() < 1e-5);
     }
 }
 

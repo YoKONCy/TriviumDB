@@ -110,7 +110,7 @@ fn final_prune_retains_signature_exits_and_repair_restores_orphaned_nodes() {
     adj.set_neighbors_raw(64, &[65]);
     adj.set_neighbors_raw(65, &[0]);
     let profile = BuildProfile::new();
-    let view = ExperimentalBuildView {
+    let view = ParallelBuildContext {
         adj: &adj,
         n,
         dim: 65,
@@ -120,7 +120,6 @@ fn final_prune_retains_signature_exits_and_repair_restores_orphaned_nodes() {
         sigs: &index.bq_store,
         locks: &locks,
         profile: &profile,
-        eager: false,
     };
     let mut candidates = (1..=64)
         .map(|node| {

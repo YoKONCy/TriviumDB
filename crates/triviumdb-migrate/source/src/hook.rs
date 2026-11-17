@@ -1,0 +1,685 @@
+//! 检索管线 Hook 系统
+//!
+//! 提供 6 个管线关键阶段的自定义扩展点，允许开发者在构建 RAG 系统时：
+//! - 注入自定义字段、改写查询参数
+//! - 替代/增强内置召回（对接外部 C++ FAISS / ScaNN 等高性能模块）
+//! - 自定义评分调权、业务逻辑过滤
+//! - 外置 Cross-Encoder 精排 / ONNX 推理
+//! - 结果增强、统计埋点、回传自定义数据
+//!
+//! # 设计原则
+//!
+//! 1. **零开销可选**: 默认 `NoopHook`，未注册 Hook 时编译器内联消除全部调用
+//! 2. **按需覆写**: 所有方法都有默认空实现，开发者只需覆写感兴趣的阶段
+//! 3. **FFI 友好**: `#[repr(C)]` 数据结构 + `extern "C"` 函数签名，支持 C/C++ 动态库
+
+use crate::database::SearchConfig;
+use crate::node::SearchHit;
+
+// ═══════════════════════════════════════════════════════
+//  Hook 上下文：管线各阶段之间的共享状态容器
+// ═══════════════════════════════════════════════════════
+
+/// Hook 上下文，在管线各阶段之间传递共享状态。
+///
+/// 开发者可以在 `on_pre_search` 中写入自定义数据，
+/// 后续阶段（如 `on_rerank`）可以读取这些数据。
+#[derive(Debug, Clone)]
+pub struct HookContext {
+    /// 开发者自定义的附加数据（任意 JSON）
+    ///
+    /// 典型用途：
+    /// - 传入用户身份 `{"user_id": "u_12345"}`
+    /// - 传入会话上下文 `{"session": "abc", "history_ids": [1,2,3]}`
+    /// - 回传统计信息 `{"latency_ms": 12.5, "recall_count": 100}`
+    pub custom_data: serde_json::Value,
+
+    /// 管线阶段计时统计（自动填充）
+    ///
+    /// 格式: `[(阶段名称, 耗时)]`，如 `[("vector_recall", 3.2ms), ("graph_expand", 1.1ms)]`
+    pub stage_timings: Vec<(String, std::time::Duration)>,
+
+    /// 每阶段候选数量，便于分析召回、扩散、重排和多样性阶段的增删。
+    pub stage_counts: Vec<(String, usize)>,
+
+    pub observations: Vec<(String, u64)>,
+
+    /// Hook 执行失败。具体语言绑定或 FFI 适配器在此记录错误，管线在阶段结束后
+    /// 将其转换为结构化 `HookExecutionError`，禁止静默回退。
+    pub error: Option<String>,
+
+    /// 当前查询是否被 Hook 提前终止
+    ///
+    /// 若在 `on_pre_search` 中设为 `true`，管线将跳过后续所有阶段，
+    /// 直接返回 `on_pre_search` 阶段已有的结果。
+    pub abort: bool,
+}
+
+impl Default for HookContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HookContext {
+    pub fn new() -> Self {
+        Self {
+            custom_data: serde_json::Value::Null,
+            stage_timings: Vec::new(),
+            stage_counts: Vec::new(),
+            observations: Vec::new(),
+            error: None,
+            abort: false,
+        }
+    }
+
+    /// 记录一个阶段的耗时
+    pub fn record_timing(&mut self, stage: impl Into<String>, elapsed: std::time::Duration) {
+        self.stage_timings.push((stage.into(), elapsed));
+    }
+
+    pub fn record_count(&mut self, stage: impl Into<String>, count: usize) {
+        self.stage_counts.push((stage.into(), count));
+    }
+
+    pub fn record_observation(&mut self, name: impl Into<String>, value: u64) {
+        self.observations.push((name.into(), value));
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+//  核心 Hook Trait
+// ═══════════════════════════════════════════════════════
+
+/// 检索管线 Hook Trait
+///
+/// 所有方法都有默认实现（no-op），开发者只需覆写感兴趣的阶段。
+///
+/// # 管线阶段与 Hook 点
+///
+/// ```text
+///   查询输入
+///       │
+///   🔌 #1 on_pre_search        — 查询预处理
+///       │
+///   🔌 #2 on_custom_recall     — 自定义召回（可替代内置）
+///       │
+///   ┌── 内置召回管线 ──┐
+///   │  L1 文本稀疏召回  │
+///   │  L2 向量稠密召回  │
+///   │  L3 布隆预过滤    │
+///   └──────────────────┘
+///       │
+///   🔌 #3 on_post_recall       — 召回后处理
+///       │
+///   ┌── 认知管线 ──────┐
+///   │  L4 FISTA 残差    │
+///   │  L5 影子查询      │
+///   └──────────────────┘
+///       │
+///   🔌 #4 on_pre_graph_expand  — 图扩散前
+///       │
+///   ┌── 图谱扩散 ──────┐
+///   │  L6 SA-PPR 扩散   │
+///   │  L7 不应期/抑制    │
+///   └──────────────────┘
+///       │
+///   🔌 #5 on_rerank            — 重排序
+///       │
+///   ┌── 多样性 ────────┐
+///   │  L9 DPP 采样      │
+///   └──────────────────┘
+///       │
+///   🔌 #6 on_post_search       — 最终后处理
+///       │
+///   返回结果
+/// ```
+pub trait SearchHook: Send + Sync + std::any::Any {
+    /// 🔌 Hook #1：查询预处理
+    ///
+    /// 在检索管线启动前调用。可以修改查询向量、调整配置参数、注入上下文数据。
+    ///
+    /// # 典型用途
+    /// - 动态调整 `top_k`（先多召回再精排）
+    /// - 向 `ctx` 注入用户画像 / 会话信息
+    /// - 对查询向量做归一化或增强
+    /// - 设置 `ctx.abort = true` 提前终止管线
+    fn on_pre_search(
+        &self,
+        _query_vector: &mut Vec<f32>,
+        _config: &mut SearchConfig,
+        _ctx: &mut HookContext,
+    ) {
+        // 默认空实现
+    }
+
+    /// 🔌 Hook #2：自定义召回
+    ///
+    /// 返回 `Some(hits)` 表示**替代**内置召回结果，`None` 走默认管线。
+    ///
+    /// # 模式
+    /// - **替代 (Replace)**: 返回 `Some(my_results)` 完全跳过内置召回
+    /// - **增强 (Augment)**: 返回 `None`，在 `on_post_recall` 中合并额外结果
+    ///
+    /// # 典型用途
+    /// - 对接外部 C++ FAISS / ScaNN 索引做粗排
+    /// - 使用自定义 ANN 算法
+    /// - 从外部缓存/服务拉取预计算结果
+    fn on_custom_recall(
+        &self,
+        _query_vector: &[f32],
+        _config: &SearchConfig,
+        _ctx: &mut HookContext,
+    ) -> Option<Vec<SearchHit>> {
+        None // 默认不替代
+    }
+
+    /// 🔌 Hook #3：召回后处理
+    ///
+    /// 在内置召回（或自定义召回）完成后、图扩散之前调用。
+    ///
+    /// # 典型用途
+    /// - 自定义评分调权（时间衰减、推荐权重等）
+    /// - 业务逻辑过滤（去除已读内容、黑名单等）
+    /// - 向 `SearchHit.payload` 注入额外字段
+    /// - 合并来自外部数据源的额外候选
+    fn on_post_recall(&self, _hits: &mut Vec<SearchHit>, _ctx: &mut HookContext) {
+        // 默认空实现
+    }
+
+    /// 🔌 Hook #4：图扩散前拦截
+    ///
+    /// 在向量/文本召回的锚点结果送入 SA-PPR 图扩散之前调用。
+    ///
+    /// # 典型用途
+    /// - 修改种子集（添加/移除特定节点）
+    /// - 注入来自外部知识图谱的额外种子
+    /// - 根据业务逻辑动态调整扩散参数
+    fn on_pre_graph_expand(&self, _seeds: &mut Vec<SearchHit>, _ctx: &mut HookContext) {
+        // 默认空实现
+    }
+
+    /// 🔌 Hook #5：自定义重排序
+    ///
+    /// 在图扩散完成后、DPP 多样性采样之前调用。
+    /// 返回 `Some(reranked)` 表示覆盖排序结果，`None` 走默认排序。
+    ///
+    /// # 典型用途
+    /// - Cross-Encoder 精排
+    /// - 外置 C++ ONNX Runtime 推理
+    /// - 基于业务规则的自定义排序逻辑
+    /// - 多路结果的 Reciprocal Rank Fusion (RRF)
+    fn on_rerank(
+        &self,
+        _hits: &mut Vec<SearchHit>,
+        _ctx: &mut HookContext,
+    ) -> Option<Vec<SearchHit>> {
+        None // 默认不覆盖
+    }
+
+    /// 🔌 Hook #6：最终后处理
+    ///
+    /// 在所有管线阶段完成后、结果返回给调用方之前调用。
+    ///
+    /// # 典型用途
+    /// - 结果增强（添加摘要、翻译等）
+    /// - 回传统计数据到 `ctx.custom_data`
+    /// - 日志/埋点记录
+    /// - 最终截断或格式化
+    fn on_post_search(&self, _results: &mut Vec<SearchHit>, _ctx: &mut HookContext) {
+        // 默认空实现
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+//  内置 Hook 实现
+// ═══════════════════════════════════════════════════════
+
+/// 空操作 Hook：所有方法都是 no-op
+///
+/// 作为默认 Hook 使用，编译器会内联消除所有调用，实现真正的零开销。
+pub struct NoopHook;
+
+impl SearchHook for NoopHook {}
+
+// ═══════════════════════════════════════════════════════
+//  组合 Hook：链式调用多个 Hook
+// ═══════════════════════════════════════════════════════
+
+/// 组合 Hook：按注册顺序依次调用多个 Hook
+///
+/// 当开发者需要同时使用多个独立的 Hook 模块时（如一个做过滤、一个做重排），
+/// 可以用 `CompositeHook` 将它们组合起来。
+///
+/// # 语义
+/// - `on_pre_search`: 所有 Hook 依次调用
+/// - `on_custom_recall`: 第一个返回 `Some` 的 Hook 生效
+/// - `on_post_recall`: 所有 Hook 依次调用
+/// - `on_pre_graph_expand`: 所有 Hook 依次调用
+/// - `on_rerank`: 第一个返回 `Some` 的 Hook 生效
+/// - `on_post_search`: 所有 Hook 依次调用
+pub struct CompositeHook {
+    hooks: Vec<Box<dyn SearchHook>>,
+}
+
+impl CompositeHook {
+    pub fn new() -> Self {
+        Self { hooks: Vec::new() }
+    }
+
+    /// 添加一个 Hook 到链末尾
+    pub fn add(&mut self, hook: impl SearchHook + 'static) {
+        self.hooks.push(Box::new(hook));
+    }
+}
+
+impl Default for CompositeHook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SearchHook for CompositeHook {
+    fn on_pre_search(
+        &self,
+        query_vector: &mut Vec<f32>,
+        config: &mut SearchConfig,
+        ctx: &mut HookContext,
+    ) {
+        for hook in &self.hooks {
+            hook.on_pre_search(query_vector, config, ctx);
+            if ctx.abort {
+                return;
+            }
+        }
+    }
+
+    fn on_custom_recall(
+        &self,
+        query_vector: &[f32],
+        config: &SearchConfig,
+        ctx: &mut HookContext,
+    ) -> Option<Vec<SearchHit>> {
+        // 第一个返回 Some 的 Hook 生效
+        for hook in &self.hooks {
+            if let Some(result) = hook.on_custom_recall(query_vector, config, ctx) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    fn on_post_recall(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
+        for hook in &self.hooks {
+            hook.on_post_recall(hits, ctx);
+        }
+    }
+
+    fn on_pre_graph_expand(&self, seeds: &mut Vec<SearchHit>, ctx: &mut HookContext) {
+        for hook in &self.hooks {
+            hook.on_pre_graph_expand(seeds, ctx);
+        }
+    }
+
+    fn on_rerank(
+        &self,
+        hits: &mut Vec<SearchHit>,
+        ctx: &mut HookContext,
+    ) -> Option<Vec<SearchHit>> {
+        for hook in &self.hooks {
+            if let Some(result) = hook.on_rerank(hits, ctx) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    fn on_post_search(&self, results: &mut Vec<SearchHit>, ctx: &mut HookContext) {
+        for hook in &self.hooks {
+            hook.on_post_search(results, ctx);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+//  FFI 桥接层：支持 C/C++ 动态库扩展
+// ═══════════════════════════════════════════════════════
+
+/// C ABI 兼容的搜索命中结构体
+///
+/// 用于与 C/C++ 动态库交换数据。
+/// 开发者可以用 C++ 编写高性能的召回/重排模块，
+/// 编译为 `.dll` / `.so` 后通过 `FfiHook` 加载。
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiSearchHit {
+    pub id: u64,
+    pub score: f32,
+}
+
+pub type FfiHookAbiVersionFn = unsafe extern "C" fn() -> u32;
+pub type FfiStageFn = unsafe extern "C" fn(
+    stage: u32,
+    query_ptr: *const f32,
+    query_len: usize,
+    hits_ptr: *mut FfiSearchHit,
+    hits_capacity: usize,
+    hits_count: *mut usize,
+) -> i32;
+
+pub const FFI_HOOK_ABI_VERSION: u32 = 2;
+pub const FFI_STAGE_PRE_SEARCH: u32 = 1;
+pub const FFI_STAGE_CUSTOM_RECALL: u32 = 2;
+pub const FFI_STAGE_POST_RECALL: u32 = 3;
+pub const FFI_STAGE_PRE_GRAPH_EXPAND: u32 = 4;
+pub const FFI_STAGE_RERANK: u32 = 5;
+pub const FFI_STAGE_POST_SEARCH: u32 = 6;
+
+/// C 侧召回函数签名
+///
+/// ```c
+/// int trivium_recall(
+///     const float* query, size_t query_len, size_t top_k,
+///     FfiSearchHit* out_hits, size_t* out_count
+/// );
+/// ```
+pub type FfiRecallFn = unsafe extern "C" fn(
+    query_ptr: *const f32,
+    query_len: usize,
+    top_k: usize,
+    out_hits: *mut FfiSearchHit,
+    out_count: *mut usize,
+) -> i32;
+
+/// C 侧重排函数签名
+///
+/// ```c
+/// int trivium_rerank(FfiSearchHit* hits, size_t count);
+/// ```
+pub type FfiRerankFn = unsafe extern "C" fn(hits_ptr: *mut FfiSearchHit, hits_count: usize) -> i32;
+
+fn valid_ffi_hit(hit: &FfiSearchHit) -> bool {
+    hit.id != 0 && hit.score.is_finite()
+}
+
+/// FFI Hook：通过动态库加载 C/C++ 扩展模块
+///
+/// # 使用方法
+///
+/// ```rust,ignore
+/// // C++ 侧编译为 libmy_plugin.so / my_plugin.dll
+/// let hook = FfiHook::load("./libmy_plugin.so")?;
+/// db.set_hook(hook);
+/// ```
+///
+/// # C++ 侧实现示例
+///
+/// ```cpp
+/// extern "C" int trivium_recall(
+///     const float* query, size_t query_len, size_t top_k,
+///     FfiSearchHit* out_hits, size_t* out_count
+/// ) {
+///     // 使用 FAISS / 自定义算法做检索
+///     *out_count = /* 实际命中数 */;
+///     return 0; // 0 = 成功
+/// }
+/// ```
+pub struct FfiHook {
+    /// 持有动态库句柄，防止提前卸载
+    _lib: libloading::Library,
+    stage_fn: Option<FfiStageFn>,
+    recall_fn: Option<FfiRecallFn>,
+    rerank_fn: Option<FfiRerankFn>,
+}
+
+// SAFETY: FFI 函数指针本身是 Send+Sync 安全的（它们是全局函数地址）
+// 动态库在 FfiHook 生命周期内保持加载
+unsafe impl Send for FfiHook {}
+unsafe impl Sync for FfiHook {}
+
+impl FfiHook {
+    /// 从动态库文件加载 Hook
+    ///
+    /// 会尝试查找以下符号（均为可选）：
+    /// - `trivium_recall`: 自定义召回函数
+    /// - `trivium_rerank`: 自定义重排函数
+    ///
+    /// # 错误
+    /// 当动态库文件不存在或无法加载时返回错误。
+    pub fn load(path: &str) -> crate::error::Result<Self> {
+        unsafe {
+            let lib = libloading::Library::new(path).map_err(|e| {
+                crate::error::TriviumError::HookLoadError(format!(
+                    "无法加载外置 Hook 动态库 (Failed to load FFI Hook library) '{}': {}",
+                    path, e
+                ))
+            })?;
+
+            let abi_version = lib
+                .get::<FfiHookAbiVersionFn>(b"trivium_hook_abi_version")
+                .ok()
+                .map(|function| (*function)());
+            let stage_fn = lib
+                .get::<FfiStageFn>(b"trivium_hook_invoke_v2")
+                .ok()
+                .map(|f| *f);
+            if stage_fn.is_some() && abi_version != Some(FFI_HOOK_ABI_VERSION) {
+                return Err(crate::error::TriviumError::HookLoadError(format!(
+                    "FFI Hook ABI 版本不匹配：期望 {}，实际 {:?}",
+                    FFI_HOOK_ABI_VERSION, abi_version
+                )));
+            }
+            let recall_fn = lib.get::<FfiRecallFn>(b"trivium_recall").ok().map(|f| *f);
+            let rerank_fn = lib.get::<FfiRerankFn>(b"trivium_rerank").ok().map(|f| *f);
+
+            tracing::info!(
+                "已加载外置 Hook 模块 (FFI Hook loaded): {} (recall={}, rerank={})",
+                path,
+                recall_fn.is_some(),
+                rerank_fn.is_some()
+            );
+
+            Ok(Self {
+                _lib: lib,
+                stage_fn,
+                recall_fn,
+                rerank_fn,
+            })
+        }
+    }
+}
+
+impl FfiHook {
+    fn invoke_v2(
+        &self,
+        stage: u32,
+        query: &[f32],
+        hits: &mut Vec<SearchHit>,
+        minimum_capacity: usize,
+        ctx: &mut HookContext,
+    ) -> bool {
+        let Some(function) = self.stage_fn else {
+            return false;
+        };
+        let capacity = hits.len().max(minimum_capacity).clamp(1, 1_000_000);
+        let mut ffi_hits = vec![FfiSearchHit { id: 0, score: 0.0 }; capacity];
+        for (target, source) in ffi_hits.iter_mut().zip(hits.iter()) {
+            target.id = source.id;
+            target.score = source.score;
+        }
+        let mut count = hits.len().min(capacity);
+        let code = unsafe {
+            function(
+                stage,
+                query.as_ptr(),
+                query.len(),
+                ffi_hits.as_mut_ptr(),
+                capacity,
+                &mut count,
+            )
+        };
+        if code != 0 {
+            ctx.error = Some(format!("FFI Hook v2 阶段 {stage} 返回错误码 {code}"));
+            return true;
+        }
+        if count > capacity {
+            ctx.error = Some(format!(
+                "FFI Hook v2 阶段 {stage} 返回数量 {count} 超过容量 {capacity}"
+            ));
+            return true;
+        }
+        *hits = ffi_hits[..count]
+            .iter()
+            .filter(|hit| valid_ffi_hit(hit))
+            .map(|hit| SearchHit {
+                id: hit.id,
+                score: hit.score,
+                payload: serde_json::Value::Null,
+            })
+            .collect();
+        true
+    }
+}
+
+impl SearchHook for FfiHook {
+    fn on_pre_search(
+        &self,
+        query_vector: &mut Vec<f32>,
+        _config: &mut SearchConfig,
+        ctx: &mut HookContext,
+    ) {
+        let mut hits = Vec::new();
+        self.invoke_v2(FFI_STAGE_PRE_SEARCH, query_vector, &mut hits, 1, ctx);
+    }
+
+    fn on_custom_recall(
+        &self,
+        query_vector: &[f32],
+        config: &SearchConfig,
+        ctx: &mut HookContext,
+    ) -> Option<Vec<SearchHit>> {
+        if self.stage_fn.is_some() {
+            let mut hits = Vec::new();
+            let capacity = config.top_k.saturating_mul(2);
+            self.invoke_v2(
+                FFI_STAGE_CUSTOM_RECALL,
+                query_vector,
+                &mut hits,
+                capacity,
+                ctx,
+            );
+            return Some(hits);
+        }
+        let recall_fn = self.recall_fn?;
+
+        // 预分配输出缓冲区（最多 top_k * 2 个候选）
+        let buf_size = config.top_k * 2;
+        let mut buf = vec![FfiSearchHit { id: 0, score: 0.0 }; buf_size];
+        let mut count: usize = 0;
+
+        // SAFETY: 调用 C 侧函数，指针有效性由 buf 的生命周期保证
+        let ret = unsafe {
+            (recall_fn)(
+                query_vector.as_ptr(),
+                query_vector.len(),
+                config.top_k,
+                buf.as_mut_ptr(),
+                &mut count,
+            )
+        };
+
+        if ret != 0 {
+            tracing::warn!(
+                "FFI recall 函数返回错误码 (FFI recall returned error code): {}",
+                ret
+            );
+            return None;
+        }
+
+        // 转换 FFI 结构体为 Rust SearchHit
+        let hits: Vec<SearchHit> = buf[..count.min(buf_size)]
+            .iter()
+            .filter(|h| valid_ffi_hit(h))
+            .map(|h| SearchHit {
+                id: h.id,
+                score: h.score,
+                payload: serde_json::Value::Null,
+            })
+            .collect();
+
+        Some(hits)
+    }
+
+    fn on_post_recall(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
+        let capacity = hits.len();
+        self.invoke_v2(FFI_STAGE_POST_RECALL, &[], hits, capacity, ctx);
+    }
+
+    fn on_pre_graph_expand(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
+        let capacity = hits.len();
+        self.invoke_v2(FFI_STAGE_PRE_GRAPH_EXPAND, &[], hits, capacity, ctx);
+    }
+
+    fn on_rerank(
+        &self,
+        hits: &mut Vec<SearchHit>,
+        _ctx: &mut HookContext,
+    ) -> Option<Vec<SearchHit>> {
+        if self.stage_fn.is_some() {
+            let capacity = hits.len();
+            self.invoke_v2(FFI_STAGE_RERANK, &[], hits, capacity, _ctx);
+            return Some(hits.clone());
+        }
+        let rerank_fn = self.rerank_fn?;
+
+        // 转换为 FFI 格式
+        let mut ffi_hits: Vec<FfiSearchHit> = hits
+            .iter()
+            .map(|h| FfiSearchHit {
+                id: h.id,
+                score: h.score,
+            })
+            .collect();
+
+        // SAFETY: 调用 C 侧函数，原地修改分数
+        let ret = unsafe { (rerank_fn)(ffi_hits.as_mut_ptr(), ffi_hits.len()) };
+
+        if ret != 0 {
+            tracing::warn!(
+                "FFI rerank 函数返回错误码 (FFI rerank returned error code): {}",
+                ret
+            );
+            return None;
+        }
+
+        // 将 FFI 侧修改过的分数写回 SearchHit
+        let mut reranked: Vec<SearchHit> = hits
+            .iter()
+            .zip(ffi_hits.iter())
+            .filter(|(_, ffi)| valid_ffi_hit(ffi))
+            .map(|(original, ffi)| SearchHit {
+                id: original.id,
+                score: ffi.score,
+                payload: original.payload.clone(),
+            })
+            .collect();
+
+        // 按新分数降序排序
+        reranked.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Some(reranked)
+    }
+
+    fn on_post_search(&self, hits: &mut Vec<SearchHit>, ctx: &mut HookContext) {
+        let capacity = hits.len();
+        self.invoke_v2(FFI_STAGE_POST_SEARCH, &[], hits, capacity, ctx);
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+//  单元测试
+// ═══════════════════════════════════════════════════════

@@ -12,5 +12,6 @@ mod pipeline_graph_algorithms;
 mod pipeline_iterate;
 mod pipeline_operator_contract;
 mod pipeline_paths;
-mod tsng_c0;
-mod tsng_c1;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

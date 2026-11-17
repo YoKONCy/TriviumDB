@@ -61,7 +61,10 @@ fn files(root: &std::path::Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
         .unwrap()
         .map(|entry| {
             let entry = entry.unwrap();
-            (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            (
+                entry.file_name(),
+                crate::artifact::read(entry.path()).unwrap(),
+            )
         })
         .collect::<Vec<_>>();
     result.sort_by(|left, right| left.0.cmp(&right.0));
@@ -100,7 +103,7 @@ fn reopen<T: VectorType + Serialize + DeserializeOwned>() {
             db.build_quiver_index(None).unwrap();
             db.close().unwrap();
             let original = files(&root.0);
-            let index = std::fs::read(format!("{path}.quiver")).unwrap();
+            let index = crate::artifact::read(format!("{path}.quiver")).unwrap();
             assert_eq!(&index[4..8], &2u32.to_le_bytes());
             for access_mode in [AccessMode::ReadOnly, AccessMode::ReadWrite] {
                 let mut db = Database::<T>::open_with_runtime(
@@ -181,14 +184,14 @@ fn 缓存内部损坏在外层CRC有效时严格拒绝且只读回退保留原�
         .unwrap();
     db.build_quiver_index(None).unwrap();
     db.close().unwrap();
-    let mut index = std::fs::read(format!("{path}.quiver")).unwrap();
+    let mut index = crate::artifact::read(format!("{path}.quiver")).unwrap();
     *index.last_mut().unwrap() ^= 1;
-    let mut meta = std::fs::read(format!("{path}.quiver.meta")).unwrap();
+    let mut meta = crate::artifact::read(format!("{path}.quiver.meta")).unwrap();
     meta[44..48].copy_from_slice(&crc32fast::hash(&index).to_le_bytes());
     let crc = crc32fast::hash(&meta[..56]);
     meta[56..60].copy_from_slice(&crc.to_le_bytes());
-    std::fs::write(format!("{path}.quiver"), &index).unwrap();
-    std::fs::write(format!("{path}.quiver.meta"), &meta).unwrap();
+    crate::artifact::write(format!("{path}.quiver"), &index).unwrap();
+    crate::artifact::write(format!("{path}.quiver.meta"), &meta).unwrap();
     let before = files(&root.0);
     let runtime = ResourceRuntime::new(ResourceLimits {
         memory_limit: 16 * 1024 * 1024,
@@ -212,9 +215,9 @@ fn 缓存内部损坏在外层CRC有效时严格拒绝且只读回退保留原�
     assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
     assert_eq!(runtime.stats().attached_databases, 0);
     assert_eq!(runtime.stats().active_tasks, 0);
-    let saved_index = format!("{path}.quiver.saved");
-    std::fs::rename(format!("{path}.quiver"), &saved_index).unwrap();
-    std::fs::rename(&saved_index, format!("{path}.quiver")).unwrap();
+    let saved_index = format!("{path}.idx.saved");
+    std::fs::rename(format!("{path}.idx"), &saved_index).unwrap();
+    std::fs::rename(&saved_index, format!("{path}.idx")).unwrap();
     let mut reader = Database::<f32>::open_with_config(
         &path,
         Config {

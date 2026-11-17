@@ -2,6 +2,80 @@ use serde_json::json;
 use triviumdb::database::{Config, Database, SearchConfig, StorageMode};
 use triviumdb::test_hooks::{IoPoint, fail_io_at};
 
+#[test]
+fn 检查点封条保护新文本且后续删除继续级联清理() {
+    let root = super::support::TestDir::new("text_replay_seals");
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        for eager in [false, true] {
+            for sync in [
+                triviumdb::storage::wal::SyncMode::Normal,
+                triviumdb::storage::wal::SyncMode::Off,
+            ] {
+                let path = root.file(&format!("{mode:?}-{eager}-{sync:?}.tdb"));
+                let cfg = Config {
+                    dim: 2,
+                    storage_mode: mode,
+                    load_text_index: eager,
+                    sync_mode: sync,
+                    auto_build_quiver: false,
+                    ..Default::default()
+                };
+                let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+                db.insert_with_id(1, &[1., 0.], json!({"version":"old"}))
+                    .unwrap();
+                db.flush().unwrap();
+                db.delete(1).unwrap();
+                db.insert_with_id(1, &[0., 1.], json!({"version":"new"}))
+                    .unwrap();
+                db.index_text(1, "newtoken").unwrap();
+                db.index_keyword(1, "newanchor").unwrap();
+                {
+                    let _failure = fail_io_at(IoPoint::CheckpointWalClear);
+                    assert_eq!(db.flush().unwrap_err().code(), "TDB_IO");
+                    drop(db);
+                }
+                let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+                db.build_text_index().unwrap();
+                assert_eq!(db.get_payload(1).unwrap(), Some(json!({"version":"new"})));
+                assert_eq!(hits(&db, "newtoken"), [1]);
+                assert_eq!(hits(&db, "newanchor"), [1]);
+                db.close().unwrap();
+                let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+                db.build_text_index().unwrap();
+                assert_eq!(hits(&db, "newtoken"), [1]);
+                assert_eq!(hits(&db, "newanchor"), [1]);
+                db.close().unwrap();
+                // 独立写入已确认日志，保留关闭后的文本检查点作为恢复起点。
+                let mut wal = triviumdb::storage::wal::Wal::open_with_sync(
+                    &path,
+                    triviumdb::storage::wal::SyncMode::Full,
+                )
+                .unwrap();
+                wal.append(&triviumdb::storage::wal::WalEntry::<f32>::Delete { id: 1 })
+                    .unwrap();
+                wal.append(&triviumdb::storage::wal::WalEntry::<f32>::Insert {
+                    id: 1,
+                    vector: vec![1., 0.],
+                    payload: json!({"version":"later"}).to_string(),
+                })
+                .unwrap();
+                drop(wal);
+                let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+                db.build_text_index().unwrap();
+                assert_eq!(db.get_payload(1).unwrap(), Some(json!({"version":"later"})));
+                assert!(hits(&db, "newtoken").is_empty());
+                assert!(hits(&db, "newanchor").is_empty());
+                db.close().unwrap();
+                let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+                db.build_text_index().unwrap();
+                assert!(hits(&db, "newtoken").is_empty());
+                assert!(hits(&db, "newanchor").is_empty());
+                db.close().unwrap();
+            }
+        }
+    }
+}
+
 fn hits(db: &Database<f32>, query: &str) -> Vec<u64> {
     let config = SearchConfig {
         top_k: 10,
@@ -26,6 +100,9 @@ fn 文本与派生索引发布故障支持重开恢复及同句柄重试() {
             IoPoint::TextMetadataWrite,
             IoPoint::PropertySidecarWrite,
             IoPoint::GraphSidecarWrite,
+            IoPoint::IndexContainerWrite,
+            IoPoint::IndexContainerSync,
+            IoPoint::IndexContainerPublish,
             IoPoint::PublicationCommitSync,
             IoPoint::PublicationCommitRename,
         ] {

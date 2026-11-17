@@ -1,6 +1,6 @@
 # TriviumDB Hook 开发指南
 
-> 本文介绍 `0.9.1` 的 `search*` 检索管线 Hook，覆盖 Rust、Python、Node.js 与 FFI ABI v2。TQL 的 Cascades/NodeSet 管线通过查询算子和 EXPLAIN 扩展。版本记录见[变更说明](changes/0.9.1.md)。
+> 本文介绍 `0.9.2-beta.1` 的 `search*` 检索管线 Hook，覆盖 Rust、Python、Node.js 与 FFI 插件。TQL 的 Cascades/NodeSet 管线通过查询算子和 EXPLAIN 扩展。版本记录见[变更说明](changes/0.9.2-beta.1.md)。
 
 ---
 
@@ -37,6 +37,10 @@ TriviumDB v0.6.0 引入的 Hook 系统提供了 **6 个管线关键阶段的自�
 | **按需覆写** | 所有方法都有默认空实现，开发者只需覆写感兴趣的阶段 |
 | **FFI 友好** | `FfiHook` 支持运行时加载 C/C++ `.so/.dll/.dylib` 动态库 |
 | **类型安全** | `SearchHook: Send + Sync` 编译器强制线程安全 |
+
+每个回调结束后，Core 立即检查 `HookContext.error` 并通过 `TDB_HOOK_EXECUTION` 返回失败。空召回、普通返回及 DPP 最终返回执行相同契约，后续阶段在错误返回后结束。Python、Node 与 FFI 适配器通过 Core 传播回调失败。
+
+查询向量在 Hook 改写后以及目标 dtype 转换后分别校验维度与有限性。f32 有限值转为 f16 后溢出时，查询返回 `TDB_INVALID_VECTOR`。
 
 ---
 
@@ -153,11 +157,11 @@ for (stage, dur) in &ctx.stage_timings {
 | 符号名 | 对应 Hook 点 | 说明 |
 | -------- | ------------- | ------ |
 | `trivium_hook_abi_version` | 全局 | 返回插件实现的 ABI 版本（当前 `2`），与内核不匹配时拒绝加载 |
-| `trivium_hook_invoke_v2` | 六阶段 | ABI v2 统一入口：`(stage, ctx, hits, count)`，返回 `0` 成功 / 非零错误码，覆盖 pre_search / custom_recall / post_recall / pre_graph_expand / rerank / post_search 全部六个阶段 |
-| `trivium_recall` | `on_custom_recall` | v1 兼容：`int(const float* query, size_t query_len, size_t top_k, FfiSearchHit* out_hits, size_t* out_count)` |
-| `trivium_rerank` | `on_rerank` | v1 兼容：`int(FfiSearchHit* hits, size_t count)` |
+| `trivium_hook_invoke_v2` | 六阶段 | 统一阶段入口：`int(stage, query_ptr, query_len, hits_ptr, hits_capacity, hits_count)`，返回 `0` 成功 / 非零错误码，覆盖 pre_search / custom_recall / post_recall / pre_graph_expand / rerank / post_search 全部六个阶段 |
+| `trivium_recall` | `on_custom_recall` | 单独召回入口：`int(const float* query, size_t query_len, size_t top_k, FfiSearchHit* out_hits, size_t* out_count)` |
+| `trivium_rerank` | `on_rerank` | 单独重排入口：`int(FfiSearchHit* hits, size_t count)` |
 
-> **提醒**：新插件建议直接实现 `trivium_hook_invoke_v2` + `trivium_hook_abi_version`：六阶段全部可注入，错误码会传播为结构化查询错误；只导出 `trivium_recall`/`trivium_rerank` 的旧插件继续以 v1 兼容方式加载。
+六阶段插件实现 `trivium_hook_invoke_v2` 与 `trivium_hook_abi_version`，各阶段错误码传播为结构化查询错误。单独召回和重排入口分别提供对应阶段的插件能力。
 
 ### 完整示例：自定义重排序插件
 
@@ -430,7 +434,9 @@ FFI 动态库随最后一个 Hook 所有者释放而卸载。只有数据库持�
 | 上下文·数据 | `ctx.custom_data` (dict) | `context.customData` (object) | `ctx.custom_data` (serde_json::Value) |
 | 上下文·终止 | `ctx.aborted` (bool) | `context.aborted` (bool) | `ctx.abort` (bool) |
 
-> **回调提醒**：原生 Python/JS Hook 的异常转换为结构化查询错误。Node 回调必须是同步函数，禁止返回 Promise。
+Node 的 `onCustomRecall` 返回 `null` 时执行内置召回，重排和后置命中回调返回 `null` 时保留当前命中。空数组显式替换为空命中。命中逐项校验字符串 ID、有效 u64 范围和有限 f32 分数，整批校验完成后应用替换。向量回调返回数值数组，维度和 dtype 边界由 Core 校验。
+
+> **回调提醒**　原生 Python／JS Hook 的失败通过结构化查询错误传播。Node Hook 同步执行，Promise 和格式错误返回 `TDB_HOOK_EXECUTION`。异步计算由宿主完成后，再以同步回调提供结果。
 
 ---
 

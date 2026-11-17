@@ -41,9 +41,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok"] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 fn child_command() -> Command {
@@ -212,3 +210,6 @@ fn 测试_深层海量多重自连边_避免调用栈溢出() {
     drop(db);
     cleanup(&path);
 }
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

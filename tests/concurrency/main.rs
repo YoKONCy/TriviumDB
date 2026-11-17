@@ -13,3 +13,6 @@ mod resources;
 #[cfg(feature = "test-hooks")]
 #[path = "../support/mod.rs"]
 mod support;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

@@ -4,6 +4,122 @@ use serde_json::json;
 use triviumdb::storage::wal::{SyncMode, Wal, WalEntry};
 use triviumdb::{Database, TriviumError};
 
+#[test]
+fn 文本检查点元数据按独立布局校验并拒绝损坏与截断() {
+    let root = TestDir::new("text_metadata_integrity");
+    let path = root.file("data.tdb");
+    let mut db = Database::<f32>::open(&path, 2).unwrap();
+    db.insert_with_id(1, &[1., 0.], json!({"name":"saved"}))
+        .unwrap();
+    db.index_text(1, "preserved").unwrap();
+    db.index_keyword(1, "keyword").unwrap();
+    db.close().unwrap();
+    let meta_path = format!("{path}.text.meta");
+    let valid = crate::artifact::read(&meta_path).unwrap();
+    let main = crate::artifact::read(&path).unwrap();
+    let text = crate::artifact::read(format!("{path}.text")).unwrap();
+    let base = crate::artifact::read(format!("{path}.wal")).unwrap();
+    assert_eq!(&base[..6], b"TVWL\x07\x00");
+    assert_eq!(&base[6..10], &20u32.to_le_bytes());
+    assert_eq!(&base[10..14], &12u32.to_le_bytes());
+    assert_eq!(base.len(), 34);
+    let mut expected = b"TMET\x02\x00\x00\x00".to_vec();
+    expected.extend_from_slice(&(main.len() as u64).to_le_bytes());
+    expected.extend_from_slice(&(text.len() as u64).to_le_bytes());
+    expected.extend_from_slice(&crc32fast::hash(&text).to_le_bytes());
+    expected.extend_from_slice(&crc32fast::hash(&main).to_le_bytes());
+    expected.extend_from_slice(&base[14..30]);
+    expected.extend_from_slice(&crc32fast::hash(&expected).to_le_bytes());
+    assert_eq!(valid, expected);
+    let mut mismatched = base.clone();
+    mismatched[14] ^= 1;
+    let checksum = crc32fast::hash(&mismatched[10..30]);
+    mismatched[30..34].copy_from_slice(&checksum.to_le_bytes());
+    crate::artifact::write(format!("{path}.wal"), &mismatched).unwrap();
+    assert_eq!(
+        Database::<f32>::open(&path, 2).err().unwrap().code(),
+        "TDB_CORRUPTED_FILE"
+    );
+    assert_eq!(
+        crate::artifact::read(format!("{path}.wal")).unwrap(),
+        mismatched
+    );
+    let mut old_version = base.clone();
+    old_version[4..6].copy_from_slice(&6u16.to_le_bytes());
+    crate::artifact::write(format!("{path}.wal"), &old_version).unwrap();
+    assert_eq!(
+        Database::<f32>::open(&path, 2).err().unwrap().code(),
+        "TDB_MIGRATION_REQUIRED"
+    );
+    assert_eq!(
+        crate::artifact::read(format!("{path}.wal")).unwrap(),
+        old_version
+    );
+    let mut missing = b"TVWL\x07\x00".to_vec();
+    let mut deletion = 4u32.to_le_bytes().to_vec();
+    deletion.extend_from_slice(&1u64.to_le_bytes());
+    missing.extend_from_slice(&(deletion.len() as u32).to_le_bytes());
+    missing.extend_from_slice(&deletion);
+    missing.extend_from_slice(&crc32fast::hash(&deletion).to_le_bytes());
+    crate::artifact::write(format!("{path}.wal"), &missing).unwrap();
+    assert_eq!(
+        Database::<f32>::open(&path, 2).err().unwrap().code(),
+        "TDB_RECOVERY_REQUIRED"
+    );
+    assert_eq!(
+        crate::artifact::read(format!("{path}.wal")).unwrap(),
+        missing
+    );
+    assert_eq!(crate::artifact::read(format!("{path}.text")).unwrap(), text);
+    crate::artifact::write(format!("{path}.wal"), base).unwrap();
+    let mut wal = Wal::open_with_sync(&path, SyncMode::Full).unwrap();
+    wal.append(&WalEntry::<f32>::Delete { id: 1 }).unwrap();
+    drop(wal);
+    let wal_bytes = crate::artifact::read(format!("{path}.wal")).unwrap();
+    for length in 0..valid.len() {
+        crate::artifact::write(&meta_path, &valid[..length]).unwrap();
+        assert_eq!(
+            Database::<f32>::open(&path, 2).err().unwrap().code(),
+            "TDB_CORRUPTED_FILE"
+        );
+        assert_eq!(crate::artifact::read(&meta_path).unwrap(), valid[..length]);
+        assert_eq!(
+            crate::artifact::read(format!("{path}.wal")).unwrap(),
+            wal_bytes
+        );
+    }
+    for offset in 0..valid.len() {
+        let mut corrupt = valid.clone();
+        corrupt[offset] ^= 1;
+        crate::artifact::write(&meta_path, &corrupt).unwrap();
+        assert_eq!(
+            Database::<f32>::open(&path, 2).err().unwrap().code(),
+            "TDB_CORRUPTED_FILE"
+        );
+        assert_eq!(crate::artifact::read(&meta_path).unwrap(), corrupt);
+    }
+    for (start, end) in [(8, 16), (28, 32)] {
+        let mut corrupt = valid.clone();
+        corrupt[start..end].fill(255);
+        let checksum = crc32fast::hash(&corrupt[..48]);
+        corrupt[48..52].copy_from_slice(&checksum.to_le_bytes());
+        crate::artifact::write(&meta_path, &corrupt).unwrap();
+        assert_eq!(
+            Database::<f32>::open(&path, 2).err().unwrap().code(),
+            "TDB_CORRUPTED_FILE"
+        );
+        assert_eq!(crate::artifact::read(&meta_path).unwrap(), corrupt);
+        assert_eq!(
+            crate::artifact::read(format!("{path}.wal")).unwrap(),
+            wal_bytes
+        );
+    }
+    crate::artifact::write(&meta_path, valid).unwrap();
+    let mut db = Database::<f32>::open(&path, 2).unwrap();
+    assert!(db.get(1).unwrap().is_none());
+    db.close().unwrap();
+}
+
 fn sample(path: &str) -> Vec<u8> {
     Database::<f32>::open(path, 2).unwrap().close().unwrap();
     let mut wal = Wal::open_with_sync(path, SyncMode::Full).unwrap();
@@ -16,7 +132,7 @@ fn sample(path: &str) -> Vec<u8> {
         .unwrap();
     }
     drop(wal);
-    std::fs::read(format!("{path}.wal")).unwrap()
+    crate::artifact::read(format!("{path}.wal")).unwrap()
 }
 
 fn frames(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
@@ -47,7 +163,7 @@ fn 完整坏帧在首中尾均拒绝且反复打开保留原始日志() {
             } else {
                 corrupt[frame.end - 1] ^= 1;
             }
-            std::fs::write(format!("{path}.wal"), &corrupt).unwrap();
+            crate::artifact::write(format!("{path}.wal"), &corrupt).unwrap();
             for _ in 0..2 {
                 assert!(matches!(
                     Wal::read_entries::<f32>(&path),
@@ -57,10 +173,13 @@ fn 完整坏帧在首中尾均拒绝且反复打开保留原始日志() {
                     Database::<f32>::open(&path, 2),
                     Err(TriviumError::CorruptedFile(_))
                 ));
-                assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), corrupt);
+                assert_eq!(
+                    crate::artifact::read(format!("{path}.wal")).unwrap(),
+                    corrupt
+                );
             }
             // 恢复测试副本后，三条已确认事实都必须仍能回放并再次持久化。
-            std::fs::write(format!("{path}.wal"), valid).unwrap();
+            crate::artifact::write(format!("{path}.wal"), valid).unwrap();
             let mut db = Database::<f32>::open(&path, 2).unwrap();
             assert_eq!(db.all_node_ids().unwrap(), [1, 2, 3]);
             for id in 1..=3 {
@@ -79,7 +198,7 @@ fn 尾帧任意物理截断仅保留两条完整记录() {
     for length in last.start..last.end {
         let path = root.file(&format!("tail-{length}.tdb"));
         Database::<f32>::open(&path, 2).unwrap().close().unwrap();
-        std::fs::write(format!("{path}.wal"), &original[..length]).unwrap();
+        crate::artifact::write(format!("{path}.wal"), &original[..length]).unwrap();
         let mut db = Database::<f32>::open(&path, 2).unwrap();
         assert_eq!(db.all_node_ids().unwrap(), [1, 2]);
         assert_eq!(db.get_payload(2).unwrap(), Some(json!({"id":2})));
@@ -95,11 +214,11 @@ fn 非法完整长度拒绝且保留已确认后缀() {
         let mut bytes = sample(&path);
         let middle = frames(&bytes)[1].start;
         bytes[middle..middle + 4].copy_from_slice(&length.to_le_bytes());
-        std::fs::write(format!("{path}.wal"), &bytes).unwrap();
+        crate::artifact::write(format!("{path}.wal"), &bytes).unwrap();
         assert!(matches!(
             Database::<f32>::open(&path, 2),
             Err(TriviumError::CorruptedFile(_))
         ));
-        assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), bytes);
+        assert_eq!(crate::artifact::read(format!("{path}.wal")).unwrap(), bytes);
     }
 }

@@ -4,3 +4,6 @@
 mod graph_algorithms;
 mod graph_b2;
 mod reverse_edge;
+
+#[path = "../support/mod.rs"]
+mod support;

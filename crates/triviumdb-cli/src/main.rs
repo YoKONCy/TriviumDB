@@ -252,6 +252,7 @@ fn run(cli: Cli, cfg: config::Config) -> CliResult {
             }
         },
         Commands::Export { db, output } => {
+            commands::export::validate_output_path(&db.path, &output)?;
             let handle = open(&db, &cfg)?;
             commands::export::run(&handle, &db.path, &output)
         }

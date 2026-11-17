@@ -1,7 +1,10 @@
 #![allow(non_snake_case)]
 //! 按领域聚合的集成测试入口。
+#[path = "../support/artifact.rs"]
+mod artifact;
 
 mod boundary;
+mod cognitive_boundaries;
 mod console_editing;
 mod console_host;
 mod database_advanced;
@@ -48,3 +51,6 @@ mod write_outcomes;
 mod support;
 
 mod document_ingestion;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

@@ -14,3 +14,6 @@ mod tql_ast;
 mod traversal;
 mod vector;
 mod wal;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;
