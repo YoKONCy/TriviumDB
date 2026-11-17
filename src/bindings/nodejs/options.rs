@@ -69,6 +69,7 @@ pub(super) fn parse_search_config(
         Some(value) => argument_object(env, value, "config", None)?,
         None => env.create_object()?,
     };
+    let exact = optional_bool(env, object.get("exact")?, false, "exact")?;
     let config = crate::database::SearchConfig {
         top_k: parse_search_usize(env, object.get("topK")?, 5.0, "topK", true)?,
         recall_k: parse_search_usize(env, object.get("recallK")?, 0.0, "recallK", false)?,
@@ -80,7 +81,7 @@ pub(super) fn parse_search_config(
             "expandDepth",
             false,
         )?,
-        min_score: optional_number(env, object.get("minScore")?, 0.1, "minScore")? as f32,
+        min_score: optional_number(env, object.get("minScore")?, 0.0, "minScore")? as f32,
         teleport_alpha: optional_number(env, object.get("teleportAlpha")?, 0.0, "teleportAlpha")?
             as f32,
         enable_advanced_pipeline: optional_bool(
@@ -123,7 +124,7 @@ pub(super) fn parse_search_config(
             object.get("forceBruteForce")?,
             false,
             "forceBruteForce",
-        )?,
+        )? || exact,
         diffusion_bias: object
             .get("diffusionBias")?
             .map(|value| {

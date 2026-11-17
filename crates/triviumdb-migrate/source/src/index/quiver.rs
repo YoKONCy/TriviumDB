@@ -1,0 +1,2595 @@
+//! QuIVer — QUantized Index for Vector Retrieval
+//!
+//! BQ-native Vamana 图索引，论文核心实现。
+//! 支持 rayon 并行批量构建（batch_build）。
+//!
+//! 核心架构：
+//!   - 2-bit Sign-Magnitude 量化 (pos + strong)
+//!   - Vamana α-diversity 剪枝构图
+//!   - 默认无训练SM-L2位运算导航 + 原始向量余弦精排
+//!
+//! 设计要点：
+//!   - Bitset visited: 可复用位向量，2.5KB/20K 节点
+//!   - Flat 邻接表: 连续内存，固定步长
+//!   - BQ 签名连续存储: SoA 布局，预取友好
+
+use crate::index::bq::{Bq2Signature, Bq2Store};
+use crate::vector::{
+    cosine_query_norm_f32_384, cosine_similarity_f32, cosine_similarity_f32_384_with_query_norm,
+};
+use rayon::prelude::*;
+use std::cell::UnsafeCell;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+/// 默认SM-L2查询内核，以及可显式选择的校正与原生欧氏模式。
+#[path = "quiver/sm.rs"]
+pub mod sm;
+
+/// SSD 冷向量的通用维度编码、布局校验与标量评分基底。
+#[path = "quiver/cold.rs"]
+pub mod cold;
+mod decoding;
+
+/// 单文件SSD索引的流式发布、代际Reader与显式量化检索。
+#[path = "quiver/runtime.rs"]
+pub mod runtime;
+
+mod connectivity;
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct NonNanF32(pub f32);
+
+impl Eq for NonNanF32 {}
+impl PartialOrd for NonNanF32 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for NonNanF32 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
+/// 查询时导航评分器。评分越小，候选越优先；该抽象不参与 QuIVer 建图或裁边。
+pub trait NavigationScorer {
+    fn score(&mut self, node_id: u64, bq_distance: u32) -> u32;
+
+    /// search_with_scorer控制检查点；返回false时结束候选生成，调用方保留并传播原因。
+    fn checkpoint(&mut self) -> bool {
+        true
+    }
+
+    fn accept_result(&mut self, _node_id: u64) -> bool {
+        true
+    }
+}
+
+/// 与历史 QuIVer 查询完全等价的纯 BQ 导航评分器。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BqNavigationScorer;
+
+impl NavigationScorer for BqNavigationScorer {
+    #[inline(always)]
+    fn score(&mut self, _node_id: u64, bq_distance: u32) -> u32 {
+        bq_distance
+    }
+}
+
+// ── Bitset ──
+
+struct Bitset {
+    data: Vec<u64>,
+    len: usize,
+}
+
+impl Bitset {
+    fn new(n: usize) -> Self {
+        Self {
+            data: vec![0u64; n.div_ceil(64)],
+            len: n,
+        }
+    }
+    #[inline(always)]
+    fn set(&mut self, i: usize) {
+        self.data[i >> 6] |= 1u64 << (i & 63);
+    }
+    #[inline(always)]
+    fn test(&self, i: usize) -> bool {
+        (self.data[i >> 6] >> (i & 63)) & 1 != 0
+    }
+    fn clear(&mut self) {
+        self.data.iter_mut().for_each(|x| *x = 0);
+    }
+    fn grow(&mut self, new_n: usize) {
+        let need = new_n.div_ceil(64);
+        if need > self.data.len() {
+            self.data.resize(need, 0);
+        }
+        self.len = new_n;
+    }
+}
+
+struct SparseBitset {
+    data: Vec<u64>,
+    touched_words: Vec<usize>,
+}
+
+struct SearchScratch384 {
+    visited: SparseBitset,
+    candidates: BinaryHeap<Reverse<(NonNanF32, u32)>>,
+    results: BinaryHeap<(NonNanF32, u32)>,
+    vector: Vec<f32>,
+    scored: Vec<(f32, u32)>,
+}
+
+impl SearchScratch384 {
+    fn new() -> Self {
+        Self {
+            visited: SparseBitset::new(0),
+            candidates: BinaryHeap::new(),
+            results: BinaryHeap::new(),
+            vector: Vec::with_capacity(384),
+            scored: Vec::new(),
+        }
+    }
+}
+
+impl SparseBitset {
+    fn new(n: usize) -> Self {
+        Self {
+            data: vec![0; n.div_ceil(64)],
+            touched_words: Vec::new(),
+        }
+    }
+
+    fn begin(&mut self) {
+        for word in self.touched_words.drain(..) {
+            self.data[word] = 0;
+        }
+    }
+
+    #[inline(always)]
+    fn set(&mut self, index: usize) {
+        let word = index >> 6;
+        if self.data[word] == 0 {
+            self.touched_words.push(word);
+        }
+        self.data[word] |= 1u64 << (index & 63);
+    }
+
+    #[inline(always)]
+    fn test(&self, index: usize) -> bool {
+        (self.data[index >> 6] >> (index & 63)) & 1 != 0
+    }
+
+    fn grow(&mut self, new_n: usize) {
+        let words = new_n.div_ceil(64);
+        if words > self.data.len() {
+            self.data.resize(words, 0);
+        }
+    }
+}
+
+trait SearchVisited {
+    fn begin(&mut self);
+    fn set(&mut self, index: usize);
+    fn test(&self, index: usize) -> bool;
+}
+
+impl SearchVisited for Bitset {
+    fn begin(&mut self) {
+        self.clear();
+    }
+
+    fn set(&mut self, index: usize) {
+        self.set(index);
+    }
+
+    fn test(&self, index: usize) -> bool {
+        self.test(index)
+    }
+}
+
+impl SearchVisited for SparseBitset {
+    fn begin(&mut self) {
+        self.begin();
+    }
+
+    fn set(&mut self, index: usize) {
+        self.set(index);
+    }
+
+    fn test(&self, index: usize) -> bool {
+        self.test(index)
+    }
+}
+
+// ── Flat neighbor list ──
+// Layer 0: 常规近邻按 m0 选择；既有双倍容量还可保留跨签名出口和导航树边。
+// 每行存为 [degree, n0, n1, ...]，stride = 2*m0+1。
+// Upper layers: 用 Vec<Vec<u32>>（节点少，性能不敏感）
+
+const EMPTY_NB: u32 = u32::MAX;
+
+struct FlatAdj {
+    data: Vec<u32>, // n * stride 个 u32
+    stride: usize,  // 每行元素数，第一个元素是度数
+}
+
+struct SpinLockGuard<'a> {
+    lock: &'a AtomicBool,
+}
+
+impl Drop for SpinLockGuard<'_> {
+    fn drop(&mut self) {
+        self.lock.store(false, Ordering::Release);
+    }
+}
+
+#[repr(transparent)]
+struct NodeGuard<'a>((u32, SpinLockGuard<'a>));
+
+impl NodeGuard<'_> {
+    #[inline(always)]
+    fn node(&self) -> u32 {
+        self.0.0
+    }
+}
+
+struct StripedSpinLocks {
+    locks: Vec<AtomicBool>,
+    mask: usize,
+}
+
+impl StripedSpinLocks {
+    fn new(nodes: usize, m: usize) -> Self {
+        // 96核时需要足够的条纹数减少争用；每核至少 256 条纹
+        let desired = nodes.clamp(256, 65536).max(m * 64);
+        let count = desired.next_power_of_two();
+        let locks = (0..count).map(|_| AtomicBool::new(false)).collect();
+        Self {
+            locks,
+            mask: count - 1,
+        }
+    }
+
+    #[inline(always)]
+    fn stripe(&self, node: u32) -> usize {
+        const FIB: usize = 0x9E3779B97F4A7C15usize;
+        (node as usize).wrapping_mul(FIB) & self.mask
+    }
+
+    #[inline(always)]
+    fn lock(&self, node: u32) -> NodeGuard<'_> {
+        let lock = &self.locks[self.stripe(node)];
+        while lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+        NodeGuard((node, SpinLockGuard { lock }))
+    }
+
+    /// 计时版加锁：返回自旋等待耗时(ns)，用于构图性能探针
+    #[inline(always)]
+    fn lock_timed(&self, node: u32) -> (NodeGuard<'_>, u64) {
+        let lock = &self.locks[self.stripe(node)];
+        let t0 = Instant::now();
+        let mut spun = false;
+        while lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spun = true;
+            std::hint::spin_loop();
+        }
+        // 仅在确实自旋等待时计入耗时，避免无争用时 Instant 噪声主导
+        let wait = if spun {
+            t0.elapsed().as_nanos() as u64
+        } else {
+            0
+        };
+        (NodeGuard((node, SpinLockGuard { lock })), wait)
+    }
+}
+
+/// 构图性能探针：通过环境变量 TRIVIUM_BUILD_PROFILE=1 启用，默认零开销。
+/// 分段累计纳秒，定位 spin-lock 弱扩展的真正主因。
+struct BuildProfile {
+    enabled: bool,
+    bitset_ns: AtomicU64,   // 每节点 Bitset 分配耗时
+    beam_ns: AtomicU64,     // beam search 寻路耗时
+    fwd_ns: AtomicU64,      // 前向候选准备+vamana_select+写自身边
+    rev_wait_ns: AtomicU64, // 反向剪枝的自旋锁等待耗时
+    rev_work_ns: AtomicU64, // 反向剪枝的锁内做活耗时(去掉等待)
+    nodes: AtomicU64,       // 处理节点数
+}
+
+impl BuildProfile {
+    fn new() -> Self {
+        let enabled = std::env::var("TRIVIUM_BUILD_PROFILE").as_deref() == Ok("1");
+        Self {
+            enabled,
+            bitset_ns: AtomicU64::new(0),
+            beam_ns: AtomicU64::new(0),
+            fwd_ns: AtomicU64::new(0),
+            rev_wait_ns: AtomicU64::new(0),
+            rev_work_ns: AtomicU64::new(0),
+            nodes: AtomicU64::new(0),
+        }
+    }
+
+    #[inline(always)]
+    fn add(&self, counter: &AtomicU64, ns: u64) {
+        if self.enabled {
+            counter.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
+    fn report(&self, wall_secs: f64, threads: usize) {
+        if !self.enabled {
+            return;
+        }
+        let nodes = self.nodes.load(Ordering::Relaxed).max(1);
+        let ms = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e6;
+        let per = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / nodes as f64;
+        let total_cpu_ms = ms(&self.bitset_ns)
+            + ms(&self.beam_ns)
+            + ms(&self.fwd_ns)
+            + ms(&self.rev_wait_ns)
+            + ms(&self.rev_work_ns);
+        tracing::info!(
+            nodes,
+            threads,
+            wall_seconds = wall_secs,
+            total_cpu_ms,
+            "构图性能探针完成 (Graph build profiler completed)"
+        );
+        let line = |name: &str, c: &AtomicU64| {
+            let cpu_ms = ms(c);
+            let pct = if total_cpu_ms > 0.0 {
+                cpu_ms / total_cpu_ms * 100.0
+            } else {
+                0.0
+            };
+            tracing::info!(
+                stage = name,
+                cpu_ms,
+                percent = pct,
+                per_node_ns = per(c),
+                "构图阶段性能 (Graph build stage profile)"
+            );
+        };
+        line("Bitset分配/allocate", &self.bitset_ns);
+        line("束搜索寻路/beam search", &self.beam_ns);
+        line("前向选边/forward select", &self.fwd_ns);
+        line("反向剪枝锁等待/reverse wait", &self.rev_wait_ns);
+        line("反向剪枝工作/reverse work", &self.rev_work_ns);
+    }
+}
+
+impl FlatAdj {
+    fn new(stride: usize) -> Self {
+        Self {
+            data: Vec::new(),
+            stride,
+        }
+    }
+
+    /// 为新节点追加空邻居列表
+    fn push_empty(&mut self) {
+        self.data.push(0); // degree = 0
+        for _ in 1..self.stride {
+            self.data.push(EMPTY_NB);
+        }
+    }
+
+    #[inline(always)]
+    fn degree(&self, node: u32) -> usize {
+        self.data[node as usize * self.stride] as usize
+    }
+
+    #[inline(always)]
+    fn neighbors(&self, node: u32) -> &[u32] {
+        let base = node as usize * self.stride;
+        let deg = self.data[base] as usize;
+        &self.data[base + 1..base + 1 + deg]
+    }
+
+    /// 追加一条边（不检查重复，调用方保证）
+    fn push_neighbor(&mut self, node: u32, nb: u32) {
+        let base = node as usize * self.stride;
+        let deg = self.data[base] as usize;
+        if deg + 1 < self.stride {
+            self.data[base + 1 + deg] = nb;
+            self.data[base] = (deg + 1) as u32;
+        }
+    }
+
+    /// 替换整个邻居列表
+    fn set_neighbors(&mut self, node: u32, nbs: &[u32]) {
+        let base = node as usize * self.stride;
+        let count = nbs.len().min(self.stride - 1);
+        self.data[base] = count as u32;
+        for i in 0..count {
+            self.data[base + 1 + i] = nbs[i];
+        }
+        for i in count..(self.stride - 1) {
+            self.data[base + 1 + i] = EMPTY_NB;
+        }
+    }
+
+    fn contains(&self, node: u32, nb: u32) -> bool {
+        self.neighbors(node).contains(&nb)
+    }
+
+    fn reset_full(&mut self, nodes: usize) {
+        self.data.clear();
+        self.data.resize(nodes * self.stride, EMPTY_NB);
+        for node in 0..nodes {
+            self.data[node * self.stride] = 0;
+        }
+    }
+}
+
+// ── BQ-Vamana 图 ──
+
+struct ConcurrentFlatAdj {
+    data: Box<[UnsafeCell<u32>]>,
+    stride: usize,
+    nodes: usize,
+}
+
+unsafe impl Sync for ConcurrentFlatAdj {}
+
+impl ConcurrentFlatAdj {
+    fn new(nodes: usize, stride: usize) -> Self {
+        let len = nodes.checked_mul(stride).expect("并发邻接表容量溢出");
+        let mut data = Vec::with_capacity(len);
+        for i in 0..len {
+            let value = if i % stride == 0 { 0 } else { EMPTY_NB };
+            data.push(UnsafeCell::new(value));
+        }
+        Self {
+            data: data.into_boxed_slice(),
+            stride,
+            nodes,
+        }
+    }
+
+    #[inline(always)]
+    fn check_node(&self, node: u32) {
+        debug_assert!((node as usize) < self.nodes);
+        debug_assert!((node as usize + 1) * self.stride <= self.data.len());
+    }
+
+    fn neighbors_locked(&self, node: u32, locks: &StripedSpinLocks) -> Vec<u32> {
+        let guard = locks.lock(node);
+        self.neighbors_with_guard(&guard)
+    }
+
+    fn neighbors_raw(&self, node: u32) -> Vec<u32> {
+        self.check_node(node);
+        unsafe {
+            let base = node as usize * self.stride;
+            let deg = *self.data[base].get() as usize;
+            debug_assert!(deg < self.stride);
+            let mut out = Vec::with_capacity(deg);
+            for i in 0..deg.min(self.stride - 1) {
+                let nb = *self.data[base + 1 + i].get();
+                if nb != EMPTY_NB && (nb as usize) < self.nodes {
+                    out.push(nb);
+                }
+            }
+            out
+        }
+    }
+
+    /// 邻接表单节点容量（不含度数槽）
+    #[inline(always)]
+    fn capacity(&self) -> usize {
+        self.stride - 1
+    }
+
+    /// 读取节点当前度数（需持锁调用，惰性剪枝用）
+    #[inline(always)]
+    fn degree_raw(&self, node: u32) -> usize {
+        self.check_node(node);
+        unsafe { (*self.data[node as usize * self.stride].get() as usize).min(self.stride - 1) }
+    }
+
+    /// 判断节点邻居中是否已含 nb（需持锁调用，惰性剪枝用）
+    fn contains_raw(&self, node: u32, nb: u32) -> bool {
+        self.check_node(node);
+        unsafe {
+            let base = node as usize * self.stride;
+            let deg = (*self.data[base].get() as usize).min(self.stride - 1);
+            for i in 0..deg {
+                if *self.data[base + 1 + i].get() == nb {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+
+    /// 追加一条边（不剪枝，调用方保证未满且无重复，需持锁调用）
+    #[inline(always)]
+    fn push_neighbor_raw(&self, node: u32, nb: u32) {
+        self.check_node(node);
+        unsafe {
+            let base = node as usize * self.stride;
+            let deg = *self.data[base].get() as usize;
+            if deg + 1 < self.stride {
+                *self.data[base + 1 + deg].get() = nb;
+                *self.data[base].get() = (deg + 1) as u32;
+            }
+        }
+    }
+
+    fn neighbors_with_guard(&self, guard: &NodeGuard<'_>) -> Vec<u32> {
+        self.neighbors_raw(guard.node())
+    }
+
+    fn set_neighbors_raw(&self, node: u32, nbs: &[u32]) {
+        self.check_node(node);
+        unsafe {
+            let base = node as usize * self.stride;
+            let count = nbs.len().min(self.stride - 1);
+            *self.data[base].get() = count as u32;
+            for i in 0..count {
+                debug_assert!((nbs[i] as usize) < self.nodes);
+                *self.data[base + 1 + i].get() = nbs[i];
+            }
+            for i in count..(self.stride - 1) {
+                *self.data[base + 1 + i].get() = EMPTY_NB;
+            }
+        }
+    }
+
+    fn set_neighbors_locked_fast(&self, node: u32, nbs: &[u32], locks: &StripedSpinLocks) {
+        let _guard = locks.lock(node);
+        self.set_neighbors_raw(node, nbs);
+    }
+
+    fn freeze_into_flat(self, dst: &mut FlatAdj) {
+        dst.data.clear();
+        dst.data.reserve(self.data.len());
+        for cell in self.data.iter() {
+            unsafe {
+                dst.data.push(*cell.get());
+            }
+        }
+        dst.stride = self.stride;
+    }
+}
+
+struct ParallelBuildContext<'a> {
+    adj: &'a ConcurrentFlatAdj,
+    n: usize,
+    dim: usize,
+    m0: usize,
+    ef: usize,
+    alpha: f32,
+    sigs: &'a Bq2Store,
+    locks: &'a StripedSpinLocks,
+    profile: &'a BuildProfile,
+}
+
+impl ParallelBuildContext<'_> {
+    fn beam_search_l0_locked(
+        &self,
+        q_sig: &Bq2Signature,
+        entry: u32,
+        ef: usize,
+        visited: &mut Bitset,
+    ) -> Vec<(NonNanF32, u32)> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        visited.clear();
+
+        let mut candidates: BinaryHeap<Reverse<(NonNanF32, u32)>> =
+            BinaryHeap::with_capacity(ef * 2);
+        let mut results: BinaryHeap<(NonNanF32, u32)> = BinaryHeap::with_capacity(ef + 1);
+
+        let d = NonNanF32(
+            self.sigs
+                .distance_to_sig_in_bounds(entry as usize, q_sig, self.dim) as f32,
+        );
+        visited.set(entry as usize);
+        candidates.push(Reverse((d, entry)));
+        results.push((d, entry));
+
+        while let Some(Reverse((cd, cur))) = candidates.pop() {
+            if results.len() >= ef && cd > results.peek().unwrap().0 {
+                break;
+            }
+
+            let nbs = self.adj.neighbors_locked(cur, self.locks);
+
+            // 批量预取未访问邻居的 BQ 签名
+            for &nb in &nbs {
+                if !visited.test(nb as usize) {
+                    self.sigs.prefetch_sig(nb as usize);
+                }
+            }
+
+            for nb in nbs {
+                if visited.test(nb as usize) {
+                    continue;
+                }
+                visited.set(nb as usize);
+
+                let nd = NonNanF32(
+                    self.sigs
+                        .distance_to_sig_in_bounds(nb as usize, q_sig, self.dim)
+                        as f32,
+                );
+                if results.len() < ef || nd < results.peek().unwrap().0 {
+                    candidates.push(Reverse((nd, nb)));
+                    results.push((nd, nb));
+                    if results.len() > ef {
+                        results.pop();
+                    }
+                }
+            }
+        }
+
+        let mut res: Vec<(NonNanF32, u32)> = results.into_vec();
+        res.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        res
+    }
+
+    fn connect_node(&self, idx: u32, visited: &mut Bitset) {
+        if idx == 0 {
+            return;
+        }
+
+        let prof = self.profile.enabled;
+        let my_sig = self.sigs.get_sig_in_bounds(idx as usize);
+        let t_beam = if prof { Some(Instant::now()) } else { None };
+        let candidates_sym = self.beam_search_l0_locked(&my_sig, 0, self.ef, visited);
+        if let Some(t) = t_beam {
+            self.profile
+                .add(&self.profile.beam_ns, t.elapsed().as_nanos() as u64);
+        }
+        let t_fwd = if prof { Some(Instant::now()) } else { None };
+        let mut candidates: Vec<(u32, u32)> = candidates_sym
+            .into_iter()
+            .filter(|&(_, id)| id != idx)
+            .map(|(_, id)| {
+                (
+                    self.sigs
+                        .distance_in_bounds(idx as usize, id as usize, self.dim),
+                    id,
+                )
+            })
+            .collect();
+
+        let samples = self.ef.min(128).max(self.m0 * 2);
+        let mut state = (idx as usize)
+            .wrapping_mul(0x9E3779B97F4A7C15usize)
+            .wrapping_add(0xBF58476D1CE4E5B9usize);
+        for _ in 0..samples {
+            state ^= state >> 30;
+            state = state.wrapping_mul(0xBF58476D1CE4E5B9usize);
+            state ^= state >> 27;
+            state = state.wrapping_mul(0x94D049BB133111EBusize);
+            state ^= state >> 31;
+            let id = (state % self.n) as u32;
+            if id != idx {
+                candidates.push((
+                    self.sigs
+                        .distance_in_bounds(idx as usize, id as usize, self.dim),
+                    id,
+                ));
+            }
+        }
+
+        candidates.sort_unstable_by_key(|&(_, id)| id);
+        candidates.dedup_by_key(|&mut (_, id)| id);
+        candidates.sort_unstable_by_key(|&(d, _)| d);
+
+        if candidates.is_empty() {
+            candidates.push((self.sigs.distance_in_bounds(idx as usize, 0, self.dim), 0));
+        }
+
+        let selected =
+            QuIVer::vamana_select(self.sigs, idx, &candidates, self.m0, self.dim, self.alpha);
+        self.adj
+            .set_neighbors_locked_fast(idx, &selected, self.locks);
+        if let Some(t) = t_fwd {
+            self.profile
+                .add(&self.profile.fwd_ns, t.elapsed().as_nanos() as u64);
+        }
+
+        let cap = self.adj.capacity();
+        for &nb in &selected {
+            let (_guard, wait_ns) = self.locks.lock_timed(nb);
+            self.profile.add(&self.profile.rev_wait_ns, wait_ns);
+            let t_work = if prof { Some(Instant::now()) } else { None };
+
+            // 惰性剪枝：邻居表未满则直接追加(O(deg))，仅当容量用尽才触发一次完整剪枝。
+            // 邻接表 stride=m0*2+1 留有 2× headroom，使昂贵的 vamana_select(O(deg²))
+            // 从"每条反向边都跑"降为"约每 m0 条才跑一次"，砍掉构图主成本。
+            if !self.adj.contains_raw(nb, idx) {
+                if self.adj.degree_raw(nb) < cap {
+                    self.adj.push_neighbor_raw(nb, idx);
+                } else {
+                    let mut current = self.adj.neighbors_raw(nb);
+                    current.push(idx);
+                    let mut nb_candidates: Vec<(u32, u32)> = current
+                        .into_iter()
+                        .filter(|&n| n != nb)
+                        .map(|n| {
+                            (
+                                self.sigs
+                                    .distance_in_bounds(nb as usize, n as usize, self.dim),
+                                n,
+                            )
+                        })
+                        .collect();
+                    nb_candidates.sort_unstable_by_key(|&(_, id)| id);
+                    nb_candidates.dedup_by_key(|&mut (_, id)| id);
+                    nb_candidates.sort_unstable_by_key(|&(d, _)| d);
+                    let pruned = QuIVer::vamana_select(
+                        self.sigs,
+                        nb,
+                        &nb_candidates,
+                        self.m0,
+                        self.dim,
+                        self.alpha,
+                    );
+                    self.adj.set_neighbors_raw(nb, &pruned);
+                }
+            }
+
+            if let Some(t) = t_work {
+                self.profile
+                    .add(&self.profile.rev_work_ns, t.elapsed().as_nanos() as u64);
+            }
+        }
+        self.profile.nodes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 构图后剪至 m0 个常规近邻，并在原容量内保留碰撞簇的跨签名出口。
+    /// 每节点最多剪一次，O(n) 单次剪枝，相对原"每边重剪"成本可忽略。
+    fn final_prune(&self, node: u32) {
+        let deg = self.adj.degree_raw(node);
+        if deg <= self.m0 {
+            return;
+        }
+        let current = self.adj.neighbors_raw(node);
+        let mut cand: Vec<(u32, u32)> = current
+            .into_iter()
+            .filter(|&n| n != node)
+            .map(|n| {
+                (
+                    self.sigs
+                        .distance_in_bounds(node as usize, n as usize, self.dim),
+                    n,
+                )
+            })
+            .collect();
+        cand.sort_unstable_by_key(|&(_, id)| id);
+        cand.dedup_by_key(|&mut (_, id)| id);
+        cand.sort_unstable_by_key(|&(d, _)| d);
+        let pruned =
+            QuIVer::select_diverse_layer0(self.sigs, node, &cand, self.m0, self.dim, self.alpha);
+        self.adj.set_neighbors_raw(node, &pruned);
+    }
+}
+
+const DEFAULT_PREFILTER_SLOT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+type PrefilterSlotPosting = Arc<Vec<(u64, u32)>>;
+
+struct PrefilterSlotCacheEntry {
+    posting: PrefilterSlotPosting,
+    bytes: usize,
+    last_used: u64,
+}
+
+struct PrefilterSlotCacheState {
+    entries: std::collections::HashMap<(u64, u64), PrefilterSlotCacheEntry>,
+    bytes: usize,
+    max_bytes: usize,
+    clock: u64,
+}
+
+impl PrefilterSlotCacheState {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+
+    fn get(&mut self, key: (u64, u64)) -> Option<PrefilterSlotPosting> {
+        self.clock = self.clock.wrapping_add(1);
+        let entry = self.entries.get_mut(&key)?;
+        entry.last_used = self.clock;
+        Some(Arc::clone(&entry.posting))
+    }
+
+    fn insert(&mut self, key: (u64, u64), posting: PrefilterSlotPosting) {
+        let bytes = posting
+            .len()
+            .saturating_mul(std::mem::size_of::<(u64, u32)>());
+        if bytes > self.max_bytes {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous.bytes);
+        }
+        while self.bytes.saturating_add(bytes) > self.max_bytes {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(removed.bytes);
+            }
+        }
+        self.clock = self.clock.wrapping_add(1);
+        self.entries.insert(
+            key,
+            PrefilterSlotCacheEntry {
+                posting,
+                bytes,
+                last_used: self.clock,
+            },
+        );
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+}
+
+impl Default for PrefilterSlotCacheState {
+    fn default() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            bytes: 0,
+            max_bytes: DEFAULT_PREFILTER_SLOT_CACHE_BYTES,
+            clock: 0,
+        }
+    }
+}
+
+type PrefilterSlotCache = Mutex<PrefilterSlotCacheState>;
+
+pub struct QuIVer {
+    /// 运行期路由身份；Reader持有令牌，替换实例后旧令牌持续阻止地址复用造成误绑定。
+    routing_identity: std::sync::Arc<()>,
+    dim: usize,
+    n: usize,
+    m: usize,
+    m0: usize,
+    ef_construction: usize,
+    ml: f64,
+    alpha: f32,
+
+    // Hot（常驻内存）
+    bq_store: Bq2Store,
+    // 显式安装的查询校正；复用layer0，结构或向量变化后失效。
+    corrected_sm: Option<sm::SmIndex>,
+    // 默认无训练SM-L2；增量插入追加位码，删除仅屏蔽精排，旧文件由向量池恢复。
+    default_sm: Option<sm::SmIndex>,
+    layer0: FlatAdj,
+    upper_layers: Vec<Vec<Vec<u32>>>,
+    upper_bytes: usize,
+    node_max_layer: Vec<u8>,
+
+    // ID 映射
+    ids: Vec<u64>,                                       // internal_index → NodeId
+    slot_indices: Vec<usize>, // internal_index → MemTable slot_index（精排用）
+    id_to_internal: std::collections::HashMap<u64, u32>, // NodeId → internal_index（增量操作用）
+
+    entry_point: u32,
+    max_level: usize,
+
+    // 增量管理
+    tombstones: Vec<bool>, // internal_index → 是否已删除
+    dirty_count: usize,    // 增量变更计数（tombstone + 追加节点）
+
+    // 当前 QuIVer 实例范围内的属性 posting → internal slot 派生缓存。
+    // QuIVer 重建会替换整个实例；增量变更会清空缓存，不参与持久化或建图。
+    prefilter_slot_cache: PrefilterSlotCache,
+
+    visited: Bitset, // 建图期间复用，搜索时每次新建
+    /// 从当前入口覆盖全部节点的导航树；仅保存父节点，不复制邻接表或原始向量。
+    connectivity_parents: Vec<u32>,
+}
+
+pub struct QuIVerConfig {
+    pub m: usize,
+    pub ef_construction: usize,
+    /// Vamana α 参数：1.0=严格剪枝，1.2=推荐值，越大图越密
+    pub alpha: f32,
+}
+
+impl Default for QuIVerConfig {
+    fn default() -> Self {
+        Self {
+            m: 16,
+            ef_construction: 128,
+            alpha: 1.2,
+        }
+    }
+}
+
+pub struct QuIVerSearchConfig {
+    pub top_k: usize,
+    pub ef_search: usize,
+    pub rerank_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QuIVerPrefilterMetrics {
+    pub posting_lookup_ns: u64,
+    pub node_mapping_ns: u64,
+    pub bq_heap_scan_ns: u64,
+    pub output_sort_ns: u64,
+    pub cache_hit: bool,
+    pub mapped_candidates: usize,
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
+impl QuIVerSearchConfig {
+    #[inline]
+    fn rerank_limit(&self) -> usize {
+        self.rerank_limit.unwrap_or(self.ef_search).max(self.top_k)
+    }
+}
+
+impl QuIVer {
+    pub fn new(dim: usize, config: &QuIVerConfig) -> Self {
+        assert!(
+            dim <= crate::index::bq::MAX_BQ_DIM,
+            "QuIVer 维度超过安全上限"
+        );
+        let m = config.m;
+        let m0 = m * 2;
+        Self {
+            dim,
+            n: 0,
+            routing_identity: std::sync::Arc::new(()),
+            m,
+            m0,
+            ef_construction: config.ef_construction,
+            ml: 1.0 / (m as f64).ln(),
+            alpha: config.alpha,
+            bq_store: Bq2Store::new(dim),
+            corrected_sm: None,
+            default_sm: if dim == 0 {
+                None
+            } else {
+                Some(sm::SmIndex::empty_routing(dim).expect("合法SM维度"))
+            },
+            layer0: FlatAdj::new(m0 * 2 + 1),
+            upper_layers: Vec::new(),
+            upper_bytes: 0,
+            node_max_layer: Vec::new(),
+            ids: Vec::new(),
+            slot_indices: Vec::new(),
+            id_to_internal: std::collections::HashMap::new(),
+            entry_point: 0,
+            max_level: 0,
+            tombstones: Vec::new(),
+            dirty_count: 0,
+            prefilter_slot_cache: Mutex::new(PrefilterSlotCacheState::default()),
+            visited: Bitset::new(0),
+            connectivity_parents: Vec::new(),
+        }
+    }
+
+    fn random_level(&self, lcg: &mut u64) -> usize {
+        *lcg = lcg
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let r = ((*lcg >> 33) as f64 / (1u64 << 31) as f64).max(1e-15);
+        (-r.ln() * self.ml).floor() as usize
+    }
+
+    pub fn insert(&mut self, vector: &[f32], id: u64, slot_index: usize, lcg: &mut u64) {
+        self.corrected_sm = None;
+        assert_eq!(vector.len(), self.dim);
+        let previous_entry = self.entry_point;
+        let idx = self.n as u32;
+
+        let sig = Bq2Signature::from_vector(vector);
+        self.bq_store.push_sig(&sig);
+        self.ids.push(id);
+        self.slot_indices.push(slot_index);
+        self.id_to_internal.insert(id, idx);
+        self.tombstones.push(false);
+
+        let level = self.random_level(lcg);
+        self.node_max_layer.push(level as u8);
+
+        // 扩展 layer0
+        self.layer0.push_empty();
+
+        // 扩展 upper layers
+        while self.upper_layers.len() < level {
+            // upper_layers[0] = layer 1, [1] = layer 2, ...
+            self.upper_bytes += self.n * std::mem::size_of::<Vec<u32>>();
+            self.upper_layers.push(vec![Vec::new(); self.n]);
+        }
+        for ul in self.upper_layers.iter_mut() {
+            ul.push(Vec::new());
+            self.upper_bytes += std::mem::size_of::<Vec<u32>>();
+        }
+
+        self.n += 1;
+        self.connectivity_parents.push(EMPTY_NB);
+
+        if let Some(model) = &mut self.default_sm {
+            model
+                .push_routing_vector(vector, id)
+                .expect("插入向量必须合法");
+        }
+
+        // 确保 visited bitset 够大
+        self.visited.grow(self.n);
+
+        if self.n == 1 {
+            self.entry_point = 0;
+            self.max_level = level;
+            return;
+        }
+
+        let my_sig = self.bq_store.get_sig_in_bounds(idx as usize);
+        let mut cur_node = self.entry_point;
+
+        // ── 高层贪心下降（BQ 距离，不需要 f32 向量） ──
+        for l in ((level + 1)..=self.max_level).rev() {
+            let ul_idx = l - 1;
+            if ul_idx < self.upper_layers.len() {
+                loop {
+                    let mut changed = false;
+                    let cur_d =
+                        self.bq_store
+                            .distance_in_bounds(idx as usize, cur_node as usize, self.dim);
+                    let mut best_d = cur_d;
+
+                    for &nb in &self.upper_layers[ul_idx][cur_node as usize] {
+                        let nd =
+                            self.bq_store
+                                .distance_in_bounds(idx as usize, nb as usize, self.dim);
+                        if nd < best_d {
+                            cur_node = nb;
+                            best_d = nd;
+                            changed = true;
+                        }
+                    }
+                    if !changed {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. 高层搜索
+        let mut visited = Bitset::new(self.n);
+        for l in (level..=self.max_level).rev() {
+            let res = self.beam_search_upper(&my_sig, l, cur_node, 1, &mut visited);
+            if !res.is_empty() {
+                cur_node = res[0].1;
+            }
+        }
+
+        // 4. 新节点插入各层
+        for l in (0..=level).rev() {
+            let ef = self.ef_construction;
+            let candidates_sym = if l == 0 {
+                self.beam_search_l0(&my_sig, cur_node, ef, &mut visited)
+            } else {
+                self.beam_search_upper(&my_sig, l, cur_node, ef, &mut visited)
+            };
+            let candidates: Vec<(u32, u32)> = candidates_sym
+                .into_iter()
+                .map(|(_, id)| {
+                    (
+                        self.bq_store
+                            .distance_in_bounds(idx as usize, id as usize, self.dim),
+                        id,
+                    )
+                })
+                .collect();
+
+            let max_nb = if l == 0 { self.m0 } else { self.m };
+            let selected = self.select_neighbors(idx, &candidates, max_nb);
+
+            if l == 0 {
+                // 正向边：idx → selected
+                for &nb in &selected {
+                    if !self.layer0.contains(idx, nb) {
+                        self.layer0.push_neighbor(idx, nb);
+                    }
+                }
+
+                // ── Vamana 双向剪枝（核心）──
+                // 对于每个被选中的邻居 nb，将 idx 加入 nb 的候选集，
+                // 然后用 vamana_select 重新决定 nb 应该保留哪些邻居。
+                // 这保证了反向边也经过多样性剪枝，而不是盲目堆积。
+                for &nb in &selected {
+                    // 收集 nb 的当前邻居 + 新候选 idx
+                    let mut nb_candidates: Vec<(u32, u32)> = self
+                        .layer0
+                        .neighbors(nb)
+                        .iter()
+                        .map(|&n| {
+                            (
+                                self.bq_store
+                                    .distance_in_bounds(nb as usize, n as usize, self.dim),
+                                n,
+                            )
+                        })
+                        .collect();
+
+                    // 如果 idx 还不在 nb 的邻居中，加入候选
+                    if !self.layer0.contains(nb, idx) {
+                        let d =
+                            self.bq_store
+                                .distance_in_bounds(nb as usize, idx as usize, self.dim);
+                        nb_candidates.push((d, idx));
+                    }
+
+                    // 按距离排序后做 Vamana 剪枝
+                    nb_candidates.sort_unstable_by_key(|&(d, _)| d);
+                    let pruned = self.select_layer0_neighbors(nb, &nb_candidates);
+                    self.layer0.set_neighbors(nb, &pruned);
+                }
+            } else {
+                let ul = l - 1;
+                // 正向边
+                for &nb in &selected {
+                    if !self.upper_layers[ul][idx as usize].contains(&nb) {
+                        self.upper_bytes += 4;
+                        self.upper_layers[ul][idx as usize].push(nb);
+                    }
+                }
+
+                // 双向剪枝（上层）
+                for &nb in &selected {
+                    let mut nb_candidates: Vec<(u32, u32)> = self.upper_layers[ul][nb as usize]
+                        .iter()
+                        .map(|&n| {
+                            (
+                                self.bq_store
+                                    .distance_in_bounds(nb as usize, n as usize, self.dim),
+                                n,
+                            )
+                        })
+                        .collect();
+
+                    if !self.upper_layers[ul][nb as usize].contains(&idx) {
+                        let d =
+                            self.bq_store
+                                .distance_in_bounds(nb as usize, idx as usize, self.dim);
+                        nb_candidates.push((d, idx));
+                    }
+
+                    nb_candidates.sort_unstable_by_key(|&(d, _)| d);
+                    let pruned = Self::vamana_select(
+                        &self.bq_store,
+                        nb,
+                        &nb_candidates,
+                        self.m,
+                        self.dim,
+                        self.alpha,
+                    );
+                    self.upper_bytes = self
+                        .upper_bytes
+                        .saturating_sub(self.upper_layers[ul][nb as usize].len() * 4)
+                        .saturating_add(pruned.len() * 4);
+                    self.upper_layers[ul][nb as usize] = pruned;
+                }
+            }
+
+            if !candidates.is_empty() {
+                cur_node = candidates[0].1;
+            }
+        }
+
+        if level > self.max_level {
+            self.entry_point = idx;
+            self.max_level = level;
+        }
+        self.finish_layer0_insertion(idx, previous_entry);
+        if let Some(model) = &mut self.default_sm {
+            model.set_routing_entry(self.entry_point);
+        }
+    }
+
+    /// Vamana 选边
+    fn select_neighbors(&self, target: u32, candidates: &[(u32, u32)], max_k: usize) -> Vec<u32> {
+        if max_k == self.m0 {
+            return Self::select_diverse_layer0(
+                &self.bq_store,
+                target,
+                candidates,
+                max_k,
+                self.dim,
+                self.alpha,
+            );
+        }
+        Self::vamana_select(
+            &self.bq_store,
+            target,
+            candidates,
+            max_k,
+            self.dim,
+            self.alpha,
+        )
+    }
+
+    /// Layer 0 搜索：cheap BQ 导航后用完整 2-bit BQ 距离重排候选
+    fn beam_search_l0<V: SearchVisited>(
+        &self,
+        q_sig: &Bq2Signature,
+        entry: u32,
+        ef: usize,
+        visited: &mut V,
+    ) -> Vec<(NonNanF32, u32)> {
+        let mut scorer = BqNavigationScorer;
+        self.beam_search_l0_with_scorer(q_sig, entry, ef, visited, &mut scorer)
+    }
+
+    fn beam_search_l0_with_scorer<V: SearchVisited, S: NavigationScorer>(
+        &self,
+        q_sig: &Bq2Signature,
+        entry: u32,
+        ef: usize,
+        visited: &mut V,
+        scorer: &mut S,
+    ) -> Vec<(NonNanF32, u32)> {
+        #[cfg(target_arch = "x86_64")]
+        if self.dim == 384
+            && !*crate::index::bq::FORCE_NO_384_KERNEL
+            && is_x86_feature_detected!("popcnt")
+        {
+            return self.beam_search_l0_impl::<true, V, S>(q_sig, entry, ef, visited, scorer);
+        }
+        self.beam_search_l0_impl::<false, V, S>(q_sig, entry, ef, visited, scorer)
+    }
+
+    fn beam_search_l0_impl<const DIM_384: bool, V: SearchVisited, S: NavigationScorer>(
+        &self,
+        q_sig: &Bq2Signature,
+        entry: u32,
+        ef: usize,
+        visited: &mut V,
+        scorer: &mut S,
+    ) -> Vec<(NonNanF32, u32)> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        visited.begin();
+        if !scorer.checkpoint() {
+            return Vec::new();
+        }
+
+        let mut candidates: BinaryHeap<Reverse<(NonNanF32, u32)>> =
+            BinaryHeap::with_capacity(ef * 2);
+        let mut results: BinaryHeap<(NonNanF32, u32)> = BinaryHeap::with_capacity(ef + 1);
+
+        let cheap_distance = |node: u32| -> u32 {
+            #[cfg(target_arch = "x86_64")]
+            if DIM_384 {
+                return self
+                    .bq_store
+                    .distance_to_sig_cheap_384(node as usize, q_sig);
+            }
+            self.bq_store
+                .distance_to_sig_cheap_in_bounds(node as usize, q_sig, self.dim)
+        };
+        let d = NonNanF32(scorer.score(self.ids[entry as usize], cheap_distance(entry)) as f32);
+        visited.set(entry as usize);
+        candidates.push(Reverse((d, entry)));
+        results.push((d, entry));
+
+        while let Some(Reverse((cd, cur))) = candidates.pop() {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
+            if results.len() >= ef && cd > results.peek().unwrap().0 {
+                break;
+            }
+
+            let nbs = self.layer0.neighbors(cur);
+
+            for &nb in nbs {
+                if !visited.test(nb as usize) {
+                    self.bq_store.prefetch_sig(nb as usize);
+                }
+            }
+
+            for &nb in nbs {
+                if !scorer.checkpoint() {
+                    return Vec::new();
+                }
+                if visited.test(nb as usize) {
+                    continue;
+                }
+                visited.set(nb as usize);
+
+                let nd = NonNanF32(scorer.score(self.ids[nb as usize], cheap_distance(nb)) as f32);
+                if results.len() < ef || nd < results.peek().unwrap().0 {
+                    candidates.push(Reverse((nd, nb)));
+                    results.push((nd, nb));
+                    if results.len() > ef {
+                        results.pop();
+                    }
+                }
+            }
+        }
+
+        let mut res: Vec<(NonNanF32, u32)> = results.into_vec();
+        for item in &mut res {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
+            item.0 = NonNanF32(self.bq_store.distance_to_sig_in_bounds(
+                item.1 as usize,
+                q_sig,
+                self.dim,
+            ) as f32);
+        }
+        res.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        res
+    }
+
+    fn beam_search_l0_384_with_scorer<S: NavigationScorer>(
+        &self,
+        q_sig: &Bq2Signature,
+        entry: u32,
+        ef: usize,
+        scratch: &mut SearchScratch384,
+        scorer: &mut S,
+    ) -> Vec<(NonNanF32, u32)> {
+        if !scorer.checkpoint() {
+            return Vec::new();
+        }
+        scratch.visited.begin();
+        scratch.candidates.clear();
+        scratch.results.clear();
+        scratch.candidates.reserve(ef.saturating_mul(2));
+        scratch.results.reserve(ef.saturating_add(1));
+
+        let distance = |scorer: &mut S, node: u32| -> NonNanF32 {
+            let bq_distance = self
+                .bq_store
+                .distance_to_sig_cheap_384(node as usize, q_sig);
+            NonNanF32(scorer.score(self.ids[node as usize], bq_distance) as f32)
+        };
+        let initial_distance = distance(scorer, entry);
+        scratch.visited.set(entry as usize);
+        scratch.candidates.push(Reverse((initial_distance, entry)));
+        scratch.results.push((initial_distance, entry));
+
+        while let Some(Reverse((candidate_distance, current))) = scratch.candidates.pop() {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
+            if scratch.results.len() >= ef && candidate_distance > scratch.results.peek().unwrap().0
+            {
+                break;
+            }
+            let neighbors = self.layer0.neighbors(current);
+            for &neighbor in neighbors {
+                if !scratch.visited.test(neighbor as usize) {
+                    self.bq_store.prefetch_sig(neighbor as usize);
+                }
+            }
+            for &neighbor in neighbors {
+                if !scorer.checkpoint() {
+                    return Vec::new();
+                }
+                if scratch.visited.test(neighbor as usize) {
+                    continue;
+                }
+                scratch.visited.set(neighbor as usize);
+                let neighbor_distance = distance(scorer, neighbor);
+                if scratch.results.len() < ef
+                    || neighbor_distance < scratch.results.peek().unwrap().0
+                {
+                    scratch
+                        .candidates
+                        .push(Reverse((neighbor_distance, neighbor)));
+                    scratch.results.push((neighbor_distance, neighbor));
+                    if scratch.results.len() > ef {
+                        scratch.results.pop();
+                    }
+                }
+            }
+        }
+
+        let mut candidates = scratch.results.drain().collect::<Vec<_>>();
+        for candidate in &mut candidates {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
+            candidate.0 = NonNanF32(self.bq_store.distance_to_sig_in_bounds(
+                candidate.1 as usize,
+                q_sig,
+                384,
+            ) as f32);
+        }
+        candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        candidates
+    }
+
+    /// Upper layer Symmetric beam search
+    fn beam_search_upper(
+        &self,
+        q_sig: &Bq2Signature,
+        layer: usize,
+        entry: u32,
+        ef: usize,
+        visited: &mut Bitset,
+    ) -> Vec<(NonNanF32, u32)> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        if layer == 0 {
+            return Vec::new();
+        }
+        let ul = layer - 1;
+        if ul >= self.upper_layers.len() {
+            return Vec::new();
+        }
+
+        visited.clear();
+        let mut candidates: BinaryHeap<Reverse<(NonNanF32, u32)>> = BinaryHeap::new();
+        let mut results: BinaryHeap<(NonNanF32, u32)> = BinaryHeap::with_capacity(ef + 1);
+
+        let d = NonNanF32(
+            self.bq_store
+                .distance_to_sig_in_bounds(entry as usize, q_sig, self.dim) as f32,
+        );
+        visited.set(entry as usize);
+        candidates.push(Reverse((d, entry)));
+        results.push((d, entry));
+
+        while let Some(Reverse((cd, cur))) = candidates.pop() {
+            if results.len() >= ef && cd > results.peek().unwrap().0 {
+                break;
+            }
+
+            let nbs: Vec<u32> = self.upper_layers[ul][cur as usize].clone();
+            for nb in nbs {
+                if visited.test(nb as usize) {
+                    continue;
+                }
+                visited.set(nb as usize);
+                let nd = NonNanF32(self.bq_store.distance_to_sig_in_bounds(
+                    nb as usize,
+                    q_sig,
+                    self.dim,
+                ) as f32);
+                if results.len() < ef || nd < results.peek().unwrap().0 {
+                    candidates.push(Reverse((nd, nb)));
+                    results.push((nd, nb));
+                    if results.len() > ef {
+                        results.pop();
+                    }
+                }
+            }
+        }
+
+        let mut res: Vec<(NonNanF32, u32)> = results.into_vec();
+        res.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        res
+    }
+
+    /// Vamana Robust Prune (带有 alpha 放宽因子的 Heuristic)
+    fn vamana_select(
+        sigs: &Bq2Store,
+        target: u32,
+        candidates: &[(u32, u32)],
+        max_k: usize,
+        dim: usize,
+        alpha: f32,
+    ) -> Vec<u32> {
+        let mut selected: Vec<u32> = Vec::with_capacity(max_k);
+
+        for &(dist_to_target, cid) in candidates {
+            if cid == target {
+                continue;
+            }
+            if selected.len() >= max_k {
+                break;
+            }
+
+            // Vamana Prune: dist_to_selected < alpha * dist_to_target
+            let dominated = selected.iter().any(|&s| {
+                let dist_to_selected = sigs.distance_in_bounds(cid as usize, s as usize, dim);
+                (dist_to_selected as f32) < alpha * (dist_to_target as f32)
+            });
+
+            if !dominated {
+                selected.push(cid);
+            }
+        }
+
+        if selected.len() < max_k {
+            for &(_, cid) in candidates {
+                if cid == target {
+                    continue;
+                }
+                if selected.len() >= max_k {
+                    break;
+                }
+                if !selected.contains(&cid) {
+                    selected.push(cid);
+                }
+            }
+        }
+
+        selected
+    }
+
+    /// 两阶段搜索：默认无训练SM-L2导航 + 原始向量按需余弦精排。
+    ///
+    /// # 冷热分离
+    /// - **Hot（Stage 1）**：默认导航访问紧凑SM位码、幅值、重建范数和图拓扑。
+    /// - **Cold（Stage 2）**：按有效精排预算通过 `get_vec_f32` 回调读取原始向量。
+    ///   未指定预算时默认为64，受候选宽度限制，并至少覆盖top_k。
+    /// - 显式校正模式可以读取锚点；显式原生L2返回负平方距离。
+    ///   尚未绑定原始向量的独立旧索引保留BQ兼容路径，数据库加载会恢复默认SM状态。
+    ///
+    /// `get_vec_f32(slot, buf)`：把 `slot` 对应节点的向量以 f32 写入 `buf`，
+    /// 成功返回 `true`。调用方按需从向量池或mmap冷层读取，
+    /// 默认查询无需传入或常驻第二份全量f32数组。
+    pub fn search<F>(
+        &self,
+        query: &[f32],
+        mut get_vec_f32: F,
+        config: &QuIVerSearchConfig,
+    ) -> Vec<(u64, f32)>
+    where
+        F: FnMut(usize, &mut Vec<f32>) -> bool,
+    {
+        if query.len() != self.dim
+            || query.iter().any(|x| !x.is_finite())
+            || self.n == 0
+            || config.top_k == 0
+        {
+            return Vec::new();
+        }
+        if let Some(model) = self.corrected_sm.as_ref().or(self.default_sm.as_ref()) {
+            let native_l2 = self.sm_native_l2_enabled();
+            let norm = query.iter().map(|&x| (x as f64).powi(2)).sum::<f64>();
+            let normalized;
+            let sm_query = if !native_l2 && norm > 0. && (norm - 1.).abs() > 1e-5 {
+                let scale = 1. / norm.sqrt();
+                normalized = query
+                    .iter()
+                    .map(|&x| (x as f64 * scale) as f32)
+                    .collect::<Vec<_>>();
+                &normalized[..]
+            } else {
+                query
+            };
+            let top_k = config.top_k.min(self.n);
+            let ef = config.ef_search.max(top_k).min(self.n);
+            // 精排预算为上限；低宽度及top_k大于64时仍使用SM，不静默回退BQ。
+            let budget = config.rerank_limit.unwrap_or(64).max(top_k).min(ef);
+            let sm_config = QuIVerSearchConfig {
+                top_k,
+                ef_search: ef,
+                rerank_limit: Some(budget),
+            };
+            let mut fill = |internal: usize, buffer: &mut Vec<f32>| {
+                !self.tombstones[internal] && get_vec_f32(self.slot_indices[internal], buffer)
+            };
+            let mut output = model.search_routed(sm_query, &self.layer0, &sm_config, &mut fill);
+            if output
+                .as_ref()
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                && self.corrected_sm_enabled()
+                && let Some(default) = &self.default_sm
+            {
+                // 属性过滤屏蔽显式校正锚点时，使用无锚点默认SM，仍保持余弦精排。
+                output = default.search_routed(sm_query, &self.layer0, &sm_config, &mut fill);
+            }
+            return match output {
+                Ok(output) => output.neighbors,
+                Err(error) => {
+                    tracing::warn!(%error, "SM查询失败，拒绝切换评分或精排度量");
+                    Vec::new()
+                }
+            };
+        }
+        // 仅缺少原始向量的独立旧sidecar仍使用BQ；数据库加载时会流式补齐SM。
+        let mut scorer = BqNavigationScorer;
+        self.search_with_scorer(query, get_vec_f32, config, &mut scorer)
+    }
+
+    /// 估算指定属性候选在 BQ2 空间中的相对密度。
+    ///
+    /// 返回“候选集合平均成对距离 / 全局平均成对距离”。小于 1 表示候选更聚集。
+    /// 采样按排序后等距抽取，且仅比较相邻样本，保证成本有界与结果确定。
+    pub fn vector_density_skew(
+        &self,
+        candidate_ids: &[u64],
+        max_samples: usize,
+    ) -> Option<(f64, usize)> {
+        fn sample_slots(index: &QuIVer, ids: &[u64], limit: usize) -> Vec<usize> {
+            let mut slots = ids
+                .iter()
+                .filter_map(|id| index.id_to_internal.get(id).copied())
+                .map(|slot| slot as usize)
+                .filter(|slot| !index.tombstones.get(*slot).copied().unwrap_or(true))
+                .collect::<Vec<_>>();
+            slots.sort_unstable();
+            slots.dedup();
+            if slots.len() > limit {
+                let last = slots.len() - 1;
+                slots = (0..limit)
+                    .map(|position| slots[position * last / (limit - 1)])
+                    .collect();
+            }
+            slots
+        }
+
+        fn mean_adjacent_distance(index: &QuIVer, slots: &[usize]) -> Option<f64> {
+            let (sum, count) = slots.windows(2).fold((0u64, 0usize), |(sum, count), pair| {
+                (
+                    sum.saturating_add(u64::from(
+                        index
+                            .bq_store
+                            .distance_in_bounds(pair[0], pair[1], index.dim),
+                    )),
+                    count + 1,
+                )
+            });
+            (count > 0).then_some(sum as f64 / count as f64)
+        }
+
+        let limit = max_samples.clamp(2, 256);
+        let candidate_slots = sample_slots(self, candidate_ids, limit);
+        let all_ids = self
+            .ids
+            .iter()
+            .copied()
+            .filter(|id| self.id_to_internal.contains_key(id))
+            .collect::<Vec<_>>();
+        let global_slots = sample_slots(self, &all_ids, limit);
+        let candidate_mean = mean_adjacent_distance(self, &candidate_slots)?;
+        let global_mean = mean_adjacent_distance(self, &global_slots)?;
+        if global_mean <= f64::EPSILON {
+            return Some((1.0, candidate_slots.len()));
+        }
+        Some((
+            (candidate_mean / global_mean).clamp(0.25, 4.0),
+            candidate_slots.len(),
+        ))
+    }
+
+    /// 对指定 NodeId 候选集合执行纯 BQ2 粗排，不访问原始向量。
+    ///
+    /// 该接口仅复用现有 BQ2 签名和 NodeId 映射，不修改 Vamana 图或建边语义。
+    pub fn prefilter_candidates(
+        &self,
+        query: &[f32],
+        candidate_ids: &[u64],
+        limit: usize,
+    ) -> Vec<(u64, u32)> {
+        self.prefilter_candidates_profiled(query, candidate_ids, 0, 0, limit)
+            .0
+    }
+
+    /// 使用当前 QuIVer 实例范围内的 internal slot posting 缓存执行 BQ2 粗排，
+    /// 并返回可供 benchmark 分解的阶段耗时。缓存不落盘，也不参与 Vamana 建图。
+    pub fn prefilter_candidates_profiled(
+        &self,
+        query: &[f32],
+        candidate_ids: &[u64],
+        posting_identity: u64,
+        property_generation: u64,
+        limit: usize,
+    ) -> (Vec<(u64, u32)>, QuIVerPrefilterMetrics) {
+        if query.len() != self.dim || limit == 0 {
+            return (Vec::new(), QuIVerPrefilterMetrics::default());
+        }
+        let lookup_started = Instant::now();
+        let cache_key = (posting_identity, property_generation);
+        let cached = self
+            .prefilter_slot_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(cache_key);
+        let posting_lookup_ns = elapsed_ns(lookup_started);
+        let cache_hit = cached.is_some();
+        let mapping_started = Instant::now();
+        let slots = cached.unwrap_or_else(|| {
+            let mapped = candidate_ids
+                .iter()
+                .map(|id| {
+                    (
+                        *id,
+                        self.id_to_internal.get(id).copied().unwrap_or(u32::MAX),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mapped = Arc::new(mapped);
+            self.prefilter_slot_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(cache_key, Arc::clone(&mapped));
+            mapped
+        });
+        let node_mapping_ns = elapsed_ns(mapping_started);
+        let signature = Bq2Signature::from_vector(query);
+        let scan_started = Instant::now();
+        let mut best = BinaryHeap::with_capacity(limit.min(slots.len()));
+        let mut mapped_candidates = 0usize;
+        for &(id, internal) in slots.iter() {
+            let internal = internal as usize;
+            if internal == u32::MAX as usize
+                || self.tombstones.get(internal).copied().unwrap_or(true)
+            {
+                continue;
+            }
+            mapped_candidates += 1;
+            let candidate = (
+                self.bq_store
+                    .distance_to_sig_in_bounds(internal, &signature, self.dim),
+                id,
+            );
+            if best.len() < limit {
+                best.push(candidate);
+            } else if best.peek().is_some_and(|worst| candidate < *worst) {
+                best.pop();
+                best.push(candidate);
+            }
+        }
+        let bq_heap_scan_ns = elapsed_ns(scan_started);
+        let sort_started = Instant::now();
+        let mut scored = best
+            .into_iter()
+            .map(|(distance, id)| (id, distance))
+            .collect::<Vec<_>>();
+        scored.sort_unstable_by(|left, right| {
+            left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0))
+        });
+        let output_sort_ns = elapsed_ns(sort_started);
+        (
+            scored,
+            QuIVerPrefilterMetrics {
+                posting_lookup_ns,
+                node_mapping_ns,
+                bq_heap_scan_ns,
+                output_sort_ns,
+                cache_hit,
+                mapped_candidates,
+            },
+        )
+    }
+
+    /// 使用自定义查询时评分器搜索。仅显式联合查询应调用此入口。
+    pub fn search_with_scorer<F, S>(
+        &self,
+        query: &[f32],
+        get_vec_f32: F,
+        config: &QuIVerSearchConfig,
+        scorer: &mut S,
+    ) -> Vec<(u64, f32)>
+    where
+        F: FnMut(usize, &mut Vec<f32>) -> bool,
+        S: NavigationScorer,
+    {
+        self.search_with_scorer_impl::<false, _, _>(query, get_vec_f32, config, scorer)
+    }
+
+    /// 文档请求使用拥有型工作区，每轮结束归还访问位图、候选堆和精排缓冲。
+    pub(crate) fn search_with_scorer_local<F, S>(
+        &self,
+        query: &[f32],
+        get_vec_f32: F,
+        config: &QuIVerSearchConfig,
+        scorer: &mut S,
+    ) -> Vec<(u64, f32)>
+    where
+        F: FnMut(usize, &mut Vec<f32>) -> bool,
+        S: NavigationScorer,
+    {
+        self.search_with_scorer_impl::<true, _, _>(query, get_vec_f32, config, scorer)
+    }
+
+    fn search_with_scorer_impl<const LOCAL: bool, F, S>(
+        &self,
+        query: &[f32],
+        mut get_vec_f32: F,
+        config: &QuIVerSearchConfig,
+        scorer: &mut S,
+    ) -> Vec<(u64, f32)>
+    where
+        F: FnMut(usize, &mut Vec<f32>) -> bool,
+        S: NavigationScorer,
+    {
+        if self.n == 0
+            || config.top_k == 0
+            || query.len() != self.dim
+            || query.iter().any(|value| !value.is_finite())
+        {
+            return Vec::new();
+        }
+        let normalized_config = QuIVerSearchConfig {
+            top_k: config.top_k.min(self.n),
+            ef_search: config.ef_search.max(config.top_k).min(self.n),
+            rerank_limit: config.rerank_limit.map(|limit| limit.min(self.n)),
+        };
+        let config = &normalized_config;
+        let dim = self.dim;
+
+        let q_sig = Bq2Signature::from_vector(query);
+        let mut cur_node = self.entry_point;
+
+        // 高层贪心下降
+        for l in (1..=self.max_level).rev() {
+            let ul = l - 1;
+            if ul < self.upper_layers.len() {
+                loop {
+                    if !scorer.checkpoint() {
+                        return Vec::new();
+                    }
+                    let mut changed = false;
+                    let cur_d =
+                        self.bq_store
+                            .distance_to_sig_in_bounds(cur_node as usize, &q_sig, dim);
+                    let mut best_d = cur_d;
+                    for &nb in &self.upper_layers[ul][cur_node as usize] {
+                        if !scorer.checkpoint() {
+                            return Vec::new();
+                        }
+                        let nd = self
+                            .bq_store
+                            .distance_to_sig_in_bounds(nb as usize, &q_sig, dim);
+                        if nd < best_d {
+                            cur_node = nb;
+                            best_d = nd;
+                            changed = true;
+                        }
+                    }
+                    if !changed {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Stage 1: Symmetric BQ beam search
+        // 使用 thread_local Bitset 复用，避免每次查询 heap alloc
+        thread_local! {
+            static VISITED: std::cell::RefCell<Bitset> = std::cell::RefCell::new(Bitset::new(0));
+            static SCRATCH_384: std::cell::RefCell<SearchScratch384> = std::cell::RefCell::new(SearchScratch384::new());
+        }
+        let use_384 =
+            dim == 384 && !*crate::index::bq::FORCE_NO_384_KERNEL && cfg!(target_arch = "x86_64");
+        if use_384 {
+            let mut search = |scratch: &mut SearchScratch384| {
+                scratch.visited.grow(self.n);
+                let mut bq_candidates = self.beam_search_l0_384_with_scorer(
+                    &q_sig,
+                    cur_node,
+                    config.ef_search,
+                    scratch,
+                    scorer,
+                );
+                self.sort_rerank_candidates(&mut bq_candidates);
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::hit(
+                    crate::test_hooks::ConcurrencyPoint::QuiverCandidateProduced,
+                );
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeVectorRerank);
+                self.rerank_candidates_384(
+                    query,
+                    &bq_candidates,
+                    config,
+                    &mut get_vec_f32,
+                    scratch,
+                    scorer,
+                )
+            };
+            return if LOCAL {
+                search(&mut SearchScratch384::new())
+            } else {
+                SCRATCH_384.with(|cell| search(&mut cell.borrow_mut()))
+            };
+        }
+        let mut navigate = |visited: &mut Bitset| {
+            if visited.len < self.n {
+                visited.grow(self.n);
+            }
+            self.beam_search_l0_with_scorer(&q_sig, cur_node, config.ef_search, visited, scorer)
+        };
+        let mut bq_candidates = if LOCAL {
+            navigate(&mut Bitset::new(self.n))
+        } else {
+            VISITED.with(|cell| navigate(&mut cell.borrow_mut()))
+        };
+        self.sort_rerank_candidates(&mut bq_candidates);
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::QuiverCandidateProduced);
+
+        // Stage 2: f32 按需精排（跳过 tombstone，通过 slot_indices 映射到冷存储）
+        // 复用单个缓冲区，避免每个候选 heap alloc；冷向量按需取回仅触达 ~ef 个候选。
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeVectorRerank);
+        let rerank_limit = config.rerank_limit().min(bq_candidates.len());
+        let mut buf: Vec<f32> = Vec::with_capacity(dim);
+        let mut scored: Vec<(f32, u32)> = Vec::with_capacity(rerank_limit);
+        for &(_, nid) in &bq_candidates {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
+            if scored.len() >= rerank_limit {
+                break;
+            }
+            if self.tombstones[nid as usize] || !scorer.accept_result(self.ids[nid as usize]) {
+                continue;
+            }
+            let slot = self.slot_indices[nid as usize];
+            if get_vec_f32(slot, &mut buf) && buf.len() == dim && buf.iter().all(|v| v.is_finite())
+            {
+                scored.push((cosine_similarity_f32(query, &buf), nid));
+            }
+        }
+        scored.retain(|value| value.0.is_finite());
+        scored.sort_unstable_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| self.ids[a.1 as usize].cmp(&self.ids[b.1 as usize]))
+        });
+
+        scored
+            .iter()
+            .take(config.top_k)
+            .map(|&(sim, nid)| (self.ids[nid as usize], sim))
+            .collect()
+    }
+
+    fn sort_rerank_candidates(&self, candidates: &mut [(NonNanF32, u32)]) {
+        candidates.sort_unstable_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| self.ids[a.1 as usize].cmp(&self.ids[b.1 as usize]))
+        });
+    }
+
+    fn rerank_candidates_384<F, S>(
+        &self,
+        query: &[f32],
+        bq_candidates: &[(NonNanF32, u32)],
+        config: &QuIVerSearchConfig,
+        get_vec_f32: &mut F,
+        scratch: &mut SearchScratch384,
+        scorer: &mut S,
+    ) -> Vec<(u64, f32)>
+    where
+        F: FnMut(usize, &mut Vec<f32>) -> bool,
+        S: NavigationScorer,
+    {
+        let rerank_limit = config.rerank_limit().min(bq_candidates.len());
+        scratch.scored.clear();
+        if scratch.scored.capacity() < rerank_limit {
+            scratch
+                .scored
+                .reserve(rerank_limit - scratch.scored.capacity());
+        }
+        let query_norm = cosine_query_norm_f32_384(query).unwrap_or_default();
+        for &(_, nid) in bq_candidates {
+            if !scorer.checkpoint() {
+                return Vec::new();
+            }
+            if scratch.scored.len() >= rerank_limit {
+                break;
+            }
+            if self.tombstones[nid as usize] || !scorer.accept_result(self.ids[nid as usize]) {
+                continue;
+            }
+            let slot = self.slot_indices[nid as usize];
+            if get_vec_f32(slot, &mut scratch.vector)
+                && scratch.vector.len() == 384
+                && scratch.vector.iter().all(|v| v.is_finite())
+            {
+                scratch.scored.push((
+                    cosine_similarity_f32_384_with_query_norm(query, &scratch.vector, query_norm),
+                    nid,
+                ));
+            }
+        }
+        scratch.scored.retain(|value| value.0.is_finite());
+        scratch.scored.sort_unstable_by(|left, right| {
+            right
+                .0
+                .total_cmp(&left.0)
+                .then_with(|| self.ids[left.1 as usize].cmp(&self.ids[right.1 as usize]))
+        });
+        scratch
+            .scored
+            .iter()
+            .take(config.top_k)
+            .map(|&(score, nid)| (self.ids[nid as usize], score))
+            .collect()
+    }
+
+    /// 便捷封装：从连续 f32 数组（按 slot 偏移）精排。
+    ///
+    /// 主要用于纯内存场景与单元测试。生产检索路径应直接调用 `search`
+    /// 并传入按需读取 mmap 冷存储的回调，以保持冷热分离。
+    pub fn search_flat(
+        &self,
+        query: &[f32],
+        ext_vectors: &[f32],
+        config: &QuIVerSearchConfig,
+    ) -> Vec<(u64, f32)> {
+        let dim = self.dim;
+        self.search(
+            query,
+            |slot, buf| {
+                let offset = slot * dim;
+                if offset + dim <= ext_vectors.len() {
+                    buf.clear();
+                    buf.extend_from_slice(&ext_vectors[offset..offset + dim]);
+                    true
+                } else {
+                    false // slot 越界（不应发生，防御性跳过）
+                }
+            },
+            config,
+        )
+    }
+
+    /// 使用外部流式编码得到的 BQ2 签名构建图，不保留全量 FP32 向量副本。
+    pub(crate) fn batch_build_from_store(
+        &mut self,
+        ids: &[u64],
+        slot_idxs: &[usize],
+        store: Bq2Store,
+    ) {
+        self.corrected_sm = None;
+        self.default_sm = None;
+        let n = ids.len();
+        let dim = self.dim;
+        assert_eq!(slot_idxs.len(), n);
+        assert_eq!(store.len(), n, "Bq2Store 长度必须与 ids 长度一致");
+        if n == 0 {
+            return;
+        }
+
+        // 直接使用外部 store，不做内部编码
+        let mut lcg: u64 = 12345;
+        let mut levels = Vec::with_capacity(n);
+        for _ in 0..n {
+            levels.push(self.random_level(&mut lcg) as u8);
+        }
+
+        self.n = n;
+        self.bq_store = store;
+        self.ids.clear();
+        self.ids.extend_from_slice(ids);
+        self.slot_indices.clear();
+        self.slot_indices.extend_from_slice(slot_idxs);
+        self.id_to_internal.clear();
+        for (i, &id) in ids.iter().enumerate() {
+            self.id_to_internal.insert(id, i as u32);
+        }
+        self.tombstones = vec![false; n];
+        self.dirty_count = 0;
+        self.node_max_layer = levels;
+        self.entry_point = 0;
+        self.max_level = 0;
+        self.upper_layers.clear();
+        self.upper_bytes = 0;
+        self.visited = Bitset::new(n);
+        self.layer0.reset_full(n);
+
+        let locks = StripedSpinLocks::new(n, self.m0);
+        let concurrent_adj = ConcurrentFlatAdj::new(n, self.layer0.stride);
+        let profile = BuildProfile::new();
+        let view = ParallelBuildContext {
+            adj: &concurrent_adj,
+            n,
+            dim,
+            m0: self.m0,
+            ef: self.ef_construction,
+            alpha: self.alpha,
+            sigs: &self.bq_store,
+            locks: &locks,
+            profile: &profile,
+        };
+
+        let t_build = Instant::now();
+        let chunk = 256usize;
+        let rounds = n.div_ceil(chunk);
+        for round in 0..rounds {
+            let start = round * chunk;
+            let end = ((round + 1) * chunk).min(n);
+            (start..end).into_par_iter().for_each(|i| {
+                let prof = profile.enabled;
+                let t_bs = if prof { Some(Instant::now()) } else { None };
+                let mut visited = Bitset::new(n);
+                if let Some(t) = t_bs {
+                    profile.add(&profile.bitset_ns, t.elapsed().as_nanos() as u64);
+                }
+                view.connect_node(i as u32, &mut visited);
+            });
+        }
+        // 最终剪枝保留跨签名出口，避免同码近邻占满名额后封闭入口所在的簇。
+        (0..n as u32)
+            .into_par_iter()
+            .for_each(|node| view.final_prune(node));
+        profile.report(
+            t_build.elapsed().as_secs_f64(),
+            rayon::current_num_threads(),
+        );
+
+        concurrent_adj.freeze_into_flat(&mut self.layer0);
+        self.repair_layer0_connectivity();
+    }
+
+    /// 批量并行构图，统一使用有界邻接表、延迟反向剪枝及连通性保护。
+    pub fn batch_build(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize]) {
+        self.corrected_sm = None;
+        self.default_sm = None;
+        let n = ids.len();
+        let dim = self.dim;
+        assert_eq!(vectors.len(), n * dim);
+        assert_eq!(slot_idxs.len(), n);
+        if n == 0 {
+            return;
+        }
+
+        let mut store = Bq2Store::new(dim);
+        store.reserve(n);
+        for chunk in vectors.chunks(dim) {
+            store.push_from_vector(chunk);
+        }
+
+        let mut lcg: u64 = 12345;
+        let mut levels = Vec::with_capacity(n);
+        for _ in 0..n {
+            levels.push(self.random_level(&mut lcg) as u8);
+        }
+
+        self.n = n;
+        self.bq_store = store;
+        self.ids.clear();
+        self.ids.extend_from_slice(ids);
+        self.slot_indices.clear();
+        self.slot_indices.extend_from_slice(slot_idxs);
+        self.id_to_internal.clear();
+        for (i, &id) in ids.iter().enumerate() {
+            self.id_to_internal.insert(id, i as u32);
+        }
+        self.tombstones = vec![false; n];
+        self.dirty_count = 0;
+        self.node_max_layer = levels;
+        self.entry_point = 0;
+        self.max_level = 0;
+        self.upper_layers.clear();
+        self.upper_bytes = 0;
+        self.visited = Bitset::new(n);
+        self.layer0.reset_full(n);
+
+        let locks = StripedSpinLocks::new(n, self.m0);
+        let concurrent_adj = ConcurrentFlatAdj::new(n, self.layer0.stride);
+        let profile = BuildProfile::new();
+        let view = ParallelBuildContext {
+            adj: &concurrent_adj,
+            n,
+            dim,
+            m0: self.m0,
+            ef: self.ef_construction,
+            alpha: self.alpha,
+            sigs: &self.bq_store,
+            locks: &locks,
+            profile: &profile,
+        };
+
+        let t_build = Instant::now();
+        let chunk = 256usize;
+        let rounds = n.div_ceil(chunk);
+        for round in 0..rounds {
+            let start = round * chunk;
+            let end = ((round + 1) * chunk).min(n);
+            (start..end).into_par_iter().for_each(|i| {
+                let prof = profile.enabled;
+                let t_bs = if prof { Some(Instant::now()) } else { None };
+                let mut visited = Bitset::new(n);
+                if let Some(t) = t_bs {
+                    profile.add(&profile.bitset_ns, t.elapsed().as_nanos() as u64);
+                }
+                view.connect_node(i as u32, &mut visited);
+            });
+        }
+        // 最终剪枝在原有容量内保留跨签名出口。
+        (0..n as u32)
+            .into_par_iter()
+            .for_each(|node| view.final_prune(node));
+        profile.report(
+            t_build.elapsed().as_secs_f64(),
+            rayon::current_num_threads(),
+        );
+
+        concurrent_adj.freeze_into_flat(&mut self.layer0);
+        self.repair_layer0_connectivity();
+        if cfg!(debug_assertions) {
+            self.validate_layer0();
+        }
+        self.rebuild_default_sm(vectors);
+    }
+
+    fn validate_layer0(&self) {
+        if self.n == 0 {
+            return;
+        }
+        debug_assert_eq!(self.layer0.data.len(), self.n * self.layer0.stride);
+        for node in 0..self.n {
+            let base = node * self.layer0.stride;
+            let deg = self.layer0.data[base] as usize;
+            assert!(
+                deg < self.layer0.stride,
+                "L0 节点 {} 度数 {} 超过 stride {}",
+                node,
+                deg,
+                self.layer0.stride
+            );
+            let mut seen = Vec::with_capacity(deg);
+            for i in 0..deg {
+                let nb = self.layer0.data[base + 1 + i];
+                assert!(nb != EMPTY_NB, "L0 节点 {} 有效邻居区出现空槽", node);
+                assert!(
+                    (nb as usize) < self.n,
+                    "L0 节点 {} 邻居 {} 越界，n={}",
+                    node,
+                    nb,
+                    self.n
+                );
+                assert!(nb as usize != node, "L0 节点 {} 出现自环", node);
+                seen.push(nb);
+            }
+            seen.sort_unstable();
+            for pair in seen.windows(2) {
+                assert!(
+                    pair[0] != pair[1],
+                    "L0 节点 {} 出现重复邻居 {}",
+                    node,
+                    pair[0]
+                );
+            }
+            for i in deg..(self.layer0.stride - 1) {
+                assert!(
+                    self.layer0.data[base + 1 + i] == EMPTY_NB,
+                    "L0 节点 {} 无效邻居区出现非空槽",
+                    node
+                );
+            }
+        }
+    }
+
+    /// 热路径使用常数时间计量；度数分布留给显式诊断接口。
+    pub(crate) fn hot_memory_bytes(&self) -> usize {
+        // 固定64字节覆盖运行期身份的Arc控制块与分配开销。
+        // 身份目录采用保守桶预算，溢出饱和后由调用方预算拒绝。
+        let routing_metadata = self
+            .ids
+            .capacity()
+            .saturating_mul(std::mem::size_of::<u64>())
+            .saturating_add(
+                self.slot_indices
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            )
+            .saturating_add(self.tombstones.capacity())
+            .saturating_add(self.id_to_internal.capacity().saturating_mul(64))
+            .saturating_add(64);
+        let hot = self.bq_store.hot_bytes()
+            + self.layer0.data.len() * 4
+            + self.upper_bytes
+            + self.connectivity_parents.capacity() * std::mem::size_of::<u32>()
+            + self
+                .corrected_sm
+                .as_ref()
+                .map_or(0, |model| model.routing_owned_bytes())
+            + self
+                .default_sm
+                .as_ref()
+                .map_or(0, |model| model.routing_owned_bytes());
+        hot.saturating_add(routing_metadata)
+    }
+
+    pub fn stats(&self) -> QuIVerStats {
+        let tombstone_count = self.tombstones.iter().filter(|&&t| t).count();
+
+        QuIVerStats {
+            n: self.n,
+            max_level: self.max_level,
+            hot_bytes: self.hot_memory_bytes(),
+            tombstone_count,
+            dirty_count: self.dirty_count,
+            avg_degree_l0: if self.n > 0 {
+                (0..self.n)
+                    .map(|i| self.layer0.degree(i as u32))
+                    .sum::<usize>() as f64
+                    / self.n as f64
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// 图连通性诊断
+    pub fn debug_connectivity(&self) {
+        // 度数分布
+        let mut deg0 = 0usize;
+        let mut min_deg = usize::MAX;
+        let mut max_deg = 0usize;
+        for i in 0..self.n {
+            let d = self.layer0.degree(i as u32);
+            if d == 0 {
+                deg0 += 1;
+            }
+            min_deg = min_deg.min(d);
+            max_deg = max_deg.max(d);
+        }
+        tracing::debug!(
+            min_degree = min_deg,
+            max_degree = max_deg,
+            isolated_nodes = deg0,
+            nodes = self.n,
+            "QuIVer L0 度数诊断 (QuIVer L0 degree diagnostics)"
+        );
+
+        // BFS 从入口点测可达性
+        let mut visited = vec![false; self.n];
+        let mut queue = std::collections::VecDeque::new();
+        visited[self.entry_point as usize] = true;
+        queue.push_back(self.entry_point);
+        let mut reached = 1usize;
+        while let Some(cur) = queue.pop_front() {
+            for &nb in self.layer0.neighbors(cur) {
+                if !visited[nb as usize] {
+                    visited[nb as usize] = true;
+                    queue.push_back(nb);
+                    reached += 1;
+                }
+            }
+        }
+        tracing::debug!(
+            reached,
+            nodes = self.n,
+            reachable_percent = 100.0 * reached as f64 / self.n as f64,
+            "QuIVer 入口点可达性 (QuIVer entry-point reachability)"
+        );
+
+        // 入口点邻居数
+        tracing::debug!(
+            entry_point = self.entry_point,
+            degree = self.layer0.degree(self.entry_point),
+            "QuIVer 入口点诊断 (QuIVer entry-point diagnostics)"
+        );
+    }
+
+    // ── 增量管理接口 ──
+
+    /// 软删除：标记 tombstone，搜索时跳过（节点仍参与图遍历作为中转）
+    pub fn soft_delete(&mut self, id: u64) -> bool {
+        if let Some(&idx) = self.id_to_internal.get(&id) {
+            if !self.tombstones[idx as usize] {
+                self.corrected_sm = None;
+                self.tombstones[idx as usize] = true;
+                self.dirty_count += 1;
+                self.prefilter_slot_cache
+                    .get_mut()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clear();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 是否需要全量重建（增量变更超过 25%）
+    #[inline]
+    pub fn needs_rebuild(&self) -> bool {
+        self.n > 0 && self.dirty_count * 4 > self.n
+    }
+
+    /// 活跃节点数（总数 - tombstone 数）
+    #[inline]
+    pub fn active_count(&self) -> usize {
+        self.n - self.tombstones.iter().filter(|&&t| t).count()
+    }
+
+    /// sidecar 的活跃 ID 与冷向量 slot 必须逐项对应当前事实；墓碑不参与覆盖。
+    pub(crate) fn matches_fact_slots<T: crate::VectorType>(
+        &self,
+        mt: &crate::storage::memtable::MemTable<T>,
+    ) -> bool {
+        self.dim == mt.dim()
+            && self.active_count() == mt.node_count()
+            && self
+                .ids
+                .iter()
+                .zip(&self.slot_indices)
+                .zip(&self.tombstones)
+                .all(|((&id, &slot), &deleted)| deleted || mt.active_id_at_slot(slot) == Some(id))
+    }
+
+    /// 节点总数（含 tombstone）
+    #[inline]
+    pub fn total_count(&self) -> usize {
+        self.n
+    }
+
+    /// 递增增量变更计数（增量追加节点时调用）
+    #[inline]
+    pub fn dirty_count_inc(&mut self) {
+        self.dirty_count += 1;
+    }
+
+    // ── 持久化 ──
+
+    const QUIVER_MAGIC: &'static [u8; 4] = b"QUIV";
+    pub const QUIVER_VERSION: u32 = 2;
+
+    /// 将 QuIVer 索引保存到文件（POD memcpy 格式）
+    ///
+    /// 文件结构：
+    /// ```text
+    /// [Magic "QUIV" 4B] [Version 4B] [Header 40B]
+    /// [BQ Signatures: n × 128B]
+    /// [Layer0 FlatAdj: n × stride × 4B]
+    /// [Tombstones: n × 1B]
+    /// [IDs: n × 8B]
+    /// [SlotIndices: n × 8B]
+    /// [NodeMaxLayer: n × 1B]
+    /// [Upper Layers: 变长编码]
+    /// [Default SM: u64长度 + QDSM版本化路由行及CRC，长度0表示按原始向量恢复]
+    /// ```
+    pub fn save_to_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::{BufWriter, Write};
+
+        let tmp_path = path.with_extension("quiver.tmp");
+        let file = std::fs::File::create(&tmp_path)?;
+        let mut w = BufWriter::new(file);
+
+        self.write_snapshot(&mut w)?;
+        w.flush()?;
+        let file = w.into_inner().map_err(|e| e.into_error())?;
+        file.sync_all()?;
+        drop(file);
+        crate::storage::fs::robust_rename_and_sync(&tmp_path, path)?;
+
+        tracing::info!(
+            "QuIVer 索引已持久化 (QuIVer index persisted)：{} 个节点，dim={}，max_level={}",
+            self.n,
+            self.dim,
+            self.max_level
+        );
+        Ok(())
+    }
+
+    /// 将既有热索引格式流式写入容器，冷行区由存储层另行发布。
+    pub(crate) fn write_snapshot(&self, mut w: impl std::io::Write) -> std::io::Result<()> {
+        // Magic + Version
+        w.write_all(Self::QUIVER_MAGIC)?;
+        w.write_all(&Self::QUIVER_VERSION.to_le_bytes())?;
+
+        // Header (40 bytes)
+        w.write_all(&(self.dim as u32).to_le_bytes())?;
+        w.write_all(&(self.n as u32).to_le_bytes())?;
+        w.write_all(&(self.m as u32).to_le_bytes())?;
+        w.write_all(&(self.m0 as u32).to_le_bytes())?;
+        w.write_all(&(self.ef_construction as u32).to_le_bytes())?;
+        w.write_all(&self.alpha.to_le_bytes())?;
+        w.write_all(&self.entry_point.to_le_bytes())?;
+        w.write_all(&(self.max_level as u32).to_le_bytes())?;
+        w.write_all(&(self.dirty_count as u32).to_le_bytes())?;
+        w.write_all(&[0u8; 4])?; // 保留字段
+
+        // BQ Signatures（紧凑格式：chunks + pos + strong）
+        let chunks = self.bq_store.chunks();
+        w.write_all(&(chunks as u32).to_le_bytes())?;
+        w.write_all(bytemuck::cast_slice(self.bq_store.pos_data()))?;
+        w.write_all(bytemuck::cast_slice(self.bq_store.strong_data()))?;
+
+        // Layer0 FlatAdj (POD memcpy)
+        w.write_all(bytemuck::cast_slice(&self.layer0.data))?;
+
+        // Tombstones
+        let mut tomb_bytes = [0u8; 4096];
+        for chunk in self.tombstones.chunks(tomb_bytes.len()) {
+            for (byte, &deleted) in tomb_bytes.iter_mut().zip(chunk) {
+                *byte = u8::from(deleted);
+            }
+            w.write_all(&tomb_bytes[..chunk.len()])?;
+        }
+
+        // IDs
+        for &id in &self.ids {
+            w.write_all(&id.to_le_bytes())?;
+        }
+
+        // SlotIndices
+        for &si in &self.slot_indices {
+            w.write_all(&(si as u64).to_le_bytes())?;
+        }
+
+        // NodeMaxLayer
+        w.write_all(&self.node_max_layer)?;
+
+        // Upper Layers (变长编码)
+        w.write_all(&(self.upper_layers.len() as u32).to_le_bytes())?;
+        for layer in &self.upper_layers {
+            w.write_all(&(layer.len() as u32).to_le_bytes())?;
+            for adj in layer {
+                w.write_all(&(adj.len() as u16).to_le_bytes())?;
+                for &nb in adj {
+                    w.write_all(&nb.to_le_bytes())?;
+                }
+            }
+        }
+
+        if let Some(model) = &self.default_sm {
+            if model.dimension() != self.dim || model.len() != self.n {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "QuIVer默认SM身份不一致 (QuIVer default SM identity mismatch)",
+                ));
+            }
+            w.write_all(&(model.routing_snapshot_len()? as u64).to_le_bytes())?;
+            model.write_routing_snapshot(&mut w, &self.ids, &self.tombstones)?;
+        } else {
+            w.write_all(&0u64.to_le_bytes())?;
+        }
+
+        Ok(())
+    }
+
+    /// 从文件加载 QuIVer 索引
+    pub fn load_from_file(path: &std::path::Path) -> std::io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let data = unsafe { memmap2::MmapOptions::new().map(&file)? };
+        Self::load_from_bytes(&data)
+    }
+}
+
+pub struct QuIVerStats {
+    pub n: usize,
+    pub max_level: usize,
+    pub hot_bytes: usize,
+    pub tombstone_count: usize,
+    pub dirty_count: usize,
+    pub avg_degree_l0: f64,
+}
+
+#[inline]
+pub fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    dot / (na.sqrt() * nb.sqrt()).max(1e-30)
+}

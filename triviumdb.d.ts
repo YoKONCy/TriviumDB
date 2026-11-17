@@ -224,7 +224,7 @@ export interface JsSearchConfig {
   rerankK?: number;
   /** 图谱扩散跳数 (默认 2) */
   expandDepth?: number;
-  /** 余弦相似度下限 (默认 0.1) */
+  /** 余弦相似度下限 (默认 0.0) */
   minScore?: number;
   /** PPR 回跳概率 0.0~1.0，越高越抑制深层扩散 (默认 0.0) */
   teleportAlpha?: number;
@@ -252,6 +252,8 @@ export interface JsSearchConfig {
   payloadFilter?: Record<string, unknown>;
   /** 强制使用暴力搜索 (默认 false) */
   forceBruteForce?: boolean;
+  /** 全量精确向量召回 (默认 false)，与 forceBruteForce 任一为 true 时启用 */
+  exact?: boolean;
   /**
    * CCSA: 扩散方向偏置向量
    *
@@ -426,6 +428,7 @@ export interface ErrorDetailsByCode {
   TDB_WRITE_OUTCOME_UNKNOWN: Record<string, never>;
   TDB_UNSUPPORTED_WAL_VERSION: { found: number; supported: number };
   TDB_UNSUPPORTED_DATABASE_VERSION: { found: number; minimum_supported: number; current: number };
+  TDB_MIGRATION_REQUIRED: { component: string; found: number; current: number; migration_entrypoint: 'scripts/migrate.py' };
   TDB_API_MIGRATION_REQUIRED: { removed_api: string; replacement: string };
   TDB_UNSUPPORTED_SIDECAR_VERSION: { component: string; found: number; minimum_supported: number; current: number; action: string };
   TDB_INVALID_INPUT: { reason: string; argument_kind?: 'missing' | 'unknown_keyword' | 'multiple_values' | 'positional_only' | 'too_many_positional' | 'invalid_arguments' };
@@ -570,6 +573,9 @@ export class PreparedTql {
   parameterNames(): string[];
 }
 
+/** PreparedTql 的兼容名称，引用同一构造器及类型。 */
+export { PreparedTql as JsPreparedTql };
+
 export interface PropertyIndexInfo {
   field: string;
   fields: string[];
@@ -620,7 +626,7 @@ export class TriviumDB {
 
   // ── Hook 管理 ──
 
-  /** 注册同步 JavaScript 六阶段 Hook；回调不得返回 Promise */
+  /** 注册同步 JavaScript 六阶段 Hook。null 使用该阶段默认处理，空命中数组清空结果，Promise 和格式错误返回 TDB_HOOK_EXECUTION。 */
   setHook(hook: {
     onPreSearch?: (query: number[]) => number[] | null;
     onCustomRecall?: (query: number[]) => Array<{ id: string; score: number; payload?: unknown }> | null;
@@ -846,12 +852,13 @@ export class TriviumDB {
    * @param queryVector 查询向量
    * @param topK        向外找多少个最相似锚点向量 (默认 5)
    * @param expandDepth 获取到上述锚点后，在图谱里扩散的跳跃深度 (默认 0，纯粹退化为向量相似度检索)
-   * @param minScore    只接受相似度大于这个阈值的搜索命中 (默认 0.5)
+   * @param minScore    相似度下限，包含边界值 (默认 0.0)
+   * @param exact       全量精确向量召回 (默认 false)
    */
-  search(queryVector: Vector, topK?: number | null, expandDepth?: number | null, minScore?: number | null, payloadFilter?: Record<string, unknown> | null): JsSearchHit[];
+  search(queryVector: Vector, topK?: number | null, expandDepth?: number | null, minScore?: number | null, payloadFilter?: Record<string, unknown> | null, exact?: boolean | null): JsSearchHit[];
 
-  searchGrouped(queryVector: Vector, topK?: number | null, expandDepth?: number | null, minScore?: number | null, payloadFilter?: Record<string, unknown> | null): JsGroupedSearchResult;
-  searchBatch(queryVectors: Vector[], topK?: number | null, parallelism?: number | null, minScore?: number | null): Promise<JsSearchHit[][]>;
+  searchGrouped(queryVector: Vector, topK?: number | null, expandDepth?: number | null, minScore?: number | null, payloadFilter?: Record<string, unknown> | null, exact?: boolean | null): JsGroupedSearchResult;
+  searchBatch(queryVectors: Vector[], topK?: number | null, parallelism?: number | null, minScore?: number | null, exact?: boolean | null): Promise<JsSearchHit[][]>;
 
   /**
    * 认知管线检索：向量锚定 + FISTA残差 + SA-PPR有限深度扩散 + DPP多样性采样
@@ -869,7 +876,7 @@ export class TriviumDB {
    * @param minScore    最小分数
    * @param hybridAlpha 混合权重 (0.0~1.0)，越大向量占比越高。默认 0.7
    */
-  searchHybrid(queryVector: Vector, queryText: string, topK?: number | null, expandDepth?: number | null, minScore?: number | null, hybridAlpha?: number | null, payloadFilter?: Record<string, unknown> | null): JsSearchHit[];
+  searchHybrid(queryVector: Vector, queryText: string, topK?: number | null, expandDepth?: number | null, minScore?: number | null, hybridAlpha?: number | null, payloadFilter?: Record<string, unknown> | null, exact?: boolean | null): JsSearchHit[];
 
   /**
    * 替换节点的 BM25 正文；空文本清除正文，关键词保持不变

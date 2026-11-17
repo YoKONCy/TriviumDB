@@ -117,6 +117,12 @@ db.delete_many_atomic([7, "11"])  # type: ignore[list-item]
 # ── retrieval ──
 hits = db.search([0.1] * 8, top_k=5)
 assert_type(hits, list[SearchHit])
+assert_type(db.search([0.1] * 8, exact=True), list[SearchHit])
+assert_type(db.search_batch([[0.1] * 8], exact=True), list[list[SearchHit]])
+assert_type(db.search_advanced([0.1] * 8, exact=True), list[SearchHit])
+db.search([0.1] * 8, exact="true")  # type: ignore[arg-type]
+db.search_batch([[0.1] * 8], exact=1)  # type: ignore[arg-type]
+db.search_advanced([0.1] * 8, exact="true")  # type: ignore[arg-type]
 assert_type(hits[0].id, int)
 assert_type(hits[0].score, float)
 db.search([0.1] * 8, top_k="1")  # type: ignore[arg-type]

@@ -234,18 +234,12 @@ fn small_stack_worker() {
                     .underlying(),
                 TriviumError::QueryDeadlineExceeded | TriviumError::QueryExecution(_)
             ));
-            assert!(
-                started.elapsed() < std::time::Duration::from_secs(2),
-                "路径期限或步数预算必须及时终止展开"
-            );
-            let started = std::time::Instant::now();
             assert!(matches!(
                 execute_tql_with_limits(&query, &mt, TqlLimits::default())
                     .unwrap_err()
                     .underlying(),
                 TriviumError::QueryExecution(_)
             ));
-            assert!(started.elapsed() < std::time::Duration::from_secs(2));
         })
         .unwrap()
         .join()

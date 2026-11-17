@@ -4,3 +4,6 @@
 mod emi_bitflip;
 mod hw_intrusion;
 mod unsafe_audit;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

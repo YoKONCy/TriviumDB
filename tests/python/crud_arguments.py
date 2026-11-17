@@ -63,6 +63,13 @@ def run_crud_arguments(root):
             db.upsert_edge(7, 11, "route", 0.5, {"part": "前段"})
             assert facts(db) == fixture["before"]
             wal = Path(file + ".wal").read_bytes()
+            for operator in ("$set", "$inc", "$unset"):
+                for value in fixture["invalid_patch_operands"]:
+                    patch = {"$set": {"name": "变化"}, "$inc": {"count": 1}, "$unset": {"absent": True}}
+                    patch[operator] = value
+                    invalid(lambda: db.patch_payload(7, patch), f"patch.{operator}")
+                    assert facts(db) == fixture["before"]
+                    assert Path(file + ".wal").read_bytes() == wal
             for operation in fixture["operations"]:
                 method = getattr(db, operation["python"])
                 for entry in operation["fields"]:

@@ -26,16 +26,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// 默认SM-L2查询内核，以及可显式选择的校正与原生欧氏模式。
-#[path = "quiver/corrected_sm.rs"]
-pub mod corrected_sm;
+#[path = "quiver/sm.rs"]
+pub mod sm;
 
 /// SSD 冷向量的通用维度编码、布局校验与标量评分基底。
 #[path = "quiver/cold.rs"]
 pub mod cold;
+mod decoding;
 
 /// 单文件SSD索引的流式发布、代际Reader与显式量化检索。
-#[path = "quiver/ssd.rs"]
-pub mod ssd;
+#[path = "quiver/runtime.rs"]
+pub mod runtime;
 
 mod connectivity;
 
@@ -564,13 +565,9 @@ impl ConcurrentFlatAdj {
         }
     }
 
+    #[cfg(test)]
     fn set_neighbors_with_guard(&self, guard: &NodeGuard<'_>, nbs: &[u32]) {
         self.set_neighbors_raw(guard.node(), nbs);
-    }
-
-    fn set_neighbors_locked(&self, node: u32, nbs: &[u32], locks: &StripedSpinLocks) {
-        let guard = locks.lock(node);
-        self.set_neighbors_with_guard(&guard, nbs);
     }
 
     fn set_neighbors_locked_fast(&self, node: u32, nbs: &[u32], locks: &StripedSpinLocks) {
@@ -590,7 +587,7 @@ impl ConcurrentFlatAdj {
     }
 }
 
-struct ExperimentalBuildView<'a> {
+struct ParallelBuildContext<'a> {
     adj: &'a ConcurrentFlatAdj,
     n: usize,
     dim: usize,
@@ -600,11 +597,9 @@ struct ExperimentalBuildView<'a> {
     sigs: &'a Bq2Store,
     locks: &'a StripedSpinLocks,
     profile: &'a BuildProfile,
-    /// 反向剪枝模式：true=旧的"每条边全量剪枝"(A/B对照用)，false=惰性剪枝(默认)
-    eager: bool,
 }
 
-impl ExperimentalBuildView<'_> {
+impl ParallelBuildContext<'_> {
     fn beam_search_l0_locked(
         &self,
         q_sig: &Bq2Signature,
@@ -669,84 +664,7 @@ impl ExperimentalBuildView<'_> {
         res
     }
 
-    fn connect_node_checked(&self, idx: u32, visited: &mut Bitset) {
-        if idx == 0 {
-            return;
-        }
-
-        let my_sig = self.sigs.get_sig_in_bounds(idx as usize);
-        let candidates_sym = self.beam_search_l0_locked(&my_sig, 0, self.ef, visited);
-        let mut candidates: Vec<(u32, u32)> = candidates_sym
-            .into_iter()
-            .filter(|&(_, id)| id != idx)
-            .map(|(_, id)| {
-                (
-                    self.sigs
-                        .distance_in_bounds(idx as usize, id as usize, self.dim),
-                    id,
-                )
-            })
-            .collect();
-
-        let samples = self.ef.min(128).max(self.m0 * 2);
-        let mut state = (idx as usize)
-            .wrapping_mul(0x9E3779B97F4A7C15usize)
-            .wrapping_add(0xBF58476D1CE4E5B9usize);
-        for _ in 0..samples {
-            state ^= state >> 30;
-            state = state.wrapping_mul(0xBF58476D1CE4E5B9usize);
-            state ^= state >> 27;
-            state = state.wrapping_mul(0x94D049BB133111EBusize);
-            state ^= state >> 31;
-            let id = (state % self.n) as u32;
-            if id != idx {
-                candidates.push((
-                    self.sigs
-                        .distance_in_bounds(idx as usize, id as usize, self.dim),
-                    id,
-                ));
-            }
-        }
-
-        candidates.sort_unstable_by_key(|&(_, id)| id);
-        candidates.dedup_by_key(|&mut (_, id)| id);
-        candidates.sort_unstable_by_key(|&(d, _)| d);
-
-        if candidates.is_empty() {
-            candidates.push((self.sigs.distance_in_bounds(idx as usize, 0, self.dim), 0));
-        }
-
-        let selected =
-            QuIVer::vamana_select(self.sigs, idx, &candidates, self.m0, self.dim, self.alpha);
-        self.adj.set_neighbors_locked(idx, &selected, self.locks);
-
-        for &nb in &selected {
-            let guard = self.locks.lock(nb);
-            let mut current = self.adj.neighbors_with_guard(&guard);
-            if !current.contains(&idx) {
-                current.push(idx);
-            }
-            let mut nb_candidates: Vec<(u32, u32)> = current
-                .into_iter()
-                .filter(|&n| n != nb)
-                .map(|n| {
-                    (
-                        self.sigs
-                            .distance_in_bounds(nb as usize, n as usize, self.dim),
-                        n,
-                    )
-                })
-                .collect();
-            nb_candidates.sort_unstable_by_key(|&(_, id)| id);
-            nb_candidates.dedup_by_key(|&mut (_, id)| id);
-            nb_candidates.sort_unstable_by_key(|&(d, _)| d);
-            let pruned =
-                QuIVer::vamana_select(self.sigs, nb, &nb_candidates, self.m0, self.dim, self.alpha);
-            self.adj.set_neighbors_with_guard(&guard, &pruned);
-        }
-    }
-
-    fn connect_node_fast(&self, idx: u32, visited: &mut Bitset) {
+    fn connect_node(&self, idx: u32, visited: &mut Bitset) {
         if idx == 0 {
             return;
         }
@@ -818,36 +736,7 @@ impl ExperimentalBuildView<'_> {
             // 惰性剪枝：邻居表未满则直接追加(O(deg))，仅当容量用尽才触发一次完整剪枝。
             // 邻接表 stride=m0*2+1 留有 2× headroom，使昂贵的 vamana_select(O(deg²))
             // 从"每条反向边都跑"降为"约每 m0 条才跑一次"，砍掉构图主成本。
-            // eager=true 时恢复旧的"每条边全量剪枝"行为，用于 recall A/B 对照。
-            if self.eager {
-                let mut current = self.adj.neighbors_raw(nb);
-                if !current.contains(&idx) {
-                    current.push(idx);
-                }
-                let mut nb_candidates: Vec<(u32, u32)> = current
-                    .into_iter()
-                    .filter(|&n| n != nb)
-                    .map(|n| {
-                        (
-                            self.sigs
-                                .distance_in_bounds(nb as usize, n as usize, self.dim),
-                            n,
-                        )
-                    })
-                    .collect();
-                nb_candidates.sort_unstable_by_key(|&(_, id)| id);
-                nb_candidates.dedup_by_key(|&mut (_, id)| id);
-                nb_candidates.sort_unstable_by_key(|&(d, _)| d);
-                let pruned = QuIVer::vamana_select(
-                    self.sigs,
-                    nb,
-                    &nb_candidates,
-                    self.m0,
-                    self.dim,
-                    self.alpha,
-                );
-                self.adj.set_neighbors_raw(nb, &pruned);
-            } else if !self.adj.contains_raw(nb, idx) {
+            if !self.adj.contains_raw(nb, idx) {
                 if self.adj.degree_raw(nb) < cap {
                     self.adj.push_neighbor_raw(nb, idx);
                 } else {
@@ -1008,9 +897,9 @@ pub struct QuIVer {
     // Hot（常驻内存）
     bq_store: Bq2Store,
     // 显式安装的查询校正；复用layer0，结构或向量变化后失效。
-    corrected_sm: Option<corrected_sm::CorrectedSmIndex>,
+    corrected_sm: Option<sm::SmIndex>,
     // 默认无训练SM-L2；增量插入追加位码，删除仅屏蔽精排，旧文件由向量池恢复。
-    default_sm: Option<corrected_sm::CorrectedSmIndex>,
+    default_sm: Option<sm::SmIndex>,
     layer0: FlatAdj,
     upper_layers: Vec<Vec<Vec<u32>>>,
     upper_bytes: usize,
@@ -1103,7 +992,7 @@ impl QuIVer {
             default_sm: if dim == 0 {
                 None
             } else {
-                Some(corrected_sm::CorrectedSmIndex::empty_routing(dim).expect("合法SM维度"))
+                Some(sm::SmIndex::empty_routing(dim).expect("合法SM维度"))
             },
             layer0: FlatAdj::new(m0 * 2 + 1),
             upper_layers: Vec::new(),
@@ -1478,177 +1367,6 @@ impl QuIVer {
         }
         res.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         res
-    }
-
-    fn beam_search_l0_dual<S: NavigationScorer>(
-        &self,
-        q_sig: &Bq2Signature,
-        entry: u32,
-        ef: usize,
-        scorer: &mut S,
-        signal_quota_ppm: u32,
-        signal_seed_ids: &[u64],
-    ) -> Vec<(NonNanF32, u32)> {
-        let mut discovered = Bitset::new(self.n);
-        let mut expanded = Bitset::new(self.n);
-        let mut vector_queue = BinaryHeap::with_capacity(ef.saturating_mul(2));
-        let mut signal_queue = BinaryHeap::with_capacity(ef.saturating_mul(2));
-        let mut vector_results = BinaryHeap::with_capacity(ef.saturating_add(1));
-        let mut signal_results = BinaryHeap::with_capacity(ef.saturating_add(1));
-        let distance = |node: u32| {
-            self.bq_store
-                .distance_to_sig_cheap_in_bounds(node as usize, q_sig, self.dim)
-        };
-        let add = |node: u32,
-                   discovered: &mut Bitset,
-                   vector_queue: &mut BinaryHeap<Reverse<(NonNanF32, u32)>>,
-                   signal_queue: &mut BinaryHeap<Reverse<(NonNanF32, u32)>>,
-                   vector_results: &mut BinaryHeap<(NonNanF32, u32)>,
-                   signal_results: &mut BinaryHeap<(NonNanF32, u32)>,
-                   scorer: &mut S| {
-            if discovered.test(node as usize) {
-                return;
-            }
-            discovered.set(node as usize);
-            let vector_distance = NonNanF32(distance(node) as f32);
-            let signal_distance =
-                NonNanF32(scorer.score(self.ids[node as usize], vector_distance.0 as u32) as f32);
-            vector_queue.push(Reverse((vector_distance, node)));
-            signal_queue.push(Reverse((signal_distance, node)));
-            vector_results.push((vector_distance, node));
-            signal_results.push((signal_distance, node));
-            if vector_results.len() > ef {
-                vector_results.pop();
-            }
-            if signal_results.len() > ef {
-                signal_results.pop();
-            }
-        };
-        add(
-            entry,
-            &mut discovered,
-            &mut vector_queue,
-            &mut signal_queue,
-            &mut vector_results,
-            &mut signal_results,
-            scorer,
-        );
-        for &id in signal_seed_ids {
-            if let Some(&node) = self.id_to_internal.get(&id)
-                && !self.tombstones[node as usize]
-            {
-                add(
-                    node,
-                    &mut discovered,
-                    &mut vector_queue,
-                    &mut signal_queue,
-                    &mut vector_results,
-                    &mut signal_results,
-                    scorer,
-                );
-            }
-        }
-
-        let mut quota_accumulator = 0u64;
-        loop {
-            while vector_queue
-                .peek()
-                .is_some_and(|Reverse((_, node))| expanded.test(*node as usize))
-            {
-                vector_queue.pop();
-            }
-            while signal_queue
-                .peek()
-                .is_some_and(|Reverse((_, node))| expanded.test(*node as usize))
-            {
-                signal_queue.pop();
-            }
-            let vector_available = vector_queue.peek().is_some_and(|Reverse((score, _))| {
-                vector_results.len() < ef || *score <= vector_results.peek().unwrap().0
-            });
-            let signal_available = signal_queue.peek().is_some_and(|Reverse((score, _))| {
-                signal_results.len() < ef || *score <= signal_results.peek().unwrap().0
-            });
-            if !vector_available && !signal_available {
-                break;
-            }
-            quota_accumulator = quota_accumulator.saturating_add(u64::from(signal_quota_ppm));
-            let prefer_signal = quota_accumulator >= 1_000_000;
-            if prefer_signal {
-                quota_accumulator -= 1_000_000;
-            }
-            let current = if prefer_signal && signal_available || !vector_available {
-                signal_queue.pop().map(|Reverse((_, node))| node)
-            } else {
-                vector_queue.pop().map(|Reverse((_, node))| node)
-            };
-            let Some(current) = current else {
-                break;
-            };
-            if expanded.test(current as usize) {
-                continue;
-            }
-            expanded.set(current as usize);
-            let neighbors = self.layer0.neighbors(current);
-            for &neighbor in neighbors {
-                if !discovered.test(neighbor as usize) {
-                    self.bq_store.prefetch_sig(neighbor as usize);
-                }
-            }
-            for &neighbor in neighbors {
-                add(
-                    neighbor,
-                    &mut discovered,
-                    &mut vector_queue,
-                    &mut signal_queue,
-                    &mut vector_results,
-                    &mut signal_results,
-                    scorer,
-                );
-            }
-        }
-
-        let mut vector = vector_results.into_vec();
-        let mut signal = signal_results.into_vec();
-        vector.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        signal.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        let mut selected = Bitset::new(self.n);
-        let mut candidates = Vec::with_capacity(ef);
-        let mut vector_index = 0usize;
-        let mut signal_index = 0usize;
-        let mut merge_accumulator = 0u64;
-        while candidates.len() < ef && (vector_index < vector.len() || signal_index < signal.len())
-        {
-            merge_accumulator = merge_accumulator.saturating_add(u64::from(signal_quota_ppm));
-            let prefer_signal = merge_accumulator >= 1_000_000;
-            if prefer_signal {
-                merge_accumulator -= 1_000_000;
-            }
-            let source =
-                if prefer_signal && signal_index < signal.len() || vector_index >= vector.len() {
-                    let item = signal[signal_index];
-                    signal_index += 1;
-                    item
-                } else {
-                    let item = vector[vector_index];
-                    vector_index += 1;
-                    item
-                };
-            if selected.test(source.1 as usize) {
-                continue;
-            }
-            selected.set(source.1 as usize);
-            candidates.push(source);
-        }
-        for candidate in &mut candidates {
-            candidate.0 = NonNanF32(self.bq_store.distance_to_sig_in_bounds(
-                candidate.1 as usize,
-                q_sig,
-                self.dim,
-            ) as f32);
-        }
-        candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        candidates
     }
 
     fn beam_search_l0_384_with_scorer<S: NavigationScorer>(
@@ -2080,107 +1798,6 @@ impl QuIVer {
         )
     }
 
-    /// 实验性双队列联合导航。纯向量入口不会调用此方法。
-    pub fn search_dual_queue<F, S>(
-        &self,
-        query: &[f32],
-        mut get_vec_f32: F,
-        config: &QuIVerSearchConfig,
-        scorer: &mut S,
-        signal_quota_ppm: u32,
-        signal_seed_ids: &[u64],
-    ) -> Vec<(u64, f32)>
-    where
-        F: FnMut(usize, &mut Vec<f32>) -> bool,
-        S: NavigationScorer,
-    {
-        if self.n == 0
-            || config.top_k == 0
-            || query.len() != self.dim
-            || query.iter().any(|value| !value.is_finite())
-        {
-            return Vec::new();
-        }
-        let normalized_config = QuIVerSearchConfig {
-            top_k: config.top_k.min(self.n),
-            ef_search: config.ef_search.max(config.top_k).min(self.n),
-            rerank_limit: config.rerank_limit.map(|limit| limit.min(self.n)),
-        };
-        let config = &normalized_config;
-        let query_signature = Bq2Signature::from_vector(query);
-        let mut entry = self.entry_point;
-        for layer in (1..=self.max_level).rev() {
-            let upper = layer - 1;
-            if upper >= self.upper_layers.len() {
-                continue;
-            }
-            loop {
-                let mut changed = false;
-                let mut best = self.bq_store.distance_to_sig_in_bounds(
-                    entry as usize,
-                    &query_signature,
-                    self.dim,
-                );
-                for &neighbor in &self.upper_layers[upper][entry as usize] {
-                    let distance = self.bq_store.distance_to_sig_in_bounds(
-                        neighbor as usize,
-                        &query_signature,
-                        self.dim,
-                    );
-                    if distance < best {
-                        entry = neighbor;
-                        best = distance;
-                        changed = true;
-                    }
-                }
-                if !changed {
-                    break;
-                }
-            }
-        }
-        let mut candidates = self.beam_search_l0_dual(
-            &query_signature,
-            entry,
-            config.ef_search,
-            scorer,
-            signal_quota_ppm,
-            signal_seed_ids,
-        );
-        self.sort_rerank_candidates(&mut candidates);
-        let rerank_limit = config.rerank_limit().min(candidates.len());
-        let mut buffer = Vec::with_capacity(self.dim);
-        let mut scored = Vec::with_capacity(rerank_limit);
-        for &(_, internal) in &candidates {
-            if scored.len() >= rerank_limit {
-                break;
-            }
-            if self.tombstones[internal as usize]
-                || !scorer.accept_result(self.ids[internal as usize])
-            {
-                continue;
-            }
-            let slot = self.slot_indices[internal as usize];
-            if get_vec_f32(slot, &mut buffer)
-                && buffer.len() == self.dim
-                && buffer.iter().all(|v| v.is_finite())
-            {
-                scored.push((cosine_similarity_f32(query, &buffer), internal));
-            }
-        }
-        scored.retain(|value| value.0.is_finite());
-        scored.sort_unstable_by(|left, right| {
-            right
-                .0
-                .total_cmp(&left.0)
-                .then_with(|| self.ids[left.1 as usize].cmp(&self.ids[right.1 as usize]))
-        });
-        scored
-            .into_iter()
-            .take(config.top_k)
-            .map(|(score, internal)| (self.ids[internal as usize], score))
-            .collect()
-    }
-
     /// 使用自定义查询时评分器搜索。仅显式联合查询应调用此入口。
     pub fn search_with_scorer<F, S>(
         &self,
@@ -2455,218 +2072,6 @@ impl QuIVer {
         )
     }
 
-    /// ═══ 并行批量构建（rayon 加速）═══
-    ///
-    /// 利用 rayon 并行计算 BQ 签名，预分配所有数据结构，
-    /// 然后顺序插入建图。相比逐个 insert 减少了：
-    ///   - BQ 签名计算时间（并行化）
-    ///   - 动态扩容开销（一次性预分配）
-    ///   - Visited bitset 重复分配（复用）
-    pub fn batch_build(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize]) {
-        self.corrected_sm = None;
-        let n = ids.len();
-        let dim = self.dim;
-        assert_eq!(vectors.len(), n * dim);
-        assert_eq!(slot_idxs.len(), n);
-
-        // ── Phase 1: 并行计算 BQ 签名 ──
-        let sigs: Vec<Bq2Signature> = vectors
-            .par_chunks(dim)
-            .map(Bq2Signature::from_vector)
-            .collect();
-
-        // ── Phase 2: 预分配所有数据结构 ──
-        self.bq_store.reserve(n);
-        self.ids.reserve(n);
-        self.slot_indices.reserve(n);
-        self.tombstones.reserve(n);
-        self.node_max_layer.reserve(n);
-
-        // 预先计算所有层级
-        let mut lcg: u64 = 12345;
-        let mut levels = Vec::with_capacity(n);
-        for _ in 0..n {
-            levels.push(self.random_level(&mut lcg));
-        }
-        let _max_level = *levels.iter().max().unwrap_or(&0);
-
-        // 预分配 Layer 0
-        self.layer0.data.reserve(n * self.layer0.stride);
-
-        // ── Phase 3: 逐个插入建图 ──
-        // 使用预计算的签名，避免重复计算
-        let mut visited = Bitset::new(0);
-        for i in 0..n {
-            let previous_entry = self.entry_point;
-            let _v = &vectors[i * dim..(i + 1) * dim];
-            let idx = self.n as u32;
-
-            // 直接使用预计算的签名
-            self.bq_store.push_sig(&sigs[i]);
-            self.ids.push(ids[i]);
-            self.slot_indices.push(slot_idxs[i]);
-            self.id_to_internal.insert(ids[i], idx);
-            self.tombstones.push(false);
-
-            let level = levels[i];
-            self.node_max_layer.push(level as u8);
-
-            self.layer0.push_empty();
-            while self.upper_layers.len() < level {
-                self.upper_bytes += self.n * std::mem::size_of::<Vec<u32>>();
-                self.upper_layers.push(vec![Vec::new(); self.n]);
-            }
-            for ul in self.upper_layers.iter_mut() {
-                ul.push(Vec::new());
-                self.upper_bytes += std::mem::size_of::<Vec<u32>>();
-            }
-
-            self.n += 1;
-            self.connectivity_parents.push(EMPTY_NB);
-            visited.grow(self.n);
-
-            if self.n == 1 {
-                self.entry_point = 0;
-                self.max_level = level;
-                continue;
-            }
-
-            let my_sig = self.bq_store.get_sig_in_bounds(idx as usize);
-            let mut cur_node = self.entry_point;
-
-            // 高层贪心下降（BQ 距离）
-            for l in ((level + 1)..=self.max_level).rev() {
-                let ul_idx = l - 1;
-                if ul_idx < self.upper_layers.len() {
-                    loop {
-                        let mut changed = false;
-                        let cur_d =
-                            self.bq_store
-                                .distance_in_bounds(idx as usize, cur_node as usize, dim);
-                        let mut best_d = cur_d;
-                        for &nb in &self.upper_layers[ul_idx][cur_node as usize] {
-                            let nd =
-                                self.bq_store
-                                    .distance_in_bounds(idx as usize, nb as usize, dim);
-                            if nd < best_d {
-                                cur_node = nb;
-                                best_d = nd;
-                                changed = true;
-                            }
-                        }
-                        if !changed {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // 高层搜索
-            for l in (level..=self.max_level).rev() {
-                let res = self.beam_search_upper(&my_sig, l, cur_node, 1, &mut visited);
-                if !res.is_empty() {
-                    cur_node = res[0].1;
-                }
-            }
-
-            // 各层插入
-            for l in (0..=level).rev() {
-                let ef = self.ef_construction;
-                let candidates_sym = if l == 0 {
-                    self.beam_search_l0(&my_sig, cur_node, ef, &mut visited)
-                } else {
-                    self.beam_search_upper(&my_sig, l, cur_node, ef, &mut visited)
-                };
-                let candidates: Vec<(u32, u32)> = candidates_sym
-                    .into_iter()
-                    .map(|(_, id)| {
-                        (
-                            self.bq_store
-                                .distance_in_bounds(idx as usize, id as usize, dim),
-                            id,
-                        )
-                    })
-                    .collect();
-
-                let max_nb = if l == 0 { self.m0 } else { self.m };
-                let selected = self.select_neighbors(idx, &candidates, max_nb);
-
-                if l == 0 {
-                    for &nb in &selected {
-                        if !self.layer0.contains(idx, nb) {
-                            self.layer0.push_neighbor(idx, nb);
-                        }
-                    }
-                    // Vamana 双向剪枝
-                    for &nb in &selected {
-                        let mut nb_candidates: Vec<(u32, u32)> = self
-                            .layer0
-                            .neighbors(nb)
-                            .iter()
-                            .map(|&n| {
-                                (
-                                    self.bq_store
-                                        .distance_in_bounds(nb as usize, n as usize, dim),
-                                    n,
-                                )
-                            })
-                            .collect();
-                        if !self.layer0.contains(nb, idx) {
-                            let d =
-                                self.bq_store
-                                    .distance_in_bounds(nb as usize, idx as usize, dim);
-                            nb_candidates.push((d, idx));
-                        }
-                        nb_candidates.sort_unstable_by_key(|&(d, _)| d);
-                        let pruned = self.select_layer0_neighbors(nb, &nb_candidates);
-                        self.layer0.set_neighbors(nb, &pruned);
-                    }
-                } else {
-                    let ul = l - 1;
-                    for &nb in &selected {
-                        if !self.upper_layers[ul][idx as usize].contains(&nb) {
-                            self.upper_bytes += 4;
-                            self.upper_layers[ul][idx as usize].push(nb);
-                        }
-                        if !self.upper_layers[ul][nb as usize].contains(&idx) {
-                            self.upper_bytes += 4;
-                            self.upper_layers[ul][nb as usize].push(idx);
-                        }
-                    }
-                }
-
-                if !candidates.is_empty() {
-                    cur_node = candidates[0].1;
-                }
-            }
-
-            if level > self.max_level {
-                self.entry_point = idx;
-                self.max_level = level;
-            }
-            self.finish_layer0_insertion(idx, previous_entry);
-        }
-        self.rebuild_default_sm(vectors);
-    }
-
-    pub fn batch_build_experimental_v2_checked(
-        &mut self,
-        vectors: &[f32],
-        ids: &[u64],
-        slot_idxs: &[usize],
-    ) {
-        self.batch_build_experimental_v2_impl(vectors, ids, slot_idxs, true);
-    }
-
-    pub fn batch_build_experimental_v2(
-        &mut self,
-        vectors: &[f32],
-        ids: &[u64],
-        slot_idxs: &[usize],
-    ) {
-        self.batch_build_experimental_v2_impl(vectors, ids, slot_idxs, false);
-    }
-
     /// 使用外部流式编码得到的 BQ2 签名构建图，不保留全量 FP32 向量副本。
     pub(crate) fn batch_build_from_store(
         &mut self,
@@ -2714,7 +2119,7 @@ impl QuIVer {
         let locks = StripedSpinLocks::new(n, self.m0);
         let concurrent_adj = ConcurrentFlatAdj::new(n, self.layer0.stride);
         let profile = BuildProfile::new();
-        let view = ExperimentalBuildView {
+        let view = ParallelBuildContext {
             adj: &concurrent_adj,
             n,
             dim,
@@ -2724,7 +2129,6 @@ impl QuIVer {
             sigs: &self.bq_store,
             locks: &locks,
             profile: &profile,
-            eager: std::env::var("TRIVIUM_EAGER_PRUNE").as_deref() == Ok("1"),
         };
 
         let t_build = Instant::now();
@@ -2740,7 +2144,7 @@ impl QuIVer {
                 if let Some(t) = t_bs {
                     profile.add(&profile.bitset_ns, t.elapsed().as_nanos() as u64);
                 }
-                view.connect_node_fast(i as u32, &mut visited);
+                view.connect_node(i as u32, &mut visited);
             });
         }
         // 最终剪枝保留跨签名出口，避免同码近邻占满名额后封闭入口所在的簇。
@@ -2756,37 +2160,8 @@ impl QuIVer {
         self.repair_layer0_connectivity();
     }
 
-    /// 使用外部预构建签名的实验兼容入口。
-    #[cfg(feature = "ablation")]
-    pub fn batch_build_with_store(
-        &mut self,
-        _vectors: &[f32],
-        ids: &[u64],
-        slot_idxs: &[usize],
-        store: Bq2Store,
-    ) {
-        self.batch_build_from_store(ids, slot_idxs, store);
-    }
-
-    /// 获取 Layer 0 节点的邻居列表（**仅限实验**）。
-    #[cfg(feature = "ablation")]
-    pub fn layer0_neighbors(&self, node: u32) -> &[u32] {
-        self.layer0.neighbors(node)
-    }
-
-    /// 获取图的入口节点索引（**仅限实验**）。
-    #[cfg(feature = "ablation")]
-    pub fn ablation_entry_point(&self) -> u32 {
-        self.entry_point
-    }
-
-    fn batch_build_experimental_v2_impl(
-        &mut self,
-        vectors: &[f32],
-        ids: &[u64],
-        slot_idxs: &[usize],
-        checked: bool,
-    ) {
+    /// 批量并行构图，统一使用有界邻接表、延迟反向剪枝及连通性保护。
+    pub fn batch_build(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize]) {
         self.corrected_sm = None;
         self.default_sm = None;
         let n = ids.len();
@@ -2832,7 +2207,7 @@ impl QuIVer {
         let locks = StripedSpinLocks::new(n, self.m0);
         let concurrent_adj = ConcurrentFlatAdj::new(n, self.layer0.stride);
         let profile = BuildProfile::new();
-        let view = ExperimentalBuildView {
+        let view = ParallelBuildContext {
             adj: &concurrent_adj,
             n,
             dim,
@@ -2842,7 +2217,6 @@ impl QuIVer {
             sigs: &self.bq_store,
             locks: &locks,
             profile: &profile,
-            eager: std::env::var("TRIVIUM_EAGER_PRUNE").as_deref() == Ok("1"),
         };
 
         let t_build = Instant::now();
@@ -2858,14 +2232,10 @@ impl QuIVer {
                 if let Some(t) = t_bs {
                     profile.add(&profile.bitset_ns, t.elapsed().as_nanos() as u64);
                 }
-                if checked {
-                    view.connect_node_checked(i as u32, &mut visited);
-                } else {
-                    view.connect_node_fast(i as u32, &mut visited);
-                }
+                view.connect_node(i as u32, &mut visited);
             });
         }
-        // 最终剪枝保留跨签名出口；checked 路径没有额外候选时为空操作。
+        // 最终剪枝在原有容量内保留跨签名出口。
         (0..n as u32)
             .into_par_iter()
             .for_each(|node| view.final_prune(node));
@@ -2876,187 +2246,8 @@ impl QuIVer {
 
         concurrent_adj.freeze_into_flat(&mut self.layer0);
         self.repair_layer0_connectivity();
-        if cfg!(debug_assertions)
-            || std::env::var("TRIVIUM_BQ_VAMANA_VALIDATE").as_deref() == Ok("1")
-        {
+        if cfg!(debug_assertions) {
             self.validate_layer0();
-        }
-        self.rebuild_default_sm(vectors);
-    }
-
-    pub fn batch_build_experimental(&mut self, vectors: &[f32], ids: &[u64], slot_idxs: &[usize]) {
-        self.corrected_sm = None;
-        let n = ids.len();
-        let dim = self.dim;
-        assert_eq!(vectors.len(), n * dim);
-        assert_eq!(slot_idxs.len(), n);
-
-        let sigs: Vec<Bq2Signature> = vectors
-            .par_chunks(dim)
-            .map(Bq2Signature::from_vector)
-            .collect();
-
-        self.bq_store.reserve(n);
-        self.ids.reserve(n);
-        self.slot_indices.reserve(n);
-        self.tombstones.reserve(n);
-        self.node_max_layer.reserve(n);
-
-        let mut lcg: u64 = 12345;
-        let mut levels = Vec::with_capacity(n);
-        for _ in 0..n {
-            levels.push(self.random_level(&mut lcg));
-        }
-
-        self.layer0.data.reserve(n * self.layer0.stride);
-
-        let mut visited = Bitset::new(0);
-        for i in 0..n {
-            let previous_entry = self.entry_point;
-            let _v = &vectors[i * dim..(i + 1) * dim];
-            let idx = self.n as u32;
-
-            self.bq_store.push_sig(&sigs[i]);
-            self.ids.push(ids[i]);
-            self.slot_indices.push(slot_idxs[i]);
-            self.id_to_internal.insert(ids[i], idx);
-            self.tombstones.push(false);
-
-            let level = levels[i];
-            self.node_max_layer.push(level as u8);
-
-            self.layer0.push_empty();
-            while self.upper_layers.len() < level {
-                self.upper_bytes += self.n * std::mem::size_of::<Vec<u32>>();
-                self.upper_layers.push(vec![Vec::new(); self.n]);
-            }
-            for ul in self.upper_layers.iter_mut() {
-                ul.push(Vec::new());
-                self.upper_bytes += std::mem::size_of::<Vec<u32>>();
-            }
-
-            self.n += 1;
-            self.connectivity_parents.push(EMPTY_NB);
-            visited.grow(self.n);
-
-            if self.n == 1 {
-                self.entry_point = 0;
-                self.max_level = level;
-                continue;
-            }
-
-            let my_sig = self.bq_store.get_sig_in_bounds(idx as usize);
-            let mut cur_node = self.entry_point;
-
-            for l in ((level + 1)..=self.max_level).rev() {
-                let ul_idx = l - 1;
-                if ul_idx < self.upper_layers.len() {
-                    loop {
-                        let mut changed = false;
-                        let cur_d =
-                            self.bq_store
-                                .distance_in_bounds(idx as usize, cur_node as usize, dim);
-                        let mut best_d = cur_d;
-                        for &nb in &self.upper_layers[ul_idx][cur_node as usize] {
-                            let nd =
-                                self.bq_store
-                                    .distance_in_bounds(idx as usize, nb as usize, dim);
-                            if nd < best_d {
-                                cur_node = nb;
-                                best_d = nd;
-                                changed = true;
-                            }
-                        }
-                        if !changed {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            for l in (level..=self.max_level).rev() {
-                let res = self.beam_search_upper(&my_sig, l, cur_node, 1, &mut visited);
-                if !res.is_empty() {
-                    cur_node = res[0].1;
-                }
-            }
-
-            for l in (0..=level).rev() {
-                let ef = self.ef_construction;
-                let candidates_sym = if l == 0 {
-                    self.beam_search_l0(&my_sig, cur_node, ef, &mut visited)
-                } else {
-                    self.beam_search_upper(&my_sig, l, cur_node, ef, &mut visited)
-                };
-                let candidates: Vec<(u32, u32)> = candidates_sym
-                    .into_iter()
-                    .map(|(_, id)| {
-                        (
-                            self.bq_store
-                                .distance_in_bounds(idx as usize, id as usize, dim),
-                            id,
-                        )
-                    })
-                    .collect();
-
-                let max_nb = if l == 0 { self.m0 } else { self.m };
-                let selected = self.select_neighbors(idx, &candidates, max_nb);
-
-                if l == 0 {
-                    for &nb in &selected {
-                        if !self.layer0.contains(idx, nb) {
-                            self.layer0.push_neighbor(idx, nb);
-                        }
-                    }
-
-                    for &nb in &selected {
-                        let this = &mut *self;
-                        let mut nb_candidates: Vec<(u32, u32)> = this
-                            .layer0
-                            .neighbors(nb)
-                            .iter()
-                            .map(|&n| {
-                                (
-                                    this.bq_store
-                                        .distance_in_bounds(nb as usize, n as usize, dim),
-                                    n,
-                                )
-                            })
-                            .collect();
-                        if !this.layer0.contains(nb, idx) {
-                            let d =
-                                this.bq_store
-                                    .distance_in_bounds(nb as usize, idx as usize, dim);
-                            nb_candidates.push((d, idx));
-                        }
-                        nb_candidates.sort_unstable_by_key(|&(d, _)| d);
-                        let pruned = this.select_layer0_neighbors(nb, &nb_candidates);
-                        this.layer0.set_neighbors(nb, &pruned);
-                    }
-                } else {
-                    let ul = l - 1;
-                    for &nb in &selected {
-                        if !self.upper_layers[ul][idx as usize].contains(&nb) {
-                            self.upper_bytes += 4;
-                            self.upper_layers[ul][idx as usize].push(nb);
-                        }
-                        if !self.upper_layers[ul][nb as usize].contains(&idx) {
-                            self.upper_bytes += 4;
-                            self.upper_layers[ul][nb as usize].push(idx);
-                        }
-                    }
-                }
-
-                if !candidates.is_empty() {
-                    cur_node = candidates[0].1;
-                }
-            }
-
-            if level > self.max_level {
-                self.entry_point = idx;
-                self.max_level = level;
-            }
-            self.finish_layer0_insertion(idx, previous_entry);
         }
         self.rebuild_default_sm(vectors);
     }
@@ -3395,387 +2586,6 @@ impl QuIVer {
         let file = std::fs::File::open(path)?;
         let data = unsafe { memmap2::MmapOptions::new().map(&file)? };
         Self::load_from_bytes(&data)
-    }
-
-    pub fn load_from_bytes(bytes: &[u8]) -> std::io::Result<Self> {
-        fn invalid(message: impl Into<String>) -> std::io::Error {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
-        }
-
-        fn checked_end(
-            offset: usize,
-            count: usize,
-            width: usize,
-            name: &str,
-        ) -> std::io::Result<usize> {
-            count
-                .checked_mul(width)
-                .and_then(|bytes| offset.checked_add(bytes))
-                .ok_or_else(|| invalid(format!("{name} 长度溢出")))
-        }
-
-        if bytes.len() < 52 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "QuIVer 文件太小 (QuIVer file too small)",
-            ));
-        }
-
-        // Magic
-        if &bytes[0..4] != Self::QUIVER_MAGIC {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "无效的 QuIVer magic (Invalid QuIVer magic): {:?}",
-                    &bytes[0..4]
-                ),
-            ));
-        }
-
-        // Version
-        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        if !(1..=Self::QUIVER_VERSION).contains(&version) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "不支持的 QuIVer 版本 (Unsupported QuIVer version): {}",
-                    version
-                ),
-            ));
-        }
-
-        // Header
-        let mut off = 8;
-        let dim = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        if dim == 0 || dim > crate::index::bq::MAX_BQ_DIM {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "QuIVer 维度 {} 超出安全范围 1..={} ",
-                    dim,
-                    crate::index::bq::MAX_BQ_DIM
-                ),
-            ));
-        }
-        let n = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        let m = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        let m0 = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        let ef_construction = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        let alpha = f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
-        off += 4;
-        let entry_point = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
-        off += 4;
-        let max_level = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        let dirty_count = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        off += 4; // 保留字段
-
-        if n == 0 || m == 0 || m0 == 0 || !alpha.is_finite() || alpha <= 0.0 {
-            return Err(invalid("QuIVer 头部参数非法"));
-        }
-        if entry_point as usize >= n || max_level > n {
-            return Err(invalid("QuIVer 入口或层级超出节点范围"));
-        }
-
-        // BQ Signatures（紧凑格式）
-        let chunks = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        let expected_chunks = dim.div_ceil(64);
-        if chunks != expected_chunks {
-            return Err(invalid(format!(
-                "QuIVer BQ chunks 不匹配: 期望 {expected_chunks}，实际 {chunks}"
-            )));
-        }
-        let pos_end = checked_end(
-            off,
-            n,
-            chunks
-                .checked_mul(8)
-                .ok_or_else(|| invalid("BQ 单签名长度溢出"))?,
-            "BQ pos",
-        )?;
-        let strong_end = checked_end(
-            pos_end,
-            n,
-            chunks
-                .checked_mul(8)
-                .ok_or_else(|| invalid("BQ 单签名长度溢出"))?,
-            "BQ strong",
-        )?;
-        if strong_end > bytes.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "BQ 签名数据不完整 (BQ signature data incomplete)",
-            ));
-        }
-        let pos_data: Vec<u64> = bytes[off..pos_end]
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|chunk| u64::from_le_bytes(*chunk))
-            .collect();
-        let strong_data: Vec<u64> = bytes[pos_end..strong_end]
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|chunk| u64::from_le_bytes(*chunk))
-            .collect();
-        let bq_store = Bq2Store::from_raw(pos_data, strong_data, chunks)
-            .map_err(|error| invalid(error.to_string()))?;
-        off = strong_end;
-
-        // Layer0 FlatAdj
-        let stride = m0
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| invalid("Layer0 stride 溢出"))?;
-        let l0_end = checked_end(
-            off,
-            n,
-            stride
-                .checked_mul(4)
-                .ok_or_else(|| invalid("Layer0 单节点长度溢出"))?,
-            "Layer0",
-        )?;
-        if l0_end > bytes.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Layer0 数据不完整 (Layer0 data incomplete)",
-            ));
-        }
-        let l0_data: Vec<u32> = bytes[off..l0_end]
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|chunk| u32::from_le_bytes(*chunk))
-            .collect();
-        off = l0_end;
-
-        // Tombstones
-        let tomb_end = checked_end(off, n, 1, "Tombstone")?;
-        if tomb_end > bytes.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Tombstone 数据不完整 (Tombstone data incomplete)",
-            ));
-        }
-        if bytes[off..tomb_end].iter().any(|&byte| byte > 1) {
-            return Err(invalid(
-                "QuIVer墓碑编码无效 (Invalid QuIVer tombstone encoding)",
-            ));
-        }
-        let tombstones: Vec<bool> = bytes[off..tomb_end].iter().map(|&b| b != 0).collect();
-        off = tomb_end;
-
-        // IDs
-        let ids_end = checked_end(off, n, 8, "IDs")?;
-        if ids_end > bytes.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "IDs 数据不完整 (IDs data incomplete)",
-            ));
-        }
-        let ids: Vec<u64> = bytes[off..ids_end]
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|chunk| u64::from_le_bytes(*chunk))
-            .collect();
-        off = ids_end;
-
-        // SlotIndices
-        let si_end = checked_end(off, n, 8, "SlotIndices")?;
-        if si_end > bytes.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "SlotIndices 数据不完整 (SlotIndices data incomplete)",
-            ));
-        }
-        let slot_indices: Vec<usize> = bytes[off..si_end]
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|chunk| u64::from_le_bytes(*chunk) as usize)
-            .collect();
-        off = si_end;
-
-        // NodeMaxLayer
-        let nml_end = checked_end(off, n, 1, "NodeMaxLayer")?;
-        if nml_end > bytes.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "NodeMaxLayer 数据不完整 (NodeMaxLayer data incomplete)",
-            ));
-        }
-        let node_max_layer: Vec<u8> = bytes[off..nml_end].to_vec();
-        off = nml_end;
-
-        // Upper Layers
-        if off + 4 > bytes.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Upper Layers header 不完整 (Upper Layers header incomplete)",
-            ));
-        }
-        let num_upper = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        if num_upper != max_level {
-            return Err(invalid("QuIVer upper layer 数量与 max_level 不一致"));
-        }
-
-        let mut upper_layers = Vec::with_capacity(num_upper);
-        for _ in 0..num_upper {
-            if off + 4 > bytes.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Upper layer 节点数不完整 (Upper layer node count incomplete)",
-                ));
-            }
-            let layer_nodes = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-            off += 4;
-            if layer_nodes != n {
-                return Err(invalid("QuIVer upper layer 节点数与索引节点数不一致"));
-            }
-
-            let mut layer = Vec::with_capacity(layer_nodes);
-            for _ in 0..layer_nodes {
-                if off + 2 > bytes.len() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Upper adj 度数不完整 (Upper adj degree incomplete)",
-                    ));
-                }
-                let deg = u16::from_le_bytes(bytes[off..off + 2].try_into().unwrap()) as usize;
-                off += 2;
-
-                let neighbors_end = checked_end(off, deg, 4, "Upper adj")?;
-                if neighbors_end > bytes.len() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Upper adj 邻居列表不完整 (Upper adj neighbor list incomplete)",
-                    ));
-                }
-                let mut adj = Vec::with_capacity(deg);
-                for _ in 0..deg {
-                    let neighbor = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
-                    if neighbor as usize >= n {
-                        return Err(invalid("QuIVer upper layer 邻居越界"));
-                    }
-                    adj.push(neighbor);
-                    off += 4;
-                }
-                layer.push(adj);
-            }
-            upper_layers.push(layer);
-        }
-
-        // 构建反向映射
-        let mut id_to_internal = std::collections::HashMap::with_capacity(n);
-        for (i, &id) in ids.iter().enumerate() {
-            if id == 0 {
-                return Err(invalid("QuIVer 节点 ID 为 0 (QuIVer node ID is zero)"));
-            }
-            if let Some(&previous) = id_to_internal.get(&id) {
-                // 向量更新保留旧墓碑行；同一业务ID仅允许一个活跃表示。
-                if !tombstones[previous as usize] && !tombstones[i] {
-                    return Err(invalid(
-                        "QuIVer 活跃节点 ID 重复 (Duplicate active QuIVer node ID)",
-                    ));
-                }
-                if !tombstones[previous as usize] {
-                    continue;
-                }
-            }
-            id_to_internal.insert(id, i as u32);
-        }
-
-        for node in 0..n {
-            let base = node * stride;
-            let degree = l0_data[base] as usize;
-            if degree > stride - 1 {
-                return Err(invalid("QuIVer Layer0 degree 越界"));
-            }
-            for &neighbor in &l0_data[base + 1..base + 1 + degree] {
-                if neighbor as usize >= n {
-                    return Err(invalid("QuIVer Layer0 邻居越界"));
-                }
-            }
-        }
-
-        let mut index = Self {
-            dim,
-            n,
-            routing_identity: std::sync::Arc::new(()),
-            m,
-            m0,
-            ef_construction,
-            ml: 1.0 / (m as f64).ln(),
-            alpha,
-            bq_store,
-            corrected_sm: None,
-            default_sm: None,
-            layer0: FlatAdj {
-                data: l0_data,
-                stride,
-            },
-            upper_bytes: upper_layers
-                .iter()
-                .flat_map(|layer| layer.iter())
-                .map(|row| row.len() * 4 + std::mem::size_of::<Vec<u32>>())
-                .sum(),
-            upper_layers,
-            node_max_layer,
-            ids,
-            slot_indices,
-            id_to_internal,
-            entry_point,
-            max_level,
-            tombstones,
-            dirty_count,
-            prefilter_slot_cache: Mutex::new(PrefilterSlotCacheState::default()),
-            visited: Bitset::new(n),
-            connectivity_parents: Vec::new(),
-        };
-        if version >= 2 {
-            let length_end = off
-                .checked_add(8)
-                .ok_or_else(|| invalid("SM长度偏移溢出 (SM length offset overflow)"))?;
-            let length_bytes = bytes
-                .get(off..length_end)
-                .ok_or_else(|| invalid("SM长度字段截断 (Truncated SM length field)"))?;
-            let length = u64::from_le_bytes(length_bytes.as_chunks::<8>().0[0]);
-            let length = usize::try_from(length)
-                .map_err(|_| invalid("SM长度超出平台范围 (SM length exceeds platform range)"))?;
-            let end = length_end
-                .checked_add(length)
-                .ok_or_else(|| invalid("SM快照长度溢出 (SM snapshot length overflow)"))?;
-            if end != bytes.len() {
-                return Err(invalid("SM快照范围不匹配 (SM snapshot range mismatch)"));
-            }
-            if length > 0 {
-                index.default_sm = Some(corrected_sm::CorrectedSmIndex::from_routing_snapshot(
-                    &bytes[length_end..end],
-                    dim,
-                    &index.ids,
-                    entry_point,
-                )?);
-            }
-        }
-        index.restore_navigation_tree()?;
-        tracing::info!(
-            "QuIVer 索引从磁盘加载完成：{} 个节点，dim={}，max_level={}，tombstone={}",
-            n,
-            dim,
-            max_level,
-            index.tombstones.iter().filter(|&&t| t).count()
-        );
-        Ok(index)
     }
 }
 
@@ -4212,7 +3022,7 @@ mod tests {
         let ids = vec![10, 20, 30, 40];
         let slots = vec![0, 1, 2, 3];
 
-        quiver.batch_build_experimental_v2(&vectors, &ids, &slots);
+        quiver.batch_build(&vectors, &ids, &slots);
 
         assert_eq!(quiver.active_count(), 4);
         assert_eq!(quiver.total_count(), 4);
@@ -4245,7 +3055,7 @@ mod tests {
     }
 
     #[test]
-    fn test_quiver_多路径建图与序列化() {
+    fn test_quiver_重建与增量写入序列化() {
         let config = QuIVerConfig {
             m: 16,
             ef_construction: 32,
@@ -4263,13 +3073,23 @@ mod tests {
         quiver.batch_build(&vectors, &ids, &slots);
         assert_eq!(quiver.total_count(), 4);
 
-        // 测试追加式批量建图
-        quiver.batch_build_experimental(&vectors, &[50, 60, 70, 80], &[4, 5, 6, 7]);
-        assert_eq!(quiver.total_count(), 8);
-
-        // 测试带校验的批量建图（会重置图）
-        quiver.batch_build_experimental_v2_checked(&vectors, &ids, &slots);
-        assert_eq!(quiver.total_count(), 4);
+        // 当前构图入口替换旧 ID、墓碑和导航状态，完整候选按稳定 ID 顺序返回。
+        assert!(quiver.soft_delete(10));
+        let search = QuIVerSearchConfig {
+            top_k: 4,
+            ef_search: 4,
+            rerank_limit: Some(4),
+        };
+        quiver.batch_build(&vectors, &[70, 80, 90, 100], &slots);
+        assert_eq!(
+            quiver.search_flat(&vectors[..4], &vectors, &search),
+            vec![(70, 1.), (80, 0.), (90, 0.), (100, 0.)]
+        );
+        quiver.batch_build(&vectors, &ids, &slots);
+        assert_eq!(
+            quiver.search_flat(&vectors[..4], &vectors, &search),
+            vec![(10, 1.), (20, 0.), (30, 0.), (40, 0.)]
+        );
 
         // 测试单节点增量插入
         let mut lcg = 12345;
@@ -4284,17 +3104,16 @@ mod tests {
         quiver.debug_connectivity();
 
         // 测试序列化与反序列化
-        let path = std::path::Path::new("test_quiver_ser.quiv");
-        quiver.save_to_file(path).unwrap();
+        let root = crate::test_support::TestDir::new("quiver_rebuild");
+        let path = std::path::PathBuf::from(root.file("sample.quiv"));
+        quiver.save_to_file(&path).unwrap();
 
-        let loaded = QuIVer::load_from_file(path).unwrap();
+        let loaded = QuIVer::load_from_file(&path).unwrap();
         assert_eq!(loaded.total_count(), 5);
         assert_eq!(loaded.active_count(), 5);
         assert_eq!(loaded.dim, 4);
         assert_eq!(loaded.entry_point, quiver.entry_point);
         assert_eq!(loaded.ids, vec![10, 20, 30, 40, 50]);
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -4313,7 +3132,7 @@ mod tests {
         let ids: Vec<u64> = (0..n as u64).collect();
         let slots: Vec<usize> = (0..n).collect();
 
-        quiver.batch_build_experimental_v2(&vectors, &ids, &slots);
+        quiver.batch_build(&vectors, &ids, &slots);
         assert_eq!(quiver.total_count(), n);
 
         let stats = quiver.stats();
@@ -4365,7 +3184,7 @@ mod tests {
         let mut quiver = QuIVer::new(4, &config);
 
         let vectors = vec![1.0f32, 0.0, 0.0, 0.0];
-        quiver.batch_build_experimental_v2(&vectors, &[42], &[0]);
+        quiver.batch_build(&vectors, &[42], &[0]);
         assert_eq!(quiver.total_count(), 1);
 
         let search_config = QuIVerSearchConfig {
@@ -4383,7 +3202,7 @@ mod tests {
         let config = QuIVerConfig::default();
         let mut quiver = QuIVer::new(4, &config);
         let vectors = vec![1.0, 0.0, 0.0, 0.0];
-        quiver.batch_build_experimental_v2(&vectors, &[1], &[0]);
+        quiver.batch_build(&vectors, &[1], &[0]);
 
         // 删除不存在的 ID
         assert!(!quiver.soft_delete(999));
@@ -4514,7 +3333,7 @@ mod tests {
     }
 
     #[test]
-    fn 热内存账本跨三条构图追加删除和重载保持准确() {
+    fn 热内存账本跨构图增量写入删除和重载保持准确() {
         fn check(index: &QuIVer) {
             let upper = index
                 .upper_layers
@@ -4550,31 +3369,28 @@ mod tests {
             alpha: 1.2,
         };
         let vectors = make_random_vectors(160, 8, 5739);
-        for builder in 0..3 {
+        {
             let mut index = QuIVer::new(8, &cfg);
             check(&index);
             let ids = (1..=160).collect::<Vec<_>>();
             let slots = (0..160).collect::<Vec<_>>();
-            match builder {
-                0 => index.batch_build(&vectors, &ids, &slots),
-                1 => index.batch_build_experimental(&vectors, &ids, &slots),
-                _ => index.batch_build_experimental_v2_checked(&vectors, &ids, &slots),
-            }
+            index.batch_build(&vectors, &ids, &slots);
             check(&index);
-            index.batch_build_experimental(
-                &vectors[..8 * 16],
-                &(161..=176).collect::<Vec<_>>(),
-                &(160..176).collect::<Vec<_>>(),
-            );
+            for offset in 0..16 {
+                index.insert(
+                    &vectors[offset * 8..(offset + 1) * 8],
+                    161 + offset as u64,
+                    160 + offset,
+                    &mut 23579,
+                );
+            }
             check(&index);
             index.insert(&vectors[..8], 177, 176, &mut 23579);
             check(&index);
             index.soft_delete(1);
             check(&index);
-            let root = std::env::temp_dir().join(format!(
-                "tdb-quiver-ledger-{builder}-{}",
-                std::process::id()
-            ));
+            let root =
+                std::env::temp_dir().join(format!("tdb-quiver-ledger-{}", std::process::id()));
             std::fs::create_dir_all(&root).unwrap();
             let path = root.join("sample.quiv");
             index.save_to_file(&path).unwrap();

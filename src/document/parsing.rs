@@ -477,6 +477,20 @@ fn plain(writer: &mut Writer<'_>) -> Result<()> {
     Ok(())
 }
 
+fn markdown_kind(tag: &pulldown_cmark::Tag<'_>) -> Option<&'static str> {
+    use pulldown_cmark::Tag;
+    match tag {
+        Tag::Paragraph => Some("paragraph"),
+        Tag::Heading { .. } => Some("heading"),
+        Tag::CodeBlock(_) => Some("code"),
+        Tag::Item => Some("list_item"),
+        Tag::Table(_) => Some("table"),
+        Tag::TableCell => Some("cell"),
+        Tag::BlockQuote(_) => Some("quote"),
+        _ => None,
+    }
+}
+
 fn markdown(writer: &mut Writer<'_>) -> Result<()> {
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
     let mut options = Options::empty();
@@ -487,8 +501,53 @@ fn markdown(writer: &mut Writer<'_>) -> Result<()> {
         .peekable();
     let mut open = Vec::<(TagEnd, usize)>::new();
     let mut sections = Vec::<(u8, usize)>::new();
-    while let Some((event, range)) = parser.next() {
+    let mut scopes = Vec::<(TagEnd, Option<&'static str>, bool)>::new();
+    let mut suppressed = 0usize;
+    let mut hidden_until = 0;
+    while let Some((mut event, mut range)) = parser.next() {
         crate::request::check_current()?;
+        if matches!(event, Event::Html(_)) && range.start < hidden_until && range.end > hidden_until
+        {
+            // 同一 HTML 行可同时包含隐藏元素的关闭标签和后续可见正文。
+            range.start = hidden_until;
+            event = Event::Html(writer.raw[range.clone()].into());
+        }
+        if suppressed > 0 && range.start >= hidden_until && !matches!(event, Event::End(_)) {
+            // 跨越隐藏元素的 Markdown 结构从首个可见片段重新建立有效范围。
+            for (end, kind, hidden) in &mut scopes {
+                if *hidden {
+                    *hidden = false;
+                    if let Some(kind) = kind {
+                        let parent = open
+                            .last()
+                            .map(|(_, index)| *index)
+                            .or_else(|| sections.last().map(|(_, index)| *index))
+                            .map(|index| writer.blocks[index].key.clone());
+                        let index = writer.open(kind, parent)?;
+                        open.push((*end, index));
+                    }
+                }
+            }
+            suppressed = 0;
+        }
+        match &event {
+            Event::Start(tag) => {
+                let hidden = range.start < hidden_until;
+                scopes.push((tag.to_end(), markdown_kind(tag), hidden));
+                if hidden {
+                    suppressed += 1;
+                    continue;
+                }
+            }
+            Event::End(_) => {
+                if scopes.pop().is_some_and(|(_, _, hidden)| hidden) {
+                    suppressed -= 1;
+                    continue;
+                }
+            }
+            _ if range.start < hidden_until => continue,
+            _ => {}
+        }
         match event {
             Event::Start(tag) => {
                 if let Tag::Heading { level, .. } = &tag
@@ -506,16 +565,7 @@ fn markdown(writer: &mut Writer<'_>) -> Result<()> {
                     let index = writer.open("section", parent)?;
                     sections.push((level, index));
                 }
-                let kind = match &tag {
-                    Tag::Paragraph => Some("paragraph"),
-                    Tag::Heading { .. } => Some("heading"),
-                    Tag::CodeBlock(_) => Some("code"),
-                    Tag::Item => Some("list_item"),
-                    Tag::Table(_) => Some("table"),
-                    Tag::TableCell => Some("cell"),
-                    Tag::BlockQuote(_) => Some("quote"),
-                    _ => None,
-                };
+                let kind = markdown_kind(&tag);
                 if let Some(kind) = kind {
                     let parent = open
                         .last()
@@ -540,14 +590,40 @@ fn markdown(writer: &mut Writer<'_>) -> Result<()> {
             | Event::DisplayMath(text) => writer.append(&text, range)?,
             Event::SoftBreak | Event::HardBreak => writer.append("\n", range)?,
             Event::Rule => writer.newline(range.end)?,
-            Event::Html(_) => {
-                let mut end = range.end;
+            Event::Html(text) => {
+                // HTML 事件保留独立来源，引用与列表的 Markdown 前缀位于事件间隙。
+                let mut combined = text.to_string();
+                let mut origins = vec![(0..combined.len(), range)];
                 while parser
                     .peek()
                     .is_some_and(|(event, _)| matches!(event, Event::Html(_)))
                 {
-                    if let Some((_, next)) = parser.next() {
-                        end = next.end;
+                    if let Some((Event::Html(text), next)) = parser.next() {
+                        budget(
+                            "document_parse_input_bytes",
+                            combined.len().saturating_add(text.len()),
+                            writer.config.max_input_bytes.min(64 * 1024 * 1024),
+                        )?;
+                        let start = combined.len();
+                        match origins.last_mut() {
+                            Some((local, source))
+                                if source.end == next.start
+                                    && local.len() == source.len()
+                                    && next.len() == text.len() =>
+                            {
+                                local.end = start + text.len();
+                                source.end = next.end;
+                            }
+                            _ => {
+                                budget(
+                                    "document_source_mappings",
+                                    origins.len().saturating_add(1),
+                                    writer.config.max_mappings.min(1_000_000),
+                                )?;
+                                origins.push((start..start + text.len(), next));
+                            }
+                        }
+                        combined.push_str(&text);
                     }
                 }
                 let parent = open
@@ -555,9 +631,20 @@ fn markdown(writer: &mut Writer<'_>) -> Result<()> {
                     .map(|(_, index)| *index)
                     .or_else(|| sections.last().map(|(_, index)| *index))
                     .map(|index| writer.blocks[index].key.clone());
-                html(writer, range.start..end, parent)?;
+                if let Some(start) = html_mapped(writer, &combined, &origins, parent)? {
+                    hidden_until = markdown_hidden_end(writer.raw, start)?.ok_or_else(|| {
+                        invalid(
+                            "source.mappings",
+                            "隐藏元素来源失配 (Hidden element source mismatch)",
+                        )
+                    })?;
+                }
             }
             Event::InlineHtml(_) => {
+                if let Some(end) = markdown_hidden_end(writer.raw, range.start)? {
+                    hidden_until = end;
+                    continue;
+                }
                 let parent = open
                     .last()
                     .map(|(_, index)| *index)
@@ -580,17 +667,81 @@ fn markdown(writer: &mut Writer<'_>) -> Result<()> {
     Ok(())
 }
 
-fn html(writer: &mut Writer<'_>, range: Range<usize>, base_parent: Option<String>) -> Result<()> {
+// 从隐藏元素起点连续分词，跨 Markdown 事件保留 raw-text 与模板嵌套语义。
+fn markdown_hidden_end(raw: &str, start: usize) -> Result<Option<usize>> {
     use html5gum::{DefaultEmitter, Token, Tokenizer};
+    let mut emitter = DefaultEmitter::<usize>::new_with_span();
+    emitter.naively_switch_states(true);
+    let mut parser = Tokenizer::new_with_emitter(&raw[start..], emitter);
+    let Some(token) = parser.next() else {
+        return Ok(None);
+    };
+    let token = token.map_err(|error| {
+        invalid(
+            "content",
+            &format!("HTML读取失败 (HTML read failed): {error}"),
+        )
+    })?;
+    let Token::StartTag(tag) = token else {
+        return Ok(None);
+    };
+    if tag.self_closing || !matches!(tag.name.as_slice(), b"script" | b"style" | b"template") {
+        return Ok(None);
+    }
+    let name = tag.name;
+    let mut depth = 1usize;
+    for token in parser {
+        crate::request::check_current()?;
+        let token = token.map_err(|error| {
+            invalid(
+                "content",
+                &format!("HTML读取失败 (HTML read failed): {error}"),
+            )
+        })?;
+        match token {
+            Token::StartTag(tag) if tag.name == name && !tag.self_closing => {
+                depth = depth.saturating_add(1)
+            }
+            Token::EndTag(tag) if tag.name == name => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(Some(start + tag.span.end));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(Some(raw.len()))
+}
+
+fn html_source_offset(origins: &[(Range<usize>, Range<usize>)], offset: usize) -> usize {
+    let index = origins.partition_point(|(local, _)| local.end < offset);
+    origins.get(index).map_or_else(
+        || origins.last().map_or(0, |(_, source)| source.end),
+        |(local, source)| source.start + offset.saturating_sub(local.start).min(source.len()),
+    )
+}
+
+fn html(writer: &mut Writer<'_>, range: Range<usize>, base_parent: Option<String>) -> Result<()> {
     let raw = writer
         .raw
         .get(range.clone())
         .ok_or_else(|| invalid("source", "HTML来源范围无效 (Invalid HTML source range)"))?;
+    html_mapped(writer, raw, &[(0..raw.len(), range)], base_parent).map(|_| ())
+}
+
+fn html_mapped(
+    writer: &mut Writer<'_>,
+    raw: &str,
+    origins: &[(Range<usize>, Range<usize>)],
+    base_parent: Option<String>,
+) -> Result<Option<usize>> {
+    use html5gum::{DefaultEmitter, Token, Tokenizer};
     let mut emitter = DefaultEmitter::<usize>::new_with_span();
     emitter.naively_switch_states(true);
     let parser = Tokenizer::new_with_emitter(raw, emitter);
     let mut open = Vec::<(String, usize)>::new();
-    let mut skipped = Vec::<String>::new();
+    let mut skipped = Vec::<(String, usize)>::new();
     for token in parser {
         crate::request::check_current()?;
         let token = token.map_err(|error| {
@@ -611,7 +762,16 @@ fn html(writer: &mut Writer<'_>, range: Range<usize>, base_parent: Option<String
                     .to_owned();
                 if matches!(name.as_str(), "script" | "style" | "template") {
                     if !tag.self_closing {
-                        skipped.push(name.clone());
+                        let index =
+                            origins.partition_point(|(local, _)| local.end <= tag.span.start);
+                        let start = origins.get(index).map_or_else(
+                            || html_source_offset(origins, tag.span.start),
+                            |(local, source)| {
+                                source.start
+                                    + tag.span.start.saturating_sub(local.start).min(source.len())
+                            },
+                        );
+                        skipped.push((name.clone(), start));
                     }
                     continue;
                 }
@@ -629,10 +789,10 @@ fn html(writer: &mut Writer<'_>, range: Range<usize>, base_parent: Option<String
                     _ => None,
                 };
                 if matches!(name.as_str(), "br" | "hr") {
-                    writer.newline(range.start + tag.span.end)?;
+                    writer.newline(html_source_offset(origins, tag.span.end))?;
                 }
                 if let Some(kind) = kind {
-                    writer.newline(range.start + tag.span.start)?;
+                    writer.newline(html_source_offset(origins, tag.span.start))?;
                     let parent = open
                         .last()
                         .map(|(_, index)| writer.blocks[*index].key.clone())
@@ -654,7 +814,10 @@ fn html(writer: &mut Writer<'_>, range: Range<usize>, base_parent: Option<String
                         )
                     })?
                     .to_owned();
-                if skipped.last().is_some_and(|previous| *previous == name) {
+                if skipped
+                    .last()
+                    .is_some_and(|(previous, _)| *previous == name)
+                {
                     skipped.pop();
                     continue;
                 }
@@ -665,7 +828,7 @@ fn html(writer: &mut Writer<'_>, range: Range<usize>, base_parent: Option<String
                     for (_, block) in open.drain(index..).rev() {
                         writer.close(block);
                     }
-                    writer.newline(range.start + tag.span.end)?;
+                    writer.newline(html_source_offset(origins, tag.span.end))?;
                 }
             }
             Token::String(text) if skipped.is_empty() => {
@@ -686,10 +849,33 @@ fn html(writer: &mut Writer<'_>, range: Range<usize>, base_parent: Option<String
                     writer.text.pop();
                     writer.maps.pop();
                 }
-                writer.append(
-                    value,
-                    (range.start + text.span.start)..(range.start + text.span.end),
-                )?;
+                let index = origins.partition_point(|(local, _)| local.end <= text.span.start);
+                if let Some((local, source)) = origins.get(index)
+                    && text.span.end <= local.end
+                {
+                    let source = if local.len() == source.len() {
+                        (source.start + text.span.start - local.start)
+                            ..(source.start + text.span.end - local.start)
+                    } else {
+                        source.clone()
+                    };
+                    writer.append(value, source)?;
+                } else {
+                    // 多行文本逐段解码与回映射，实体转换的 Cover 保持在单个来源段内。
+                    for (local, source) in &origins[index..] {
+                        if local.start >= text.span.end {
+                            break;
+                        }
+                        let start = local.start.max(text.span.start);
+                        let end = local.end.min(text.span.end);
+                        let source = if local.len() == source.len() {
+                            (source.start + start - local.start)..(source.start + end - local.start)
+                        } else {
+                            source.clone()
+                        };
+                        html(writer, source, base_parent.clone())?;
+                    }
+                }
             }
             _ => {}
         }
@@ -697,7 +883,7 @@ fn html(writer: &mut Writer<'_>, range: Range<usize>, base_parent: Option<String
     for (_, index) in open.into_iter().rev() {
         writer.close(index);
     }
-    Ok(())
+    Ok(skipped.first().map(|(_, start)| *start))
 }
 
 fn json(writer: &mut Writer<'_>, lines: bool) -> Result<()> {

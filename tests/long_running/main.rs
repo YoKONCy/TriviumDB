@@ -3,3 +3,6 @@
 
 mod soak;
 mod stress;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

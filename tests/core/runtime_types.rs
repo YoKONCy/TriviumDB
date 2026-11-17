@@ -26,9 +26,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok", ".tmp", ".vec.tmp"] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 fn node<'a>(row: &'a HashMap<String, Node<f32>>, var: &str) -> &'a Node<f32> {

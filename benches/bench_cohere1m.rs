@@ -373,30 +373,7 @@ fn main() {
         );
     }
 
-    match std::env::var("TRIVIUM_BQ_HNSW_EXPERIMENTAL").as_deref() {
-        Ok("2-checked") => {
-            println!(
-                "使用类型化校验并发构图路径 / Using typed checked concurrent graph-build path"
-            );
-            index.batch_build_experimental_v2_checked(batch_data, batch_ids, batch_slots);
-        }
-        Ok("1") => {
-            println!(
-                "使用早期反向剪枝并行构图路径（旧版）/ Using legacy early reverse-pruning parallel graph-build path"
-            );
-            index.batch_build_experimental(batch_data, batch_ids, batch_slots);
-        }
-        Ok("serial") => {
-            println!(
-                "使用串行构图路径（旧版，仅用于对照）/ Using legacy serial graph-build path for comparison"
-            );
-            index.batch_build(batch_data, batch_ids, batch_slots);
-        }
-        _ => {
-            println!("使用并发构图路径（默认）/ Using default concurrent graph-build path");
-            index.batch_build_experimental_v2(batch_data, batch_ids, batch_slots);
-        }
-    }
+    index.batch_build(batch_data, batch_ids, batch_slots);
 
     // 增量插入剩余部分
     if batch_n < n_train {

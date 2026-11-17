@@ -91,7 +91,7 @@ fn main() {
     let slot_idxs: Vec<usize> = (0..n_train).collect();
 
     let t_build = Instant::now();
-    index.batch_build_experimental_v2(&train_data, &ids, &slot_idxs);
+    index.batch_build(&train_data, &ids, &slot_idxs);
     let build_time = t_build.elapsed().as_secs_f64();
     println!(
         "构建完成! 耗时 {:.1}s ({:.0} vecs/s)\n",

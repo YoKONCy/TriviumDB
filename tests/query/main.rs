@@ -3,7 +3,6 @@
 
 mod aggregation_tx;
 mod proptest_query;
-mod query_memory_budget_dimensions;
 mod tql_dml;
 mod tql_executor;
 mod tql_index;
@@ -35,3 +34,6 @@ fn query_child_command() -> std::process::Command {
         std::process::Command::new(executable)
     }
 }
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

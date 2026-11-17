@@ -94,7 +94,7 @@ fn hash(set: &NodeSet) -> u64 {
             .similarity
             .or(row.graph_score)
             .or(row.property_score)
-            .map_or(0, |score| score.value.to_bits() as u64);
+            .map_or(0, |score| score.value.to_bits());
         hash.wrapping_mul(0x100000001b3)
             .wrapping_add(row.id)
             .wrapping_add(score.rotate_left(17))

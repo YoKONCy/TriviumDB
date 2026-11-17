@@ -49,6 +49,9 @@ async function runErrorContract(root) {
         header.writeUInt16LE(65535, 4)
         fs.writeFileSync(path.join(directory, 'future.tdb'), header)
       }
+      const oldBytes = test.operation === 'format_migration'
+        ? fs.readFileSync(path.join(__dirname, '../fixtures/release_090/f32/rom/checkpoint/sample.tdb')) : null
+      if (oldBytes) fs.writeFileSync(path.join(directory, 'old.tdb'), oldBytes)
       const actions = {
         missing_parameter: () => db.executePreparedTql(db.prepareTql('MATCH (n) RETURN $required AS value'), {}),
         unexpected_parameter: () => db.executePreparedTql(db.prepareTql('MATCH (n) RETURN $required AS value'), { required: 1, extra: 2 }),
@@ -63,8 +66,13 @@ async function runErrorContract(root) {
         locked: () => new TriviumDB(file, { dim: 2 }),
         io: () => new TriviumDB(path.join(directory, 'blocked/database.tdb'), { dim: 2 }),
         version: () => new TriviumDB(path.join(directory, 'future.tdb'), { dim: 2 }),
+        format_migration: () => new TriviumDB(path.join(directory, 'old.tdb'), { dim: 2 }),
       }
       assert.throws(actions[test.operation], error => assertError(error, test))
+      if (test.operation === 'format_migration') {
+        assert.deepEqual(fs.readFileSync(path.join(directory, 'old.tdb')), oldBytes)
+        assert.equal(fs.existsSync(path.join(directory, 'old.tdb.lock')), false)
+      }
       if (test.operation === 'dimension') {
         await assert.rejects(db.searchBatch([[1]], 1, 1, 0), error => assertError(error, { ...test, write: undefined }))
       }

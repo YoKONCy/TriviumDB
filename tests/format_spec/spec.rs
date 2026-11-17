@@ -12,6 +12,8 @@ pub enum FileRole {
     Text,
     TextMeta,
     Manifest,
+    IndexContainer,
+    Lock,
 }
 
 impl FileRole {
@@ -29,6 +31,8 @@ impl FileRole {
             Self::Text => ".text",
             Self::TextMeta => ".text.meta",
             Self::Manifest => ".manifest.json",
+            Self::IndexContainer => ".idx",
+            Self::Lock => ".lock",
         }
     }
 }
@@ -141,9 +145,27 @@ pub const TDB_HEADER: &[FieldSpec] = &[
         width: 4,
         encoding: FieldEncoding::U32Le,
     },
+    FieldSpec {
+        name: "database_id",
+        offset: 74,
+        width: 16,
+        encoding: FieldEncoding::Bytes,
+    },
+    FieldSpec {
+        name: "checkpoint_id",
+        offset: 90,
+        width: 16,
+        encoding: FieldEncoding::Bytes,
+    },
+    FieldSpec {
+        name: "identity_crc",
+        offset: 106,
+        width: 4,
+        encoding: FieldEncoding::U32Le,
+    },
 ];
 
-pub const FLUSH_MARKER_V3: &[FieldSpec] = &[
+pub const FLUSH_MARKER: &[FieldSpec] = &[
     FieldSpec {
         name: "magic",
         offset: 0,
@@ -332,8 +354,8 @@ pub const GRAPH_HEADER: &[FieldSpec] = &[
 #[test]
 fn 所有固定规格字段不重叠且完全落在声明头部内() {
     for (name, fields, size) in [
-        ("tdb", TDB_HEADER, 74),
-        ("flush", FLUSH_MARKER_V3, 53),
+        ("tdb", TDB_HEADER, 110),
+        ("flush", FLUSH_MARKER, 53),
         ("wal", WAL_HEADER, 6),
         ("property", PROPERTY_HEADER, 48),
         ("graph", GRAPH_HEADER, 36),

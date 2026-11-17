@@ -17,12 +17,28 @@ def run_tql_semantics(root: str) -> None:
         db.insert_with_id(99, [0], {'kind': 'root'})
         for row in contract['records']:
             db.link(99, row['id'], 'item', row['id'])
+        plan = rows(db, 'EXPLAIN SEARCH VECTOR [1] TOP 1 RETURN *')[0]['plan']['payload']
+        assert plan['vector_access_path'] == 'exact_fallback'
+        assert plan['access_path']['kind'] == 'full_node_scan'
         for source in contract['sources']:
             for case in contract['cases']:
                 query = source['query'] + ' ' + case['suffix'].replace('{var}', source['variable'])
                 assert rows(db, query) == case['rows'], query
             n = source['variable']
             assert rows(db, f'{source["query"]} RETURN {n}.g AS g, COUNT(*) AS {n} ORDER BY {n}.g ASC') == [{'g': 'a', n: 1}, {'g': 'b', n: 2}]
+    finally:
+        db.close()
+    db = open_db('indexed-order')
+    try:
+        for record in contract['indexed_order']['records']:
+            db.insert_with_id(record['id'], [1], record['payload'])
+        for target in [2, 3]:
+            db.link(1, target, 'related', 3.4028234663852886e38)
+        for phase in range(len(contract['indexed_order']['indexes']) + 1):
+            if phase > 0:
+                db.create_ordered_index(contract['indexed_order']['indexes'][phase - 1])
+            for case in contract['indexed_order']['cases']:
+                assert rows(db, case['query']) == case['rows'], case['query']
     finally:
         db.close()
     db = open_db('set')

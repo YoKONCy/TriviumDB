@@ -1590,12 +1590,25 @@ fn execute_write(
             }))
         }
         WriteOperation::DeleteMany(request) => {
+            let mut touched_edges = Vec::new();
+            for &id in &request.ids {
+                touched_edges.extend(incident_edge_keys(database, id)?);
+            }
             let affected = database
                 .delete_many_atomic(&request.ids)
                 .map_err(ApiError::from)?;
             versions.generation = versions.generation.saturating_add(1);
             for id in request.ids {
                 versions.node_versions.insert(id, versions.generation);
+            }
+            for edge in touched_edges {
+                versions
+                    .node_versions
+                    .insert(edge.source, versions.generation);
+                versions
+                    .node_versions
+                    .insert(edge.target, versions.generation);
+                versions.edge_versions.insert(edge, versions.generation);
             }
             Ok(StoredWriteResult::Mutation(WriteResult {
                 mutation: MutationResponse {
@@ -1632,9 +1645,32 @@ fn execute_write(
         }
         WriteOperation::Transaction(request) => {
             validate_transaction_preconditions(versions, &request)?;
+            // 在借用事务前读取实际边，覆盖已持久化且尚未登记进版本表的关联边。
+            let mut touched_edges = Vec::new();
+            for operation in &request.operations {
+                match operation {
+                    TransactionOperation::Delete { id } => {
+                        touched_edges.extend(incident_edge_keys(database, *id)?);
+                    }
+                    TransactionOperation::Unlink {
+                        source,
+                        target,
+                        label: None,
+                    } => {
+                        touched_edges.extend(
+                            database
+                                .get_edges(*source)
+                                .map_err(ApiError::from)?
+                                .into_iter()
+                                .filter(|edge| edge.target_id == *target)
+                                .map(|edge| EdgeKey::new(*source, *target, &edge.label)),
+                        );
+                    }
+                    _ => {}
+                }
+            }
             let mut transaction = database.begin_tx();
             let mut touched_nodes = Vec::new();
-            let mut touched_edges = Vec::new();
             for operation in &request.operations {
                 match operation {
                     TransactionOperation::Insert {
@@ -1677,13 +1713,6 @@ fn execute_write(
                             touched_edges.push(EdgeKey::new(*source, *target, label));
                         } else {
                             transaction.unlink(*source, *target);
-                            touched_edges.extend(
-                                versions
-                                    .edge_versions
-                                    .keys()
-                                    .filter(|key| key.source == *source && key.target == *target)
-                                    .cloned(),
-                            );
                         }
                         touched_nodes.extend([*source, *target]);
                     }
@@ -1697,6 +1726,8 @@ fn execute_write(
                 versions.node_versions.insert(id, generation);
             }
             for edge in touched_edges {
+                versions.node_versions.insert(edge.source, generation);
+                versions.node_versions.insert(edge.target, generation);
                 versions.edge_versions.insert(edge, generation);
             }
             Ok(StoredWriteResult::Transaction(TransactionResult {
@@ -1706,6 +1737,23 @@ fn execute_write(
             }))
         }
     }
+}
+
+fn incident_edge_keys(database: &Database<f32>, id: u64) -> Result<Vec<EdgeKey>, ApiError> {
+    let mut edges = database
+        .get_edges(id)
+        .map_err(ApiError::from)?
+        .into_iter()
+        .map(|edge| EdgeKey::new(id, edge.target_id, &edge.label))
+        .collect::<Vec<_>>();
+    edges.extend(
+        database
+            .get_incoming_edges(id, None)
+            .map_err(ApiError::from)?
+            .into_iter()
+            .map(|edge| EdgeKey::new(edge.source_id, id, &edge.label)),
+    );
+    Ok(edges)
 }
 
 fn apply_index_change(

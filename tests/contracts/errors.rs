@@ -6,8 +6,7 @@ use triviumdb::database::{AccessMode, Config};
 use triviumdb::query::tql_prepared::TqlParamValue;
 use triviumdb::{Database, TriviumError};
 
-#[path = "../support/mod.rs"]
-mod support;
+use crate::support;
 
 fn error<T>(result: triviumdb::Result<T>) -> TriviumError {
     match result {
@@ -86,6 +85,15 @@ fn 共享错误用例保留类别与完整字段() {
                 let future = root.file("future.tdb");
                 std::fs::write(&future, header).unwrap();
                 error(Database::<f32>::open(&future, 2))
+            }
+            "format_migration" => {
+                let old = root.file("old.tdb");
+                let bytes = include_bytes!("../fixtures/release_090/f32/rom/checkpoint/sample.tdb");
+                std::fs::write(&old, bytes).unwrap();
+                let refused = error(Database::<f32>::open(&old, 2));
+                assert_eq!(std::fs::read(&old).unwrap(), bytes);
+                assert!(!std::path::Path::new(&format!("{old}.lock")).exists());
+                refused
             }
             other => panic!("未知错误操作：{other}"),
         };

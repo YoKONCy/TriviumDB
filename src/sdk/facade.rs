@@ -25,8 +25,8 @@ pub struct DatabaseReader<T: VectorType> {
 impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseReader<T> {
     pub fn configure_quiver(
         &self,
-        options: crate::index::quiver::ssd::SsdRuntimeOptions,
-    ) -> Result<crate::index::quiver::ssd::SsdStats> {
+        options: crate::index::quiver::runtime::QuiverRuntimeOptions,
+    ) -> Result<crate::index::quiver::runtime::QuiverRuntimeStats> {
         self.inner.configure_quiver(options)
     }
     pub fn search_quiver(
@@ -36,35 +36,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
     ) -> Result<Vec<(u64, f32)>> {
         self.inner.search_quiver(query, config)
     }
-    pub fn quiver_stats(&self) -> Result<Option<crate::index::quiver::ssd::SsdStats>> {
+    pub fn quiver_stats(
+        &self,
+    ) -> Result<Option<crate::index::quiver::runtime::QuiverRuntimeStats>> {
         self.inner.quiver_stats()
     }
     pub fn close_quiver(&self) -> Result<()> {
         self.inner.close_quiver()
     }
-    pub fn configure_quiver_int8(
-        &self,
-        options: crate::index::quiver::ssd::SsdRuntimeOptions,
-    ) -> Result<crate::index::quiver::ssd::SsdStats> {
-        self.inner.configure_quiver_int8(options)
-    }
-
-    pub fn search_quiver_int8(
-        &self,
-        query: &[f32],
-        config: &crate::index::quiver::QuIVerSearchConfig,
-    ) -> Result<Vec<(u64, f32)>> {
-        self.inner.search_quiver_int8(query, config)
-    }
-
-    pub fn quiver_int8_stats(&self) -> Result<Option<crate::index::quiver::ssd::SsdStats>> {
-        self.inner.quiver_int8_stats()
-    }
-
-    pub fn close_quiver_int8(&self) -> Result<()> {
-        self.inner.close_quiver_int8()
-    }
-
     pub fn with_request_context<R>(
         &self,
         context: &super::RequestContext,
@@ -126,45 +105,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
 
     pub fn search_exact(&self, query_vector: &[T], top_k: usize) -> Result<Vec<SearchHit>> {
         self.inner.search_exact(query_vector, top_k)
-    }
-
-    pub fn tsng_ground_truth(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-    ) -> Result<crate::tsng::TsngGroundTruth> {
-        self.inner.tsng_ground_truth(query)
-    }
-
-    pub fn search_tsng(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-        config: crate::tsng::TsngSearchConfig,
-    ) -> Result<crate::tsng::TsngSearchResult> {
-        self.inner.search_tsng(query, config)
-    }
-
-    pub fn search_tsng_post_filter(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-        config: crate::tsng::TsngSearchConfig,
-    ) -> Result<crate::tsng::TsngSearchResult> {
-        self.inner.search_tsng_post_filter(query, config)
-    }
-
-    pub fn search_tsng_graph_union(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-        config: crate::tsng::TsngSearchConfig,
-    ) -> Result<crate::tsng::TsngSearchResult> {
-        self.inner.search_tsng_graph_union(query, config)
-    }
-
-    pub fn search_tsng_industrial(
-        &self,
-        query: &crate::tsng::TsngQuery<'_, T>,
-        config: crate::tsng::IndustrialSearchConfig,
-    ) -> Result<crate::tsng::TsngSearchResult> {
-        self.inner.search_tsng_industrial(query, config)
     }
 
     pub fn resource_stats(&self) -> crate::resources::ResourceStats {

@@ -342,7 +342,7 @@ fn 图作用域内存准入拒绝后归还工作区并支持重试() {
 
 #[test]
 fn 文档压缩来源共用冷热精度并在重开后保留证据与只读零写() {
-    use triviumdb::index::quiver::ssd::SsdRuntimeOptions;
+    use triviumdb::index::quiver::runtime::QuiverRuntimeOptions;
     let root = TestDir::new("tql-document-compressed");
     let file = root.file("data.tdb");
     let mut db = database::<f32>(&file, "f32");
@@ -362,7 +362,8 @@ fn 文档压缩来源共用冷热精度并在重开后保留证据与只读零�
             }
         }
     }
-    db.configure_quiver(SsdRuntimeOptions::compact()).unwrap();
+    db.configure_quiver(QuiverRuntimeOptions::compact())
+        .unwrap();
     let evidence = db.tql("DOCUMENTS {operation:'search',query:{text:'alpha',max_documents:1,include_matches:true}} RETURN document.evidence AS evidence,document.matches AS windows").unwrap();
     match &evidence[0]["evidence"] {
         TqlValue::Object(value) => {
@@ -413,7 +414,7 @@ fn 文档压缩来源共用冷热精度并在重开后保留证据与只读零�
     let before = snapshot();
     let mut reader = Database::<f32>::open_read_only(&file, 2).unwrap();
     reader
-        .configure_quiver(SsdRuntimeOptions::compact())
+        .configure_quiver(QuiverRuntimeOptions::compact())
         .unwrap();
     assert_content(&json!(json_rows(reader.tql(query).unwrap())), &expected);
     reader.close().unwrap();

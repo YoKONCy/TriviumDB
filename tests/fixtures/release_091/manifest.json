@@ -1,0 +1,64 @@
+{
+  "release": "v0.9.1",
+  "commit": "46f767f8c5befeb7da091267f2b19052f3cba8d9",
+  "generator_sha256": "32ea197d4b1abb1757841e894db2d9c0cbd1074f232160d9b530f16f6f7e432e",
+  "platform": "Windows x86_64 MSVC Rust 1.98.0",
+  "source": "git archive v0.9.1; only temporary workspace membership and example entry changed; original engine sources unchanged",
+  "expected": {
+    "ids": [
+      10,
+      20
+    ],
+    "source_id": "note.md",
+    "source_content": "# 标题\n\n甲乙",
+    "graph_id": "词",
+    "edge": [
+      10,
+      20,
+      "关联",
+      0.5
+    ],
+    "updated_payload": {
+      "kind": "updated"
+    },
+    "receipt": "migration-receipt"
+  },
+  "files": {
+    "rom/expected.json": {
+      "bytes": 3361,
+      "sha256": "fa49579ab03943b978167f3d8de77243dd8cc4989378a719ca90cc82be8280b6"
+    },
+    "rom/sample.tdb": {
+      "bytes": 3600,
+      "sha256": "1ea1afd47bf1948f77cc6f1312c0740911b5cb633f6059b4cb4d49edfcb87602"
+    },
+    "rom/sample.tdb.wal": {
+      "bytes": 6,
+      "sha256": "20ea915fcc011fff14455f5051eb369da208039de3a809b62ab4c991c0392a2e"
+    },
+    "mmap/expected.json": {
+      "bytes": 3361,
+      "sha256": "82d83be6ae9ec8651f02baa388cc8fbe80a7aacbdda3bf5d1cd82095c0b3bc00"
+    },
+    "mmap/sample.tdb": {
+      "bytes": 3383,
+      "sha256": "231219174eab53951b3254d82e14eb7efc9e803107713be2a7553bbe6824e6b9"
+    },
+    "mmap/sample.tdb.flush_ok": {
+      "bytes": 53,
+      "sha256": "6e4dbf529fc997fda5e6e18ddeb8cd12f5940dab6f75d73ac796a1412492f11f"
+    },
+    "mmap/sample.tdb.pld.1": {
+      "bytes": 309,
+      "sha256": "e6264aad22b0886f66c2b05f8dbbafb3ad54305b4b7758d5a482377b27dd51f9"
+    },
+    "mmap/sample.tdb.vec": {
+      "bytes": 16,
+      "sha256": "a666c95f0822c64e01580063e9bb27c629d4d0534e3163a9611738599f97df2a"
+    },
+    "mmap/sample.tdb.wal": {
+      "bytes": 6,
+      "sha256": "20ea915fcc011fff14455f5051eb369da208039de3a809b62ab4c991c0392a2e"
+    }
+  }
+}

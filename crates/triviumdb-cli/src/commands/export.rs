@@ -1,46 +1,41 @@
-//! `export` 子命令：导出全部节点为 JSONL（每行一个 JSON 对象）。
-//!
-//! 行格式：`{"id":1,"vector":[...],"payload":{...},"edges":[{"target","label","weight"}]}`
+//! `export` 子命令按原始 dtype 导出节点、Payload 和完整边。
 
-use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use colored::Colorize;
-use serde_json::json;
 
 use crate::CliResult;
 use crate::db_handle::DbHandle;
 
 pub fn run(handle: &DbHandle, db_path: &str, output: &str) -> CliResult {
     validate_output_path(db_path, output)?;
-
-    let file = File::create(output)?;
-    let mut w = BufWriter::new(file);
-
-    let ids = handle.get_all_ids()?;
+    let output_path = normalized_path(Path::new(output))?;
+    let parent = output_path
+        .parent()
+        .ok_or("导出路径缺少目录 (Export path has no parent)")?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    let mut ids = handle.get_all_ids()?;
+    ids.sort_unstable();
     let pb = crate::util::progress_bar(ids.len() as u64, "export");
     let mut count = 0usize;
-    for id in ids {
-        if let Some(node) = handle.get(id)? {
-            let line = json!({
-                "id": node.id,
-                "vector": node.vector,
-                "payload": node.payload,
-                "edges": node.edges.iter().map(|e| json!({
-                    "target": e.target_id,
-                    "label": e.label,
-                    "weight": e.weight,
-                })).collect::<Vec<_>>(),
-            });
-            writeln!(w, "{}", serde_json::to_string(&line)?)?;
-            count += 1;
+    {
+        let mut writer = BufWriter::new(staged.as_file_mut());
+        for id in ids {
+            if let Some(record) = handle.export_node(id)? {
+                writeln!(writer, "{}", serde_json::to_string(&record)?)?;
+                count += 1;
+            }
+            pb.inc(1);
         }
-        pb.inc(1);
+        writer.flush()?;
     }
     pb.finish_and_clear();
-    w.flush()?;
-
+    staged.as_file().sync_all()?;
+    validate_output_path(db_path, output)?;
+    staged.persist(&output_path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
     println!(
         "{} 已导出 {count} 个节点 / Exported {count} nodes -> {output}",
         "✓".green().bold()
@@ -48,51 +43,72 @@ pub fn run(handle: &DbHandle, db_path: &str, output: &str) -> CliResult {
     Ok(())
 }
 
-fn validate_output_path(db_path: &str, output: &str) -> CliResult {
+// 固定制品及其临时、代际文件共享受保护的名称族。
+use triviumdb::storage::artifacts::{
+    RESERVED_SUFFIXES as PROTECTED_SUFFIXES, is_reserved_name as protected_name,
+};
+
+pub(crate) fn validate_output_path(db_path: &str, output: &str) -> CliResult {
+    let database = normalized_path(Path::new(db_path))?;
     let output_path = normalized_path(Path::new(output))?;
-    for protected in protected_paths(db_path) {
-        if paths_equal(&output_path, &normalized_path(&protected)?) {
-            return Err(format!(
-                "拒绝导出到数据库相关文件 / Refusing to export to a database-related file: {}（可能覆盖或破坏数据库文件 / This could overwrite or corrupt database files）",
-                output
-            )
-            .into());
+    let parent = database
+        .parent()
+        .ok_or("数据库路径缺少目录 (Database path has no parent)")?;
+    let name = database
+        .file_name()
+        .ok_or("数据库路径缺少文件名 (Database path has no file name)")?
+        .to_string_lossy();
+    let mut protected = vec![database.clone()];
+    protected.extend(
+        PROTECTED_SUFFIXES
+            .iter()
+            .map(|suffix| parent.join(format!("{name}{suffix}"))),
+    );
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        if protected_name(&entry.file_name().to_string_lossy(), &name) {
+            protected.push(entry.path());
         }
+    }
+    let reserved_name = output_path
+        .parent()
+        .is_some_and(|directory| paths_equal(directory, parent))
+        && output_path
+            .file_name()
+            .is_some_and(|file| protected_name(&file.to_string_lossy(), &name));
+    let mut conflicts = reserved_name;
+    for path in protected {
+        let resolved = normalized_path(&path)?;
+        conflicts |= paths_equal(&output_path, &resolved)
+            || output_path.starts_with(&resolved) && path.is_dir();
+        if output_path.try_exists()? && path.try_exists()? {
+            conflicts |= same_file::is_same_file(&output_path, &path)?;
+        }
+    }
+    if conflicts {
+        return Err(format!(
+            "拒绝导出到数据库相关文件 (Refusing to export to a database-related file): {output}"
+        )
+        .into());
     }
     Ok(())
 }
 
-fn protected_paths(db_path: &str) -> Vec<PathBuf> {
-    [
-        db_path.to_string(),
-        format!("{db_path}.vec"),
-        format!("{db_path}.wal"),
-        format!("{db_path}.flush_ok"),
-        format!("{db_path}.lock"),
-        format!("{db_path}.quiver"),
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .collect()
-}
-
 fn normalized_path(path: &Path) -> std::io::Result<PathBuf> {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut normalized = PathBuf::new();
-    for component in abs.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
+    if path.try_exists()? {
+        return path.canonicalize();
     }
-    Ok(normalized)
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "路径缺少文件名 (Path has no file name)",
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok(parent.canonicalize()?.join(name))
 }
 
 fn paths_equal(a: &Path, b: &Path) -> bool {

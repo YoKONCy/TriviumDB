@@ -13,6 +13,9 @@ module.exports = function tqlSemantics(root, TriviumDB) {
     for (const row of contract.records) db.insertWithId(row.id, [1], row.payload)
     db.insertWithId(99, [0], { kind: 'root' })
     for (const row of contract.records) db.link(99, row.id, 'item', row.id)
+    const plan = db.tql('EXPLAIN SEARCH VECTOR [1] TOP 1 RETURN *')[0].plan.payload
+    assert.equal(plan.vector_access_path, 'exact_fallback')
+    assert.equal(plan.access_path.kind, 'full_node_scan')
     for (const source of contract.sources) {
       for (const test of contract.cases) {
         const query = source.query + ' ' + test.suffix.replaceAll('{var}', source.variable)
@@ -23,6 +26,16 @@ module.exports = function tqlSemantics(root, TriviumDB) {
         [{ g: 'a', [n]: 1 }, { g: 'b', [n]: 2 }])
     }
   } finally { db.close() }
+
+  const indexed = open('indexed-order')
+  try {
+    for (const row of contract.indexed_order.records) indexed.insertWithId(row.id, [1], row.payload)
+    for (const target of [2, 3]) indexed.link(1, target, 'related', 3.4028234663852886e38)
+    for (let phase = 0; phase <= contract.indexed_order.indexes.length; phase++) {
+      if (phase > 0) indexed.createOrderedIndex(contract.indexed_order.indexes[phase - 1])
+      for (const test of contract.indexed_order.cases) assert.deepEqual(indexed.tql(test.query), test.rows, test.query)
+    }
+  } finally { indexed.close() }
 
   const updates = open('set')
   try {

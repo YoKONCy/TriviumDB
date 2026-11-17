@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> 本文介绍 `0.9.1` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.1.md)。
+> 本文介绍 `0.9.2-beta.1` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.2-beta.1.md)。
 
 ---
 
@@ -250,6 +250,8 @@ RETURN related, source.document_id AS document_id, source.evidence AS evidence
 
 `EXPLAIN` 提供 `graph_scope`、`graph_revisions`、`selected_graph_stats`、`named_graph_members` 访问路径和 Cascades 物理阶段。文档物理来源区分 `document_text_search`、`document_exact_search`、`document_ann_search`，通过 `document_source` 提供请求配置。`EXPLAIN ANALYZE` 执行相同管线并返回实际行数及算子观测。
 
+`EXPLAIN SEARCH` 通过 `vector_access_path` 表示向量访问选择，取值为 `ann_post_filter` 或 `exact_fallback`。结构化 `access_path` 保留节点／属性访问路径，两者分别描述各自阶段。字段名称调整见[版本说明](changes/0.9.2-beta.1.md)。
+
 Prepared 支持图身份、预期修订、文档文字、过滤条件及向量分量等配置叶节点。同名参数共用必需参数目录和首个真实引用范围，缺参、额外参数及转换错误使用既有结构化错误。来源配置、图作用域和执行算子的错误携带对应 UTF-8 范围。
 
 Rust 直接构造 `TqlQuery` 时需提供 `graph_scope`，直接构造 `EdgeView` 时需提供 `graph_id`。默认图或省略作用域的结构字面量将对应字段设为 `None`。
@@ -261,6 +263,8 @@ Rust 直接构造 `TqlQuery` 时需提供 `graph_scope`，直接构造 `EdgeView
 ## FIND — 文档过滤查询
 
 `FIND` 入口对全库节点的 JSON Payload 进行条件过滤，功能完全覆盖旧的 `db.filter()` 和 `db.filter_where()` API。无可用属性索引时，Planner 在 `EXPLAIN` 中标记 `cold_payload_scan`；执行器按 Payload 目录顺序访问冷数据，并受 lookup/parse 工作预算约束。高频字段应建立 Hash、Ordered ART、Composite ART、Bitmap 或 N-gram 索引，先缩小 NodeId 候选再执行必要的 residual predicate。
+
+管线的 Payload lookup 和实际解析字节按本次查询执行计量，工作线程继承所属查询的账本。PROFILE 中的 Payload 用量记录当前查询的累计值，实例统计维护独立的累计口径。复用执行上下文时重新建立本次账本和阶段统计。
 
 ### 基础语法
 
@@ -691,6 +695,8 @@ LIMIT 10 OFFSET 20    -- 跳过前 20 条，返回 10 条
 
 RETURN 别名在 ORDER BY 中可用，也可参与排序算术；WHERE 与 RETURN 表达式使用各自的输入作用域。WITH 承接实例的 `max_query_rows`、`row_overflow`、内存预算与取消控制。显式 LIMIT 可覆盖默认行数上限，OFFSET + LIMIT 继续接受内存准入；聚合、去重与完整排序要求完整输入。管线工作区在执行前按候选规模保守预留。
 
+`ORDER BY picked.rank` 在 `RETURN _.nested AS picked` 下读取投影对象的 `rank`。规划器按作用域核对索引等价性，投影排序完成后执行分页。排序键相等时，节点行按完整绑定名称和 NodeId、边行按图身份与端点和标签、管线行按节点与绑定及路径身份稳定比较；聚合行按分组键比较。该最终比较保持升序，`DESC` 作用于显式排序键。
+
 ---
 
 ## WITH 可组合管线
@@ -764,6 +770,8 @@ RETURN diverse, diversity_score(diverse) AS diversity
 
 DPP 从输入的 `similarity`、`text_score` 或 `graph_score` 中选择质量分数。候选池最多 512 个节点，`TOP` 不得超过输入候选数；向量读取和临时矩阵均计入预算。`diversity_score()` 表示确定性选择次序的边际排名分数，原质量分数保留在对应字段中。
 
+质量核与正则项在对数域统一缩放，Cholesky 中间量采用 `f64`。同分候选按稳定节点顺序选择，每个候选最多选取一次。
+
 ### 参数化 SA-PPR
 
 ```sql
@@ -775,6 +783,8 @@ RETURN expanded, graph_score(expanded) AS score
 ```
 
 `DEPTH`、`ALPHA`、`MAX_EDGES`、`MIN_WEIGHT` 和可选的 `LABELS` 显式控制有限深度扩散。该算子采用 Depth-Bounded SA-PPR 语义；需要迭代收敛结果时使用 PageRank。
+
+种子节点、实际扫描边、前沿峰值和深度分别受遍历预算限制，`MAX_EDGES` 在检查扫描预算后选择各节点的传播边。管线按完整结果契约使用 Error 耗尽策略，超限返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`；临时内存和请求取消沿统一查询上下文执行。归一化分母使用 `f64` 累加，扩散内核生成 `f32` 分数后写入管线的 `f64` 分数字段。种子适配前校验有限 `f32` 范围，超出范围返回结构化查询错误。
 
 ### FISTA 残差召回
 
@@ -798,7 +808,11 @@ WITH clustered
 RETURN clustered, topic(clustered) AS topic_id, topic_score(clustered) AS confidence
 ```
 
-`TOPICS` 对候选向量执行确定性 NMF，并把 W 矩阵的主导主题映射回节点。候选最多 512、`K` 最大 32 且不得超过候选数、迭代最多 256；V/W/H 矩阵在分配前接受内存预算检查。当前输出逐节点主题编号与权重，不输出可跨阶段传递的 H 矩阵 artifact。
+`TOPICS` 对候选向量执行确定性 NMF，并把 W 矩阵的主导主题映射回节点。候选最多 512、`K` 最大 32 且不得超过候选数、迭代最多 256。初始化、矩阵更新和残差计算采用 `f64`，分配前按 V/W/H、输入输出和中间矩阵检查内存预算，查询输出前验证分解因子的有限性。结果提供逐节点主题编号与权重。
+
+开发内核的 `ScoreValue.value` 使用 `f64`，图算法的宽类型结果沿 `graph_score()`、图指标函数、排序和聚合保留。例如边权 `1e-40` 的倒数中心性约为 `1e40`，TQL 与 HTTP 返回有限浮点数。
+
+> **Rust 调用提醒**　直接构造 `ScoreValue` 时，将已有 `f32` 数值显式转换为 `f64`。向量与搜索命中的表示遵循各自 dtype 和 API 契约。
 
 ---
 
@@ -809,6 +823,8 @@ RETURN clustered, topic(clustered) AS topic_id, topic_score(clustered) AS confid
 整数的字面量、属性、节点 ID 与 Prepared 参数覆盖 `i64::MIN..=u64::MAX`；Rust 一等值使用 `Int(i64)`、`UInt(u64)`、`Float(f64)`。`WHERE`、排序与 `MIN/MAX` 共用精确数值比较，整数和浮点混合比较保持整数精度。浮点相等比较使用实际数值相等；`+0.0` 与 `-0.0` 相等。
 
 整数之间的 `+ - *` 和整数 `SUM` 保留整数结果，超出整数域时返回 Null。含浮点操作数的算术、除法与 `AVG` 使用 binary64；除法仅将实际的正负零视为零分母，有限的小分母正常计算。`MIN/MAX` 保留选中数值的类型和值。
+
+`AVG` 使用补偿求和，在中间和溢出时按最大绝对值缩放，在同号大数及正负抵消时计算有限均值。例如两个 `1e308` 的平均值为 `1e308`。普通整数、零值与极小有限输入沿相同数值契约处理。
 
 Python 返回精确 `int`。Node 的整数标量在安全整数范围内返回 `number`，超范围时返回十进制字符串，`COLLECT` 等列表中的整数采用相同转换；整节点结果中的 ID 继续使用字符串。例如，`RETURN 18446744073709551613 AS value` 在 Python 中返回整数，在 Node 中返回字符串 `"18446744073709551613"`。
 
@@ -872,6 +888,8 @@ Path 当前是一等 NodeId 序列；`path_length` 返回边数。`WEIGHTED_PATH
 `NODE_SIMILARITY input TOP n CUTOFF x [LABEL label] AS pairs` 在输入诱导无向图上计算邻居集合 Jaccard，相似节点对通过 `pair_left()`、`pair_right()` 与 `node_similarity()` 投影。PairSet 以 `(left,right)` 为行身份，两个节点共同参与去重；节点对数量、邻居交集工作量、结果数和临时字节均受硬预算约束。
 
 集合阶段公开 `UNION/INTERSECT/EXCEPT`，普通 NodeSet 仍按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。所有路径与集合算法均受节点数、字节和遍历预算约束。
+
+`ALL_PATHS` 的 `DEPTH` 限定查询范围。执行预算阻止继续扩展时返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`，TQL 管线采用完整结果的 Error 策略。Core `bounded_all_paths` 的 Partial 策略通过 `truncated` 标记部分结果。路径平均边权和多路径均值使用 `f64` 累加，输出为 `f32`；TQL 聚合分数超出有限表示范围时返回查询错误。
 
 Rust `NodeRow.provenance.property_origin` 记录物理计划当前保留的单个等值属性入口，用于成本估算与执行审计。合并行的该字段一致时保留，来源有差异时清除。直接属性召回后精排可以保留入口；先全量评分再与属性召回求交，会按合并规则得到相应来源。比较这类等价物理计划时，分别验证各自预期的 `property_origin`，再按原始顺序精确比较其余完整字段，包括其他 provenance、分数值与分数类别。
 
@@ -992,7 +1010,7 @@ TQL 文本
   → TqlValueResult（Node、Edge、标量、Path、List、Object、Null）
 ```
 
-`FIND` 可选择主键、Hash/Ordered/Composite/Bitmap、索引交集或 Fast Tags + 精确校验；`SEARCH` 可选择可用的向量访问路径与 exact fallback；`MATCH`、图算法和路径阶段复用 `.gidx`/内存图目录。Cascades 在有界计划空间内依据统计信息和成本模型确定执行方案。
+`FIND` 可选择主键、Hash/Ordered/Composite/Bitmap、索引交集或 Fast Tags + 精确校验；`SEARCH` 可选择可用的向量访问路径与 exact fallback；`MATCH`、图算法和路径阶段复用 `.idx` 中的图目录组件或内存图目录。Cascades 在有界计划空间内依据统计信息和成本模型确定执行方案。
 
 ---
 

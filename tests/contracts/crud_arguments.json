@@ -1,4 +1,5 @@
 {
+  "invalid_patch_operands": [null, 7, "bad", [], true],
   "before": [
     {"id": 7, "vector": [1, 0], "payload": {"name": "源", "count": 1}, "num_edges": 1, "edges": [{"target_id": 11, "label": "route", "weight": 0.5, "metadata": {"part": "前段"}}]},
     {"id": 11, "vector": [0, 1], "payload": {"name": "中"}, "num_edges": 0, "edges": []}

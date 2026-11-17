@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 //! 按领域聚合的集成测试入口。
+#[path = "../support/artifact.rs"]
+mod artifact;
 #[cfg(feature = "test-hooks")]
 mod direct_write_outcomes;
 #[cfg(feature = "test-hooks")]
@@ -31,3 +33,6 @@ mod migration_publication;
 mod schema_publication;
 #[cfg(feature = "test-hooks")]
 mod wal_failure_state;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

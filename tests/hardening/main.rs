@@ -2,3 +2,6 @@
 //! 按领域聚合的集成测试入口。
 
 mod security;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

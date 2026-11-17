@@ -16,17 +16,7 @@ pub use transfer::{
 };
 
 pub const MANIFEST_VERSION: u16 = 2;
-const GENERATION_SUFFIXES: [&str; 9] = [
-    "",
-    ".vec",
-    ".flush_ok",
-    ".quiver",
-    ".quiver.meta",
-    ".text",
-    ".text.meta",
-    ".pidx",
-    ".gidx",
-];
+use crate::storage::artifacts::CHECKPOINT_SUFFIXES as GENERATION_SUFFIXES;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationFile {

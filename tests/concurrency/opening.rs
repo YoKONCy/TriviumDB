@@ -5,7 +5,7 @@ use super::support::TestDir;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
-use triviumdb::database::{AccessMode, Config};
+use triviumdb::database::{AccessMode, Config, StorageMode};
 use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_path};
 use triviumdb::{Database, TriviumError};
 
@@ -53,6 +53,88 @@ fn open(
             },
         )
     })
+}
+
+#[test]
+fn WAL截断期间重开只报告租约冲突且清理后恢复完整事实() {
+    for storage_mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let root = TestDir::new("open_wal_truncate");
+        let path = root.file("sample.tdb");
+        let mut owner = Database::<f32>::open_with_config(
+            &path,
+            Config {
+                dim: 3,
+                storage_mode,
+                auto_build_quiver: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        owner
+            .insert_with_id(1, &[1., 2., 3.], json!({"state":"confirmed"}))
+            .unwrap();
+        let wal = format!("{path}.wal");
+        let wal_scope = std::fs::canonicalize(&wal).unwrap();
+        let pause = pause_at_path(
+            ConcurrencyPoint::AfterWalTruncate,
+            wal_scope.to_str().unwrap(),
+        );
+        let writer = std::thread::spawn(move || {
+            owner.flush().unwrap();
+            owner
+        });
+        pause.wait_until_arrived();
+        let truncated_length = std::fs::metadata(&wal).map(|metadata| metadata.len());
+        let before = snapshot(&root.0);
+        let attempts = [AccessMode::ReadWrite, AccessMode::ReadOnly].map(|access_mode| {
+            Database::<f32>::open_with_config(
+                &path,
+                Config {
+                    dim: 3,
+                    storage_mode,
+                    access_mode,
+                    ..Default::default()
+                },
+            )
+        });
+        let after = snapshot(&root.0);
+        pause.release();
+        let mut owner = writer.join().unwrap();
+        assert_eq!(
+            truncated_length.unwrap(),
+            0,
+            "交错点必须实际处于空 WAL 窗口"
+        );
+        assert_eq!(before, after);
+        for result in attempts {
+            assert!(
+                matches!(result, Err(TriviumError::DatabaseLocked(_))),
+                "重开必须先判断租约冲突"
+            );
+        }
+        assert_eq!(
+            owner.get_payload(1).unwrap(),
+            Some(json!({"state":"confirmed"}))
+        );
+        owner.close().unwrap();
+        for _ in 0..2 {
+            let mut reopened = Database::<f32>::open_with_config(
+                &path,
+                Config {
+                    dim: 3,
+                    storage_mode,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(reopened.all_node_ids().unwrap(), [1]);
+            let node = reopened.get(1).unwrap().unwrap();
+            assert_eq!(node.vector, [1., 2., 3.]);
+            assert_eq!(node.payload, json!({"state":"confirmed"}));
+            assert!(node.edges.is_empty());
+            reopened.close().unwrap();
+        }
+    }
 }
 
 #[test]

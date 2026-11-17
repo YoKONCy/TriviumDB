@@ -166,9 +166,37 @@ fn dpp_quality_weight为零_纯多样性() {
     assert_eq!(selected.len(), 2);
 }
 
+#[test]
+fn dpp_大质量因子和大向量保持独立方向与稳定选择() {
+    for scale in [1.0f32, 1e30] {
+        let vectors = vec![
+            vec![scale, 0.0],
+            vec![0.8 * scale, 0.6 * scale],
+            vec![0.6 * scale, 0.8 * scale],
+        ];
+        for score in [100.0, f32::MAX] {
+            // 同分时先取编号 0，再取与其夹角更大的编号 2。
+            assert_eq!(dpp_greedy(&vectors, &[score; 3], 2, 10.0), [0, 2]);
+        }
+    }
+}
+
 // ════════════════════════════════════════════════════════════════
 //  NMF — 从内联分离 + 补齐
 // ════════════════════════════════════════════════════════════════
+
+#[test]
+fn nmf_有限大数的标量分解保持原始尺度() {
+    for value in [1.0f32, 1e30, f32::MAX] {
+        let (w, h) = nmf_multiplicative_update(&[value], 1, 1, 1, 8, 1e-4);
+        assert_eq!(w.len(), 1);
+        assert_eq!(h.len(), 1);
+        assert!(w[0].is_finite() && w[0] > 0.0);
+        assert!(h[0].is_finite() && h[0] > 0.0);
+        let reconstructed = f64::from(w[0]) * f64::from(h[0]);
+        assert!((reconstructed / f64::from(value) - 1.0).abs() < 1e-5);
+    }
+}
 
 #[test]
 fn nmf_基本分解() {

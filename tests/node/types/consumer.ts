@@ -10,6 +10,22 @@ function check(condition: boolean, message: string): asserts condition {
 }
 
 export function inspectRequestContext(database: TriviumDB): void {
+  const exactHits: JsSearchHit[] = database.search([1, 0], 5, 0, undefined, undefined, true);
+  const exactAdvanced: JsSearchHit[] = database.searchAdvanced([1, 0], { exact: true });
+  const exactBatch: Promise<JsSearchHit[][]> = database.searchBatch([[1, 0]], 5, 1, undefined, true);
+  void [exactHits, exactAdvanced, exactBatch];
+  // @ts-expect-error 精确开关使用布尔值。
+  database.search([1, 0], 5, 0, undefined, undefined, 'true');
+  // @ts-expect-error 配置中的精确开关使用布尔值。
+  database.searchAdvanced([1, 0], { exact: 'true' });
+  // @ts-expect-error 批量精确开关使用布尔值。
+  database.searchBatch([[1, 0]], 5, 1, undefined, 1);
+  database.setHook({ onRerank: () => null });
+  database.setHook({ onRerank: hits => hits });
+  // @ts-expect-error 同步 Hook 拒绝 Promise 返回值。
+  database.setHook({ onPreSearch: async query => query });
+  // @ts-expect-error Hook 命中的 ID 使用十进制字符串。
+  database.setHook({ onCustomRecall: () => [{ id: 1, score: 1 }] });
   const context = new RequestContext('typed-request', 0);
   const identity: string = context.requestId;
   const node: JsNodeView | null = context.run(() => database.get(7));
@@ -199,6 +215,15 @@ export function inspectCoreError(error: TriviumDBError): void {
     void resource;
     // @ts-expect-error 锁忙详情通过 resource 定位，不提供 I/O 类别。
     error.details.io_kind;
+  }
+  if (error.code === 'TDB_MIGRATION_REQUIRED') {
+    const component: string = error.details.component;
+    const found: number = error.details.found;
+    const current: number = error.details.current;
+    const entrypoint: string = error.details.migration_entrypoint;
+    // @ts-expect-error 格式身份使用数值。
+    const invalidVersion: string = error.details.found;
+    void [component, found, current, entrypoint, invalidVersion];
   }
   if (error.code === 'TDB_REENTRANT_ACCESS') {
     const operation: string = error.details.operation;

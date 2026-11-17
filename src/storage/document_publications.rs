@@ -3,7 +3,10 @@
 use crate::document::*;
 use crate::{Result, TriviumError, VectorType};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 pub(crate) const MAX_RECORD_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PENDING: usize = 128;
@@ -87,6 +90,9 @@ pub(crate) struct PublicationStore {
     pending: usize,
     bytes: usize,
     pub clock: u64,
+    // 恢复期间延迟普通删除的归档级联，覆盖水位内的后续 Begin 保护其所属新代。
+    replay_checkpoint_clock: Option<u64>,
+    replay_deleted: BTreeSet<String>,
 }
 
 pub(crate) fn missing(id: &str) -> TriviumError {
@@ -111,11 +117,13 @@ impl PublicationStore {
         self.by_document.get(&id)
     }
     pub fn memory_bytes(&self) -> usize {
-        self.bytes.saturating_add(if self.uploads.is_empty() {
-            0
-        } else {
-            16 * 1024
-        })
+        self.bytes
+            .saturating_add(self.replay_deleted.len().saturating_mul(192))
+            .saturating_add(if self.uploads.is_empty() {
+                0
+            } else {
+                16 * 1024
+            })
     }
     pub fn projection_bytes(&self) -> usize {
         if self.uploads.is_empty() {
@@ -208,6 +216,25 @@ impl PublicationStore {
             self.remove(key);
         }
     }
+    pub fn begin_replay(&mut self) {
+        self.replay_checkpoint_clock = Some(self.clock);
+    }
+    pub fn replay_delete_node(&mut self, id: u64) {
+        if let Some(ids) = self.by_document.get(&id) {
+            for key in ids {
+                self.replay_deleted.insert(key.clone());
+            }
+        }
+    }
+    fn apply_replay_deletions(&mut self) {
+        while let Some(id) = self.replay_deleted.pop_first() {
+            self.remove(&id);
+        }
+    }
+    pub fn finish_replay(&mut self) {
+        self.apply_replay_deletions();
+        self.replay_checkpoint_clock = None;
+    }
     pub fn stamp(&self, change: Change) -> Result<Record> {
         Ok(Record {
             sequence: self
@@ -236,10 +263,25 @@ impl PublicationStore {
                 } => validate_nodes::<T>(raw, dim, false)?,
                 _ => {}
             }
+            if self
+                .replay_checkpoint_clock
+                .is_some_and(|clock| record.sequence <= clock)
+                && let Change::Begin { header, .. } = &record.change
+                && self.uploads.get(&header.upload_id).is_some_and(|upload| {
+                    upload.header.revision == header.revision
+                        && upload.header.document_id == header.document_id
+                })
+            {
+                self.replay_deleted.remove(&header.upload_id);
+            }
             return Ok(());
         }
         if Some(record.sequence) != self.clock.checked_add(1) {
             return Err(conflict("upload.sequence"));
+        }
+        if replay {
+            // 新日志从检查点事实继续执行，先完成此前普通删除的真实级联。
+            self.apply_replay_deletions();
         }
         self.apply::<T>(&record.change, dim)?;
         self.clock = record.sequence;

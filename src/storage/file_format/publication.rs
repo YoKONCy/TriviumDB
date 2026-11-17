@@ -9,18 +9,7 @@ use crate::storage::fs::sync_parent_directory;
 use std::io::Read;
 
 // 魔数(4) + 版本(1) + 目标代(8) + 三个文件的存在标记/长度/CRC(39) + 日志 CRC(4)。
-const JOURNAL_SIZE: usize = 56;
-const GROUP_SUFFIXES: [&str; 9] = [
-    "",
-    ".vec",
-    ".flush_ok",
-    ".quiver",
-    ".quiver.meta",
-    ".text",
-    ".text.meta",
-    ".pidx",
-    ".gidx",
-];
+use crate::storage::artifacts::CHECKPOINT_SUFFIXES as GROUP_SUFFIXES;
 const GROUP_JOURNAL_SIZE: usize = 15 + GROUP_SUFFIXES.len() * 13 + 4;
 
 struct Journal {
@@ -127,7 +116,7 @@ pub(super) fn begin(
 ) -> Result<()> {
     let mut bytes = [0u8; GROUP_JOURNAL_SIZE];
     bytes[..4].copy_from_slice(b"TPUB");
-    bytes[4] = 2;
+    bytes[4] = 3;
     bytes[5] = u8::from(mode == StorageMode::Rom);
     bytes[7..15].copy_from_slice(&generation.to_le_bytes());
     for (index, suffix) in GROUP_SUFFIXES.iter().enumerate() {
@@ -167,28 +156,25 @@ pub(super) fn begin(
 
 fn read_journal(path: &str) -> Result<Journal> {
     let mut input = File::open(journal_path(path))?;
-    let size = input.metadata()?.len();
-    if size != JOURNAL_SIZE as u64 && size != GROUP_JOURNAL_SIZE as u64 {
-        return Err(TriviumError::CorruptedFile("发布恢复日志长度无效".into()));
+    if input.metadata()?.len() != GROUP_JOURNAL_SIZE as u64 {
+        return Err(TriviumError::CorruptedFile(
+            "当前发布日志长度无效 (Invalid current publication journal length)".into(),
+        ));
     }
-    let mut bytes = vec![0; size as usize];
+    let mut bytes = [0u8; GROUP_JOURNAL_SIZE];
     input.read_exact(&mut bytes)?;
-    if size == JOURNAL_SIZE as u64 {
-        let (generation, files) = decode(&bytes)?;
-        return Ok(Journal {
-            generation,
-            rom: false,
-            committed: false,
-            files: files.into_iter().map(Some).collect(),
-        });
-    }
     decode_group(&bytes)
 }
 
 fn decode_group(bytes: &[u8]) -> Result<Journal> {
-    let crc_offset = GROUP_JOURNAL_SIZE - 4;
-    if bytes.len() != GROUP_JOURNAL_SIZE
-        || &bytes[..5] != b"TPUB\x02"
+    if bytes.len() != GROUP_JOURNAL_SIZE || bytes.get(4) != Some(&3) {
+        return Err(TriviumError::CorruptedFile(
+            "当前发布目录格式无效 (Invalid current publication directory format)".into(),
+        ));
+    }
+    let count = GROUP_SUFFIXES.len();
+    let crc_offset = bytes.len() - 4;
+    if &bytes[..4] != b"TPUB"
         || bytes[5] > 1
         || bytes[6] > bytes[5]
         || crc32fast::hash(&bytes[..crc_offset]) != read_u32_le(bytes, crc_offset, "发布日志 CRC")?
@@ -201,8 +187,8 @@ fn decode_group(bytes: &[u8]) -> Result<Journal> {
     if generation == 0 {
         return Err(TriviumError::CorruptedFile("发布目标代不能为零".into()));
     }
-    let mut files = Vec::with_capacity(GROUP_SUFFIXES.len());
-    for index in 0..GROUP_SUFFIXES.len() {
+    let mut files = Vec::with_capacity(count);
+    for index in 0..count {
         let offset = 15 + index * 13;
         let state = bytes[offset];
         let size = read_u64_le(bytes, offset + 1, "备份长度")?;
@@ -240,7 +226,7 @@ pub(super) fn commit_rom(path: &str) -> Result<()> {
     bytes[15] = if main.present { 2 } else { 1 };
     bytes[16..24].copy_from_slice(&main.size.to_le_bytes());
     bytes[24..28].copy_from_slice(&main.crc.to_le_bytes());
-    let crc_offset = GROUP_JOURNAL_SIZE - 4;
+    let crc_offset = bytes.len() - 4;
     let crc = crc32fast::hash(&bytes[..crc_offset]);
     bytes[crc_offset..].copy_from_slice(&crc.to_le_bytes());
     let target = journal_path(path);
@@ -255,39 +241,6 @@ pub(super) fn commit_rom(path: &str) -> Result<()> {
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::PublicationCommitRename)?;
     robust_rename_and_sync(Path::new(&temporary), Path::new(&target))?;
     Ok(())
-}
-
-fn decode(bytes: &[u8]) -> Result<(u64, [SavedFile; 3])> {
-    if bytes.len() != JOURNAL_SIZE
-        || &bytes[..4] != b"TPUB"
-        || bytes[4] != 1
-        || crc32fast::hash(&bytes[..52]) != read_u32_le(bytes, 52, "发布日志 CRC")?
-    {
-        return Err(TriviumError::CorruptedFile(
-            "发布恢复日志格式或 CRC 无效".into(),
-        ));
-    }
-    let generation = read_u64_le(bytes, 5, "发布目标代")?;
-    if generation == 0 {
-        return Err(TriviumError::CorruptedFile("发布目标代不能为零".into()));
-    }
-    let mut files = [SavedFile {
-        present: false,
-        size: 0,
-        crc: 0,
-    }; 3];
-    for (index, saved) in files.iter_mut().enumerate() {
-        let offset = 13 + index * 13;
-        *saved = SavedFile {
-            present: bytes[offset] == 1,
-            size: read_u64_le(bytes, offset + 1, "备份长度")?,
-            crc: read_u32_le(bytes, offset + 9, "备份 CRC")?,
-        };
-        if bytes[offset] > 1 || (!saved.present && (saved.size != 0 || saved.crc != 0)) {
-            return Err(TriviumError::CorruptedFile("发布备份几何信息无效".into()));
-        }
-    }
-    Ok((generation, files))
 }
 
 /// 返回是否回滚了未提交的文件；只读路径只检查，不创建、删除或修改文件。
@@ -329,9 +282,27 @@ pub(crate) fn recover<T: VectorType>(path: &str, writable: bool) -> Result<bool>
                 "已提交发布代的事实文件损坏".into(),
             ));
         }
+        let mut header = [0u8; 6];
+        File::open(path)?.read_exact(&mut header)?;
+        let container_required = u16::from_le_bytes([header[4], header[5]]) >= 14;
+        if container_required || Path::new(&format!("{path}.idx")).exists() {
+            crate::storage::index_container::validate_complete(path).map_err(|error| {
+                match error.kind() {
+                    std::io::ErrorKind::InvalidData
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::NotFound => TriviumError::CorruptedFile(
+                        format!("已提交索引容器损坏，保留恢复现场 (Committed index container is invalid; recovery files retained): {error}"),
+                    ),
+                    _ => error.into(),
+                }
+            })?;
+        }
         if writable {
             validate_checkpoint_type::<T>(path, &vec_path_from_db(path), path)?;
             cleanup(path)?;
+            if Path::new(&format!("{path}.idx")).exists() {
+                crate::storage::index_container::cleanup_components(path)?;
+            }
         }
         return Ok(false);
     }
@@ -405,37 +376,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 发布日志拒绝截断_未知版本_无效存在位与损坏crc() {
-        // 固定布局的独立字节 oracle，不能由生产编码器生成。
-        let mut bytes = [0u8; JOURNAL_SIZE];
-        bytes[..5].copy_from_slice(b"TPUB\x01");
-        bytes[5] = 1;
-        let crc = crc32fast::hash(&bytes[..52]);
-        bytes[52..].copy_from_slice(&crc.to_le_bytes());
-        assert!(decode(&bytes).is_ok());
-        for length in 0..JOURNAL_SIZE {
-            assert!(decode(&bytes[..length]).is_err());
-        }
-        for offset in 0..JOURNAL_SIZE {
-            let mut corrupt = bytes;
-            corrupt[offset] ^= 1;
-            assert!(decode(&corrupt).is_err());
-        }
-        for (offset, value) in [(4, 2), (5, 0), (13, 2), (14, 1)] {
-            let mut corrupt = bytes;
-            corrupt[offset] = value;
-            let crc = crc32fast::hash(&corrupt[..52]);
-            corrupt[52..].copy_from_slice(&crc.to_le_bytes());
-            assert!(decode(&corrupt).is_err());
-        }
-    }
-
-    #[test]
     fn 文件组日志拒绝截断_错误状态_未知版本与损坏crc() {
         let mut bytes = [0u8; GROUP_JOURNAL_SIZE];
-        bytes[..5].copy_from_slice(b"TPUB\x02");
+        bytes[..5].copy_from_slice(b"TPUB\x03");
         bytes[7] = 1;
-        for index in 0..9 {
+        for index in 0..10 {
             bytes[15 + index * 13] = 1;
         }
         let sign = |bytes: &mut [u8; GROUP_JOURNAL_SIZE]| {
@@ -452,7 +397,7 @@ mod tests {
             corrupt[offset] ^= 1;
             assert!(decode_group(&corrupt).is_err());
         }
-        for (offset, value) in [(4, 3), (5, 2), (6, 1), (7, 0), (15, 0), (15, 3), (16, 1)] {
+        for (offset, value) in [(4, 255), (5, 2), (6, 1), (7, 0), (15, 0), (15, 3), (16, 1)] {
             let mut corrupt = bytes;
             corrupt[offset] = value;
             sign(&mut corrupt);

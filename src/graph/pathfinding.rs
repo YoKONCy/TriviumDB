@@ -61,6 +61,26 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
         });
     }
 
+    let initial_metrics = TraversalMetrics {
+        visited_nodes: 1,
+        peak_frontier_size: 1,
+        ..Default::default()
+    };
+    let initial_exhaustion = if budget.max_visited_nodes < 2 {
+        Some(BudgetDimension::VisitedNodes)
+    } else if budget.max_frontier_size < 2 {
+        Some(BudgetDimension::FrontierSize)
+    } else {
+        None
+    };
+    if let Some(dimension) = initial_exhaustion {
+        return Ok(ShortestPathOutput {
+            path: None,
+            metrics: initial_metrics,
+            truncated: exhausted(budget, dimension, initial_metrics)?,
+            bidirectional: true,
+        });
+    }
     let mut forward = HashMap::from([(src, (0usize, None))]);
     let mut backward = HashMap::from([(dst, (0usize, None))]);
     let mut forward_frontier = vec![src];
@@ -100,30 +120,43 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
             } else {
                 backward[&current].0
             };
-            let mut neighbors: Vec<NodeId> = if expand_forward {
-                mt.get_edges(current)
-                    .unwrap_or(&[])
-                    .iter()
-                    .filter(|edge| label_filter.is_none_or(|label| edge.label == label))
-                    .map(|edge| edge.target_id)
-                    .collect()
-            } else {
-                mt.get_incoming_edges(current, label_filter)
-                    .into_iter()
-                    .map(|edge| edge.source_id)
-                    .collect()
-            };
+            let edges: Box<dyn Iterator<Item = (NodeId, &crate::node::Edge)> + '_> =
+                if expand_forward {
+                    Box::new(
+                        mt.get_edges(current)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|edge| (edge.target_id, edge)),
+                    )
+                } else {
+                    Box::new(mt.get_incoming_sources(current).iter().flat_map(|source| {
+                        mt.get_edges(*source)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(move |edge| (*source, edge))
+                    }))
+                };
+            let mut neighbors = Vec::new();
+            for (neighbor, edge) in edges {
+                crate::graph::budget::check_control(&control)?;
+                if metrics.examined_edges >= budget.max_examined_edges {
+                    truncated = exhausted(budget, BudgetDimension::ExaminedEdges, metrics)?;
+                    break;
+                }
+                metrics.examined_edges += 1;
+                if (expand_forward || edge.target_id == current)
+                    && label_filter.is_none_or(|label| edge.label == label)
+                {
+                    neighbors.push(neighbor);
+                }
+            }
+            if truncated {
+                break;
+            }
             neighbors.sort_unstable();
             neighbors.dedup();
             for neighbor in neighbors {
                 crate::graph::budget::check_control(&control)?;
-                if metrics.examined_edges >= budget.max_examined_edges {
-                    if exhausted(budget, BudgetDimension::ExaminedEdges, metrics)? {
-                        truncated = true;
-                    }
-                    break;
-                }
-                metrics.examined_edges += 1;
                 let own = if expand_forward {
                     &mut forward
                 } else {
@@ -136,10 +169,24 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
                         }
                         break;
                     }
+                    let next_size =
+                        next_frontier
+                            .len()
+                            .saturating_add(1)
+                            .saturating_add(if expand_forward {
+                                backward_frontier.len()
+                            } else {
+                                forward_frontier.len()
+                            });
+                    if next_size > budget.max_frontier_size {
+                        truncated = exhausted(budget, BudgetDimension::FrontierSize, metrics)?;
+                        break;
+                    }
                     entry.insert((current_depth + 1, Some(current)));
                     metrics.visited_nodes += 1;
                     metrics.depth_reached = metrics.depth_reached.max(current_depth + 1);
                     next_frontier.push(neighbor);
+                    metrics.peak_frontier_size = metrics.peak_frontier_size.max(next_size);
                 }
                 let other = if expand_forward { &backward } else { &forward };
                 if other.contains_key(&neighbor) {
@@ -164,19 +211,6 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
         }
         next_frontier.sort_unstable();
         next_frontier.dedup();
-        let next_size = next_frontier.len()
-            + if expand_forward {
-                backward_frontier.len()
-            } else {
-                forward_frontier.len()
-            };
-        metrics.peak_frontier_size = metrics.peak_frontier_size.max(next_size);
-        if next_size > budget.max_frontier_size {
-            if exhausted(budget, BudgetDimension::FrontierSize, metrics)? {
-                truncated = true;
-            }
-            break;
-        }
         if expand_forward {
             forward_frontier = next_frontier;
         } else {
@@ -237,6 +271,9 @@ pub(crate) fn shortest_path_view<T: VectorType>(
     max_depth: usize,
     label_filter: Option<&str>,
 ) -> Option<Path> {
+    if !mt.contains(src) || !mt.contains(dst) {
+        return None;
+    }
     if src == dst {
         return Some(vec![src]);
     }
@@ -452,7 +489,6 @@ pub(crate) fn bounded_all_paths_view<T: VectorType>(
             "最大路径数必须大于 0 (max_paths must be greater than zero)".into(),
         ));
     }
-    let max_depth = config.max_depth.min(budget.max_depth);
     let mut state = BoundedPathState {
         results: Vec::new(),
         visited: HashSet::from([src]),
@@ -466,7 +502,7 @@ pub(crate) fn bounded_all_paths_view<T: VectorType>(
         },
         truncated: false,
     };
-    bounded_path_dfs(mt, src, dst, config, budget, max_depth, &mut state)?;
+    bounded_path_dfs(mt, src, dst, config, budget, &mut state)?;
     state
         .results
         .sort_by(|left, right| left.nodes.cmp(&right.nodes));
@@ -493,7 +529,6 @@ fn bounded_path_dfs<T: VectorType>(
     dst: NodeId,
     config: &BoundedPathConfig,
     budget: &TraversalBudget,
-    max_depth: usize,
     state: &mut BoundedPathState,
 ) -> Result<()> {
     let control = crate::request::control().unwrap_or_default();
@@ -513,7 +548,12 @@ fn bounded_path_dfs<T: VectorType>(
             strength_average: if state.weights.is_empty() {
                 1.0
             } else {
-                state.weights.iter().copied().sum::<f32>() / state.weights.len() as f32
+                (state
+                    .weights
+                    .iter()
+                    .map(|weight| f64::from(*weight))
+                    .sum::<f64>()
+                    / state.weights.len() as f64) as f32
             },
         });
         if state.results.len() >= config.max_paths {
@@ -521,25 +561,22 @@ fn bounded_path_dfs<T: VectorType>(
         }
         return Ok(());
     }
-    if depth >= max_depth {
+    if depth >= config.max_depth {
         return Ok(());
     }
-    let mut edges = mt
-        .get_edges(current)
-        .unwrap_or(&[])
-        .iter()
-        .collect::<Vec<_>>();
+    let outgoing = mt.get_edges(current).unwrap_or_default();
+    if outgoing.len() > budget.max_frontier_size {
+        state.truncated = exhausted(budget, BudgetDimension::FrontierSize, state.metrics)?;
+        return Ok(());
+    }
+    state.metrics.peak_frontier_size = state.metrics.peak_frontier_size.max(outgoing.len());
+    let mut edges = outgoing.iter().collect::<Vec<_>>();
     edges.sort_by(|left, right| {
         left.target_id
             .cmp(&right.target_id)
             .then_with(|| left.label.cmp(&right.label))
             .then_with(|| left.weight.total_cmp(&right.weight))
     });
-    state.metrics.peak_frontier_size = state.metrics.peak_frontier_size.max(edges.len());
-    if edges.len() > budget.max_frontier_size {
-        state.truncated = exhausted(budget, BudgetDimension::FrontierSize, state.metrics)?;
-        return Ok(());
-    }
     for edge in edges {
         crate::graph::budget::check_control(&control)?;
         if state.metrics.examined_edges >= budget.max_examined_edges {
@@ -556,6 +593,10 @@ fn bounded_path_dfs<T: VectorType>(
         {
             continue;
         }
+        if depth >= budget.max_depth {
+            state.truncated = exhausted(budget, BudgetDimension::Depth, state.metrics)?;
+            break;
+        }
         if state.metrics.visited_nodes >= budget.max_visited_nodes {
             state.truncated = exhausted(budget, BudgetDimension::VisitedNodes, state.metrics)?;
             break;
@@ -565,7 +606,7 @@ fn bounded_path_dfs<T: VectorType>(
         state.nodes.push(edge.target_id);
         state.weights.push(edge.weight);
         state.labels.push(edge.label.clone());
-        bounded_path_dfs(mt, edge.target_id, dst, config, budget, max_depth, state)?;
+        bounded_path_dfs(mt, edge.target_id, dst, config, budget, state)?;
         state.labels.pop();
         state.weights.pop();
         state.nodes.pop();

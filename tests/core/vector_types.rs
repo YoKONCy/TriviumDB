@@ -27,9 +27,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok"] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 /// 构造 f16 向量的辅助函数

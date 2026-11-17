@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) const HEADER_BYTES: usize = 160;
 pub(crate) const RECORD_HEADER_BYTES: usize = 32;
 const MAGIC: &[u8; 8] = b"QVSSD001";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// 来源身份由宿主的不可变事实清单摘要提供，发布身份标识本次索引代际。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -55,12 +55,7 @@ impl Header {
     fn bytes(&self) -> [u8; HEADER_BYTES] {
         let mut bytes = [0u8; HEADER_BYTES];
         bytes[..8].copy_from_slice(MAGIC);
-        let version = if self.metadata.encoding.is_centered() {
-            2u32
-        } else {
-            VERSION
-        };
-        bytes[8..12].copy_from_slice(&version.to_le_bytes());
+        bytes[8..12].copy_from_slice(&VERSION.to_le_bytes());
         bytes[12..16].copy_from_slice(&(HEADER_BYTES as u32).to_le_bytes());
         bytes[16..48].copy_from_slice(&self.metadata.source);
         bytes[48..64].copy_from_slice(&self.metadata.generation);
@@ -91,7 +86,7 @@ impl Header {
         expected_source: [u8; 32],
     ) -> Result<Self> {
         if &bytes[..8] != MAGIC
-            || ![VERSION, 2].contains(&word(bytes, 8))
+            || word(bytes, 8) != VERSION
             || word(bytes, 12) != HEADER_BYTES as u32
             || word(bytes, 156) != crc32fast::hash(&bytes[..156])
         {
@@ -108,13 +103,7 @@ impl Header {
             });
         }
         let layout = ColdLayout::from_header(&bytes[112..152])?;
-        if word(bytes, 8)
-            != if layout.encoding().is_centered() {
-                2
-            } else {
-                1
-            }
-            || word(bytes, 152) as usize != layout.center_bytes()
+        if word(bytes, 152) as usize != layout.center_bytes()
             || (!layout.encoding().is_centered() && word(bytes, 108) != 0)
         {
             return Err(corrupt(
@@ -483,6 +472,7 @@ pub(crate) struct ReadCounters {
 
 pub(crate) struct ColdFile {
     file: File,
+    base_offset: u64,
     io: Option<super::quiver_io::AsyncReader>,
     header: Header,
     #[cfg(feature = "test-hooks")]
@@ -493,22 +483,44 @@ pub(crate) struct ColdFile {
 
 impl ColdFile {
     pub fn open(path: &Path, expected_source: [u8; 32]) -> Result<Self> {
-        Self::open_bound(path, expected_source, None)
+        Self::open_bound(path, expected_source, None, None)
     }
 
     pub fn open_bound(
         path: &Path,
         expected_source: [u8; 32],
         binding: Option<(u64, u32)>,
+        database: Option<&str>,
     ) -> Result<Self> {
-        if !std::fs::metadata(path)?.is_file() {
+        let container = database.map(|path| PathBuf::from(format!("{path}.idx")));
+        let physical = container.as_deref().unwrap_or(path);
+        if !std::fs::metadata(physical)?.is_file() {
             return Err(TriviumError::InvalidInput(
                 "SSD读取目标必须为普通文件 (SSD read target must be a regular file)".into(),
             )
             .at_field("path"));
         }
-        let mut file = File::open(path)?;
-        let length = file.metadata()?.len();
+        let part = if let Some(database) = database {
+            super::index_container::open(database, ".qssd")?
+        } else {
+            super::index_container::standalone(path)?
+        }
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "SSD组件缺失 (SSD component missing)",
+            )
+        })?;
+        let length = part.length;
+        let base_offset = part.offset;
+        let mut file = part.file;
+        if !file.metadata()?.is_file() {
+            return Err(TriviumError::InvalidInput(
+                "SSD读取目标必须为普通文件 (SSD read target must be a regular file)".into(),
+            )
+            .at_field("path"));
+        }
+        file.seek(SeekFrom::Start(base_offset))?;
         if length < HEADER_BYTES as u64 {
             return Err(corrupt(
                 "SSD制品头部被截断 (SSD artifact header is truncated)",
@@ -526,6 +538,7 @@ impl ColdFile {
         }
         Ok(Self {
             file,
+            base_offset,
             io: None,
             header,
             #[cfg(feature = "test-hooks")]
@@ -551,7 +564,7 @@ impl ColdFile {
         read_exact_at(
             &self.file,
             &mut bytes,
-            HEADER_BYTES as u64 + self.header.metadata.hot_bytes,
+            self.base_offset + HEADER_BYTES as u64 + self.header.metadata.hot_bytes,
             None,
         )?;
         if crc32fast::hash(&bytes) != self.header.center_crc {
@@ -629,7 +642,7 @@ impl ColdFile {
             read_exact_at(
                 &self.file,
                 &mut buffer[..count],
-                HEADER_BYTES as u64 + offset,
+                self.base_offset + HEADER_BYTES as u64 + offset,
                 None,
             )?;
             checksum.update(&buffer[..count]);
@@ -645,7 +658,12 @@ impl ColdFile {
         let bytes = usize::try_from(self.header.metadata.hot_bytes)
             .map_err(|_| corrupt("SSD热区超出平台范围 (SSD hot section exceeds platform range)"))?;
         let mut buffer = zeroed(bytes)?;
-        read_exact_at(&self.file, &mut buffer, HEADER_BYTES as u64, None)?;
+        read_exact_at(
+            &self.file,
+            &mut buffer,
+            self.base_offset + HEADER_BYTES as u64,
+            None,
+        )?;
         crate::request::check_current()?;
         if crc32fast::hash(&buffer) != self.header.hot_crc {
             return Err(corrupt("SSD热区CRC无效 (Invalid SSD hot section CRC)"));
@@ -682,7 +700,7 @@ impl ColdFile {
             &self.path.to_string_lossy(),
         );
         crate::request::check_current()?;
-        let cold_offset = self.header.cold_offset()?;
+        let cold_offset = self.base_offset + self.header.cold_offset()?;
         let mut order = requests
             .iter()
             .enumerate()

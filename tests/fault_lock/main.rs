@@ -27,14 +27,21 @@ fn child_command() -> Command {
 }
 
 fn database_files(path: &Path) -> Vec<(String, Vec<u8>)> {
-    ["", ".vec", ".wal", ".flush_ok", ".quiver", ".quiver.meta"]
-        .into_iter()
-        .filter_map(|suffix| {
-            let file = PathBuf::from(format!("{}{suffix}", path.display()));
-            file.exists()
-                .then(|| (suffix.to_string(), std::fs::read(file).unwrap()))
-        })
-        .collect()
+    let name = path.file_name().unwrap().to_str().unwrap();
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(path.parent().unwrap()).unwrap() {
+        let entry = entry.unwrap();
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        // Windows 独占租约禁止读取锁定字节；此处比较完整的数据与恢复制品。
+        if file_name == format!("{name}.lock") {
+            continue;
+        }
+        if file_name == name || file_name.starts_with(&format!("{name}.")) {
+            files.push((file_name, std::fs::read(entry.path()).unwrap()));
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
 }
 
 #[test]

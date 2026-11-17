@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
-pub const DOCUMENT_SCHEMA_VERSION: u32 = 1;
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 2;
 pub const DOCUMENT_EDGE_LABEL: &str = "tdb.document.contains";
 pub(crate) const DOCUMENT_FIELD: &str = "_tdb_document";
 mod publication;
@@ -331,9 +331,9 @@ pub enum DocumentVectorRerank {
 /// 本次查询实际使用的压缩表示与驻留策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentCompressionInfo {
-    pub encoding: crate::index::quiver::ssd::RerankEncoding,
-    pub query_precision: crate::index::quiver::ssd::QueryPrecision,
-    pub residency: crate::index::quiver::ssd::Residency,
+    pub encoding: crate::index::quiver::runtime::RerankEncoding,
+    pub query_precision: crate::index::quiver::runtime::QueryPrecision,
+    pub residency: crate::index::quiver::runtime::Residency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -642,7 +642,8 @@ impl DocumentSnapshot {
 
     pub(crate) fn validate(&self) -> Result<()> {
         valid_id(self.document_id, "document.root.id")?;
-        if !(1..=2).contains(&self.schema_version) || uuid::Uuid::parse_str(&self.revision).is_err()
+        if self.schema_version != DOCUMENT_SCHEMA_VERSION
+            || uuid::Uuid::parse_str(&self.revision).is_err()
         {
             return Err(invalid(
                 "document.revision",
@@ -656,12 +657,6 @@ impl DocumentSnapshot {
         )?;
         budget("document_blocks", self.blocks.len(), 100_000)?;
         if let Some(source) = &self.source {
-            if self.schema_version != 2 {
-                return Err(invalid(
-                    "document.schema_version",
-                    "解析来源要求文档结构版本2 (Parsed sources require document schema version two)",
-                ));
-            }
             source.validate(&self.content)?;
         }
         for (field, value) in [

@@ -52,6 +52,60 @@ async fn session_status(app: Router) -> Value {
 }
 
 #[tokio::test]
+async fn 插入序号连边通过嵌入http保留完整事务内容() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../../tests/contracts/console_cases.json")).unwrap();
+    let case = fixture["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["name"] == "插入序号连边与自动ID共享原子事务")
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("insert-edges.tdb");
+    let mut core = Database::<f32>::open(file.to_str().unwrap(), 2).unwrap();
+    for node in fixture["setup"].as_array().unwrap() {
+        let vector: Vec<f32> = serde_json::from_value(node["vector"].clone()).unwrap();
+        core.insert_with_id(
+            node["id"].as_u64().unwrap(),
+            &vector,
+            node["payload"].clone(),
+        )
+        .unwrap();
+    }
+    let database = Arc::new(Mutex::new(core));
+    let host = ConsoleHost::attach(
+        &database,
+        ConsoleOptions {
+            read_only: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let app = build_console_app(host, ConsoleHttpOptions::default()).unwrap();
+    let (status, response) = post(app.clone(), wire("创建及连边", case["command"].clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["data"], case["expected"]);
+    let ids = case["verify"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["id"].clone())
+        .collect::<Vec<_>>();
+    let (status, response) = post(
+        app,
+        wire("读取完整内容", json!({"operation":"getNodes","ids":ids})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response["data"],
+        json!({"nodes":case["verify"],"missingIds":[]})
+    );
+    database.lock().unwrap().close().unwrap();
+}
+
+#[tokio::test]
 async fn 请求体解析前保留身份且头正文不符时保留全部事实() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("identity.tdb");

@@ -25,7 +25,7 @@ impl PyTriviumDB {
     /// print(ctx.timings)   # {'hook_pre_search': 0.1, 'graph_expand': 2.3, ...}
     /// print(ctx.custom_data)  # Hook 注入的自定义数据
     /// ```
-    #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(2), min_score=float_argument(0.1), payload_filter=None), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None)")]
+    #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(2), min_score=float_argument(0.0), payload_filter=None, *, exact=boolean_argument(false)), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.0, payload_filter=None, *, exact=False)")]
     fn search_with_context(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -36,10 +36,12 @@ impl PyTriviumDB {
         expand_depth: Py<PyAny>,
         min_score: Py<PyAny>,
         payload_filter: Option<&Bound<'_, PyAny>>,
+        exact: Py<PyAny>,
     ) -> PyResult<(Vec<PySearchHit>, PyHookContext)> {
         let (_request, borrowed) = database_read(slf)?;
         let this = &*borrowed;
         let min_score = read_float(min_score.bind(py), "min_score")?;
+        let exact = extract_argument(py, exact.bind(py), "exact", None)?;
         let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
         let recall_k = extract_argument(py, recall_k.bind(py), "recall_k", None)?;
         let rerank_k = extract_argument(py, rerank_k.bind(py), "rerank_k", None)?;
@@ -56,7 +58,8 @@ impl PyTriviumDB {
             min_score,
             payload_filter: rust_filter,
             ..Default::default()
-        };
+        }
+        .with_exact(exact);
 
         let (results, hook_ctx) = match &this.inner {
             DbBackend::F32(db) => {
@@ -115,7 +118,7 @@ impl PyTriviumDB {
         Ok((hits, ctx))
     }
 
-    #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(0), min_score=float_argument(0.5), payload_filter=None, max_edges_per_node=integer_argument(0), min_edge_weight=float_argument(0.0), edge_direction=string_argument("out")), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out')")]
+    #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(0), min_score=float_argument(0.0), payload_filter=None, max_edges_per_node=integer_argument(0), min_edge_weight=float_argument(0.0), edge_direction=string_argument("out"), *, exact=boolean_argument(false)), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.0, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out', *, exact=False)")]
     fn search(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -129,11 +132,13 @@ impl PyTriviumDB {
         max_edges_per_node: Py<PyAny>,
         min_edge_weight: Py<PyAny>,
         edge_direction: Py<PyAny>,
+        exact: Py<PyAny>,
     ) -> PyResult<Vec<PySearchHit>> {
         let (_request, borrowed) = database_read(slf)?;
         let this = &*borrowed;
         let min_score = read_float(min_score.bind(py), "min_score")?;
         let min_edge_weight = read_float(min_edge_weight.bind(py), "min_edge_weight")?;
+        let exact = extract_argument(py, exact.bind(py), "exact", None)?;
         let edge_direction = read_string(edge_direction.bind(py), "edge_direction")?;
         let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
         let recall_k = extract_argument(py, recall_k.bind(py), "recall_k", None)?;
@@ -158,7 +163,8 @@ impl PyTriviumDB {
             min_edge_weight,
             edge_direction: parse_edge_direction(&edge_direction)?,
             ..Default::default()
-        };
+        }
+        .with_exact(exact);
 
         let results = match &this.inner {
             DbBackend::F32(db) => {
@@ -189,7 +195,7 @@ impl PyTriviumDB {
             .collect::<PyResult<Vec<_>>>()
     }
 
-    #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(2), min_score=float_argument(0.1), payload_filter=None, max_edges_per_node=integer_argument(0), min_edge_weight=float_argument(0.0), edge_direction=string_argument("out")), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out')")]
+    #[pyo3(signature = (query_vector, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(2), min_score=float_argument(0.0), payload_filter=None, max_edges_per_node=integer_argument(0), min_edge_weight=float_argument(0.0), edge_direction=string_argument("out"), *, exact=boolean_argument(false)), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.0, payload_filter=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out', *, exact=False)")]
     fn search_grouped(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -203,11 +209,13 @@ impl PyTriviumDB {
         max_edges_per_node: Py<PyAny>,
         min_edge_weight: Py<PyAny>,
         edge_direction: Py<PyAny>,
+        exact: Py<PyAny>,
     ) -> PyResult<PyGroupedSearchResult> {
         let (_request, borrowed) = database_read(slf)?;
         let this = &*borrowed;
         let min_score = read_float(min_score.bind(py), "min_score")?;
         let min_edge_weight = read_float(min_edge_weight.bind(py), "min_edge_weight")?;
+        let exact = extract_argument(py, exact.bind(py), "exact", None)?;
         let edge_direction = read_string(edge_direction.bind(py), "edge_direction")?;
         let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
         let recall_k = extract_argument(py, recall_k.bind(py), "recall_k", None)?;
@@ -229,7 +237,8 @@ impl PyTriviumDB {
             min_edge_weight,
             edge_direction: parse_edge_direction(&edge_direction)?,
             ..Default::default()
-        };
+        }
+        .with_exact(exact);
         let result = match &this.inner {
             DbBackend::F32(db) => {
                 let vector: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
@@ -268,7 +277,7 @@ impl PyTriviumDB {
         })
     }
 
-    #[pyo3(signature = (query_vectors, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(0), min_score=float_argument(0.5), parallelism=integer_argument(0)), text_signature="($self, query_vectors, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.5, parallelism=0)")]
+    #[pyo3(signature = (query_vectors, top_k=integer_argument(5), recall_k=integer_argument(0), rerank_k=integer_argument(0), expand_depth=integer_argument(0), min_score=float_argument(0.0), parallelism=integer_argument(0), *, exact=boolean_argument(false)), text_signature="($self, query_vectors, top_k=5, recall_k=0, rerank_k=0, expand_depth=0, min_score=0.0, parallelism=0, *, exact=False)")]
     fn search_batch(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -279,6 +288,7 @@ impl PyTriviumDB {
         expand_depth: Py<PyAny>,
         min_score: Py<PyAny>,
         parallelism: Py<PyAny>,
+        exact: Py<PyAny>,
     ) -> PyResult<Vec<Vec<PySearchHit>>> {
         let (_request, borrowed) = database_read(slf)?;
         let this = &*borrowed;
@@ -288,6 +298,7 @@ impl PyTriviumDB {
         let rerank_k = extract_argument(py, rerank_k.bind(py), "rerank_k", None)?;
         let expand_depth = extract_argument(py, expand_depth.bind(py), "expand_depth", None)?;
         let parallelism = extract_argument(py, parallelism.bind(py), "parallelism", None)?;
+        let exact = extract_argument(py, exact.bind(py), "exact", None)?;
         let config = crate::database::SearchConfig {
             top_k,
             recall_k,
@@ -296,7 +307,8 @@ impl PyTriviumDB {
             min_score,
             enable_advanced_pipeline: false,
             ..Default::default()
-        };
+        }
+        .with_exact(exact);
         let batch_config = crate::database::BatchSearchConfig { parallelism };
         let results = match &this.inner {
             DbBackend::F32(db) => {
@@ -349,7 +361,7 @@ impl PyTriviumDB {
             recall_k=integer_argument(0),
             rerank_k=integer_argument(0),
             expand_depth=integer_argument(2),
-            min_score=float_argument(0.1),
+            min_score=float_argument(0.0),
             teleport_alpha=float_argument(0.0),
             enable_advanced_pipeline=boolean_argument(true),
             enable_sparse_residual=boolean_argument(false),
@@ -366,8 +378,10 @@ impl PyTriviumDB {
             expand_labels=None,
             max_edges_per_node=integer_argument(0),
             min_edge_weight=float_argument(0.0),
-            edge_direction=string_argument("out")
-        ), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.1, teleport_alpha=0.0, enable_advanced_pipeline=True, enable_sparse_residual=False, fista_lambda=0.1, fista_threshold=0.3, enable_dpp=False, dpp_quality_weight=1.0, enable_refractory_fatigue=False, enable_text_hybrid_search=False, text_boost=1.5, custom_query_text=None, payload_filter=None, force_brute_force=False, expand_labels=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out')")]
+            edge_direction=string_argument("out"),
+            *,
+            exact=boolean_argument(false)
+        ), text_signature="($self, query_vector, top_k=5, recall_k=0, rerank_k=0, expand_depth=2, min_score=0.0, teleport_alpha=0.0, enable_advanced_pipeline=True, enable_sparse_residual=False, fista_lambda=0.1, fista_threshold=0.3, enable_dpp=False, dpp_quality_weight=1.0, enable_refractory_fatigue=False, enable_text_hybrid_search=False, text_boost=1.5, custom_query_text=None, payload_filter=None, force_brute_force=False, expand_labels=None, max_edges_per_node=0, min_edge_weight=0.0, edge_direction='out', *, exact=False)")]
     fn search_advanced(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -394,6 +408,7 @@ impl PyTriviumDB {
         max_edges_per_node: Py<PyAny>,
         min_edge_weight: Py<PyAny>,
         edge_direction: Py<PyAny>,
+        exact: Py<PyAny>,
     ) -> PyResult<Vec<PySearchHit>> {
         let (_request, borrowed) = database_read(slf)?;
         let this = &*borrowed;
@@ -429,8 +444,9 @@ impl PyTriviumDB {
             "enable_text_hybrid_search",
             None,
         )?;
-        let force_brute_force =
+        let force_brute_force: bool =
             extract_argument(py, force_brute_force.bind(py), "force_brute_force", None)?;
+        let exact: bool = extract_argument(py, exact.bind(py), "exact", None)?;
         let edge_direction = read_string(edge_direction.bind(py), "edge_direction")?;
         let custom_query_text = custom_query_text
             .map(|value| read_string(&value, "custom_query_text"))
@@ -473,7 +489,8 @@ impl PyTriviumDB {
             edge_direction: parse_edge_direction(&edge_direction)?,
             payload_filter: rust_filter,
             ..Default::default()
-        };
+        }
+        .with_exact(exact || force_brute_force);
 
         let q_text = custom_query_text.as_deref();
 
@@ -506,7 +523,7 @@ impl PyTriviumDB {
             .collect::<PyResult<Vec<_>>>()
     }
 
-    #[pyo3(signature = (query_vector, query_text, top_k=integer_argument(5), expand_depth=integer_argument(2), min_score=float_argument(0.1), hybrid_alpha=float_argument(0.7), payload_filter=None), text_signature="($self, query_vector, query_text, top_k=5, expand_depth=2, min_score=0.1, hybrid_alpha=0.7, payload_filter=None)")]
+    #[pyo3(signature = (query_vector, query_text, top_k=integer_argument(5), expand_depth=integer_argument(2), min_score=float_argument(0.0), hybrid_alpha=float_argument(0.7), payload_filter=None, *, exact=boolean_argument(false)), text_signature="($self, query_vector, query_text, top_k=5, expand_depth=2, min_score=0.0, hybrid_alpha=0.7, payload_filter=None, *, exact=False)")]
     fn search_hybrid(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -517,11 +534,13 @@ impl PyTriviumDB {
         min_score: Py<PyAny>,
         hybrid_alpha: Py<PyAny>,
         payload_filter: Option<&Bound<'_, PyAny>>,
+        exact: Py<PyAny>,
     ) -> PyResult<Vec<PySearchHit>> {
         let (_request, borrowed) = database_read(slf)?;
         let this = &*borrowed;
         let min_score = read_float(min_score.bind(py), "min_score")?;
         let hybrid_alpha = read_float(hybrid_alpha.bind(py), "hybrid_alpha")?;
+        let exact = extract_argument(py, exact.bind(py), "exact", None)?;
         let query_text: String = extract_argument(py, &query_text, "query_text", None)?;
         let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
         let expand_depth = extract_argument(py, expand_depth.bind(py), "expand_depth", None)?;
@@ -541,7 +560,8 @@ impl PyTriviumDB {
             text_boost: boost,
             payload_filter: rust_filter,
             ..Default::default()
-        };
+        }
+        .with_exact(exact);
         let query_text = query_text.to_owned();
         let results = match &this.inner {
             DbBackend::F32(db) => {

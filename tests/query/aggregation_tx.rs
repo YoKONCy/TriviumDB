@@ -25,9 +25,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok", ".tmp", ".vec.tmp"] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -695,7 +693,8 @@ fn COV4_28_tql_explain_variants() {
         .unwrap();
     assert!(!r2.is_empty());
     let plan = &r2[0]["plan"].payload;
-    assert_eq!(plan["industrial_access_path"], "exact_fallback");
+    assert_eq!(plan["vector_access_path"], "exact_fallback");
+    assert_eq!(plan["access_path"]["kind"], "full_node_scan");
     assert_eq!(plan["estimated_candidates"], db.node_count().unwrap());
     assert!(plan["estimated_temp_bytes"].as_u64().unwrap() > 0);
     assert!(plan["estimated_vector_page_reads"].as_u64().unwrap() > 0);

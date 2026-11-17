@@ -4,8 +4,9 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::Instant;
-use triviumdb::index::quiver::ssd::{
-    IoMode, QueryPrecision, RerankEncoding, Residency, SsdOptions, SsdQuiver, SsdRuntimeOptions,
+use triviumdb::index::quiver::runtime::{
+    IoMode, QueryPrecision, QuiverArtifactOptions, QuiverRuntime, QuiverRuntimeOptions,
+    RerankEncoding, Residency,
 };
 use triviumdb::index::quiver::{QuIVer, QuIVerConfig, QuIVerSearchConfig};
 use triviumdb::{ResourceLimits, ResourceRuntime};
@@ -134,11 +135,11 @@ fn main() {
                     .expect("保存固定基准图失败 (Failed to save the fixed benchmark graph)");
                 index
             };
-            SsdQuiver::publish(
+            QuiverRuntime::publish(
                 &index,
                 &path,
                 source,
-                SsdOptions {
+                QuiverArtifactOptions {
                     encoding,
                     ..Default::default()
                 },
@@ -168,9 +169,13 @@ fn main() {
                     })
                     .unwrap();
                     let opened = Instant::now();
-                    let mut reader =
-                        SsdQuiver::open(&path, source, SsdOptions::default(), runtime.clone())
-                            .unwrap();
+                    let mut reader = QuiverRuntime::open(
+                        &path,
+                        source,
+                        QuiverArtifactOptions::default(),
+                        runtime.clone(),
+                    )
+                    .unwrap();
                     let open_ms = opened.elapsed().as_secs_f64() * 1000.;
                     let full_cache = nodes * (reader.stats().metadata.record_bytes + 512);
                     let (mode, residency, cache_bytes) = match variant {
@@ -183,7 +188,7 @@ fn main() {
                     };
                     let configured = Instant::now();
                     reader
-                        .configure(SsdRuntimeOptions {
+                        .configure(QuiverRuntimeOptions {
                             residency,
                             cache_bytes,
                             io_mode: mode,

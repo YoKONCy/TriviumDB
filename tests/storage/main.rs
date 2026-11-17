@@ -1,10 +1,12 @@
 #![allow(non_snake_case)]
 //! 按领域聚合的集成测试入口。
+#[path = "../support/artifact.rs"]
+mod artifact;
 #[path = "../support/mod.rs"]
 mod support;
 
 mod compaction_core;
-mod format_migration;
+mod format_admission;
 mod graph_block_persistence;
 mod immutable;
 mod ordered_property_index;
@@ -21,6 +23,9 @@ mod vector_memory;
 mod wal_integrity;
 mod wal_semantics;
 
+mod index_container;
 mod index_schema_boundaries;
 mod kernel_boundaries;
-mod receipt_history;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

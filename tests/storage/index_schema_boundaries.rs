@@ -24,7 +24,7 @@ fn group(root: &Path) -> BTreeMap<String, Vec<u8>> {
             let entry = entry.unwrap();
             (
                 entry.file_name().into_string().unwrap(),
-                std::fs::read(entry.path()).unwrap(),
+                crate::artifact::read(entry.path()).unwrap(),
             )
         })
         .collect()
@@ -111,72 +111,6 @@ fn sign(bytes: &mut [u8], offset: usize, range: std::ops::Range<usize>) {
 }
 
 #[test]
-fn 历史复合字段边界不明确时查询扫描事实且唯一约束从主文件恢复() {
-    let case = contract();
-    let fields = vec!["a\0b".into(), "c".into()];
-    for mode in [StorageMode::Rom, StorageMode::Mmap] {
-        for unique in [false, true] {
-            let root = support::TestDir::new("legacy_composite_fields");
-            let path = root.file("sample.tdb");
-            let mut db =
-                Database::<f32>::open_with_config(&path, config(mode, AccessMode::ReadWrite))
-                    .unwrap();
-            db.insert_with_id(1, &[1., 0.], case["payload"].clone())
-                .unwrap();
-            if unique {
-                db.create_unique_composite_index(&fields).unwrap();
-            } else {
-                db.create_composite_index(&fields).unwrap();
-            }
-            db.close().unwrap();
-            drop(db);
-            let mut bytes = std::fs::read(format!("{path}.pidx")).unwrap();
-            // 独立 v7 布局：48 字节头、kind/flags、长度和 NUL 分隔的原始字段名。
-            let old_len = u32_at(&bytes, 50);
-            bytes.splice(54..54 + old_len, b"a\0b\0c".iter().copied());
-            bytes[50..54].copy_from_slice(&5u32.to_le_bytes());
-            bytes[4..6].copy_from_slice(&7u16.to_le_bytes());
-            let end = bytes.len() - 4;
-            sign(&mut bytes, end, 0..end);
-            std::fs::write(format!("{path}.pidx"), bytes).unwrap();
-            let before = group(&root.0);
-            let mut reader =
-                Database::<f32>::open_with_config(&path, config(mode, AccessMode::ReadOnly))
-                    .unwrap();
-            assert_eq!(ids(&reader, case["query"].as_str().unwrap()), [1]);
-            assert_eq!(
-                reader.list_unique_indexes().unwrap(),
-                if unique { vec![fields.clone()] } else { vec![] }
-            );
-            reader.close().unwrap();
-            drop(reader);
-            assert_eq!(group(&root.0), before);
-            let mut writer =
-                Database::<f32>::open_with_config(&path, config(mode, AccessMode::ReadWrite))
-                    .unwrap();
-            if unique {
-                assert!(matches!(
-                    writer
-                        .insert_with_id(2, &[0., 1.], case["payload"].clone())
-                        .unwrap_err()
-                        .underlying(),
-                    TriviumError::UniqueConstraintViolation { .. }
-                ));
-            } else {
-                writer.create_composite_index(&fields).unwrap();
-            }
-            writer.close().unwrap();
-            let mut reader =
-                Database::<f32>::open_with_config(&path, config(mode, AccessMode::ReadOnly))
-                    .unwrap();
-            assert_eq!(ids(&reader, case["query"].as_str().unwrap()), [1]);
-            assert_eq!(reader.index_info().unwrap()[0].fields, fields);
-            reader.close().unwrap();
-        }
-    }
-}
-
-#[test]
 fn 复合字段磁盘边界在构建与写日志前拒绝() {
     let root = support::TestDir::new("composite_field_limits");
     let path = root.file("sample.tdb");
@@ -189,7 +123,7 @@ fn 复合字段磁盘边界在构建与写日志前拒绝() {
             .map(|index| format!("field{index}"))
             .collect::<Vec<_>>(),
     ];
-    let before = std::fs::read(format!("{path}.wal")).unwrap();
+    let before = crate::artifact::read(format!("{path}.wal")).unwrap();
     for fields in cases {
         assert!(matches!(
             db.create_composite_index(&fields).unwrap_err().underlying(),
@@ -201,7 +135,10 @@ fn 复合字段磁盘边界在构建与写日志前拒绝() {
                 .underlying(),
             TriviumError::InvalidInput(_)
         ));
-        assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
+        assert_eq!(
+            crate::artifact::read(format!("{path}.wal")).unwrap(),
+            before
+        );
         assert_eq!(db.get_payload(1).unwrap(), Some(json!({"a":1})));
     }
     db.close().unwrap();
@@ -269,8 +206,11 @@ fn crc合法的畸形图副本在采用前拒绝且主文件事实保留() {
         db.upsert_edge(1, 2, "rel", 2., json!({"ok":1})).unwrap();
         db.close().unwrap();
         drop(db);
-        let damaged = damage_graph(&std::fs::read(format!("{path}.gidx")).unwrap(), mutation);
-        std::fs::write(format!("{path}.gidx"), damaged).unwrap();
+        let damaged = damage_graph(
+            &crate::artifact::read(format!("{path}.gidx")).unwrap(),
+            mutation,
+        );
+        crate::artifact::write(format!("{path}.gidx"), damaged).unwrap();
         // 清单自身覆盖当前副本校验和，再独立验证结构与主文件事实。
         triviumdb::storage::snapshot::write_manifest(&path, "graph-boundary", "f32", 2, 3).unwrap();
         let before = group(&root.0);
@@ -379,7 +319,7 @@ fn 合法图副本保留平行标签自环大id及完整metadata() {
 }
 
 #[test]
-fn 复合字段编码畸形时严格拒绝或扫描事实() {
+fn 复合字段定义畸形时默认及严格策略均拒绝并保留源文件() {
     for definition in [
         r#"["a","a"]"#,
         r#"["", "c"]"#,
@@ -397,13 +337,13 @@ fn 复合字段编码畸形时严格拒绝或扫描事实() {
             .unwrap();
         db.close().unwrap();
         drop(db);
-        let mut bytes = std::fs::read(format!("{path}.pidx")).unwrap();
+        let mut bytes = crate::artifact::read(format!("{path}.pidx")).unwrap();
         let len = u32_at(&bytes, 50);
         bytes.splice(54..54 + len, definition.bytes());
         bytes[50..54].copy_from_slice(&(definition.len() as u32).to_le_bytes());
         let end = bytes.len() - 4;
         sign(&mut bytes, end, 0..end);
-        std::fs::write(format!("{path}.pidx"), bytes).unwrap();
+        crate::artifact::write(format!("{path}.pidx"), bytes).unwrap();
         let before = group(&root.0);
         assert!(matches!(
             Database::<f32>::open_with_config(
@@ -415,10 +355,13 @@ fn 复合字段编码畸形时严格拒绝或扫描事实() {
             ),
             Err(TriviumError::CorruptedFile(_))
         ));
-        let mut reader = Database::<f32>::open_read_only(&path, 2).unwrap();
-        assert_eq!(ids(&reader, case["query"].as_str().unwrap()), [1]);
-        reader.close().unwrap();
-        drop(reader);
+        assert_eq!(
+            Database::<f32>::open_read_only(&path, 2)
+                .err()
+                .unwrap()
+                .code(),
+            "TDB_CORRUPTED_FILE"
+        );
         assert_eq!(group(&root.0), before);
     }
 }

@@ -1,0 +1,865 @@
+//! 多个数据库实例共享的资源准入、工作线程和诊断。
+//!
+//! 内存按显式数据库配额和临时工作区预留，不以 RSS、缓存命中率或瞬时系统负载改变
+//! 查询语义。工作线程在运行时内统一计数；闲置线程池回收完成后才创建替代线程池。
+
+use crate::error::{Result, TriviumError};
+use rayon::ThreadPool;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::thread::{JoinHandle, ThreadId};
+
+fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
+    value.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+/// 共享运行时的显式资源上限。内存与活动任务的零值表示不限。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResourceLimits {
+    pub memory_limit: usize,
+    /// 从总预算中保护的维护工作区；零值在有限总预算下自动保护八分之一。
+    pub maintenance_memory_limit: usize,
+    /// 零值按当前可用并行度选择，最多 64 个工作线程。
+    pub max_threads: usize,
+    pub max_active_tasks: usize,
+}
+
+/// 配额与任务是可执行的准入约束；进程 RSS 不属于本统计的内存承诺。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResourceStats {
+    pub memory_limit: usize,
+    pub maintenance_memory_limit: usize,
+    pub reserved_maintenance_bytes: usize,
+    pub active_maintenance_tasks: usize,
+    pub reserved_database_bytes: usize,
+    pub reserved_workspace_bytes: usize,
+    pub peak_reserved_bytes: usize,
+    pub attached_databases: usize,
+    pub max_threads: usize,
+    pub allocated_worker_threads: usize,
+    pub live_worker_threads: usize,
+    pub peak_worker_threads: usize,
+    pub max_active_tasks: usize,
+    pub active_tasks: usize,
+    pub peak_active_tasks: usize,
+    pub rejected_memory_requests: u64,
+    pub rejected_task_requests: u64,
+    pub rejected_thread_requests: u64,
+    pub maintenance_jobs: usize,
+    pub maintenance_completed: u64,
+    pub maintenance_failed: u64,
+    /// 当前账本可准入的前台字节；None 表示未设置共享内存上限。
+    pub available_foreground_bytes: Option<usize>,
+    /// 当前账本可准入的维护字节；与前台余额共享总预算，不能相加。
+    pub available_maintenance_bytes: Option<usize>,
+    pub available_task_slots: Option<usize>,
+}
+
+/// 一次预算拒绝的结构化字段，单位由 resource 标识。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResourceBudgetDetails {
+    pub resource: &'static str,
+    pub requested: usize,
+    pub used: usize,
+    pub limit: usize,
+}
+
+impl ResourceBudgetDetails {
+    pub(crate) fn from_error(error: &TriviumError) -> Option<Self> {
+        match error.underlying() {
+            TriviumError::ResourceBudgetExceeded {
+                resource,
+                requested,
+                used,
+                limit,
+            } => Some(Self {
+                resource,
+                requested: *requested,
+                used: *used,
+                limit: *limit,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// 后台故障的可序列化诊断；宿主按 kind 和 budget 分类，不解析 message。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResourceFailure {
+    pub kind: &'static str,
+    pub code: &'static str,
+    pub message: String,
+    pub details: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write: Option<crate::error::WriteErrorInfo>,
+    pub budget: Option<ResourceBudgetDetails>,
+}
+
+impl ResourceFailure {
+    pub(crate) fn from_error(error: &TriviumError) -> Self {
+        let kind = match error.underlying() {
+            TriviumError::ResourceBudgetExceeded { .. } => "resource_budget",
+            TriviumError::Io(_) => "io",
+            TriviumError::CapacityAllocationFailed { .. } => "capacity",
+            TriviumError::DatabaseClosed => "database_closed",
+            TriviumError::ShutdownFailed { .. } => "shutdown",
+            _ => "other",
+        };
+        Self {
+            kind,
+            code: error.code(),
+            message: error.to_string(),
+            details: error.details(),
+            write: error.info().write,
+            budget: ResourceBudgetDetails::from_error(error),
+        }
+    }
+}
+
+#[derive(Default)]
+struct State {
+    io_threads: usize,
+    database_bytes: usize,
+    workspace_bytes: usize,
+    maintenance_bytes: usize,
+    maintenance_tasks: HashSet<u64>,
+    peak_bytes: usize,
+    databases: usize,
+    tasks: HashMap<u64, usize>,
+    bindings: HashMap<ThreadId, Vec<u64>>,
+    next_task: u64,
+    peak_tasks: usize,
+    rejected_memory: u64,
+    rejected_tasks: u64,
+    rejected_threads: u64,
+    maintenance_jobs: usize,
+    maintenance_completed: u64,
+    maintenance_failed: u64,
+    pools: Vec<PoolEntry>,
+}
+
+#[derive(Default)]
+struct WorkerCounts {
+    live: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+struct WorkerExit(Arc<WorkerCounts>);
+
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct PoolEntry {
+    threads: usize,
+    pool: Arc<ThreadPool>,
+    joins: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+impl PoolEntry {
+    fn retire(self) {
+        drop(self.pool);
+        for join in lock(&self.joins).drain(..) {
+            let _ = join.join();
+        }
+    }
+}
+
+struct Inner {
+    limits: ResourceLimits,
+    state: Mutex<State>,
+    workers: Arc<WorkerCounts>,
+}
+
+/// 可克隆的共享资源句柄；克隆只共享同一组额度，不建立第二套预算。
+#[derive(Clone)]
+pub struct ResourceRuntime(Arc<Inner>);
+
+impl std::fmt::Debug for ResourceRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResourceRuntime")
+            .field("stats", &self.stats())
+            .finish()
+    }
+}
+
+impl ResourceRuntime {
+    pub fn new(mut limits: ResourceLimits) -> Result<Self> {
+        if limits.max_threads > 64 {
+            return Err(TriviumError::InvalidInput(
+                "运行时工作线程上限不得超过 64 (Runtime worker limit must not exceed 64)".into(),
+            )
+            .at_field("max_threads"));
+        }
+        if limits.memory_limit > 0 {
+            if limits.maintenance_memory_limit == 0 {
+                limits.maintenance_memory_limit = (limits.memory_limit / 8).max(1);
+            }
+            if limits.maintenance_memory_limit > limits.memory_limit {
+                return Err(TriviumError::InvalidInput(
+                    "维护保护额度不能超过运行时总内存额度 (Maintenance memory limit must not exceed the runtime memory limit)".into(),
+                ).at_field("maintenance_memory_limit"));
+            }
+        }
+        if limits.max_threads == 0 {
+            limits.max_threads = std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1)
+                .min(64);
+        }
+        Ok(Self(Arc::new(Inner {
+            limits,
+            state: Mutex::new(State::default()),
+            workers: Arc::new(WorkerCounts::default()),
+        })))
+    }
+
+    pub(crate) fn shared_default() -> Self {
+        static DEFAULT: OnceLock<ResourceRuntime> = OnceLock::new();
+        DEFAULT
+            .get_or_init(|| {
+                Self(Arc::new(Inner {
+                    // 保留旧入口允许不同查询并发度的行为，同时约束所有缓存池的总线程数。
+                    limits: ResourceLimits {
+                        memory_limit: 0,
+                        max_threads: 64,
+                        max_active_tasks: 0,
+                        maintenance_memory_limit: 0,
+                    },
+                    state: Mutex::new(State::default()),
+                    workers: Arc::new(WorkerCounts::default()),
+                }))
+            })
+            .clone()
+    }
+
+    pub fn stats(&self) -> ResourceStats {
+        let state = lock(&self.0.state);
+        let foreground = state.database_bytes.saturating_add(state.workspace_bytes);
+        let active_tasks = state.tasks.len() - state.maintenance_tasks.len();
+        let memory_limit = self.0.limits.memory_limit;
+        ResourceStats {
+            memory_limit: self.0.limits.memory_limit,
+            maintenance_memory_limit: self.0.limits.maintenance_memory_limit,
+            reserved_maintenance_bytes: state.maintenance_bytes,
+            active_maintenance_tasks: state.maintenance_tasks.len(),
+            reserved_database_bytes: state.database_bytes,
+            reserved_workspace_bytes: state.workspace_bytes,
+            peak_reserved_bytes: state.peak_bytes,
+            attached_databases: state.databases,
+            max_threads: self.0.limits.max_threads,
+            allocated_worker_threads: state.pools.iter().map(|entry| entry.threads).sum::<usize>()
+                + state.io_threads,
+            live_worker_threads: self.0.workers.live.load(Ordering::SeqCst),
+            peak_worker_threads: self.0.workers.peak.load(Ordering::SeqCst),
+            max_active_tasks: self.0.limits.max_active_tasks,
+            active_tasks: state.tasks.len() - state.maintenance_tasks.len(),
+            peak_active_tasks: state.peak_tasks,
+            rejected_memory_requests: state.rejected_memory,
+            rejected_task_requests: state.rejected_tasks,
+            rejected_thread_requests: state.rejected_threads,
+            maintenance_jobs: state.maintenance_jobs,
+            maintenance_completed: state.maintenance_completed,
+            maintenance_failed: state.maintenance_failed,
+            available_foreground_bytes: (memory_limit > 0).then(|| {
+                memory_limit
+                    .saturating_sub(
+                        self.0
+                            .limits
+                            .maintenance_memory_limit
+                            .max(state.maintenance_bytes),
+                    )
+                    .saturating_sub(foreground)
+            }),
+            available_maintenance_bytes: (memory_limit > 0).then(|| {
+                memory_limit
+                    .saturating_sub(foreground)
+                    .saturating_sub(state.maintenance_bytes)
+            }),
+            available_task_slots: (self.0.limits.max_active_tasks > 0)
+                .then(|| self.0.limits.max_active_tasks.saturating_sub(active_tasks)),
+        }
+    }
+
+    pub(crate) fn max_threads(&self) -> usize {
+        self.0.limits.max_threads
+    }
+
+    pub(crate) fn parallelism(&self) -> usize {
+        std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1)
+            .min(self.max_threads())
+    }
+
+    pub(crate) fn register_maintenance(&self) {
+        lock(&self.0.state).maintenance_jobs += 1;
+    }
+
+    pub(crate) fn unregister_maintenance(&self) {
+        lock(&self.0.state).maintenance_jobs -= 1;
+    }
+
+    pub(crate) fn record_maintenance(&self, success: bool) {
+        let mut state = lock(&self.0.state);
+        if success {
+            state.maintenance_completed = state.maintenance_completed.saturating_add(1);
+        } else {
+            state.maintenance_failed = state.maintenance_failed.saturating_add(1);
+        }
+    }
+
+    fn check_memory(&self, state: &mut State, additional: usize) -> Result<()> {
+        let used = state
+            .database_bytes
+            .checked_add(state.workspace_bytes)
+            .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                reason: "共享资源计数溢出".into(),
+            })?;
+        let projected =
+            used.checked_add(additional)
+                .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                    reason: "共享资源预留溢出".into(),
+                })?;
+        let limit = self.0.limits.memory_limit.saturating_sub(
+            self.0
+                .limits
+                .maintenance_memory_limit
+                .max(state.maintenance_bytes),
+        );
+        if self.0.limits.memory_limit > 0 && projected > limit {
+            state.rejected_memory = state.rejected_memory.saturating_add(1);
+            return Err(TriviumError::ResourceBudgetExceeded {
+                resource: "memory_bytes",
+                requested: additional,
+                used,
+                limit,
+            });
+        }
+        let total = projected
+            .checked_add(state.maintenance_bytes)
+            .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                reason: "共享总预留计数溢出".into(),
+            })?;
+        state.peak_bytes = state.peak_bytes.max(total);
+        Ok(())
+    }
+
+    pub(crate) fn reserve_database(&self, bytes: usize) -> Result<DatabaseReservation> {
+        if self.0.limits.memory_limit > 0 && bytes == 0 {
+            return Err(TriviumError::InvalidInput(
+                "有共享内存上限时，数据库必须指定非零 memory_limit".into(),
+            ));
+        }
+        let mut state = lock(&self.0.state);
+        self.check_memory(&mut state, bytes)?;
+        let databases = state.databases.checked_add(1).ok_or_else(|| {
+            TriviumError::CapacityAllocationFailed {
+                reason: "数据库资源登记数量溢出".into(),
+            }
+        })?;
+        state.database_bytes += bytes;
+        state.databases = databases;
+        Ok(DatabaseReservation {
+            runtime: self.clone(),
+            bytes: AtomicUsize::new(bytes),
+        })
+    }
+
+    pub(crate) fn reserve_workspace(&self, bytes: usize) -> Result<WorkspaceReservation> {
+        let mut state = lock(&self.0.state);
+        self.check_memory(&mut state, bytes)?;
+        state.workspace_bytes += bytes;
+        Ok(WorkspaceReservation {
+            runtime: self.clone(),
+            bytes,
+            maintenance: false,
+        })
+    }
+
+    pub(crate) fn reserve_maintenance_workspace(
+        &self,
+        bytes: usize,
+    ) -> Result<WorkspaceReservation> {
+        let mut state = lock(&self.0.state);
+        let used = state
+            .database_bytes
+            .checked_add(state.workspace_bytes)
+            .and_then(|n| n.checked_add(state.maintenance_bytes))
+            .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                reason: "维护资源计数溢出".into(),
+            })?;
+        let projected =
+            used.checked_add(bytes)
+                .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                    reason: "维护工作区预留溢出".into(),
+                })?;
+        if self.0.limits.memory_limit > 0 && projected > self.0.limits.memory_limit {
+            state.rejected_memory = state.rejected_memory.saturating_add(1);
+            return Err(TriviumError::ResourceBudgetExceeded {
+                resource: "maintenance_memory_bytes",
+                requested: bytes,
+                used,
+                limit: self.0.limits.memory_limit,
+            });
+        }
+        state.maintenance_bytes += bytes;
+        state.peak_bytes = state.peak_bytes.max(projected);
+        Ok(WorkspaceReservation {
+            runtime: self.clone(),
+            bytes,
+            maintenance: true,
+        })
+    }
+
+    pub(crate) fn is_maintenance_task(&self) -> bool {
+        let state = lock(&self.0.state);
+        state
+            .bindings
+            .get(&std::thread::current().id())
+            .and_then(|s| s.last())
+            .is_some_and(|id| state.maintenance_tasks.contains(id))
+    }
+
+    pub(crate) fn enter_task(&self) -> Result<TaskLease> {
+        self.enter_task_kind(false)
+    }
+
+    pub(crate) fn enter_maintenance_task(&self) -> Result<TaskLease> {
+        self.enter_task_kind(true)
+    }
+
+    fn enter_task_kind(&self, maintenance: bool) -> Result<TaskLease> {
+        let owner = std::thread::current().id();
+        let mut state = lock(&self.0.state);
+        let inherited = state
+            .bindings
+            .get(&owner)
+            .and_then(|s| s.last())
+            .copied()
+            .filter(|id| !maintenance || state.maintenance_tasks.contains(id));
+        let id = if let Some(id) = inherited {
+            let refs = state
+                .tasks
+                .get_mut(&id)
+                .ok_or_else(|| TriviumError::InvalidInput("资源任务继承状态无效".into()))?;
+            *refs = refs
+                .checked_add(1)
+                .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+                    reason: "任务引用计数溢出".into(),
+                })?;
+            id
+        } else {
+            let used = if maintenance {
+                state.maintenance_tasks.len()
+            } else {
+                state.tasks.len() - state.maintenance_tasks.len()
+            };
+            let limit = if maintenance {
+                self.max_threads()
+            } else {
+                self.0.limits.max_active_tasks
+            };
+            if limit > 0 && used >= limit {
+                state.rejected_tasks = state.rejected_tasks.saturating_add(1);
+                return Err(TriviumError::ResourceBudgetExceeded {
+                    resource: if maintenance {
+                        "maintenance_tasks"
+                    } else {
+                        "active_tasks"
+                    },
+                    requested: 1,
+                    used,
+                    limit,
+                });
+            }
+            state.next_task = state.next_task.checked_add(1).ok_or_else(|| {
+                TriviumError::CapacityAllocationFailed {
+                    reason: "资源任务编号溢出".into(),
+                }
+            })?;
+            let id = state.next_task;
+            state.tasks.insert(id, 1);
+            if maintenance {
+                state.maintenance_tasks.insert(id);
+            }
+            state.peak_tasks = state
+                .peak_tasks
+                .max(state.tasks.len() - state.maintenance_tasks.len());
+            id
+        };
+        state.bindings.entry(owner).or_default().push(id);
+        Ok(TaskLease {
+            runtime: self.clone(),
+            id,
+            owner: Some(owner),
+        })
+    }
+
+    pub(crate) fn maintenance_pool(&self) -> Result<ResourcePool> {
+        if let Some(pool) = lock(&self.0.state).pools.first() {
+            return Ok(ResourcePool {
+                runtime: self.clone(),
+                pool: Arc::clone(&pool.pool),
+            });
+        }
+        self.pool(1)
+    }
+
+    pub(crate) fn current_task(&self) -> Option<u64> {
+        lock(&self.0.state)
+            .bindings
+            .get(&std::thread::current().id())
+            .and_then(|stack| stack.last())
+            .copied()
+    }
+
+    pub(crate) fn bind_task(&self, id: Option<u64>) -> TaskBinding {
+        let owner = std::thread::current().id();
+        if let Some(id) = id {
+            lock(&self.0.state)
+                .bindings
+                .entry(owner)
+                .or_default()
+                .push(id);
+        }
+        TaskBinding {
+            runtime: self.clone(),
+            id,
+            owner,
+        }
+    }
+
+    /// 仅回收没有调用方持有的池；资源不足立即返回，不在数据库锁内等待其他任务。
+    pub(crate) fn pool(&self, requested: usize) -> Result<ResourcePool> {
+        let mut state = lock(&self.0.state);
+        let available = self.max_threads().saturating_sub(state.io_threads);
+        if available == 0 {
+            state.rejected_threads += 1;
+            return Err(TriviumError::ResourceBudgetExceeded {
+                resource: "worker_threads",
+                requested: 1,
+                used: state.io_threads,
+                limit: self.max_threads(),
+            });
+        }
+        let threads = requested.clamp(1, available);
+        // 同一运行时的嵌套工作可以复用更小的当前池，保证不会扩张其线程上限。
+        if let Some(entry) = state
+            .pools
+            .iter()
+            .find(|entry| entry.threads <= threads && entry.pool.current_thread_index().is_some())
+            .or_else(|| state.pools.iter().find(|entry| entry.threads == threads))
+        {
+            return Ok(ResourcePool {
+                runtime: self.clone(),
+                pool: Arc::clone(&entry.pool),
+            });
+        }
+        let mut allocated: usize =
+            state.pools.iter().map(|entry| entry.threads).sum::<usize>() + state.io_threads;
+        while allocated.saturating_add(threads) > self.max_threads() {
+            let Some(index) = state
+                .pools
+                .iter()
+                .position(|entry| Arc::strong_count(&entry.pool) == 1)
+            else {
+                state.rejected_threads = state.rejected_threads.saturating_add(1);
+                return Err(TriviumError::ResourceBudgetExceeded {
+                    resource: "worker_threads",
+                    requested: threads,
+                    used: allocated,
+                    limit: self.max_threads(),
+                });
+            };
+            let entry = state.pools.remove(index);
+            allocated -= entry.threads;
+            // join 不获取资源状态锁，确保旧线程退出后才释放可供新池使用的线程额度。
+            entry.retire();
+        }
+        let joins = Arc::new(Mutex::new(Vec::new()));
+        let thread_joins = Arc::clone(&joins);
+        let workers = Arc::clone(&self.0.workers);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(move |index| format!("triviumdb-resource-{threads}-{index}"))
+            .spawn_handler(move |thread| {
+                let mut builder = std::thread::Builder::new();
+                if let Some(name) = thread.name() {
+                    builder = builder.name(name.to_owned());
+                }
+                if let Some(size) = thread.stack_size() {
+                    builder = builder.stack_size(size);
+                }
+                let workers = Arc::clone(&workers);
+                let join = builder.spawn(move || {
+                    let live = workers.live.fetch_add(1, Ordering::SeqCst) + 1;
+                    workers.peak.fetch_max(live, Ordering::SeqCst);
+                    let _exit = WorkerExit(workers);
+                    thread.run();
+                })?;
+                lock(&thread_joins).push(join);
+                Ok(())
+            })
+            .build();
+        let pool = match pool {
+            Ok(pool) => Arc::new(pool),
+            Err(error) => {
+                for join in lock(&joins).drain(..) {
+                    let _ = join.join();
+                }
+                return Err(TriviumError::CapacityAllocationFailed {
+                    reason: format!("资源线程池创建失败：{error}"),
+                });
+            }
+        };
+        state.pools.push(PoolEntry {
+            threads,
+            pool: Arc::clone(&pool),
+            joins,
+        });
+        Ok(ResourcePool {
+            runtime: self.clone(),
+            pool,
+        })
+    }
+}
+
+impl ResourceRuntime {
+    pub(crate) fn reserve_io_threads(&self, count: usize) -> Result<IoThreadReservation> {
+        let mut state = lock(&self.0.state);
+        let count = count.min(
+            self.max_threads()
+                .saturating_sub(1)
+                .saturating_sub(state.io_threads),
+        );
+        let mut allocated =
+            state.pools.iter().map(|pool| pool.threads).sum::<usize>() + state.io_threads;
+        while allocated.saturating_add(count) > self.max_threads() {
+            let Some(index) = state
+                .pools
+                .iter()
+                .position(|pool| Arc::strong_count(&pool.pool) == 1)
+            else {
+                state.rejected_threads += 1;
+                return Err(TriviumError::ResourceBudgetExceeded {
+                    resource: "worker_threads",
+                    requested: count,
+                    used: allocated,
+                    limit: self.max_threads(),
+                });
+            };
+            let pool = state.pools.remove(index);
+            allocated -= pool.threads;
+            pool.retire();
+        }
+        state.io_threads += count;
+        Ok(IoThreadReservation {
+            runtime: self.clone(),
+            count,
+        })
+    }
+
+    pub(crate) fn enter_io_worker(&self) -> impl Drop + use<> {
+        let live = self.0.workers.live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.0.workers.peak.fetch_max(live, Ordering::SeqCst);
+        WorkerExit(self.0.workers.clone())
+    }
+}
+
+pub(crate) struct IoThreadReservation {
+    runtime: ResourceRuntime,
+    count: usize,
+}
+impl IoThreadReservation {
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+}
+impl Drop for IoThreadReservation {
+    fn drop(&mut self) {
+        lock(&self.runtime.0.state).io_threads -= self.count;
+    }
+}
+
+pub(crate) struct DatabaseReservation {
+    runtime: ResourceRuntime,
+    bytes: AtomicUsize,
+}
+
+impl DatabaseReservation {
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn resize(&self, bytes: usize) -> Result<()> {
+        if self.runtime.0.limits.memory_limit > 0 && bytes == 0 {
+            return Err(TriviumError::InvalidInput(
+                "共享内存受限时不能取消数据库配额".into(),
+            ));
+        }
+        let mut state = lock(&self.runtime.0.state);
+        let previous = self.bytes.load(Ordering::Relaxed);
+        if bytes > previous {
+            self.runtime.check_memory(&mut state, bytes - previous)?;
+        }
+        state.database_bytes = state.database_bytes - previous + bytes;
+        self.bytes.store(bytes, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+impl Drop for DatabaseReservation {
+    fn drop(&mut self) {
+        let mut state = lock(&self.runtime.0.state);
+        state.database_bytes -= self.bytes.load(Ordering::Relaxed);
+        state.databases -= 1;
+    }
+}
+
+pub(crate) struct WorkspaceReservation {
+    runtime: ResourceRuntime,
+    bytes: usize,
+    maintenance: bool,
+}
+
+impl WorkspaceReservation {
+    /// 当前请求已在共享Runtime取得的额度，组合执行器据此避免重复预留。
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// 扩容先准入，再把新增预留转入当前凭证；缩容和异常退出均准确归还账本。
+    pub(crate) fn resize(&mut self, bytes: usize) -> Result<()> {
+        if bytes > self.bytes {
+            let extra = bytes - self.bytes;
+            let mut addition = if self.maintenance {
+                self.runtime.reserve_maintenance_workspace(extra)?
+            } else {
+                self.runtime.reserve_workspace(extra)?
+            };
+            self.bytes = bytes;
+            addition.bytes = 0;
+        } else if bytes < self.bytes {
+            let mut state = lock(&self.runtime.0.state);
+            if self.maintenance {
+                state.maintenance_bytes -= self.bytes - bytes;
+            } else {
+                state.workspace_bytes -= self.bytes - bytes;
+            }
+            self.bytes = bytes;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for WorkspaceReservation {
+    fn drop(&mut self) {
+        let mut state = lock(&self.runtime.0.state);
+        if self.maintenance {
+            state.maintenance_bytes -= self.bytes;
+        } else {
+            state.workspace_bytes -= self.bytes;
+        }
+    }
+}
+
+fn unbind(state: &mut State, owner: ThreadId, id: u64) {
+    if let Some(stack) = state.bindings.get_mut(&owner) {
+        if let Some(index) = stack.iter().rposition(|candidate| *candidate == id) {
+            stack.remove(index);
+        }
+        if stack.is_empty() {
+            state.bindings.remove(&owner);
+        }
+    }
+}
+
+pub(crate) struct TaskLease {
+    runtime: ResourceRuntime,
+    id: u64,
+    owner: Option<ThreadId>,
+}
+
+impl TaskLease {
+    pub(crate) fn detach(&mut self) {
+        if let Some(owner) = self.owner.take() {
+            unbind(&mut lock(&self.runtime.0.state), owner, self.id);
+        }
+    }
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl Drop for TaskLease {
+    fn drop(&mut self) {
+        self.detach();
+        let mut state = lock(&self.runtime.0.state);
+        if let Some(refs) = state.tasks.get_mut(&self.id) {
+            *refs -= 1;
+            if *refs == 0 {
+                state.tasks.remove(&self.id);
+                state.maintenance_tasks.remove(&self.id);
+            }
+        }
+    }
+}
+
+pub(crate) struct TaskBinding {
+    runtime: ResourceRuntime,
+    id: Option<u64>,
+    owner: ThreadId,
+}
+
+impl Drop for TaskBinding {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            unbind(&mut lock(&self.runtime.0.state), self.owner, id);
+        }
+    }
+}
+
+pub(crate) struct ResourcePool {
+    runtime: ResourceRuntime,
+    pool: Arc<ThreadPool>,
+}
+
+impl ResourcePool {
+    pub(crate) fn spawn_task(
+        &self,
+        mut task: TaskLease,
+        operation: impl FnOnce() + Send + 'static,
+        completed: impl FnOnce() + Send + 'static,
+    ) {
+        task.detach();
+        let runtime = self.runtime.clone();
+        let keep_alive = Arc::clone(&self.pool);
+        self.pool.spawn(move || {
+            let _pool = keep_alive;
+            {
+                let _binding = runtime.bind_task(Some(task.id()));
+                operation();
+            }
+            drop(task);
+            completed();
+        });
+    }
+    pub(crate) fn install<R: Send>(&self, operation: impl FnOnce() -> R + Send) -> R {
+        self.install_task(self.runtime.current_task(), operation)
+    }
+    pub(crate) fn install_task<R: Send>(
+        &self,
+        task: Option<u64>,
+        operation: impl FnOnce() -> R + Send,
+    ) -> R {
+        self.pool.install(|| {
+            let _binding = self.runtime.bind_task(task);
+            operation()
+        })
+    }
+}

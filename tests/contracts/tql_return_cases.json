@@ -12,6 +12,23 @@
     {"query": "FIND {kind: \"sample\"} AS n WITH n", "variable": "n"},
     {"query": "MATCH (root)-[edge:item]->(n)", "variable": "n"}
   ],
+  "indexed_order": {
+    "records": [
+      {"id":1,"payload":{"rank":1,"v":30,"same":0,"nested":{"rank":30},"seed":true,"huge":1e308}},
+      {"id":2,"payload":{"rank":2,"v":10,"same":0,"nested":{"rank":20},"seed":false,"huge":1e308}},
+      {"id":3,"payload":{"rank":3,"v":20,"same":0,"nested":{"rank":10},"seed":false,"huge":1e308}}
+    ],
+    "indexes": ["rank", "v", "same"],
+    "cases": [
+      {"query":"FIND {rank: {$gt:0}} RETURN _.nested AS picked ORDER BY picked.rank LIMIT 1", "rows":[{"picked":{"rank":10}}]},
+      {"query":"FIND {rank: {$gt:0}} RETURN AVG(_.huge) AS average", "rows":[{"average":1e308}]},
+      {"query":"FIND {rank: {$gt:0}} RETURN _.nested AS _ ORDER BY _.rank DESC LIMIT 1 OFFSET 1", "rows":[{"_":{"rank":20}}]},
+      {"query":"FIND {v: {$gt:0}} RETURN _.id AS id ORDER BY _.same LIMIT 1", "rows":[{"id":1}]},
+      {"query":"FIND {v: {$gt:0}} RETURN _.id AS id ORDER BY _.same DESC LIMIT 1 OFFSET 1", "rows":[{"id":2}]},
+      {"query":"FIND {v: {$gt:0}} AS n WITH n RETURN n.id AS id ORDER BY n.same DESC LIMIT 2", "rows":[{"id":1},{"id":2}]},
+      {"query":"FIND {seed:true} WITH _ AS seed SA_PPR_CONFIG seed DEPTH 1 ALPHA 0 MAX_EDGES 10 MIN_WEIGHT 0 AS expanded WITH expanded RETURN expanded.id AS id, graph_score(expanded) AS score ORDER BY expanded.id", "rows":[{"id":1,"score":1.0},{"id":2,"score":0.5},{"id":3,"score":0.5}]}
+    ]
+  },
   "cases": [
     {"name":"computed_distinct", "suffix":"RETURN DISTINCT {var}.x + 1 AS v ORDER BY v ASC", "rows":[{"v":2},{"v":3},{"v":4}]},
     {"name":"field_distinct", "suffix":"RETURN DISTINCT {var}.g AS v ORDER BY v ASC", "rows":[{"v":"a"},{"v":"b"}]},

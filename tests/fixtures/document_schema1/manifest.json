@@ -1,0 +1,76 @@
+{
+  "commit": "46f767f8c5befeb7da091267f2b19052f3cba8d9",
+  "release": "v0.9.1",
+  "generator_sha256": "7fb0e16952d7d2d9056bd9bd0f94334210d1e58255e6a792b0c4e91b207ecc24",
+  "platform": "Windows x86_64 MSVC Rust 1.98.0",
+  "files": {
+    "rom/expected.json": {
+      "bytes": 2285,
+      "sha256": "d6d16d1d9fdae7880270278d339ee7b2108bb31ac371f988bca25490b3f39fb7"
+    },
+    "rom/sample.tdb": {
+      "bytes": 1315,
+      "sha256": "36c9f4b7787bc7daaadecbc5aaf47da5f3f62f2a3b181d2609631922ad96eaf9"
+    },
+    "rom/sample.tdb.gidx": {
+      "bytes": 320,
+      "sha256": "f566c8d614f7177a7ead2414a5c7c27dcb35e84b0138729e5303f000c15e67f3"
+    },
+    "rom/sample.tdb.pidx": {
+      "bytes": 153,
+      "sha256": "73817f546ce328c7b12f80f5ea1c093f6c23138ed55a68466927ccf9cdf89714"
+    },
+    "rom/sample.tdb.text": {
+      "bytes": 235,
+      "sha256": "fdc57d15df839f122662b7341b80902200e83231ce2d9b91fe30e44fbcdb882d"
+    },
+    "rom/sample.tdb.text.meta": {
+      "bytes": 28,
+      "sha256": "82747fecc9f5b6ba1b854a49b45e4c60bd2b2e0b397c9cf63345085a408000dc"
+    },
+    "rom/sample.tdb.wal": {
+      "bytes": 6,
+      "sha256": "20ea915fcc011fff14455f5051eb369da208039de3a809b62ab4c991c0392a2e"
+    },
+    "mmap/expected.json": {
+      "bytes": 2285,
+      "sha256": "f1062bec1b742ba5a5cd52bd0b658d9876264105504127e359d7fa2768bde4c8"
+    },
+    "mmap/sample.tdb": {
+      "bytes": 627,
+      "sha256": "d1ed63d7113445b6fd8233d94303390d0edbad87d950fc697a8dc3670b822083"
+    },
+    "mmap/sample.tdb.flush_ok": {
+      "bytes": 53,
+      "sha256": "614003444674466bc50cfb03b3743adbd5b76397e8aa1af28c5d79933bbc035f"
+    },
+    "mmap/sample.tdb.gidx": {
+      "bytes": 320,
+      "sha256": "f34b7a990b464f09d2067d46991bf6ef3bc28ee1ee41019bfaa9ec347f58fd97"
+    },
+    "mmap/sample.tdb.pidx": {
+      "bytes": 153,
+      "sha256": "09676de4896ebf59722d1eb8419f6990f7013a8e1175d0f9debe74bb40e4872c"
+    },
+    "mmap/sample.tdb.pld.2": {
+      "bytes": 804,
+      "sha256": "4443f411c1451f7e1ba5672200d5b477403555195f21589e7868de9f57d17685"
+    },
+    "mmap/sample.tdb.text": {
+      "bytes": 235,
+      "sha256": "81e9d0ab0d29358ded86c77974cd93add044fbedad0aa37a05ab28b5f29e6eaa"
+    },
+    "mmap/sample.tdb.text.meta": {
+      "bytes": 28,
+      "sha256": "836e83afecf87b2e8dc72c8b9f3bb60b8e41d56323646be2d6baf6eabacc2fe9"
+    },
+    "mmap/sample.tdb.vec": {
+      "bytes": 24,
+      "sha256": "9c334ad8a46185c6623fe1237b275f73e95f384f80aaa5664420c651e08b2291"
+    },
+    "mmap/sample.tdb.wal": {
+      "bytes": 6,
+      "sha256": "20ea915fcc011fff14455f5051eb369da208039de3a809b62ab4c991c0392a2e"
+    }
+  }
+}

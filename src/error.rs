@@ -522,12 +522,21 @@ pub enum TriviumError {
     UnsupportedWalVersion { found: u16, supported: u16 },
 
     #[error(
-        "不支持的数据库文件版本 (Unsupported database file version): 发现 v{found}，当前可读取 v{minimum_supported}..=v{current}；v5 对应 TriviumDB 0.7.x/0.8.x，早于 0.7.0 的文件请手动导出迁移"
+        "不支持的数据库文件格式 (Unsupported database file format): 发现 {found}，当前 {current}"
     )]
     UnsupportedDatabaseVersion {
         found: u16,
         minimum_supported: u16,
         current: u16,
+    },
+
+    #[error(
+        "数据格式需要外部迁移 (External data migration required): {component}，来源 {found}，目标 {current}；请运行 scripts/migrate.py (run scripts/migrate.py)"
+    )]
+    MigrationRequired {
+        component: &'static str,
+        found: u32,
+        current: u32,
     },
 
     #[error(
@@ -785,6 +794,7 @@ impl TriviumError {
             Self::WriteOutcomeUnknown => "TDB_WRITE_OUTCOME_UNKNOWN",
             Self::UnsupportedWalVersion { .. } => "TDB_UNSUPPORTED_WAL_VERSION",
             Self::UnsupportedDatabaseVersion { .. } => "TDB_UNSUPPORTED_DATABASE_VERSION",
+            Self::MigrationRequired { .. } => "TDB_MIGRATION_REQUIRED",
             Self::ApiMigrationRequired { .. } => "TDB_API_MIGRATION_REQUIRED",
             Self::UnsupportedSidecarVersion { .. } => "TDB_UNSUPPORTED_SIDECAR_VERSION",
             Self::InvalidInput(_) => "TDB_INVALID_INPUT",
@@ -894,6 +904,13 @@ impl TriviumError {
             }
             Self::UnsupportedWalVersion { found, supported } => {
                 json!({"found": found, "supported": supported})
+            }
+            Self::MigrationRequired {
+                component,
+                found,
+                current,
+            } => {
+                json!({"component": component, "found": found, "current": current, "migration_entrypoint": "scripts/migrate.py"})
             }
             Self::UnsupportedDatabaseVersion {
                 found,

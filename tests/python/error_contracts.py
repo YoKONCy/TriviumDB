@@ -34,6 +34,9 @@ def run_error_contract(root):
                 header[:4] = b"TVDB"
                 header[4:6] = (65535).to_bytes(2, "little")
                 (directory / "future.tdb").write_bytes(header)
+            if operation == "format_migration":
+                old_bytes = (Path(__file__).parents[1] / "fixtures/release_090/f32/rom/checkpoint/sample.tdb").read_bytes()
+                (directory / "old.tdb").write_bytes(old_bytes)
             actions = {
                 "missing_parameter": lambda: db.execute_prepared_tql(db.prepare_tql("MATCH (n) RETURN $required AS value"), {}),
                 "unexpected_parameter": lambda: db.execute_prepared_tql(db.prepare_tql("MATCH (n) RETURN $required AS value"), {"required": 1, "extra": 2}),
@@ -48,6 +51,7 @@ def run_error_contract(root):
                 "locked": lambda: triviumdb.TriviumDB(file, dim=2),
                 "io": lambda: triviumdb.TriviumDB(str(directory / "blocked/database.tdb"), dim=2),
                 "version": lambda: triviumdb.TriviumDB(str(directory / "future.tdb"), dim=2),
+                "format_migration": lambda: triviumdb.TriviumDB(str(directory / "old.tdb"), dim=2),
             }
             try:
                 actions[operation]()
@@ -65,6 +69,9 @@ def run_error_contract(root):
                 assert error.write == case.get("write"), operation
                 for field, value in error.details.items():
                     assert getattr(error, field) == value, (operation, field)
+                if operation == "format_migration":
+                    assert (directory / "old.tdb").read_bytes() == old_bytes
+                    assert not (directory / "old.tdb.lock").exists()
             else:
                 raise AssertionError(f"操作应返回结构化错误：{operation}")
         finally:

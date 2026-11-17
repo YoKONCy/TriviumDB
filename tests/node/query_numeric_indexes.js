@@ -45,7 +45,7 @@ module.exports = function queryNumericIndexes(root, TriviumDB) {
 
   const nestedFile = path.join(root, 'tql-nested-integers.tdb')
   new TriviumDB(nestedFile, options).close()
-  fs.copyFileSync(path.join(__dirname, '../fixtures/numeric_ids/full_u64_v3.bin'), nestedFile + '.wal')
+  fs.copyFileSync(path.join(__dirname, '../fixtures/numeric_ids/full_u64.bin'), nestedFile + '.wal')
   const nested = new TriviumDB(nestedFile, options)
   try {
     assert.deepEqual(nested.tql('MATCH (n) WHERE n.id > 0 RETURN n.id AS id, n.unsigned AS value'),

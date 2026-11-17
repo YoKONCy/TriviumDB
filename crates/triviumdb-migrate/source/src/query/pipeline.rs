@@ -1,0 +1,3041 @@
+//! TQL NodeSet 物理算子与统一执行上下文。
+//!
+//! NodeSet 是阶段间唯一交换格式，携带稳定 NodeId、score、provenance、Path 和截断信息。
+//! 本模块实现扩展、过滤、精排、图算法、路径、集合代数与定点迭代，并统一执行内存、
+//! 遍历及并行预算。并行算子必须稳定归并，任何线程数都不能改变输出顺序或分数位模式。
+
+use crate::VectorType;
+use crate::error::{Result, TriviumError};
+use crate::filter::Filter;
+use crate::graph::budget::{BudgetExhaustionPolicy, TraversalBudget};
+use crate::graph::reachability::{
+    ReachabilityConfig, ReachabilityDirection,
+    traverse_compact_parallel_view as traverse_compact_parallel,
+    traverse_compact_view as traverse_compact,
+};
+use crate::graph::view::GraphRead;
+use crate::node::NodeId;
+use crate::query::parallel::{QueryParallelismBudget, query_pool};
+use crate::storage::memtable::MemTable;
+use rayon::prelude::*;
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
+use std::time::Instant;
+
+/// 行投影保留标量、JSON 内容与实体身份，供后续物理阶段直接读取。
+#[derive(Debug, Clone, PartialEq)]
+pub enum BindingValue {
+    Int(i64),
+    UInt(u64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    Path(Vec<NodeId>),
+    Json(serde_json::Value),
+    Node(NodeId),
+    Edge(crate::node::EdgeView),
+    Null,
+}
+
+impl BindingValue {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Str(value) => value.capacity(),
+            Self::Path(value) => value
+                .capacity()
+                .saturating_mul(std::mem::size_of::<NodeId>()),
+            Self::Json(value) => crate::storage::payload_store::estimate_json_memory(value),
+            Self::Edge(value) => value
+                .label
+                .capacity()
+                .saturating_add(value.graph_id.as_ref().map_or(0, String::capacity))
+                .saturating_add(crate::storage::payload_store::estimate_json_memory(
+                    &value.metadata,
+                )),
+            _ => 0,
+        }
+    }
+}
+
+pub(super) fn compare_bindings(left: &NodeRow, right: &NodeRow) -> std::cmp::Ordering {
+    left.bindings
+        .iter()
+        .flat_map(|values| values.iter())
+        .zip(right.bindings.iter().flat_map(|values| values.iter()))
+        .map(|((a, av), (b, bv))| {
+            a.cmp(b)
+                .then_with(|| super::tql_executor::compare_for_sort(av, bv))
+        })
+        .find(|order| !order.is_eq())
+        .unwrap_or_else(|| {
+            left.bindings
+                .as_ref()
+                .map_or(0, |v| v.len())
+                .cmp(&right.bindings.as_ref().map_or(0, |v| v.len()))
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoreKind {
+    Approximate,
+    Exact,
+    DepthBounded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct ScoreValue {
+    /// 保留图算法的宽类型结果，供投影、排序、聚合与各语言绑定传递。
+    pub value: f64,
+    pub kind: ScoreKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PropertyOrigin {
+    pub field: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct Provenance {
+    pub source_ids: Vec<NodeId>,
+    pub min_depth: Option<usize>,
+    /// 记录当前物理计划保留的单个等值属性入口，供成本估算与执行审计使用。
+    /// 合并来源不同时清除；采用不同算子序列的等价计划可返回不同的该字段。
+    pub property_origin: Option<PropertyOrigin>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphMetric {
+    PageRank,
+    Degree,
+    Betweenness,
+    SaPpr,
+    HarmonicCentrality,
+    WeightedDistance,
+    NodeSimilarity,
+    CoreNumber,
+    TriangleCount,
+    ClusteringCoefficient,
+    Authority,
+    Hub,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NodeRow {
+    pub id: NodeId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_score: Option<ScoreValue>,
+    /// WITH 投影快照在扩展分支间共享；不同快照保持独立的逻辑行。
+    #[serde(skip)]
+    pub bindings: Option<Arc<BTreeMap<String, BindingValue>>>,
+    pub similarity: Option<ScoreValue>,
+    pub property_score: Option<ScoreValue>,
+    pub graph_score: Option<ScoreValue>,
+    pub graph_metrics: BTreeMap<GraphMetric, ScoreValue>,
+    pub text_score: Option<ScoreValue>,
+    pub diversity_score: Option<ScoreValue>,
+    pub residual_score: Option<ScoreValue>,
+    pub topic_id: Option<u64>,
+    pub topic_score: Option<ScoreValue>,
+    pub community_id: Option<u64>,
+    pub path_strength: Option<ScoreValue>,
+    pub path_count: Option<usize>,
+    pub path: Option<Vec<NodeId>>,
+    pub pair: Option<(NodeId, NodeId)>,
+    pub path_rank: Option<usize>,
+    pub provenance: Provenance,
+}
+
+impl NodeRow {
+    pub fn new(id: NodeId) -> Self {
+        Self {
+            id,
+            document_score: None,
+            bindings: None,
+            similarity: None,
+            property_score: None,
+            graph_score: None,
+            graph_metrics: BTreeMap::new(),
+            text_score: None,
+            diversity_score: None,
+            residual_score: None,
+            topic_id: None,
+            topic_score: None,
+            community_id: None,
+            path_strength: None,
+            path_count: None,
+            path: None,
+            pair: None,
+            path_rank: None,
+            provenance: Provenance::default(),
+        }
+    }
+    pub fn set_graph_metric(&mut self, metric: GraphMetric, score: ScoreValue) -> Result<()> {
+        if !score.value.is_finite() {
+            return Err(TriviumError::QueryExecution(
+                "图分数超出有限范围 (Graph score exceeds the finite range)".into(),
+            ));
+        }
+        self.graph_metrics.insert(metric, score);
+        self.graph_score = Some(score);
+        Ok(())
+    }
+
+    pub fn graph_metric(&self, metric: GraphMetric) -> Option<ScoreValue> {
+        self.graph_metrics.get(&metric).copied()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+pub struct NodeSet {
+    rows: Vec<NodeRow>,
+}
+
+impl NodeSet {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn from_ids(ids: impl IntoIterator<Item = NodeId>) -> Self {
+        let mut rows = ids.into_iter().map(NodeRow::new).collect::<Vec<_>>();
+        rows.sort_unstable_by_key(|row| row.id);
+        rows.dedup_by_key(|row| row.id);
+        Self { rows }
+    }
+
+    pub fn from_rows(rows: Vec<NodeRow>) -> Self {
+        let mut set = Self { rows };
+        set.normalize();
+        set
+    }
+
+    pub fn rows(&self) -> &[NodeRow] {
+        &self.rows
+    }
+
+    pub fn into_rows(self) -> Vec<NodeRow> {
+        self.rows
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        let inline = self
+            .rows
+            .len()
+            .saturating_mul(std::mem::size_of::<NodeRow>());
+        let graph_metrics = self
+            .rows
+            .iter()
+            .map(|row| {
+                row.graph_metrics.len().saturating_mul(
+                    std::mem::size_of::<GraphMetric>()
+                        .saturating_add(std::mem::size_of::<ScoreValue>())
+                        .saturating_add(std::mem::size_of::<usize>() * 4),
+                )
+            })
+            .sum::<usize>();
+        let bindings = self
+            .rows
+            .iter()
+            .filter_map(|row| row.bindings.as_ref())
+            .map(|values| {
+                values.iter().fold(0usize, |bytes, (name, value)| {
+                    bytes
+                        .saturating_add(name.capacity())
+                        .saturating_add(
+                            std::mem::size_of::<(String, BindingValue)>()
+                                + 4 * std::mem::size_of::<usize>(),
+                        )
+                        .saturating_add(value.heap_bytes())
+                })
+            })
+            .fold(0usize, usize::saturating_add);
+        inline
+            .saturating_add(graph_metrics)
+            .saturating_add(bindings)
+    }
+
+    fn normalize(&mut self) {
+        let document_ranked =
+            !self.rows.is_empty() && self.rows.iter().all(|row| row.document_score.is_some());
+        let ranked = !self.rows.is_empty() && self.rows.iter().all(|row| row.similarity.is_some());
+        self.rows.sort_by(|left, right| {
+            left.id
+                .cmp(&right.id)
+                .then_with(|| left.pair.cmp(&right.pair))
+                .then_with(|| compare_bindings(left, right))
+                .then_with(|| left.path_rank.cmp(&right.path_rank))
+                .then_with(|| {
+                    if left.path_rank.is_some() || right.path_rank.is_some() {
+                        left.path.cmp(&right.path)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+        });
+        self.rows.dedup_by(|left, right| {
+            let same_ranked_path =
+                left.path_rank.is_none() && right.path_rank.is_none() || left.path == right.path;
+            if (left.id, left.pair, left.path_rank) != (right.id, right.pair, right.path_rank)
+                || !same_ranked_path
+                || !compare_bindings(left, right).is_eq()
+            {
+                return false;
+            }
+            merge_row(right, left);
+            true
+        });
+        if document_ranked {
+            self.rows.sort_by(|left, right| {
+                right
+                    .document_score
+                    .map(|score| score.value)
+                    .unwrap_or_default()
+                    .total_cmp(
+                        &left
+                            .document_score
+                            .map(|score| score.value)
+                            .unwrap_or_default(),
+                    )
+                    .then(left.id.cmp(&right.id))
+                    .then_with(|| compare_bindings(left, right))
+            });
+        } else if ranked {
+            self.rows.sort_by(compare_similarity);
+        }
+    }
+}
+
+fn merge_row(target: &mut NodeRow, source: &NodeRow) {
+    let target_distance = target
+        .graph_metrics
+        .get(&GraphMetric::WeightedDistance)
+        .copied();
+    let source_distance = source
+        .graph_metrics
+        .get(&GraphMetric::WeightedDistance)
+        .copied();
+    let weighted_path = target_distance.is_some() || source_distance.is_some();
+    let prefer_source_weighted = match (target_distance, source_distance) {
+        (None, Some(_)) => true,
+        (Some(left), Some(right)) => {
+            right.value < left.value
+                || right.value == left.value
+                    && source.path.as_ref().is_some_and(|candidate| {
+                        target
+                            .path
+                            .as_ref()
+                            .is_none_or(|current| candidate < current)
+                    })
+        }
+        _ => false,
+    };
+    if prefer_source_weighted {
+        if let Some(distance) = source_distance {
+            target
+                .graph_metrics
+                .insert(GraphMetric::WeightedDistance, distance);
+            target.graph_score = Some(distance);
+        }
+        target.path = source.path.clone();
+    }
+    target.similarity = better_score(target.similarity, source.similarity);
+    target.property_score = better_score(target.property_score, source.property_score);
+    if !weighted_path {
+        target.graph_score = better_score(target.graph_score, source.graph_score);
+    }
+    for (&metric, &score) in &source.graph_metrics {
+        if metric == GraphMetric::WeightedDistance && weighted_path {
+            continue;
+        }
+        let merged = better_score(target.graph_metrics.get(&metric).copied(), Some(score));
+        if let Some(merged) = merged {
+            target.graph_metrics.insert(metric, merged);
+        }
+    }
+    target.text_score = better_score(target.text_score, source.text_score);
+    target.document_score = better_score(target.document_score, source.document_score);
+    target.diversity_score = better_score(target.diversity_score, source.diversity_score);
+    target.residual_score = better_score(target.residual_score, source.residual_score);
+    target.topic_id = target.topic_id.or(source.topic_id);
+    target.topic_score = better_score(target.topic_score, source.topic_score);
+    target.community_id = target.community_id.or(source.community_id);
+    target.pair = target.pair.or(source.pair);
+    target.path_rank = target.path_rank.or(source.path_rank);
+    target.path_strength = better_score(target.path_strength, source.path_strength);
+    target.path_count = match (target.path_count, source.path_count) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (left, right) => left.or(right),
+    };
+    if !weighted_path
+        && source.path.as_ref().is_some_and(|candidate| {
+            target.path.as_ref().is_none_or(|current| {
+                candidate.len() < current.len()
+                    || candidate.len() == current.len() && candidate < current
+            })
+        })
+    {
+        target.path = source.path.clone();
+    }
+    target
+        .provenance
+        .source_ids
+        .extend(source.provenance.source_ids.iter().copied());
+    target.provenance.source_ids.sort_unstable();
+    target.provenance.source_ids.dedup();
+    target.provenance.min_depth = match (target.provenance.min_depth, source.provenance.min_depth) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    };
+    if target.provenance.property_origin != source.provenance.property_origin {
+        target.provenance.property_origin = None;
+    }
+}
+
+fn better_score(left: Option<ScoreValue>, right: Option<ScoreValue>) -> Option<ScoreValue> {
+    fn quality(kind: ScoreKind) -> u8 {
+        match kind {
+            ScoreKind::Approximate => 0,
+            ScoreKind::DepthBounded => 1,
+            ScoreKind::Exact => 2,
+        }
+    }
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            if quality(right.kind) > quality(left.kind)
+                || right.kind == left.kind && right.value > left.value
+            {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
+        (left, right) => left.or(right),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineBudget {
+    pub max_stages: usize,
+    pub max_nodes: usize,
+    pub max_node_set_bytes: usize,
+    pub max_vector_read_bytes: usize,
+    pub max_payload_lookups: u64,
+    pub max_payload_parsed_bytes: u64,
+    pub traversal: TraversalBudget,
+    pub parallelism: QueryParallelismBudget,
+}
+
+impl Default for PipelineBudget {
+    fn default() -> Self {
+        Self {
+            max_stages: 16,
+            max_nodes: 100_000,
+            max_node_set_bytes: 64 * 1024 * 1024,
+            max_vector_read_bytes: 256 * 1024 * 1024,
+            max_payload_lookups: 100_000,
+            max_payload_parsed_bytes: 256 * 1024 * 1024,
+            traversal: TraversalBudget::default(),
+            parallelism: QueryParallelismBudget::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PipelineStageMetrics {
+    pub operator: &'static str,
+    pub input_rows: usize,
+    pub output_rows: usize,
+    pub elapsed_ns: u64,
+    pub node_set_bytes: usize,
+    pub vector_read_bytes: usize,
+    pub payload_lookups: u64,
+    pub payload_parsed_bytes: u64,
+    pub visited_nodes: usize,
+    pub examined_edges: usize,
+}
+
+pub struct PipelineContext<'a, T: VectorType> {
+    pub memtable: &'a MemTable<T>,
+    pub budget: PipelineBudget,
+    pub metrics: Vec<PipelineStageMetrics>,
+    pub query_control: Option<super::tql_executor::QueryControl>,
+    pub(crate) workspace_limit: usize,
+    pub(crate) database_memory_limit: usize,
+    pub(crate) graph_scope: Option<Arc<crate::graph::view::ScopedGraph>>,
+    profile: bool,
+    stages: usize,
+    vector_read_bytes: usize,
+    payload_meter: Arc<crate::request::PayloadMeter>,
+    workspace_bytes: usize,
+    workspaces: Vec<crate::resources::WorkspaceReservation>,
+}
+
+impl<'a, T: VectorType> PipelineContext<'a, T> {
+    pub fn new(memtable: &'a MemTable<T>, budget: PipelineBudget) -> Self {
+        Self::with_profile(memtable, budget, false)
+    }
+
+    pub fn with_profile(memtable: &'a MemTable<T>, budget: PipelineBudget, profile: bool) -> Self {
+        Self {
+            memtable,
+            budget,
+            metrics: Vec::new(),
+            query_control: crate::request::control(),
+            workspace_limit: 0,
+            database_memory_limit: 0,
+            graph_scope: None,
+            profile,
+            stages: 0,
+            vector_read_bytes: 0,
+            payload_meter: Arc::default(),
+            workspace_bytes: 0,
+            workspaces: Vec::new(),
+        }
+    }
+
+    pub(crate) fn reserve_row_workspace(&mut self, bytes: usize) -> Result<()> {
+        if self.database_memory_limit > 0 {
+            let graph_bytes = self
+                .graph_scope
+                .as_ref()
+                .map_or(0, |graph| graph.reserved_bytes());
+            self.memtable.ensure_additional_memory(
+                self.database_memory_limit,
+                bytes.saturating_add(graph_bytes),
+            )?;
+        }
+        if bytes > self.workspace_bytes {
+            let extra = bytes - self.workspace_bytes;
+            self.workspaces
+                .push(self.memtable.resource_runtime().reserve_workspace(extra)?);
+            self.workspace_bytes = bytes;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn graph(&self) -> crate::graph::view::GraphView<'_, T> {
+        crate::graph::view::GraphView {
+            facts: self.memtable,
+            scoped: self.graph_scope.as_deref(),
+        }
+    }
+
+    pub(crate) fn document_memory_limit(&self) -> Result<usize> {
+        if self.database_memory_limit == 0 {
+            return Ok(0);
+        }
+        let used = self.workspace_bytes.saturating_add(
+            self.graph_scope
+                .as_ref()
+                .map_or(0, |graph| graph.reserved_bytes()),
+        );
+        self.database_memory_limit
+            .checked_sub(used)
+            .filter(|remaining| *remaining > 0)
+            .ok_or(TriviumError::ResourceBudgetExceeded {
+                resource: "query_memory_bytes",
+                requested: 1,
+                used,
+                limit: self.database_memory_limit,
+            })
+    }
+
+    fn graph_request(&self) -> Result<crate::request::RequestContext> {
+        let inherited = crate::request::current();
+        let mut control = self.query_control.clone().unwrap_or_default();
+        if let Some(request) = &inherited {
+            control = control.combined_with(request.control());
+        }
+        crate::request::RequestContext::new(
+            inherited
+                .as_ref()
+                .map_or("pipeline", |request| request.request_id()),
+            control,
+            false,
+        )
+        .map(|request| request.with_payload_meter(Arc::clone(&self.payload_meter)))
+    }
+
+    fn run_graph<R: Send>(
+        &self,
+        threads: usize,
+        operation: impl FnOnce() -> Result<R> + Send,
+    ) -> Result<R> {
+        let request = self.graph_request()?;
+        if threads == 1 {
+            request.run(operation)
+        } else {
+            query_pool(self.memtable.resource_runtime(), threads)?
+                .install(|| request.run(operation))
+        }
+    }
+
+    fn begin_stage(&mut self) -> Result<()> {
+        if let Some(control) = &self.query_control {
+            control.check()?;
+        }
+        self.stages = self.stages.saturating_add(1);
+        if self.stages > self.budget.max_stages {
+            return Err(TriviumError::QueryExecution(format!(
+                "管线阶段数超过预算 {} (Pipeline stage count exceeds budget {})",
+                self.budget.max_stages, self.budget.max_stages
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn charge_vectors(&mut self, vectors: usize) -> Result<usize> {
+        let bytes = vectors
+            .checked_mul(self.memtable.dim())
+            .and_then(|value| value.checked_mul(std::mem::size_of::<T>()))
+            .ok_or_else(|| TriviumError::QueryExecution("管线向量读取字节溢出".into()))?;
+        self.vector_read_bytes = self.vector_read_bytes.saturating_add(bytes);
+        if self.vector_read_bytes > self.budget.max_vector_read_bytes {
+            return Err(TriviumError::QueryExecution(format!(
+                "管线向量读取 {} 字节超过预算 {} (Pipeline vector reads {} bytes exceed budget {})",
+                self.vector_read_bytes,
+                self.budget.max_vector_read_bytes,
+                self.vector_read_bytes,
+                self.budget.max_vector_read_bytes
+            )));
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn remaining_vectors(&self) -> usize {
+        self.budget
+            .max_vector_read_bytes
+            .saturating_sub(self.vector_read_bytes)
+            / self
+                .memtable
+                .dim()
+                .saturating_mul(std::mem::size_of::<T>())
+                .max(1)
+    }
+
+    fn payload_usage(&self) -> (u64, u64) {
+        self.payload_meter.usage()
+    }
+
+    fn validate_payload_budget(&self) -> Result<(u64, u64)> {
+        let (lookups, parsed_bytes) = self.payload_usage();
+        if lookups > self.budget.max_payload_lookups {
+            return Err(TriviumError::PayloadQueryBudgetExceeded {
+                dimension: "lookups",
+                used: lookups,
+                budget: self.budget.max_payload_lookups,
+            });
+        }
+        if parsed_bytes > self.budget.max_payload_parsed_bytes {
+            return Err(TriviumError::PayloadQueryBudgetExceeded {
+                dimension: "parsed_bytes",
+                used: parsed_bytes,
+                budget: self.budget.max_payload_parsed_bytes,
+            });
+        }
+        Ok((lookups, parsed_bytes))
+    }
+
+    fn validate_output(&self, output: &NodeSet) -> Result<()> {
+        let bytes = output.estimated_bytes();
+        if output.len() > self.budget.max_nodes || bytes > self.budget.max_node_set_bytes {
+            return Err(TriviumError::QueryExecution(format!(
+                "管线 NodeSet 超过预算：{} 个节点，{} 字节 (Pipeline NodeSet exceeds budget: {} nodes, {} bytes)",
+                output.len(),
+                bytes,
+                output.len(),
+                bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
+pub trait PipelineOperator<T: VectorType> {
+    fn uses_graph(&self) -> bool {
+        false
+    }
+    fn name(&self) -> &'static str;
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet>;
+    /// 查询装配器附加实际算子来源；通用管线继续传递原始错误。
+    fn map_error(&self, error: TriviumError) -> TriviumError {
+        error
+    }
+}
+
+struct PipelineWorkspace<'query, 'data, T: VectorType>(&'query mut PipelineContext<'data, T>);
+impl<'data, T: VectorType> std::ops::Deref for PipelineWorkspace<'_, 'data, T> {
+    type Target = PipelineContext<'data, T>;
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+impl<T: VectorType> std::ops::DerefMut for PipelineWorkspace<'_, '_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+    }
+}
+impl<T: VectorType> Drop for PipelineWorkspace<'_, '_, T> {
+    fn drop(&mut self) {
+        self.0.workspaces.clear();
+        self.0.workspace_bytes = 0;
+    }
+}
+
+pub fn execute_pipeline<T: VectorType>(
+    context: &mut PipelineContext<'_, T>,
+    operators: &[Box<dyn PipelineOperator<T> + '_>],
+) -> Result<NodeSet> {
+    execute_pipeline_with_workspace(context, operators).map(|(set, _workspaces)| set)
+}
+
+/// 返回结果及其工作区凭证，供上层在投影完成后统一归还额度。
+pub(crate) fn execute_pipeline_with_workspace<T: VectorType>(
+    context: &mut PipelineContext<'_, T>,
+    operators: &[Box<dyn PipelineOperator<T> + '_>],
+) -> Result<(NodeSet, Vec<crate::resources::WorkspaceReservation>)> {
+    let mut workspace = PipelineWorkspace(context);
+    workspace.metrics.clear();
+    workspace.stages = 0;
+    workspace.vector_read_bytes = 0;
+    workspace.payload_meter = Arc::default();
+    let request = workspace.graph_request()?;
+    let _scope = request.enter()?;
+    let context = &mut *workspace;
+    let rows = context.memtable.node_count().min(context.budget.max_nodes);
+    let estimate = rows
+        .checked_mul(std::mem::size_of::<NodeRow>() + 64)
+        .and_then(|bytes| bytes.checked_mul(4))
+        .ok_or_else(|| TriviumError::CapacityAllocationFailed {
+            reason: "管线工作区估算溢出".into(),
+        })?;
+    if context.workspace_limit > 0 && estimate > context.workspace_limit {
+        return Err(TriviumError::QueryRowBudgetExceeded {
+            budget: context.workspace_limit
+                / (std::mem::size_of::<NodeRow>() + 64).saturating_mul(4),
+        });
+    }
+    context.reserve_row_workspace(estimate)?;
+    let mut current = NodeSet::empty();
+    for operator in operators {
+        let locate = |error| operator.map_error(error);
+        context.begin_stage().map_err(locate)?;
+        if operator.uses_graph() && context.graph_scope.is_some() {
+            let graph = context.graph();
+            current.rows.retain(|row| graph.contains(row.id));
+        }
+        let input_rows = context.profile.then(|| current.len());
+        let started = context.profile.then(Instant::now);
+        current = operator.apply(current, context).map_err(locate)?;
+        if let Some(control) = &context.query_control {
+            control.check().map_err(locate)?;
+        }
+        current.normalize();
+        context.validate_output(&current).map_err(locate)?;
+        context
+            .reserve_row_workspace(current.estimated_bytes())
+            .map_err(locate)?;
+        let (payload_lookups, payload_parsed_bytes) =
+            context.validate_payload_budget().map_err(locate)?;
+        if let (Some(input_rows), Some(started)) = (input_rows, started) {
+            context.metrics.push(PipelineStageMetrics {
+                operator: operator.name(),
+                input_rows,
+                output_rows: current.len(),
+                elapsed_ns: started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                node_set_bytes: current.estimated_bytes(),
+                vector_read_bytes: context.vector_read_bytes,
+                payload_lookups,
+                payload_parsed_bytes,
+                visited_nodes: 0,
+                examined_edges: 0,
+            });
+        }
+    }
+    let workspaces = std::mem::take(&mut context.workspaces);
+    Ok((current, workspaces))
+}
+
+pub struct FullNodeScanSource;
+
+impl<T: VectorType> PipelineOperator<T> for FullNodeScanSource {
+    fn name(&self) -> &'static str {
+        "full_node_scan"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        Ok(NodeSet::from_ids(context.memtable.active_node_ids()))
+    }
+}
+
+pub struct FilteredNodeScanSource {
+    pub filter: Filter,
+}
+
+impl<T: VectorType> PipelineOperator<T> for FilteredNodeScanSource {
+    fn name(&self) -> &'static str {
+        "filtered_node_scan"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        Ok(NodeSet::from_ids(
+            context.memtable.active_node_ids().filter(|id| {
+                context
+                    .memtable
+                    .get_payload(*id)
+                    .is_some_and(|payload| self.filter.matches(&payload))
+            }),
+        ))
+    }
+}
+
+pub struct NodeIdsSource {
+    pub ids: Vec<NodeId>,
+}
+
+impl<T: VectorType> PipelineOperator<T> for NodeIdsSource {
+    fn name(&self) -> &'static str {
+        "node_ids"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        Ok(NodeSet::from_ids(
+            self.ids
+                .iter()
+                .copied()
+                .filter(|id| context.memtable.contains(*id)),
+        ))
+    }
+}
+
+pub struct ExactVectorSearch<T: VectorType> {
+    pub query: Vec<T>,
+    pub top_k: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for ExactVectorSearch<T> {
+    fn name(&self) -> &'static str {
+        "exact_vector_search"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        crate::vector::validate_query_vector(&self.query, context.memtable.dim())?;
+        let ids = context.memtable.all_node_ids();
+        context.charge_vectors(ids.len())?;
+        let mut scored = ids
+            .into_iter()
+            .filter_map(|id| {
+                let vector = context.memtable.get_vector(id)?;
+                Some((id, T::similarity(&self.query, vector)))
+            })
+            .collect::<Vec<_>>();
+        let compare = |left: &(NodeId, f32), right: &(NodeId, f32)| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        };
+        if self.top_k == 0 {
+            scored.clear();
+        } else if self.top_k < scored.len() {
+            scored.select_nth_unstable_by(self.top_k, compare);
+            scored.truncate(self.top_k);
+            scored.sort_by(compare);
+        } else {
+            scored.sort_by(compare);
+        }
+        Ok(NodeSet {
+            rows: scored
+                .into_iter()
+                .map(|(id, score)| {
+                    let mut row = NodeRow::new(id);
+                    row.similarity = Some(ScoreValue {
+                        value: f64::from(score),
+                        kind: ScoreKind::Exact,
+                    });
+                    row.provenance.source_ids.push(id);
+                    row
+                })
+                .collect(),
+        })
+    }
+}
+
+pub struct QuiverVectorSearch<T: VectorType> {
+    pub query: Vec<T>,
+    pub top_k: usize,
+    pub ef_search: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for QuiverVectorSearch<T> {
+    fn name(&self) -> &'static str {
+        "quiver_vector_search"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        crate::vector::validate_query_vector(&self.query, context.memtable.dim())?;
+        let Some(index) = context
+            .memtable
+            .quiver()
+            .filter(|_| !crate::vector::is_binary_vector::<T>())
+        else {
+            return ExactVectorSearch {
+                query: self.query.clone(),
+                top_k: self.top_k,
+            }
+            .apply(NodeSet::empty(), context);
+        };
+        let query = self
+            .query
+            .iter()
+            .map(|value| value.to_f32())
+            .collect::<Vec<_>>();
+        let mut vector_error = None;
+        let config = crate::index::quiver::QuIVerSearchConfig {
+            top_k: self.top_k,
+            ef_search: self.ef_search.max(self.top_k),
+            rerank_limit: Some(self.ef_search.max(self.top_k)),
+        };
+        let configured = context
+            .memtable
+            .configured_quiver_search(&query, &config, &|_| true)?;
+        let approximate = configured.is_some();
+        let hits = if let Some(hits) = configured {
+            hits
+        } else {
+            index.search(
+                &query,
+                |slot, output| {
+                    let vector = match context.memtable.active_vector_at_slot(slot) {
+                        Ok(Some((_, vector))) => vector,
+                        Ok(None) => return false,
+                        Err(error) => {
+                            vector_error = Some(error);
+                            return false;
+                        }
+                    };
+                    output.clear();
+                    output.extend(vector.iter().map(|value| value.to_f32()));
+                    true
+                },
+                &config,
+            )
+        };
+        if let Some(error) = vector_error {
+            return Err(error);
+        }
+        context.charge_vectors(hits.len())?;
+        Ok(NodeSet::from_rows(
+            hits.into_iter()
+                .map(|(id, score)| {
+                    let mut row = NodeRow::new(id);
+                    row.similarity = Some(ScoreValue {
+                        value: f64::from(score),
+                        kind: if approximate {
+                            ScoreKind::Approximate
+                        } else {
+                            ScoreKind::Exact
+                        },
+                    });
+                    row.provenance.source_ids.push(id);
+                    row
+                })
+                .collect(),
+        ))
+    }
+}
+
+pub struct TextSearchSource {
+    pub query: String,
+    pub top_k: usize,
+    pub k1: f32,
+    pub b: f32,
+    pub ac_weight: f32,
+    pub include_bm25: bool,
+    pub include_ac: bool,
+}
+
+impl<T: VectorType> PipelineOperator<T> for TextSearchSource {
+    fn name(&self) -> &'static str {
+        "text_search_source"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        if self.query.len() > 4096
+            || self.query.split_whitespace().count() > 256
+            || context.memtable.node_count() > context.budget.max_nodes
+            || self.top_k == 0
+            || self.top_k > context.budget.max_nodes
+        {
+            return Err(TriviumError::InvalidInput(
+                "文本查询或召回规模超过预算 (Text query or recall size exceeds budget)".into(),
+            ));
+        }
+        if !self.k1.is_finite()
+            || self.k1 <= 0.0
+            || !self.b.is_finite()
+            || !(0.0..=1.0).contains(&self.b)
+            || !self.ac_weight.is_finite()
+            || self.ac_weight < 0.0
+        {
+            return Err(TriviumError::InvalidInput(
+                "文本召回参数无效 (Invalid text retrieval parameters)".into(),
+            ));
+        }
+        let index = context.memtable.text_engine();
+        let mut scores = HashMap::<NodeId, f32>::new();
+        if self.include_bm25 {
+            for (id, score) in index.search_bm25(&self.query, self.k1, self.b) {
+                *scores.entry(id).or_default() += score;
+            }
+        }
+        if self.include_ac {
+            for (id, score) in index.search_ac(&self.query) {
+                *scores.entry(id).or_default() += score * self.ac_weight;
+            }
+        }
+        let mut scored = scores.into_iter().collect::<Vec<_>>();
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        scored.truncate(self.top_k);
+        Ok(NodeSet::from_rows(
+            scored
+                .into_iter()
+                .filter(|(id, _)| context.memtable.contains(*id))
+                .map(|(id, score)| {
+                    let mut row = NodeRow::new(id);
+                    row.text_score = Some(ScoreValue {
+                        value: f64::from(score),
+                        kind: ScoreKind::Exact,
+                    });
+                    row.provenance.source_ids.push(id);
+                    row
+                })
+                .collect(),
+        ))
+    }
+}
+
+pub struct DppDiversify {
+    pub top_k: usize,
+    pub quality_weight: f32,
+}
+
+impl<T: VectorType> PipelineOperator<T> for DppDiversify {
+    fn name(&self) -> &'static str {
+        "dpp_diversify"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        const MAX_POOL: usize = 512;
+        if self.top_k == 0 || input.len() > MAX_POOL || self.top_k > input.len() {
+            return Err(TriviumError::InvalidInput(
+                "DPP 要求 1 <= TOP <= 候选数且候选池不超过 512 (DPP candidate bounds violated)"
+                    .into(),
+            ));
+        }
+        if !self.quality_weight.is_finite() || !(0.0..=10.0).contains(&self.quality_weight) {
+            return Err(TriviumError::InvalidInput("DPP quality_weight 无效".into()));
+        }
+        let temp_cells = input
+            .len()
+            .checked_mul(self.top_k)
+            .and_then(|cells| cells.checked_add(input.len().checked_mul(6)?))
+            .and_then(|cells| cells.checked_add(input.len().checked_mul(context.memtable.dim())?))
+            .ok_or_else(|| TriviumError::QueryExecution("DPP 临时预算溢出".into()))?;
+        let temp_bytes = temp_cells
+            .checked_mul(std::mem::size_of::<f64>())
+            .ok_or_else(|| TriviumError::QueryExecution("DPP 临时字节预算溢出".into()))?;
+        if temp_bytes > context.budget.max_node_set_bytes {
+            return Err(TriviumError::QueryExecution(
+                "DPP 超过临时内存预算 (DPP exceeds temporary memory budget)".into(),
+            ));
+        }
+        let _matrix_workspace = context
+            .memtable
+            .resource_runtime()
+            .reserve_workspace(temp_bytes)?;
+        context.charge_vectors(input.len())?;
+        let mut rows = input.into_rows();
+        rows.sort_by_key(|row| row.id);
+        let mut vectors = Vec::with_capacity(rows.len());
+        let mut scores = Vec::with_capacity(rows.len());
+        let mut valid = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(vector) = context.memtable.get_vector(row.id) {
+                vectors.push(vector.iter().map(|value| value.to_f32()).collect());
+                scores.push(
+                    row.similarity
+                        .or(row.text_score)
+                        .or(row.graph_score)
+                        .map_or(1.0, |score| score.value),
+                );
+                valid.push(row);
+            }
+        }
+        let selected =
+            crate::cognitive::dpp_greedy_wide(&vectors, &scores, self.top_k, self.quality_weight);
+        let mut output = Vec::with_capacity(selected.len());
+        for (rank, index) in selected.into_iter().enumerate() {
+            if let Some(mut row) = valid.get(index).cloned() {
+                row.diversity_score = Some(ScoreValue {
+                    value: 1.0 / (rank + 1) as f64,
+                    kind: ScoreKind::Approximate,
+                });
+                output.push(row);
+            }
+        }
+        Ok(NodeSet { rows: output })
+    }
+}
+
+pub struct FistaResidualRecall<T: VectorType> {
+    pub query: Vec<T>,
+    pub top_k: usize,
+    pub lambda: f32,
+    pub threshold: f32,
+    pub iterations: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for FistaResidualRecall<T> {
+    fn name(&self) -> &'static str {
+        "fista_residual_recall"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        crate::vector::validate_query_vector(&self.query, context.memtable.dim())?;
+        const MAX_CANDIDATES: usize = 512;
+        const MAX_ITERATIONS: usize = 256;
+        if input.is_empty()
+            || input.len() > MAX_CANDIDATES
+            || self.top_k == 0
+            || self.iterations == 0
+            || self.iterations > MAX_ITERATIONS
+            || !self.lambda.is_finite()
+            || self.lambda <= 0.0
+            || !self.threshold.is_finite()
+            || self.threshold < 0.0
+        {
+            return Err(TriviumError::InvalidInput(
+                "FISTA 参数或候选预算无效".into(),
+            ));
+        }
+        let gram_cells = input
+            .len()
+            .checked_mul(input.len())
+            .ok_or_else(|| TriviumError::QueryExecution("FISTA Gram 矩阵预算溢出".into()))?;
+        let gram_bytes = gram_cells
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| TriviumError::QueryExecution("FISTA Gram 矩阵字节预算溢出".into()))?;
+        if gram_bytes > context.budget.max_node_set_bytes {
+            return Err(TriviumError::QueryExecution(
+                "FISTA Gram 矩阵超过临时内存预算 (FISTA Gram matrix exceeds temporary memory budget)".into(),
+            ));
+        }
+        let _matrix_workspace = context
+            .memtable
+            .resource_runtime()
+            .reserve_workspace(gram_bytes)?;
+        context.charge_vectors(input.len().saturating_add(context.memtable.node_count()))?;
+        let entities = input
+            .rows()
+            .iter()
+            .filter_map(|row| {
+                context.memtable.get_vector(row.id).map(|vector| {
+                    vector
+                        .iter()
+                        .map(|value| value.to_f32())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let query = self
+            .query
+            .iter()
+            .map(|value| value.to_f32())
+            .collect::<Vec<_>>();
+        let (_, residual, norm) =
+            crate::cognitive::fista_solve(&query, &entities, self.lambda, self.iterations);
+        if norm <= self.threshold {
+            return Ok(NodeSet::empty());
+        }
+        let mut inherited = input
+            .into_rows()
+            .into_iter()
+            .map(|row| (row.id, row))
+            .collect::<BTreeMap<_, _>>();
+        let mut scored = context
+            .memtable
+            .all_node_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let vector = context.memtable.get_vector(id)?;
+                let vector = vector
+                    .iter()
+                    .map(|value| value.to_f32())
+                    .collect::<Vec<_>>();
+                Some((id, crate::vector::cosine_similarity_f32(&residual, &vector)))
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        scored.truncate(self.top_k);
+        Ok(NodeSet::from_rows(
+            scored
+                .into_iter()
+                .map(|(id, score)| {
+                    let mut row = inherited.remove(&id).unwrap_or_else(|| NodeRow::new(id));
+                    row.residual_score = Some(ScoreValue {
+                        value: f64::from(score),
+                        kind: ScoreKind::Exact,
+                    });
+                    row
+                })
+                .collect(),
+        ))
+    }
+}
+
+pub struct NmfTopics {
+    pub topics: usize,
+    pub iterations: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for NmfTopics {
+    fn name(&self) -> &'static str {
+        "nmf_topics"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        const MAX_CANDIDATES: usize = 512;
+        const MAX_TOPICS: usize = 32;
+        const MAX_ITERATIONS: usize = 256;
+        if input.is_empty()
+            || input.len() > MAX_CANDIDATES
+            || self.topics == 0
+            || self.topics > MAX_TOPICS
+            || self.topics > input.len()
+            || self.iterations == 0
+            || self.iterations > MAX_ITERATIONS
+        {
+            return Err(TriviumError::InvalidInput("NMF 参数或矩阵预算无效".into()));
+        }
+        // 峰值包含 V、三份 m×k、三份 k×d 及两份 k×k 工作矩阵。
+        let matrix_cells = input
+            .len()
+            .checked_mul(context.memtable.dim())
+            .and_then(|value| {
+                value.checked_add(input.len().checked_mul(self.topics)?.checked_mul(3)?)
+            })
+            .and_then(|value| {
+                value.checked_add(
+                    self.topics
+                        .checked_mul(context.memtable.dim())?
+                        .checked_mul(3)?,
+                )
+            })
+            .and_then(|value| {
+                value.checked_add(self.topics.checked_mul(self.topics)?.checked_mul(2)?)
+            })
+            .ok_or_else(|| TriviumError::QueryExecution("NMF 矩阵预算溢出".into()))?;
+        let matrix_bytes = matrix_cells
+            .checked_mul(std::mem::size_of::<f64>())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    input
+                        .len()
+                        .checked_mul(context.memtable.dim())?
+                        .checked_mul(std::mem::size_of::<f32>())?,
+                )
+            })
+            .ok_or_else(|| TriviumError::QueryExecution("NMF 矩阵字节预算溢出".into()))?;
+        if matrix_bytes > context.budget.max_node_set_bytes {
+            return Err(TriviumError::QueryExecution(
+                "NMF 矩阵超过临时内存预算 (NMF matrices exceed temporary memory budget)".into(),
+            ));
+        }
+        let _matrix_workspace = context
+            .memtable
+            .resource_runtime()
+            .reserve_workspace(matrix_bytes)?;
+        context.charge_vectors(input.len())?;
+        let mut rows = input.into_rows();
+        rows.sort_by_key(|row| row.id);
+        let mut flat = Vec::with_capacity(rows.len().saturating_mul(context.memtable.dim()));
+        for row in &rows {
+            let vector = context
+                .memtable
+                .get_vector(row.id)
+                .ok_or(TriviumError::NodeNotFound(row.id))?;
+            flat.extend(vector.iter().map(|value| value.to_f32()));
+        }
+        let (weights, topics) = crate::cognitive::nmf_multiplicative_update(
+            &flat,
+            rows.len(),
+            context.memtable.dim(),
+            self.topics,
+            self.iterations,
+            1e-4,
+        );
+        if weights
+            .iter()
+            .chain(&topics)
+            .any(|value| !value.is_finite())
+        {
+            return Err(TriviumError::QueryExecution(
+                "NMF 分解超出有限范围 (NMF factorization exceeds the finite range)".into(),
+            ));
+        }
+        for (row_index, row) in rows.iter_mut().enumerate() {
+            let start = row_index * self.topics;
+            let topic_weights = &weights[start..start + self.topics];
+            let (topic, score) = topic_weights
+                .iter()
+                .copied()
+                .enumerate()
+                .max_by(|left, right| {
+                    left.1
+                        .total_cmp(&right.1)
+                        .then_with(|| right.0.cmp(&left.0))
+                })
+                .unwrap_or((0, 0.0));
+            row.topic_id = Some(topic as u64);
+            row.topic_score = Some(ScoreValue {
+                value: f64::from(score),
+                kind: ScoreKind::Approximate,
+            });
+        }
+        Ok(NodeSet { rows })
+    }
+}
+
+pub struct PropertyLookup {
+    pub field: String,
+    pub value: serde_json::Value,
+}
+
+impl<T: VectorType> PipelineOperator<T> for PropertyLookup {
+    fn name(&self) -> &'static str {
+        "property_lookup"
+    }
+
+    fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let ids = if let Some(ids) = context
+            .memtable
+            .find_by_property_index(&self.field, &self.value)
+        {
+            ids
+        } else {
+            let threads = context
+                .budget
+                .parallelism
+                .threads(context.memtable.node_count());
+            if threads == 1 {
+                context
+                    .memtable
+                    .find_nodes_by_field(&self.field, &self.value)
+            } else {
+                context.run_graph(threads, || {
+                    Ok(context.memtable.find_nodes_by_field_parallel(
+                        &self.field,
+                        &self.value,
+                        threads,
+                    ))
+                })?
+            }
+        };
+        let mut output = NodeSet::from_ids(ids);
+        for row in &mut output.rows {
+            row.property_score = Some(ScoreValue {
+                value: 1.0,
+                kind: ScoreKind::Exact,
+            });
+            row.provenance.property_origin = Some(PropertyOrigin {
+                field: self.field.clone(),
+                value: self.value.clone(),
+            });
+        }
+        Ok(output)
+    }
+}
+
+pub struct ExactRerank<T: VectorType> {
+    pub query: Vec<T>,
+    pub top_k: Option<usize>,
+}
+
+impl<T: VectorType> PipelineOperator<T> for ExactRerank<T> {
+    fn name(&self) -> &'static str {
+        "exact_rerank"
+    }
+
+    fn apply(&self, mut input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        crate::vector::validate_query_vector(&self.query, context.memtable.dim())?;
+        context.charge_vectors(input.len())?;
+        let threads = context.budget.parallelism.threads(input.len());
+        let control = context.graph_request()?.control().clone();
+        let score_row = |mut rows: Vec<NodeRow>, mut row: NodeRow| -> Result<Vec<NodeRow>> {
+            control.check()?;
+            if let Some(vector) = context.memtable.get_vector(row.id) {
+                row.document_score = None;
+                row.similarity = Some(ScoreValue {
+                    value: f64::from(T::similarity(&self.query, vector)),
+                    kind: ScoreKind::Exact,
+                });
+                rows.push(row);
+            }
+            Ok(rows)
+        };
+        input.rows = if threads == 1 {
+            input.rows.into_iter().try_fold(Vec::new(), score_row)?
+        } else {
+            query_pool(context.memtable.resource_runtime(), threads)?.install(|| {
+                input
+                    .rows
+                    .into_par_iter()
+                    .try_fold(Vec::new, score_row)
+                    .try_reduce(Vec::new, |mut left, right| {
+                        control.check()?;
+                        left.extend(right);
+                        Ok(left)
+                    })
+            })?
+        };
+        control.check()?;
+        if let Some(top_k) = self.top_k {
+            if top_k == 0 {
+                input.rows.clear();
+            } else if top_k < input.rows.len() {
+                input.rows.select_nth_unstable_by(top_k, compare_similarity);
+                input.rows.truncate(top_k);
+                input.rows.sort_by(compare_similarity);
+            } else {
+                input.rows.sort_by(compare_similarity);
+            }
+        } else {
+            input.rows.sort_by(compare_similarity);
+        }
+        Ok(input)
+    }
+}
+
+fn compare_similarity(left: &NodeRow, right: &NodeRow) -> std::cmp::Ordering {
+    right
+        .similarity
+        .map(|score| score.value)
+        .unwrap_or(f64::NEG_INFINITY)
+        .total_cmp(
+            &left
+                .similarity
+                .map(|score| score.value)
+                .unwrap_or(f64::NEG_INFINITY),
+        )
+        .then_with(|| left.id.cmp(&right.id))
+        .then_with(|| compare_bindings(left, right))
+}
+
+pub struct PropertyIndexFilter {
+    pub equalities: Vec<(String, serde_json::Value)>,
+    pub strategy: PropertyIndexStrategy,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PropertyIndexStrategy {
+    Hash,
+    Ordered,
+    Composite,
+    Bitmap,
+    Intersection,
+}
+
+impl<T: VectorType> PipelineOperator<T> for PropertyIndexFilter {
+    fn name(&self) -> &'static str {
+        match self.strategy {
+            PropertyIndexStrategy::Hash => "property_hash_filter",
+            PropertyIndexStrategy::Ordered => "property_ordered_filter",
+            PropertyIndexStrategy::Composite => "property_composite_filter",
+            PropertyIndexStrategy::Bitmap => "property_bitmap_filter",
+            PropertyIndexStrategy::Intersection => "property_intersection_filter",
+        }
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let ids = match self.strategy {
+            PropertyIndexStrategy::Hash | PropertyIndexStrategy::Ordered => self
+                .equalities
+                .first()
+                .and_then(|(field, value)| context.memtable.find_by_property_index(field, value)),
+            PropertyIndexStrategy::Composite => context
+                .memtable
+                .find_by_composite_property_index(&self.equalities)
+                .map(|(_, ids)| ids),
+            PropertyIndexStrategy::Bitmap => context
+                .memtable
+                .find_by_bitmap_intersection(&self.equalities),
+            PropertyIndexStrategy::Intersection => {
+                let mut intersection = None::<BTreeSet<NodeId>>;
+                let mut complete = true;
+                for (field, value) in &self.equalities {
+                    let Some(ids) = context.memtable.find_by_property_index(field, value) else {
+                        complete = false;
+                        break;
+                    };
+                    let ids = ids.into_iter().collect::<BTreeSet<_>>();
+                    intersection = Some(match intersection {
+                        Some(current) => current.intersection(&ids).copied().collect(),
+                        None => ids,
+                    });
+                }
+                complete.then(|| intersection.unwrap_or_default().into_iter().collect())
+            }
+        };
+        let Some(ids) = ids else {
+            return Ok(input);
+        };
+        let allowed = ids.into_iter().collect::<BTreeSet<_>>();
+        Ok(NodeSet::from_rows(
+            input
+                .into_rows()
+                .into_iter()
+                .filter(|row| allowed.contains(&row.id))
+                .collect(),
+        ))
+    }
+}
+
+pub struct PayloadFilter {
+    pub filter: Filter,
+}
+
+impl<T: VectorType> PipelineOperator<T> for PayloadFilter {
+    fn name(&self) -> &'static str {
+        "filter"
+    }
+
+    fn apply(&self, mut input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        input.rows.retain(|row| {
+            context
+                .memtable
+                .get_payload(row.id)
+                .is_some_and(|payload| self.filter.matches(&payload))
+        });
+        Ok(input)
+    }
+}
+
+pub struct Limit {
+    pub limit: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for Limit {
+    fn name(&self) -> &'static str {
+        "limit"
+    }
+
+    fn apply(&self, mut input: NodeSet, _context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        input.rows.truncate(self.limit);
+        Ok(input)
+    }
+}
+
+pub struct Expand {
+    pub min_depth: usize,
+    pub max_depth: usize,
+    pub labels: Option<Vec<String>>,
+    pub direction: ReachabilityDirection,
+    pub include_input: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExpandHit {
+    target_id: NodeId,
+    source_id: NodeId,
+    depth: usize,
+}
+
+#[derive(Debug)]
+struct ExpandSourceOutput {
+    hits: Vec<ExpandHit>,
+    visited_nodes: usize,
+    examined_edges: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for Expand {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "expand"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        // 遍历期间只追加紧凑命中记录；结果确定后一次排序、线性分组并物化 NodeRow。
+        // 这避免在热路径维护包含大 NodeRow 的树，也不承担通用 HashMap 的哈希成本。
+        let mut sources = input.rows.iter().map(|row| row.id).collect::<Vec<_>>();
+        sources.sort_unstable();
+        sources.dedup();
+        let traversal = context.budget.traversal;
+        let config = ReachabilityConfig {
+            min_depth: self.min_depth,
+            max_depth: self.max_depth.min(traversal.max_depth),
+            labels: self.labels.clone(),
+            direction: self.direction,
+            max_visited_nodes: traversal.max_visited_nodes,
+            max_results: context.budget.max_nodes,
+            max_edges: traversal.max_examined_edges,
+            max_frontier_size: traversal.max_frontier_size,
+            exhaustion_policy: BudgetExhaustionPolicy::Error,
+        };
+        let request = context.graph_request()?;
+        let traverse_source = |&source_id: &NodeId| -> Result<ExpandSourceOutput> {
+            let reached = request.run(|| traverse_compact(&context.graph(), source_id, &config))?;
+            Ok(ExpandSourceOutput {
+                hits: reached
+                    .results
+                    .into_iter()
+                    .map(|target| ExpandHit {
+                        target_id: target.target_id,
+                        source_id,
+                        depth: target.depth,
+                    })
+                    .collect(),
+                visited_nodes: reached.visited_nodes,
+                examined_edges: reached.traversed_edges,
+            })
+        };
+        let graph_stats = context
+            .graph_scope
+            .as_ref()
+            .map(|graph| graph.stats.clone())
+            .unwrap_or_else(|| context.memtable.graph_stats());
+        let estimated_reachable = if sources.len() == 1 {
+            let degree = graph_stats.avg_out_degree.max(1.0);
+            (0..self.max_depth).fold(1.0f64, |total, _| {
+                (total * degree).min(graph_stats.node_count as f64)
+            }) as usize
+        } else {
+            sources.len()
+        };
+        let threads = if sources.len() == 1 && estimated_reachable < 100_000 {
+            1
+        } else {
+            context.budget.parallelism.threads(estimated_reachable)
+        };
+        let outputs = if sources.len() == 1 && threads > 1 {
+            vec![context.run_graph(threads, || {
+                let source_id = sources[0];
+                let reached = traverse_compact_parallel(&context.graph(), source_id, &config)?;
+                Ok::<_, TriviumError>(ExpandSourceOutput {
+                    hits: reached
+                        .results
+                        .into_iter()
+                        .map(|target| ExpandHit {
+                            target_id: target.target_id,
+                            source_id,
+                            depth: target.depth,
+                        })
+                        .collect(),
+                    visited_nodes: reached.visited_nodes,
+                    examined_edges: reached.traversed_edges,
+                })
+            })?]
+        } else if threads == 1 {
+            sources
+                .iter()
+                .map(traverse_source)
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            query_pool(context.memtable.resource_runtime(), threads)?.install(|| {
+                sources
+                    .par_iter()
+                    .map(traverse_source)
+                    .collect::<Result<Vec<_>>>()
+            })?
+        };
+        let mut hits = Vec::<ExpandHit>::new();
+        let mut visited_nodes = 0usize;
+        let mut examined_edges = 0usize;
+        for output in outputs {
+            visited_nodes = visited_nodes.saturating_add(output.visited_nodes);
+            examined_edges = examined_edges.saturating_add(output.examined_edges);
+            if visited_nodes > traversal.max_visited_nodes
+                || examined_edges > traversal.max_examined_edges
+            {
+                return Err(TriviumError::QueryExecution(
+                    "多源图扩展超过全局遍历预算 (Multi-source expansion exceeds global traversal budget)".into(),
+                ));
+            }
+            hits.extend(output.hits);
+        }
+        hits.sort_unstable_by_key(|hit| (hit.target_id, hit.source_id, hit.depth));
+        if input.rows.iter().any(|row| row.bindings.is_some()) {
+            let mut parents = BTreeMap::<NodeId, Vec<&NodeRow>>::new();
+            for row in &input.rows {
+                parents.entry(row.id).or_default().push(row);
+            }
+            let mut expanded = Vec::new();
+            for hit in hits {
+                for parent in &parents[&hit.source_id] {
+                    if expanded.len() >= context.budget.max_nodes {
+                        return Err(TriviumError::QueryExecution(
+                            "扩展绑定行超过节点预算 (Expanded binding rows exceed node budget)"
+                                .into(),
+                        ));
+                    }
+                    let mut row = NodeRow::new(hit.target_id);
+                    row.bindings = parent.bindings.clone();
+                    row.provenance.source_ids = vec![hit.source_id];
+                    row.provenance.min_depth = Some(hit.depth);
+                    row.graph_score = Some(ScoreValue {
+                        value: 1.0 / hit.depth.max(1) as f64,
+                        kind: ScoreKind::Exact,
+                    });
+                    expanded.push(row);
+                }
+            }
+            if self.include_input {
+                expanded.extend(input.rows);
+            }
+            return Ok(NodeSet::from_rows(expanded));
+        }
+        let mut expanded_rows = Vec::new();
+        let mut cursor = 0usize;
+        while cursor < hits.len() {
+            let target_id = hits[cursor].target_id;
+            let mut row = NodeRow::new(target_id);
+            let mut min_depth = usize::MAX;
+            while cursor < hits.len() && hits[cursor].target_id == target_id {
+                let hit = hits[cursor];
+                if row.provenance.source_ids.last().copied() != Some(hit.source_id) {
+                    row.provenance.source_ids.push(hit.source_id);
+                }
+                min_depth = min_depth.min(hit.depth);
+                cursor += 1;
+            }
+            row.provenance.min_depth = Some(min_depth);
+            row.graph_score = Some(ScoreValue {
+                value: 1.0 / min_depth.max(1) as f64,
+                kind: ScoreKind::Exact,
+            });
+            expanded_rows.push(row);
+        }
+        if !self.include_input {
+            return Ok(NodeSet {
+                rows: expanded_rows,
+            });
+        }
+        Ok(NodeSet::from_rows(
+            input.rows.into_iter().chain(expanded_rows).collect(),
+        ))
+    }
+}
+
+pub struct ExpandExactRerank<T: VectorType> {
+    pub expand: Expand,
+    pub query: Vec<T>,
+    pub top_k: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for ExpandExactRerank<T> {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "expand_exact_rerank"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let expanded = self.expand.apply(input, context)?;
+        ExactRerank {
+            query: self.query.clone(),
+            top_k: Some(self.top_k),
+        }
+        .apply(expanded, context)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorAggregation {
+    Sum,
+    Max,
+    WeightedSum,
+}
+
+/// 多锚点扩展：保留所有命中锚点来源，并显式聚合锚点贡献。
+pub struct MultiAnchorExpand {
+    pub max_depth: usize,
+    pub labels: Option<Vec<String>>,
+    pub direction: ReachabilityDirection,
+    pub anchor_weights: BTreeMap<NodeId, f32>,
+    pub aggregation: AnchorAggregation,
+}
+
+impl<T: VectorType> PipelineOperator<T> for MultiAnchorExpand {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "multi_anchor_expand"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let mut output = BTreeMap::<NodeId, NodeRow>::new();
+        let mut visited_nodes = 0usize;
+        let mut examined_edges = 0usize;
+        for source in input.rows {
+            let reached = traverse_compact(
+                &context.graph(),
+                source.id,
+                &ReachabilityConfig {
+                    min_depth: 1,
+                    max_depth: self.max_depth.min(context.budget.traversal.max_depth),
+                    labels: self.labels.clone(),
+                    direction: self.direction,
+                    max_visited_nodes: context.budget.traversal.max_visited_nodes,
+                    max_results: context.budget.max_nodes,
+                    max_edges: context.budget.traversal.max_examined_edges,
+                    max_frontier_size: context.budget.traversal.max_frontier_size,
+                    exhaustion_policy: BudgetExhaustionPolicy::Error,
+                },
+            )?;
+            visited_nodes = visited_nodes.saturating_add(reached.visited_nodes);
+            examined_edges = examined_edges.saturating_add(reached.traversed_edges);
+            if visited_nodes > context.budget.traversal.max_visited_nodes
+                || examined_edges > context.budget.traversal.max_examined_edges
+            {
+                return Err(TriviumError::QueryExecution(
+                    "多锚点扩展超过全局遍历预算 (Multi-anchor expansion exceeds global traversal budget)".into(),
+                ));
+            }
+            let anchor_weight = self.anchor_weights.get(&source.id).copied().unwrap_or(1.0);
+            for target in reached.results {
+                let base = 1.0 / target.depth.max(1) as f64;
+                let contribution = match self.aggregation {
+                    AnchorAggregation::WeightedSum => base * f64::from(anchor_weight),
+                    AnchorAggregation::Sum | AnchorAggregation::Max => base,
+                };
+                let row = output.entry(target.target_id).or_insert_with(|| {
+                    let mut row = NodeRow::new(target.target_id);
+                    row.graph_score = Some(ScoreValue {
+                        value: 0.0,
+                        kind: ScoreKind::Exact,
+                    });
+                    row
+                });
+                let current = row.graph_score.map_or(0.0, |score| score.value);
+                row.graph_score = Some(ScoreValue {
+                    value: match self.aggregation {
+                        AnchorAggregation::Max => current.max(contribution),
+                        AnchorAggregation::Sum | AnchorAggregation::WeightedSum => {
+                            current + contribution
+                        }
+                    },
+                    kind: ScoreKind::Exact,
+                });
+                if row.provenance.source_ids.last().copied() != Some(source.id) {
+                    row.provenance.source_ids.push(source.id);
+                }
+                row.provenance.min_depth = Some(
+                    row.provenance
+                        .min_depth
+                        .map_or(target.depth, |depth| depth.min(target.depth)),
+                );
+            }
+        }
+        Ok(NodeSet::from_rows(output.into_values().collect()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathStrengthAggregation {
+    MaxProduct,
+    SumProduct,
+    AverageWeight,
+}
+
+/// 从输入锚点到目标集合执行批量最短路径。
+pub struct BatchShortestPaths {
+    pub targets: Vec<NodeId>,
+    pub label_filter: Option<String>,
+}
+
+impl<T: VectorType> PipelineOperator<T> for BatchShortestPaths {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "batch_shortest_paths"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let mut output = BTreeMap::<NodeId, NodeRow>::new();
+        let mut consumed_nodes = 0usize;
+        let mut consumed_edges = 0usize;
+        for source in input.rows {
+            for &target in &self.targets {
+                let result = crate::graph::pathfinding::shortest_path_bidirectional_view(
+                    &context.graph(),
+                    source.id,
+                    target,
+                    self.label_filter.as_deref(),
+                    &context.budget.traversal,
+                )?;
+                consumed_nodes = consumed_nodes.saturating_add(result.metrics.visited_nodes);
+                consumed_edges = consumed_edges.saturating_add(result.metrics.examined_edges);
+                if consumed_nodes > context.budget.traversal.max_visited_nodes
+                    || consumed_edges > context.budget.traversal.max_examined_edges
+                {
+                    return Err(TriviumError::QueryExecution(
+                        "批量最短路径超过全局遍历预算 (Batch shortest paths exceed global traversal budget)".into(),
+                    ));
+                }
+                let Some(path) = result.path else {
+                    continue;
+                };
+                let depth = path.len().saturating_sub(1);
+                let candidate = NodeRow {
+                    id: target,
+                    graph_score: Some(ScoreValue {
+                        value: 1.0 / depth.max(1) as f64,
+                        kind: ScoreKind::Exact,
+                    }),
+                    path_count: Some(1),
+                    path: Some(path),
+                    provenance: Provenance {
+                        source_ids: vec![source.id],
+                        min_depth: Some(depth),
+                        property_origin: source.provenance.property_origin.clone(),
+                    },
+                    ..NodeRow::new(target)
+                };
+                if let Some(existing) = output.get_mut(&target) {
+                    merge_row(existing, &candidate);
+                } else {
+                    output.insert(target, candidate);
+                }
+            }
+        }
+        Ok(NodeSet::from_rows(output.into_values().collect()))
+    }
+}
+
+/// 从输入锚点到目标集合枚举有界简单路径并聚合路径强度。
+pub struct WeightedShortestPathsOperator {
+    pub targets: Vec<NodeId>,
+    pub label_filter: Option<String>,
+}
+
+impl<T: VectorType> PipelineOperator<T> for WeightedShortestPathsOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "weighted_dijkstra"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        if context.graph().node_count() > context.budget.max_nodes {
+            return Err(TriviumError::QueryExecution(
+                "加权最短路径全图节点数超过预算 (Weighted shortest path graph exceeds node budget)"
+                    .into(),
+            ));
+        }
+        let universe = context.graph().all_node_ids().into_iter().collect();
+        let workspace = crate::graph::analytics::build_workspace_view(
+            &context.graph(),
+            &universe,
+            self.label_filter.as_deref(),
+            context.budget.traversal.max_examined_edges,
+            context.budget.max_node_set_bytes,
+        )?;
+        let request_count = input
+            .len()
+            .checked_mul(self.targets.len())
+            .ok_or_else(|| TriviumError::QueryExecution("加权最短路径请求数量溢出".into()))?;
+        let request_budget = context
+            .budget
+            .traversal
+            .max_examined_edges
+            .checked_div(request_count.max(1))
+            .unwrap_or(0);
+        let mut rows = Vec::new();
+        for source in input.rows {
+            for &target in &self.targets {
+                let Some(path) = crate::graph::analytics::weighted_dijkstra(
+                    &workspace,
+                    source.id,
+                    target,
+                    request_budget,
+                )?
+                else {
+                    continue;
+                };
+                let mut row = NodeRow::new(target);
+                row.path = Some(path.nodes.clone());
+                row.path_count = Some(1);
+                row.provenance.source_ids = vec![source.id];
+                row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+                row.set_graph_metric(
+                    GraphMetric::WeightedDistance,
+                    ScoreValue {
+                        value: path.cost,
+                        kind: ScoreKind::Exact,
+                    },
+                )?;
+                rows.push(row);
+            }
+        }
+        Ok(NodeSet::from_rows(rows))
+    }
+}
+
+pub struct YenKShortestPathsOperator {
+    pub targets: Vec<NodeId>,
+    pub label_filter: Option<String>,
+    pub k: usize,
+}
+
+impl<T: VectorType> PipelineOperator<T> for YenKShortestPathsOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "yen_k_shortest_paths"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        if context.graph().node_count() > context.budget.max_nodes {
+            return Err(TriviumError::QueryExecution(
+                "Yen 全图节点数超过预算 (Yen graph exceeds node budget)".into(),
+            ));
+        }
+        let universe = context.graph().all_node_ids().into_iter().collect();
+        let workspace = crate::graph::analytics::build_workspace_view(
+            &context.graph(),
+            &universe,
+            self.label_filter.as_deref(),
+            context.budget.traversal.max_examined_edges,
+            context.budget.max_node_set_bytes,
+        )?;
+        let mut rows = Vec::new();
+        for source in input.rows {
+            for &target in &self.targets {
+                let paths = crate::graph::analytics::yen_k_shortest_paths(
+                    &workspace,
+                    source.id,
+                    target,
+                    self.k,
+                    context.budget.traversal.max_examined_edges,
+                    context.budget.max_nodes,
+                )?;
+                for (rank, path) in paths.into_iter().enumerate() {
+                    let mut row = NodeRow::new(target);
+                    row.path = Some(path.nodes.clone());
+                    row.path_count = Some(1);
+                    row.path_rank = Some(rank + 1);
+                    row.provenance.source_ids = vec![source.id];
+                    row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+                    row.set_graph_metric(
+                        GraphMetric::WeightedDistance,
+                        ScoreValue {
+                            value: path.cost,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                    rows.push(row);
+                }
+            }
+        }
+        Ok(NodeSet::from_rows(rows))
+    }
+}
+
+pub struct NodeSimilarityOperator {
+    pub label_filter: Option<String>,
+    pub top_k: usize,
+    pub cutoff: f64,
+}
+
+impl<T: VectorType> PipelineOperator<T> for NodeSimilarityOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "node_similarity"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let universe = ids(&input);
+        let workspace = crate::graph::analytics::build_workspace_view(
+            &context.graph(),
+            &universe,
+            self.label_filter.as_deref(),
+            context.budget.traversal.max_examined_edges,
+            context.budget.max_node_set_bytes,
+        )?;
+        let pairs = crate::graph::analytics::node_similarity(
+            &workspace,
+            self.top_k,
+            self.cutoff,
+            context.budget.traversal.max_examined_edges,
+            context.budget.max_node_set_bytes,
+        )?;
+        let mut rows = Vec::with_capacity(pairs.pairs().len());
+        for pair in pairs.pairs() {
+            let mut row = NodeRow::new(pair.left);
+            row.pair = Some((pair.left, pair.right));
+            row.provenance.source_ids = vec![pair.left, pair.right];
+            row.set_graph_metric(
+                GraphMetric::NodeSimilarity,
+                ScoreValue {
+                    value: pair.similarity,
+                    kind: ScoreKind::Exact,
+                },
+            )?;
+            rows.push(row);
+        }
+        Ok(NodeSet::from_rows(rows))
+    }
+}
+
+pub struct BoundedAllPaths {
+    pub targets: Vec<NodeId>,
+    pub config: crate::graph::pathfinding::BoundedPathConfig,
+    pub aggregation: PathStrengthAggregation,
+}
+
+impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "bounded_all_paths"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let mut output = BTreeMap::<NodeId, NodeRow>::new();
+        let mut consumed_nodes = 0usize;
+        let mut consumed_edges = 0usize;
+        for source in input.rows {
+            for &target in &self.targets {
+                let result = crate::graph::pathfinding::bounded_all_paths_view(
+                    &context.graph(),
+                    source.id,
+                    target,
+                    &self.config,
+                    &TraversalBudget {
+                        exhaustion_policy: BudgetExhaustionPolicy::Error,
+                        ..context.budget.traversal
+                    },
+                )?;
+                consumed_nodes = consumed_nodes.saturating_add(result.metrics.visited_nodes);
+                consumed_edges = consumed_edges.saturating_add(result.metrics.examined_edges);
+                if consumed_nodes > context.budget.traversal.max_visited_nodes
+                    || consumed_edges > context.budget.traversal.max_examined_edges
+                {
+                    return Err(TriviumError::QueryExecution(
+                        "批量全路径超过全局遍历预算 (Batch all-paths exceed global traversal budget)".into(),
+                    ));
+                }
+                if result.paths.is_empty() {
+                    continue;
+                }
+                let score = match self.aggregation {
+                    PathStrengthAggregation::MaxProduct => result
+                        .paths
+                        .iter()
+                        .map(|path| path.strength_product)
+                        .max_by(f32::total_cmp)
+                        .unwrap_or(0.0),
+                    PathStrengthAggregation::SumProduct => result
+                        .paths
+                        .iter()
+                        .map(|path| f64::from(path.strength_product))
+                        .sum::<f64>()
+                        as f32,
+                    PathStrengthAggregation::AverageWeight => {
+                        (result
+                            .paths
+                            .iter()
+                            .map(|path| f64::from(path.strength_average))
+                            .sum::<f64>()
+                            / result.paths.len() as f64) as f32
+                    }
+                };
+                if !score.is_finite() {
+                    return Err(TriviumError::QueryExecution(
+                        "路径聚合分数超出有限 f32 范围 (Path aggregate score exceeds the finite f32 range)".into(),
+                    ));
+                }
+                let best_path = result
+                    .paths
+                    .iter()
+                    .max_by(|left, right| {
+                        left.strength_product
+                            .total_cmp(&right.strength_product)
+                            .then_with(|| right.nodes.cmp(&left.nodes))
+                    })
+                    .map(|path| path.nodes.clone());
+                let depth = best_path
+                    .as_ref()
+                    .map_or(0, |path| path.len().saturating_sub(1));
+                let candidate = NodeRow {
+                    id: target,
+                    path_strength: Some(ScoreValue {
+                        value: f64::from(score),
+                        kind: ScoreKind::Exact,
+                    }),
+                    path_count: Some(result.paths.len()),
+                    path: best_path,
+                    provenance: Provenance {
+                        source_ids: vec![source.id],
+                        min_depth: Some(depth),
+                        property_origin: source.provenance.property_origin.clone(),
+                    },
+                    ..NodeRow::new(target)
+                };
+                if let Some(existing) = output.get_mut(&target) {
+                    merge_row(existing, &candidate);
+                } else {
+                    output.insert(target, candidate);
+                }
+            }
+        }
+        Ok(NodeSet::from_rows(output.into_values().collect()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphSubsetMode {
+    Induced,
+    Expand {
+        hops: usize,
+        labels: Option<Vec<String>>,
+        direction: ReachabilityDirection,
+    },
+    Boundary {
+        hops: usize,
+        labels: Option<Vec<String>>,
+        direction: ReachabilityDirection,
+    },
+}
+
+fn graph_subset<T: VectorType>(
+    input: &NodeSet,
+    mode: &GraphSubsetMode,
+    context: &mut PipelineContext<'_, T>,
+) -> Result<(BTreeSet<NodeId>, BTreeSet<NodeId>)> {
+    let original = ids(input);
+    match mode {
+        GraphSubsetMode::Induced => Ok((original.clone(), original)),
+        GraphSubsetMode::Expand {
+            hops,
+            labels,
+            direction,
+        }
+        | GraphSubsetMode::Boundary {
+            hops,
+            labels,
+            direction,
+        } => {
+            let expanded = Expand {
+                min_depth: 1,
+                max_depth: *hops,
+                labels: labels.clone(),
+                direction: *direction,
+                include_input: true,
+            }
+            .apply(input.clone(), context)?;
+            let universe = ids(&expanded);
+            let output = if matches!(mode, GraphSubsetMode::Boundary { .. }) {
+                original
+            } else {
+                universe.clone()
+            };
+            Ok((universe, output))
+        }
+    }
+}
+
+pub struct PageRankOperator {
+    pub mode: GraphSubsetMode,
+    pub config: crate::graph::subset::SubsetPageRankConfig,
+    pub label_filter: Option<String>,
+}
+
+impl<T: VectorType> PipelineOperator<T> for PageRankOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "subset_pagerank"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
+        let threads = context.budget.parallelism.threads(universe.len());
+        let result = context.run_graph(threads, || {
+            if threads == 1 {
+                crate::graph::subset::subset_pagerank_view(
+                    &context.graph(),
+                    &universe,
+                    self.config,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            } else {
+                crate::graph::subset::subset_pagerank_parallel_view(
+                    &context.graph(),
+                    &universe,
+                    self.config,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            }
+        })?;
+        let mut rows = rows_by_id(&input)
+            .into_iter()
+            .map(|(id, row)| (id, row.clone()))
+            .collect::<HashMap<_, _>>();
+        for (id, score) in result.scores {
+            if output_ids.contains(&id) {
+                let row = rows.entry(id).or_insert_with(|| NodeRow::new(id));
+                let score = ScoreValue {
+                    value: score,
+                    kind: ScoreKind::Exact,
+                };
+                row.graph_score = Some(score);
+                row.graph_metrics.insert(GraphMetric::PageRank, score);
+            }
+        }
+        Ok(NodeSet {
+            rows: output_ids
+                .into_iter()
+                .filter_map(|id| rows.remove(&id))
+                .collect(),
+        })
+    }
+}
+
+pub struct DegreeCentralityOperator {
+    pub mode: GraphSubsetMode,
+    pub label_filter: Option<String>,
+}
+
+impl<T: VectorType> PipelineOperator<T> for DegreeCentralityOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "subset_degree_centrality"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
+        let degree_threads = context.budget.parallelism.threads(universe.len());
+        let (scores, _) = context.run_graph(degree_threads, || {
+            if degree_threads == 1 {
+                crate::graph::subset::subset_degree_centrality_view(
+                    &context.graph(),
+                    &universe,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            } else {
+                crate::graph::subset::subset_degree_centrality_parallel_view(
+                    &context.graph(),
+                    &universe,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            }
+        })?;
+        let old = rows_by_id(&input);
+        let build_row = |score: &crate::graph::subset::SubsetDegreeCentrality| {
+            if !output_ids.contains(&score.id) {
+                return None;
+            }
+            let mut row = old
+                .get(&score.id)
+                .map_or_else(|| NodeRow::new(score.id), |row| (*row).clone());
+            row.graph_score = Some(ScoreValue {
+                value: score.normalized,
+                kind: ScoreKind::Exact,
+            });
+            Some(row)
+        };
+        let rows = if degree_threads == 1 {
+            scores.iter().filter_map(build_row).collect()
+        } else {
+            query_pool(context.memtable.resource_runtime(), degree_threads)?
+                .install(|| scores.par_iter().filter_map(build_row).collect())
+        };
+        Ok(NodeSet { rows })
+    }
+}
+
+pub struct BetweennessOperator {
+    pub mode: GraphSubsetMode,
+    pub label_filter: Option<String>,
+    pub sample_size: Option<usize>,
+}
+
+impl<T: VectorType> PipelineOperator<T> for BetweennessOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "subset_betweenness"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
+        let threads = context.budget.parallelism.threads(universe.len());
+        let result = context.run_graph(threads, || {
+            if threads == 1 {
+                crate::graph::subset::subset_betweenness_view(
+                    &context.graph(),
+                    &universe,
+                    self.label_filter.as_deref(),
+                    self.sample_size,
+                    context.budget.traversal.max_examined_edges,
+                )
+            } else {
+                crate::graph::subset::subset_betweenness_parallel_view(
+                    &context.graph(),
+                    &universe,
+                    self.label_filter.as_deref(),
+                    self.sample_size,
+                    context.budget.traversal.max_examined_edges,
+                )
+            }
+        })?;
+        let old = rows_by_id(&input);
+        let kind = if result.exact {
+            ScoreKind::Exact
+        } else {
+            ScoreKind::Approximate
+        };
+        let rows = result
+            .scores
+            .into_iter()
+            .filter(|(id, _)| output_ids.contains(id))
+            .map(|(id, score)| {
+                let mut row = old
+                    .get(&id)
+                    .map_or_else(|| NodeRow::new(id), |row| (*row).clone());
+                row.graph_score = Some(ScoreValue { value: score, kind });
+                row
+            })
+            .collect();
+        Ok(NodeSet { rows })
+    }
+}
+
+pub struct WccOperator {
+    pub mode: GraphSubsetMode,
+    pub label_filter: Option<String>,
+}
+
+impl<T: VectorType> PipelineOperator<T> for WccOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "subset_wcc"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
+        let threads = context.budget.parallelism.threads(universe.len());
+        let (components, _) = context.run_graph(threads, || {
+            if threads == 1 {
+                crate::graph::subset::subset_wcc_view(
+                    &context.graph(),
+                    &universe,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            } else {
+                crate::graph::subset::subset_wcc_parallel_view(
+                    &context.graph(),
+                    &universe,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            }
+        })?;
+        let old = rows_by_id(&input);
+        let mut memberships = BTreeMap::new();
+        for (index, component) in components.into_iter().enumerate() {
+            for id in component {
+                memberships.insert(id, index as u64 + 1);
+            }
+        }
+        let rows = output_ids
+            .into_iter()
+            .map(|id| {
+                let mut row = old
+                    .get(&id)
+                    .map_or_else(|| NodeRow::new(id), |row| (*row).clone());
+                row.community_id = memberships.get(&id).copied();
+                row
+            })
+            .collect();
+        Ok(NodeSet { rows })
+    }
+}
+
+pub struct LeidenOperator {
+    pub mode: GraphSubsetMode,
+    pub config: crate::graph::leiden::LeidenConfig,
+}
+
+impl<T: VectorType> PipelineOperator<T> for LeidenOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "leiden_modularity"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
+        let allowed = universe.iter().copied().collect::<BTreeSet<_>>();
+        let mut edges = HashMap::new();
+        let mut examined = 0usize;
+        for &source in &universe {
+            let mut neighbors = Vec::new();
+            for edge in context.graph().get_edges(source).unwrap_or(&[]) {
+                examined = examined.saturating_add(1);
+                if examined > context.budget.traversal.max_examined_edges {
+                    return Err(TriviumError::QueryExecution(
+                        "Leiden 检查边数量超过预算 (Leiden examined-edge budget exceeded)".into(),
+                    ));
+                }
+                if allowed.contains(&edge.target_id) {
+                    neighbors.push((edge.target_id, edge.weight));
+                }
+            }
+            edges.insert(source, neighbors);
+        }
+        let result = crate::graph::leiden::run_leiden_controlled(
+            &crate::graph::leiden::AdjacencySnapshot {
+                edges,
+                node_ids: universe.into_iter().collect(),
+            },
+            &self.config,
+            &context.query_control.clone().unwrap_or_default(),
+        )?;
+        let old = rows_by_id(&input);
+        let rows = output_ids
+            .into_iter()
+            .filter_map(|id| {
+                let community = result.node_to_cluster.get(&id).copied()?;
+                let mut row = old
+                    .get(&id)
+                    .map_or_else(|| NodeRow::new(id), |row| (*row).clone());
+                row.community_id = Some(community as u64);
+                Some(row)
+            })
+            .collect();
+        Ok(NodeSet { rows })
+    }
+}
+
+/// 确定性加权标签传播算子。它不是 Leiden，质量标记固定为近似。
+pub struct LabelPropagationOperator {
+    pub mode: GraphSubsetMode,
+    pub config: crate::graph::subset::LabelPropagationConfig,
+    pub label_filter: Option<String>,
+}
+
+impl<T: VectorType> PipelineOperator<T> for LabelPropagationOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "deterministic_label_propagation"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
+        let threads = context.budget.parallelism.threads(universe.len());
+        let result = context.run_graph(threads, || {
+            if threads == 1 {
+                crate::graph::subset::deterministic_label_propagation_view(
+                    &context.graph(),
+                    &universe,
+                    self.config,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            } else {
+                crate::graph::subset::deterministic_label_propagation_parallel_view(
+                    &context.graph(),
+                    &universe,
+                    self.config,
+                    self.label_filter.as_deref(),
+                    context.budget.traversal.max_examined_edges,
+                )
+            }
+        })?;
+        let old = rows_by_id(&input);
+        let rows = output_ids
+            .into_iter()
+            .filter_map(|id| {
+                let community = result.node_to_community.get(&id).copied()?;
+                let mut row = old
+                    .get(&id)
+                    .map_or_else(|| NodeRow::new(id), |row| (*row).clone());
+                row.community_id = Some(community);
+                Some(row)
+            })
+            .collect();
+        Ok(NodeSet { rows })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuralAlgorithm {
+    Scc,
+    KCore,
+    ArticulationPoints,
+    TriangleCount,
+    Hits,
+    HarmonicCentrality,
+}
+
+pub struct StructuralGraphOperator {
+    pub mode: GraphSubsetMode,
+    pub algorithm: StructuralAlgorithm,
+    pub label_filter: Option<String>,
+    pub max_iterations: usize,
+    pub tolerance: f64,
+}
+
+impl<T: VectorType> PipelineOperator<T> for StructuralGraphOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        match self.algorithm {
+            StructuralAlgorithm::Scc => "subset_scc",
+            StructuralAlgorithm::KCore => "subset_k_core",
+            StructuralAlgorithm::ArticulationPoints => "subset_articulation_points",
+            StructuralAlgorithm::TriangleCount => "subset_triangle_count",
+            StructuralAlgorithm::Hits => "subset_hits",
+            StructuralAlgorithm::HarmonicCentrality => "subset_harmonic_centrality",
+        }
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let (universe, output_ids) = graph_subset(&input, &self.mode, context)?;
+        if universe.len() > context.budget.max_nodes {
+            return Err(TriviumError::QueryExecution(
+                "图算法节点数超过预算 (Graph algorithm node count exceeds budget)".into(),
+            ));
+        }
+        let workspace = crate::graph::analytics::build_workspace_view(
+            &context.graph(),
+            &universe,
+            self.label_filter.as_deref(),
+            context.budget.traversal.max_examined_edges,
+            context.budget.max_node_set_bytes,
+        )?;
+        let old = rows_by_id(&input);
+        let mut rows = output_ids
+            .iter()
+            .map(|&id| {
+                old.get(&id)
+                    .map_or_else(|| NodeRow::new(id), |row| (*row).clone())
+            })
+            .collect::<Vec<_>>();
+        match self.algorithm {
+            StructuralAlgorithm::Scc => {
+                let components =
+                    crate::graph::analytics::strongly_connected_components_controlled(&workspace)?;
+                for row in &mut rows {
+                    row.community_id = components.get(&row.id).copied();
+                }
+            }
+            StructuralAlgorithm::KCore => {
+                let core = crate::graph::analytics::k_core_controlled(&workspace)?;
+                for row in &mut rows {
+                    row.set_graph_metric(
+                        GraphMetric::CoreNumber,
+                        ScoreValue {
+                            value: core.get(&row.id).copied().unwrap_or(0) as f64,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                }
+            }
+            StructuralAlgorithm::ArticulationPoints => {
+                let points = crate::graph::analytics::articulation_points_controlled(&workspace)?;
+                rows.retain(|row| points.contains(&row.id));
+            }
+            StructuralAlgorithm::TriangleCount => {
+                let metrics = crate::graph::analytics::triangle_metrics(
+                    &workspace,
+                    context.budget.traversal.max_examined_edges,
+                )?;
+                for row in &mut rows {
+                    let (triangles, coefficient) =
+                        metrics.get(&row.id).copied().unwrap_or_default();
+                    row.set_graph_metric(
+                        GraphMetric::TriangleCount,
+                        ScoreValue {
+                            value: triangles as f64,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                    row.set_graph_metric(
+                        GraphMetric::ClusteringCoefficient,
+                        ScoreValue {
+                            value: coefficient,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                }
+            }
+            StructuralAlgorithm::Hits => {
+                let scores = crate::graph::analytics::hits(
+                    &workspace,
+                    self.max_iterations,
+                    self.tolerance,
+                    context.budget.traversal.max_examined_edges,
+                )?;
+                for row in &mut rows {
+                    let (authority, hub) = scores.get(&row.id).copied().unwrap_or_default();
+                    row.set_graph_metric(
+                        GraphMetric::Authority,
+                        ScoreValue {
+                            value: authority,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                    row.set_graph_metric(
+                        GraphMetric::Hub,
+                        ScoreValue {
+                            value: hub,
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                }
+            }
+            StructuralAlgorithm::HarmonicCentrality => {
+                let scores = crate::graph::analytics::harmonic_centrality(
+                    &workspace,
+                    context.budget.traversal.max_examined_edges,
+                )?;
+                for row in &mut rows {
+                    row.set_graph_metric(
+                        GraphMetric::HarmonicCentrality,
+                        ScoreValue {
+                            value: scores.get(&row.id).copied().unwrap_or_default(),
+                            kind: ScoreKind::Exact,
+                        },
+                    )?;
+                }
+            }
+        }
+        Ok(NodeSet::from_rows(rows))
+    }
+}
+
+pub fn graph_metric_from_name(name: &str) -> Option<GraphMetric> {
+    match name {
+        "harmonic_centrality" => Some(GraphMetric::HarmonicCentrality),
+        "weighted_distance" => Some(GraphMetric::WeightedDistance),
+        "node_similarity" => Some(GraphMetric::NodeSimilarity),
+        "core_number" => Some(GraphMetric::CoreNumber),
+        "triangle_count" => Some(GraphMetric::TriangleCount),
+        "clustering_coefficient" => Some(GraphMetric::ClusteringCoefficient),
+        "authority_score" => Some(GraphMetric::Authority),
+        "hub_score" => Some(GraphMetric::Hub),
+        _ => None,
+    }
+}
+
+/// 有限深度 SA-PPR 算子。分数质量明确标记为 DepthBounded，而非收敛型 PPR Exact。
+pub struct SaPprOperator {
+    pub max_depth: usize,
+    pub restart_alpha: f32,
+    pub labels: Option<Vec<String>>,
+    pub max_edges_per_node: usize,
+    pub min_edge_weight: f32,
+}
+
+impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "sa_ppr_depth_bounded"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        let traversal = context.budget.traversal;
+        traversal.validate()?;
+        let graph_scope = context.graph_scope.clone();
+        let graph = crate::graph::view::GraphView {
+            facts: context.memtable,
+            scoped: graph_scope.as_deref(),
+        };
+        let control = context.graph_request()?.control().clone();
+        let mut admitted = crate::graph::budget::TraversalMetrics::default();
+        let row_bytes = std::mem::size_of::<NodeRow>()
+            .saturating_mul(2)
+            .saturating_add(256)
+            .saturating_add(input.len().saturating_mul(8));
+        let mut admit = |projected: crate::graph::budget::TraversalMetrics| -> Result<()> {
+            crate::graph::budget::check_control(&control)?;
+            let dimension = if projected.visited_nodes > traversal.max_visited_nodes {
+                Some(crate::graph::budget::BudgetDimension::VisitedNodes)
+            } else if projected.examined_edges > traversal.max_examined_edges {
+                Some(crate::graph::budget::BudgetDimension::ExaminedEdges)
+            } else if projected.peak_frontier_size > traversal.max_frontier_size {
+                Some(crate::graph::budget::BudgetDimension::FrontierSize)
+            } else if projected.depth_reached > traversal.max_depth {
+                Some(crate::graph::budget::BudgetDimension::Depth)
+            } else {
+                None
+            };
+            if let Some(dimension) = dimension {
+                // 管线沿用图扩展的完整结果错误策略。
+                crate::graph::budget::exhausted(
+                    &TraversalBudget {
+                        exhaustion_policy: BudgetExhaustionPolicy::Error,
+                        ..traversal
+                    },
+                    dimension,
+                    admitted,
+                )?;
+            }
+            if projected.visited_nodes > context.budget.max_nodes {
+                return Err(TriviumError::QueryRowBudgetExceeded {
+                    budget: context.budget.max_nodes,
+                });
+            }
+            let bytes = projected
+                .visited_nodes
+                .saturating_mul(row_bytes)
+                .saturating_add(projected.examined_edges.saturating_mul(96))
+                .saturating_add(input.len().saturating_mul(128));
+            let limit = if context.workspace_limit > 0 {
+                context
+                    .workspace_limit
+                    .min(context.budget.max_node_set_bytes)
+            } else {
+                context.budget.max_node_set_bytes
+            };
+            if bytes > limit {
+                return Err(TriviumError::ResourceBudgetExceeded {
+                    resource: "query_memory_bytes",
+                    requested: bytes,
+                    used: 0,
+                    limit,
+                });
+            }
+            if bytes > context.workspace_bytes {
+                context.reserve_row_workspace(
+                    bytes
+                        .max(context.workspace_bytes.saturating_mul(2))
+                        .min(limit),
+                )?;
+            }
+            admitted = projected;
+            Ok(())
+        };
+        admit(crate::graph::budget::TraversalMetrics::default())?;
+        let seeds = input
+            .rows
+            .iter()
+            .filter(|row| graph.contains(row.id))
+            .map(|row| {
+                let score = row
+                    .similarity
+                    .or(row.graph_score)
+                    .map_or(1.0, |score| score.value.max(0.0)) as f32;
+                if !score.is_finite() {
+                    return Err(TriviumError::QueryExecution(
+                        "SA-PPR 种子分数超出有限 f32 范围 (SA-PPR seed score exceeds the finite f32 range)".into(),
+                    ));
+                }
+                Ok(crate::node::SearchHit { id: row.id, score, payload: serde_json::Value::Null })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let hits = crate::graph::traversal::expand_graph_checked(
+            &graph,
+            seeds,
+            self.max_depth,
+            self.restart_alpha,
+            false,
+            0,
+            false,
+            None,
+            self.labels.as_deref(),
+            self.max_edges_per_node,
+            self.min_edge_weight,
+            crate::database::EdgeDirection::Outgoing,
+            admit,
+        )?;
+        Ok(NodeSet::from_rows(
+            hits.into_iter()
+                .map(|(id, score)| {
+                    let mut row = NodeRow::new(id);
+                    let graph_score = ScoreValue {
+                        value: f64::from(score),
+                        kind: ScoreKind::DepthBounded,
+                    };
+                    row.graph_score = Some(graph_score);
+                    row.graph_metrics.insert(GraphMetric::SaPpr, graph_score);
+                    row.provenance.source_ids = input.rows.iter().map(|seed| seed.id).collect();
+                    row.provenance.min_depth = Some(self.max_depth);
+                    row
+                })
+                .collect(),
+        ))
+    }
+}
+
+pub struct BoundedIterate<T: VectorType> {
+    pub operators: Vec<Box<dyn PipelineOperator<T>>>,
+    pub max_iterations: usize,
+    pub stop_on_fixed_point: bool,
+}
+
+impl<T: VectorType> PipelineOperator<T> for BoundedIterate<T> {
+    fn uses_graph(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &'static str {
+        "bounded_iterate"
+    }
+
+    fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
+        if self.max_iterations == 0 {
+            return Err(TriviumError::InvalidInput(
+                "ITERATE 最大轮数必须大于 0 (ITERATE max_iterations must be greater than zero)"
+                    .into(),
+            ));
+        }
+        let mut current = input;
+        let mut seen = ids(&current);
+        for _ in 0..self.max_iterations {
+            let mut next = current.clone();
+            for operator in &self.operators {
+                next = operator.apply(next, context)?;
+                next.normalize();
+                context.validate_output(&next)?;
+            }
+            let next_ids = ids(&next);
+            let new_count = next_ids.difference(&seen).count();
+            seen.extend(next_ids);
+            current = combine_sets(current, next, SetOperation::Union);
+            context.validate_output(&current)?;
+            if self.stop_on_fixed_point && new_count == 0 {
+                break;
+            }
+        }
+        Ok(current)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOperation {
+    Union,
+    Intersect,
+    Difference,
+}
+
+pub fn combine_sets(left: NodeSet, right: NodeSet, operation: SetOperation) -> NodeSet {
+    // 集合接口按 NodeId 返回；同一节点的不同投影环境继续分别保留。
+    let canonical = |rows| {
+        let mut output = NodeSet::from_rows(rows);
+        output.rows.sort_by_key(|row| row.id);
+        output
+    };
+    let mut left = left.into_rows();
+    if matches!(operation, SetOperation::Union) {
+        left.extend(right.into_rows());
+        return canonical(left);
+    }
+    let right = right
+        .into_rows()
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect::<BTreeMap<_, _>>();
+    match operation {
+        SetOperation::Union => {}
+        SetOperation::Intersect => {
+            left.retain_mut(|row| {
+                if let Some(other) = right.get(&row.id) {
+                    merge_row(row, other);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        SetOperation::Difference => left.retain(|row| !right.contains_key(&row.id)),
+    }
+    canonical(left)
+}
+
+pub fn lower_search_entry<T: VectorType>(
+    vector: &[serde_json::Number],
+    top_k: usize,
+    expand: Option<&crate::query::tql_ast::ExpandClause>,
+) -> Result<Vec<Box<dyn PipelineOperator<T>>>> {
+    let mut operators: Vec<Box<dyn PipelineOperator<T>>> = vec![Box::new(ExactVectorSearch {
+        query: vector
+            .iter()
+            .map(T::from_json_number)
+            .collect::<Result<Vec<_>>>()?,
+        top_k,
+    })];
+    if let Some(expand) = expand {
+        let direction = match expand.direction {
+            crate::query::tql_ast::EdgeDirection::Forward => ReachabilityDirection::Outgoing,
+            crate::query::tql_ast::EdgeDirection::Backward => ReachabilityDirection::Incoming,
+            crate::query::tql_ast::EdgeDirection::Both => ReachabilityDirection::Both,
+        };
+        operators.push(Box::new(Expand {
+            min_depth: expand.min_depth,
+            max_depth: expand.max_depth,
+            labels: (!expand.labels.is_empty()).then(|| expand.labels.clone()),
+            direction,
+            include_input: true,
+        }));
+    }
+    Ok(operators)
+}
+
+pub fn ids(set: &NodeSet) -> BTreeSet<NodeId> {
+    set.rows.iter().map(|row| row.id).collect()
+}
+
+pub fn rows_by_id(set: &NodeSet) -> HashMap<NodeId, &NodeRow> {
+    set.rows.iter().map(|row| (row.id, row)).collect()
+}

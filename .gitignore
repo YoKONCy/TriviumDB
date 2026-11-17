@@ -23,6 +23,15 @@ dist/
 !tests/fixtures/v0810_text_mmap/sample.tdb.wal
 !tests/fixtures/v0900_format10/*/*/sample.tdb
 !tests/fixtures/v0900_format10/*/*/sample.tdb.wal
+!tests/fixtures/release_090/*/*/*/sample.tdb
+!tests/fixtures/release_090/*/*/*/sample.tdb.wal
+!tests/fixtures/release_091/*/sample.tdb
+!tests/fixtures/release_091/*/sample.tdb.wal
+!tests/fixtures/document_schema1/*/sample.tdb
+!tests/fixtures/document_schema1/*/sample.tdb.wal
+!tests/fixtures/pre_externalization_format14/*/sample.tdb
+!tests/fixtures/pre_externalization_format14/*/sample.tdb.wal
+!crates/triviumdb-migrate/Cargo.lock
 !tests/fixtures/pre_named_graph_format11/*/sample.tdb
 !tests/fixtures/pre_named_graph_format11/*/sample.tdb.wal
 !tests/fixtures/pre_document_publication_format12/*/sample.tdb
@@ -51,6 +60,7 @@ package-lock.json
 *.qssd.publish-lock
 *.qssd-*.tmp.lease
 !tests/fixtures/quiver_ssd_v1/*.qssd
+!tests/fixtures/quiver_ssd_current/*.qssd
 
 # ══════ 本地规划文档 ══════
 /docs/TEMP-TODO/

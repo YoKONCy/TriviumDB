@@ -1,0 +1,20 @@
+{
+  "dimension": 2,
+  "query": [1.0, 0.0],
+  "records": [
+    {"id": 9, "vector": [1, 0], "score": 1.0, "payload": {"kind": "other", "name": "axis"}},
+    {"id": 2, "vector": [5, 12], "score": 0.38461538461538464, "payload": {"kind": "keep", "name": "tie-two"}},
+    {"id": 1, "vector": [5, 12], "score": 0.38461538461538464, "payload": {"kind": "keep", "name": "tie-one"}},
+    {"id": 8, "vector": [1, 20], "score": 0.04993761694389223, "payload": {"kind": "keep", "name": "low-positive"}},
+    {"id": 4, "vector": [0, 1], "score": 0.0, "payload": {"kind": "keep", "name": "orthogonal"}},
+    {"id": 6, "vector": [-1, 0], "score": -1.0, "payload": {"kind": "keep", "name": "opposite"}}
+  ],
+  "cases": [
+    {"name": "default_threshold", "exact": false, "ids": [9, 1, 2, 8, 4]},
+    {"name": "exact_default_threshold", "exact": true, "ids": [9, 1, 2, 8, 4]},
+    {"name": "exact_payload_filter", "exact": true, "filter": {"kind": "keep"}, "ids": [1, 2, 8, 4]},
+    {"name": "exact_explicit_threshold", "exact": true, "min_score": 0.5, "ids": [9]},
+    {"name": "exact_negative_scores", "exact": true, "min_score": -1.0, "ids": [9, 1, 2, 8, 4, 6]},
+    {"name": "exact_top_k_tie", "exact": true, "top_k": 2, "ids": [9, 1]}
+  ]
+}

@@ -25,7 +25,6 @@ mod request;
 pub mod resources;
 pub mod sdk;
 pub mod storage;
-pub mod tsng;
 
 #[cfg(feature = "test-hooks")]
 pub mod test_hooks;
@@ -60,11 +59,6 @@ pub use sdk::{SharedDatabase, WeakDatabase};
 pub use storage::compaction::{MaintenanceDeferReason, MaintenancePhase, MaintenanceStatus};
 pub use storage::generation::{CurrentGeneration, GenerationReader, GenerationStore};
 pub use storage::memtable::{GraphIntegrityReport, GraphRepairReport, GraphStats};
-pub use tsng::{
-    BeamAdaptation, GraphSignalQuery, IndustrialAccessPath, IndustrialSearchConfig,
-    QueryMemoryBudget, TsngBudget, TsngCost, TsngGroundTruth, TsngHit, TsngQualityMetrics,
-    TsngQuery, TsngSearchConfig, TsngSearchMetrics, TsngSearchResult, TsngWeights, quality_metrics,
-};
 pub mod vector;
 pub use vector::VectorType;
 

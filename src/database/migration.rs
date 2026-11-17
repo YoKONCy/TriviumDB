@@ -13,7 +13,7 @@ struct Destination {
     lease: Option<std::fs::File>,
 }
 
-fn ensure_empty(target: &str) -> Result<()> {
+pub(super) fn ensure_empty(target: &str) -> Result<()> {
     let path = Path::new(target);
     let parent = path.parent().ok_or_else(|| {
         TriviumError::InvalidInput(

@@ -17,18 +17,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &[
-        "",
-        ".wal",
-        ".vec",
-        ".lock",
-        ".flush_ok",
-        ".tmp",
-        ".vec.tmp",
-        ".flush_ok.tmp",
-    ] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 fn seed_flushed_db(path: &str, count: u32) {
@@ -81,9 +70,9 @@ fn open_with_sync(path: &str, mode: SyncMode) -> Database<f32> {
 //  1. WAL 文件被外部清空
 // ════════════════════════════════════════════════════════════════
 
-/// WAL 文件被外部清空为 0 字节后，引擎应能安全启动
+/// 外部截断破坏 WAL 身份时拒绝打开，修复来源后完整检查点仍可读取。
 #[test]
-fn IO_01_WAL文件被清空_安全启动() {
+fn IO_01_WAL头被清空_拒绝并保留修复入口() {
     let path = tmp_db("wal_zeroed");
     cleanup(&path);
 
@@ -98,12 +87,17 @@ fn IO_01_WAL文件被清空_安全启动() {
 
     // 清空 WAL 文件
     let wal_path = format!("{}.wal", path);
+    let original = std::fs::read(&wal_path).unwrap();
     std::fs::write(&wal_path, b"").unwrap();
 
     // 重新打开
     let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
     assert!(result.is_ok(), "WAL 被清空后不应 panic");
-    let db = result.unwrap().unwrap();
+    let error = result.unwrap().err().expect("缺失 WAL 身份必须拒绝");
+    assert_eq!(error.code(), "TDB_CORRUPTED_FILE");
+    assert!(std::fs::read(&wal_path).unwrap().is_empty());
+    std::fs::write(&wal_path, original).unwrap();
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
 
     // flush 过的数据应该还在
     assert_eq!(
@@ -112,6 +106,7 @@ fn IO_01_WAL文件被清空_安全启动() {
         "flush 过的数据不受 WAL 清空影响"
     );
 
+    db.close().unwrap();
     cleanup(&path);
 }
 

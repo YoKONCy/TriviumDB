@@ -1,54 +1,27 @@
 use super::fixture::*;
 use super::mutation::{Mutation, field_boundary_mutations, truncation_mutations};
-use super::spec::{FLUSH_MARKER_V3, FileRole, TDB_HEADER};
+use super::spec::{FLUSH_MARKER, FileRole, TDB_HEADER};
 use triviumdb::database::Database;
 
-fn marker_v2_from_v3(bytes: &[u8]) -> Vec<u8> {
-    let mut marker = bytes[..29].to_vec();
-    marker[4] = 2;
-    marker.extend_from_slice(&bytes[37..45]);
-    marker.extend_from_slice(&crc32fast::hash(&marker).to_le_bytes());
-    marker
-}
-
-fn marker_v1_from_v3(bytes: &[u8]) -> Vec<u8> {
-    let mut marker = bytes[..29].to_vec();
-    marker[4] = 1;
-    marker
-}
-
 #[test]
-fn flush_marker_v1_v2兼容且v3完整字段边界_marker_crc和未知版本矩阵() {
+fn 当前提交标记字段边界_crc及未知版本矩阵() {
     let source = seed("flush_marker_source");
     let marker = std::fs::read(format!("{source}.flush_ok")).unwrap();
-    let generation = u64::from_le_bytes(marker[5..13].try_into().unwrap());
-    let payload_path = format!("{source}.pld.{generation}");
-    let payload = std::fs::read(&payload_path).unwrap();
     assert_eq!(marker.len(), 53);
     assert_eq!(marker[4], 3);
+    let control = Database::<f32>::open_read_only(&source, DIM).unwrap();
+    assert_eq!(control.all_node_ids().unwrap(), [1, 2, 3, 4, 5, 6, 7, 8]);
+    drop(control);
 
-    for legacy in [marker_v1_from_v3(&marker), marker_v2_from_v3(&marker)] {
-        std::fs::write(format!("{source}.flush_ok"), legacy).unwrap();
-        std::fs::write(&payload_path, "旧标记必须忽略残留 sidecar".as_bytes()).unwrap();
-        let database = Database::<f32>::open_read_only(&source, DIM).unwrap();
-        assert_eq!(database.node_count().unwrap(), 8);
-        drop(database);
-        assert_read_only_zero_write(&source);
-    }
-    std::fs::write(format!("{source}.flush_ok"), &marker).unwrap();
-    std::fs::write(&payload_path, payload).unwrap();
-    let mut database = Database::<f32>::open(&source, DIM).unwrap();
-    database.flush().unwrap();
-    drop(database);
-    let marker = std::fs::read(format!("{source}.flush_ok")).unwrap();
-
-    let mutations = field_boundary_mutations(FLUSH_MARKER_V3)
+    let mutations = field_boundary_mutations(FLUSH_MARKER)
         .into_iter()
-        .chain(truncation_mutations(marker.len(), FLUSH_MARKER_V3))
+        .chain(truncation_mutations(marker.len(), FLUSH_MARKER))
         .chain([
             Mutation::FlipBit { offset: 49, bit: 0 },
             Mutation::Append(vec![0xa5; 8]),
-        ]);
+        ])
+        // 边界值可能恰好等于原字段；原始合法输入由上面的正向对照验证。
+        .filter(|mutation| mutation.apply(&marker) != marker);
     for (index, mutation) in mutations.enumerate() {
         let candidate = path(&format!("flush_marker_case_{index}"));
         copy_roles(
@@ -79,7 +52,7 @@ fn marker修复自身crc后_错误尺寸和文件crc仍被语义校验拒绝() {
         "vec_crc",
         "payload_crc",
     ] {
-        let field = *FLUSH_MARKER_V3
+        let field = *FLUSH_MARKER
             .iter()
             .find(|field| field.name == field_name)
             .unwrap();

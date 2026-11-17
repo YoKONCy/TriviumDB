@@ -1,0 +1,143 @@
+{
+  "acknowledged": {
+    "data": {
+      "createdIds": [],
+      "replayed": false,
+      "revision": "86f2234cb58e430ca6492192b540e6da:000000000000000a"
+    },
+    "requestId": "修改",
+    "version": 1
+  },
+  "command": {
+    "command": {
+      "expectedRevision": "86f2234cb58e430ca6492192b540e6da:0000000000000009",
+      "idempotencyKey": "migration-receipt",
+      "operation": "guardedTransaction",
+      "operations": [
+        {
+          "id": "20",
+          "op": "updatePayload",
+          "payload": {
+            "kind": "updated"
+          }
+        }
+      ]
+    },
+    "requestId": "修改",
+    "version": 1
+  },
+  "document": {
+    "blocks": [
+      {
+        "end_byte": 14,
+        "key": "block-0",
+        "kind": "section",
+        "node_id": null,
+        "parent": null,
+        "start_byte": 0
+      },
+      {
+        "end_byte": 6,
+        "key": "block-1",
+        "kind": "heading",
+        "node_id": null,
+        "parent": "block-0",
+        "start_byte": 0
+      },
+      {
+        "end_byte": 13,
+        "key": "block-2",
+        "kind": "paragraph",
+        "node_id": null,
+        "parent": "block-0",
+        "start_byte": 7
+      }
+    ],
+    "content": "标题\n甲乙\n",
+    "content_hash": "sha256:f282645c872eadf8fe40d1bc826e20f39caf82e300efb55e1ec7020fbc25c63d",
+    "document_id": "10",
+    "parser_id": "tdb-markdown-v1:sha256:cc4e3e7caaeadf73655109314b5f57cb48c7b05b33ccd025ff65c2cc54ad9253",
+    "revision": "d3cd5f48-368f-4b26-8d60-a0bcb8280ab5",
+    "schema_version": 2,
+    "source": {
+      "content_hash": "sha256:e6c6e9915f9e07215223f226a865c23acc446bc47fd6575801a00099dc6beff9",
+      "mappings": [
+        {
+          "kind": "exact",
+          "location": {
+            "page": null,
+            "paragraph": null,
+            "region": null
+          },
+          "source_end": 8,
+          "source_start": 2,
+          "text_end": 6,
+          "text_start": 0
+        },
+        {
+          "kind": "synthetic",
+          "location": {
+            "page": null,
+            "paragraph": null,
+            "region": null
+          },
+          "source_end": 9,
+          "source_start": 9,
+          "text_end": 7,
+          "text_start": 6
+        },
+        {
+          "kind": "exact",
+          "location": {
+            "page": null,
+            "paragraph": null,
+            "region": null
+          },
+          "source_end": 16,
+          "source_start": 10,
+          "text_end": 13,
+          "text_start": 7
+        },
+        {
+          "kind": "synthetic",
+          "location": {
+            "page": null,
+            "paragraph": null,
+            "region": null
+          },
+          "source_end": 16,
+          "source_start": 16,
+          "text_end": 14,
+          "text_start": 13
+        }
+      ],
+      "media_type": "text/markdown",
+      "original_text": "# 标题\n\n甲乙"
+    },
+    "source_id": "note.md",
+    "source_revision": "r1"
+  },
+  "graph": {
+    "edges": [
+      {
+        "label": "关联",
+        "metadata": {
+          "source": "migration"
+        },
+        "source_id": "10",
+        "target_id": "20",
+        "weight": 0.5
+      }
+    ],
+    "graph_id": "词",
+    "members": [
+      "10",
+      "20"
+    ],
+    "metadata": {
+      "kind": "shared"
+    },
+    "revision": "01629eda-8788-4f28-ac99-d2f01f7e01cd:1",
+    "schema_version": 1
+  }
+}

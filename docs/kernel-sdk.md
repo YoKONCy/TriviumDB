@@ -1,12 +1,13 @@
 # 内核 SDK 与存储内核分层
 
-> 本文定义 `0.9.1` 嵌入式调用的职责、共享所有权、请求失败与关闭边界。实现入口见 [`src/sdk/`](../src/sdk/mod.rs)，变更记录见[版本说明](changes/0.9.1.md)。
+> 本文定义 `0.9.2-beta.1` 嵌入式调用的职责、共享所有权、请求失败与关闭边界。实现入口见 [`src/sdk/`](../src/sdk/mod.rs)，变更记录见[版本说明](changes/0.9.2-beta.1.md)。
 
 ---
 
 ## 目录
 
 - [职责与依赖](#职责与依赖)
+- [两阶段冻结目标](#两阶段冻结目标)
 - [原生绑定模块组织](#原生绑定模块组织)
 - [当前依赖记录](#当前依赖记录)
 - [共享访问与事务提交](#共享访问与事务提交)
@@ -20,7 +21,7 @@
 
 ## 职责与依赖
 
-QuIVer 冷向量编码位于 Core 的 `index::quiver::cold`，维护版本化行布局、中心化 INT8／INT4、查询表示、字节校验及标量／SIMD 评分。`index::quiver::ssd` 维护 SM 导航、压缩行与共享中心租约、LRU/Pending 缓存、候选预取及驻留转换，`storage::quiver_cold` 与 `storage::quiver_io` 管理流式发布、来源绑定、代际句柄、异步 Direct I/O、排空和暂存回收。`database::quiver_ssd` 计算数据库来源身份，并在 checkpoint 后刷新启用的派生代际。SDK 的 `quiver` 模块转换 JSON 与字符串 ID，Python／Node 复用请求借用和结构化错误。数据库关闭复用现有操作排空和存储释放路径，中心、Reader 缓冲及 I/O 线程分别在内核与共享 Runtime 中准入。当前接口及使用条件见 [QuIVer SSD Reader](quiver.md#ssd-索引制品与-reader)。
+QuIVer 冷向量编码位于 Core 的 `index::quiver::cold`，维护版本化行布局、中心化 INT8／INT4、查询表示、字节校验及标量／SIMD 评分。`index::quiver::runtime` 维护 SM 导航、压缩行与共享中心租约、LRU/Pending 缓存、候选预取及驻留转换，`storage::quiver_cold` 与 `storage::quiver_io` 管理流式发布、来源绑定、代际句柄、异步 Direct I/O、排空和暂存回收。`database::quiver_runtime` 计算数据库来源身份，并在 checkpoint 后刷新启用的派生代际。SDK 的 `quiver` 模块转换 JSON 与字符串 ID，Python／Node 复用请求借用和结构化错误。数据库关闭复用现有操作排空和存储释放路径，中心、Reader 缓冲及 I/O 线程分别在内核与共享 Runtime 中准入。当前接口及使用条件见 [QuIVer SSD Reader](quiver.md#ssd-索引制品与-reader)。
 
 数据库压缩 Reader 在 Core 读写锁内借用主 QuIVer 路由，运行期身份令牌与向量代际共同限定绑定。Reader 维护压缩行、中心、缓存、I/O 及固定账本，主路由由数据库基础堆统一计量。独立 Reader 管理自有路由。来源绑定、流式 CRC 校验、图重建后的重新绑定以及关闭排空均由存储内核完成，SDK 传递 `routing_shared` 等统计字段。
 
@@ -58,6 +59,29 @@ Node 外层配置在已知属性读取前检查对象形状，拒绝数组、函
 
 ---
 
+## 两阶段冻结目标
+
+冻结分为应用侧 SDK 与存储内核两个阶段。本节记录已确定的交付目标，当前实现状态见[文件组与格式演进](storage-format.md#备份与格式演进)。
+
+| 阶段 | 稳定契约 | 内部演进与迁移 |
+| --- | --- | --- |
+| 本次收敛，目标 `1.0.0-beta.1`：SDK 层冻结 | 应用使用的正式 Rust SDK、Python／Node API、TQL、SDK 请求协议、类型声明、错误字段和生命周期语义 | 内部 API、模块组织和存储布局继续演进，SDK 适配内部变化；TDB 版本升级涉及的数据及版本化制品迁移统一由外部脚本显式执行 |
+| `1.0.0`：内核层冻结 | 在 SDK 契约之上，冻结 SDK 与存储内核之间的正式接口、类型、所有权、事务与持久化语义 | 正式内部 API 保持兼容，后续通过兼容新增、缺陷修复和私有实现重构演进；版本迁移继续沿外部脚本入口执行 |
+
+SDK 冻结覆盖调用签名、公开导入、参数与默认值、数据表示、返回结构、错误类别及字段，以及排序、预算、事务、取消、关闭和资源释放等可观察行为。[正式接口清单](sdk-contract.md)登记应用入口、声明来源与内核扩展边界。nightly Server 的 HTTP 和 UI 按各自发布通道管理，调用 Core 时遵守相同 SDK 契约。
+
+`1.0.0` 的内部 API 指 SDK 与存储内核及已登记内核模块之间承担调用契约的接口。私有函数、文件拆分、算法实现和缓存策略可以持续重构，正式调用方的兼容性与已承诺语义保持稳定。SDK 冻结后，宿主沿用既有调用方式，内部接口调整由 SDK 同批适配。
+
+外部脚本承担升级编排、来源与目标版本选择、预检、排他维护租约、有界转换、完整事实校验、目标发布和迁移报告。脚本可以调用版本固定的专用 Rust 迁移程序或来源版本工具，复用经过验证的解码能力。应用以同一脚本入口显式发起迁移，普通 SDK 调用保持稳定；SDK 构造、打开、查询、关闭及后台维护只处理当前格式操作和恢复，需要跨版本转换时返回结构化迁移指引。
+
+当前格式的 WAL 回放、事务恢复、文件组恢复及正常派生索引重建由内核维护。迁移范围覆盖 TDB 管理的数据与版本化制品，应用业务配置和业务规则由宿主管理。历史解码与来源恢复后端在独立迁移 workspace 中维护独立源码，[外部入口](migration.md)在副本恢复并统一文档结构，再通过逻辑事实协议调用当前内核建立目标。`database::inspection::transfer` 维护工具协议及目标导入，`database::inspection` 核验完整事实。生产内核的模块装配维护当前格式路径。
+
+本版正式命名采用 `QuIVer::batch_build`、`quiver::sm::SmIndex` 与 `quiver::runtime::QuiverRuntime`。TSNG 对照入口、旧构图变体和消融特性移入独立研究快照，Rust 根导出与类型化 Reader 仅承接当前生产能力。单元测试内部保留独立标量参考，硬件派发和当前格式故障验证继续维护。调用变化见[版本说明](changes/0.9.2-beta.1.md)，正式使用方式见 [QuIVer](quiver.md)。
+
+> **交付提醒**：SDK 冻结以正式接口清单、跨语言制品验收及外部迁移工具交付为完成条件。`1.0.0` 再验收内核正式接口和持久化契约。磁盘布局保留显式格式身份，已有数据库在升级前保留完整备份。
+
+---
+
 ## 原生绑定模块组织
 
 Python 与 Node 的原生绑定分别位于 [`src/bindings/python/`](../src/bindings/python/mod.rs) 和 [`src/bindings/nodejs/`](../src/bindings/nodejs/mod.rs)。目录入口装配职责模块、dtype 分发宏及公开导出，模块之间显式导入所需类型和转换函数。共享数据库句柄及后端字段在各自语言绑定目录内可见，业务调用沿 SDK 请求借用进入 Core。
@@ -78,6 +102,8 @@ Python 与 Node 的原生绑定分别位于 [`src/bindings/python/`](../src/bind
 | Node `batch_search.rs`、`hook_refs.rs` | 异步检索任务、请求传播及所属事件线程的 Hook 引用清理 |
 
 Python 通过 PyO3 的 `multiple-pymethods` 特性，将同一类的公开方法按职责注册。每个 `#[pyclass]` 在所属模块定义一次，方法实现分布在对应职责文件。Node 的 `#[napi]` 方法实现采用相同的职责划分。Python 的 `.pyi` 从已安装 wheel 生成，npm 的公开声明由 `triviumdb.d.ts` 提供。
+
+Node 的 CommonJS 入口 `index.js` 在包装原生对象后显式导出 `TriviumDB`、`PreparedTql`、`ResourceRuntime`、`ConsoleSession`、`RequestContext`、`verifySnapshot` 和 `restoreSnapshot`，供 CommonJS 与 ESM 使用同一对象及构造器。`JsPreparedTql` 是 `PreparedTql` 的兼容别名。原生 Prepared 类型按公开名称注册，Rust 兼容路径继续导出 `JsPreparedTql`。变更记录见[版本说明](changes/0.9.2-beta.1.md)。
 
 Node 原生注册在 napi-rs 2 装配类之前统一登记 `TriviumDB` 名称，将构造器及各职责实现块的属性装配到同一公开类。注册回调使用 Node 提供的当前环境，并随每个模块实例初始化执行。
 
@@ -145,6 +171,8 @@ fn example() -> triviumdb::Result<()> {
 `sdk::RequestContext` 由 Core 请求控制层定义，保存关联 ID、共享 QueryControl 与写入意图。`request_id()` 返回原 ID，`control()` 供实际查询和事务传播取消及期限。克隆共享同一个取消信号，准入结果对应本次 SDK 调用。事务原子性通过 TxBuilder 和 Core 提交入口提供。
 
 `SharedDatabase::try_read_with_context` 和 `try_write_with_context` 在借用前及取得实例后检查上下文，继续使用立即拒绝的共享锁和重入规则。业务闭包返回的内核错误保留原始阶段与结果。`commit_tx_with_context` 在上下文和内核准入后消费 builder，SDK 准入拒绝保留缓冲并返回 `transaction_consumed=false`，进入 Core 后按实际消费状态返回。事务预检完成、WAL 尚未追加时再次观察取消，拒绝提供 `validation/not_committed`。
+
+Payload 查询账本由 Core 为每次管线执行建立，存储读取入口记录 lookup 和实际解析字节，工作线程通过请求作用域继承所属账本。预算和 PROFILE 共用该账本，实例累计缓存统计由存储层单独维护。作用域 Guard 在执行线程退出时归还当前账本，SDK 负责传递请求身份与执行控制。
 
 ```rust
 use triviumdb::sdk::RequestContext;

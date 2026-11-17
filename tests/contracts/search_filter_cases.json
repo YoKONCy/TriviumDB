@@ -1,0 +1,35 @@
+{
+  "records": [
+    {"id":1,"payload":{"value":null,"scope":"kept"}},
+    {"id":2,"payload":{"scope":"kept"}},
+    {"id":3,"payload":{"value":[]}},
+    {"id":4,"payload":{"value":[1,null,{"zero":-0.0}]}},
+    {"id":5,"payload":{"value":{}}},
+    {"id":6,"payload":{"value":{"a":-0.0,"b":[null,{"x":2}]}}},
+    {"id":7,"payload":{"value":-0.0}},
+    {"id":8,"payload":{"value":0.0}},
+    {"id":9,"payload":{"value":1}},
+    {"id":10,"payload":{"value":"1"}},
+    {"id":11,"payload":{"value":true}},
+    {"id":12,"payload":{"value":false}},
+    {"id":13,"payload":{"a.b":[null,0.0],"":null}}
+  ],
+  "cases": [
+    {"filter":{"value":{"$eq":null}},"ids":[1]},
+    {"filter":{"value":{"$eq":[]}},"ids":[3]},
+    {"filter":{"value":{"$eq":[1,null,{"zero":0.0}]}},"ids":[4]},
+    {"filter":{"value":{"$eq":{}}},"ids":[5]},
+    {"filter":{"value":{"$eq":{"b":[null,{"x":2}],"a":0.0}}},"ids":[6]},
+    {"filter":{"value":{"$eq":0.0}},"ids":[7,8]},
+    {"filter":{"value":{"$eq":-0.0}},"ids":[7,8]},
+    {"filter":{"value":{"$eq":1}},"ids":[9]},
+    {"filter":{"value":{"$eq":"1"}},"ids":[10]},
+    {"filter":{"value":{"$eq":true}},"ids":[11]},
+    {"filter":{"value":{"$eq":false}},"ids":[12]},
+    {"filter":{"a.b":{"$eq":[null,-0.0]}},"ids":[13]},
+    {"filter":{"":{"$eq":null}},"ids":[13]},
+    {"filter":{"$and":[{"value":{"$eq":null}},{"scope":"kept"}]},"ids":[1]},
+    {"filter":{"$or":[{"value":{"$eq":null}},{"value":{"$eq":[]}}]},"ids":[1,3]},
+    {"filter":{"value":{"$eq":[2,1]}},"ids":[]}
+  ]
+}
