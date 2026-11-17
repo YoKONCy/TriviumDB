@@ -3,6 +3,8 @@ use triviumdb::database::Database;
 use triviumdb::query::tql_executor::TqlValue;
 use triviumdb::query::tql_prepared::TqlParamValue;
 
+use crate::support;
+
 fn canonical(rows: Vec<HashMap<String, TqlValue<f32>>>) -> Vec<u64> {
     let mut output = rows
         .into_iter()
@@ -21,15 +23,8 @@ fn canonical(rows: Vec<HashMap<String, TqlValue<f32>>>) -> Vec<u64> {
 
 #[test]
 fn Prepared与Direct在多组参数下逐行一致() {
-    let root = std::env::temp_dir().join("triviumdb_test");
-    std::fs::create_dir_all(&root).unwrap();
-    let path = root
-        .join("prepared_differential.tdb")
-        .to_string_lossy()
-        .to_string();
-    for suffix in ["", ".wal", ".vec", ".lock", ".flush_ok"] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    let root = support::TestDir::new("prepared_differential");
+    let path = root.file("database.tdb");
     let mut database = Database::<f32>::open(&path, 2).unwrap();
     for id in 1..=24 {
         database

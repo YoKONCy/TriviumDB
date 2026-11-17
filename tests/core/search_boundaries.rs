@@ -264,7 +264,7 @@ fn 三种dtype在墓碑复用后同分截断选择最小nodeid() {
 }
 
 #[test]
-fn quiver完整候选池三条公开路径在同分和软删除后保持nodeid顺序() {
+fn quiver完整候选池公开路径在同分和软删除后保持nodeid顺序() {
     for dim in [3, 384, 768] {
         let n = 48;
         let vectors = vec![1f32; n * dim];
@@ -278,7 +278,7 @@ fn quiver完整候选池三条公开路径在同分和软删除后保持nodeid�
                 alpha: 1.2,
             },
         );
-        index.batch_build_experimental_v2_checked(&vectors, &ids, &slots);
+        index.batch_build(&vectors, &ids, &slots);
         for deleted in [false, true] {
             if deleted {
                 index.soft_delete(1);
@@ -301,7 +301,6 @@ fn quiver完整候选池三条公开路径在同分和软删除后保持nodeid�
                 let outputs = [
                     index.search(&query, fill, &config),
                     index.search_with_scorer(&query, fill, &config, &mut BqNavigationScorer),
-                    index.search_dual_queue(&query, fill, &config, &mut BqNavigationScorer, 0, &[]),
                 ];
                 for hits in outputs {
                     assert_eq!(
@@ -323,7 +322,7 @@ fn quiver完整候选池三条公开路径在同分和软删除后保持nodeid�
 fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
     for dim in [3, 384] {
         let mut index = QuIVer::new(dim, &QuIVerConfig::default());
-        index.batch_build_experimental_v2_checked(&vec![1.; 4 * dim], &[4, 3, 2, 1], &[0, 1, 2, 3]);
+        index.batch_build(&vec![1.; 4 * dim], &[4, 3, 2, 1], &[0, 1, 2, 3]);
         let config = QuIVerSearchConfig {
             top_k: 3,
             ef_search: 4,
@@ -347,11 +346,6 @@ fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
                     .search_with_scorer(&query, fill, &config, &mut BqNavigationScorer)
                     .is_empty()
             );
-            assert!(
-                index
-                    .search_dual_queue(&query, fill, &config, &mut BqNavigationScorer, 0, &[])
-                    .is_empty()
-            );
         }
         let query = vec![1.; dim];
         let zero = QuIVerSearchConfig {
@@ -362,11 +356,6 @@ fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
         assert!(
             index
                 .search_with_scorer(&query, fill, &zero, &mut BqNavigationScorer)
-                .is_empty()
-        );
-        assert!(
-            index
-                .search_dual_queue(&query, fill, &zero, &mut BqNavigationScorer, 0, &[])
                 .is_empty()
         );
         for invalid in [f32::NAN, f32::INFINITY] {
@@ -380,11 +369,6 @@ fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
                     .search_with_scorer(&query, fill, &config, &mut BqNavigationScorer)
                     .is_empty()
             );
-            assert!(
-                index
-                    .search_dual_queue(&query, fill, &config, &mut BqNavigationScorer, 0, &[])
-                    .is_empty()
-            );
         }
         let fill = |_: usize, out: &mut Vec<f32>| {
             out.clear();
@@ -396,11 +380,6 @@ fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
                 .search_with_scorer(&query, fill, &config, &mut BqNavigationScorer)
                 .is_empty()
         );
-        assert!(
-            index
-                .search_dual_queue(&query, fill, &config, &mut BqNavigationScorer, 0, &[])
-                .is_empty()
-        );
     }
 }
 
@@ -408,7 +387,7 @@ fn quiver非法查询与冷向量在普通和384维路径一致拒绝() {
 fn quiver精排名额由有效冷向量占用且同分在截断前处理() {
     for dim in [3, 384] {
         let mut index = QuIVer::new(dim, &QuIVerConfig::default());
-        index.batch_build_experimental_v2_checked(&vec![1.; 4 * dim], &[4, 3, 2, 1], &[0, 1, 2, 3]);
+        index.batch_build(&vec![1.; 4 * dim], &[4, 3, 2, 1], &[0, 1, 2, 3]);
         index.soft_delete(1);
         let cfg = QuIVerSearchConfig {
             top_k: 1,
@@ -421,15 +400,10 @@ fn quiver精排名额由有效冷向量占用且同分在截断前处理() {
             true
         };
         let query = vec![1.; dim];
-        let outputs = [
-            index.search_with_scorer(&query, fill, &cfg, &mut BqNavigationScorer),
-            index.search_dual_queue(&query, fill, &cfg, &mut BqNavigationScorer, 0, &[]),
-        ];
+        let hits = index.search_with_scorer(&query, fill, &cfg, &mut BqNavigationScorer);
         // ID 1 已删除，ID 2 回调含非法分量，剩余同分中 ID 3 优先。
-        for hits in outputs {
-            assert_eq!(hits.iter().map(|h| h.0).collect::<Vec<_>>(), [3]);
-            assert!((hits[0].1 - 1.).abs() < 1e-5);
-        }
+        assert_eq!(hits.iter().map(|h| h.0).collect::<Vec<_>>(), [3]);
+        assert!((hits[0].1 - 1.).abs() < 1e-5);
     }
 }
 

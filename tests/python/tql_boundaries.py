@@ -82,7 +82,7 @@ def run_tql_boundaries(root: str) -> None:
         db.close()
     file = Path(root) / 'boundaries-full-id.tdb'
     triviumdb.TriviumDB(str(file), dim=2, auto_build_quiver=False).close()
-    shutil.copyfile(Path(__file__).parents[1] / 'fixtures/numeric_ids/full_u64_v3.bin', str(file)+'.wal')
+    shutil.copyfile(Path(__file__).parents[1] / 'fixtures/numeric_ids/full_u64.bin', str(file)+'.wal')
     db = triviumdb.TriviumDB(str(file), dim=2, auto_build_quiver=False)
     try:
         before = Path(str(file)+'.wal').read_bytes()

@@ -17,6 +17,9 @@ def run_tql_semantics(root: str) -> None:
         db.insert_with_id(99, [0], {'kind': 'root'})
         for row in contract['records']:
             db.link(99, row['id'], 'item', row['id'])
+        plan = rows(db, 'EXPLAIN SEARCH VECTOR [1] TOP 1 RETURN *')[0]['plan']['payload']
+        assert plan['vector_access_path'] == 'exact_fallback'
+        assert plan['access_path']['kind'] == 'full_node_scan'
         for source in contract['sources']:
             for case in contract['cases']:
                 query = source['query'] + ' ' + case['suffix'].replace('{var}', source['variable'])

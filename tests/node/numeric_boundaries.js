@@ -44,7 +44,7 @@ module.exports = async function numericBoundaries(root, TriviumDB) {
   for (const storageMode of ['rom', 'mmap']) {
     const file = path.join(root, `numeric-outputs-${storageMode}.tdb`)
     new TriviumDB(file, { ...options, storageMode }).close()
-    fs.copyFileSync(path.join(__dirname, '../fixtures/numeric_ids/wal_v3.bin'), file + '.wal')
+    fs.copyFileSync(path.join(__dirname, '../fixtures/numeric_ids/wal.bin'), file + '.wal')
     const db = new TriviumDB(file, { ...options, storageMode })
     try {
       const expected = ['1', '9007199254740991', '9007199254740992', '9007199254740993']

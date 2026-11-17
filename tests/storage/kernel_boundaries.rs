@@ -141,49 +141,6 @@ fn typed_empty_checkpoint_protects_uncheckpointed_wal() {
     }
 }
 
-#[test]
-fn historical_checkpoint_geometry_establishes_dtype_without_rewriting() {
-    let sample = Sample::new();
-    let path = sample.path();
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v0810_text_mmap");
-    for entry in std::fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name().into_string().unwrap();
-        if let Some(suffix) = name.strip_prefix("sample.tdb") {
-            std::fs::copy(entry.path(), format!("{path}{suffix}")).unwrap();
-        }
-    }
-    std::fs::File::create(format!("{path}.lock")).unwrap();
-    let before = facts(&sample.0);
-    for access_mode in [AccessMode::ReadOnly, AccessMode::ReadWrite] {
-        let cfg = Config {
-            dim: 4,
-            access_mode,
-            auto_build_quiver: false,
-            ..Default::default()
-        };
-        assert!(matches!(
-            Database::<half::f16>::open_with_config(&path, cfg),
-            Err(TriviumError::DtypeMismatch {
-                stored: "f32",
-                requested: "f16"
-            })
-        ));
-        assert!(matches!(
-            Database::<u64>::open_with_config(&path, cfg),
-            Err(TriviumError::DtypeMismatch {
-                stored: "f32",
-                requested: "u64"
-            })
-        ));
-        assert_eq!(facts(&sample.0), before);
-    }
-    let mut db = Database::<f32>::open_read_only(&path, 4).unwrap();
-    assert_eq!(db.node_count().unwrap(), 4);
-    db.close().unwrap();
-    assert_eq!(facts(&sample.0), before);
-}
-
 fn write_legacy_empty(path: &str) {
     // 独立构造无 dtype 的 v9 空 Rom 检查点。
     let mut bytes = vec![0u8; 58];
@@ -219,14 +176,19 @@ fn untyped_wal_requires_original_version_recovery() {
         drop(wal);
         std::fs::File::create(format!("{path}.lock")).unwrap();
         let before = facts(&sample.0);
-        assert!(matches!(
-            Database::<f32>::open(&path, 2),
-            Err(TriviumError::CorruptedFile(_))
-        ));
-        assert!(matches!(
-            Database::<half::f16>::open(&path, 2),
-            Err(TriviumError::CorruptedFile(_))
-        ));
+        for error in [
+            Database::<f32>::open(&path, 2).err().unwrap(),
+            Database::<half::f16>::open(&path, 2).err().unwrap(),
+        ] {
+            assert_eq!(
+                error.code(),
+                if legacy_checkpoint {
+                    "TDB_MIGRATION_REQUIRED"
+                } else {
+                    "TDB_CORRUPTED_FILE"
+                }
+            );
+        }
         assert_eq!(facts(&sample.0), before);
     }
 }
@@ -526,26 +488,4 @@ fn blocked_vector_worker() {
     assert_eq!(reopened.get(1).unwrap().unwrap().vector, vec![0.0, 1.0]);
     reopened.close().unwrap();
     std::process::exit(0);
-}
-
-#[test]
-fn empty_legacy_type_upgrade_preserves_index_definitions_as_a_file_group() {
-    for mode in [StorageMode::Rom, StorageMode::Mmap] {
-        let sample = Sample::new();
-        let path = sample.path();
-        write_legacy_empty(&path);
-        let mut mt = triviumdb::storage::memtable::MemTable::<f32>::new(2);
-        mt.register_property_index("key");
-        triviumdb::index::property::save_sidecar(mt.property_indexes(), &path, 0, (0, 0)).unwrap();
-        let db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
-        assert_eq!(db.index_info().unwrap().len(), 1);
-        // Drop 只排空 WAL，验证打开时的迁移已独立发布完整文件组。
-        drop(db);
-        let mut readonly = Database::<f32>::open_read_only(&path, 2).unwrap();
-        let info = readonly.index_info().unwrap();
-        assert_eq!(info.len(), 1);
-        assert_eq!(info[0].field, "key");
-        assert_eq!(info[0].entry_count, 0);
-        readonly.close().unwrap();
-    }
 }

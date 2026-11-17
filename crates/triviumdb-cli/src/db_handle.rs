@@ -284,13 +284,10 @@ pub fn sniff_header(tdb_path: &str) -> Result<HeaderInfo> {
     }
 
     let version = u16::from_le_bytes([header[4], header[5]]);
-    if !(triviumdb::storage::file_format::MINIMUM_SUPPORTED_VERSION
-        ..=triviumdb::storage::file_format::CURRENT_VERSION)
-        .contains(&version)
-    {
+    if version != triviumdb::storage::file_format::CURRENT_VERSION {
         return Err(TriviumError::UnsupportedDatabaseVersion {
             found: version,
-            minimum_supported: triviumdb::storage::file_format::MINIMUM_SUPPORTED_VERSION,
+            minimum_supported: triviumdb::storage::file_format::CURRENT_VERSION,
             current: triviumdb::storage::file_format::CURRENT_VERSION,
         });
     }

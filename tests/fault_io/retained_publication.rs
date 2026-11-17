@@ -30,7 +30,7 @@ fn released(root: &Path) {
     #[cfg(target_os = "linux")]
     {
         let prefix = format!("{}/", root.canonicalize().unwrap().display());
-        let maps = std::fs::read("/proc/self/maps").unwrap();
+        let maps = crate::artifact::read("/proc/self/maps").unwrap();
         assert!(
             !String::from_utf8_lossy(&maps).contains(&prefix),
             "关闭后仍保留数据库文件映射：{prefix}"
@@ -136,7 +136,12 @@ fn close<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(
 fn run_failed_close<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>() {
     for mode in [StorageMode::Mmap, StorageMode::Rom] {
         for asynchronous in [false, true] {
-            for point in [IoPoint::TextMetadataWrite, IoPoint::GraphSidecarWrite] {
+            for point in [
+                IoPoint::TextMetadataWrite,
+                IoPoint::GraphSidecarWrite,
+                IoPoint::IndexContainerSync,
+                IoPoint::IndexContainerPublish,
+            ] {
                 let root = root();
                 let path = root.join("sample.tdb").to_string_lossy().into_owned();
                 seed::<T>(&path, mode);
@@ -393,13 +398,13 @@ fn 重复注册屏障拒绝后原有屏障仍可控制目标线程() {
 }
 
 #[test]
-fn 恢复已替换正文后再次IO失败保留撤销组并可再次恢复() {
+fn 恢复主文件后容器恢复失败保留撤销组并可再次恢复() {
     for mode in [StorageMode::Mmap, StorageMode::Rom] {
         let root = root();
         let path = root.join("sample.tdb").to_string_lossy().into_owned();
         seed::<f32>(&path, mode);
-        let original_main = std::fs::read(&path).unwrap();
-        let original_text = std::fs::read(format!("{path}.text")).unwrap();
+        let original_main = crate::artifact::read(&path).unwrap();
+        let original_text = crate::artifact::read(format!("{path}.text")).unwrap();
         let open = || {
             Database::<f32>::open_with_config(
                 &path,
@@ -418,27 +423,28 @@ fn 恢复已替换正文后再次IO失败保留撤销组并可再次恢复() {
         db.update_payload(1, json!({"kind":"changed"})).unwrap();
         db.index_text(1, "uncommittedtoken").unwrap();
         {
-            let _failure = fail_io_at(IoPoint::GraphSidecarWrite);
+            let _failure = fail_io_at(match mode {
+                StorageMode::Mmap => IoPoint::MarkerSync,
+                StorageMode::Rom => IoPoint::PublicationCommitSync,
+            });
             assert!(db.flush().is_err());
         }
-        assert_ne!(std::fs::read(&path).unwrap(), original_main);
+        assert_ne!(crate::artifact::read(&path).unwrap(), original_main);
         assert_ne!(
-            std::fs::read(format!("{path}.text")).unwrap(),
+            crate::artifact::read(format!("{path}.text")).unwrap(),
             original_text
         );
+        let candidate = std::fs::read(format!("{path}.idx")).unwrap();
         drop(db);
-        let original_journal = std::fs::read(format!("{path}.publish")).unwrap();
-        // 元数据恢复临时文件被占位，确定在主数据与正文恢复后中断后续恢复。
-        let obstacle = format!("{path}.text.meta.tmp");
+        let original_journal = crate::artifact::read(format!("{path}.publish")).unwrap();
+        // 容器恢复临时文件被占位，确定在主数据恢复后中断容器替换。
+        let obstacle = format!("{path}.idx.tmp");
         std::fs::create_dir(&obstacle).unwrap();
         assert!(matches!(open(), Err(TriviumError::Io(_))));
-        assert_eq!(std::fs::read(&path).unwrap(), original_main);
+        assert_eq!(crate::artifact::read(&path).unwrap(), original_main);
+        assert_eq!(std::fs::read(format!("{path}.idx")).unwrap(), candidate);
         assert_eq!(
-            std::fs::read(format!("{path}.text")).unwrap(),
-            original_text
-        );
-        assert_eq!(
-            std::fs::read(format!("{path}.publish")).unwrap(),
+            crate::artifact::read(format!("{path}.publish")).unwrap(),
             original_journal
         );
         std::fs::remove_dir(&obstacle).unwrap();
@@ -446,7 +452,7 @@ fn 恢复已替换正文后再次IO失败保留撤销组并可再次恢复() {
             .unwrap()
             .map(|entry| {
                 let path = entry.unwrap().path();
-                let data = std::fs::read(&path).unwrap();
+                let data = crate::artifact::read(&path).unwrap();
                 (path, data)
             })
             .collect::<Vec<_>>();
@@ -459,7 +465,7 @@ fn 恢复已替换正文后再次IO失败保留撤销组并可再次恢复() {
             Err(TriviumError::RecoveryRequired { .. })
         ));
         for (file, data) in before {
-            assert_eq!(std::fs::read(file).unwrap(), data);
+            assert_eq!(crate::artifact::read(file).unwrap(), data);
         }
         let mut db = open().unwrap();
         assert_eq!(db.node_count().unwrap(), 3);
@@ -483,6 +489,146 @@ fn 恢复已替换正文后再次IO失败保留撤销组并可再次恢复() {
         released(&root);
         cleanup(&root);
         std::hint::black_box((db, again));
+    }
+}
+
+#[test]
+fn 已提交容器损坏时保留恢复现场_修复后保留新正文及完整事实() {
+    use std::collections::BTreeMap;
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_path};
+
+    fn image(root: &Path, locked: bool) -> BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| !locked || entry.file_name() != "sample.tdb.lock")
+            .map(|entry| {
+                (
+                    entry.file_name().to_str().unwrap().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    for mode in [StorageMode::Mmap, StorageMode::Rom] {
+        let source = root();
+        let path = source.canonicalize().unwrap().join("sample.tdb");
+        let path = path.to_str().unwrap();
+        seed::<f32>(path, mode);
+        let mut db = Database::<f32>::open_with_config(
+            path,
+            Config {
+                dim: 4,
+                storage_mode: mode,
+                load_text_index: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.index_text(1, "committedtoken").unwrap();
+        let pause = pause_at_path(ConcurrencyPoint::AfterPublicationCommitted, path);
+        assert!(!db.close_timeout(Duration::ZERO).unwrap());
+        arrived(&pause);
+        let mut committed = image(&source, true);
+        assert!(committed.contains_key("sample.tdb.publish"));
+        assert!(committed.contains_key("sample.tdb.text"));
+        pause.release();
+        assert!(db.close_timeout(Duration::from_secs(10)).unwrap());
+        committed.insert(
+            "sample.tdb.lock".into(),
+            std::fs::read(source.join("sample.tdb.lock")).unwrap(),
+        );
+
+        for damage in ["missing", "directory", "text"] {
+            let candidate = root();
+            for (name, bytes) in &committed {
+                std::fs::write(candidate.join(name), bytes).unwrap();
+            }
+            let container = candidate.join("sample.tdb.idx");
+            let original = committed.get("sample.tdb.idx").unwrap();
+            if damage == "missing" {
+                std::fs::remove_file(&container).unwrap();
+            } else {
+                let mut changed = original.clone();
+                let offset = if damage == "directory" {
+                    0
+                } else {
+                    // 独立目录规格：第三项为文本，偏移字段位于 104..112。
+                    usize::try_from(u64::from_le_bytes(changed[104..112].try_into().unwrap()))
+                        .unwrap()
+                };
+                changed[offset] ^= 1;
+                std::fs::write(&container, changed).unwrap();
+            }
+            let path = candidate.join("sample.tdb");
+            let path = path.to_str().unwrap();
+            let before = image(&candidate, false);
+            for access_mode in [
+                triviumdb::database::AccessMode::ReadOnly,
+                triviumdb::database::AccessMode::ReadWrite,
+            ] {
+                let error = Database::<f32>::open_with_config(
+                    path,
+                    Config {
+                        dim: 4,
+                        storage_mode: mode,
+                        access_mode,
+                        ..Default::default()
+                    },
+                )
+                .err()
+                .expect("损坏的已提交容器必须拒绝");
+                assert_eq!(
+                    error.code(),
+                    "TDB_CORRUPTED_FILE",
+                    "{mode:?}/{damage}/{access_mode:?}"
+                );
+                assert_eq!(
+                    image(&candidate, false),
+                    before,
+                    "拒绝后必须保留完整恢复现场"
+                );
+            }
+            std::fs::write(&container, original).unwrap();
+            let mut repaired = Database::<f32>::open_with_config(
+                path,
+                Config {
+                    dim: 4,
+                    storage_mode: mode,
+                    load_text_index: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(repaired.all_node_ids().unwrap(), [1, 2]);
+            assert_eq!(repaired.get(1).unwrap().unwrap().vector, [1.; 4]);
+            assert_eq!(
+                repaired.get_payload(2).unwrap().unwrap(),
+                json!({"kind":"second"})
+            );
+            assert_eq!(repaired.index_info().unwrap().len(), 1);
+            assert_eq!(text_ids(&repaired, "BM25", "committedtoken"), [1]);
+            assert!(text_ids(&repaired, "BM25", "originaltoken").is_empty());
+            assert_eq!(text_ids(&repaired, "AC", "originalalias"), [1]);
+            assert!(!candidate.join("sample.tdb.publish").exists());
+            assert!(!candidate.join("sample.tdb.text").exists());
+            repaired.close().unwrap();
+            let mut reopened = Database::<f32>::open_with_config(
+                path,
+                Config {
+                    dim: 4,
+                    load_text_index: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(text_ids(&reopened, "BM25", "committedtoken"), [1]);
+            assert_eq!(reopened.all_node_ids().unwrap(), [1, 2]);
+            reopened.close().unwrap();
+            cleanup(&candidate);
+        }
+        cleanup(&source);
     }
 }
 

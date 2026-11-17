@@ -3,70 +3,6 @@ use triviumdb::database::{Config, Database, SearchConfig, StorageMode};
 use triviumdb::test_hooks::{IoPoint, fail_io_at};
 
 #[test]
-fn 干净历史文本在首次写入前补齐封条且中断后可重试() {
-    let root = super::support::TestDir::new("legacy_text_seal");
-    for eager in [false, true] {
-        for interrupted in [false, true] {
-            let path = root.file(&format!("{eager}-{interrupted}.tdb"));
-            let cfg = Config {
-                dim: 2,
-                load_text_index: eager,
-                auto_build_quiver: false,
-                ..Default::default()
-            };
-            let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
-            db.insert_with_id(1, &[1., 0.], json!({"version":"old"}))
-                .unwrap();
-            db.index_text(1, "oldtext").unwrap();
-            db.index_keyword(1, "oldkeyword").unwrap();
-            db.close().unwrap();
-            let text = std::fs::read(format!("{path}.text")).unwrap();
-            let mut metadata = std::fs::read(format!("{path}.text.meta")).unwrap();
-            metadata.truncate(28);
-            metadata[4..8].copy_from_slice(&1u32.to_le_bytes());
-            std::fs::write(format!("{path}.text.meta"), metadata).unwrap();
-            if interrupted {
-                let _failure = fail_io_at(IoPoint::CheckpointWalClear);
-                assert_eq!(
-                    Database::<f32>::open_with_config(&path, cfg)
-                        .err()
-                        .unwrap()
-                        .code(),
-                    "TDB_IO"
-                );
-            }
-            let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
-            assert_eq!(
-                &std::fs::read(format!("{path}.text.meta")).unwrap()[..8],
-                b"TMET\x02\x00\x00\x00"
-            );
-            assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), text);
-            db.close().unwrap();
-            assert!(!triviumdb::storage::wal::Wal::needs_recovery(&path));
-            let mut wal = triviumdb::storage::wal::Wal::open_with_sync(
-                &path,
-                triviumdb::storage::wal::SyncMode::Full,
-            )
-            .unwrap();
-            wal.append(&triviumdb::storage::wal::WalEntry::<f32>::Delete { id: 1 })
-                .unwrap();
-            wal.append(&triviumdb::storage::wal::WalEntry::<f32>::Insert {
-                id: 1,
-                vector: vec![0., 1.],
-                payload: json!({"version":"new"}).to_string(),
-            })
-            .unwrap();
-            drop(wal);
-            let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
-            db.build_text_index().unwrap();
-            assert_eq!(db.get_payload(1).unwrap(), Some(json!({"version":"new"})));
-            assert!(hits(&db, "oldtext oldkeyword").is_empty());
-            db.close().unwrap();
-        }
-    }
-}
-
-#[test]
 fn 检查点封条保护新文本且后续删除继续级联清理() {
     let root = super::support::TestDir::new("text_replay_seals");
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
@@ -164,6 +100,9 @@ fn 文本与派生索引发布故障支持重开恢复及同句柄重试() {
             IoPoint::TextMetadataWrite,
             IoPoint::PropertySidecarWrite,
             IoPoint::GraphSidecarWrite,
+            IoPoint::IndexContainerWrite,
+            IoPoint::IndexContainerSync,
+            IoPoint::IndexContainerPublish,
             IoPoint::PublicationCommitSync,
             IoPoint::PublicationCommitRename,
         ] {

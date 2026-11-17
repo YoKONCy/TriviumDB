@@ -124,7 +124,7 @@ QuIVer 构建：不得持有 MemTable guard 等待 singleflight Condvar
 
 当前开发 WAL 使用 `TVWL + v7` 头。ReadWrite 持有排他锁时，v2 按独立历史布局校验并补齐边 Metadata，v3/v4/v5/v6 按对应布局流式验证已提交前缀，经同步临时文件和原子替换发布 v7。不完整尾部按恢复规则截除，完整帧 CRC 或解码错误保留原始 WAL。有效的历史空头按各自读取契约处理，v2 沿用 Writer 恢复及升级入口。无头、未知版本及非法迁移输入返回结构化错误。
 
-文档候选与归档保存在 v13 主文件的 `DARC` 块，记录逐条受 32 MiB 编码上限、长度、整体 CRC 和计数验证。恢复在解码及完整正文组装前分别执行工作区准入，校验候选向量 dtype／维度、解析摘要、来源映射和结构层级。最终发布共享事务封条，检查点序号水位处理旧 WAL 重叠。原文、二进制摘要与外部解析位置由统一契约保存，详情见[文档接入](document-ingestion.md)。
+文档候选与归档保存在主文件的 `DARC` 块，记录逐条受 32 MiB 编码上限、长度、整体 CRC 和计数验证。恢复在解码及完整正文组装前分别执行工作区准入，校验候选向量 dtype／维度、解析摘要、来源映射和结构层级。最终发布共享事务封条，检查点序号水位处理保留 WAL 的重叠恢复。原文、二进制摘要与外部解析位置由统一契约保存，详情见[文档接入](document-ingestion.md)。
 
 受保护编辑的回执与事实写在同一事务封条内，完整提交后一起恢复。回执载入检查长度、计数、UTF-8、版本令牌、创建 ID 范围及预算，孤立的回执 WAL 记录返回损坏错误。WAL 前的取消检查保留未提交事实，WAL 开始后的提交按原子协议完成。
 
@@ -201,13 +201,13 @@ magic(4) + version(1) + generation(8)
 - 只有 v3 marker 明确声明的 Payload generation 才允许加载；v1/v2 marker 旁的游离 `.pld` 不参与旧快照。
 - v1（29 字节）与 v2（41 字节）保持只读兼容；ReadWrite 在下一次显式 flush 时升级为 v3，打开时不隐式迁移。
 - generation 化 Payload 文件避免 Windows 上替换仍被 Reader mmap 的同名文件；marker 提交后旧 generation 才失去可见性，并在引用释放后 best-effort 回收。
-- 发布前流式保存旧文件组，随后同步并发布 `.publish` 撤销日志。当前 `TPUB` v2 日志为 136 字节，记录主文件、向量、marker、QuIVer 及其元数据、文本及其元数据、属性和图索引的存在状态、长度、CRC、代际、存储模式和提交状态，并校验日志自身 CRC。读取同时支持历史 v1 日志。延期保存且正文保持原样时，可保留原文本文件并省去正文备份复制。
+- 发布前流式保存旧文件组，随后同步并发布 `.publish` 撤销日志。当前 `TPUB` 格式 3 为 149 字节，将统一 `.idx` 纳入恢复目录，记录文件存在状态、长度、CRC、代际、存储模式和提交状态，并校验日志自身 CRC。延迟文本与已发布 SSD 组件随完整容器保留，复制采用固定大小缓冲。
 - Mmap 在全部索引同步后发布 marker；Rom 在文件组同步后原子更新日志提交状态，并记录新主文件的长度与 CRC。ReadWrite 打开时检查提交点：未提交则校验备份、恢复旧文件组并回放 WAL；已提交则验证新代并清理日志。恢复复制保留备份，全部恢复文件同步后才清理日志及备份，支持恢复途中再次中断。
 - ReadOnly/Immutable 不执行恢复或清理；有待恢复日志/WAL 时返回 `RecoveryRequired`，保持字节级零写。无有效恢复基础的文件损坏返回 `CorruptedFile`，不构造缺向量、缺 Payload 或空库的伪恢复状态；已提交新代损坏不能回滚旧代。
-- 旧代备份消耗纳入发布的文件组大小所对应的磁盘读写和临时空间，复制使用有界缓冲。映射有效时，同一句柄失败重试保留最初备份，向量映射在替换过程中失效时，实例进入待恢复状态，共享查询句柄统一拒绝后续操作。释放实例后由可写打开恢复文件组并回放 WAL。主文件使用 v13，marker 使用 v3，待恢复发布由支持对应日志版本的内核完成。
+- 旧代备份消耗纳入发布的文件组大小所对应的磁盘读写和临时空间，复制使用有界缓冲。映射有效时，同一句柄失败重试保留最初备份，向量映射在替换过程中失效时，实例进入待恢复状态，共享查询句柄统一拒绝后续操作。释放实例后由可写打开恢复文件组并回放 WAL。当前主文件格式为 14，marker 为 3，待恢复发布由支持对应日志版本的内核完成。布局与空间条件见[数据库文件组](storage-format.md)。
 - 默认 `storage::publication_recovery` 用独立日志字节 oracle 验证恢复、损坏拒绝、提交点与只读零写；`test-hooks` 强杀矩阵要求完整恢复所有 `Full` 模式已同步事务，打开失败不能算通过。
 - 唯一约束创建/删除持有写锁完成文件组检查点。发布失败隔离实例及共享查询句柄，保留原始错误；释放后可写重开按实际提交点恢复约束与 WAL。预检拒绝保持当前实例可用。
-- `.pidx v8` 以 JSON 数组保存复合字段列表；历史复合 posting 通过事实扫描提供结果，唯一约束以主文件定义重建。`.gidx v3` 在采用前完成边记录、反向/标签目录和主文件事实的逐项验证；验证与 JSON 解码峰值参与加载预算准入，异常副本返回结构化损坏错误。
+- 属性组件以 JSON 数组保存复合字段列表，唯一约束以主文件定义为准。图目录组件在采用前完成边记录、反向/标签目录和主文件事实的逐项验证；验证与 JSON 解码峰值参与加载预算准入，异常副本返回结构化损坏错误。
 
 ---
 
@@ -215,9 +215,9 @@ magic(4) + version(1) + generation(8)
 
 **实现位置**：`storage/file_format.rs`
 
-载入先检查历史公共头的 58 字节、`TVDB` 魔数与支持的版本范围。v10 及之后校验完整的 74 字节类型头，包括 `VTYP`、dtype、元素宽度、reserved 和头部 CRC32。Rom 的向量块止于 `edge_offset`，Mmap 的 `.vec` 长度与 slot 数、维度、元素宽度精确对应。v11 在唯一约束块后记录有界回执，尾部的长度、CRC32 与 `TREC` 标识按独立边界验证。
+载入检查 `TVDB` 魔数与支持的版本范围。当前主文件头为 110 字节，校验 `VTYP`、dtype、元素宽度、reserved、数据库身份、检查点标识和 CRC32。Rom 的向量块止于 `edge_offset`，Mmap 的 `.vec` 长度与 slot 数、维度、元素宽度精确对应。回执块尾部的长度、CRC32 与 `TREC` 标识按独立边界验证。统一 `.idx` 另行验证主文件绑定、目录、组件边界与校验。
 
-v12在唯一约束与回执之间保存命名图块，逐记录长度、整体长度、CRC32和 `NGRF`标识在解码与分配前校验。图成员必须引用有效全库节点，边端点必须属于图成员集合。WAL恢复在完整回放后核对成员引用，覆盖检查点已发布而日志尚未清理的重叠情形。版本化布局和删除语义见[命名图](named-graphs.md)。
+命名图块的逐记录长度、整体长度、CRC32 和 `NGRF` 标识在解码与分配前校验。图成员必须引用有效全库节点，边端点必须属于图成员集合。WAL 恢复在完整回放后核对成员引用，覆盖检查点已发布而日志尚未清理的重叠情形。布局和删除语义见[命名图](named-graphs.md)。
 
 ReadWrite/ReadOnly 类型不匹配返回 `DtypeMismatch`，并保留 `stored`、`requested` 字段。发布恢复先验证可信备份的类型，再复制正式文件；Readonly 路径保持原文件组。历史仅 WAL 或无类型空检查点附带非空 WAL 的数据，先用原版本恢复并完成检查点后升级。
 
@@ -350,7 +350,7 @@ QuIVer 构建有独立峰值预算，流式准备 BQ2 与默认 SM 状态，避�
 
 构图连通性保护的父节点数组、预分配遍历栈和访问位图在分配前纳入峰值预算；父节点数组也计入索引热内存。重载不补拓扑：旧图通过重建应用新规则，断连图按已有缺失索引策略处理。
 
-查询统一受四类预算约束：QueryMemoryBudget（候选/union/精排向量/页读取字节）、TraversalBudget（visited/edges/frontier/depth）、PipelineBudget（NodeSet 节点与字节）和 QueryParallelismBudget（线程与并行阈值）。分配前检查、按阶段切片；Error 模式 fail-closed，只有显式 Partial 策略才允许带 truncated 标记返回。GraphFirst、路径、集合、图算法和聚合同样遵守各阶段预算。
+查询由 PipelineBudget 约束阶段数、NodeSet 节点与字节、向量读取及 Payload 访问，TraversalBudget 约束 visited／edges／frontier／depth，QueryParallelismBudget 约束线程与并行阈值，共享 ResourceRuntime 登记实际工作区。分配前检查、按阶段切片；Error 模式 fail-closed，显式 Partial 策略以 truncated 标记返回。GraphFirst、路径、集合、图算法和聚合同样遵守各阶段预算。
 
 ---
 
@@ -624,7 +624,7 @@ db.clear_hook()
 | `storage/vec_pool.rs` | mmap、裸切片与页面建议 | 文件/映射生命周期、长度与对齐、映射访问边界 |
 | `storage/file_format.rs`、`graph_blocks.rs`、`payload_store.rs`、`index/property.rs` | 只读映射或字节转换 | 格式几何与完整性校验、对齐、引用寿命和发布顺序 |
 | `index/bq.rs` | 标量裸指针、SIMD 与预取 | 有效行偏移、完整 chunk/尾块边界、指令集与分配长度 |
-| `vector.rs`、`index/quiver/corrected_sm*` | SIMD 加载及计算 | 指令集分派、长度/尾部、对齐与浮点数值边界 |
+| `vector.rs`、`index/quiver/sm*` | SIMD 加载及计算 | 指令集分派、长度/尾部、对齐与浮点数值边界 |
 | `index/quiver.rs` | UnsafeCell 邻接表、手工 Sync、其他并行构图代码 | 行锁与访问范围、别名约束、并行阶段结束后的冻结 |
 | `hook.rs` | 外部函数调用与手工 Send/Sync | ABI、动态库与回调寿命、跨线程调用约束 |
 | `bindings/python/hooks.rs`、`bindings/nodejs/hook_refs.rs` | 回调包装的手工 Send/Sync | 对象跨线程访问及 Python/Node 运行时约束 |

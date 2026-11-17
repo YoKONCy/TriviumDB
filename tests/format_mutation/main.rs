@@ -44,9 +44,7 @@ fn path(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for suffix in ["", ".wal", ".vec", ".lock", ".flush_ok"] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 fn fixture(name: &str) -> String {
@@ -68,13 +66,46 @@ fn fixture(name: &str) -> String {
 }
 
 fn snapshot(path: &str) -> BTreeMap<String, Vec<u8>> {
-    ["", ".wal", ".vec", ".flush_ok"]
-        .into_iter()
-        .filter_map(|suffix| {
-            let name = format!("{path}{suffix}");
-            std::fs::read(&name).ok().map(|bytes| (name, bytes))
-        })
-        .collect()
+    let database = std::path::Path::new(path);
+    let name = database.file_name().unwrap().to_str().unwrap();
+    let mut files = BTreeMap::new();
+    for entry in std::fs::read_dir(database.parent().unwrap()).unwrap() {
+        let entry = entry.unwrap();
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if file_name == name || file_name.starts_with(&format!("{name}.")) {
+            files.insert(
+                file_name[name.len()..].to_owned(),
+                std::fs::read(entry.path()).unwrap(),
+            );
+        }
+    }
+    files
+}
+
+fn copy_group(source: &str, destination: &str) {
+    for (suffix, bytes) in snapshot(source) {
+        std::fs::write(format!("{destination}{suffix}"), bytes).unwrap();
+    }
+}
+
+fn verify_control(source: &str) {
+    let control = format!("{source}_control");
+    cleanup(&control);
+    copy_group(source, &control);
+    let before = snapshot(&control);
+    let mut db = Database::<f32>::open_read_only(&control, 4).unwrap();
+    assert_eq!(db.node_count().unwrap(), 12);
+    for id in 1..=12 {
+        let node = db.get(id).unwrap().unwrap();
+        assert_eq!(node.vector, vec![(id - 1) as f32, 1.0, 0.0, 0.0]);
+        assert_eq!(
+            node.payload,
+            serde_json::json!({"kind": "fixture", "index": id - 1})
+        );
+    }
+    db.close().unwrap();
+    assert_eq!(snapshot(&control), before);
+    cleanup(&control);
 }
 
 fn mutations(length: usize) -> Vec<Mutation> {
@@ -114,10 +145,12 @@ fn mutations(length: usize) -> Vec<Mutation> {
 #[test]
 fn tdb格式变异全部拒绝或安全降级且绝不改写损坏输入() {
     let original_path = fixture("tdb");
+    verify_control(&original_path);
     let original = std::fs::read(&original_path).unwrap();
     for (index, mutation) in mutations(original.len()).into_iter().enumerate() {
         let candidate = path(&format!("tdb_case_{index}"));
         cleanup(&candidate);
+        copy_group(&original_path, &candidate);
         std::fs::write(&candidate, mutation.apply(&original)).unwrap();
         let before = snapshot(&candidate);
         let result = Database::<f32>::open_read_only(&candidate, 4);
@@ -136,8 +169,9 @@ fn tdb格式变异全部拒绝或安全降级且绝不改写损坏输入() {
 }
 
 #[test]
-fn flush_marker和vec等长变异由v2_crc_fail_closed且只读零写() {
+fn flush_marker和vec等长变异由完整crc拒绝且只读零写() {
     let original_path = fixture("cross_file");
+    verify_control(&original_path);
     for suffix in [".vec", ".flush_ok"] {
         let source = format!("{original_path}{suffix}");
         let original = std::fs::read(&source).unwrap();
@@ -145,14 +179,7 @@ fn flush_marker和vec等长变异由v2_crc_fail_closed且只读零写() {
             for bit in [0, 7] {
                 let candidate = path(&format!("cross_{}_{}_{}", &suffix[1..], offset, bit));
                 cleanup(&candidate);
-                std::fs::copy(&original_path, &candidate).unwrap();
-                for copy_suffix in [".vec", ".flush_ok"] {
-                    std::fs::copy(
-                        format!("{original_path}{copy_suffix}"),
-                        format!("{candidate}{copy_suffix}"),
-                    )
-                    .unwrap();
-                }
+                copy_group(&original_path, &candidate);
                 let mutated = Mutation::FlipBit { offset, bit }.apply(&original);
                 std::fs::write(format!("{candidate}{suffix}"), mutated).unwrap();
                 let before = snapshot(&candidate);
@@ -183,3 +210,6 @@ fn 文件读取工具自身覆盖偏移边界且不产生危险分配() {
     assert_eq!(bytes, [1, 2, 3, 4]);
     cleanup(&path);
 }
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

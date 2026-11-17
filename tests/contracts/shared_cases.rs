@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use triviumdb::Database;
 use triviumdb::query::tql_prepared::TqlParamValue;
 
+use crate::support;
+
 #[derive(Deserialize)]
 struct Contract {
     schema_version: u32,
@@ -58,24 +60,8 @@ fn parameter(value: &Value) -> TqlParamValue {
 fn 共享json契约由rust适配器完整执行() {
     let contract: Contract = serde_json::from_str(include_str!("public_cases.json")).unwrap();
     assert_eq!(contract.schema_version, 1);
-    let root = std::env::temp_dir().join("triviumdb_shared_contract_rust");
-    std::fs::create_dir_all(&root).unwrap();
-    let path = root.join("database.tdb").to_string_lossy().to_string();
-    for suffix in [
-        "",
-        ".wal",
-        ".vec",
-        ".lock",
-        ".flush_ok",
-        ".graph",
-        ".propidx",
-        ".text",
-        ".text.meta",
-        ".quiver",
-        ".quiver.meta",
-    ] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    let root = support::TestDir::new("shared_contract_rust");
+    let path = root.file("database.tdb");
     let mut database = Database::<f32>::open(&path, contract.setup.dimension).unwrap();
     for node in contract.setup.nodes {
         database

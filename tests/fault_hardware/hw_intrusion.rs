@@ -32,9 +32,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok"] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 /// 创建一个有数据的 DB 并 flush 到磁盘

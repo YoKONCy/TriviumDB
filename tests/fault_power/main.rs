@@ -30,9 +30,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok", ".tmp", ".vec.tmp"] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 fn child_command() -> Command {
@@ -198,7 +196,8 @@ fn PWR_00A_发布阶段强杀必须恢复全部已同步事务() {
             ));
             let (dim, base) = publication_shape(case);
             cleanup(&path);
-            if base > 0 {
+            // 先完成新库初始化，强杀屏障只观察已确认事务之后的检查点发布。
+            {
                 let mut database = Database::<f32>::open(&path, dim).unwrap();
                 for id in 1..=base {
                     database
@@ -650,3 +649,6 @@ fn PWR_04_事务commit后断电_WAL原子回放() {
 
 #[cfg(feature = "test-hooks")]
 mod snapshot;
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

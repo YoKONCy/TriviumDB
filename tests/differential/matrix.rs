@@ -22,17 +22,7 @@ fn open(path: &str, mode: StorageMode) -> Database<f32> {
 }
 
 pub(crate) fn cleanup(path: &str) {
-    for suffix in [
-        "",
-        ".wal",
-        ".vec",
-        ".lock",
-        ".flush_ok",
-        ".propidx",
-        ".graph",
-    ] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 pub(crate) fn seed(database: &mut Database<f32>, reference: &RefDatabase) {

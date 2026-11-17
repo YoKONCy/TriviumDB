@@ -426,6 +426,7 @@ export interface ErrorDetailsByCode {
   TDB_WRITE_OUTCOME_UNKNOWN: Record<string, never>;
   TDB_UNSUPPORTED_WAL_VERSION: { found: number; supported: number };
   TDB_UNSUPPORTED_DATABASE_VERSION: { found: number; minimum_supported: number; current: number };
+  TDB_MIGRATION_REQUIRED: { component: string; found: number; current: number; migration_entrypoint: 'scripts/migrate.py' };
   TDB_API_MIGRATION_REQUIRED: { removed_api: string; replacement: string };
   TDB_UNSUPPORTED_SIDECAR_VERSION: { component: string; found: number; minimum_supported: number; current: number; action: string };
   TDB_INVALID_INPUT: { reason: string; argument_kind?: 'missing' | 'unknown_keyword' | 'multiple_values' | 'positional_only' | 'too_many_positional' | 'invalid_arguments' };

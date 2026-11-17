@@ -126,6 +126,7 @@ fn json_boundaries<T: VectorType + serde::Serialize + serde::de::DeserializeOwne
             // 独立空库只靠 WAL 恢复同一合法值，避免 close 的检查点掩盖回放路径。
             let replay_path = root.file(&format!("replay_{mode:?}_{cache}.tdb"));
             std::fs::copy(&path, &replay_path).unwrap();
+            std::fs::copy(format!("{path}.idx"), format!("{replay_path}.idx")).unwrap();
             std::fs::copy(format!("{path}.wal"), format!("{replay_path}.wal")).unwrap();
             let mut replay = Database::<T>::open_with_config(&replay_path, cfg).unwrap();
             assert_eq!(replay.get_payload(3).unwrap(), Some(accepted.clone()));

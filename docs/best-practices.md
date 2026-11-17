@@ -166,8 +166,10 @@ TriviumDB v0.4 引入了 **Rom / Mmap 双存储引擎**，在打开数据库时�
 
 | 模式 | 启动开销 | 内存占用 | 磁盘文件 | 推荐场景 |
 | ------ | ---------- | ---------- | ---------- | ---------- |
-| **Rom（单文件）** | O(N) 全量加载 | = 数据体积 | 单一 `.tdb` | 知识库 < 50 万节点、需要一键打包转移 |
-| **Mmap（分离，默认）** | ~O(1) 映射 | ≈ 目录 + delta + 有界缓存 + 工作集 | `.tdb` + `.vec` + `.pld.<generation>` + `.flush_ok` | 超大规模数据、追求冷启动与 Payload 堆占用可控 |
+| **Rom（内嵌事实）** | O(N) 全量加载 | = 数据体积 | `.tdb` + `.idx` | 内存足以容纳事实数据的知识库 |
+| **Mmap（分离，默认）** | 映射、目录恢复与完整性校验 | ≈ 目录 + delta + 有界缓存 + 工作集 | `.tdb` + `.idx` + `.vec` + `.pld.<generation>` + `.flush_ok` | 大规模数据、需要控制 Payload 堆占用 |
+
+表中列出开发版的检查点文件，运行期间还使用 WAL、锁及发布制品。布局与备份边界见[数据库文件组](storage-format.md)。
 
 检查点通过 `.publish` 管理主数据、向量、marker、QuIVer、文本、属性和图索引文件组，流式备份使用有界内存，临时磁盘空间随被备份文件组增长。中断后先由 ReadWrite 打开恢复，再执行 flush/close 后迁移或复制完整提交代。保存崩溃现场时保留 `.publish`、全部 `.publish.N` 备份、WAL、相关 Payload 代际与正式文件组。ReadOnly/Immutable 保持现场原样，并通过待恢复错误交由 Writer 处理。
 
@@ -176,7 +178,7 @@ TriviumDB v0.4 引入了 **Rom / Mmap 双存储引擎**，在打开数据库时�
 ```rust
 use triviumdb::database::{Database, Config, StorageMode};
 
-// Rom 模式（单文件便携）
+// Rom 模式（主文件内嵌向量与 Payload）
 let db = Database::<f32>::open_with_config("agent.tdb", Config {
     dim: 1536,
     storage_mode: StorageMode::Rom,
@@ -197,7 +199,7 @@ let mut db = Database::<f32>::open_with_config("agent.tdb", Config {
     storage_mode: StorageMode::Rom, // 声明目标状态
     ..Default::default()
 })?;
-db.flush()?;  // 引擎自动完成: 向量解封 → 写入单 .tdb → 删除旧 .vec
+db.flush()?;  // 引擎将事实内嵌到 .tdb，发布统一索引容器并回收旧 .vec
 ```
 
 ---
@@ -768,13 +770,13 @@ db_b = triviumdb.TriviumDB("shared.tdb", dim=768)  # 💥 文件锁冲突!
 
 ### 数据库文件版本策略
 
-- `0.9.1` 内核支持 v5–v13 主文件，历史来源的 dtype、检查点与 WAL 组合按对应校验规则打开。
-- `0.7.0` 的 v5/32-chunk BQ 和 `0.7.1–0.8.x` 的 v5/48-chunk BQ 按历史布局识别，可写句柄在后续检查点发布当前 v11 格式。
-- ReadOnly 以原格式读取受支持的历史文件；Immutable 的 manifest 必须与现有文件字节匹配。
-- 当前主文件为 v11，WAL 为 v4，有界编辑回执与事实共用提交封条及检查点。Mmap 的 Payload generation 文件与 `.tdb/.vec/.flush_ok` 一同管理，ReadOnly/Immutable 保持原文件格式。早于 v5 的文件通过对应旧版导出迁移。
-- 当前内核按声明的版本范围解析文件；范围之外的版本返回明确错误，并保留原文件。
+- 当前开发主文件格式为 14，WAL 为 7，索引与登记文本统一保存在 `.idx`，完整布局见[数据库文件组](storage-format.md)。
+- ReadOnly/Immutable 保持物理零写，Immutable 的 manifest 必须与完整文件组匹配。
+- 格式之外的版本返回结构化错误并保留原文件。单格式准入与外部迁移脚本仍属后续收敛工作，按[SDK 冻结与内核冻结两个阶段](kernel-sdk.md#两阶段冻结目标)交付。
 
-文件格式升级与下文的 Embedding 维度迁移是两件不同的事：前者保留现有向量并由内核自动完成，后者用于更换向量模型和维度。
+下文的 Embedding 维度迁移用于更换向量模型与维度，保留文档和图事实。
+
+> **升级提醒**：切换内核前关闭实例并备份完整文件组。旧内核环境使用升级前备份，已发布版本的格式范围见对应版本说明。
 
 > **升级提醒**　切换格式前保留完整文件组备份，旧内核环境使用升级前备份。文件头与 sidecar 版本由内核管理，历史无头 WAL 使用对应旧内核恢复后再迁移。
 
@@ -828,7 +830,7 @@ SM状态随构图生成；增量插入只追加新节点的紧凑位码与幅值
 
 底层 `QuIVerSearchConfig` 未指定精排预算时，上限默认为64；实际预算受候选宽度限制，并至少覆盖请求的 `top_k`。上层管线显式传入的预算继续生效。过滤拒绝及墓碑不占成功精排名额，低搜索宽度不再导致普通查询退回旧BQ。
 
-查询样本校正／锚点模式及原生欧氏模式仍需通过Rust接口显式选择；图或向量变化后取消显式覆盖并恢复默认SM-L2。原生欧氏模式返回负平方距离，默认查询返回余弦分数。直接使用自定义 `NavigationScorer` 的TSNG路径保留原评分协议；仅从字节加载、尚未绑定原始向量的独立旧 `QuIVer` 对象也保留BQ兼容入口，数据库加载流程会自动补齐默认状态。
+查询样本校正／锚点模式及原生欧氏模式通过 Rust 接口显式选择；图或向量变化后取消显式覆盖并恢复默认 SM-L2。原生欧氏模式返回负平方距离，默认查询返回余弦分数。文档 ANN 通过 `NavigationScorer` 接入范围过滤、遍历预算与取消检查；仅从字节加载、尚未绑定原始向量的独立 `QuIVer` 对象保留 BQ 查询入口，数据库加载流程会自动补齐默认状态。
 
 ### QuIVer 自动激活条件
 

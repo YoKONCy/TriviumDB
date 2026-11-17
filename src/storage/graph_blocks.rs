@@ -40,13 +40,10 @@ impl MappedGraphStore {
         expected_nodes: usize,
         mut admit: impl FnMut(usize) -> Result<()>,
     ) -> Result<Option<Self>> {
-        let path = format!("{db_path}.gidx");
-        if !Path::new(&path).exists() {
+        let Some(part) = crate::storage::index_container::open(db_path, ".gidx")? else {
             return Ok(None);
-        }
-        let file = std::fs::File::open(&path)?;
-        // SAFETY: 只读文件映射由本结构持有，所有切片均受 mmap 生命周期约束。
-        let mmap = unsafe { Mmap::map(&file) }.map_err(TriviumError::Io)?;
+        };
+        let mmap = part.map()?;
         if mmap.len() < HEADER_SIZE + 4 || &mmap[..4] != MAGIC {
             return Err(corrupted(
                 "图块 sidecar 文件头无效 (Invalid graph block sidecar header)",
@@ -65,11 +62,7 @@ impl MappedGraphStore {
                 "图索引保留位无效 (Invalid graph index reserved bits)",
             ));
         }
-        if !(1..=VERSION).contains(&version) {
-            return Err(corrupted(
-                "图块 sidecar 版本不受支持 (Unsupported graph block sidecar version)",
-            ));
-        }
+        crate::storage::format::require("graph_index", version.into(), VERSION.into())?;
         let node_count = read_u64(&mmap, 8, "node_count")? as usize;
         let block_count = read_u64(&mmap, 16, "block_count")? as usize;
         if node_count != expected_nodes || block_count > expected_nodes {
@@ -84,7 +77,7 @@ impl MappedGraphStore {
         }
 
         let mut cursor = HEADER_SIZE;
-        if version >= 3 {
+        {
             let main_size = read_u64(&mmap, cursor, "main_size")?;
             cursor += 12;
             if main_size != std::fs::metadata(db_path)?.len() {
@@ -92,9 +85,6 @@ impl MappedGraphStore {
                     "图索引与主文件事实不匹配 (Graph index does not match main file facts)",
                 ));
             }
-        } else {
-            // 旧格式缺少事实绑定，由调用方保留主文件中已读取的权威图。
-            return Ok(None);
         }
         let main_file = std::fs::File::open(db_path)?;
         // SAFETY: 主文件只读映射仅在本次校验期间使用，所有偏移均检查范围。
@@ -112,15 +102,12 @@ impl MappedGraphStore {
             ));
         }
         let main_version = read_u16(&main, 4, "main_version")?;
-        if !(crate::storage::file_format::MINIMUM_SUPPORTED_VERSION
-            ..=crate::storage::file_format::CURRENT_VERSION)
-            .contains(&main_version)
-            || (main_version >= 10
-                && (main.len() < 74
-                    || crc32fast::hash(&main[..70]) != read_u32(&main, 70, "main_header_crc")?))
+        if main_version != crate::storage::file_format::CURRENT_VERSION
+            || main.len() < 110
+            || crc32fast::hash(&main[..106]) != read_u32(&main, 106, "main_identity_crc")?
         {
             return Err(corrupted(
-                "图索引对应主文件版本或校验无效 (Invalid graph index main version or checksum)",
+                "图索引对应主文件身份无效 (Invalid graph index main identity)",
             ));
         }
         let mut blocks = HashMap::with_capacity(block_count);
@@ -181,7 +168,7 @@ impl MappedGraphStore {
                 .ok_or_else(|| corrupted("图边计数溢出 (Graph edge count overflow)"))?;
             cursor = end;
         }
-        if version >= 2 {
+        {
             let directory_len = read_u64(&mmap, cursor, "directory_len")? as usize;
             cursor = cursor
                 .checked_add(8)

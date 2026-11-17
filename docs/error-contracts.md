@@ -26,6 +26,8 @@
 
 ## 公共表示
 
+历史磁盘身份通过 `TDB_MIGRATION_REQUIRED` 返回 `details.component`、`found`、`current`、`migration_entrypoint`，入口为 `scripts/migrate.py`。普通打开在创建协调文件前执行格式准入，并在获得租约后重新核对；历史身份拒绝保持来源文件组。未来主文件与 WAL 身份分别沿 `TDB_UNSUPPORTED_DATABASE_VERSION`、`TDB_UNSUPPORTED_WAL_VERSION` 处理。完整操作见[外部迁移工具](migration.md)。
+
 | 字段 | 当前契约 |
 | --- | --- |
 | `schema_version` | 当前为 `1` |

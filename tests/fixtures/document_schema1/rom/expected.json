@@ -1,0 +1,98 @@
+{
+  "acknowledged": {
+    "createdIds": [],
+    "replayed": false,
+    "revision": "0623ed7e3101429190cc690774d96144:0000000000000007"
+  },
+  "command": {
+    "expectedRevision": "0623ed7e3101429190cc690774d96144:0000000000000006",
+    "idempotencyKey": "schema1-migration",
+    "operation": "guardedTransaction",
+    "operations": [
+      {
+        "id": "9",
+        "op": "updatePayload",
+        "payload": {
+          "state": "after"
+        }
+      }
+    ]
+  },
+  "edges": [
+    {
+      "label": "tdb.document.contains",
+      "metadata": {
+        "document_id": "7",
+        "key": "paragraph",
+        "parent": null,
+        "position": 0,
+        "revision": "ff1ad9fd-3024-4c3d-986b-f482ffe4cccc"
+      },
+      "target_id": 8,
+      "weight": 1.0
+    }
+  ],
+  "fragment": {
+    "_tdb_document": {
+      "document_id": "7",
+      "end_byte": 6,
+      "key": "paragraph",
+      "revision": "ff1ad9fd-3024-4c3d-986b-f482ffe4cccc",
+      "schema_version": 1,
+      "start_byte": 0
+    },
+    "code": "block",
+    "data": {
+      "key": "block",
+      "rank": 2
+    },
+    "text": "甲乙"
+  },
+  "root": {
+    "_tdb_document": {
+      "blocks": [
+        {
+          "end_byte": 6,
+          "key": "paragraph",
+          "kind": "paragraph",
+          "node_id": "8",
+          "parent": null,
+          "start_byte": 0
+        }
+      ],
+      "content": "甲乙",
+      "content_hash": "sha256:f73ab1f5c2b9542c9cea79597b69a5c4dc106721d7de6fa9e4303c0fe45cfe3d",
+      "document_id": "7",
+      "parser_id": "plain",
+      "revision": "ff1ad9fd-3024-4c3d-986b-f482ffe4cccc",
+      "schema_version": 1,
+      "source_id": "plain.txt",
+      "source_revision": "r1"
+    },
+    "code": "root",
+    "data": {
+      "key": "root",
+      "rank": 1
+    }
+  },
+  "snapshot": {
+    "blocks": [
+      {
+        "end_byte": 6,
+        "key": "paragraph",
+        "kind": "paragraph",
+        "node_id": "8",
+        "parent": null,
+        "start_byte": 0
+      }
+    ],
+    "content": "甲乙",
+    "content_hash": "sha256:f73ab1f5c2b9542c9cea79597b69a5c4dc106721d7de6fa9e4303c0fe45cfe3d",
+    "document_id": "7",
+    "parser_id": "plain",
+    "revision": "ff1ad9fd-3024-4c3d-986b-f482ffe4cccc",
+    "schema_version": 1,
+    "source_id": "plain.txt",
+    "source_revision": "r1"
+  }
+}

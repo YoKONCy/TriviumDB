@@ -206,6 +206,15 @@ export function inspectCoreError(error: TriviumDBError): void {
     // @ts-expect-error 锁忙详情通过 resource 定位，不提供 I/O 类别。
     error.details.io_kind;
   }
+  if (error.code === 'TDB_MIGRATION_REQUIRED') {
+    const component: string = error.details.component;
+    const found: number = error.details.found;
+    const current: number = error.details.current;
+    const entrypoint: string = error.details.migration_entrypoint;
+    // @ts-expect-error 格式身份使用数值。
+    const invalidVersion: string = error.details.found;
+    void [component, found, current, entrypoint, invalidVersion];
+  }
   if (error.code === 'TDB_REENTRANT_ACCESS') {
     const operation: string = error.details.operation;
     void operation;

@@ -30,7 +30,7 @@ fn assert_facts<T: VectorType + Serialize + DeserializeOwned>(
     snapshot: &DocumentSnapshot,
 ) {
     let expected = contract();
-    assert_eq!(snapshot.schema_version, 1);
+    assert_eq!(snapshot.schema_version, 2);
     assert_eq!(snapshot.document_id, 9007199254740993);
     assert_eq!(snapshot.source_id, "vault://notes/cat.md");
     assert_eq!(snapshot.source_revision, "file-v1");
@@ -89,7 +89,7 @@ fn assert_facts<T: VectorType + Serialize + DeserializeOwned>(
             assert_eq!(
                 node.payload,
                 json!({"_tdb_document":{
-                "schema_version":1,"document_id":"9007199254740993","revision":snapshot.revision,
+                "schema_version":2,"document_id":"9007199254740993","revision":snapshot.revision,
                 "key":key,"start_byte":start,"end_byte":end
             },"text":text,"data":data})
             );

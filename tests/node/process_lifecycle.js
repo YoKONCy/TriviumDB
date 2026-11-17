@@ -118,7 +118,7 @@ async function child(mode, directory) {
       db.flush()
     }
     assert.equal(db.nodeCount(), 4000)
-    assert(fs.existsSync(file + '.quiver'), '内存对照必须包含已持久化 QuIVer')
+    assert(fs.existsSync(file + '.idx'), '已发布文件组必须包含统一索引容器')
     sample(db, directory, mode)
     assert(db.estimatedMemory() < 4000 * dim * 4, '重开应保持紧凑索引与映射向量结构')
     const expected = JSON.parse(fs.readFileSync(path.join(directory, 'quiver-query.json'), 'utf8'))

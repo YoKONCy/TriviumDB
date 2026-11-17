@@ -9,9 +9,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for suffix in ["", ".vec", ".wal", ".lock", ".flush_ok", ".manifest.json"] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 #[test]

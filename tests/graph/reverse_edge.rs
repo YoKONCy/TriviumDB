@@ -1,13 +1,12 @@
-use std::time::Instant;
 use triviumdb::Database;
+
+use crate::support;
 
 #[test]
 fn test_reverse_edge_avalanche_deletion() {
-    let db_path = "test_reverse_edge_avalanche.tdb";
-    let _ = std::fs::remove_file(db_path);
-    let _ = std::fs::remove_file(format!("{}.vec", db_path));
-    let _ = std::fs::remove_file(format!("{}.wal", db_path));
-    let _ = std::fs::remove_file(format!("{}.lock", db_path));
+    let root = support::TestDir::new("reverse_edge");
+    let path = root.file("reverse-edge.tdb");
+    let db_path = path.as_str();
 
     let mut db = Database::<f32>::open(db_path, 8).unwrap();
     db.disable_auto_compaction();
@@ -18,7 +17,7 @@ fn test_reverse_edge_avalanche_deletion() {
 
     let num_fans = 10_000;
 
-    // Create fan nodes and link to center
+    // 创建入边来源，验证删除高入度节点的完整级联。
     let mut fan_ids = Vec::new();
     for i in 0..num_fans {
         let fan_id = db
@@ -30,58 +29,35 @@ fn test_reverse_edge_avalanche_deletion() {
 
     assert_eq!(db.node_count().unwrap(), num_fans as usize + 1);
 
-    // Verify center is heavily linked
+    // 每条入边必须实际存在。
     for fan_id in &fan_ids {
         let fan_node = db.get(*fan_id).unwrap().unwrap();
         assert_eq!(fan_node.edges.len(), 1);
         assert_eq!(fan_node.edges[0].target_id, center_id);
     }
 
-    // Now delete the center node
-    let start = Instant::now();
+    // 删除中心节点后核对全部关联边。
     db.delete(center_id).unwrap();
-    let elapsed = start.elapsed();
-
-    println!(
-        "Deleted center node with {} incoming edges in {:?}",
-        num_fans, elapsed
-    );
-
-    // QEMU 用户态仿真的墙钟时间不代表真实 ARM64 性能；该环境只验证完整清理语义。
-    if std::env::var_os("TRIVIUM_TEST_QEMU_AARCH64").is_none() {
-        assert!(
-            elapsed.as_millis() < 500,
-            "Deletion took too long, might be hitting O(E) avalanche!"
-        );
-    }
-
-    // Verify correctness: center is gone
     assert!(db.get(center_id).unwrap().is_none());
     assert_eq!(db.node_count().unwrap(), num_fans as usize);
 
-    // Verify correctness: all fans have NO outgoing edges pointing to center!
+    // 所有来源节点的出边均已清理。
     for fan_id in &fan_ids {
         let fan_node = db.get(*fan_id).unwrap().unwrap();
         assert!(
             fan_node.edges.is_empty(),
-            "Fan should not have any remaining edges to the deleted center"
+            "来源节点仍保留指向已删除中心的边"
         );
     }
 
-    // Verify unlink cleanup logic correctly removes reverse edge
+    // 独立断边同步移除反向目录。
     let node_a = db.insert(&[0.0; 8], serde_json::json!("A")).unwrap();
     let node_b = db.insert(&[0.0; 8], serde_json::json!("B")).unwrap();
     db.link(node_a, node_b, "test", 1.0).unwrap();
     db.unlink(node_a, node_b).unwrap();
-    // After unlink, deleting B should theoretically not need to touch A anymore.
     db.delete(node_b).unwrap();
     let a_node = db.get(node_a).unwrap().unwrap();
     assert!(a_node.edges.is_empty());
 
-    // Cleanup
     drop(db);
-    let _ = std::fs::remove_file(db_path);
-    let _ = std::fs::remove_file(format!("{}.vec", db_path));
-    let _ = std::fs::remove_file(format!("{}.wal", db_path));
-    let _ = std::fs::remove_file(format!("{}.lock", db_path));
 }

@@ -44,21 +44,9 @@ pub fn run(handle: &DbHandle, db_path: &str, output: &str) -> CliResult {
 }
 
 // 固定制品及其临时、代际文件共享受保护的名称族。
-const PROTECTED_SUFFIXES: &[&str] = &[
-    ".vec",
-    ".wal",
-    ".flush_ok",
-    ".lock",
-    ".quiver",
-    ".text",
-    ".pidx",
-    ".gidx",
-    ".manifest.json",
-    ".pld",
-    ".publish",
-    ".qssd",
-    ".tmp",
-];
+use triviumdb::storage::artifacts::{
+    RESERVED_SUFFIXES as PROTECTED_SUFFIXES, is_reserved_name as protected_name,
+};
 
 pub(crate) fn validate_output_path(db_path: &str, output: &str) -> CliResult {
     let database = normalized_path(Path::new(db_path))?;
@@ -104,26 +92,6 @@ pub(crate) fn validate_output_path(db_path: &str, output: &str) -> CliResult {
         .into());
     }
     Ok(())
-}
-
-fn protected_name(candidate: &str, database: &str) -> bool {
-    #[cfg(windows)]
-    let folded_names = (
-        candidate.to_ascii_lowercase(),
-        database.to_ascii_lowercase(),
-    );
-    #[cfg(windows)]
-    let (candidate, database) = (folded_names.0.as_str(), folded_names.1.as_str());
-    if candidate == database {
-        return true;
-    }
-    let Some(suffix) = candidate.strip_prefix(database) else {
-        return false;
-    };
-    PROTECTED_SUFFIXES
-        .iter()
-        .any(|prefix| suffix == *prefix || suffix.starts_with(&format!("{prefix}.")))
-        || suffix.starts_with(".qssd-")
 }
 
 fn normalized_path(path: &Path) -> std::io::Result<PathBuf> {

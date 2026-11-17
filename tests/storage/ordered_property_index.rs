@@ -14,17 +14,7 @@ fn path(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for suffix in [
-        "",
-        ".vec",
-        ".wal",
-        ".lock",
-        ".flush_ok",
-        ".pidx",
-        ".manifest.json",
-    ] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 fn build(name: &str, nodes: usize) -> (String, Database<f32>) {
@@ -75,39 +65,6 @@ fn ordered_index_数字和字符串范围与全扫描差分一致() {
         assert_eq!(ids(&db, query), expected, "{query}");
     }
     drop(db);
-    cleanup(&path);
-}
-
-#[test]
-fn 旧键编码sidecar只读打开内存重建且保持零写() {
-    let (path, mut db) = build("legacy_key_encoding", 200);
-    db.create_index("bucket").unwrap();
-    db.create_ordered_index("score").unwrap();
-    db.flush().unwrap();
-    drop(db);
-
-    let sidecar = format!("{path}.pidx");
-    let mut bytes = std::fs::read(&sidecar).unwrap();
-    bytes[6..8].copy_from_slice(&1u16.to_le_bytes());
-    let crc = crc32fast::hash(&bytes[..bytes.len() - 4]);
-    let crc_offset = bytes.len() - 4;
-    bytes[crc_offset..].copy_from_slice(&crc.to_le_bytes());
-    std::fs::write(&sidecar, &bytes).unwrap();
-    let before = std::fs::read(&sidecar).unwrap();
-
-    let db = Database::<f32>::open_with_config(
-        &path,
-        Config {
-            dim: DIM,
-            access_mode: AccessMode::ReadOnly,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert!(db.list_indexes().unwrap().contains(&"bucket".to_owned()));
-    assert_eq!(ids(&db, r#"FIND {score: {$gte: 90}} RETURN *"#).len(), 10);
-    drop(db);
-    assert_eq!(std::fs::read(&sidecar).unwrap(), before);
     cleanup(&path);
 }
 
@@ -264,7 +221,7 @@ fn ordered_index_整数范围与复合等值组合不得返回空集() {
         .unwrap();
     assert_eq!(ids(&db, query), expected);
     db.flush().unwrap();
-    let sidecar_size = std::fs::metadata(format!("{path}.pidx")).unwrap().len();
+    let sidecar_size = crate::artifact::read(format!("{path}.pidx")).unwrap().len();
     assert!(sidecar_size > 36, "属性索引 sidecar 必须包含实际索引数据");
     drop(db);
     cleanup(&path);
@@ -319,9 +276,9 @@ fn ordered_index_sidecar_逐字节截断全部拒绝且不_panic() {
     db.create_ordered_index("score").unwrap();
     db.close().unwrap();
     let sidecar = format!("{path}.pidx");
-    let original = std::fs::read(&sidecar).unwrap();
+    let original = crate::artifact::read(&sidecar).unwrap();
     for length in 0..original.len() {
-        std::fs::write(&sidecar, &original[..length]).unwrap();
+        crate::artifact::write(&sidecar, &original[..length]).unwrap();
         let result = Database::<f32>::open_with_config(
             &path,
             Config {

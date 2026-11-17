@@ -11,11 +11,11 @@ use crate::storage::wal::SyncMode;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StorageMode {
     /// Mmap 分离模式（默认）：`.tdb`、`.vec` 与 `.pld.<generation>` 保存事实，
-    /// `.flush_ok` 绑定发布代际；启用的索引使用各自 sidecar。完整备份使用快照接口。
+    /// `.flush_ok` 绑定发布代际；索引统一保存在 `.idx`。完整备份使用快照接口。
     #[default]
     Mmap,
     /// Rom 模式：节点向量、Payload 与边内嵌 `.tdb`，打开时载入内存；
-    /// 文本等索引、WAL 和文件组发布记录按功能独立保存。
+    /// 文本等索引保存在 `.idx`；WAL 和文件组发布记录各自维护。
     Rom,
 }
 

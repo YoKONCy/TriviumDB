@@ -19,9 +19,7 @@ fn path(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for suffix in ["", ".wal", ".vec", ".lock", ".flush_ok", ".propidx"] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 #[test]

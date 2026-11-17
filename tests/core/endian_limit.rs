@@ -19,9 +19,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".tdb", ".wal", ".vec", ".lock", ".flush_ok"] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 #[test]
@@ -213,7 +211,14 @@ fn 测试_恢复next_id耗尽后插入应返回错误而非回绕() {
     let mut bytes = std::fs::read(&path).unwrap();
     let crc = crc32fast::hash(&bytes[..70]);
     bytes[70..74].copy_from_slice(&crc.to_le_bytes());
-    std::fs::write(&path, bytes).unwrap();
+    let identity_crc = crc32fast::hash(&bytes[..106]);
+    bytes[106..110].copy_from_slice(&identity_crc.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    let mut container = std::fs::read(format!("{path}.idx")).unwrap();
+    container[24..28].copy_from_slice(&crc32fast::hash(&bytes).to_le_bytes());
+    let container_crc = crc32fast::hash(&container[..508]);
+    container[508..512].copy_from_slice(&container_crc.to_le_bytes());
+    std::fs::write(format!("{path}.idx"), container).unwrap();
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
     let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
         db.insert(&[1.0, 0.0, 0.0, 0.0], serde_json::json!({}))

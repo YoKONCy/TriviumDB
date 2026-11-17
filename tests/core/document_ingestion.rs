@@ -653,60 +653,6 @@ fn 检查点覆盖批次后旧日志重放保持最终发布和回收() {
     );
 }
 
-#[test]
-fn 历史十二版与五版命名图日志完整升级() {
-    fn run<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(dtype: &str) {
-        let dir = TestDir::new("document-format12-history");
-        let path = dir.file("sample.tdb");
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/pre_document_publication_format12")
-            .join(dtype);
-        let expected: Value =
-            serde_json::from_slice(&std::fs::read(fixture.join("case.json")).unwrap()).unwrap();
-        for entry in std::fs::read_dir(&fixture).unwrap() {
-            let entry = entry.unwrap();
-            std::fs::copy(entry.path(), dir.0.join(entry.file_name())).unwrap();
-        }
-        assert_eq!(&std::fs::read(&path).unwrap()[4..6], &12u16.to_le_bytes());
-        assert_eq!(
-            &std::fs::read(format!("{path}.wal")).unwrap()[4..6],
-            &5u16.to_le_bytes()
-        );
-        let mut db = Database::<T>::open_with_config(&path, config(StorageMode::Mmap)).unwrap();
-        assert_eq!(db.all_node_ids().unwrap(), [11, 22, 33]);
-        assert_eq!(
-            serde_json::to_value(
-                db.get_named_graph("历史命名图", &Default::default())
-                    .unwrap()
-            )
-            .unwrap(),
-            expected["after"]
-        );
-        for (id, vector) in [(11, [1., 0.]), (22, [0., 1.]), (33, [1., 1.])] {
-            let node = db.get(id).unwrap().unwrap();
-            assert_eq!(node.vector, vector.map(T::from_f32));
-            assert_eq!(node.payload, json!({"id":id}));
-        }
-        assert!(db.list_document_uploads(None).unwrap().is_empty());
-        db.flush().unwrap();
-        db.close().unwrap();
-        assert_eq!(&std::fs::read(&path).unwrap()[4..6], &13u16.to_le_bytes());
-        let mut db = Database::<T>::open_with_config(&path, config(StorageMode::Rom)).unwrap();
-        assert_eq!(
-            serde_json::to_value(
-                db.get_named_graph("历史命名图", &Default::default())
-                    .unwrap()
-            )
-            .unwrap(),
-            expected["after"]
-        );
-        db.close().unwrap();
-    }
-    run::<f32>("f32");
-    run::<half::f16>("f16");
-    run::<u64>("u64");
-}
-
 #[cfg(feature = "test-hooks")]
 #[test]
 fn 最终发布同步未知结果恢复完整候选表示并再次持久化() {

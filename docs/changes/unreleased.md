@@ -6,6 +6,46 @@
 
 ## 中文说明
 
+### SDK 接口清单、外部迁移与单格式准入
+
+- [SDK 正式接口清单](../sdk-contract.md)登记 Rust 应用入口与内核扩展边界、Python/Node 声明来源、TQL 与 JSON 协议、错误字段和生命周期。`1.0.0-beta.1` 目标为 SDK 冻结，`1.0.0` 再冻结正式内核契约；当前版本元数据保持 `0.9.1`。
+- 生产内部函数与当前格式用例按职责命名，Hook 阶段派发统一为 `invoke_stage`。主文件和 CLI 直接比较唯一的当前格式身份，存储观测的最低格式字段取同一身份。磁盘格式字段与已公开的 FFI 符号沿各自持久化及插件契约维护。
+- 普通打开仅处理当前主格式 15、WAL 7、统一索引容器及当前组件布局。在创建协调文件前和获得租约后检查格式，历史身份返回 `TDB_MIGRATION_REQUIRED` 及 `component`、`found`、`current`、`migration_entrypoint`。当前格式的 WAL 和文件组中断恢复继续由内核维护。
+- `scripts/migrate.py` 调用独立 workspace 的原生工具。来源恢复后端拥有独立源码，通过逻辑事实协议调用当前内核写出目标，生产模块装配维护当前格式。支持主格式 5–15、三种 dtype、Rom/Mmap，在副本恢复并比较节点、向量位模式、Payload、边元数据、登记文本、索引定义、文档、命名图及回执，核验后发布新目录。旧普通复合索引字段无法无歧义恢复时明确拒绝。
+- 普通文档、解析文档及片段标签统一使用结构 2，目标主格式标记为 15。外部迁移统一旧结构 1 并保留文档身份、范围、修订、业务字段、唯一约束和持久回执。来源格式 5–9 按完整向量几何识别类型，旧空检查点要求 `--source-dtype f32/f16/u64`，缺参返回 `TDB_MIGRATION_DTYPE_REQUIRED`。
+- 工具身份更新为 `tdb-migrate-2`，编排协议保持 1。来源与目标分别使用独立暂存子目录，当前数据库读取要求完整 `.idx`。当前独立 SSD 制品及属性 sidecar 通过各自显式入口读写，检查点暂存组件由内核发布流程管理。
+- 检查模式依赖既有来源锁并保持来源零写。执行模式可创建协调锁，保留来源数据。工具实施源/目标租约、摘要核对、资源准入、目标归属及原子目录提交；发布确认标记在复核后移除，进程中断可用原命令重试，发布后错误提供提交结果。
+- QVSSD 全部 codec 统一使用包络 2。迁移目标保留完整向量并清除旧压缩缓存，宿主重新配置编码与缓存预算。来源快照 manifest 保留在来源；目标按普通数据库交付，Immutable 分发使用当前 SDK 重新发布快照。
+- 独立样本由不可变 `v0.9.0` 源码生成，覆盖三种 dtype × Rom/Mmap × 检查点/WAL；`v0.9.1` 原始源码样本补充解析文档、来源映射、命名图与持久回执。验收核对完整内容、再次重开、未提交事务与截断尾帧、源文件保持、拒绝、预算、租约和发布前后进程退出重试；跨平台命令加入 CI。
+- 格式 11/WAL 4 与格式 12/WAL 5 的既有原生 wheel 样本接入外部迁移验收，逐文件核对来源摘要。三种 dtype 分别迁入 Rom/Mmap，核对默认图及命名图、修订、旧回执状态与原命令幂等重试，后续写入验证自动 ID 和唯一约束。脚本入口覆盖两种来源的检查、发布及同源重试。
+
+```bash
+cargo build --locked --manifest-path crates/triviumdb-migrate/Cargo.toml --target-dir target/migration
+python scripts/migrate.py --source /data/old.tdb --destination /data/current --check
+python scripts/migrate.py --source /data/old.tdb --destination /data/current --execute
+```
+
+> **迁移提醒**　停止来源持有者并保留完整备份。目标是新目录，数据库为其下 `database.tdb`。支持范围、资源选项和确认重试见[迁移指南](../migration.md)。平台验收以对应提交的 CI 为准。
+
+### 正式命名与研究路径隔离
+
+- QuIVer 正式批量构图入口统一为 `batch_build`，采用此前数据库默认使用的并行构图、延迟反向剪枝和连通性保护。旧串行、追加式及 checked 对照构图从生产库移出；逐节点更新继续使用现有增量入口。`TRIVIUM_EAGER_PRUNE` 和旧构图选择开关随研究对照退出。
+- SM 查询模块采用 `index::quiver::sm`，快照类型为 `SmIndex`。`search`、`search_traced` 和 `search_with_vectors` 自动使用生产派发，调用参数移除 `SmSearchMode`；独立标量参考仅参与内部正确性测试。研究图导入／导出和串行研究构图归入冻结快照。
+- 压缩冷热运行时采用 `index::quiver::runtime::{QuiverRuntime, QuiverRuntimeOptions, QuiverArtifactOptions, QuiverRuntimeStats}`，分别替代原 `ssd` 模块的 `SsdQuiver`、`SsdRuntimeOptions`、`SsdOptions` 和 `SsdStats`。数据库及类型化 Reader 使用 `configure_quiver`、`search_quiver`、`quiver_stats`、`close_quiver`；原 INT8 别名移除。中心化 INT4／INT8、查询精度、缓存额度及冷热切换沿既有配置执行。
+- TSNG 研究模块、crate 根导出、Database／Reader 对照入口及专用双队列导航退出正式 SDK；配套研究用例和消融基准随源码快照保留。正式查询继续由 TQL／Planner 和已有检索入口执行，文档 ANN 使用的自定义评分接口继续维护。EXPLAIN 的 `industrial_access_path` 字段改为 `vector_access_path`，取值与规划行为保持一致，原结构化 `access_path` 独立保留。Cargo 的 `ablation` 特性移除，研究目录排除出发布包，已有 ICDE 归档保持原始内容。
+- 保留部署诊断覆盖 `TRIVIUM_NO_AVX512`、`TRIVIUM_DISABLE_384_KERNEL` 和构图计量 `TRIVIUM_BUILD_PROFILE`。硬件自动派发、标量回退、合法维度处理与 `test-hooks` 故障验证继续维护。
+
+> **调用提醒**　这是 SDK 冻结前的接口整理，Rust 调用方按上述名称更新导入和调用参数，各语言的 EXPLAIN 消费方改读 `vector_access_path`。Python／Node 的公共方法、压缩运行时 JSON 字段和类型声明沿用原契约。命名整理保持默认算法参数，格式准入与外部迁移见上节。
+
+### 统一索引容器与验收范围收敛
+
+- 主文件格式 15 保存持久化数据库身份与每次发布的检查点标识，`.idx` 容器以主文件长度、CRC 和两种身份绑定文件组，拒绝另一数据库或同库旧检查点的容器。QuIVer、登记正文与关键词、属性索引定义、图目录和可选压缩重排组件集中保存，正常提交清理暂存组件。完整布局见[文件组说明](../storage-format.md)。
+- 容器使用固定目录、组件 CRC 与 64 KiB 对齐范围。属性及图索引直接映射组件，SSD 读取包含组件基址；已持有的 Reader 沿旧文件句柄完成读取。发布日志、快照及 CLI 导出路径保护共享制品目录，快照同时包含已发布的 SSD 组件。
+- 容器缺失、身份错配和非法目录返回结构化错误。登记文本和属性索引定义损坏时保留源件并拒绝不完整加载，显式文本重建接受宿主提供的完整内容。重开处理已提交的待清理日志时，先验证完整容器和各组件；损坏时保留恢复日志、备份及暂存组件。
+- 删除正常内核自动升级旧磁盘格式的测试，保留历史 fixture 和当前格式的数据往返、损坏拒绝、事务恢复、只读零写及资源释放契约。Python／Node 文本用例改用当前格式核对重建与重开。测试清理范围补齐统一容器，故障矩阵增加容器写入、同步及替换失败。
+
+> **使用提醒**　新格式由当前开发版写入，旧版内核无法打开。容器发布会重写完整容器，需为暂存组件、候选容器和旧代备份预留空间；完整数据备份使用快照 API。
+
 ### CLI JSONL 数据正确性
 
 - 导出按节点 ID 升序读取原始 dtype。u64 向量使用 JSON 无符号整数保留完整位模式，f32／f16 保留对应数值；每条边同时输出 `target`、`label`、`weight` 和 `metadata`。
@@ -35,13 +75,13 @@
 
 ### 文本恢复、向量索引与检索回调
 
-- 检查点在文件组发布前同步 WAL v7 的唯一封条，TMET v2 将封条、主文件长度及 CRC、文本长度及 CRC 绑定并校验。恢复按封条区分检查点覆盖的旧删除与后续真实删除，覆盖节点 ID 复用、立即／延期加载、Rom／Mmap 和 Off 同步模式。历史 TMET v1 保留读取能力；旧文本缺少封条且恢复涉及已登记节点的删除及 ID 复用时，返回 `TDB_RECOVERY_REQUIRED`，定位字段为 `text_index.recovery_boundary`，保留原始文件供处理。
+- 检查点在文件组发布前同步 WAL v7 的唯一封条，TMET v2 将封条、主文件长度及 CRC、文本长度及 CRC 绑定并校验。恢复按封条区分检查点覆盖的旧删除与后续真实删除，覆盖节点 ID 复用、立即／延期加载、Rom／Mmap 和 Off 同步模式。恢复边界无法确认时返回 `TDB_RECOVERY_REQUIRED`，定位字段为 `text_index.recovery_boundary`，保留原始文件供处理。历史文本格式由外部迁移工具读取和转换。
 - WAL 回放实际插入新向量后使已有 QuIVer 路由失效，后续普通搜索按配置重建或精确回退，恢复后的当前实例可检索全部已确认节点。
-- 已有文本检查点在无待恢复日志时，由 Writer 打开流程补齐封条及 TMET v2，覆盖元数据发布后、日志清理前失败的重试。旧 WAL 升级按帧与事务暂存执行内存准入，长日志中反复更新少量节点时按实际恢复峰值处理。
+- 当前文本检查点在文件组发布中写出完整元数据及恢复封条，覆盖元数据发布后、日志清理前失败的重试。历史 WAL 在外部工具的副本中按帧与事务暂存执行内存准入，恢复完成后交付逻辑事实，由当前内核生成目标文件组。
 - 自定义召回、召回后、图扩散前和 DPP 最终回调结束时立即检查 Hook 错误，统一返回 `TDB_HOOK_EXECUTION`。空召回和普通返回沿相同错误传播契约执行。
 - `$set`、`$inc`、`$unset` 的操作数在应用整份补丁前验证为 JSON 对象。非法操作数返回 `TDB_INVALID_INPUT` 及 `patch.<操作符>` 字段定位，Payload 与 WAL 保持提交前内容。
 
-> **升级与恢复提醒**　升级前保留完整文件组备份。当前开发内核写入 WAL v7 与 TMET v2，历史 WAL v2–v6 由 Writer 按对应布局校验并升级。旧版本环境从升级前备份恢复。遗留恢复歧义通过完整备份恢复数据库，或由宿主保留的事实创建新库并登记正文与关键词。已被旧版本清除的文本按备份或来源重建。
+> **升级与恢复提醒**　升级前保留完整文件组备份。当前开发内核使用主格式 15、WAL v7 与 TMET v2，历史数据库通过 `scripts/migrate.py` 显式迁入新目录。旧版本环境从原来源或升级前备份打开。遗留恢复歧义通过完整备份恢复数据库，或由宿主保留的事实创建新库并登记正文与关键词。已被旧版本清除的文本按备份或来源重建。
 
 ### 查询计量、路径深度与文档解析
 
@@ -76,6 +116,46 @@
 
 ## English
 
+### SDK inventory, external migration and current-format admission
+
+- The [SDK inventory](../sdk-contract.md) records supported Rust application interfaces and kernel boundaries, Python/Node declarations, TQL and JSON protocols, errors and lifecycle semantics. `1.0.0-beta.1` targets the SDK freeze; `1.0.0` adds the supported kernel contract freeze. Package metadata remains `0.9.1`.
+- Production internals and current-format tests use responsibility-based names, with Hook stage dispatch named `invoke_stage`. The main-file reader and CLI compare a single current-format identity directly, and storage diagnostics report that same identity as the minimum format. Disk-format fields and published FFI symbols follow their persistence and plugin contracts.
+- Ordinary opens accept only main format 15, WAL 7, the unified index container and current component layouts. Admission runs before coordination files are created and again under the lease. Historical identities return `TDB_MIGRATION_REQUIRED` with `component`, `found`, `current` and `migration_entrypoint`. Current-format WAL and interrupted-publication recovery remain kernel responsibilities.
+- `scripts/migrate.py` invokes a native tool in a separate workspace. Its source recovery backend owns independent source code and transfers logical facts to the current kernel, which writes the destination. Production module assembly maintains the current format. The tool accepts main formats 5–15, all three dtypes and Rom/Mmap. Complete node, vector-bit, Payload, edge-metadata, text, index-definition, document, named-graph and receipt facts are compared before a new directory is published. Ambiguous historical ordinary composite-index field lists are rejected.
+- Plain documents, parsed documents and fragment tags share document schema 2 in destination main format 15. External migration upgrades schema 1 while retaining document identity, ranges, revisions, business fields, unique constraints and persistent receipts. Formats 5–9 identify dtype through exact vector geometry. Legacy empty checkpoints require `--source-dtype f32/f16/u64`, with `TDB_MIGRATION_DTYPE_REQUIRED` for missing confirmation.
+- Tool identity advances to `tdb-migrate-2` with orchestration protocol 1. Source and destination use separate staging subdirectories. Database reads require a complete `.idx` container. Current standalone SSD artifacts and property sidecars retain explicit read/write entry points, and kernel publication manages current staging components.
+- Check mode requires an existing source lock and preserves source files. Execute mode may create coordination locks while preserving source data. The tool enforces source/destination leases, digest validation, resource admission, ownership and atomic directory publication. A confirmation marker remains until verification finishes; the same command retries after interruption, and post-publication errors report the commit outcome.
+- Every QVSSD codec uses envelope 2. Migration preserves complete vectors and removes old compressed caches; hosts configure encoding and cache budgets again. Source snapshot manifests remain at the source. Destinations are ordinary databases; use the current SDK to publish a new snapshot for Immutable distribution.
+- Independent fixtures generated from immutable `v0.9.0` source cover three dtypes, Rom/Mmap and checkpoint/confirmed-WAL states; fixtures from original `v0.9.1` source add parsed documents, source mappings, named graphs and persistent receipts. Acceptance verifies full contents, reopening, uncommitted transactions and torn WAL tails, source preservation, rejection, budgets, leases and retry after process exit before and after publication. Cross-platform commands are added to CI.
+- Existing fixtures from historical native wheels now verify external migration for format 11/WAL 4 and format 12/WAL 5, with per-file provenance digest checks. All three dtypes migrate into Rom and Mmap targets, preserving default and named graphs, revisions, historical receipt status and idempotent retry of the original command. Subsequent writes verify automatic IDs and unique constraints. The script entry point covers check, publication and same-source retry for both formats.
+
+```bash
+cargo build --locked --manifest-path crates/triviumdb-migrate/Cargo.toml --target-dir target/migration
+python scripts/migrate.py --source /data/old.tdb --destination /data/current --check
+python scripts/migrate.py --source /data/old.tdb --destination /data/current --execute
+```
+
+> **Migration note**　Stop source holders and keep a complete backup. The destination is a new directory containing `database.tdb`. See the [migration guide](../migration.md) for supported sources, resource options and confirmation retries. Platform acceptance depends on CI for the corresponding commit.
+
+### Production naming and research isolation
+
+- `QuIVer::batch_build` is the production batch constructor, using the parallel construction, deferred reverse pruning and connectivity protection previously selected by the database. Historical serial, append and checked comparison builders move out of the production library; individual updates retain the existing incremental API. The research-only `TRIVIUM_EAGER_PRUNE` and historical builder-selection switches retire with those comparisons.
+- SM queries live in `index::quiver::sm`, with snapshots represented by `SmIndex`. `search`, `search_traced` and `search_with_vectors` select the production dispatch automatically and no longer take `SmSearchMode`. The independent scalar reference is available only to internal correctness tests. Research graph import/export and the serial research builder are preserved in frozen snapshots.
+- Compressed hot/SSD execution uses `index::quiver::runtime::{QuiverRuntime, QuiverRuntimeOptions, QuiverArtifactOptions, QuiverRuntimeStats}`, replacing `SsdQuiver`, `SsdRuntimeOptions`, `SsdOptions` and `SsdStats` from the former `ssd` module. Database and typed Reader calls use `configure_quiver`, `search_quiver`, `quiver_stats` and `close_quiver`; the INT8 aliases are removed. Centered INT4/INT8, query precision, cache budgets and residency switching retain their configuration semantics.
+- The TSNG research module, root exports, Database/Reader comparison APIs and dedicated dual-queue navigation leave the production SDK. Related research cases and ablation benchmarks are retained with the source snapshot. TQL/Planner and the existing search APIs remain the application query paths, and document ANN retains its custom scoring interface. EXPLAIN renames `industrial_access_path` to `vector_access_path`, retaining its values and planning behavior alongside the existing structured `access_path`. Cargo's `ablation` feature is removed, research directories are excluded from release packages, and the existing ICDE archive retains its original content.
+- Deployment diagnostics retain `TRIVIUM_NO_AVX512`, `TRIVIUM_DISABLE_384_KERNEL` and construction profiling through `TRIVIUM_BUILD_PROFILE`. Hardware dispatch, scalar fallback, supported dimensions and `test-hooks` fault verification remain maintained.
+
+> **Caller guidance**　These API changes precede the SDK freeze. Update Rust imports and call arguments using the mapping above, and read `vector_access_path` in EXPLAIN consumers across languages. Python/Node public methods, compressed-runtime JSON fields and declarations retain their contracts. Naming changes retain default algorithm parameters; current-format admission and migration are described above.
+
+### Unified index container and acceptance scope
+
+- Main-file format 15 stores a persistent database identity and a fresh checkpoint identifier for each publication. The `.idx` container binds to the main file through its length, CRC and both identities, rejecting containers from another database or an older checkpoint of the same database. QuIVer, registered text and keywords, property index definitions, graph directories and optional compressed reranking artifacts share this container; successful checkpoint cleanup removes staging components. See the [file-group specification](../storage-format.md).
+- The container uses a fixed directory, component CRCs and 64 KiB aligned ranges. Property and graph indexes map their component ranges directly; SSD reads include the component base offset. Existing readers finish through retained file handles. Publication recovery, snapshots and CLI export protection share the artifact catalog. Snapshots include published SSD components.
+- Missing containers, identity mismatches and invalid directories produce structured errors. Corrupted registered text or property index definitions remain intact on disk and cause incomplete loading to be rejected. Explicit text rebuilding accepts complete replacement content from the host. Reopening with a committed journal awaiting cleanup validates the complete container and its components first; corruption preserves recovery journals, backups, and staging components.
+- Tests requiring automatic historical disk-format upgrades in the normal engine are removed. Historical fixtures remain available; current-format round trips, corruption rejection, transaction recovery, physical read-only behavior and resource release remain in scope. Python and Node text contracts now exercise current-format rebuilding and reopening. Test cleanup covers the container, and fault matrices include container write, sync and replacement failures.
+
+> **Usage note**　The development engine writes the new format, which older engines cannot open. Publication rewrites the complete container and requires space for staging components, the candidate container and previous-generation backups. Use snapshot APIs for complete database backups.
+
 Subsequent development builds on `0.9.1`. See the [bilingual release notes](0.9.1.md) for delivered capabilities.
 
 ### CLI JSONL data correctness
@@ -107,13 +187,13 @@ Subsequent development builds on `0.9.1`. See the [bilingual release notes](0.9.
 
 ### Text recovery, vector indexes, and search callbacks
 
-- Checkpoints synchronize a unique WAL v7 seal before publishing their file group. TMET v2 binds and checks the seal, main-file size and CRC, and text-file size and CRC. Recovery distinguishes checkpoint-covered deletions from subsequent deletions, covering node ID reuse, eager/deferred loading, Rom/Mmap, and Off synchronization. TMET v1 remains readable. When legacy text has no seal and recovery deletes and reuses an indexed node ID, opening returns `TDB_RECOVERY_REQUIRED` with target `text_index.recovery_boundary` and preserves the original files for recovery.
+- Checkpoints synchronize a unique WAL v7 seal before publishing their file group. TMET v2 binds and checks the seal, main-file size and CRC, and text-file size and CRC. Recovery distinguishes checkpoint-covered deletions from subsequent deletions, covering node ID reuse, eager/deferred loading, Rom/Mmap, and Off synchronization. Unverifiable recovery boundaries return `TDB_RECOVERY_REQUIRED` with target `text_index.recovery_boundary` and preserve the original files for recovery. Historical text formats are read and converted by the external migration tool.
 - Actual vector insertion during WAL replay invalidates existing QuIVer routing. Subsequent ordinary searches rebuild or use exact fallback according to configuration, making all acknowledged nodes searchable in the recovered instance.
-- Writers add a seal and TMET v2 to an existing text checkpoint when opening with no pending recovery log, including retries after metadata publication succeeds before WAL cleanup fails. Legacy WAL upgrades admit memory for individual frames and pending transactions, accounting for the actual recovery peak when a long log repeatedly updates a small set of nodes.
+- Current text checkpoints write complete metadata and recovery seals as part of file-group publication, including retries after metadata publication succeeds before WAL cleanup fails. The external tool admits memory for historical WAL frames and pending transactions in its source copy. Recovered logical facts are then passed to the current kernel to create the destination file group.
 - Custom recall, post-recall, pre-graph, and final DPP callbacks immediately propagate Hook errors as `TDB_HOOK_EXECUTION`. Empty recall and ordinary returns follow the same error contract.
 - `$set`, `$inc`, and `$unset` operands are validated as JSON objects before applying a patch. Invalid operands return `TDB_INVALID_INPUT` with a `patch.<operator>` target, retaining the pre-commit Payload and WAL contents.
 
-> **Upgrade and recovery note**　Retain a complete file-group backup before upgrading. Development builds write WAL v7 and TMET v2. Writers validate and upgrade historical WAL v2–v6 using their corresponding layouts. Restore the pre-upgrade backup when returning to an older engine. For ambiguous legacy recovery, restore a full database backup or create a new database from the host's retained facts and register its text and keywords. Rebuild text already removed by an older engine from a backup or retained source.
+> **Upgrade and recovery note**　Retain a complete file-group backup before upgrading. Development builds use main format 15, WAL v7 and TMET v2. Explicitly migrate historical databases into a new directory with `scripts/migrate.py`. Older engines can open the retained source or pre-upgrade backup. For ambiguous legacy recovery, restore a full database backup or create a new database from the host's retained facts and register its text and keywords. Rebuild text already removed by an older engine from a backup or retained source.
 
 ### Query accounting, path depth, and document parsing
 

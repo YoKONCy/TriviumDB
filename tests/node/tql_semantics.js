@@ -13,6 +13,9 @@ module.exports = function tqlSemantics(root, TriviumDB) {
     for (const row of contract.records) db.insertWithId(row.id, [1], row.payload)
     db.insertWithId(99, [0], { kind: 'root' })
     for (const row of contract.records) db.link(99, row.id, 'item', row.id)
+    const plan = db.tql('EXPLAIN SEARCH VECTOR [1] TOP 1 RETURN *')[0].plan.payload
+    assert.equal(plan.vector_access_path, 'exact_fallback')
+    assert.equal(plan.access_path.kind, 'full_node_scan')
     for (const source of contract.sources) {
       for (const test of contract.cases) {
         const query = source.query + ' ' + test.suffix.replaceAll('{var}', source.variable)

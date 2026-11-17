@@ -1,6 +1,6 @@
-//! SSD运行时JSON协议。绑定仅负责传输，来源、预算、I/O与排空均由内核执行。
+//! 压缩冷热运行时 JSON 协议。绑定负责传输，来源、预算、I/O 与排空由内核执行。
 
-use crate::index::quiver::{QuIVerSearchConfig, ssd::SsdRuntimeOptions};
+use crate::index::quiver::{QuIVerSearchConfig, runtime::QuiverRuntimeOptions};
 use crate::{Database, Result, TriviumError, VectorType};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 enum Command {
     Configure {
         #[serde(default)]
-        options: SsdRuntimeOptions,
+        options: QuiverRuntimeOptions,
     },
     Search {
         vector: Vec<f32>,
@@ -31,7 +31,7 @@ struct Hit {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Response {
-    Stats(Option<Box<crate::index::quiver::ssd::SsdStats>>),
+    Stats(Option<Box<crate::index::quiver::runtime::QuiverRuntimeStats>>),
     Hits { hits: Vec<Hit> },
     Collected { removed: usize },
     Closed,
@@ -101,9 +101,9 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
                     .collect(),
             }
         }
-        Command::Stats {} => Response::Stats(db.quiver_int8_stats()?.map(Box::new)),
+        Command::Stats {} => Response::Stats(db.quiver_stats()?.map(Box::new)),
         Command::Close {} => {
-            db.close_quiver_int8()?;
+            db.close_quiver()?;
             Response::Closed
         }
         Command::CollectTemporary {} => Response::Collected {

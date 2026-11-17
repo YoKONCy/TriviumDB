@@ -16,19 +16,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for suffix in [
-        "",
-        ".vec",
-        ".wal",
-        ".lock",
-        ".flush_ok",
-        ".quiver",
-        ".quiver.meta",
-        ".text",
-        ".text.meta",
-    ] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 #[test]
@@ -38,7 +26,7 @@ fn 只读跨进程辅助进程() {
     };
     let ready = std::env::var("TRIVIUM_READ_ONLY_CHILD_READY").unwrap();
     let db = Database::<f32>::open_read_only(&path, 2).unwrap();
-    std::fs::write(&ready, b"ready").unwrap();
+    crate::artifact::write(&ready, b"ready").unwrap();
     std::thread::sleep(Duration::from_secs(3));
     assert!(!db.search(&[1.0, 0.0], 1, 0, 0.0).unwrap().is_empty());
 }
@@ -192,13 +180,17 @@ fn 只读打开遇到空旧版本_wal拒绝且字节不变() {
     create_clean_database(&path);
     let wal_path = format!("{path}.wal");
     let legacy_header = [b'T', b'V', b'W', b'L', 2, 0];
-    std::fs::write(&wal_path, legacy_header).unwrap();
+    crate::artifact::write(&wal_path, legacy_header).unwrap();
 
     assert!(matches!(
         Database::<f32>::open_read_only(&path, 2),
-        Err(TriviumError::RecoveryRequired { .. })
+        Err(TriviumError::MigrationRequired {
+            component: "wal",
+            found: 2,
+            current: 7
+        })
     ));
-    assert_eq!(std::fs::read(&wal_path).unwrap(), legacy_header);
+    assert_eq!(crate::artifact::read(&wal_path).unwrap(), legacy_header);
     cleanup(&path);
 }
 
@@ -213,12 +205,16 @@ fn 只读与不可变遇到非空v2_wal均拒绝且完整文件状态零写() {
     bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&data);
     bytes.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
-    std::fs::write(&wal_path, &bytes).unwrap();
+    crate::artifact::write(&wal_path, &bytes).unwrap();
     let before = file_state(&path);
 
     assert!(matches!(
         Database::<f32>::open_read_only(&path, 2),
-        Err(TriviumError::RecoveryRequired { .. })
+        Err(TriviumError::MigrationRequired {
+            component: "wal",
+            found: 2,
+            current: 7
+        })
     ));
     assert_eq!(file_state(&path), before);
 
@@ -241,12 +237,12 @@ fn 只读打开遇到待恢复_wal明确拒绝且不修改文件() {
         db.insert(&[0.0, 1.0], json!({})).unwrap();
     }
     let wal_path = format!("{path}.wal");
-    let before = std::fs::read(&wal_path).unwrap();
+    let before = crate::artifact::read(&wal_path).unwrap();
     assert!(matches!(
         Database::<f32>::open_read_only(&path, 2),
         Err(TriviumError::RecoveryRequired { .. })
     ));
-    assert_eq!(std::fs::read(&wal_path).unwrap(), before);
+    assert_eq!(crate::artifact::read(&wal_path).unwrap(), before);
     cleanup(&path);
 }
 
@@ -256,10 +252,10 @@ fn 只读加载损坏sidecar保持所有文件字节不变() {
     create_clean_database(&path);
     let quiver_path = format!("{path}.quiver");
     let meta_path = format!("{path}.quiver.meta");
-    std::fs::write(&quiver_path, b"corrupt-quiver").unwrap();
-    std::fs::write(&meta_path, b"corrupt-meta").unwrap();
-    let before_quiver = std::fs::read(&quiver_path).unwrap();
-    let before_meta = std::fs::read(&meta_path).unwrap();
+    crate::artifact::write(&quiver_path, b"corrupt-quiver").unwrap();
+    crate::artifact::write(&meta_path, b"corrupt-meta").unwrap();
+    let before_quiver = crate::artifact::read(&quiver_path).unwrap();
+    let before_meta = crate::artifact::read(&meta_path).unwrap();
     let config = Config {
         dim: 2,
         access_mode: AccessMode::ReadOnly,
@@ -277,9 +273,9 @@ fn 只读加载损坏sidecar保持所有文件字节不变() {
             .is_empty()
     );
     drop(db);
-    assert_eq!(std::fs::read(&quiver_path).unwrap(), before_quiver);
-    assert_eq!(std::fs::read(&meta_path).unwrap(), before_meta);
-    assert!(Path::new(&quiver_path).exists());
+    assert_eq!(crate::artifact::read(&quiver_path).unwrap(), before_quiver);
+    assert_eq!(crate::artifact::read(&meta_path).unwrap(), before_meta);
+    assert!(crate::artifact::exists(&quiver_path));
     cleanup(&path);
 }
 
@@ -289,14 +285,17 @@ fn 只读拒绝缺失一致性标记的跨文件代际且不修改文件() {
     create_clean_database(&path);
     let marker = format!("{path}.flush_ok");
     std::fs::remove_file(&marker).unwrap();
-    let tdb_before = std::fs::read(&path).unwrap();
-    let vec_before = std::fs::read(format!("{path}.vec")).unwrap();
+    let tdb_before = crate::artifact::read(&path).unwrap();
+    let vec_before = crate::artifact::read(format!("{path}.vec")).unwrap();
     assert!(matches!(
         Database::<f32>::open_read_only(&path, 2),
         Err(TriviumError::CorruptedFile(_))
     ));
-    assert_eq!(std::fs::read(&path).unwrap(), tdb_before);
-    assert_eq!(std::fs::read(format!("{path}.vec")).unwrap(), vec_before);
+    assert_eq!(crate::artifact::read(&path).unwrap(), tdb_before);
+    assert_eq!(
+        crate::artifact::read(format!("{path}.vec")).unwrap(),
+        vec_before
+    );
     assert!(!Path::new(&marker).exists());
     cleanup(&path);
 }
@@ -320,28 +319,24 @@ fn 只读和不可变reader拒绝进程本地fatigue() {
 
 fn file_state(path: &str) -> Vec<(String, u64, std::time::SystemTime, u32)> {
     let mut state = Vec::new();
-    for suffix in [
-        "",
-        ".vec",
-        ".wal",
-        ".lock",
-        ".flush_ok",
-        ".quiver",
-        ".quiver.meta",
-        ".text",
-        ".text.meta",
-    ] {
-        let file = format!("{path}{suffix}");
-        if let Ok(bytes) = std::fs::read(&file) {
-            let metadata = std::fs::metadata(&file).unwrap();
-            state.push((
-                suffix.to_string(),
-                metadata.len(),
-                metadata.modified().unwrap(),
-                crc32fast::hash(&bytes),
-            ));
+    let database = std::path::Path::new(path);
+    let name = database.file_name().unwrap().to_str().unwrap();
+    for entry in std::fs::read_dir(database.parent().unwrap()).unwrap() {
+        let entry = entry.unwrap();
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if file_name != name && !file_name.starts_with(&format!("{name}.")) {
+            continue;
         }
+        let metadata = entry.metadata().unwrap();
+        let bytes = std::fs::read(entry.path()).unwrap();
+        state.push((
+            file_name,
+            metadata.len(),
+            metadata.modified().unwrap(),
+            crc32fast::hash(&bytes),
+        ));
     }
+    state.sort_by(|left, right| left.0.cmp(&right.0));
     state
 }
 
@@ -398,11 +393,11 @@ fn reader严格索引策略拒绝损坏quiver且不删除() {
     create_clean_database(&path);
     let quiver = format!("{path}.quiver");
     let meta = format!("{path}.quiver.meta");
-    std::fs::write(&quiver, b"broken").unwrap();
-    std::fs::write(&meta, b"broken").unwrap();
+    crate::artifact::write(&quiver, b"broken").unwrap();
+    crate::artifact::write(&meta, b"broken").unwrap();
     let before = (
-        std::fs::read(&quiver).unwrap(),
-        std::fs::read(&meta).unwrap(),
+        crate::artifact::read(&quiver).unwrap(),
+        crate::artifact::read(&meta).unwrap(),
     );
     let strict = Config {
         dim: 2,
@@ -411,7 +406,7 @@ fn reader严格索引策略拒绝损坏quiver且不删除() {
         ..Default::default()
     };
     assert!(Database::<f32>::open_with_config(&path, strict).is_err());
-    assert_eq!(std::fs::read(&quiver).unwrap(), before.0);
-    assert_eq!(std::fs::read(&meta).unwrap(), before.1);
+    assert_eq!(crate::artifact::read(&quiver).unwrap(), before.0);
+    assert_eq!(crate::artifact::read(&meta).unwrap(), before.1);
     cleanup(&path);
 }

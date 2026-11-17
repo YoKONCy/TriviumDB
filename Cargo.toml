@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/triviumdb-cli", "crates/triviumdb-server"]
-exclude = ["fuzz"]
+exclude = ["fuzz", "crates/triviumdb-migrate"]
 # 默认成员仅为根 lib 包：保持 `cargo check/test/clippy`（不带 --workspace）
 # 的作用域与引入 workspace 前一致；CLI 工具需用 `-p triviumdb-cli` 显式构建。
 default-members = ["."]
@@ -18,7 +18,7 @@ keywords = ["vector-database", "graph-database", "hybrid-search", "rag", "mmap"]
 categories = ["database", "data-structures", "algorithms"]
 readme = "README.md"
 autobenches = false
-exclude = ["docs/TEMP-TODO/**", "evaluation/**"]
+exclude = ["docs/TEMP-TODO/**", "research/**", "evaluation/**", "crates/triviumdb-migrate/**"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -28,7 +28,6 @@ default = []
 python = ["dep:pyo3"]
 nodejs = ["dep:napi", "dep:napi-derive"]
 usearch-bench = ["dep:usearch"]
-ablation = [] # encoding ablation 实验专用
 test-hooks = [] # 并发确定性交错测试专用，生产构建不得启用
 
 [dependencies]
@@ -109,18 +108,6 @@ harness = false
 # B. 三模管线与产品性能 Gate
 # ─────────────────────────────────────────────────────────────
 [[bench]]
-name = "bench_tsng_c0"
-harness = false
-
-[[bench]]
-name = "bench_tsng_c1"
-harness = false
-
-[[bench]]
-name = "bench_tsng_pipeline"
-harness = false
-
-[[bench]]
 name = "bench_pipeline_gate"
 harness = false
 
@@ -166,33 +153,9 @@ harness = false
 name = "bench_sensitivity"
 harness = false
 
-[[bench]]
-name = "bench_quiver_ablation"
-harness = false
-
-[[bench]]
-name = "bench_quiver_connectivity"
-harness = false
-required-features = ["ablation"]
-
 # ─────────────────────────────────────────────────────────────
-# E. 研究与硬件消融：不会进入默认日常 benchmark
+# 发布配置
 # ─────────────────────────────────────────────────────────────
-[[bench]]
-name = "bench_encoding_ablation"
-harness = false
-required-features = ["ablation"]
-
-[[bench]]
-name = "bench_ssd_cold_hot"
-harness = false
-required-features = ["ablation"]
-
-[[bench]]
-name = "bench_variance"
-harness = false
-required-features = ["ablation"]
-
 [profile.release]
 lto = true
 codegen-units = 1

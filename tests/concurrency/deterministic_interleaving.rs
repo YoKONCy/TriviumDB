@@ -84,19 +84,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &[
-        "",
-        ".wal",
-        ".vec",
-        ".lock",
-        ".flush_ok",
-        ".quiver",
-        ".quiver.meta",
-        ".text",
-        ".text.meta",
-    ] {
-        std::fs::remove_file(format!("{path}{ext}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 #[test]

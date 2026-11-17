@@ -6,136 +6,6 @@ use triviumdb::database::{Config, StorageMode};
 use triviumdb::storage::wal::{SyncMode, Wal, WalEntry};
 use triviumdb::{Database, TriviumError, VectorType};
 
-#[test]
-fn 六版WAL按帧准入并保留最终已确认内容() {
-    let dir = TestDir::new();
-    let path = dir.path();
-    let mut db = Database::<f32>::open(&path, 2).unwrap();
-    db.insert_with_id(1, &[1., 0.], serde_json::json!({"value":"initial"}))
-        .unwrap();
-    db.close().unwrap();
-    let mut wal = Wal::open_with_sync(&path, SyncMode::Normal).unwrap();
-    for _ in 0..20 {
-        wal.append(&WalEntry::<f32>::UpdatePayload {
-            id: 1,
-            payload: serde_json::json!({"value":"x".repeat(32 * 1024)}).to_string(),
-        })
-        .unwrap();
-    }
-    wal.append(&WalEntry::<f32>::UpdatePayload {
-        id: 1,
-        payload: serde_json::json!({"value":"final"}).to_string(),
-    })
-    .unwrap();
-    drop(wal);
-    let mut legacy = std::fs::read(format!("{path}.wal")).unwrap();
-    legacy[4..6].copy_from_slice(&6u16.to_le_bytes());
-    std::fs::write(format!("{path}.wal"), &legacy).unwrap();
-    // 总日志的 64 倍超过 8 MiB，单帧解码与最终节点事实均可在此额度内完成。
-    assert!(legacy.len() * 64 > 8 * 1024 * 1024);
-    let mut db = Database::<f32>::open_with_config(
-        &path,
-        Config {
-            dim: 2,
-            memory_limit: 8 * 1024 * 1024,
-            auto_build_quiver: false,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        db.get_payload(1).unwrap(),
-        Some(serde_json::json!({"value":"final"}))
-    );
-    db.close().unwrap();
-    let mut db = Database::<f32>::open(&path, 2).unwrap();
-    assert_eq!(
-        db.get_payload(1).unwrap(),
-        Some(serde_json::json!({"value":"final"}))
-    );
-    db.close().unwrap();
-}
-
-#[test]
-fn 无封条历史文本的歧义恢复保留原始文件且普通删除仍可恢复() {
-    for mode in [StorageMode::Rom, StorageMode::Mmap] {
-        for eager in [false, true] {
-            for reinsert in [false, true] {
-                let dir = TestDir::new();
-                let path = dir.path();
-                let cfg = Config {
-                    dim: 2,
-                    storage_mode: mode,
-                    load_text_index: eager,
-                    auto_build_quiver: false,
-                    ..Default::default()
-                };
-                let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
-                db.insert_with_id(1, &[1., 0.], serde_json::json!({"name":"saved"}))
-                    .unwrap();
-                db.index_text(1, "retainedtext").unwrap();
-                db.index_keyword(1, "retainedkeyword").unwrap();
-                db.close().unwrap();
-                let text = std::fs::read(format!("{path}.text")).unwrap();
-                let mut meta = b"TMET".to_vec();
-                meta.extend_from_slice(&1u32.to_le_bytes());
-                meta.extend_from_slice(&std::fs::metadata(&path).unwrap().len().to_le_bytes());
-                meta.extend_from_slice(&(text.len() as u64).to_le_bytes());
-                meta.extend_from_slice(&crc32fast::hash(&text).to_le_bytes());
-                std::fs::write(format!("{path}.text.meta"), meta).unwrap();
-                // 按 v6 的独立枚举判别值和小端字段构造 Delete／Insert 帧。
-                let mut wal = b"TVWL\x06\x00".to_vec();
-                let mut frame = |body: &[u8]| {
-                    wal.extend_from_slice(&(body.len() as u32).to_le_bytes());
-                    wal.extend_from_slice(body);
-                    wal.extend_from_slice(&crc32fast::hash(body).to_le_bytes());
-                };
-                let mut deletion = 4u32.to_le_bytes().to_vec();
-                deletion.extend_from_slice(&1u64.to_le_bytes());
-                frame(&deletion);
-                if reinsert {
-                    let payload = br#"{"name":"restored"}"#;
-                    let mut insertion = 2u32.to_le_bytes().to_vec();
-                    insertion.extend_from_slice(&1u64.to_le_bytes());
-                    insertion.extend_from_slice(&2u64.to_le_bytes());
-                    insertion.extend_from_slice(&0f32.to_le_bytes());
-                    insertion.extend_from_slice(&1f32.to_le_bytes());
-                    insertion.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-                    insertion.extend_from_slice(payload);
-                    frame(&insertion);
-                }
-                std::fs::write(format!("{path}.wal"), wal).unwrap();
-                if reinsert {
-                    let before = dir.snapshot();
-                    for _ in 0..2 {
-                        let error = Database::<f32>::open_with_config(&path, cfg).err().unwrap();
-                        assert_eq!(error.code(), "TDB_RECOVERY_REQUIRED");
-                        assert_eq!(
-                            serde_json::to_value(error.info()).unwrap()["target"],
-                            serde_json::json!({"field":"text_index.recovery_boundary"})
-                        );
-                        assert_eq!(dir.snapshot(), before);
-                    }
-                } else {
-                    let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
-                    assert!(db.get(1).unwrap().is_none());
-                    db.build_text_index().unwrap();
-                    assert!(
-                        db.search_hybrid(
-                            Some("retainedtext retainedkeyword"),
-                            None,
-                            &Default::default()
-                        )
-                        .unwrap()
-                        .is_empty()
-                    );
-                    db.close().unwrap();
-                }
-            }
-        }
-    }
-}
-
 struct TestDir(std::path::PathBuf);
 impl TestDir {
     fn new() -> Self {
@@ -158,7 +28,7 @@ impl TestDir {
                 let entry = entry.unwrap();
                 (
                     entry.file_name().into_string().unwrap(),
-                    std::fs::read(entry.path()).unwrap(),
+                    crate::artifact::read(entry.path()).unwrap(),
                 )
             })
             .collect()
@@ -497,14 +367,17 @@ fn last_valid_node_id_recovers_without_wrapping_allocator() {
             wal.append(&insert::<f32>(u64::MAX - 1, "null")).unwrap();
         }
         let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
-        let before = std::fs::read(format!("{path}.wal")).unwrap();
+        let before = crate::artifact::read(format!("{path}.wal")).unwrap();
         let mut tx = db.begin_tx();
         tx.insert(&[1., 0., 0., 0.], serde_json::Value::Null);
         assert!(matches!(
             tx.commit().unwrap_err().underlying(),
             TriviumError::InvalidInput(_)
         ));
-        assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
+        assert_eq!(
+            crate::artifact::read(format!("{path}.wal")).unwrap(),
+            before
+        );
         assert_eq!(db.node_count().unwrap(), 1);
         let node = db.get(u64::MAX - 1).unwrap().unwrap();
         assert_eq!(node.id, u64::MAX - 1);

@@ -1,0 +1,6 @@
+{
+  "source": "tests/fixtures/quiver_ssd_v1/unit.qssd",
+  "source_sha256": "24dc76a3b2d19ac4a844f8325bc793e7fa3a1d21c8c91a5556ef25f833dd3b77",
+  "construction": "Independent existing unit vector fixture; envelope identity u32 at 8 set to 2, header CRC32 at 156 recomputed using Python zlib; remaining bytes preserved. Does not invoke production encoder.",
+  "sha256": "599e9bb40752c9712cb1958d1f874da5ca14b7a05cbee10656d38ed6839b925c"
+}

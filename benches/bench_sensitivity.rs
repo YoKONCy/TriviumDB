@@ -253,7 +253,7 @@ fn build_index(
     let slots: Vec<usize> = (0..n).collect();
 
     let t = Instant::now();
-    index.batch_build_experimental_v2(train, &ids, &slots);
+    index.batch_build(train, &ids, &slots);
     let build_secs = t.elapsed().as_secs_f64();
     let hot_mb = index.stats().hot_bytes / 1024 / 1024;
     let vecs_per_sec = n as f64 / build_secs;

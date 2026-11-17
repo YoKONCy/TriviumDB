@@ -1,7 +1,7 @@
 use triviumdb::database::{Config, StorageMode};
 use triviumdb::index::quiver::{
     QuIVerSearchConfig,
-    ssd::{Residency, SsdRuntimeOptions},
+    runtime::{QuiverRuntimeOptions, Residency},
 };
 use triviumdb::{Database, ResourceLimits, ResourceRuntime};
 
@@ -12,8 +12,8 @@ fn query() -> QuIVerSearchConfig {
         rerank_limit: Some(4),
     }
 }
-fn options() -> SsdRuntimeOptions {
-    SsdRuntimeOptions {
+fn options() -> QuiverRuntimeOptions {
+    QuiverRuntimeOptions {
         io_depth: 1,
         cache_bytes: 4096,
         ..Default::default()
@@ -57,7 +57,7 @@ fn assert_hits(actual: Vec<(u64, f32)>, expected: &[(u64, f32)]) {
 
 #[test]
 fn centered_presets_share_public_precisions_normal_ann_and_readonly_reopen() {
-    use triviumdb::index::quiver::ssd::{QueryPrecision, RerankEncoding};
+    use triviumdb::index::quiver::runtime::{QueryPrecision, RerankEncoding};
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../contracts/quiver_ssd_cases.json")).unwrap();
     for encoding in [RerankEncoding::CenteredInt8, RerankEncoding::CenteredInt4] {
@@ -91,11 +91,11 @@ fn centered_presets_share_public_precisions_normal_ann_and_readonly_reopen() {
             ef_search: 32,
             ..query()
         };
-        let base = SsdRuntimeOptions {
+        let base = QuiverRuntimeOptions {
             encoding,
             io_depth: 1,
             cache_bytes: 0,
-            ..SsdRuntimeOptions::accuracy()
+            ..QuiverRuntimeOptions::accuracy()
         };
         for precision in [
             QueryPrecision::Fp32,
@@ -103,7 +103,7 @@ fn centered_presets_share_public_precisions_normal_ann_and_readonly_reopen() {
             QueryPrecision::Int4,
         ] {
             for residency in [Residency::Ssd, Residency::Hot] {
-                let opts = SsdRuntimeOptions {
+                let opts = QuiverRuntimeOptions {
                     query_precision: precision,
                     residency,
                     ..base
@@ -143,7 +143,7 @@ fn centered_presets_share_public_precisions_normal_ann_and_readonly_reopen() {
         };
         assert_eq!(
             reader
-                .configure_quiver(SsdRuntimeOptions {
+                .configure_quiver(QuiverRuntimeOptions {
                     encoding: other,
                     ..base
                 })
@@ -177,19 +177,19 @@ fn database_entry_binds_facts_refreshes_updates_and_reopens_read_only() {
             .unwrap();
         db.insert_with_id(2, &[0., 1.], serde_json::json!({"name":"b"}))
             .unwrap();
-        let first = db.configure_quiver_int8(options()).unwrap();
+        let first = db.configure_quiver(options()).unwrap();
         assert_hits(
-            db.search_quiver_int8(&[1., 0.], &query()).unwrap(),
+            db.search_quiver(&[1., 0.], &query()).unwrap(),
             &[(9007199254740993, 1.), (2, 0.)],
         );
         db.update_vector(9007199254740993, &[-1., 0.]).unwrap();
         assert_hits(
-            db.search_quiver_int8(&[1., 0.], &query()).unwrap(),
+            db.search_quiver(&[1., 0.], &query()).unwrap(),
             &[(2, 0.), (9007199254740993, -1.)],
         );
         assert_ne!(
             first.metadata.source,
-            db.quiver_int8_stats().unwrap().unwrap().metadata.source
+            db.quiver_stats().unwrap().unwrap().metadata.source
         );
         db.delete(2).unwrap();
         db.compact().unwrap();
@@ -197,19 +197,19 @@ fn database_entry_binds_facts_refreshes_updates_and_reopens_read_only() {
         db.close().unwrap();
         let before = snapshot(&root);
         let mut reader = Database::<f32>::open_read_only(path.to_str().unwrap(), 2).unwrap();
-        reader.configure_quiver_int8(options()).unwrap();
+        reader.configure_quiver(options()).unwrap();
         assert_hits(
-            reader.search_quiver_int8(&[1., 0.], &query()).unwrap(),
+            reader.search_quiver(&[1., 0.], &query()).unwrap(),
             &[(9007199254740993, -1.)],
         );
         reader
-            .configure_quiver_int8(SsdRuntimeOptions {
+            .configure_quiver(QuiverRuntimeOptions {
                 residency: Residency::Hot,
                 ..options()
             })
             .unwrap();
         assert_hits(
-            reader.search_quiver_int8(&[1., 0.], &query()).unwrap(),
+            reader.search_quiver(&[1., 0.], &query()).unwrap(),
             &[(9007199254740993, -1.)],
         );
         assert_eq!(
@@ -233,7 +233,7 @@ fn readonly_missing_artifact_and_invalid_configuration_preserve_files() {
     db.flush().unwrap();
     let before = snapshot(&root);
     assert_eq!(
-        db.configure_quiver_int8(SsdRuntimeOptions {
+        db.configure_quiver(QuiverRuntimeOptions {
             io_depth: 0,
             ..options()
         })
@@ -246,7 +246,7 @@ fn readonly_missing_artifact_and_invalid_configuration_preserve_files() {
     let before = snapshot(&root);
     let mut reader = Database::<f32>::open_read_only(path.to_str().unwrap(), 2).unwrap();
     assert_eq!(
-        reader.configure_quiver_int8(options()).unwrap_err().code(),
+        reader.configure_quiver(options()).unwrap_err().code(),
         "TDB_IO"
     );
     reader.close().unwrap();
@@ -364,22 +364,22 @@ fn rust_sdk_uses_the_shared_independent_residency_contract() {
 fn matching_source_tag_cannot_substitute_a_different_hot_graph() {
     use triviumdb::index::quiver::{
         QuIVer, QuIVerConfig,
-        ssd::{SsdOptions, SsdQuiver},
+        runtime::{QuiverArtifactOptions, QuiverRuntime},
     };
     let root = directory();
     let path = root.join("binding.tdb");
     let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
     db.insert_with_id(7, &[1., 0.], serde_json::Value::Null)
         .unwrap();
-    let metadata = db.configure_quiver_int8(options()).unwrap().metadata;
+    let metadata = db.configure_quiver(options()).unwrap().metadata;
     db.close().unwrap();
     let mut foreign = QuIVer::new(2, &QuIVerConfig::default());
     foreign.batch_build(&[1., 0.], &[99], &[0]);
-    SsdQuiver::publish(
+    QuiverRuntime::publish(
         &foreign,
         &path.with_extension("tdb.qssd"),
         metadata.source,
-        SsdOptions::default(),
+        QuiverArtifactOptions::default(),
         &ResourceRuntime::new(ResourceLimits::default()).unwrap(),
         |_, output| {
             output.copy_from_slice(&[1., 0.]);
@@ -387,18 +387,23 @@ fn matching_source_tag_cannot_substitute_a_different_hot_graph() {
         },
     )
     .unwrap();
+    crate::artifact::write(
+        path.with_extension("tdb.qssd"),
+        std::fs::read(path.with_extension("tdb.qssd")).unwrap(),
+    )
+    .unwrap();
     let before = snapshot(&root);
     let mut reader = Database::<f32>::open_read_only(path.to_str().unwrap(), 2).unwrap();
     assert_eq!(
-        reader.configure_quiver_int8(options()).unwrap_err().code(),
+        reader.configure_quiver(options()).unwrap_err().code(),
         "TDB_IMMUTABLE_ARTIFACT"
     );
     reader.close().unwrap();
     assert_eq!(snapshot(&root), before);
     let mut writer = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
-    writer.configure_quiver_int8(options()).unwrap();
+    writer.configure_quiver(options()).unwrap();
     assert_hits(
-        writer.search_quiver_int8(&[1., 0.], &query()).unwrap(),
+        writer.search_quiver(&[1., 0.], &query()).unwrap(),
         &[(7, 1.)],
     );
     writer.close().unwrap();
@@ -427,33 +432,26 @@ fn single_thread_runtime_keeps_refresh_and_close_available() {
         .unwrap();
     db.insert_with_id(9, &[0., 1.], serde_json::Value::Null)
         .unwrap();
-    db.configure_quiver_int8(SsdRuntimeOptions::default())
+    db.configure_quiver(QuiverRuntimeOptions::default())
         .unwrap();
     assert_hits(
-        db.search_quiver_int8(&[1., 0.], &query()).unwrap(),
+        db.search_quiver(&[1., 0.], &query()).unwrap(),
         &[(7, 1.), (9, 0.)],
     );
     db.update_vector(7, &[-1., 0.]).unwrap();
     assert_hits(
-        db.search_quiver_int8(&[1., 0.], &query()).unwrap(),
+        db.search_quiver(&[1., 0.], &query()).unwrap(),
         &[(9, 0.), (7, -1.)],
     );
     db.delete(9).unwrap();
     db.delete(7).unwrap();
     db.flush().unwrap();
-    assert!(db.quiver_int8_stats().unwrap().unwrap().closed);
+    assert!(db.quiver_stats().unwrap().unwrap().closed);
     assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
-    assert!(
-        db.search_quiver_int8(&[1., 0.], &query())
-            .unwrap()
-            .is_empty()
-    );
+    assert!(db.search_quiver(&[1., 0.], &query()).unwrap().is_empty());
     db.insert_with_id(11, &[1., 0.], serde_json::Value::Null)
         .unwrap();
-    assert_hits(
-        db.search_quiver_int8(&[1., 0.], &query()).unwrap(),
-        &[(11, 1.)],
-    );
+    assert_hits(db.search_quiver(&[1., 0.], &query()).unwrap(), &[(11, 1.)]);
     db.close().unwrap();
     assert!(runtime.stats().allocated_worker_threads <= 1);
     assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
@@ -478,16 +476,16 @@ fn database_budget_covers_base_heap_and_ssd_runtime_together() {
         "预留容量须构成真实的基础堆占用，实际{base}"
     );
     db.set_memory_limit(base + 128 * 1024).unwrap();
-    let error = db.configure_quiver_int8(options()).unwrap_err();
+    let error = db.configure_quiver(options()).unwrap_err();
     assert_eq!(error.code(), "QueueFull");
-    assert!(db.quiver_int8_stats().unwrap().is_none());
+    assert!(db.quiver_stats().unwrap().is_none());
     assert_eq!(db.get(7).unwrap().unwrap().vector, vec![1., 0.]);
     assert_eq!(db.get(9).unwrap().unwrap().vector, vec![0., 1.]);
     db.set_memory_limit(base + 2 * 1024 * 1024).unwrap();
-    let stats = db.configure_quiver_int8(options()).unwrap();
+    let stats = db.configure_quiver(options()).unwrap();
     assert!(db.estimated_memory() >= base + stats.reserved_bytes);
     assert_hits(
-        db.search_quiver_int8(&[1., 0.], &query()).unwrap(),
+        db.search_quiver(&[1., 0.], &query()).unwrap(),
         &[(7, 1.), (9, 0.)],
     );
     db.close().unwrap();
@@ -503,7 +501,7 @@ fn readonly_pending_wal_requires_recovery_before_cold_queries() {
         .unwrap();
     db.insert_with_id(9, &[0., 1.], serde_json::Value::Null)
         .unwrap();
-    db.configure_quiver_int8(options()).unwrap();
+    db.configure_quiver(options()).unwrap();
     db.update_vector(7, &[-1., 0.]).unwrap();
     drop(db);
     let before = snapshot(&root);
@@ -513,9 +511,9 @@ fn readonly_pending_wal_requires_recovery_before_cold_queries() {
     assert_eq!(error.code(), "TDB_RECOVERY_REQUIRED");
     assert_eq!(snapshot(&root), before);
     let mut writer = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
-    writer.configure_quiver_int8(options()).unwrap();
+    writer.configure_quiver(options()).unwrap();
     assert_hits(
-        writer.search_quiver_int8(&[1., 0.], &query()).unwrap(),
+        writer.search_quiver(&[1., 0.], &query()).unwrap(),
         &[(9, 0.), (7, -1.)],
     );
     writer.close().unwrap();
@@ -533,7 +531,7 @@ fn sdk_shared_read_requests_remain_available_during_a_cold_query() {
         .unwrap();
     db.insert_with_id(9, &[-1.], serde_json::Value::Null)
         .unwrap();
-    let baseline = db.configure_quiver_int8(options()).unwrap().reserved_bytes;
+    let baseline = db.configure_quiver(options()).unwrap().reserved_bytes;
     let shared = triviumdb::SharedDatabase::new(db);
     let gate = pause_at(ConcurrencyPoint::QuiverColdBeforeRead);
     let worker_shared = shared.clone();

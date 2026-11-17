@@ -6,10 +6,11 @@
 use crate::VectorType;
 use bytemuck::{Pod, Zeroable};
 
-/// 环境变量 `TRIVIUM_NO_AVX512=1` 时强制禁用 AVX-512 路径（用于消融实验）
+/// 部署诊断覆盖：`TRIVIUM_NO_AVX512=1` 禁用 AVX-512，保留较低指令集与标量派发。
 #[cfg(all(target_arch = "x86_64", not(coverage)))]
 pub(crate) static FORCE_NO_AVX512: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| std::env::var("TRIVIUM_NO_AVX512").is_ok_and(|v| v == "1"));
+/// 部署诊断覆盖：禁用 384 维专用内核，使用同一评分语义的通用维度实现。
 pub(crate) static FORCE_NO_384_KERNEL: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
     std::env::var("TRIVIUM_DISABLE_384_KERNEL").is_ok_and(|value| value == "1")
 });

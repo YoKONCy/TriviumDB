@@ -414,63 +414,6 @@ fn 检查点发布后日志清理失败保留跨重建和节点删除的最终�
 }
 
 #[test]
-fn 旧十一版检查点和四版日志保留默认图事实() {
-    fn run<T: VectorType + Serialize + DeserializeOwned>(dtype: &str) {
-        let dir = TestDir::new("named_graph_history");
-        let path = dir.file("db.tdb");
-        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/pre_named_graph_format11")
-            .join(dtype);
-        for entry in std::fs::read_dir(source).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry
-                .file_name()
-                .to_string_lossy()
-                .replacen("sample.tdb", "db.tdb", 1);
-            std::fs::copy(
-                entry.path(),
-                std::path::Path::new(&path).parent().unwrap().join(name),
-            )
-            .unwrap();
-        }
-        let mut db = Database::<T>::open_with_config(&path, config(StorageMode::Mmap)).unwrap();
-        assert_eq!(db.all_node_ids().unwrap(), [11, 22, 33]);
-        assert_eq!(
-            db.get(11).unwrap().unwrap().vector,
-            vec![T::from_f32(1.), T::zero()]
-        );
-        assert_eq!(
-            db.get_payload(11).unwrap(),
-            Some(json!({"name":"共享节点"}))
-        );
-        assert_eq!(
-            db.get_payload(33).unwrap(),
-            Some(json!({"confirmed":"wal-v4"}))
-        );
-        let edges = db.get_edges(11).unwrap();
-        assert_eq!(edges.len(), 1);
-        assert_eq!(
-            (edges[0].target_id, edges[0].label.as_str(), edges[0].weight),
-            (22, "same", 0.5)
-        );
-        assert!(
-            db.list_named_graphs(&Default::default())
-                .unwrap()
-                .is_empty()
-        );
-        db.flush().unwrap();
-        db.close().unwrap();
-        let mut db = Database::<T>::open_with_config(&path, config(StorageMode::Rom)).unwrap();
-        assert_eq!(db.all_node_ids().unwrap(), [11, 22, 33]);
-        assert_eq!(db.get_edges(11).unwrap(), edges);
-        db.close().unwrap();
-    }
-    run::<f32>("f32");
-    run::<half::f16>("f16");
-    run::<u64>("u64");
-}
-
-#[test]
 fn 只读查询保持完整文件组字节且关闭后拥有结果不占用映射() {
     let dir = TestDir::new("named_graph_readonly");
     let path = dir.file("db.tdb");
@@ -692,61 +635,6 @@ fn 边更新自环标签删除及作用域修订保持图内唯一性() {
         Some(removed)
     );
     db.close().unwrap();
-}
-
-#[test]
-fn 旧十一版检查点与空四版日志只读打开保持所有字节() {
-    let dir = TestDir::new("named_graph_history_readonly");
-    let path = dir.file("db.tdb");
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/pre_named_graph_format11/f32");
-    for entry in std::fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry
-            .file_name()
-            .to_string_lossy()
-            .replacen("sample.tdb", "db.tdb", 1);
-        std::fs::copy(
-            entry.path(),
-            std::path::Path::new(&path).parent().unwrap().join(name),
-        )
-        .unwrap();
-    }
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(format!("{path}.wal"))
-        .unwrap()
-        .set_len(6)
-        .unwrap();
-    // 只读打开使用已有协调锁，空WAL保持历史版本。
-    std::fs::write(format!("{path}.lock"), []).unwrap();
-    let read_files = || {
-        std::fs::read_dir(std::path::Path::new(&path).parent().unwrap())
-            .unwrap()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                (entry.file_name(), std::fs::read(entry.path()).unwrap())
-            })
-            .collect::<std::collections::BTreeMap<_, _>>()
-    };
-    let before = read_files();
-    let mut db = Database::<f32>::open_with_config(
-        &path,
-        Config {
-            access_mode: AccessMode::ReadOnly,
-            ..config(StorageMode::Mmap)
-        },
-    )
-    .unwrap();
-    assert_eq!(db.all_node_ids().unwrap(), [11, 22]);
-    assert_eq!(db.get_edges(11).unwrap()[0].target_id, 22);
-    assert!(
-        db.list_named_graphs(&Default::default())
-            .unwrap()
-            .is_empty()
-    );
-    db.close().unwrap();
-    assert_eq!(read_files(), before);
 }
 
 #[test]

@@ -95,7 +95,7 @@ fn 未加载文本索引的flush与close保留文件并绑定新主文件() {
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
         let path = dir.path(&format!("preserve_{mode:?}.tdb"));
         seed(&path, mode);
-        let bytes = std::fs::read(format!("{path}.text")).unwrap();
+        let bytes = crate::artifact::read(format!("{path}.text")).unwrap();
         let mut db = open(&path, mode, false);
         assert!(
             search(&db, "alpha").is_empty(),
@@ -108,10 +108,16 @@ fn 未加载文本索引的flush与close保留文件并绑定新主文件() {
         )
         .unwrap();
         db.flush().unwrap();
-        assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), bytes);
+        assert_eq!(
+            crate::artifact::read(format!("{path}.text")).unwrap(),
+            bytes
+        );
         assert!(search(&db, "alpha").is_empty());
         db.close().unwrap();
-        assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), bytes);
+        assert_eq!(
+            crate::artifact::read(format!("{path}.text")).unwrap(),
+            bytes
+        );
         let db = open(&path, mode, true);
         assert_eq!(search(&db, "alpha"), vec![1]);
         assert_eq!(search(&db, "共同别名"), vec![2]);
@@ -205,22 +211,22 @@ fn 未加载索引损坏不得被flush重算CRC认可() {
     seed(&path, StorageMode::Mmap);
     let mut db = open(&path, StorageMode::Mmap, false);
     let text_path = format!("{path}.text");
-    let mut bytes = std::fs::read(&text_path).unwrap();
+    let mut bytes = crate::artifact::read(&text_path).unwrap();
     let last = bytes.len() - 1;
     bytes[last] ^= 1;
-    std::fs::write(&text_path, &bytes).unwrap();
-    let old_meta = std::fs::read(format!("{path}.text.meta")).unwrap();
+    crate::artifact::write(&text_path, &bytes).unwrap();
+    let old_meta = crate::artifact::read(format!("{path}.text.meta")).unwrap();
     db.insert_with_id(3, &[0., 0., 1.], json!({"payload":"不同大小".repeat(100)}))
         .unwrap();
     db.flush().unwrap();
-    let new_meta = std::fs::read(format!("{path}.text.meta")).unwrap();
+    let new_meta = crate::artifact::read(format!("{path}.text.meta")).unwrap();
     assert_eq!(
         &old_meta[24..28],
         &new_meta[24..28],
         "不得重算并认可损坏后的 CRC"
     );
     assert!(db.index_text(1, "replacement").is_err());
-    assert_eq!(std::fs::read(&text_path).unwrap(), bytes);
+    assert_eq!(crate::artifact::read(&text_path).unwrap(), bytes);
 }
 
 #[test]
@@ -256,7 +262,7 @@ fn 文本已写入但属性发布失败后重开恢复完整文件组() {
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
         let path = dir.path(&format!("group_{mode:?}.tdb"));
         seed(&path, mode);
-        let old_text = std::fs::read(format!("{path}.text")).unwrap();
+        let old_text = crate::artifact::read(format!("{path}.text")).unwrap();
         let mut db = open(&path, mode, true);
         db.create_index("kind").unwrap();
         db.insert_with_id(3, &[0., 0., 1.], json!({"kind":"新增"}))
@@ -278,7 +284,10 @@ fn 文本已写入但属性发布失败后重开恢复完整文件组() {
         assert_eq!(db.node_count().unwrap(), 2);
         assert_eq!(db.get_payload(1).unwrap().unwrap(), json!({"kind":"更新"}));
         assert_eq!(db.get_payload(3).unwrap().unwrap(), json!({"kind":"新增"}));
-        assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), old_text);
+        assert_eq!(
+            crate::artifact::read(format!("{path}.text")).unwrap(),
+            old_text
+        );
         assert_eq!(search(&db, "alpha 旧别名"), vec![1]);
         assert!(search(&db, "replacement beta 共同别名").is_empty());
         db.flush().unwrap();
@@ -367,7 +376,7 @@ fn 延期文本解码执行共享工作区准入且拒绝后保持原文件() {
         .join(" ");
     db.index_text(1, &text).unwrap();
     db.close().unwrap();
-    let original = std::fs::read(format!("{path}.text")).unwrap();
+    let original = crate::artifact::read(format!("{path}.text")).unwrap();
     let runtime = ResourceRuntime::new(ResourceLimits {
         memory_limit: 12 * 1024 * 1024,
         maintenance_memory_limit: 1024 * 1024,
@@ -389,7 +398,10 @@ fn 延期文本解码执行共享工作区准入且拒绝后保持原文件() {
         db.build_text_index().unwrap_err().underlying(),
         triviumdb::TriviumError::ResourceBudgetExceeded { .. }
     ));
-    assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), original);
+    assert_eq!(
+        crate::artifact::read(format!("{path}.text")).unwrap(),
+        original
+    );
     assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
     assert!(runtime.stats().peak_reserved_bytes <= runtime.stats().memory_limit);
     db.close().unwrap();
@@ -405,7 +417,10 @@ fn 只读未加载句柄保持全部文件字节不变() {
             .unwrap()
             .map(|entry| {
                 let entry = entry.unwrap();
-                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+                (
+                    entry.file_name(),
+                    crate::artifact::read(entry.path()).unwrap(),
+                )
             })
             .collect()
     };
@@ -489,224 +504,52 @@ fn 正文替换删除后的BM25等同独立词袋reference() {
 }
 
 #[test]
-fn 历史v2快照去重并保留现有字节布局() {
-    let dir = TestDir::new();
-    let path = dir.path("legacy.text");
-    // 使用独立数据结构生成历史布局，不调用生产 writer。
-    let snapshot = (
-        BTreeMap::from([("alpha".to_owned(), vec![1u64, 1, 2])]),
-        BTreeMap::from([("alpha".to_owned(), BTreeMap::from([(1u64, 1usize)]))]),
-        BTreeMap::from([(1u64, 1usize)]),
-    );
-    let mut bytes = b"TIDX".to_vec();
-    bytes.extend_from_slice(&2u32.to_le_bytes());
-    bytes.extend(bincode::serialize(&snapshot).unwrap());
-    std::fs::write(&path, bytes).unwrap();
-    let mut index = TextIndex::load_from_file(Path::new(&path)).unwrap();
-    assert_eq!(index.search_ac("alpha"), HashMap::from([(1, 1.), (2, 1.)]));
-    index.add_text(1, "beta");
-    index.save_to_file(Path::new(&path)).unwrap();
-    let bytes = std::fs::read(&path).unwrap();
-    assert_eq!(&bytes[..8], b"TIDX\x02\x00\x00\x00");
-    type LegacySnapshot = (
-        BTreeMap<String, Vec<u64>>,
-        BTreeMap<String, BTreeMap<u64, usize>>,
-        BTreeMap<u64, usize>,
-    );
-    let (_, terms, lengths): LegacySnapshot = bincode::deserialize(&bytes[8..]).unwrap();
-    assert!(!terms.contains_key("alpha"));
-    assert_eq!(terms["beta"][&1], 1);
-    assert_eq!(lengths[&1], 1);
-}
-
-#[test]
-fn 发布版0810文件组升级后可写且保留正文关键词() {
-    let dir = TestDir::new();
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v0810_text_mmap");
-    for missing_meta in [false, true] {
-        let path = dir.path(&format!("upgrade_{missing_meta}.tdb"));
-        for suffix in [
-            "",
-            ".vec",
-            ".flush_ok",
-            ".pld.2",
-            ".text",
-            ".text.meta",
-            ".wal",
-        ] {
-            if missing_meta && suffix == ".text.meta" {
-                continue;
-            }
-            std::fs::copy(
-                source.join(format!("sample.tdb{suffix}")),
-                format!("{path}{suffix}"),
-            )
-            .unwrap();
-        }
-        let mut db = Database::<f32>::open(&path, 4).unwrap();
-        assert_eq!(db.node_count().unwrap(), 4);
-        db.insert_with_id(5, &[0., 0., 1., 0.], json!({"content":"新增"}))
-            .unwrap();
-        db.flush().unwrap();
-        db.build_text_index().unwrap();
-        assert_eq!(search(&db, "alpha"), vec![1, 2, 3, 4]);
-        assert_eq!(
-            db.tql_nodes(r#"TEXT AC "测试别名0" TOP 10 AS hits WITH hits RETURN hits"#)
-                .unwrap()
-                .iter()
-                .map(|row| row["hits"].id)
-                .collect::<Vec<_>>(),
-            vec![1]
-        );
-        db.close().unwrap();
-        let mut db = Database::<f32>::open_with_config(
-            &path,
-            Config {
-                dim: 4,
-                load_text_index: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(db.node_count().unwrap(), 5);
-        assert_eq!(
-            db.tql_nodes(r#"TEXT AC "测试别名3" TOP 10 AS hits WITH hits RETURN hits"#)
-                .unwrap()
-                .iter()
-                .map(|row| row["hits"].id)
-                .collect::<Vec<_>>(),
-            vec![4]
-        );
-        db.delete(2).unwrap();
-        db.flush().unwrap();
-        db.close().unwrap();
-        let db = Database::<f32>::open_with_config(
-            &path,
-            Config {
-                dim: 4,
-                load_text_index: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(search(&db, "alpha"), vec![1, 3, 4]);
-    }
-}
-
-#[test]
-fn 历史元数据缺失与主库长度变化均可加载合并和清理() {
-    let dir = TestDir::new();
-    for mode in [StorageMode::Rom, StorageMode::Mmap] {
-        for load in [false, true] {
-            for missing in [false, true] {
-                let path = dir.path(&format!("legacy_{mode:?}_{load}_{missing}.tdb"));
-                seed(&path, mode);
-                let meta_path = format!("{path}.text.meta");
-                if missing {
-                    std::fs::remove_file(&meta_path).unwrap();
-                } else {
-                    let mut bytes = std::fs::read(&meta_path).unwrap();
-                    // 独立构造 v1 元数据，保留历史长度变化的兼容输入。
-                    bytes.truncate(28);
-                    bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
-                    bytes[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
-                    std::fs::write(&meta_path, bytes).unwrap();
-                }
-                let mut db = open(&path, mode, load);
-                db.insert_with_id(3, &[0., 0., 1.], json!({"正文":"独立载荷"}))
-                    .unwrap();
-                db.delete(1).unwrap();
-                db.flush().unwrap();
-                db.build_text_index().unwrap();
-                assert_eq!(search(&db, "beta 共同别名"), vec![2]);
-                assert!(search(&db, "alpha 旧别名").is_empty());
-                db.close().unwrap();
-                let db = open(&path, mode, true);
-                assert_eq!(db.node_count().unwrap(), 2);
-                assert_eq!(search(&db, "beta 共同别名"), vec![2]);
-            }
-        }
-    }
-}
-
-#[test]
-fn 显式加载历史文本后关闭补齐元数据且只读打开保持原文件() {
-    let dir = TestDir::new();
-    for mode in [StorageMode::Rom, StorageMode::Mmap] {
-        let path = dir.path(&format!("legacy-close-{mode:?}.tdb"));
-        seed(&path, mode);
-        let meta = format!("{path}.text.meta");
-        std::fs::remove_file(&meta).unwrap();
-        let original = std::fs::read(format!("{path}.text")).unwrap();
-        let mut reader = Database::<f32>::open_with_config(
-            &path,
-            Config {
-                dim: 3,
-                access_mode: AccessMode::ReadOnly,
-                load_text_index: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(search(&reader, "alpha 旧别名"), vec![1]);
-        reader.close().unwrap();
-        assert!(!Path::new(&meta).exists());
-        assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), original);
-        let mut db = open(&path, mode, true);
-        db.close().unwrap();
-        let bytes = std::fs::read(&meta).unwrap();
-        assert_eq!(bytes.len(), 52);
-        assert_eq!(&bytes[..8], b"TMET\x02\x00\x00\x00");
-        assert_eq!(&bytes[48..52], &crc32fast::hash(&bytes[..48]).to_le_bytes());
-        assert_eq!(
-            &bytes[8..16],
-            &std::fs::metadata(&path).unwrap().len().to_le_bytes()
-        );
-        assert_eq!(
-            &bytes[24..28],
-            &crc32fast::hash(&std::fs::read(format!("{path}.text")).unwrap()).to_le_bytes()
-        );
-        assert_eq!(search(&open(&path, mode, true), "alpha 旧别名"), vec![1]);
-    }
-}
-
-#[test]
 fn 损坏索引原样保留且显式重建可恢复正文和关键词() {
     use triviumdb::index::text::TextIndexDocument;
     let dir = TestDir::new();
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
-        for corrupt in ["crc", "size", "metadata", "trailing", "truncated"] {
+        for corrupt in ["crc", "size", "trailing", "truncated"] {
             let path = dir.path(&format!("rebuild_{mode:?}_{corrupt}.tdb"));
             seed(&path, mode);
             let text = format!("{path}.text");
             let meta = format!("{path}.text.meta");
             match corrupt {
-                "metadata" => std::fs::write(&meta, b"TMET").unwrap(),
                 "crc" => {
-                    let mut bytes = std::fs::read(&text).unwrap();
+                    let mut bytes = crate::artifact::read(&text).unwrap();
                     let end = bytes.len() - 1;
                     bytes[end] ^= 1;
-                    std::fs::write(&text, bytes).unwrap();
+                    crate::artifact::write(&text, bytes).unwrap();
                 }
                 "size" => {
-                    let mut bytes = std::fs::read(&text).unwrap();
+                    let mut bytes = crate::artifact::read(&text).unwrap();
                     bytes.push(0);
-                    std::fs::write(&text, bytes).unwrap();
+                    crate::artifact::write(&text, bytes).unwrap();
                 }
                 _ => {
-                    std::fs::remove_file(&meta).unwrap();
-                    let mut bytes = std::fs::read(&text).unwrap();
+                    let mut bytes = crate::artifact::read(&text).unwrap();
                     if corrupt == "trailing" {
                         bytes.push(0);
                     } else {
                         bytes.truncate(10);
                     }
-                    std::fs::write(&text, bytes).unwrap();
+                    crate::artifact::write(&text, bytes).unwrap();
                 }
             }
-            let original = std::fs::read(&text).unwrap();
-            let mut db = open(&path, mode, true);
-            assert_eq!(std::fs::read(&text).unwrap(), original);
+            let original = crate::artifact::read(&text).unwrap();
+            let error = Database::<f32>::open_with_config(
+                &path,
+                Config {
+                    dim: 3,
+                    storage_mode: mode,
+                    load_text_index: true,
+                    ..Default::default()
+                },
+            )
+            .err()
+            .expect("损坏文本必须拒绝加载");
+            assert_eq!(error.code(), "TDB_IMMUTABLE_ARTIFACT");
+            let mut db = open(&path, mode, false);
+            assert_eq!(crate::artifact::read(&text).unwrap(), original);
             let error = db.build_text_index().unwrap_err();
             assert!(matches!(
                 error.underlying(),
@@ -714,7 +557,7 @@ fn 损坏索引原样保留且显式重建可恢复正文和关键词() {
             ));
             db.insert_with_id(3, &[0., 0., 1.], json!({})).unwrap();
             db.flush().unwrap();
-            assert_eq!(std::fs::read(&text).unwrap(), original);
+            assert_eq!(crate::artifact::read(&text).unwrap(), original);
             db.rebuild_text_index(&[
                 TextIndexDocument {
                     id: 1,
@@ -790,8 +633,8 @@ fn 延期加载与删除预留遵守预算且失败不追加WAL() {
     let path = dir.path("budget.tdb");
     seed(&path, StorageMode::Mmap);
     let mut db = open(&path, StorageMode::Mmap, false);
-    let before_wal = std::fs::read(format!("{path}.wal")).unwrap();
-    let before_text = std::fs::read(format!("{path}.text")).unwrap();
+    let before_wal = crate::artifact::read(format!("{path}.wal")).unwrap();
+    let before_text = crate::artifact::read(format!("{path}.text")).unwrap();
     db.set_memory_limit(db.estimated_memory() + 1024).unwrap();
     assert!(matches!(
         db.build_text_index().unwrap_err().underlying(),
@@ -804,8 +647,14 @@ fn 延期加载与删除预留遵守预算且失败不追加WAL() {
         tx.commit().unwrap_err().underlying(),
         triviumdb::TriviumError::CapacityReservationRejected { .. }
     ));
-    assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before_wal);
-    assert_eq!(std::fs::read(format!("{path}.text")).unwrap(), before_text);
+    assert_eq!(
+        crate::artifact::read(format!("{path}.wal")).unwrap(),
+        before_wal
+    );
+    assert_eq!(
+        crate::artifact::read(format!("{path}.text")).unwrap(),
+        before_text
+    );
     assert!(db.get(1).unwrap().is_some());
     db.set_memory_limit(0).unwrap();
     db.build_text_index().unwrap();

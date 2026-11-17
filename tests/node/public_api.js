@@ -47,6 +47,7 @@ function runTransactionContract(root) {
           const replayFile = file + '.replay'
           fs.copyFileSync(file, replayFile)
           fs.copyFileSync(file + '.wal', replayFile + '.wal')
+          fs.copyFileSync(file + '.idx', replayFile + '.idx')
           const replay = new TriviumDB(replayFile, options)
           try { check(replay) } finally { replay.close() }
           db.close()
@@ -61,24 +62,17 @@ function runTransactionContract(root) {
 }
 
 function runTextRecoveryContract(root) {
-  const source = path.join(__dirname, '..', 'fixtures', 'v0810_text_mmap')
-  for (const missing of [false, true]) {
-    const target = path.join(root, `text-upgrade-${missing}.tdb`)
-    for (const suffix of ['', '.vec', '.flush_ok', '.pld.2', '.text', '.text.meta', '.wal']) {
-      if (missing && suffix === '.text.meta') continue
-      fs.copyFileSync(path.join(source, `sample.tdb${suffix}`), target + suffix)
-    }
-    const db = new TriviumDB(target, { dim: 4, autoBuildQuiver: false })
-    db.insertWithId(5, [0, 0, 1, 0], {})
+  for (const storageMode of ['rom', 'mmap']) {
+    const target = path.join(root, `text-rebuild-${storageMode}.tdb`)
+    const db = new TriviumDB(target, { dim: 4, storageMode, autoBuildQuiver: false })
+    for (let id = 1; id <= 5; id++) db.insertWithId(id, [0, 0, 1, 0], {})
+    db.rebuildTextIndex([1, 2, 3, 4].map(id => ({ id, text: 'alpha', keywords: [] })))
     db.flush()
     db.buildTextIndex()
     assert.deepEqual(db.tql('TEXT BM25 "alpha" TOP 10 AS hits WITH hits RETURN hits')
       .map(row => row.hits.id).sort(), ['1', '2', '3', '4'])
     db.close()
-    fs.writeFileSync(target + '.text', 'corrupt')
-    const repair = new TriviumDB(target, { dim: 4, loadTextIndex: true, autoBuildQuiver: false })
-    assert.equal(fs.readFileSync(target + '.text', 'utf8'), 'corrupt')
-    assert.throws(() => repair.buildTextIndex())
+    const repair = new TriviumDB(target, { dim: 4, storageMode, loadTextIndex: true, autoBuildQuiver: false })
     repair.rebuildTextIndex([{ id: 1, text: 'restoredtoken', keywords: ['restoredanchor'] }])
     repair.close()
     const reader = new TriviumDB(target, { dim: 4, loadTextIndex: true, accessMode: 'readOnly' })
@@ -451,7 +445,7 @@ async function main() {
     assert.deepEqual(indexes.find(item => item.kind === 'composite').fields, ['tenant', 'region'])
 
     const storage = db.storageInfo()
-    assert.equal(storage.database_format_current, 13)
+    assert.equal(storage.database_format_current, 15)
     assert.equal(storage.property_index_format, 8)
     assert.equal(storage.node_count, 2)
 

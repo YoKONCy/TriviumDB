@@ -250,6 +250,8 @@ RETURN related, source.document_id AS document_id, source.evidence AS evidence
 
 `EXPLAIN` 提供 `graph_scope`、`graph_revisions`、`selected_graph_stats`、`named_graph_members` 访问路径和 Cascades 物理阶段。文档物理来源区分 `document_text_search`、`document_exact_search`、`document_ann_search`，通过 `document_source` 提供请求配置。`EXPLAIN ANALYZE` 执行相同管线并返回实际行数及算子观测。
 
+`EXPLAIN SEARCH` 通过 `vector_access_path` 表示向量访问选择，取值为 `ann_post_filter` 或 `exact_fallback`；结构化 `access_path` 保留节点／属性访问路径，两者分别描述各自阶段。字段名称调整见[未发布变更](changes/unreleased.md)。
+
 Prepared 支持图身份、预期修订、文档文字、过滤条件及向量分量等配置叶节点。同名参数共用必需参数目录和首个真实引用范围，缺参、额外参数及转换错误使用既有结构化错误。来源配置、图作用域和执行算子的错误携带对应 UTF-8 范围。
 
 Rust 直接构造 `TqlQuery` 时需提供 `graph_scope`，直接构造 `EdgeView` 时需提供 `graph_id`。默认图或省略作用域的结构字面量将对应字段设为 `None`。
@@ -1008,7 +1010,7 @@ TQL 文本
   → TqlValueResult（Node、Edge、标量、Path、List、Object、Null）
 ```
 
-`FIND` 可选择主键、Hash/Ordered/Composite/Bitmap、索引交集或 Fast Tags + 精确校验；`SEARCH` 可选择可用的向量访问路径与 exact fallback；`MATCH`、图算法和路径阶段复用 `.gidx`/内存图目录。Cascades 在有界计划空间内依据统计信息和成本模型确定执行方案。
+`FIND` 可选择主键、Hash/Ordered/Composite/Bitmap、索引交集或 Fast Tags + 精确校验；`SEARCH` 可选择可用的向量访问路径与 exact fallback；`MATCH`、图算法和路径阶段复用 `.idx` 中的图目录组件或内存图目录。Cascades 在有界计划空间内依据统计信息和成本模型确定执行方案。
 
 ---
 

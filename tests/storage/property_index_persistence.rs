@@ -6,18 +6,6 @@ use triviumdb::database::{AccessMode, Config, MissingIndexPolicy};
 use triviumdb::{Database, TriviumError};
 
 const DIM: usize = 4;
-const SUFFIXES: &[&str] = &[
-    "",
-    ".vec",
-    ".wal",
-    ".lock",
-    ".flush_ok",
-    ".pidx",
-    ".pidx.tmp",
-    ".gidx",
-    ".gidx.tmp",
-    ".manifest.json",
-];
 
 fn database_path(name: &str) -> String {
     let directory = std::env::temp_dir().join("triviumdb_property_index_tests");
@@ -29,9 +17,7 @@ fn database_path(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for suffix in SUFFIXES {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 fn seed_database(path: &str) {
@@ -48,7 +34,7 @@ fn seed_database(path: &str) {
 }
 
 #[test]
-fn 复合与_bitmap_索引_v4_重启更新删除无幽灵命中() {
+fn 复合与_bitmap_索引重启更新删除无幽灵命中() {
     let path = database_path("v4_composite_bitmap");
     cleanup(&path);
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
@@ -114,7 +100,7 @@ fn 属性索引重启后直接恢复并保持负命中语义() {
     cleanup(&path);
     seed_database(&path);
 
-    assert!(std::path::Path::new(&format!("{path}.pidx")).exists());
+    assert!(crate::artifact::exists(format!("{path}.pidx")));
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert_eq!(db.list_indexes().unwrap(), vec!["kind", "rank"]);
     assert_eq!(
@@ -181,11 +167,15 @@ fn 属性索引在更新删除和槽位复用后无幽灵命中() {
 }
 
 #[test]
-fn 旧数据库没有属性索引_sidecar_仍可兼容打开() {
+fn 未定义属性索引时重开保留节点事实() {
     let path = database_path("legacy_missing");
     cleanup(&path);
     seed_database(&path);
-    std::fs::remove_file(format!("{path}.pidx")).unwrap();
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    db.drop_index("kind").unwrap();
+    db.drop_index("rank").unwrap();
+    db.close().unwrap();
+    assert!(!crate::artifact::exists(format!("{path}.pidx")));
 
     let db = Database::<f32>::open(&path, DIM).unwrap();
     assert!(db.list_indexes().unwrap().is_empty());
@@ -200,29 +190,25 @@ fn 旧数据库没有属性索引_sidecar_仍可兼容打开() {
 }
 
 #[test]
-fn 损坏属性索引按策略回退或报错() {
+fn 损坏属性索引定义在默认及严格策略下保留原件并拒绝() {
     let path = database_path("corruption_policy");
     cleanup(&path);
     seed_database(&path);
     let sidecar = format!("{path}.pidx");
-    let mut bytes = std::fs::read(&sidecar).unwrap();
+    let original = crate::artifact::read(&sidecar).unwrap();
+    let mut bytes = original.clone();
     bytes[8] ^= 0x5a;
-    std::fs::write(&sidecar, bytes).unwrap();
+    crate::artifact::write(&sidecar, bytes).unwrap();
 
-    let db = Database::<f32>::open(&path, DIM).unwrap();
-    assert!(db.list_indexes().unwrap().is_empty());
+    let before = std::fs::read(format!("{path}.idx")).unwrap();
     assert_eq!(
-        db.tql_nodes(r#"FIND {kind: "event"} RETURN *"#)
-            .unwrap()
-            .len(),
-        1
+        Database::<f32>::open(&path, DIM).err().unwrap().code(),
+        "TDB_CORRUPTED_FILE"
     );
-    drop(db);
-
-    seed_database(&path);
-    let mut bytes = std::fs::read(&sidecar).unwrap();
+    assert_eq!(std::fs::read(format!("{path}.idx")).unwrap(), before);
+    let mut bytes = original;
     bytes.truncate(bytes.len() / 2);
-    std::fs::write(&sidecar, bytes).unwrap();
+    crate::artifact::write(&sidecar, bytes).unwrap();
     let error = Database::<f32>::open_with_config(
         &path,
         Config {
@@ -246,7 +232,7 @@ fn 属性索引_posting块_crc_独立拒绝损坏() {
     cleanup(&path);
     seed_database(&path);
     let sidecar = format!("{path}.pidx");
-    let mut bytes = std::fs::read(&sidecar).unwrap();
+    let mut bytes = crate::artifact::read(&sidecar).unwrap();
     assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 8);
 
     let field_len = u32::from_le_bytes(bytes[50..54].try_into().unwrap()) as usize;
@@ -270,7 +256,7 @@ fn 属性索引_posting块_crc_独立拒绝损坏() {
     let whole_crc = crc32fast::hash(&bytes[..bytes.len() - 4]);
     let end = bytes.len();
     bytes[end - 4..].copy_from_slice(&whole_crc.to_le_bytes());
-    std::fs::write(&sidecar, bytes).unwrap();
+    crate::artifact::write(&sidecar, bytes).unwrap();
 
     let error = Database::<f32>::open_with_config(
         &path,
@@ -293,10 +279,10 @@ fn 属性索引逐字节截断均不触发_panic() {
     cleanup(&path);
     seed_database(&path);
     let sidecar = format!("{path}.pidx");
-    let original = std::fs::read(&sidecar).unwrap();
+    let original = crate::artifact::read(&sidecar).unwrap();
 
     for length in 0..original.len() {
-        std::fs::write(&sidecar, &original[..length]).unwrap();
+        crate::artifact::write(&sidecar, &original[..length]).unwrap();
         let result = Database::<f32>::open_with_config(
             &path,
             Config {
@@ -320,7 +306,7 @@ fn 唯一约束由主文件恢复且_sidecar_缺失时仍然生效() {
     db.create_unique_index("email").unwrap();
     db.close().unwrap();
 
-    std::fs::remove_file(format!("{path}.pidx")).unwrap();
+    crate::artifact::remove_file(format!("{path}.pidx")).unwrap();
     let mut reopened = Database::<f32>::open(&path, DIM).unwrap();
     assert_eq!(
         reopened.list_unique_indexes().unwrap(),
@@ -475,7 +461,7 @@ fn 只读与不可变模式加载属性索引且零副作用() {
     drop(writer);
 
     let sidecar = format!("{path}.pidx");
-    let before = std::fs::read(&sidecar).unwrap();
+    let before = crate::artifact::read(&sidecar).unwrap();
     let read_only = Database::<f32>::open_with_config(
         &path,
         Config {
@@ -509,7 +495,7 @@ fn 只读与不可变模式加载属性索引且零副作用() {
     .unwrap();
     assert_eq!(immutable.list_indexes().unwrap(), vec!["kind", "rank"]);
     drop(immutable);
-    assert_eq!(std::fs::read(&sidecar).unwrap(), before);
+    assert_eq!(crate::artifact::read(&sidecar).unwrap(), before);
     cleanup(&path);
 }
 

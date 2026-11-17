@@ -42,9 +42,6 @@ cargo bench --locked --profile release-contracts --bench bench_open
 
 | Cargo 名称 | 目的 | 主要参数/输出 |
 |---|---|---|
-| `bench_tsng_c0` | TSNG ground-truth 与成本模型基线 | `TDB_C0_*`；`tsng-c0.json` |
-| `bench_tsng_c1` | matched-recall、多策略、Fixed/Selectivity/Density beam 三方 Gate | `TRIVIUM_TSNG_*`；`tsng-c1-matched-recall.json` |
-| `bench_tsng_pipeline` | Q1–Q14 管线覆盖及 Q5 分层诊断 | `TDB_PIPELINE_NODES`、`TDB_PIPELINE_DIM` |
 | `bench_pipeline_gate` | 四维度、四查询族最终 matched-result Gate | `TDB_PIPELINE_GATE_NODES`；`pipeline-gate.json` |
 
 `bench_pipeline_gate` 对每个计划逐行验证预期的 `property_origin`，随后按原始顺序精确比较其余完整 `NodeRow` 字段。`property_filter_rank` 的全量评分加交集计划清除属性入口，直接属性召回加精排计划保留 `active=true`；其他三个查询族的两侧均按集合合并规则清除该入口。报告中的哈希用于结果标识，正确性由完整行比较验证。属性执行来源语义见 [TQL 参考](../docs/tql-reference.md)。
@@ -73,25 +70,12 @@ cargo bench --locked --profile release-contracts --bench bench_open
 | `bench_recall_at_k` | Recall@K |
 | `bench_rbq2_precision` | RBQ2 精度 |
 | `bench_sensitivity` | 参数敏感性 |
-| `bench_quiver_ablation` | QuIVer 组件消融 |
 
 > **数据准备**：运行外部数据集套件前，按源码顶部说明下载数据并配置输入路径，同时记录数据集版本和校验和。
 
-## E. 研究与硬件消融
+## E. 研究归档
 
-以下研究套件通过 `ablation` feature 显式启用：
-
-```powershell
-cargo bench --features ablation --bench bench_encoding_ablation
-cargo bench --features ablation --bench bench_ssd_cold_hot
-cargo bench --features ablation --bench bench_variance
-```
-
-| Cargo 名称 | 目的 |
-|---|---|
-| `bench_encoding_ablation` | 编码方案消融 |
-| `bench_ssd_cold_hot` | SSD 冷热访问协议 |
-| `bench_variance` | 多轮方差与稳定性 |
+TSNG 对照、旧构图变体、编码和硬件消融按原始源码身份保存在独立研究快照中。正式 Cargo 包维护当前实现的功能与性能基准，使用统一构图入口；研究复现沿各快照的工具链、配置和数据集协议执行。已公开材料见 [QuIVer 复现归档](../evaluation/README.md)。
 
 ## 报告兼容性
 

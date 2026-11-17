@@ -394,7 +394,7 @@ fn 导出保护所有制品名称族及文本硬链接并保留可检索正文()
     ));
     baseline.close().unwrap();
     let before = files(&path);
-    assert!(before.contains_key(".text"));
+    assert!(before.contains_key(".idx"));
     for suffix in [
         "",
         ".vec",
@@ -407,6 +407,8 @@ fn 导出保护所有制品名称族及文本硬链接并保留可检索正文()
         ".quiver.meta",
         ".pidx",
         ".gidx",
+        ".idx",
+        ".idx.tmp",
         ".manifest.json",
         ".pld.999",
         ".publish.0",
@@ -428,14 +430,14 @@ fn 导出保护所有制品名称族及文本硬链接并保留可检索正文()
         assert_eq!(files(&path), before, "{suffix}");
     }
     let alias = root.path().join("alias.jsonl");
-    std::fs::hard_link(format!("{}.text", path.display()), &alias).unwrap();
+    std::fs::hard_link(format!("{}.idx", path.display()), &alias).unwrap();
     let rejected = tdb()
         .args(["export", path.to_str().unwrap(), alias.to_str().unwrap()])
         .output()
         .unwrap();
     assert_eq!(rejected.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("拒绝导出到数据库相关文件"));
-    assert_eq!(std::fs::read(alias).unwrap(), before[".text"]);
+    assert_eq!(std::fs::read(alias).unwrap(), before[".idx"]);
     assert_eq!(files(&path), before);
     let mut db = Database::<f32>::open_with_config(path.to_str().unwrap(), read_config).unwrap();
     let rows = db

@@ -26,9 +26,7 @@ fn tmp_db(name: &str) -> String {
 }
 
 fn cleanup(path: &str) {
-    for ext in &["", ".wal", ".vec", ".lock", ".flush_ok"] {
-        std::fs::remove_file(format!("{}{}", path, ext)).ok();
-    }
+    crate::cleanup_files::database(path);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -655,3 +653,6 @@ fn HW10_全异常向量交叉轰炸_同一DB连续恢复() {
 
     cleanup(&path);
 }
+
+#[path = "../support/cleanup.rs"]
+mod cleanup_files;

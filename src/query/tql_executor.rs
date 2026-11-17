@@ -4042,7 +4042,7 @@ fn generate_explain_plan<T: VectorType>(
             .saturating_mul(std::mem::size_of::<T>())
             .div_ceil(4096);
         plan.insert(
-            "industrial_access_path".into(),
+            "vector_access_path".into(),
             serde_json::json!(if mt.quiver().is_some() {
                 "ann_post_filter"
             } else {

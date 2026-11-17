@@ -330,13 +330,8 @@ fn reachability_四维预算和指标全部生效() {
 
 #[test]
 fn explain_analyze_暴露图统计和遍历预算() {
-    let directory = std::env::temp_dir().join("triviumdb_b2_explain");
-    std::fs::create_dir_all(&directory).unwrap();
-    let path = directory.join(format!("explain_{}", std::process::id()));
-    let path = path.to_string_lossy().into_owned();
-    for suffix in ["", ".vec", ".wal", ".lock", ".flush_ok", ".pidx"] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    let directory = crate::support::TestDir::new("graph_explain");
+    let path = directory.file("database.tdb");
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
     let first = db.insert(&[0.0; DIM], json!({"type": "first"})).unwrap();
     let second = db.insert(&[0.0; DIM], json!({"type": "second"})).unwrap();
@@ -352,20 +347,12 @@ fn explain_analyze_暴露图统计和遍历预算() {
     assert_eq!(plan["traversal_budget"]["exhaustion_policy"], "error");
     assert_eq!(plan["analyze"], true);
     drop(db);
-    for suffix in ["", ".vec", ".wal", ".lock", ".flush_ok", ".pidx"] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
 }
 
 #[test]
 fn 图统计在_link_unlink_delete_和重启后保持一致() {
-    let directory = std::env::temp_dir().join("triviumdb_b2_stats");
-    std::fs::create_dir_all(&directory).unwrap();
-    let path = directory.join(format!("stats_{}", std::process::id()));
-    let path = path.to_string_lossy().into_owned();
-    for suffix in ["", ".vec", ".wal", ".lock", ".flush_ok", ".pidx"] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
+    let directory = crate::support::TestDir::new("graph_stats");
+    let path = directory.file("database.tdb");
     let mut db = Database::<f32>::open(&path, DIM).unwrap();
     let ids: Vec<_> = (0..4)
         .map(|value| db.insert(&[value as f32, 0.0], json!({})).unwrap())
@@ -401,7 +388,4 @@ fn 图统计在_link_unlink_delete_和重启后保持一致() {
     assert_eq!(reopened.graph_stats().unwrap().edge_count, 0);
     assert_eq!(reopened.graph_stats().unwrap().node_count, 3);
     drop(reopened);
-    for suffix in ["", ".vec", ".wal", ".lock", ".flush_ok", ".pidx"] {
-        std::fs::remove_file(format!("{path}{suffix}")).ok();
-    }
 }

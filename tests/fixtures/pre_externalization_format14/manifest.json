@@ -1,0 +1,55 @@
+{
+  "base_commit": "66f1ded09541bef34e7adc21a1d08319fdb3d148",
+  "source": "本轮实施前的工作区源码快照，包含此前尚未提交的格式 14 收敛改动",
+  "source_archive_sha256": "c3fedc62fcfecfb753f233f7bf745de1509865be46f31293f6115078162d59d7",
+  "build_adjustment": "仅将临时 Cargo workspace members 置空并加入复现 example，内核源码保持捕获内容",
+  "generator": "../document_schema1/generate.rs",
+  "generator_sha256": "7fb0e16952d7d2d9056bd9bd0f94334210d1e58255e6a792b0c4e91b207ecc24",
+  "platform": "Windows x86_64 MSVC Rust 1.98.0",
+  "files": {
+    "rom/expected.json": {
+      "bytes": 2285,
+      "sha256": "ae9de774209782a7e67cb1e25b0d7ab2dd3ec0fd6517dc9b3dca4976b20a12ff"
+    },
+    "rom/sample.tdb": {
+      "bytes": 1351,
+      "sha256": "4366dc060049b945774a27a304622b5412e276f1d9b727adec2a3c19b7113e34"
+    },
+    "rom/sample.tdb.idx": {
+      "bytes": 262464,
+      "sha256": "caf015eaa2facbba5fe307acb237973dfad1c8231350b60304a2cf34e4893cd6"
+    },
+    "rom/sample.tdb.wal": {
+      "bytes": 34,
+      "sha256": "239d0dc7a2e1fd2e6ffa2319f6677b156ec944c70cf3712f9f73d0a1f28f7b8b"
+    },
+    "mmap/expected.json": {
+      "bytes": 2285,
+      "sha256": "b3d2cf33816bb5d82fc75f86feb964568536be33507d2611335cdb609c88087d"
+    },
+    "mmap/sample.tdb": {
+      "bytes": 663,
+      "sha256": "e84e4362f945a89122d233c8fe22bd9321cb313edec58f39860204c17318cef3"
+    },
+    "mmap/sample.tdb.flush_ok": {
+      "bytes": 53,
+      "sha256": "b3934ac07ab0de4a31af1e97434b7f59c9db6cb6c9eaafc4a6aa481e631cd9f1"
+    },
+    "mmap/sample.tdb.idx": {
+      "bytes": 262464,
+      "sha256": "c55a76022fb5c40097310f0ca3fca0cd12843403253f466f4903b5d77bb39de7"
+    },
+    "mmap/sample.tdb.pld.2": {
+      "bytes": 804,
+      "sha256": "1e058986ef490700a2e01f8102fe946bcdee78209307acd59cba43b3e5aee86d"
+    },
+    "mmap/sample.tdb.vec": {
+      "bytes": 24,
+      "sha256": "9c334ad8a46185c6623fe1237b275f73e95f384f80aaa5664420c651e08b2291"
+    },
+    "mmap/sample.tdb.wal": {
+      "bytes": 34,
+      "sha256": "efc7e3255da32cdad03be22f0da705edff061d879d2d308fabe6c083e66dd01c"
+    }
+  }
+}

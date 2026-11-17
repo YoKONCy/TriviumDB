@@ -133,6 +133,12 @@ jobs:
         shell: bash
         run: cargo test --target ${{ matrix.target }} --lib --tests -- --test-threads=1
 
+      - name: 验证外部迁移与独立发布样本
+        shell: bash
+        run: |
+          cargo test --locked --manifest-path crates/triviumdb-migrate/Cargo.toml --target-dir target/migration -- --test-threads=1
+          TDB_MIGRATE_TOOL="${{ github.workspace }}/target/migration/debug/triviumdb-migrate${{ runner.os == 'Windows' && '.exe' || '' }}" python -m unittest discover -s tests/tools -p test_migrate.py
+
       - name: 验证 release 小栈解析与图遍历边界
         if: runner.os == 'Linux'
         run: |
@@ -164,7 +170,7 @@ jobs:
 
       - name: 验证 QuIVer SSD、文档压缩与命名图 TQL 契约
         run: |
-          cargo test --locked --target ${{ matrix.target }} --features test-hooks --lib index::quiver::ssd -- --test-threads=1
+          cargo test --locked --target ${{ matrix.target }} --features test-hooks --lib index::quiver::runtime -- --test-threads=1
           cargo test --locked --target ${{ matrix.target }} --features test-hooks --lib storage::quiver_io -- --test-threads=1
           cargo test --locked --target ${{ matrix.target }} --features test-hooks --test core quiver_ssd -- --test-threads=1
           cargo test --locked --target ${{ matrix.target }} --features test-hooks --test core document_compressed -- --test-threads=1
@@ -445,7 +451,7 @@ jobs:
           cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --features test-hooks --lib database::lifecycle::tests -- --test-threads=1
           cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --features test-hooks --lib database::transaction::guard_tests -- --test-threads=1
           cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --lib storage::compaction::tests -- --test-threads=1
-          cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --features test-hooks --lib index::quiver::ssd::tests::runtime_tests -- --test-threads=1
+          cargo +nightly test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --features test-hooks --lib index::quiver::runtime::tests::runtime_tests -- --test-threads=1
 
   # Miri 只运行无文件映射、无外部调用的小规模内存安全子集。
   # 保留默认别名、数据竞争与泄漏检查，使用多个随机种子探索交错。
@@ -597,6 +603,11 @@ jobs:
 
       - name: 静态分析 (Clippy)
         run: cargo clippy --workspace --exclude triviumdb-server --all-targets -- -D warnings
+
+      - name: 检查独立迁移工具
+        run: |
+          cargo fmt --manifest-path crates/triviumdb-migrate/Cargo.toml --all -- --check
+          cargo clippy --locked --manifest-path crates/triviumdb-migrate/Cargo.toml --target-dir target/migration --all-targets -- -D warnings
 
   memory-pressure-observation:
     name: Memory Pressure Observation

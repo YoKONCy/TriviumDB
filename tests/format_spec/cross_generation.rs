@@ -33,11 +33,13 @@ fn tdb_vec_marker所有跨代际组合均不得拼出混合快照() {
     let new = generation("generation_new", 7);
     let roles = [FileRole::Tdb, FileRole::Vec, FileRole::FlushMarker];
     for mask in 0..8u8 {
-        if mask == 0 || mask == 7 {
-            continue;
-        }
         let candidate = path(&format!("mixed_generation_{mask}"));
-        cleanup(&candidate);
+        let main_source = if mask & 1 == 0 { &old } else { &new };
+        copy_roles(
+            main_source,
+            &candidate,
+            &[FileRole::Tdb, FileRole::Vec, FileRole::FlushMarker],
+        );
         for (bit, role) in roles.iter().enumerate() {
             let source = if mask & (1 << bit) == 0 { &old } else { &new };
             std::fs::copy(
@@ -46,10 +48,20 @@ fn tdb_vec_marker所有跨代际组合均不得拼出混合快照() {
             )
             .unwrap();
         }
-        assert!(
-            Database::<f32>::open_read_only(&candidate, DIM).is_err(),
-            "混代 mask={mask} 被错误接受"
-        );
+        if mask == 0 || mask == 7 {
+            let mut db = Database::<f32>::open_read_only(&candidate, DIM).unwrap();
+            let count = if mask == 0 { 4 } else { 7 };
+            assert_eq!(db.all_node_ids().unwrap(), (1..=count).collect::<Vec<_>>());
+            for id in 1..=count {
+                assert_eq!(db.get(id).unwrap().unwrap().vector, [id as f32, 1., 0., 0.]);
+            }
+            db.close().unwrap();
+        } else {
+            assert!(
+                Database::<f32>::open_read_only(&candidate, DIM).is_err(),
+                "混代 mask={mask} 被错误接受"
+            );
+        }
         assert_read_only_zero_write(&candidate);
         cleanup(&candidate);
     }
@@ -73,15 +85,15 @@ fn sidecar跨代际不能产生幽灵节点或错误索引结果() {
                 FileRole::Wal,
             ],
         );
-        std::fs::copy(
+        crate::artifact::copy(
             format!("{old}{}", role.suffix()),
             format!("{candidate}{}", role.suffix()),
         )
         .unwrap();
-        if let Ok(database) = Database::<f32>::open_read_only(&candidate, DIM) {
-            assert_eq!(database.node_count().unwrap(), 7);
-            assert!(database.all_node_ids().unwrap().iter().all(|id| *id <= 7));
-        }
+        let error = Database::<f32>::open_read_only(&candidate, DIM)
+            .err()
+            .expect("错配的索引定义或图目录必须拒绝");
+        assert_eq!(error.code(), "TDB_CORRUPTED_FILE", "{role:?}");
         assert_read_only_zero_write(&candidate);
         cleanup(&candidate);
     }

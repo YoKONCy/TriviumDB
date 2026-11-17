@@ -2,6 +2,8 @@
 
 > 本文列出 `0.9.1` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本记录见[变更说明](changes/0.9.1.md)，后续进展见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
 
+开发版的应用支持范围见 [SDK 正式接口清单](sdk-contract.md)。历史数据库由[外部迁移入口](migration.md)转换到当前文件组；普通打开通过 `TDB_MIGRATION_REQUIRED` 提供结构化指引。
+
 ---
 
 ## 目录
@@ -165,7 +167,7 @@ Writer 可在完成持久化后原子生成 generation manifest：
 db.publish_generation_manifest("generation-42")?;
 ```
 
-Python 使用 `db.publish_generation_manifest("generation-42")`，Node.js 使用 `db.publishGenerationManifest("generation-42")`。该操作会先执行安全 `flush()`，随后为当前 `.tdb`、`.vec`、`.pld.<generation>`、`.flush_ok` 及已存在的 TextIndex/QuIVer sidecar 记录文件大小和 CRC32，并最后原子发布 `<path>.manifest.json`。
+Python 使用 `db.publish_generation_manifest("generation-42")`，Node.js 使用 `db.publishGenerationManifest("generation-42")`。该操作先执行安全 `flush()`，随后为当前主文件、`.idx` 及 Mmap 模式的 `.vec`、`.pld.<generation>`、`.flush_ok` 记录文件大小和 CRC32，最后原子发布 `<path>.manifest.json`。
 
 同步模式和 generation 标识采用字符串参数。已覆盖的绑定类型拒绝提供 `TDB_INVALID_INPUT`、`target.field` 与 `validation/not_committed`，Python 保留原异常类型。generation 字段按语言入口使用 `generation_id` 或 `generationId`。manifest 回调重入提供 `admission/not_committed`，发布中的错误继续依据 Core 完成点判断。
 
@@ -189,7 +191,7 @@ Immutable 会在加载前验证 manifest 版本、完成状态、dtype、维度�
 
 | 策略 | 行为 |
 | --- | --- |
-| `Fallback` | 默认；忽略不可用 sidecar，QuIVer 回退安全检索路径 |
+| `Fallback` | 默认；QuIVer 组件不可用时回退安全检索路径；容器身份和持久化事实仍需有效 |
 | `BuildInMemory` | 允许当前进程在内存中惰性构建 QuIVer，磁盘 sidecar 保持原样 |
 | `Error` | 严格模式；立即返回 `ImmutableArtifactInvalid`，不修改任何文件 |
 
@@ -289,7 +291,7 @@ db.set_sync_mode(SyncMode::Off)?;
 
 数据访问统一执行生命周期检查：Rust 的 `get`、`get_payload`、`get_edge`、`get_edges`、`get_incoming_edges`、`get_all_ids`、`all_node_ids`、`node_count`、`contains`、`neighbors`、`neighbors_with_labels`、`shortest_path`、`graph_stats`、`validate_graph`、`list_indexes`、`list_unique_indexes`、`index_info` 与 `clear_search_state` 返回 `Result`；`set_hook` 也返回 `Result<()>`。调用方使用 `?` 或显式处理错误。Python/Node 的打开状态返回类型保持一致，关闭后抛错。状态、资源统计和配置诊断继续可读。
 
-`flush()` 通过 `.publish` 撤销日志管理主数据、向量、QuIVer、文本、属性与图索引文件组。Mmap 在各文件同步后提交 marker，Rom 在同步后提交日志状态。ReadWrite `open()` 先完成中断恢复，再流式回放 WAL。备份使用有界缓冲，额外磁盘空间与纳入发布的旧文件组大小对应。当前开发主文件为 v13，marker 为 v3，发布日志为 v2，并支持读取历史 v1 日志。命名图、文档候选／归档和有界编辑回执随主文件一同发布，协议见[恢复说明](security.md#8-mmap-三文件一致性标记flush_ok-v3)。
+`flush()` 通过 `.publish` 撤销日志管理主数据、向量与统一 `.idx` 容器。Mmap 在各文件同步后提交 marker，Rom 在同步后提交日志状态。ReadWrite `open()` 先完成中断恢复，再流式回放 WAL。备份使用有界缓冲，额外磁盘空间包含旧文件组、候选容器与暂存组件。当前开发主文件格式为 14，marker 为 3，发布日志为 3。命名图、文档候选／归档和有界编辑回执随主文件一同发布，布局与资源条件见[数据库文件组](storage-format.md)。
 
 WAL 的完整帧发生 CRC、解码或超长字段损坏时，`open()` 返回 `CorruptedFile` 并保留完整日志；物理未写完的尾帧继续按提交边界恢复。QuIVer 元数据 v2 将索引绑定到主文件、向量内容及活跃 ID/slot；失配按 `missing_index_policy` 回退或报错。底层 BQ Rust 距离、签名读取和原始存储解码接口返回 `Result`，详见 [QuIVer 边界](quiver.md#索引事实绑定与-bq-边界)。
 
@@ -994,7 +996,7 @@ let results = db.search_advanced(&query_vec, &config)?;
 
 ## QuIVer 压缩运行时
 
-Rust 的 `Database` 与 `DatabaseReader` 通过 `configure_quiver(SsdRuntimeOptions)`、`search_quiver(query, config)`、`quiver_stats()` 和 `close_quiver()` 使用压缩检索，原有 `*_quiver_int8`／`quiver_int8_stats` 名称继续作为兼容入口。可写数据库另提供 `collect_quiver_temporary()`。
+Rust 的 `Database` 与 `DatabaseReader` 通过 `configure_quiver(QuiverRuntimeOptions)`、`search_quiver(query, config)`、`quiver_stats()` 和 `close_quiver()` 使用压缩检索。类型从 `triviumdb::index::quiver::runtime` 导入，库编码、查询精度和冷热驻留通过配置选择。可写数据库另提供 `collect_quiver_temporary()`。Rust 名称调整见[未发布变更](changes/unreleased.md)。
 
 Python 的 `quiver_request(request_json: str) -> str` 与 Node 的 `quiverRequest(requestJson: string): string` 共享 JSON 命令。`configure` 接收 `options`，支持 `encoding`、`query_precision`、`residency`、`cache_bytes`、`io_mode`、`io_depth` 及 `use_for_ann`。编码支持 `int8`、`centered_int8`、`centered_int4`，查询表示支持 `fp32`、`int8`、`int4`。`search` 接收 `vector`、`top_k`、`ef_search` 和可选 `rerank_limit`，结果中的 NodeId 使用十进制字符串。`stats` 返回活动 Reader 统计或 `null`，`close` 释放当前运行时，`collect_temporary` 返回 `removed` 数量。
 
@@ -1685,13 +1687,13 @@ db.index_keyword(id=42, keyword="Rust")
 db.build_text_index()
 ```
 
-`load_text_index=True` 会在打开时加载持久化的全文索引。默认 `False` 省略加载，后续纯向量写入、`flush()` 和 `close()` 保留已有文本文件；显式文本登记或预热会先加载原索引并合并修改。延期加载与清理受内核内存预算约束，超限会先返回错误。
+`load_text_index=True` 会在打开时加载持久化的全文索引。默认 `False` 省略加载，后续纯向量写入、`flush()` 和 `close()` 保留容器中的文本组件；显式文本登记或预热会先加载原索引并合并修改。延期加载与清理受内核内存预算约束，超限会先返回错误。
 
 文本登记通过 `flush()` 或可写句柄的 `close()` 持久化，尚不属于 `Transaction` 的 WAL 操作。应用需保留权威正文与别名来源，以便重新登记。
 
 正文和关键词在分词、转换及索引增长前检查保守峰值，并向共享运行时预留临时工作区。预算拒绝保留原正文、关键词与 WAL。维护入口核对 WAL 可写性，已关闭的 writer 返回 `TDB_WAL_CLOSED`；权限和生命周期拒绝提供 `admission/not_committed`，输入及构建拒绝提供 `validation/not_committed`。
 
-历史 `.text`（TIDX v2）快照缺少 `.text.meta` 时，完整格式校验通过后可恢复正文与关键词，并在保存时补齐长度和 CRC。已有元数据中的文本长度和 CRC 用于校验内容；主文件长度随存储布局和节点变化更新。加载异常时保留原文本文件，错误消息区分长度、CRC、元数据格式与快照格式。
+文本及其绑定元数据作为配对组件保存在 `.idx`，通过长度、CRC 和检查点绑定验证内容。加载异常保留原容器并返回结构化错误，显式重建使用宿主提供的完整正文与关键词集合。
 
 开发版本的 TMET v2 同时保存主文件 CRC、WAL 检查点封条和元数据 CRC。恢复先核对封条与主检查点，再划分旧删除和检查点后删除。TMET v1 的无封条文本在 ID 删除及复用造成恢复歧义时，返回 `TDB_RECOVERY_REQUIRED`，字段为 `text_index.recovery_boundary`。历史文本的必要加载与校验遵守实例和共享工作区预算。
 
@@ -1749,7 +1751,7 @@ QuIVer 是自研 ANN 图索引，常规查询自动选择与维护索引。默�
 
 自动阈值按 `ceil(666,667 / dim)` 计算并限制在 209–834 节点；384/768 维为 834，1024 维为 652，1536 维为 435，3072 维为 218。
 
-QuIVer 支持增量 Insert/Delete/Update，并保护入口导航树，入口升层时连接旧树。查询召回率由数据、搜索参数与精排预算共同决定。索引以 `.tdb.quiver` 持久化，通过 `.tdb.quiver.meta` 的主数据代际、文件尺寸、节点数、维度与 CRC 校验后加载。有效 QUIV v2／QDSM 快照恢复默认 SM 路由，历史图按对应格式恢复所需状态，断连图按缺失索引策略重建或返回错误。打开期间复用校验结果并按平台回收扫描后的冷页。显式评分模式和压缩运行时由宿主重新配置。TextIndex 对应 `.tdb.text` 和 `.tdb.text.meta`。
+QuIVer 支持增量 Insert/Delete/Update，并保护入口导航树，入口升层时连接旧树。查询召回率由数据、搜索参数与精排预算共同决定。QuIVer 图和绑定元数据保存在 `.idx`，通过主数据代际、组件尺寸、节点数、维度与 CRC 校验后加载。有效 QUIV／QDSM 快照恢复默认 SM 路由，断连图按缺失索引策略重建或返回错误。打开期间复用校验结果并按平台回收扫描后的冷页。显式评分模式和压缩运行时由宿主重新配置。文本、属性、图目录和压缩重排组件与 QuIVer 共用同一容器。
 
 批量导入可在构造时设置 `auto_build_quiver=False`，或运行时调用 `set_auto_build_quiver(False)`，避免导入中途因查询触发索引构建；导入完成后重新开启并执行一次查询，或显式调用 Rust `build_quiver_index()`。`flush()` 负责持久化；QuIVer 由查询准备或显式构建入口生成。无状态评测或独立查询之间可调用 `clear_search_state()` 清空疲劳状态。
 
@@ -1759,7 +1761,7 @@ QuIVer 支持增量 Insert/Delete/Update，并保护入口导航树，入口升�
 
 ## 维度迁移
 
-> **格式提醒**　当前开发 `.tdb` 为 v13，支持读取 v5–v13，可写句柄在后续持久化时发布当前格式。Mmap raw Payload 位于 generation 绑定的 `.pld`，详见[持久化布局](features.md)。ReadOnly/Immutable 按物理零写契约打开，早于 v5 的文件通过旧内核导出迁移。旧内核环境使用升级前的完整文件组备份。sidecar 分别采用 `.pidx v8`、`.gidx v3`、`.text v2` 和 `.quiver v2`；QuIVer v1 读取和默认路由恢复见[重载说明](quiver.md#增量维护重载与内存)。
+> **格式提醒**　当前开发主文件格式为 14，统一索引容器格式为 1。Mmap raw Payload 位于 generation 绑定的 `.pld`，详见[数据库文件组](storage-format.md)。ReadOnly/Immutable 按物理零写契约打开。切换内核前备份完整文件组，旧内核环境使用升级前备份。单格式准入与外部迁移脚本仍在后续收敛范围内，交付阶段见[两阶段冻结目标](kernel-sdk.md#两阶段冻结目标)。
 
 复合索引字段列表按 JSON 数组保存，支持 NUL 和 Unicode 字段名；字段名总长度上限为 1 MiB，字段数量上限为 65,535。旧复合 posting 通过事实扫描保持结果，唯一约束从主文件恢复；普通复合索引可按原字段列表重新创建。唯一约束创建或删除在发布失败后返回原始错误，并将实例标为待恢复，后续读写返回 `TDB_WAL_CLOSED`。释放实例后可写重开，由发布提交点决定恢复旧定义或采用新定义。
 
@@ -1947,7 +1949,7 @@ WAL 追加、flush 或同步失败时返回原始错误并隔离该 writer。后
 ## 持久化类型、解析与打开准入
 
 - 文件头保存 dtype、元素宽度与 CRC32。ReadWrite/ReadOnly 使用其他 dtype 打开返回 `TDB_DTYPE_MISMATCH`，详情包含 `stored` 和 `requested`，取值为 `f32`、`f16`、`u64`。Rom 与 Mmap 共用此契约。
-- v5–v9 非空检查点通过完整向量块几何验证类型。无类型基础检查点的历史 WAL，以及空的无类型检查点附带非空 WAL，使用原版本、原 dtype 恢复并完成检查点或导出后再升级。当前 v13 检查点及 v7 WAL 由支持对应版本的内核处理，回退使用升级前的完整备份。
+- 当前检查点和 WAL 按持久化 dtype 及完整向量几何验证类型。当前主文件格式为 14，WAL 为 7；格式及迁移范围见[数据库文件组](storage-format.md)。切换到旧内核时使用升级前的完整备份。
 - 发生向量文件替换或重映射失败时，原调用保留 I/O 错误。映射已经失效的实例及其共享句柄随后返回 `TDB_WAL_CLOSED`；释放这些实例后，重新以可写模式打开，恢复发布基础并回放 WAL。
 - TQL 字符串入口完整消费输入，语句尾部非法内容在生成写操作前返回 `TDB_QUERY_PARSE`。输入上限为 4 MiB、262,144 个 token、128 层括号嵌套和 128 个表达式运算符；已有递归预算共同约束表达式与谓词。向量及 JSON 字面量中的负号按字面量处理。
 - `memory_limit` 覆盖打开时的节点与图目录、Rom 向量堆副本、Payload 解码、派生索引恢复和 WAL 暂存。各阶段在分配前进行保守峰值准入，打开完成前核对总估算占用；预算不足返回 `TDB_CAPACITY_RESERVATION_REJECTED`，本次共享资源预留释放。原始 mmap 向量和 Payload 映射按文件映射管理，堆目录及解码工作区参与准入。

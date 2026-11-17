@@ -1,6 +1,6 @@
 # TriviumDB Hook 开发指南
 
-> 本文介绍 `0.9.1` 的 `search*` 检索管线 Hook，覆盖 Rust、Python、Node.js 与 FFI ABI v2。TQL 的 Cascades/NodeSet 管线通过查询算子和 EXPLAIN 扩展。版本记录见[变更说明](changes/0.9.1.md)。
+> 本文介绍 `0.9.1` 的 `search*` 检索管线 Hook，覆盖 Rust、Python、Node.js 与 FFI 插件。TQL 的 Cascades/NodeSet 管线通过查询算子和 EXPLAIN 扩展。版本记录见[变更说明](changes/0.9.1.md)。
 
 ---
 
@@ -157,11 +157,11 @@ for (stage, dur) in &ctx.stage_timings {
 | 符号名 | 对应 Hook 点 | 说明 |
 | -------- | ------------- | ------ |
 | `trivium_hook_abi_version` | 全局 | 返回插件实现的 ABI 版本（当前 `2`），与内核不匹配时拒绝加载 |
-| `trivium_hook_invoke_v2` | 六阶段 | ABI v2 统一入口：`(stage, ctx, hits, count)`，返回 `0` 成功 / 非零错误码，覆盖 pre_search / custom_recall / post_recall / pre_graph_expand / rerank / post_search 全部六个阶段 |
-| `trivium_recall` | `on_custom_recall` | v1 兼容：`int(const float* query, size_t query_len, size_t top_k, FfiSearchHit* out_hits, size_t* out_count)` |
-| `trivium_rerank` | `on_rerank` | v1 兼容：`int(FfiSearchHit* hits, size_t count)` |
+| `trivium_hook_invoke_v2` | 六阶段 | 统一阶段入口：`int(stage, query_ptr, query_len, hits_ptr, hits_capacity, hits_count)`，返回 `0` 成功 / 非零错误码，覆盖 pre_search / custom_recall / post_recall / pre_graph_expand / rerank / post_search 全部六个阶段 |
+| `trivium_recall` | `on_custom_recall` | 单独召回入口：`int(const float* query, size_t query_len, size_t top_k, FfiSearchHit* out_hits, size_t* out_count)` |
+| `trivium_rerank` | `on_rerank` | 单独重排入口：`int(FfiSearchHit* hits, size_t count)` |
 
-> **提醒**：新插件建议直接实现 `trivium_hook_invoke_v2` + `trivium_hook_abi_version`：六阶段全部可注入，错误码会传播为结构化查询错误；只导出 `trivium_recall`/`trivium_rerank` 的旧插件继续以 v1 兼容方式加载。
+六阶段插件实现 `trivium_hook_invoke_v2` 与 `trivium_hook_abi_version`，各阶段错误码传播为结构化查询错误。单独召回和重排入口分别提供对应阶段的插件能力。
 
 ### 完整示例：自定义重排序插件
 

@@ -1,0 +1,56 @@
+//! TriviumDB 嵌入式三模数据库核心库。
+//!
+//! 一个稳定 NodeId 同时关联向量、JSON Payload 与带标签业务图；Database 提供单写多读
+//! 存储，TQL 提供可自由编排的混合查询，QuIVer/属性/文本/图索引负责加速。所有公共
+//! 路径共享确定性、预算 fail-closed、版本化磁盘格式和 ReadOnly/Immutable 零写约束。
+
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::suspicious_open_options)]
+#![allow(clippy::unnecessary_sort_by)]
+
+pub mod database;
+pub mod document;
+pub mod error;
+pub mod filter;
+pub mod graph;
+pub mod hook;
+pub mod index;
+pub mod named_graph;
+pub mod node;
+pub mod observability;
+pub mod query;
+mod request;
+pub mod resources;
+pub mod sdk;
+pub mod storage;
+
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks;
+
+pub mod cognitive;
+
+pub use database::console::{ConsoleFeature, ConsoleHost, ConsoleOptions, ConsoleSession};
+pub use database::{BatchSearchConfig, EdgeDirection, SearchConfig};
+pub use database::{
+    Database, DatabaseReader, DatabaseWriter, InstanceMemoryStats, InstanceStats, ShutdownPhase,
+    ShutdownStatus,
+};
+pub use error::{ErrorInfo, Result, TriviumError};
+pub use filter::Filter;
+pub use graph::reachability::{
+    ReachabilityConfig, ReachabilityDirection, ReachabilityOutput, ReachabilityResult,
+    ReachabilityStep, SubgraphEdge, SubgraphNode, SubgraphResult,
+};
+pub use hook::{CompositeHook, FfiHook, HookContext, NoopHook, SearchHook};
+pub use node::{Edge, GroupedSearchResult, NodeId, NodeView, SearchHit};
+pub use resources::{
+    ResourceBudgetDetails, ResourceFailure, ResourceLimits, ResourceRuntime, ResourceStats,
+};
+pub use sdk::{SharedDatabase, WeakDatabase};
+pub use storage::compaction::{MaintenanceDeferReason, MaintenancePhase, MaintenanceStatus};
+pub use storage::generation::{CurrentGeneration, GenerationReader, GenerationStore};
+pub use storage::memtable::{GraphIntegrityReport, GraphRepairReport, GraphStats};
+pub mod vector;
+pub use vector::VectorType;

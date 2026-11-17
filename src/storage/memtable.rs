@@ -504,7 +504,7 @@ pub(crate) struct QuiverBuildSnapshot {
     pub signatures: Bq2Store,
     pub ids: Vec<u64>,
     pub slots: Vec<usize>,
-    pub sm: crate::index::quiver::corrected_sm::CorrectedSmIndex,
+    pub sm: crate::index::quiver::sm::SmIndex,
 }
 
 type CrossModalCacheKey = (String, Vec<u8>);
@@ -524,6 +524,7 @@ pub struct MemTable<T: VectorType> {
     /// 最近一次完整检查点之后是否发生了需要持久化的变更。
     checkpoint_dirty: bool,
     pub(crate) editing: crate::database::editing::EditState,
+    pub(crate) storage_id: [u8; 16],
     pub(crate) document_publications: crate::storage::document_publications::PublicationStore,
     pub(crate) document_updates_paused: bool,
     pub(crate) named_graphs: crate::storage::named_graphs::NamedGraphStore,
@@ -615,7 +616,7 @@ pub struct MemTable<T: VectorType> {
     //    冷热分离：QuIVer 内部 BQ sigs + 图拓扑 = hot，f32 向量 = cold
     //    事务安全：事务 commit 期间暂停 QuIVer 同步，commit 后由事务层统一同步
     quiver_index: Option<QuIVer>,
-    pub(crate) quiver_ssd: Option<crate::database::quiver_ssd::DatabaseSsd>,
+    pub(crate) quiver_ssd: Option<crate::database::quiver_runtime::DatabaseQuiverRuntime>,
     auto_build_quiver: bool,
     /// 事务同步暂停标记：为 true 时 insert/delete/update_vector 不触发 QuIVer 增量操作
     quiver_sync_paused: bool,
@@ -650,6 +651,7 @@ impl<T: VectorType> MemTable<T> {
             generation: 0,
             checkpoint_dirty: true,
             editing: Default::default(),
+            storage_id: *uuid::Uuid::new_v4().as_bytes(),
             named_graphs: Default::default(),
             document_publications: Default::default(),
             document_updates_paused: false,
@@ -717,6 +719,7 @@ impl<T: VectorType> MemTable<T> {
             generation: 0,
             checkpoint_dirty: true,
             editing: Default::default(),
+            storage_id: *uuid::Uuid::new_v4().as_bytes(),
             named_graphs: Default::default(),
             document_publications: Default::default(),
             document_updates_paused: false,
@@ -1812,15 +1815,6 @@ impl<T: VectorType> MemTable<T> {
         &self.fast_tags
     }
 
-    /// 按 NodeId 获取 Fast Tag，供查询时导航做近似属性信号判断。
-    #[inline]
-    pub(crate) fn fast_tag_for_id(&self, id: NodeId) -> Option<u64> {
-        self.ids_to_indices
-            .get(&id)
-            .and_then(|&slot| self.fast_tags.get(slot))
-            .copied()
-    }
-
     /// 从持久化文件恢复 BQ 签名数组（跳过重建）
     pub fn set_bq_signatures(&mut self, sigs: Vec<BqSignature>) {
         self.checkpoint_dirty = true;
@@ -1878,9 +1872,9 @@ impl<T: VectorType> MemTable<T> {
     /// 同一独占借用内分离主路由与Reader，运行时切换完整复用当前绑定代际。
     pub(crate) fn configure_quiver_ssd_runtime(
         &mut self,
-        options: crate::index::quiver::ssd::SsdRuntimeOptions,
+        options: crate::index::quiver::runtime::QuiverRuntimeOptions,
         capacity: usize,
-    ) -> Result<Option<crate::index::quiver::ssd::SsdStats>> {
+    ) -> Result<Option<crate::index::quiver::runtime::QuiverRuntimeStats>> {
         let generation = self.vector_generation();
         let Some((index, active)) = self.quiver_index.as_ref().zip(self.quiver_ssd.as_mut()) else {
             return Ok(None);
@@ -2007,8 +2001,7 @@ impl<T: VectorType> MemTable<T> {
         signatures.reserve(self.payloads.len());
         let mut ids = Vec::with_capacity(self.payloads.len());
         let mut slots = Vec::with_capacity(self.payloads.len());
-        let mut sm =
-            crate::index::quiver::corrected_sm::CorrectedSmIndex::empty_routing(self.dim).ok()?;
+        let mut sm = crate::index::quiver::sm::SmIndex::empty_routing(self.dim).ok()?;
         sm.reserve_routing(self.payloads.len());
         let mut buffer = Vec::with_capacity(self.dim);
         for (slot, &node_id) in self.indices_to_ids.iter().enumerate() {
@@ -2098,7 +2091,7 @@ impl<T: VectorType> MemTable<T> {
         }
 
         let mut index = QuIVer::new(dim, config);
-        index.batch_build_experimental_v2(&vecs_f32, &ids, &slot_idxs);
+        index.batch_build(&vecs_f32, &ids, &slot_idxs);
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeQuiverPublish);
         self.quiver_index = Some(index);
@@ -3867,7 +3860,7 @@ impl<T: VectorType> MemTable<T> {
                     if self.contains(*id) && self.text_index.contains_node(*id))
             })
         {
-            // 历史快照缺少封条，节点复用时无法证明删除属于哪次文本登记。
+            // 缺少恢复封条时，节点复用的文本删除无法证明归属，要求显式恢复。
             return Err(TriviumError::RecoveryRequired {
                 wal_path: format!("{path}.wal"),
             }
@@ -3960,7 +3953,7 @@ impl<T: VectorType> MemTable<T> {
         let Some(path) = self.deferred_text_path.as_deref() else {
             return Ok(());
         };
-        let bytes = std::fs::metadata(format!("{path}.text"))?.len();
+        let bytes = crate::storage::index_container::required(path, ".text")?.length;
         // 解码前同时执行实例预算和共享运行时工作区准入。
         let estimate = usize::try_from(bytes)
             .ok()

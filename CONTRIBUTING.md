@@ -65,6 +65,9 @@ cargo test --features test-hooks --test concurrency --test differential --test f
 cargo test --features test-hooks --test query tql_planner -- --test-threads=1
 cargo check --features python
 cargo check --features nodejs
+cargo fmt --manifest-path crates/triviumdb-migrate/Cargo.toml --all -- --check
+cargo clippy --locked --manifest-path crates/triviumdb-migrate/Cargo.toml --target-dir target/migration --all-targets -- -D warnings
+cargo test --locked --manifest-path crates/triviumdb-migrate/Cargo.toml --target-dir target/migration -- --test-threads=1
 git diff --check
 ```
 
@@ -112,6 +115,8 @@ Rust Embedded Core 是产品主体和公共语义权威。Python、Node、CLI �
 
 内核 SDK 负责共享句柄、请求借用、类型与错误适配；存储内核负责事务、WAL、锁顺序、恢复、排空及 mmap 释放。两层按[职责文档](docs/kernel-sdk.md)维护，SDK 的准入与包装复用存储内核判定，已有公共路径通过兼容导出维护。
 
+冻结采用[两阶段目标](docs/kernel-sdk.md#两阶段冻结目标)：本次收敛至 `1.0.0-beta.1` 冻结应用侧 SDK 契约，内部 API 的演进由 SDK 适配；`1.0.0` 再冻结正式内核接口及其语义。自 SDK 冻结起，TDB 版本变化涉及的数据与版本化制品迁移统一通过外部脚本显式执行，普通 SDK 与内核运行路径只承担当前格式操作和恢复。脚本可调用版本固定的专用迁移程序，历史解码依赖与正常内核隔离。各阶段完成状态以实际交付和验收为准。
+
 #### A2. 用户数据正确性高于可用性
 
 无法证明结果正确时必须 fail-closed。禁止用空结果、零向量、`null`、默认值或残缺快照伪装恢复成功。corruption、migration、budget、I/O、capacity 等错误类别必须使用可区分的结构化错误，控制流不得依赖解析中英文错误消息。
@@ -126,7 +131,7 @@ Rust Embedded Core 是产品主体和公共语义权威。Python、Node、CLI �
 
 #### A5. 磁盘格式必须版本化并保留历史 oracle
 
-格式变更必须同时提供：显式版本号、最小长度与几何边界校验、checked arithmetic、分配前计数校验、CRC 等完整性保护，以及 truncation、bit flip、恶意计数与跨代组合测试。旧格式必须保留独立 fixture 与 decoder oracle；禁止为了让新测试通过而覆盖旧格式定义。
+格式变更必须同时提供：显式版本号、最小长度与几何边界校验、checked arithmetic、分配前计数校验、CRC 等完整性保护，以及 truncation、bit flip、恶意计数与跨代组合测试。历史独立 fixture、来源与内容预期保留给显式离线迁移验收。正常内核测试聚焦当前格式的数据往返、恢复和结构化拒绝；自动回退或自动升级历史格式的测试移出其维护范围。
 
 #### A6. 所有预算必须 fail-closed
 
@@ -142,7 +147,7 @@ Rust Embedded Core 是产品主体和公共语义权威。Python、Node、CLI �
 
 #### A9. Cache 与索引只能改变性能
 
-删除 cache 或设置 cache=0 后结果必须完全相同；cache 淘汰不得使进行中的查询持有悬空引用；索引候选必须经完整谓词验证；索引缺失、损坏或重建不得污染事实数据。QuIVer、BQ、属性、文本与图 sidecar 均为派生加速层，按已保存的事实重建。
+删除 cache 或设置 cache=0 后结果必须完全相同；cache 淘汰不得使进行中的查询持有悬空引用；索引候选必须经完整谓词验证；索引缺失、损坏或重建不得污染事实数据。QuIVer、BQ、属性 posting、文本倒排与图目录按已保存的事实重建。统一 `.idx` 容器同时保存登记正文、关键词和属性索引定义等持久化事实，缓存清理与索引重建必须保留这些内容。完整布局见[数据库文件组](docs/storage-format.md)。
 
 #### A10. Late Materialization 是强制不变量
 
@@ -166,7 +171,7 @@ Rust Embedded Core 是产品主体和公共语义权威。Python、Node、CLI �
 
 QuIVer 是 TriviumDB 的核心 ANN 底座与主要产品卖点。以下规则区分两类变更：
 
-- **新增 ANN 算法：允许。** 作为可选后端或实验路径接入时不触碰 QuIVer 语义，需保证确定性、事务安全、Late Materialization 不变量与完整测试；
+- **新增 ANN 算法：允许。** 研究原型在独立快照或研究工具中验证；可选生产后端经过验收后接入，保持 QuIVer 语义、确定性、事务安全、Late Materialization 不变量与完整测试。生产包维护正式模式与必要的部署诊断开关；
 - **直接修改 QuIVer 核心：必须提供跨数据集帕累托前沿证据。** 调整 BQ 编码、图导航、精排、构建或持久化语义时，必须在多个数据集与多个 Recall 工作点上同时对比 QPS、延迟与内存，证明新实现整体不劣且在关键指标上明显更优，才可合并。单一工作点或单一数据集的局部胜利不足以替换已有且经过广泛实测的版本基线。
 
 无论哪类变更，都不得破坏 Recall 语义、稳定排序、事务安全与确定性；性能数据必须可复现。
@@ -384,7 +389,7 @@ Distinguish the behavior and performance of default SM-L2, explicit corrected/na
 
 QuIVer is the core ANN foundation and a primary product differentiator of TriviumDB. The rules distinguish two kinds of change:
 
-- **Adding a new ANN algorithm: allowed.** Wiring it in as an optional backend or experimental path must not touch QuIVer semantics, and must preserve determinism, transaction safety, the late-materialization invariant, and complete tests;
+- **Adding a new ANN algorithm: allowed.** Validate research prototypes in separate snapshots or research tools. An optional production backend enters after validation and preserves QuIVer semantics, determinism, transaction safety, the late-materialization invariant, and complete tests. Production packages maintain supported modes and necessary deployment diagnostics;
 - **Directly modifying the QuIVer core: requires cross-dataset Pareto-frontier evidence.** Changes to BQ encoding, graph navigation, reranking, construction, or persistence semantics must compare QPS, latency, and memory across multiple datasets and multiple recall operating points, demonstrating that the new implementation is no worse overall and clearly better on key metrics before merging. A local win at a single operating point or on a single dataset is not sufficient to replace an established, widely benchmarked versioned baseline.
 
 Neither kind of change may break recall semantics, stable ordering, transaction safety, or determinism; performance data must be reproducible.

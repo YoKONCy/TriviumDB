@@ -346,7 +346,7 @@ fn 独立编码的无符号wal样本保留原始事实与嵌套整数() {
         .unwrap();
     std::fs::write(
         format!("{path}.wal"),
-        include_bytes!("../fixtures/numeric_ids/full_u64_v3.bin"),
+        include_bytes!("../fixtures/numeric_ids/full_u64.bin"),
     )
     .unwrap();
     let mut db = Database::<f32>::open_with_config(&path, config(StorageMode::Mmap)).unwrap();
