@@ -13,10 +13,6 @@
 
 # TriviumDB
 
-The current stable release is **0.9.1**, with document evidence retrieval, parsing and staged publication, unified document and named-graph TQL, QuIVer centered INT8/INT4 compressed reranking, Hot/SSD residency, and engineering hardening. See the [bilingual release notes](docs/changes/0.9.1.md) and the [ICDE evaluation archive](evaluation/README.md).
-
-The development branch documents its [SDK contract inventory](docs/sdk-contract.md) and uses an [external migration tool](docs/migration.md) for database upgrades.
-
 **Vector × Graph × Document — A Trinity AI-Native Embedded Database**
 
 **Battle-tested in mission-critical, air-gapped environments.**
@@ -32,6 +28,14 @@ The development branch documents its [SDK contract inventory](docs/sdk-contract.
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/YoKONCy/TriviumDB)
 
 [**中文文档**](README.md) | **English**
+
+The current prerelease is **0.9.2-beta.1**, with a unified `.idx` index container, current-format admission, external migration, exact-search switches across the three SDKs, and data-correctness hardening. Python uses `0.9.2b1`, and npm uses the `beta` channel. See the [bilingual release notes](docs/changes/0.9.2-beta.1.md) for changes and upgrade steps.
+
+The current stable release is **0.9.1**, with document evidence retrieval, parsing and staged publication, unified document and named-graph TQL, QuIVer centered INT8/INT4 compressed reranking, Hot/SSD residency, and engineering hardening. See the [bilingual release notes](docs/changes/0.9.1.md) and the [ICDE evaluation archive](evaluation/README.md).
+
+The development branch documents its [SDK contract inventory](docs/sdk-contract.md) and uses an [external migration tool](docs/migration.md) for database upgrades.
+
+See [QuIVer applicability](#quiver-applicability) for vector workload selection and exact-search entry points.
 
 </div>
 
@@ -151,6 +155,14 @@ Suppose you're building an **AI conversation memory system** and the user says "
 
 > 📖 [QuIVer architecture and configuration](docs/quiver.md) · [Benchmark guide](benches/README.md) · [0.9.0 changes](docs/changes/0.9.0.md)
 
+### QuIVer Applicability
+
+QuIVer ANN targets real semantic vectors produced by mainstream embedding models for text, code and image similarity retrieval. Query and database vectors should share the matching retrieval space defined by the model. The published evaluation covers data produced by Cohere, BGE-M3, MiniLM, Nomic and Jina models, with recall, throughput and parameters recorded separately for each dataset. [Evaluation data and paper](evaluation/README.md)
+
+For randomly synthesized vectors, handcrafted or concatenated features, and traditional non-negative descriptors, use full-scan exact retrieval. TriviumDB provides storage and exact queries for vectors satisfying its dtype and dimensionality contracts through `search_exact` in Python/Rust and `searchExact` in Node. Version `0.9.2-beta.1` also provides Python `exact=True`, Rust `SearchConfig::with_exact(true)` and the corresponding Node `exact` argument. [Exact-search API](docs/api-reference.md#search--纯向量图扩散检索-基础)
+
+> **Recall guidance**　QuIVer recall depends on vector distribution, retrieval task and search budgets. Evaluate cross-model retrieval, cross-modal retrieval and custom vector transformations separately. Validate Recall@K on your own real workload and select suitable parameters or the exact-search route.
+
 > ⚠️ **Dimension guidance: keeping database vectors at or below 3072 dimensions is strongly recommended.** TriviumDB storage and exact BruteForce retrieval support higher dimensions, but QuIVer's BQ signature safety limit is 3072 dimensions. Above this limit, automatic QuIVer construction is disabled and search safely falls back to BruteForce; manual QuIVer construction returns an explicit error. Higher-dimensional databases use exact retrieval; plan memory and compute capacity for that path.
 
 TriviumDB uses an **intelligent auto-routing dual engine**. The automatic threshold is `ceil(666,667 / dim)`, clamped to 209–834 nodes, so low-dimensional data stays exact longer while high-dimensional data switches to ANN earlier:
@@ -203,13 +215,13 @@ maturin develop --features python
 Recommended: use the blazing-fast [uv](https://github.com/astral-sh/uv) (millisecond install):
 
 ```bash
-uv pip install triviumdb
+uv pip install "triviumdb==0.9.2b1"
 ```
 
 Or traditional pip:
 
 ```bash
-pip install triviumdb
+pip install "triviumdb==0.9.2b1"
 ```
 
 ### 🌐 Node.js / Frontend Users
@@ -217,9 +229,9 @@ pip install triviumdb
 Cross-platform package includes pre-compiled `*.node` native extensions with full TypeScript completions:
 
 ```bash
-npm install triviumdb
+npm install triviumdb@0.9.2-beta.1
 # or
-pnpm add triviumdb
+pnpm add triviumdb@0.9.2-beta.1
 ```
 
 ### 🦀 Rust Native Users
@@ -227,18 +239,10 @@ pnpm add triviumdb
 Use as a library dependency:
 
 ```bash
-cargo add triviumdb
+cargo add triviumdb@0.9.2-beta.1
 ```
 
-`0.9.0` is the stable release: Rust, Python and Node.js share the native tri-model core, Cascades query planning, atomic transactions, resource budgets and controlled shutdown. Console v1 adds a host interface that reuses an already-open instance, alongside stronger file-group recovery, migration publication and Windows file-lock boundaries. Server and WebUI retain the nightly channel.
-
-```bash
-pip install "triviumdb==0.9.0"
-npm install triviumdb@0.9.0
-cargo add triviumdb@0.9.0
-```
-
-See the bilingual [0.9.0 release notes](docs/changes/0.9.0.md).
+The API examples on this page target `0.9.2-beta.1`. Upgrade existing databases through the [external migration entry point](docs/migration.md) into a current-format destination. See the [release notes](docs/changes/0.9.2-beta.1.md) for complete upgrade conditions.
 
 To add a management frontend to an embedded application, follow [Console host integration](docs/embedded-console.md) to reuse the same instance and file lock. The existing HTML still needs frontend-owned transport adaptation; the resource bundle declares that requirement and its CDN dependencies.
 

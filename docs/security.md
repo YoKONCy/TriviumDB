@@ -1,6 +1,6 @@
 # TriviumDB 安全特性详解
 
-> 本文说明 `0.9.1` 内核的并发、数据完整性、格式校验、资源预算、ReadOnly/Immutable、输入验证与跨平台 I/O 实现。版本记录见[变更说明](changes/0.9.1.md)，后续更新见[未发布变更](changes/unreleased.md)。
+> 本文说明 `0.9.2-beta.1` 内核的并发、数据完整性、格式校验、资源预算、ReadOnly/Immutable、输入验证与跨平台 I/O 实现。版本记录见[变更说明](changes/0.9.2-beta.1.md)，后续更新见[未发布变更](changes/unreleased.md)。
 
 ---
 

@@ -1,6 +1,6 @@
 # SDK 正式接口清单
 
-> 本文登记应用侧 SDK 的支持范围与兼容边界，作为 `1.0.0-beta.1` SDK 冻结的审查基线。当前开发版的版本元数据保持 `0.9.1`，交付记录见[未发布变更](changes/unreleased.md)。
+> 本文登记应用侧 SDK 的支持范围与兼容边界，作为 `1.0.0-beta.1` SDK 冻结的审查基线。当前交付版本为 `0.9.2-beta.1`，完整内容见[版本说明](changes/0.9.2-beta.1.md)。
 
 ---
 
@@ -55,6 +55,8 @@
 | 错误 | `Result`、`TriviumError`、`ErrorInfo`，公开错误定位与写入完成点类型 | 稳定错误码、必要字段、原始原因与结果判定 |
 
 上述类型在应用签名中引用的 DTO、枚举、参数及返回字段随调用一起进入支持范围。被标记 `doc(hidden)`、仅 `test-hooks` 可用的方法和直接访问存储容器的实现接口归入内核工具范围。Rust 类型参数约束和所有权规则随对应方法一起维护。
+
+`SearchConfig::default().min_score` 为 `0.0`，`with_exact(bool)` 设置既有 `force_brute_force` 字段。Python 的关键字参数 `exact` 与 Node 的可选 `exact` 参数／配置字段复用相同向量召回路径。精确召回读取数据库存储的向量，继续执行调用配置中的过滤、排序、Top-K 和后续处理。高级入口的兼容开关与 `exact` 任一为真时启用精确召回，完整签名和示例见 [检索 API](api-reference.md#search--纯向量图扩散检索-基础)。
 
 ---
 

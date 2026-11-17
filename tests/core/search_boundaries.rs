@@ -7,6 +7,120 @@ use triviumdb::index::quiver::{BqNavigationScorer, QuIVer, QuIVerConfig, QuIVerS
 use triviumdb::{Database, VectorType};
 
 #[test]
+fn 精确开关与默认阈值遵守跨语言搜索契约() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../contracts/search_entry_cases.json")).unwrap();
+    let root = support::TestDir::new("search_entry");
+    let records = fixture["records"].as_array().unwrap();
+    let query: Vec<f32> = serde_json::from_value(fixture["query"].clone()).unwrap();
+    for storage_mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let path = root.file(&format!("{storage_mode:?}.tdb"));
+        let config = Config {
+            dim: 2,
+            storage_mode,
+            ..Default::default()
+        };
+        let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
+        for record in records {
+            let vector: Vec<f32> = serde_json::from_value(record["vector"].clone()).unwrap();
+            db.insert_with_id(
+                record["id"].as_u64().unwrap(),
+                &vector,
+                record["payload"].clone(),
+            )
+            .unwrap();
+        }
+        for reopened in [false, true] {
+            if reopened {
+                db.close().unwrap();
+                db = Database::<f32>::open_with_config(&path, config).unwrap();
+            }
+            for case in fixture["cases"].as_array().unwrap() {
+                let mut search = SearchConfig {
+                    top_k: case["top_k"].as_u64().unwrap_or(records.len() as u64) as usize,
+                    expand_depth: 0,
+                    payload_filter: case
+                        .get("filter")
+                        .map(|f| triviumdb::Filter::from_json(f).unwrap()),
+                    ..Default::default()
+                }
+                .with_exact(case["exact"].as_bool().unwrap());
+                if let Some(score) = case["min_score"].as_f64() {
+                    search.min_score = score as f32;
+                }
+                let hits = db.search_advanced(&query, &search).unwrap();
+                let expected: Vec<u64> = serde_json::from_value(case["ids"].clone()).unwrap();
+                assert_eq!(
+                    hits.iter().map(|h| h.id).collect::<Vec<_>>(),
+                    expected,
+                    "{case}"
+                );
+                for hit in &hits {
+                    let record = records.iter().find(|r| r["id"] == hit.id).unwrap();
+                    assert_eq!(hit.payload, record["payload"]);
+                    assert!((hit.score as f64 - record["score"].as_f64().unwrap()).abs() < 1e-6);
+                }
+                let batch = db
+                    .search_batch(std::slice::from_ref(&query), &search, &Default::default())
+                    .unwrap();
+                assert_eq!(batch.len(), 1);
+                assert_eq!(batch[0].iter().map(|h| h.id).collect::<Vec<_>>(), expected);
+                for hit in &batch[0] {
+                    let record = records.iter().find(|r| r["id"] == hit.id).unwrap();
+                    assert_eq!(hit.payload, record["payload"]);
+                    assert!((hit.score as f64 - record["score"].as_f64().unwrap()).abs() < 1e-6);
+                }
+            }
+        }
+        db.close().unwrap();
+    }
+    assert_eq!(SearchConfig::default().min_score, 0.0);
+    assert!(SearchConfig::default().with_exact(true).force_brute_force);
+    assert!(
+        !SearchConfig::default()
+            .with_exact(true)
+            .with_exact(false)
+            .force_brute_force
+    );
+}
+
+#[test]
+fn 精确开关跳过自动建图并绕过已有索引() {
+    let root = support::TestDir::new("exact_route");
+    let mut db = Database::<f32>::open(&root.file("data.tdb"), 2).unwrap();
+    // 超过当前维度的自动建图阈值，用同分集合独立约定最小 ID 的 Top-K。
+    let count = triviumdb::storage::memtable::auto_quiver_node_threshold(2);
+    for id in (1..=count as u64).rev() {
+        db.insert_with_id(id, &[1., 0.], json!({"id":id})).unwrap();
+    }
+    let exact = SearchConfig {
+        top_k: 3,
+        expand_depth: 0,
+        ..Default::default()
+    }
+    .with_exact(true);
+    for indexed in [false, true] {
+        if indexed {
+            db.build_quiver_index(None).unwrap();
+        }
+        let (hits, ctx) = db
+            .search_hybrid_with_context(None, Some(&[1., 0.]), &exact)
+            .unwrap();
+        assert!(
+            ctx.observations
+                .contains(&("vector_route_quiver".into(), 0))
+        );
+        assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), [1, 2, 3]);
+        for hit in hits {
+            assert_eq!(hit.score, 1.);
+            assert_eq!(hit.payload, json!({"id":hit.id}));
+        }
+        assert_eq!(db.prepare_auto_quiver_build().unwrap().is_some(), !indexed);
+    }
+    db.close().unwrap();
+}
+
+#[test]
 fn JSON等值预过滤在写入更新与重开后保留完整命中() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../contracts/search_filter_cases.json")).unwrap();

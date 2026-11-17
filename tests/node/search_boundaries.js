@@ -4,6 +4,74 @@
 const assert = require('node:assert/strict')
 const path = require('node:path')
 const fixture = require('../contracts/search_filter_cases.json')
+const entries = require('../contracts/search_entry_cases.json')
+
+async function verifySearchEntries(root, TriviumDB) {
+  const query = entries.query
+  const records = new Map(entries.records.map(record => [record.id, record]))
+  function verify(hits, item) {
+    assert.deepEqual(hits.map(hit => hit.id), item.ids, item.name)
+    for (const hit of hits) {
+      assert.deepEqual(hit.payload, records.get(hit.id).payload)
+      assert.ok(Math.abs(hit.score - records.get(hit.id).score) < 1e-6, `${item.name}/${hit.id}/${hit.score}`)
+    }
+  }
+  for (const dtype of ['f32', 'f16']) {
+    const file = path.join(root, `search-entry-${dtype}.tdb`)
+    let db = new TriviumDB(file, { dim: 2, dtype })
+    try {
+      for (const record of records.values()) db.insertWithId(record.id, record.vector, record.payload)
+      for (const reopened of [false, true]) {
+        if (reopened) {
+          db.close()
+          db = new TriviumDB(file, { dim: 2, dtype })
+        }
+        for (const item of entries.cases) {
+          const topK = item.top_k ?? records.size
+          const config = { topK, expandDepth: 0, exact: item.exact, minScore: item.min_score, payloadFilter: item.filter }
+          verify(db.search(query, topK, 0, item.min_score, item.filter, item.exact), item)
+          verify(db.searchGrouped(query, topK, 0, item.min_score, item.filter, item.exact).semanticHits, item)
+          const result = db.searchWithContext(query, config)
+          verify(result.hits, item)
+          assert.equal(result.context.observations.vector_route_quiver, 0)
+          verify(db.searchAdvanced(query, { ...config, enableAdvancedPipeline: false }), item)
+          verify(db.searchHybrid(query, '', topK, 0, item.min_score, undefined, item.filter, item.exact), item)
+          if (!item.filter) {
+            const batch = await db.searchBatch([query, query], topK, 2, item.min_score, item.exact)
+            assert.equal(batch.length, 2)
+            for (const hits of batch) verify(hits, item)
+          }
+        }
+      }
+      const invalid = error => error.code === 'TDB_INVALID_INPUT' && error.target?.field === 'exact'
+      assert.throws(() => db.search(query, 3, 0, undefined, undefined, 'true'), invalid)
+      assert.throws(() => db.searchBatch([query], 3, 1, undefined, 1), invalid)
+      assert.throws(() => db.searchAdvanced(query, { exact: 'true' }), invalid)
+    } finally {
+      db.close()
+    }
+  }
+  const db = new TriviumDB(path.join(root, 'search-exact-route.tdb'), { dim: 2 })
+  try {
+    for (let id = 900; id > 0; id--) db.insertWithId(id, [1, 0], { id })
+    for (const indexed of [false, true]) {
+      if (indexed) {
+        db.search(query, 1)
+        assert.equal(db.searchWithContext(query, { topK: 1 }).context.observations.vector_route_quiver, 1)
+      }
+      const result = db.searchWithContext(query, { topK: 3, expandDepth: 0, exact: true })
+      assert.equal(result.context.observations.vector_route_quiver, 0)
+      assert.deepEqual(result.hits.map(hit => [hit.id, hit.score, hit.payload]), [1, 2, 3].map(id => [id, 1, { id }]))
+      assert.deepEqual(db.search(query, 3, 0, undefined, undefined, true).map(hit => hit.id), [1, 2, 3])
+    }
+    for (const config of [{ exact: true, forceBruteForce: false }, { exact: false, forceBruteForce: true }]) {
+      const hits = db.searchAdvanced(query, { ...config, topK: 3, expandDepth: 0, enableAdvancedPipeline: false })
+      assert.deepEqual(hits.map(hit => [hit.id, hit.score]), [[1, 1], [2, 1], [3, 1]])
+    }
+  } finally {
+    db.close()
+  }
+}
 
 const searchOptions = {
   topK: fixture.records.length, recallK: fixture.records.length,
@@ -25,6 +93,7 @@ function verifyFilters(db) {
 }
 
 module.exports = async function runSearchBoundaries(root, TriviumDB) {
+  await verifySearchEntries(root, TriviumDB)
   for (const storageMode of ['rom', 'mmap']) {
     const file = path.join(root, `search-filter-${storageMode}.tdb`)
     const options = { dim: 2, storageMode, autoBuildQuiver: false }

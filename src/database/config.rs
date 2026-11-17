@@ -115,6 +115,7 @@ pub struct SearchConfig {
     pub min_edge_weight: f32,
     /// 图扩散使用出边、入边或双向边。
     pub edge_direction: EdgeDirection,
+    /// 最低返回分数，默认 0.0；需要负余弦结果时显式设置负值。
     pub min_score: f32,
     pub teleport_alpha: f32, // L6 SA-PPR 个性化重启比例
 
@@ -180,7 +181,7 @@ impl Default for SearchConfig {
             max_edges_per_node: 0,
             min_edge_weight: 0.0,
             edge_direction: EdgeDirection::Outgoing,
-            min_score: 0.1,
+            min_score: 0.0,
             teleport_alpha: 0.0,
             enable_advanced_pipeline: false,
             enable_sparse_residual: false,
@@ -199,6 +200,17 @@ impl Default for SearchConfig {
             payload_filter: None,
             diffusion_bias: None,
         }
+    }
+}
+
+impl SearchConfig {
+    /// 选择全量精确向量召回，继续使用本配置的过滤、重排和图扩散参数。
+    ///
+    /// 精确召回按数据库存储的向量计算，跳过 QuIVer 自动构建与近似导航。
+    #[must_use]
+    pub fn with_exact(mut self, exact: bool) -> Self {
+        self.force_brute_force = exact;
+        self
     }
 }
 

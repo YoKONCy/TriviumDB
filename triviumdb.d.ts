@@ -224,7 +224,7 @@ export interface JsSearchConfig {
   rerankK?: number;
   /** 图谱扩散跳数 (默认 2) */
   expandDepth?: number;
-  /** 余弦相似度下限 (默认 0.1) */
+  /** 余弦相似度下限 (默认 0.0) */
   minScore?: number;
   /** PPR 回跳概率 0.0~1.0，越高越抑制深层扩散 (默认 0.0) */
   teleportAlpha?: number;
@@ -252,6 +252,8 @@ export interface JsSearchConfig {
   payloadFilter?: Record<string, unknown>;
   /** 强制使用暴力搜索 (默认 false) */
   forceBruteForce?: boolean;
+  /** 全量精确向量召回 (默认 false)，与 forceBruteForce 任一为 true 时启用 */
+  exact?: boolean;
   /**
    * CCSA: 扩散方向偏置向量
    *
@@ -850,12 +852,13 @@ export class TriviumDB {
    * @param queryVector 查询向量
    * @param topK        向外找多少个最相似锚点向量 (默认 5)
    * @param expandDepth 获取到上述锚点后，在图谱里扩散的跳跃深度 (默认 0，纯粹退化为向量相似度检索)
-   * @param minScore    只接受相似度大于这个阈值的搜索命中 (默认 0.5)
+   * @param minScore    相似度下限，包含边界值 (默认 0.0)
+   * @param exact       全量精确向量召回 (默认 false)
    */
-  search(queryVector: Vector, topK?: number | null, expandDepth?: number | null, minScore?: number | null, payloadFilter?: Record<string, unknown> | null): JsSearchHit[];
+  search(queryVector: Vector, topK?: number | null, expandDepth?: number | null, minScore?: number | null, payloadFilter?: Record<string, unknown> | null, exact?: boolean | null): JsSearchHit[];
 
-  searchGrouped(queryVector: Vector, topK?: number | null, expandDepth?: number | null, minScore?: number | null, payloadFilter?: Record<string, unknown> | null): JsGroupedSearchResult;
-  searchBatch(queryVectors: Vector[], topK?: number | null, parallelism?: number | null, minScore?: number | null): Promise<JsSearchHit[][]>;
+  searchGrouped(queryVector: Vector, topK?: number | null, expandDepth?: number | null, minScore?: number | null, payloadFilter?: Record<string, unknown> | null, exact?: boolean | null): JsGroupedSearchResult;
+  searchBatch(queryVectors: Vector[], topK?: number | null, parallelism?: number | null, minScore?: number | null, exact?: boolean | null): Promise<JsSearchHit[][]>;
 
   /**
    * 认知管线检索：向量锚定 + FISTA残差 + SA-PPR有限深度扩散 + DPP多样性采样
@@ -873,7 +876,7 @@ export class TriviumDB {
    * @param minScore    最小分数
    * @param hybridAlpha 混合权重 (0.0~1.0)，越大向量占比越高。默认 0.7
    */
-  searchHybrid(queryVector: Vector, queryText: string, topK?: number | null, expandDepth?: number | null, minScore?: number | null, hybridAlpha?: number | null, payloadFilter?: Record<string, unknown> | null): JsSearchHit[];
+  searchHybrid(queryVector: Vector, queryText: string, topK?: number | null, expandDepth?: number | null, minScore?: number | null, hybridAlpha?: number | null, payloadFilter?: Record<string, unknown> | null, exact?: boolean | null): JsSearchHit[];
 
   /**
    * 替换节点的 BM25 正文；空文本清除正文，关键词保持不变

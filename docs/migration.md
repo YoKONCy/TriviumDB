@@ -1,6 +1,6 @@
 # 外部迁移工具
 
-> `scripts/migrate.py` 是 TDB 版本迁移的用户入口，调用独立的 `triviumdb-migrate` 原生执行器。迁移在副本中恢复旧数据，核对完整事实后发布新目录。
+> 本文说明 `0.9.2-beta.1` 的外部迁移流程。`scripts/migrate.py` 调用独立的 `triviumdb-migrate` 原生执行器，在副本中恢复旧数据，核对完整事实后发布新目录。版本变更见[发布说明](changes/0.9.2-beta.1.md)。
 
 ---
 

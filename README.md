@@ -13,10 +13,6 @@
 
 # TriviumDB
 
-当前正式版本为 **0.9.1**，包含文档证据检索、解析与分批发布、文档与命名图统一 TQL、QuIVer 中心化 INT8／INT4 压缩重排、Hot／SSD 驻留及工程加固。完整内容见 [中英文版本说明](docs/changes/0.9.1.md)，研究测量见 [ICDE 复现归档](evaluation/README.md)。
-
-开发版的冻结范围见 [SDK 正式接口清单](docs/sdk-contract.md)，数据库升级使用[外部迁移工具](docs/migration.md)。
-
 **向量 × 图谱 × 文档 —— 三位一体的 AI 原生嵌入式数据库**
 
 **Battle-tested in mission-critical, air-gapped environments.**
@@ -32,6 +28,14 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/YoKONCy/TriviumDB)
 
 **中文** | [**English**](README_EN.md)
+
+当前预发布版本为 **0.9.2-beta.1**，包含统一 `.idx` 索引容器、单格式准入、外部迁移、三端精确检索开关与数据正确性加固。Python 版本为 `0.9.2b1`，npm 使用 `beta` 通道。完整变更与升级步骤见[双语发布说明](docs/changes/0.9.2-beta.1.md)。
+
+当前正式版本为 **0.9.1**，包含文档证据检索、解析与分批发布、文档与命名图统一 TQL、QuIVer 中心化 INT8／INT4 压缩重排、Hot／SSD 驻留及工程加固。完整内容见 [中英文版本说明](docs/changes/0.9.1.md)，研究测量见 [ICDE 复现归档](evaluation/README.md)。
+
+开发版的冻结范围见 [SDK 正式接口清单](docs/sdk-contract.md)，数据库升级使用[外部迁移工具](docs/migration.md)。
+
+向量检索的数据选型与精确检索入口见 [QuIVer 适用范围](#quiver-适用范围)。
 
 </div>
 
@@ -158,13 +162,13 @@ flowchart TD
 推荐使用超快的 [uv](https://github.com/astral-sh/uv) （只需毫秒级）：
 
 ```bash
-uv pip install triviumdb
+uv pip install "triviumdb==0.9.2b1"
 ```
 
 或者使用传统 pip：
 
 ```bash
-pip install triviumdb
+pip install "triviumdb==0.9.2b1"
 ```
 
 ### 🌐 Node.js / 前端用户
@@ -172,9 +176,9 @@ pip install triviumdb
 跨平台包已自带 `*.node` 预编译拓展，并含有完整的 TypeScript 补全：
 
 ```bash
-npm install triviumdb
+npm install triviumdb@0.9.2-beta.1
 # 或者
-pnpm add triviumdb
+pnpm add triviumdb@0.9.2-beta.1
 ```
 
 ### 🦀 Rust 原生用户
@@ -182,18 +186,10 @@ pnpm add triviumdb
 直接把我们当成 Library 依赖：
 
 ```bash
-cargo add triviumdb
+cargo add triviumdb@0.9.2-beta.1
 ```
 
-`0.9.0` 是正式版：Rust、Python、Node.js 共享原生三模内核、Cascades 查询规划、原子事务、资源预算和受控关闭；新增复用已打开实例的 Console v1 宿主接口，并完善文件组恢复、迁移发布和 Windows 文件锁边界。Server 与 WebUI 继续采用 nightly 通道。
-
-```bash
-pip install "triviumdb==0.9.0"
-npm install triviumdb@0.9.0
-cargo add triviumdb@0.9.0
-```
-
-版本内容见 [0.9.0 变更说明](docs/changes/0.9.0.md)。
+本页 API 以 `0.9.2-beta.1` 为基线。已有数据库通过[外部迁移入口](docs/migration.md)创建当前格式目标，完整升级条件见[发布说明](docs/changes/0.9.2-beta.1.md)。
 
 需要为嵌入式应用提供管理前端时，按[Console 宿主接入](docs/embedded-console.md)复用同一实例和文件锁；现有 HTML 仍需前端传输适配，资源包会标明这一条件及 CDN 依赖。
 
@@ -394,6 +390,14 @@ finally:
 `f32/f16` 浮点 Embedding 使用余弦检索与 QuIVer 加速；`u64` SimHash 指纹使用保留完整位模式的精确汉明检索。
 
 > 📖 [QuIVer 架构与配置](docs/quiver.md) · [基准测试指南](benches/README.md) · [0.9.0 变更说明](docs/changes/0.9.0.md)
+
+### QuIVer 适用范围
+
+QuIVer ANN 面向主流 embedding 模型输出的真实语义向量，服务于文本、代码和图像等语义近邻检索。查询向量与库向量应处于模型约定的匹配检索空间。公开评测覆盖 Cohere、BGE-M3、MiniLM、Nomic、Jina 等模型产生的数据，各数据集的召回、吞吐和参数均单独记录。[评测数据与论文](evaluation/README.md)
+
+随机合成向量、手工设计或拼接的特征、传统非负描述子等数据，建议使用全量精确检索。TriviumDB 对符合 dtype 与维度契约的向量提供存储和精确查询，Python／Rust 使用 `search_exact`，Node 使用 `searchExact`。`0.9.2-beta.1` 另提供 Python `exact=True`、Rust `SearchConfig::with_exact(true)` 与 Node 对应的 `exact` 参数。[精确检索 API](docs/api-reference.md#search--纯向量图扩散检索-基础)
+
+> **召回提醒**　QuIVer 的召回效果依赖向量分布、检索任务和搜索预算。跨模型、跨模态及自定义向量变换后的检索应单独验收。应用接入时使用自身真实数据核验 Recall@K，并选择对应参数或精确检索路径。
 
 > ⚠️ **维度建议：强烈建议数据库向量维度不超过 3072。** TriviumDB 的通用存储与精确 BruteForce 检索允许更高维度，但 QuIVer 的 BQ 签名安全上限是 3072 维。超过该维度时使用精确 BruteForce 检索；手动构建 QuIVer 会返回明确错误。高维数据库仍可使用，但无法获得 QuIVer ANN 加速，内存和计算开销也会显著增加。
 

@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> 本文列出 `0.9.1` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本记录见[变更说明](changes/0.9.1.md)，后续进展见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
+> 本文记录 `0.9.2-beta.1` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本说明见 [0.9.2-beta.1 变更](changes/0.9.2-beta.1.md)，后续开发见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
 
 开发版的应用支持范围见 [SDK 正式接口清单](sdk-contract.md)。历史数据库由[外部迁移入口](migration.md)转换到当前文件组；普通打开通过 `TDB_MIGRATION_REQUIRED` 提供结构化指引。
 
@@ -801,7 +801,8 @@ results = db.search(
     query_vector=[0.10, -0.48, 0.80, ...],  # 查询向量
     top_k=5,            # 向量阶段返回的锚点数量
     expand_depth=2,     # 图谱扩散跳数（0 = 纯向量检索）
-    min_score=0.5       # 最低相似度阈值
+    min_score=0.0,      # 最低相似度阈值
+    exact=True,        # 全量精确向量召回
 )
 for hit in results:
     print(f"[{hit.id}] score={hit.score:.3f} | {hit.payload}")
@@ -822,7 +823,36 @@ for hit in &results {
 | `query_vector` | `list[float]` | *必填* | 查询向量 |
 | `top_k` | `int` | `5` | 向量阶段返回的最相似节点数 |
 | `expand_depth` | `int` | `0` | 图谱扩散深度。设为 0 则退化为纯向量检索 |
-| `min_score` | `float` | `0.5` | 余弦相似度下限，低于此值的结果被过滤 |
+| `min_score` | `float` | `0.0` | 相似度下限，包含边界值；需要负余弦结果时显式设置负值 |
+| `exact` | `bool` | `False` | Python 关键字参数，选择基于数据库存储向量的全量精确召回 |
+
+Rust `SearchConfig` 与 Python／Node 的普通、批量、分组、上下文、高级及混合搜索默认阈值统一为 `0.0`。显式设置的阈值按调用参数执行。Rust 普通 `search` 的 `min_score` 为必填参数。
+
+精确召回复用现有检索管线，继续执行 Payload 过滤、稳定排序、Top-K 和配置中的图扩散、文本融合及 Hook。纯向量精确 Top-K 使用 `expand_depth=0` 并关闭高级处理。精确召回从原始向量事实读取，已有压缩重排配置下也使用数据库存储的向量精度。
+
+```rust
+use triviumdb::SearchConfig;
+
+let config = SearchConfig {
+    top_k: 10,
+    expand_depth: 0,
+    ..Default::default()
+}.with_exact(true);
+let hits = db.search_advanced(&query_vec, &config)?;
+```
+
+```javascript
+// 普通入口的末尾参数为 exact。
+const hits = db.search(queryVector, 10, 0, undefined, { agent: 'a' }, true)
+// 配置式入口接受同一精确开关。
+const detailed = db.searchAdvanced(queryVector, {
+  topK: 10, expandDepth: 0, enableAdvancedPipeline: false, exact: true,
+})
+```
+
+Python `search`、`search_batch`、`search_grouped`、`search_with_context`、`search_advanced` 与 `search_hybrid` 均接受关键字参数 `exact`。Node 的 `search`、`searchBatch`、`searchGrouped`、`searchHybrid` 在既有位置参数之后追加可选 `exact`，`searchAdvanced` 和 `searchWithContext` 使用配置字段 `exact`。高级入口保留 `force_brute_force`／`forceBruteForce`，两个开关任一为真时选择精确召回。Rust `with_exact(bool)` 设置同一 `force_brute_force` 字段。
+
+> **资源提醒**　精确召回扫描全部符合条件的存储向量，查询成本随数据量和维度增长。取消、只读和资源预算继续由内核执行。`search_with_context`／`searchWithContext` 的 `observations.vector_route_quiver` 为 `0` 时表示实际向量召回走精确路径，为 `1` 时表示 QuIVer 路径。
 
 **返回值 `SearchHit`：**
 
@@ -838,7 +868,7 @@ Python 普通／分组检索的整数数量及展开参数、批量检索的数�
 
 Python 的 `search`、`search_grouped`、`search_with_context`、`search_advanced` 和 `search_hybrid` 接受外层 `Mapping` 过滤器，包括 `MappingProxyType` 和 `UserDict`。Mapping 协议在请求范围内执行，转换中的宿主异常保留原对象与 cause。已覆盖 Filter 表示及语义错误定位 `payload_filter`，Node 对应语义错误定位 `payloadFilter`。
 
-### search_batch — 批量并行 ANN 检索
+### search_batch — 批量并行向量检索
 
 同一个数据库实例一次接收多条向量查询，由 Rust 共享线程池并行执行。所有查询在执行前完成整批校验；任一向量维度错误或包含 NaN/Infinity 时整批失败，不返回部分结果。外层结果顺序严格对应输入顺序。
 
@@ -852,6 +882,7 @@ results = db.search_batch(
     expand_depth=0,
     min_score=0.0,
     parallelism=0,
+    exact=True,
 )
 ```
 
@@ -859,10 +890,10 @@ Python 在整个 Rust 查询阶段释放 GIL，避免逐条 FFI 调用造成的�
 
 **Node.js：**
 ```javascript
-const results = await db.searchBatch(queryVectors, 10, 0, 0.0)
+const results = await db.searchBatch(queryVectors, 10, 0, 0.0, true)
 ```
 
-Node.js 接口返回 Promise，ANN 工作在后台线程执行，不阻塞事件循环。参数依次为 `queryVectors`、`topK`、`parallelism`、`minScore`。
+Node.js 接口返回 Promise，检索工作在后台线程执行。参数依次为 `queryVectors`、`topK`、`parallelism`、`minScore`、`exact`。
 
 **Rust：**
 ```rust
@@ -960,6 +991,7 @@ let config = SearchConfig {
     fista_threshold: 0.3,
     enable_dpp: true,
     dpp_quality_weight: 1.0,
+    ..Default::default()
 };
 let results = db.search_advanced(&query_vec, &config)?;
 ```
@@ -972,7 +1004,7 @@ let results = db.search_advanced(&query_vec, &config)?;
 | `recall_k` | `usize` | `0`（自动） | 初始召回池；自动值为 `max(top_k × 8, 64)` |
 | `rerank_k` | `usize` | `0`（自动） | 高级处理候选池；自动值为 `max(top_k × 4, 32)`，且不超过 `recall_k` |
 | `expand_depth` | `usize` | `2` | SA-PPR 有限深度扩散跳数 |
-| `min_score` | `f32` | `0.1` | 余弦相似度下限 |
+| `min_score` | `f32` | `0.0` | 相似度下限，包含边界值 |
 | `teleport_alpha` | `f32` | `0.0` | PPR 回跳概率 (0.0~1.0)，越高越抑制深层扩散 |
 | `enable_advanced_pipeline` | `bool` | `false` | 认知管线总开关，关闭时退化为普通检索 |
 | `enable_sparse_residual` | `bool` | `false` | 启用 FISTA 残差寻隐 + 影子查询 |
@@ -996,7 +1028,7 @@ let results = db.search_advanced(&query_vec, &config)?;
 
 ## QuIVer 压缩运行时
 
-Rust 的 `Database` 与 `DatabaseReader` 通过 `configure_quiver(QuiverRuntimeOptions)`、`search_quiver(query, config)`、`quiver_stats()` 和 `close_quiver()` 使用压缩检索。类型从 `triviumdb::index::quiver::runtime` 导入，库编码、查询精度和冷热驻留通过配置选择。可写数据库另提供 `collect_quiver_temporary()`。Rust 名称调整见[未发布变更](changes/unreleased.md)。
+Rust 的 `Database` 与 `DatabaseReader` 通过 `configure_quiver(QuiverRuntimeOptions)`、`search_quiver(query, config)`、`quiver_stats()` 和 `close_quiver()` 使用压缩检索。类型从 `triviumdb::index::quiver::runtime` 导入，库编码、查询精度和冷热驻留通过配置选择。可写数据库另提供 `collect_quiver_temporary()`。Rust 名称调整见[版本说明](changes/0.9.2-beta.1.md)。
 
 Python 的 `quiver_request(request_json: str) -> str` 与 Node 的 `quiverRequest(requestJson: string): string` 共享 JSON 命令。`configure` 接收 `options`，支持 `encoding`、`query_precision`、`residency`、`cache_bytes`、`io_mode`、`io_depth` 及 `use_for_ann`。编码支持 `int8`、`centered_int8`、`centered_int4`，查询表示支持 `fp32`、`int8`、`int4`。`search` 接收 `vector`、`top_k`、`ef_search` 和可选 `rerank_limit`，结果中的 NodeId 使用十进制字符串。`stats` 返回活动 Reader 统计或 `null`，`close` 释放当前运行时，`collect_temporary` 返回 `removed` 数量。
 
@@ -1319,7 +1351,7 @@ for row in &rows {
 
 ### prepare_tql / execute_prepared_tql
 
-Node 的 Prepared 句柄由 `db.prepareTql()` 创建，公开构造器名称为 `PreparedTql`。CommonJS 使用 `const { PreparedTql } = require('triviumdb')`，ESM 使用 `import { PreparedTql } from 'triviumdb'`，返回句柄可通过 `instanceof PreparedTql` 核对。兼容名称 `JsPreparedTql` 引用同一构造器及类型，导出修复见[未发布说明](changes/unreleased.md)。
+Node 的 Prepared 句柄由 `db.prepareTql()` 创建，公开构造器名称为 `PreparedTql`。CommonJS 使用 `const { PreparedTql } = require('triviumdb')`，ESM 使用 `import { PreparedTql } from 'triviumdb'`，返回句柄可通过 `instanceof PreparedTql` 核对。兼容名称 `JsPreparedTql` 引用同一构造器及类型，导出修复见[版本说明](changes/0.9.2-beta.1.md)。
 
 ```python
 prepared = db.prepare_tql(

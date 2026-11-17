@@ -168,7 +168,8 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         if let Some(query) = query_vector {
             crate::vector::validate_query_vector(query, mt.dim())?;
         }
-        if mt.auto_quiver_build_needed() {
+        // 精确请求直接扫描存储向量，自动建图仅服务当前需要 ANN 的向量请求。
+        if query_vector.is_some() && !config.force_brute_force && mt.auto_quiver_build_needed() {
             let projected = mt
                 .estimated_memory_bytes()
                 .saturating_add(mt.quiver_build_peak_bytes(&quiver_config));

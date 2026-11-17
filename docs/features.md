@@ -1,6 +1,6 @@
 # TriviumDB 支持特性详解
 
-> 本文介绍 TriviumDB 当前开发版的能力与适用条件。已发布基线见[中英文版本说明](changes/0.9.1.md)，开发中变更见[未发布说明](changes/unreleased.md)。
+> 本文介绍 TriviumDB `0.9.2-beta.1` 的能力与适用条件。完整内容见[中英文版本说明](changes/0.9.2-beta.1.md)，后续开发见[未发布说明](changes/unreleased.md)。
 
 ---
 

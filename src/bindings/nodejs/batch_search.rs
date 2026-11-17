@@ -1,7 +1,8 @@
 //! 批量检索的异步任务与请求上下文传播。
 
 use super::arguments::{
-    optional_number, parse_search_usize, read_array, read_number, validate_u64_component,
+    optional_bool, optional_number, parse_search_usize, read_array, read_number,
+    validate_u64_component,
 };
 use super::database::{DbBackend, TriviumDB};
 use super::errors::to_napi_error;
@@ -114,6 +115,7 @@ impl TriviumDB {
         top_k: Option<Either<f64, JsUnknown>>,
         parallelism: Option<Either<f64, JsUnknown>>,
         min_score: Option<JsUnknown>,
+        exact: Option<JsUnknown>,
     ) -> napi::Result<napi::bindgen_prelude::AsyncTask<BatchSearchTask>> {
         let query_vectors = read_array(env, query_vectors, "queryVectors", |env, value, path| {
             // 保留 u64 数值范围在任务阶段拒绝的 Promise 完成语义。
@@ -133,10 +135,11 @@ impl TriviumDB {
             search_config: crate::database::SearchConfig {
                 top_k,
                 expand_depth: 0,
-                min_score: optional_number(env, min_score, 0.5, "minScore")? as f32,
+                min_score: optional_number(env, min_score, 0.0, "minScore")? as f32,
                 enable_advanced_pipeline: false,
                 ..Default::default()
-            },
+            }
+            .with_exact(optional_bool(env, exact, false, "exact")?),
             batch_config: crate::database::BatchSearchConfig { parallelism },
         }))
     }

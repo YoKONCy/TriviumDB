@@ -10,6 +10,16 @@ function check(condition: boolean, message: string): asserts condition {
 }
 
 export function inspectRequestContext(database: TriviumDB): void {
+  const exactHits: JsSearchHit[] = database.search([1, 0], 5, 0, undefined, undefined, true);
+  const exactAdvanced: JsSearchHit[] = database.searchAdvanced([1, 0], { exact: true });
+  const exactBatch: Promise<JsSearchHit[][]> = database.searchBatch([[1, 0]], 5, 1, undefined, true);
+  void [exactHits, exactAdvanced, exactBatch];
+  // @ts-expect-error 精确开关使用布尔值。
+  database.search([1, 0], 5, 0, undefined, undefined, 'true');
+  // @ts-expect-error 配置中的精确开关使用布尔值。
+  database.searchAdvanced([1, 0], { exact: 'true' });
+  // @ts-expect-error 批量精确开关使用布尔值。
+  database.searchBatch([[1, 0]], 5, 1, undefined, 1);
   database.setHook({ onRerank: () => null });
   database.setHook({ onRerank: hits => hits });
   // @ts-expect-error 同步 Hook 拒绝 Promise 返回值。
