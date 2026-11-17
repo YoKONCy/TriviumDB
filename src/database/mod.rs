@@ -209,6 +209,45 @@ fn resolve_database_path(
     Ok((normalized, Some(lock)))
 }
 
+fn lock_database(file: &std::fs::File, mode: AccessMode, path: &str) -> Result<()> {
+    let result = match mode {
+        AccessMode::ReadWrite => FileExt::try_lock_exclusive(file),
+        AccessMode::ReadOnly => FileExt::try_lock_shared(file),
+        AccessMode::Immutable => return Ok(()),
+    };
+    result.map_err(|error| {
+        let contended = fs2::lock_contended_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock
+            || error
+                .raw_os_error()
+                .is_some_and(|code| Some(code) == contended.raw_os_error())
+        {
+            TriviumError::DatabaseLocked(format!(
+                "数据库已有不兼容的访问租约 (Database has an incompatible access lease): {path}"
+            ))
+        } else {
+            error.into()
+        }
+    })
+}
+
+fn existing_database_lock(path: &str, mode: AccessMode) -> Result<Option<std::fs::File>> {
+    if mode == AccessMode::Immutable {
+        return Ok(None);
+    }
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(mode == AccessMode::ReadWrite)
+        .open(format!("{path}.lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    lock_database(&file, mode, path)?;
+    Ok(Some(file))
+}
+
 #[cfg(unix)]
 fn reject_hard_link_alias(path: &str, metadata: &std::fs::Metadata) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
@@ -876,8 +915,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             )).at_field("dim"));
         }
 
-        crate::storage::format::admit(path)?;
-
         // ═══ 自动递归创建上层目录 ═══
         if config.access_mode == AccessMode::ReadWrite
             && let Some(parent_dir) = std::path::Path::new(path).parent()
@@ -896,43 +933,36 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
 
         // ═══ 文件锁：防止多进程并发写同一个数据库 ═══
         let lock_path = format!("{}.lock", path);
+        let mut lock_file = match reserved_lock {
+            Some(lock) => Some(lock),
+            None => existing_database_lock(path, config.access_mode)?,
+        };
         if config.access_mode != AccessMode::ReadWrite && !std::path::Path::new(path).exists() {
             return Err(TriviumError::InvalidInput(format!(
                 "只读模式要求数据库文件已存在: {path}"
             )));
         }
-        let reserved_lock_held = reserved_lock.is_some();
-        let lock_file = if let Some(lock) = reserved_lock {
-            Some(lock)
-        } else {
-            match config.access_mode {
-                AccessMode::ReadWrite => Some(
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .read(true)
-                        .write(true)
-                        .open(&lock_path)?,
-                ),
-                AccessMode::ReadOnly => {
-                    Some(std::fs::OpenOptions::new().read(true).open(&lock_path)?)
+        if lock_file.is_none() && config.access_mode != AccessMode::Immutable {
+            // 缺少协调文件时先检查格式，历史来源的拒绝路径保持物理零写。
+            if let Err(error) = crate::storage::format::admit(path) {
+                // 其他 Writer 可能刚建立租约；取得该租约后由下方重新核对格式。
+                lock_file = existing_database_lock(path, config.access_mode)?;
+                if lock_file.is_none() {
+                    return Err(error);
                 }
-                AccessMode::Immutable => None,
             }
-        };
-        let locked = reserved_lock_held
-            || match (config.access_mode, lock_file.as_ref()) {
-                (AccessMode::ReadWrite, Some(file)) => file.try_lock_exclusive().is_ok(),
-                (AccessMode::ReadOnly, Some(file)) => file.try_lock_shared().is_ok(),
-                (AccessMode::Immutable, None) => true,
-                _ => false,
-            };
-        if !locked {
-            return Err(TriviumError::DatabaseLocked(format!(
-                "Database '{}' is already opened with an incompatible access mode",
-                path
-            )));
+            if lock_file.is_none() {
+                let lock = std::fs::OpenOptions::new()
+                    .create(config.access_mode == AccessMode::ReadWrite)
+                    .read(true)
+                    .write(config.access_mode == AccessMode::ReadWrite)
+                    .open(&lock_path)?;
+                lock_database(&lock, config.access_mode, path)?;
+                lock_file = Some(lock);
+            }
         }
 
+        // 可变文件头由同一租约保护，关闭或发布过程中的瞬态内容由锁冲突隔离。
         crate::storage::format::admit(path)?;
         file_format::recover_publication::<T>(path, config.access_mode == AccessMode::ReadWrite)?;
         crate::storage::format::admit(path)?;

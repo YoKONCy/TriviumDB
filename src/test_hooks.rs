@@ -49,6 +49,7 @@ pub enum ConcurrencyPoint {
     BeforeMemtableApply,
     BeforeCompactionSave,
     BeforeWalClear,
+    AfterWalTruncate,
     AfterVecPersisted,
     AfterTdbPersisted,
     BeforeFlushMarkerRename,

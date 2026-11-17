@@ -8,6 +8,7 @@
 
 ### SDK 接口清单、外部迁移与单格式准入
 
+- 普通打开先取得已有协调租约，再检查 WAL 和索引组件的可变文件头。关闭或检查点清理 WAL 时，竞争的读写打开返回 `TDB_DATABASE_LOCKED`。缺少协调文件的历史来源先完成格式拒绝，保持源文件零写；首次预检期间出现新 Writer 时重新探测租约。请求计量使用标准库 `try_update` 名称，保留原子饱和计数。历史发布样本按原始字节检出，在 Windows 保持来源摘要。
 - [SDK 正式接口清单](../sdk-contract.md)登记 Rust 应用入口与内核扩展边界、Python/Node 声明来源、TQL 与 JSON 协议、错误字段和生命周期。`1.0.0-beta.1` 目标为 SDK 冻结，`1.0.0` 再冻结正式内核契约；当前版本元数据保持 `0.9.1`。
 - 生产内部函数与当前格式用例按职责命名，Hook 阶段派发统一为 `invoke_stage`。主文件和 CLI 直接比较唯一的当前格式身份，存储观测的最低格式字段取同一身份。磁盘格式字段与已公开的 FFI 符号沿各自持久化及插件契约维护。
 - 普通打开仅处理当前主格式 15、WAL 7、统一索引容器及当前组件布局。在创建协调文件前和获得租约后检查格式，历史身份返回 `TDB_MIGRATION_REQUIRED` 及 `component`、`found`、`current`、`migration_entrypoint`。当前格式的 WAL 和文件组中断恢复继续由内核维护。
@@ -118,6 +119,7 @@ python scripts/migrate.py --source /data/old.tdb --destination /data/current --e
 
 ### SDK inventory, external migration and current-format admission
 
+- Ordinary opens acquire an existing coordination lease before checking mutable WAL and index-component headers. Competing reader or writer opens return `TDB_DATABASE_LOCKED` while shutdown or checkpoint cleanup truncates the WAL. Historical sources without a coordination file are rejected before creating one, preserving source bytes; admission probes the lease again if a Writer appears during the first check. Request accounting uses the standard library's `try_update` name with the same atomic saturating semantics. Historical release fixtures retain their original checkout bytes and provenance digests on Windows.
 - The [SDK inventory](../sdk-contract.md) records supported Rust application interfaces and kernel boundaries, Python/Node declarations, TQL and JSON protocols, errors and lifecycle semantics. `1.0.0-beta.1` targets the SDK freeze; `1.0.0` adds the supported kernel contract freeze. Package metadata remains `0.9.1`.
 - Production internals and current-format tests use responsibility-based names, with Hook stage dispatch named `invoke_stage`. The main-file reader and CLI compare a single current-format identity directly, and storage diagnostics report that same identity as the minimum format. Disk-format fields and published FFI symbols follow their persistence and plugin contracts.
 - Ordinary opens accept only main format 15, WAL 7, the unified index container and current component layouts. Admission runs before coordination files are created and again under the lease. Historical identities return `TDB_MIGRATION_REQUIRED` with `component`, `found`, `current` and `migration_entrypoint`. Current-format WAL and interrupted-publication recovery remain kernel responsibilities.

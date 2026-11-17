@@ -4,6 +4,8 @@ evaluation/** -whitespace
 # 历史预期样本按原生制品记录的 SHA-256 核验，保存捕获时的换行字节。
 tests/fixtures/pre_named_graph_format11/receipts/case.json -text whitespace=cr-at-eol
 tests/fixtures/pre_document_publication_format12/*/case.json -text whitespace=cr-at-eol
+tests/fixtures/release_090/** -text whitespace=cr-at-eol
+tests/fixtures/release_091/** -text whitespace=cr-at-eol
 
 # 独立来源恢复后端按源码清单保存字节，便于跨平台核对捕获身份。
 crates/triviumdb-migrate/source/src/** -text whitespace=cr-at-eol

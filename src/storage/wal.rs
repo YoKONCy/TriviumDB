@@ -795,6 +795,11 @@ impl Wal {
                 .write(true)
                 .truncate(true)
                 .open(&self.wal_path)?;
+            #[cfg(feature = "test-hooks")]
+            crate::test_hooks::hit_for_path(
+                crate::test_hooks::ConcurrencyPoint::AfterWalTruncate,
+                &self.wal_path.to_string_lossy(),
+            );
             file.write_all(WAL_MAGIC)?;
             file.write_all(&WAL_VERSION.to_le_bytes())?;
             if let Some(token) = self.checkpoint_token {

@@ -56,7 +56,7 @@ pub(crate) fn record_payload_lookup() {
         if let Some(meter) = active.borrow().as_ref() {
             let _ = meter
                 .lookups
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                     Some(value.saturating_add(1))
                 });
         }
@@ -66,12 +66,11 @@ pub(crate) fn record_payload_lookup() {
 pub(crate) fn record_payload_parse(bytes: u64) {
     PAYLOAD_METER.with(|active| {
         if let Some(meter) = active.borrow().as_ref() {
-            let _ =
-                meter
-                    .parsed_bytes
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                        Some(value.saturating_add(bytes))
-                    });
+            let _ = meter
+                .parsed_bytes
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    Some(value.saturating_add(bytes))
+                });
         }
     });
 }
