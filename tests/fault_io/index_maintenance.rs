@@ -65,7 +65,8 @@ fn 已捕获构建在开始及发布前拒绝失效writer并归还任务资源()
             sync_mode: SyncMode::Full,
             ..Default::default()
         };
-        let mut db = Database::<f32>::open_with_config(&path, config).unwrap();
+        let runtime = triviumdb::ResourceRuntime::new(Default::default()).unwrap();
+        let mut db = Database::<f32>::open_with_runtime(&path, config, runtime).unwrap();
         // 834 是低维默认配置的自动构建门槛，捕获前保留尚未建图的真实事实。
         for id in 1..=834 {
             db.insert_with_id(id, &[1., 2., 3.], json!({"id":id}))

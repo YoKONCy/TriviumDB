@@ -6,7 +6,7 @@ use std::path::Path;
 use colored::Colorize;
 
 use crate::CliResult;
-use crate::db_handle::{CliRows, DType, DbHandle, sniff_header};
+use crate::db_handle::{CliRows, CliValue, DType, DbHandle, sniff_header};
 use crate::formatter::{OutputFormat, format_rows};
 
 /// 快速检查文件头与 WAL/主库存在性（不挂载数据库）。
@@ -72,7 +72,7 @@ pub fn dump(path: &str, dtype: DType, format: OutputFormat) -> CliResult {
     for id in handle.get_all_ids()? {
         if let Some(node) = handle.get(id)? {
             let mut row = HashMap::new();
-            row.insert("node".to_string(), node);
+            row.insert("node".to_string(), CliValue::Node(node));
             rows.push(row);
         }
     }

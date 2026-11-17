@@ -61,6 +61,31 @@ fn number_from_js(value: JsUnknown) -> napi::Result<Value> {
         })
 }
 
+fn bigint_from_js(value: JsUnknown) -> napi::Result<Value> {
+    // SAFETY: 调用方已经检查 BigInt 类型；句柄只在当前 JS 调用内转换。
+    let value = unsafe { value.cast::<napi::JsBigInt>() };
+    let (unsigned, fits_unsigned) = value.get_u64()?;
+    if fits_unsigned {
+        return Ok(Value::from(unsigned));
+    }
+    let (signed, fits_signed) = value.get_i64()?;
+    if fits_signed {
+        return Ok(Value::from(signed));
+    }
+    Err(napi::Error::new(
+        napi::Status::InvalidArg,
+        "JSON BigInt 必须在 i64::MIN 到 u64::MAX 之间 (JSON BigInt must fit i64::MIN through u64::MAX)",
+    ))
+}
+
+fn enumerable_own_keys(object: &JsObject) -> napi::Result<JsObject> {
+    object.get_all_property_names(
+        napi::KeyCollectionMode::OwnOnly,
+        napi::KeyFilter::Enumerable,
+        napi::KeyConversion::NumbersToStrings,
+    )
+}
+
 impl From<Value> for NodeJson {
     fn from(value: Value) -> Self {
         Self(value)
@@ -135,10 +160,14 @@ fn read_json(
                     }
                     Ok(Value::Array(values))
                 } else {
-                    let keys = object.get_property_names()?;
+                    let keys = enumerable_own_keys(&object)?;
                     let mut values = serde_json::Map::new();
                     for index in 0..keys.get_array_length()? {
-                        let key = string_from_js(keys.get_element(index)?)?;
+                        let key: JsUnknown = keys.get_element(index)?;
+                        if key.get_type()? == ValueType::Symbol {
+                            continue;
+                        }
+                        let key = string_from_js(key)?;
                         let value = object.get_property(env.create_string(&key)?)?;
                         let path = field.map(|field| crate::sdk::field_member(field, &key));
                         values.insert(
@@ -149,10 +178,7 @@ fn read_json(
                     Ok(Value::Object(values))
                 }
             }
-            ValueType::BigInt => Err(napi::Error::new(
-                napi::Status::InvalidArg,
-                "Payload BigInt 请使用十进制字符串 (Represent Payload BigInt as a decimal string)",
-            )),
+            ValueType::BigInt => bigint_from_js(value),
             ValueType::String => string_from_js(value).map(Value::String),
             ValueType::Number => number_from_js(value),
             _ => unsafe {

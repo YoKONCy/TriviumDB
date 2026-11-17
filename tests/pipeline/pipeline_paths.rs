@@ -49,6 +49,90 @@ fn pipeline_budget() -> PipelineBudget {
 }
 
 #[test]
+fn 路径别名从路径首节点继承即使终点也是起点() {
+    use triviumdb::query::{
+        tql_executor::{TqlValue, execute_tql_values},
+        tql_parser::parse_tql,
+    };
+    let mt = graph();
+    let query = parse_tql(
+        "MATCH (seed {id:{$lte:2}}) WITH seed, seed AS origin \
+         YEN_PATHS seed TO [2] K 3 AS r WITH r, origin \
+         RETURN origin.id AS source, path(r) AS p, path_rank(r) AS rank ORDER BY source",
+    )
+    .unwrap();
+    let rows = execute_tql_values(&query, &mt).unwrap();
+    assert_eq!(rows.len(), 2);
+    for (row, source, expected) in [(&rows[0], 1, &[1, 2][..]), (&rows[1], 2, &[2][..])] {
+        assert!(matches!(row["source"], TqlValue::Int(id) if id == source));
+        assert!(matches!(&row["p"], TqlValue::Path(path) if path == expected));
+        assert!(matches!(row["rank"], TqlValue::Int(1)));
+    }
+}
+
+#[test]
+fn 多路径乘积和保留抵消尾项并只处理一次重复目的地() {
+    let mut mt = MemTable::<f32>::new(2);
+    for id in 1..=5 {
+        mt.insert_with_id(id, &[1., 0.], json!({})).unwrap();
+    }
+    let large = 2.0f32.powi(100);
+    for (via, weight) in [(2, large), (3, 1.0), (4, -large)] {
+        mt.link(1, via, "a".into(), weight).unwrap();
+        mt.link(via, 5, "b".into(), 1.0).unwrap();
+    }
+    let mut context = PipelineContext::new(&mt, pipeline_budget());
+    let result = BoundedAllPaths {
+        targets: vec![5, 5],
+        config: BoundedPathConfig {
+            max_depth: 2,
+            max_paths: 10,
+            label_sequence: None,
+            forbidden_nodes: BTreeSet::new(),
+        },
+        aggregation: PathStrengthAggregation::SumProduct,
+    }
+    .apply(NodeSet::from_ids([1]), &mut context)
+    .unwrap();
+    assert_eq!(result.rows().len(), 1);
+    assert_eq!(result.rows()[0].id, 5);
+    assert_eq!(result.rows()[0].path_count, Some(3));
+    assert_eq!(result.rows()[0].path_strength.unwrap().value, 1.0);
+}
+
+#[test]
+fn 禁经集合覆盖端点且路径必须走完整标签序列() {
+    let mt = graph();
+    let mut config = BoundedPathConfig {
+        max_depth: 3,
+        max_paths: 10,
+        label_sequence: Some(vec!["a".to_owned(), "b".to_owned()]),
+        forbidden_nodes: BTreeSet::new(),
+    };
+    let paths = bounded_all_paths(&mt, 1, 4, &config, &budget()).unwrap();
+    assert_eq!(
+        paths
+            .paths
+            .into_iter()
+            .map(|path| path.nodes)
+            .collect::<Vec<_>>(),
+        [vec![1, 2, 4], vec![1, 3, 4]]
+    );
+    assert!(
+        bounded_all_paths(&mt, 1, 2, &config, &budget())
+            .unwrap()
+            .paths
+            .is_empty()
+    );
+    for excluded in [1, 4] {
+        config.forbidden_nodes = BTreeSet::from([excluded]);
+        let result = bounded_all_paths(&mt, 1, 4, &config, &budget()).unwrap();
+        assert!(result.paths.is_empty());
+        assert!(!result.truncated);
+    }
+}
+
+#[test]
 fn 查询深度与预算深度分别决定完整结果错误和部分标记() {
     use triviumdb::TriviumError;
     use triviumdb::graph::budget::BudgetDimension;

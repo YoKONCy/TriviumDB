@@ -208,6 +208,7 @@ fn kind_runtime<T: VectorType>(
     Ok(match kind {
         ReturnExprKind::Var(var) => {
             if matches!(scope.query.entry, QueryEntry::Find { .. })
+                && var != "_"
                 && let Input::Nodes(nodes, _) = input
                 && let Some(value) = nodes.get(var).and_then(|node| node.payload.get(var))
             {
@@ -306,6 +307,7 @@ fn kind_value<T: VectorType>(
             {
                 TqlValue::Edge((*edge).clone())
             } else if matches!(scope.query.entry, QueryEntry::Find { .. })
+                && var != "_"
                 && let Some(v) = nodes.get(var).and_then(|n| n.payload.get(var))
             {
                 json_to_tql_value(v.clone())

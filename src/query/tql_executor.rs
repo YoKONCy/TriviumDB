@@ -21,7 +21,7 @@ use memory::QueryMemory;
 use super::pipeline::BindingValue as RuntimeValue;
 use super::planner::{
     AccessPath, NodeAccessPlan, plan_filter, plan_filter_ordered, plan_filter_with_limit,
-    plan_match,
+    plan_match, plan_match_node_filter,
 };
 use super::tql_ast::*;
 use super::tql_source::{QueryOrigin, SourceSelector, TqlSource};
@@ -1823,7 +1823,7 @@ fn scoped_match_plan<T: VectorType>(
         .nodes
         .first()
         .and_then(|node| node.filter.as_ref())
-        .map(|filter| plan_filter(filter, mt));
+        .map(|filter| plan_match_node_filter(filter, mt));
     let candidates = match &mut access {
         Some(plan)
             if !matches!(
@@ -2220,24 +2220,25 @@ impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlOutputBin
             let lost_contexts = origins
                 .get(&row.id)
                 .is_some_and(|values| values.len() > output_counts[&row.id]);
-            let inherited = if row.bindings.is_some() && !lost_contexts {
-                Vec::new()
-            } else if let Some(values) = origins.get(&row.id) {
-                values.clone()
+            let inherited = if row.bindings.is_some() {
+                if lost_contexts {
+                    origins.get(&row.id)
+                } else {
+                    None
+                }
             } else {
-                let source = row
-                    .path
+                row.path
                     .as_ref()
                     .and_then(|path| path.first())
-                    .copied()
-                    .or_else(|| {
-                        (row.provenance.source_ids.len() == 1).then(|| row.provenance.source_ids[0])
-                    });
-                source
-                    .and_then(|source| origins.get(&source))
-                    .cloned()
-                    .unwrap_or_default()
-            };
+                    .and_then(|source| origins.get(source))
+                    .or_else(|| origins.get(&row.id))
+                    .or_else(|| match row.provenance.source_ids.as_slice() {
+                        [source] => origins.get(source),
+                        _ => None,
+                    })
+            }
+            .cloned()
+            .unwrap_or_default();
             let candidates = if inherited.is_empty() {
                 vec![row]
             } else {
@@ -2968,7 +2969,7 @@ fn execute_search<T: VectorType>(
 ) -> Result<TqlResult<T>, TriviumError> {
     let mut operators = crate::query::pipeline::lower_search_entry(vector, top_k, expand)
         .map_err(|error| limits.error(error, QueryErrorStage::Plan, SourceSelector::Entry))?;
-    let post_filter = if expand.is_none() {
+    let indexed_filter = if expand.is_none() {
         query
             .predicate
             .as_ref()
@@ -2990,9 +2991,10 @@ fn execute_search<T: VectorType>(
     } else {
         None
     };
-    if let Some((filter, candidates)) = post_filter {
+    if let Some((filter, candidates)) = indexed_filter {
         operators = vec![
             Box::new(crate::query::pipeline::NodeIdsSource { ids: candidates }),
+            Box::new(crate::query::pipeline::PayloadFilter { filter }),
             Box::new(crate::query::pipeline::ExactRerank {
                 query: vector
                     .iter()
@@ -3000,7 +3002,6 @@ fn execute_search<T: VectorType>(
                     .collect::<Result<Vec<_>, _>>()?,
                 top_k: Some(top_k),
             }),
-            Box::new(crate::query::pipeline::PayloadFilter { filter }),
         ];
     }
     let mut context = crate::query::pipeline::PipelineContext::new(
@@ -3024,6 +3025,11 @@ fn execute_search<T: VectorType>(
         },
     );
     context.query_control = limits.query_control.clone();
+    context.graph_scope = limits.graph.clone();
+    if limits.graph.is_some() {
+        context.workspace_limit = limits.memory_limit;
+        context.database_memory_limit = limits.memory_limit;
+    }
     let operators = operators
         .into_iter()
         .map(|inner| match limits.origin(SourceSelector::Entry) {
@@ -3728,58 +3734,6 @@ fn first_var_from_kind(kind: &ReturnExprKind) -> Option<String> {
     }
 }
 
-fn compensated_sum(values: impl Iterator<Item = f64>) -> (f64, f64) {
-    let mut sum = 0.0f64;
-    let mut correction = 0.0f64;
-    for value in values {
-        let next = sum + value;
-        if !next.is_finite() {
-            // 调用方按输入尺度重算，保留中间和溢出的明确状态。
-            return (next, 0.0);
-        }
-        correction += if sum.abs() >= value.abs() {
-            (sum - next) + value
-        } else {
-            (value - next) + sum
-        };
-        sum = next;
-    }
-    (sum, correction)
-}
-
-fn sum_floats(values: &[serde_json::Number]) -> f64 {
-    let numbers = || values.iter().filter_map(serde_json::Number::as_f64);
-    let (sum, correction) = compensated_sum(numbers());
-    let result = sum + correction;
-    if result.is_finite() {
-        return result;
-    }
-
-    // 优先取与部分和异号的项，避免可抵消的大数溢出，同时保留原尺度上的微小项。
-    let mut positive = numbers().filter(|number| *number >= 0.0);
-    let mut negative = numbers().filter(|number| *number < 0.0);
-    let mut balance = 0.0;
-    let (sum, correction) = compensated_sum(std::iter::from_fn(|| {
-        let number = if balance > 0.0 {
-            negative.next().or_else(|| positive.next())
-        } else {
-            positive.next().or_else(|| negative.next())
-        }?;
-        balance += number;
-        Some(number)
-    }));
-    let balanced = sum + correction;
-    if balanced.is_finite() {
-        return balanced;
-    }
-
-    // 靠近浮点上限时，已积累的补偿可能使最终结果回到有限范围。
-    // 用二的幂缩放后再合并补偿，避免下结论前再次发生中间溢出。
-    let scale = values.len().next_power_of_two() as f64;
-    let (sum, correction) = compensated_sum(numbers().map(|number| number / scale));
-    (sum + correction) * scale
-}
-
 fn aggregate_numbers(
     func: AggFunc,
     values: impl Iterator<Item = serde_json::Number>,
@@ -3818,30 +3772,15 @@ fn aggregate_numbers(
             _ => serde_json::Value::Null,
         };
     }
-    let result = if func == AggFunc::Avg {
-        let count = values.len() as f64;
-        let (sum, correction) =
-            compensated_sum(values.iter().filter_map(serde_json::Number::as_f64));
-        if sum.is_finite() && correction.is_finite() {
-            sum / count + correction / count
-        } else {
-            // 缩放仅用于中间和溢出的输入，普通整数均值沿原数值尺度计算。
-            let scale = values
-                .iter()
-                .filter_map(serde_json::Number::as_f64)
-                .map(f64::abs)
-                .fold(0.0f64, f64::max);
-            let (sum, correction) = compensated_sum(
-                values
-                    .iter()
-                    .filter_map(serde_json::Number::as_f64)
-                    .map(|value| value / scale),
-            );
-            ((sum + correction) / count).clamp(-1.0, 1.0) * scale
-        }
+    let mut sum = super::numeric::ExactSum::default();
+    for value in &values {
+        sum.push_number(value);
+    }
+    let result = sum.into_f64(if func == AggFunc::Avg {
+        values.len()
     } else {
-        sum_floats(&values)
-    };
+        1
+    });
     serde_json::Number::from_f64(result).map_or(serde_json::Value::Null, serde_json::Value::Number)
 }
 

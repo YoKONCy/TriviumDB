@@ -7,7 +7,7 @@ use ratatui::symbols::Marker;
 use ratatui::widgets::TableState;
 use triviumdb::node::NodeId;
 
-use crate::db_handle::{CliNode, CliRows, DbHandle};
+use crate::db_handle::{CliNode, CliRows, CliValue, DbHandle, primary_node};
 
 /// 当前活跃面板。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -183,10 +183,7 @@ impl App {
 
     fn selected_node_id(&self) -> Option<NodeId> {
         let row = self.rows.get(self.selected)?;
-        let mut keys: Vec<&String> = row.keys().collect();
-        keys.sort();
-        let first = keys.first()?;
-        Some(row.get(*first)?.id)
+        primary_node(row).map(|node| node.id)
     }
 
     /// 刷新右侧节点详情（重新从 DB 取完整信息，避免投影裁剪导致缺字段）。
@@ -408,7 +405,7 @@ impl App {
                         }
                     } {
                         let mut row = std::collections::HashMap::new();
-                        row.insert("node".to_string(), n);
+                        row.insert("node".to_string(), CliValue::Node(n));
                         rows.push(row);
                         scores.push(*score);
                     }

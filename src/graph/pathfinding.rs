@@ -489,6 +489,13 @@ pub(crate) fn bounded_all_paths_view<T: VectorType>(
             "最大路径数必须大于 0 (max_paths must be greater than zero)".into(),
         ));
     }
+    if config.forbidden_nodes.contains(&src) || config.forbidden_nodes.contains(&dst) {
+        return Ok(BoundedPathsOutput {
+            paths: Vec::new(),
+            metrics: TraversalMetrics::default(),
+            truncated: false,
+        });
+    }
     let mut state = BoundedPathState {
         results: Vec::new(),
         visited: HashSet::from([src]),
@@ -570,6 +577,13 @@ fn bounded_path_dfs<T: VectorType>(
     let depth = state.weights.len();
     state.metrics.depth_reached = state.metrics.depth_reached.max(depth);
     if current == dst {
+        if config
+            .label_sequence
+            .as_ref()
+            .is_some_and(|labels| labels.len() != depth)
+        {
+            return Ok(());
+        }
         state.results.push(BoundedPath {
             nodes: state.nodes.clone(),
             edge_weights: state.weights.clone(),
@@ -591,7 +605,12 @@ fn bounded_path_dfs<T: VectorType>(
         }
         return Ok(());
     }
-    if depth >= config.max_depth {
+    if depth >= config.max_depth
+        || config
+            .label_sequence
+            .as_ref()
+            .is_some_and(|labels| labels.len() == depth)
+    {
         return Ok(());
     }
     let outgoing = mt.get_edges(current).unwrap_or_default();

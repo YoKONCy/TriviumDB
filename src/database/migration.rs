@@ -255,6 +255,7 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
             // 暂存目标保留图身份、修订和共享引用，随目标检查点统一发布。
             target.named_graphs = mt.named_graphs.clone();
             target.document_publications = mt.document_publications.clone();
+            target.advance_next_id(mt.next_id_value());
             target.mark_changed(false);
         }
         stage.flush()?;

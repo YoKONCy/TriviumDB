@@ -3339,15 +3339,25 @@ impl<T: VectorType> MemTable<T> {
             )
             .at_field("patch")
         })?;
-        for operation in ["$set", "$inc", "$unset"] {
-            if patch_obj
-                .get(operation)
-                .is_some_and(|value| !value.is_object())
-            {
+        if patch_obj.keys().all(|key| !key.starts_with('$')) {
+            return Err(TriviumError::ApiMigrationRequired {
+                removed_api: "patch_payload(普通对象简写)",
+                replacement: "patch_payload({\"$set\": {...}}) 或 update_payload()",
+            });
+        }
+        for (operation, operand) in patch_obj {
+            let field = format!("patch.{operation}");
+            if !matches!(operation.as_str(), "$set" | "$inc" | "$unset") {
+                return Err(TriviumError::InvalidInput(format!(
+                    "未知补丁操作符 (Unknown patch operator): {operation}"
+                ))
+                .at_field(&field));
+            }
+            if !operand.is_object() {
                 return Err(TriviumError::InvalidInput(format!(
                     "补丁操作数必须是 JSON 对象 (Patch operand must be a JSON object): {operation}"
                 ))
-                .at_field(&format!("patch.{operation}")));
+                .at_field(&field));
             }
         }
         let old_payload = self
@@ -3388,16 +3398,6 @@ impl<T: VectorType> MemTable<T> {
             for k in unset_map.keys() {
                 obj.remove(k);
             }
-        }
-
-        if !patch_obj.contains_key("$set")
-            && !patch_obj.contains_key("$inc")
-            && !patch_obj.contains_key("$unset")
-        {
-            return Err(TriviumError::ApiMigrationRequired {
-                removed_api: "patch_payload(普通对象简写)",
-                replacement: "patch_payload({\"$set\": {...}}) 或 update_payload()",
-            });
         }
 
         Ok(new_payload)

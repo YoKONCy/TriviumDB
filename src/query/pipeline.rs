@@ -2132,6 +2132,12 @@ pub struct BoundedAllPaths {
     pub aggregation: PathStrengthAggregation,
 }
 
+fn path_score_overflow() -> TriviumError {
+    TriviumError::QueryExecution(
+        "路径聚合分数超出有限 f32 范围 (Path aggregate score exceeds the finite f32 range)".into(),
+    )
+}
+
 impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
     fn uses_graph(&self) -> bool {
         true
@@ -2144,8 +2150,15 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
         let mut output = BTreeMap::<NodeId, NodeRow>::new();
         let mut consumed_nodes = 0usize;
         let mut consumed_edges = 0usize;
+        let mut seen = BTreeSet::new();
+        let targets = self
+            .targets
+            .iter()
+            .copied()
+            .filter(|id| seen.insert(*id))
+            .collect::<Vec<_>>();
         for source in input.rows {
-            for &target in &self.targets {
+            for &target in &targets {
                 let result = crate::graph::pathfinding::bounded_all_paths_view(
                     &context.graph(),
                     source.id,
@@ -2175,25 +2188,26 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
                         .map(|path| path.strength_product)
                         .max_by(f32::total_cmp)
                         .unwrap_or(0.0),
-                    PathStrengthAggregation::SumProduct => result
-                        .paths
-                        .iter()
-                        .map(|path| f64::from(path.strength_product))
-                        .sum::<f64>()
-                        as f32,
+                    PathStrengthAggregation::SumProduct => {
+                        let mut sum = super::numeric::ExactSum::default();
+                        for path in &result.paths {
+                            if !path.strength_product.is_finite() {
+                                return Err(path_score_overflow());
+                            }
+                            sum.push_float(f64::from(path.strength_product));
+                        }
+                        sum.into_f32(1)
+                    }
                     PathStrengthAggregation::AverageWeight => {
-                        (result
-                            .paths
-                            .iter()
-                            .map(|path| f64::from(path.strength_average))
-                            .sum::<f64>()
-                            / result.paths.len() as f64) as f32
+                        let mut sum = super::numeric::ExactSum::default();
+                        for path in &result.paths {
+                            sum.push_float(f64::from(path.strength_average));
+                        }
+                        sum.into_f32(result.paths.len())
                     }
                 };
                 if !score.is_finite() {
-                    return Err(TriviumError::QueryExecution(
-                        "路径聚合分数超出有限 f32 范围 (Path aggregate score exceeds the finite f32 range)".into(),
-                    ));
+                    return Err(path_score_overflow());
                 }
                 let best_path = result
                     .paths

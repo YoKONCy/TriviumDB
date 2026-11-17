@@ -262,7 +262,14 @@ impl Gate {
     }
 }
 
-type GateKey = (ConcurrencyPoint, Option<String>);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum GateScope {
+    Global,
+    Path(String),
+    Request(String),
+}
+
+type GateKey = (ConcurrencyPoint, GateScope);
 type GateRegistry = Mutex<HashMap<GateKey, Arc<Gate>>>;
 
 fn registry() -> &'static GateRegistry {
@@ -318,12 +325,17 @@ impl Drop for WaitHandle {
 
 /// 注册一次性阻塞点。同一交错点不能同时注册两次。
 pub fn pause_at(point: ConcurrencyPoint) -> WaitHandle {
-    register_gate((point, None))
+    register_gate((point, GateScope::Global))
 }
 
 /// 只阻塞指定数据库规范路径，允许相同阶段的多个实例并行测试。
 pub fn pause_at_path(point: ConcurrencyPoint, path: &str) -> WaitHandle {
-    register_gate((point, Some(path.to_owned())))
+    register_gate((point, GateScope::Path(path.to_owned())))
+}
+
+/// 只阻塞带指定请求 ID 的操作，包含继承该 ID 的内部查询及工作线程。
+pub fn pause_at_request(point: ConcurrencyPoint, request_id: &str) -> WaitHandle {
+    register_gate((point, GateScope::Request(request_id.to_owned())))
 }
 
 fn register_gate(key: GateKey) -> WaitHandle {
@@ -341,23 +353,25 @@ fn register_gate(key: GateKey) -> WaitHandle {
 
 /// 由生产路径调用：未注册时快速返回，注册时通知测试并等待释放。
 pub fn hit(point: ConcurrencyPoint) {
-    let gate = registry()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .get(&(point, None))
-        .cloned();
-    if let Some(gate) = gate {
-        gate.arrive_and_wait();
+    let request_gate = crate::request::current()
+        .map(|context| GateScope::Request(context.request_id().to_owned()));
+    wait_at(point, GateScope::Global);
+    if let Some(scope) = request_gate {
+        wait_at(point, scope);
     }
 }
 
 /// 文件发布路径同时支持全局屏障与按数据库路径选择的屏障。
 pub fn hit_for_path(point: ConcurrencyPoint, path: &str) {
     hit(point);
+    wait_at(point, GateScope::Path(path.to_owned()));
+}
+
+fn wait_at(point: ConcurrencyPoint, scope: GateScope) {
     let gate = registry()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .get(&(point, Some(path.to_owned())))
+        .get(&(point, scope))
         .cloned();
     if let Some(gate) = gate {
         gate.arrive_and_wait();

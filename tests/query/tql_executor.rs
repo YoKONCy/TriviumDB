@@ -814,6 +814,110 @@ fn TQL_SEARCH_带索引WHERE返回过滤集合内TopK() {
 }
 
 #[test]
+fn 向量精排前核对复合索引与位图索引命中的JSON类型() {
+    use serde_json::json;
+    for composite in [true, false] {
+        let path = tmp_db(&format!("filtered_top_k_{composite}"));
+        cleanup(&path);
+        let mut db = Database::<f32>::open(&path, DIM).unwrap();
+        db.insert_with_id(1, &[1., 0.], json!({"a":"same","x":1.0}))
+            .unwrap();
+        db.insert_with_id(2, &[0., 1.], json!({"a":"same","x":1}))
+            .unwrap();
+        if composite {
+            db.create_composite_index(&["a".into(), "x".into()])
+                .unwrap();
+        } else {
+            db.create_bitmap_index("a").unwrap();
+            db.create_bitmap_index("x").unwrap();
+        }
+        let rows = db
+            .tql(r#"SEARCH VECTOR [1,0] TOP 1 WHERE {a:"same",x:1} RETURN _"#)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["_"].as_node().unwrap().id, 2);
+        db.close().unwrap();
+        cleanup(&path);
+    }
+}
+
+#[test]
+fn 带标签的零跳匹配保留所有节点并可持久更新() {
+    use serde_json::json;
+    let path = tmp_db("zero_hop_match_and_set");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    for id in 1..=4 {
+        db.insert_with_id(id, &[1., 0.], json!({"updated":false}))
+            .unwrap();
+    }
+    db.link(1, 2, "r", 1.).unwrap();
+    for pattern in [
+        "(a)-[:r*0..0]->(b)",
+        "(a)<-[:r*0..0]-(b)",
+        "(a)-[:r*0..0]-(b)",
+    ] {
+        let rows = db
+            .tql(&format!("MATCH {pattern} RETURN a,b ORDER BY a.id"))
+            .unwrap();
+        let pairs = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["a"].as_node().unwrap().id,
+                    row["b"].as_node().unwrap().id,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pairs, [(1, 1), (2, 2), (3, 3), (4, 4)]);
+    }
+    let changed = db
+        .tql_mut("MATCH (a)-[:missing*0..0]->(b) SET b.updated == true")
+        .unwrap();
+    assert_eq!(changed.affected, 4);
+    db.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, DIM).unwrap();
+    for id in 1..=4 {
+        assert_eq!(
+            reopened.get_payload(id).unwrap(),
+            Some(json!({"updated":true}))
+        );
+    }
+    reopened.close().unwrap();
+    cleanup(&path);
+}
+
+#[test]
+fn FIND隐式节点变量与同名Payload字段相互独立() {
+    use serde_json::json;
+    use triviumdb::query::tql_executor::TqlValue;
+    let path = tmp_db("find_reserved_node");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    for (id, value) in [(1, json!(null)), (2, json!(7)), (3, json!("field"))] {
+        db.insert_with_id(id, &[1., 0.], json!({"_":value, "kind":"row"}))
+            .unwrap();
+    }
+    let rows = db
+        .tql(r#"FIND {kind:"row"} RETURN _ ORDER BY _.id"#)
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["_"].as_node().unwrap().id)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let count = db
+        .tql(r#"FIND {kind:"row"} RETURN COUNT(_) AS nodes, COUNT(_._) AS fields"#)
+        .unwrap();
+    assert_eq!(count.len(), 1);
+    assert!(matches!(count[0]["nodes"], TqlValue::Int(3)));
+    assert!(matches!(count[0]["fields"], TqlValue::Int(2)));
+    db.close().unwrap();
+    cleanup(&path);
+}
+
+#[test]
 fn TQL_SEARCH_带EXPAND() {
     let (db, path) = build_test_db("search_expand");
     let results = db

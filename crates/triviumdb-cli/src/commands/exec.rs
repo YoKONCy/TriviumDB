@@ -6,7 +6,7 @@ use colored::Colorize;
 
 use crate::CliResult;
 use crate::db_handle::DbHandle;
-use crate::formatter::{OutputFormat, format_rows};
+use crate::formatter::{OutputFormat, format_mutation, format_rows};
 
 pub fn run(handle: &mut DbHandle, query: &str, mutate: bool, format: OutputFormat) -> CliResult {
     let start = Instant::now();
@@ -49,18 +49,21 @@ pub fn run(handle: &mut DbHandle, query: &str, mutate: bool, format: OutputForma
     if mutate {
         let summary = handle.tql_mut(query)?;
         handle.flush()?;
-        let elapsed = start.elapsed();
-        println!(
-            "{} 影响行数 / affected={}, 新建 ID / created_ids={:?} ({:.2?})",
-            "OK".green().bold(),
-            summary.affected,
-            summary.created_ids,
-            elapsed
-        );
+        if let Some(output) = format_mutation(&summary, format) {
+            println!("{output}");
+        } else {
+            println!(
+                "{} 影响行数 / affected={}, 新建 ID / created_ids={:?} ({:.2?})",
+                "OK".green().bold(),
+                summary.affected,
+                summary.created_ids,
+                start.elapsed()
+            );
+        }
     } else {
         let rows = handle.tql(query)?;
         let n = rows.len();
-        println!("{}", format_rows(&rows, format));
+        println!("{}", format_rows(&rows, format).trim_end_matches('\n'));
         let elapsed = start.elapsed();
         // 计时信息走 stderr，避免污染管道 / JSON 输出
         eprintln!(

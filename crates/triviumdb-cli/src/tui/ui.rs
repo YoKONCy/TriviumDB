@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap}
 
 use super::app::{App, Focus, LeftView};
 use super::graph;
-use crate::db_handle::{CliNode, CliRows};
+use crate::db_handle::{CliNode, CliRows, CliValue};
 use crate::tql_highlight;
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -298,15 +298,20 @@ fn collect_columns(rows: &CliRows) -> Vec<String> {
     cols
 }
 
-fn node_cell(node: &CliNode) -> String {
-    let payload = node.payload.to_string();
-    let payload = if payload.chars().count() > 80 {
-        let s: String = payload.chars().take(80).collect();
-        format!("{s}…")
-    } else {
-        payload
+fn node_cell(value: &CliValue) -> String {
+    let compact = |text: String| {
+        if text.chars().count() > 80 {
+            let prefix: String = text.chars().take(80).collect();
+            format!("{prefix}…")
+        } else {
+            text
+        }
     };
-    format!("#{} {}", node.id, payload)
+    match value {
+        CliValue::Node(node) => format!("#{} {}", node.id, compact(node.payload.to_string())),
+        CliValue::Json(serde_json::Value::String(text)) => compact(text.clone()),
+        CliValue::Json(json) => compact(json.to_string()),
+    }
 }
 
 fn detail_text(node: &Option<CliNode>) -> Text<'static> {

@@ -238,6 +238,8 @@ ORDER BY graph, source, target
 
 图作用域贯穿 `MATCH`、`OPTIONAL MATCH`、正反向及变长路径、`EXPAND`、路径算法和图算法。文档、属性、文本及向量来源按各自查询条件产生候选，图阶段选择其中属于作用域的输入节点。
 
+简写 `SEARCH … EXPAND` 与分段 `EXPAND` 使用相同的图作用域。模式中的 `{id: ...}` 匹配结构 NodeId。允许零跳的边模式可将合格节点绑定为自身，边标签只约束实际经过的边。
+
 ```sql
 GRAPH {graph_ids: ["events"]}
 DOCUMENTS {operation: "search", query: {text: $text, max_documents: 10}}
@@ -555,7 +557,7 @@ WHERE _.score > 0.8
 RETURN *
 ```
 
-> **提醒**：不带 `EXPAND` 且 `WHERE` 是已索引的等值或 AND 等值文档过滤时，Planner 会先取得属性索引候选，再在过滤集合内精确向量排序并返回 Top-K。这样 `TOP 10 WHERE {type: "event"}` 表示 event 集合中的 Top 10。
+> **提醒**　当查询省略 `EXPAND` 且 `WHERE` 是已索引的等值或 AND 等值文档过滤时，Planner 先取得属性索引候选，核对候选的实际 JSON 值和类型，再在合格集合内精确向量排序并返回 Top-K。
 >
 > 无可用属性索引、范围/OR/通用表达式或带 `EXPAND` 的查询保留候选后过滤路径；可能少于 TOP 指定数量，但始终执行最终精确谓词校验。
 
@@ -826,9 +828,7 @@ RETURN clustered, topic(clustered) AS topic_id, topic_score(clustered) AS confid
 
 整数之间的 `+ - *` 和整数 `SUM` 保留整数结果，超出整数域时返回 Null。含浮点操作数的算术、除法与 `AVG` 使用 binary64；除法仅将实际的正负零视为零分母，有限的小分母正常计算。`MIN/MAX` 保留选中数值的类型和值。
 
-浮点 `SUM` 使用 binary64 补偿求和。中间和溢出时按相反符号交替重算，以保留有限总和及抵消后的小量。超出有限浮点范围的总和返回 Null。
-
-`AVG` 使用补偿求和，在中间和溢出时按最大绝对值缩放，在同号大数及正负抵消时计算有限均值。例如两个 `1e308` 的平均值为 `1e308`。普通整数、零值与极小有限输入沿相同数值契约处理。
+含浮点值的 `SUM` 与所有数值 `AVG` 精确累加整数及 binary64 输入，在生成结果时统一舍入为 binary64，保留抵消后的可表示尾项。`AVG` 在舍入前除以计入的数值个数。超出有限浮点范围的总和返回 Null。
 
 Python 返回精确 `int`。Node 的整数标量在安全整数范围内返回 `number`，超范围时返回十进制字符串，`COLLECT` 等列表中的整数采用相同转换；整节点结果中的 ID 继续使用字符串。例如，`RETURN 18446744073709551613 AS value` 在 Python 中返回整数，在 Node 中返回字符串 `"18446744073709551613"`。
 
@@ -836,9 +836,9 @@ Python 返回精确 `int`。Node 的整数标量在安全整数范围内返回 `
 
 TQL 数值等值谓词采用相同的索引候选和精确复核语义：整数 `1` 与浮点 `1.0` 数值相等，2^53 以上的相邻整数保持可区分。文档 Filter 与 Hash/Bitmap 的 JSON 类型键继续按其文档值契约工作。
 
-聚合支持 `COUNT/SUM/AVG/MIN/MAX/COLLECT` 与 aggregate `DISTINCT`。RETURN 中非聚合表达式构成隐式分组键；`DISTINCT b.id`、`DISTINCT id(b)` 和 `DISTINCT b.field` 均按实际投影值去重。空输入 `COUNT(*)=0`，其他无值聚合返回 Null。Rust 的 `tql()` 与 Python/Node 动态语言入口均返回统一一等值；`tql_nodes()` 保留给只需要节点绑定的 Rust 调用方，`tql_values()` 是兼容别名。
+聚合支持 `COUNT/SUM/AVG/MIN/MAX/COLLECT` 与 aggregate `DISTINCT`。RETURN 中非聚合表达式构成隐式分组键，`DISTINCT b.id`、`DISTINCT id(b)` 和 `DISTINCT b.field` 按实际投影值去重。无值聚合中，`COUNT` 返回 `0`，`COLLECT` 返回 `[]`，数值聚合返回 Null。Rust 的 `tql()` 与 Python/Node 动态语言入口均返回统一一等值，`tql_nodes()` 保留给只需要节点绑定的 Rust 调用方，`tql_values()` 是兼容别名。
 
-`COUNT(*)` 统计匹配行，`COUNT(expr)` 统计求值后非 Null 的值；`0`、`false`、空字符串与空容器均为有效值。当前聚合去重语法为 `RETURN DISTINCT COUNT(n.g) AS total`，表示先对 `n.g` 的非 Null 值去重，再计数。单跳具名边按实际边产生行，多标签平行边分别参与计数。
+`COUNT(*)` 统计匹配行，`COUNT(expr)` 统计求值后非 Null 的值。`0`、`false`、空字符串与空容器均为有效值。使用 `RETURN DISTINCT COUNT(n.g) AS total` 可先对 `n.g` 的非 Null 值去重再计数。`DISTINCT COUNT(*)` 在解析阶段返回错误。单跳具名边按实际边产生行，多标签平行边分别参与计数。`FIND` 的隐式节点变量 `_` 可用于 `COUNT(_)`，同名 Payload 字段通过 `_._` 访问。
 
 写入操作沿匹配行生成事务。`MATCH … CREATE` 的零匹配产生零次创建，每条匹配拥有独立的新节点变量作用域；同一行内的边引用对应的新节点。多字段 SET 按文本顺序累计到同一节点，重复字段采用最后一次赋值，合并后提交一次 Payload 替换。整条 mutation 通过内核事务完成预检、预算准入与原子提交。
 
@@ -887,13 +887,15 @@ WITH route
 RETURN path(route) AS nodes, path_length(route) AS hops
 ```
 
-Path 当前是一等 NodeId 序列；`path_length` 返回边数。`WEIGHTED_PATHS` 使用非负有限边权执行确定性 Dijkstra，`weighted_distance()` 返回总成本；`YEN_PATHS ... K n` 返回最多 n 条最短简单路径，`path_rank()` 从 1 开始标记顺序。等成本路径按完整 NodeId 序列决胜。
+Path 是一等 NodeId 序列，`path_length` 返回边数。`WEIGHTED_PATHS` 使用非负有限边权执行确定性 Dijkstra，`weighted_distance()` 返回总成本。`YEN_PATHS ... K n` 返回最多 n 条最短简单路径，`path_rank()` 从 1 开始标记顺序，输出行从该路径起点继承绑定。等成本路径按完整 NodeId 序列决胜。
 
 `NODE_SIMILARITY input TOP n CUTOFF x [LABEL label] AS pairs` 在输入诱导无向图上计算邻居集合 Jaccard，相似节点对通过 `pair_left()`、`pair_right()` 与 `node_similarity()` 投影。PairSet 以 `(left,right)` 为行身份，两个节点共同参与去重；节点对数量、邻居交集工作量、结果数和临时字节均受硬预算约束。
 
 集合阶段公开 `UNION/INTERSECT/EXCEPT`，普通 NodeSet 仍按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。所有路径与集合算法均受节点数、字节和遍历预算约束。
 
-`ALL_PATHS` 的 `DEPTH` 限定查询范围。执行预算阻止继续扩展时返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`，TQL 管线采用完整结果的 Error 策略。Core `bounded_all_paths` 的 Partial 策略通过 `truncated` 标记部分结果。路径平均边权和多路径均值使用 `f64` 累加，输出为 `f32`；TQL 聚合分数超出有限表示范围时返回查询错误。
+`ALL_PATHS` 的 `DEPTH` 限定查询范围，重复的 `TO` 节点只处理一次。`AVOID` 排除经过指定节点的所有路径，包含起点和终点。`LABELS` 要求边标签依次匹配整个序列。执行预算阻止继续扩展时，TQL 返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`，Core `bounded_all_paths` 的 Partial 策略通过 `truncated` 标记部分结果。
+
+路径平均边权使用 `f64` 累加。跨路径求和与均值精确累加后舍入为 `f32`。TQL 路径聚合分数超出有限表示范围时返回查询错误。
 
 路径乘积分开累乘尾数和二进制指数，在整条路径完成后转换为 `f32`。SCC 的 `community()` 保留分量节点标识的完整无符号范围。
 

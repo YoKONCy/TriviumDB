@@ -1804,6 +1804,11 @@ impl TqlParser {
         let kind = if let Some(func) = self.try_parse_agg_func() {
             self.expect(&TqlToken::LParen)?;
             let inner = if self.at(&TqlToken::Star) {
+                if func != AggFunc::Count || distinct {
+                    return Err(
+                        "星号聚合仅支持 COUNT(*) (Only COUNT(*) accepts an asterisk)".into(),
+                    );
+                }
                 let mark = self.source_mark();
                 self.advance();
                 self.finish_source("return_kind", mark);

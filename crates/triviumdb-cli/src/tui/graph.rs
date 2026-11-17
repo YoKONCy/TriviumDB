@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use triviumdb::node::NodeId;
 
 use super::app::App;
-use crate::db_handle::{CliNode, CliRow};
+use crate::db_handle::{CliNode, CliRow, primary_node};
 
 struct GraphData {
     labels: Vec<String>,
@@ -118,7 +118,9 @@ fn build_graph(app: &App) -> triviumdb::Result<GraphData> {
         let mut keys: Vec<&String> = row.keys().collect();
         keys.sort();
         for k in keys {
-            let node = &row[k];
+            let Some(node) = row[k].as_node() else {
+                continue;
+            };
             if let Entry::Vacant(e) = label_of.entry(node.id) {
                 order.push(node.id);
                 e.insert(node_label_node(node));
@@ -198,9 +200,7 @@ fn truncate_label(name: &str) -> String {
 /// 选中行的主节点 id（首个字典序变量的节点）。
 fn primary_id(app: &App) -> Option<NodeId> {
     let row = app.rows.get(app.selected)?;
-    let mut keys: Vec<&String> = row.keys().collect();
-    keys.sort();
-    Some(row.get(*keys.first()?)?.id)
+    primary_node(row).map(|node| node.id)
 }
 
 /// Fruchterman-Reingold 力导向布局，返回 [0,1]² 内的坐标。
@@ -290,10 +290,5 @@ fn normalize(pos: &mut [(f64, f64)]) {
 
 /// 给定一行结果，返回其主节点 id（用于结果排序）。
 pub fn row_primary_id(row: &CliRow) -> NodeId {
-    let mut keys: Vec<&String> = row.keys().collect();
-    keys.sort();
-    keys.first()
-        .and_then(|k| row.get(*k))
-        .map(|n| n.id)
-        .unwrap_or(NodeId::MAX)
+    primary_node(row).map_or(NodeId::MAX, |node| node.id)
 }

@@ -18,6 +18,8 @@ cargo build -p triviumdb-cli --release
 
 `--format json` 模式下，内核错误写入 stderr，字段为 `schema_version: 1`、`code`、`message`、`details`，进程退出码为 1。stdout 保留给结果数据；TQL 解析失败同样通过此结构返回。文本模式在诊断中显示稳定错误码。
 
+`tdb exec` 按 TQL 投影返回指定列，列名使用 `AS` 别名。JSON 输出保留数值、布尔值、空值、对象与列表。CSV 输出完整单元格并转义逗号、引号及换行。写入成功后，`--mutate --format json` 在 stdout 返回 `{"affected":1,"created_ids":[3]}` 形式的确认结果。CSV 使用 `affected,created_ids` 两列，后者为 JSON 数组。
+
 ```bash
 # 查看数据库元信息
 tdb info mydata.tdb

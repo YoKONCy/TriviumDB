@@ -385,6 +385,83 @@ fn exec_csv_format_has_header() {
         .stdout(predicate::str::contains("#,"));
 }
 
+#[test]
+fn exec_json只输出请求的投影列和聚合值() {
+    let (_dir, path) = seed_db();
+    let mut db = triviumdb::Database::<f32>::open(&path, 4).unwrap();
+    db.update_payload(
+        1,
+        json!({"wide":9_007_199_254_740_993u64,"private":"hidden","nested":{"keep":true}}),
+    )
+    .unwrap();
+    db.close().unwrap();
+
+    for (query, expected) in [
+        (
+            "MATCH (n {id:1}) RETURN n.wide AS v, n.nested AS fields, n.missing AS empty",
+            json!([{"v":9_007_199_254_740_993u64,"fields":{"keep":true},"empty":null}]),
+        ),
+        ("MATCH (n) RETURN COUNT(*) AS total", json!([{"total":2}])),
+    ] {
+        let output = tdb()
+            .args(["exec", &path, query, "--format=json"])
+            .assert()
+            .success();
+        let actual: serde_json::Value =
+            serde_json::from_slice(&output.get_output().stdout).unwrap();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn exec_csv完整保留长字段和嵌入的分隔字符() {
+    let (_dir, path) = seed_db();
+    let mut db = triviumdb::Database::<f32>::open(&path, 4).unwrap();
+    let long = "长".repeat(150);
+    db.update_payload(1, json!({"line":format!("{long},\"a\"\r\nb")}))
+        .unwrap();
+    db.close().unwrap();
+    let output = tdb()
+        .args([
+            "exec",
+            &path,
+            "MATCH (n {id:1}) RETURN n.line AS line",
+            "--format=csv",
+        ])
+        .assert()
+        .success();
+    let actual = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let expected = format!("#,line\n1,\"{long},\"\"a\"\"\r\nb\"\n");
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn exec_json写入确认包含实际提交的节点() {
+    let (_dir, path) = seed_db();
+    let output = tdb()
+        .args([
+            "exec",
+            &path,
+            r#"CREATE (a {name:"One"}), (b {name:"Two"})"#,
+            "--mutate",
+            "--format=json",
+        ])
+        .assert()
+        .success();
+    let actual: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(actual, json!({"affected":2,"created_ids":[3,4]}));
+    let mut reopened = triviumdb::Database::<f32>::open_read_only(&path, 4).unwrap();
+    assert_eq!(
+        reopened.get_payload(3).unwrap(),
+        Some(json!({"name":"One"}))
+    );
+    assert_eq!(
+        reopened.get_payload(4).unwrap(),
+        Some(json!({"name":"Two"}))
+    );
+    reopened.close().unwrap();
+}
+
 // ── exec (mutate) ──────────────────────────────────────────────
 
 #[test]

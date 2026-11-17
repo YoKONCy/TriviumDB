@@ -46,6 +46,8 @@ pub enum Filter {
     Range(String, RangeOp, ComparableValue),
     /// 严格 RFC3339 时间比较；阈值保存为 UTC 纳秒时间戳。
     TimeRange(String, RangeOp, i64),
+    /// 超出 i64 纳秒范围的 RFC3339 时间比较。
+    WideTimeRange(String, RangeOp, i128),
     /// 值在集合中: {"field": {"$in": [v1, v2]}}
     In(String, Vec<Value>),
     /// 逻辑与
@@ -81,6 +83,7 @@ impl Filter {
             | Self::Lte(k, _)
             | Self::Range(k, _, _)
             | Self::TimeRange(k, _, _)
+            | Self::WideTimeRange(k, _, _)
             | Self::In(k, _)
             | Self::Nin(k, _)
             | Self::Exists(k, _)
@@ -113,11 +116,12 @@ impl Filter {
             Filter::Range(key, op, threshold) => payload
                 .get(key)
                 .is_some_and(|value| compare_value(value, threshold, *op)),
-            Filter::TimeRange(key, op, threshold) => payload
-                .get(key)
-                .and_then(Value::as_str)
-                .and_then(parse_rfc3339_nanos)
-                .is_some_and(|value| compare_ordered(value, *threshold, *op)),
+            Filter::TimeRange(key, op, threshold) => {
+                time_range(payload.get(key), i128::from(*threshold), *op)
+            }
+            Filter::WideTimeRange(key, op, threshold) => {
+                time_range(payload.get(key), *threshold, *op)
+            }
 
             Filter::In(key, values) => {
                 if let Some(field_val) = payload.get(key) {
@@ -271,6 +275,11 @@ impl Filter {
                 field => {
                     if let Some(op_obj) = v.as_object() {
                         // 运算符语法: {"field": {"$gt": 18}}
+                        if op_obj.is_empty() {
+                            return Err(format!(
+                                "字段过滤运算符不能为空 (Field filter operators must not be empty): {field}"
+                            ));
+                        }
                         for (op, op_val) in op_obj {
                             let f = match op.as_str() {
                                 "$eq" => Filter::Eq(field.to_string(), op_val.clone()),
@@ -304,7 +313,18 @@ impl Filter {
                                         parse_rfc3339_nanos(input).ok_or_else(|| {
                                             format!("{operator} 包含无效 RFC3339 时间: {input}")
                                         })?;
-                                    Filter::TimeRange(field.to_string(), range_op, timestamp)
+                                    match i64::try_from(timestamp) {
+                                        Ok(timestamp) => Filter::TimeRange(
+                                            field.to_string(),
+                                            range_op,
+                                            timestamp,
+                                        ),
+                                        Err(_) => Filter::WideTimeRange(
+                                            field.to_string(),
+                                            range_op,
+                                            timestamp,
+                                        ),
+                                    }
                                 }
                                 "$in" => {
                                     let arr = op_val
@@ -479,9 +499,19 @@ fn compare_value(value: &Value, threshold: &ComparableValue, op: RangeOp) -> boo
     }
 }
 
-fn parse_rfc3339_nanos(value: &str) -> Option<i64> {
+fn parse_rfc3339_nanos(value: &str) -> Option<i128> {
     let parsed = chrono::DateTime::parse_from_rfc3339(value).ok()?;
-    parsed.timestamp_nanos_opt()
+    Some(
+        i128::from(parsed.timestamp()) * 1_000_000_000
+            + i128::from(parsed.timestamp_subsec_nanos()),
+    )
+}
+
+fn time_range(value: Option<&Value>, threshold: i128, op: RangeOp) -> bool {
+    value
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_nanos)
+        .is_some_and(|value| compare_ordered(value, threshold, op))
 }
 
 #[cfg(test)]

@@ -31,7 +31,7 @@ function rejectedValues(kind, field) {
     case 'payloads': return [[null, field], [[{}, { 'a/b~c': [1, undefined] }], `/${field}/1/a~1b~0c/1`]]
     case 'json': return [
       ...(field === 'metadata' ? [] : [[undefined, field]]), [{ '\ud800': 1 }, field],
-      ...[undefined, () => {}, Symbol('json'), 1n, NaN, Infinity, '\ud800']
+      ...[undefined, () => {}, Symbol('json'), 1n << 64n, NaN, Infinity, '\ud800']
         .map(value => [{ 'a/b~c': [1, value] }, `/${field}/a~1b~0c/1`]),
       [{ '词.行[]\0😀': undefined }, `/${field}/词.行[]\0😀`],
     ]

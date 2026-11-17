@@ -14,6 +14,7 @@ use std::io::Read;
 use half::f16;
 use serde_json::Value;
 use triviumdb::node::{Edge, NodeId, NodeView};
+use triviumdb::query::tql_executor::{TqlValue, TqlValueResult};
 use triviumdb::{Database, Result, TriviumError, VectorType};
 
 /// 数据库底层数值类型。
@@ -74,10 +75,59 @@ impl CliNode {
     }
 }
 
-/// TQL 查询的一行：变量名 → 节点快照。
-pub type CliRow = HashMap<String, CliNode>;
+/// TQL 投影值保留实体和普通 JSON 值的区别。
+#[derive(Debug, Clone)]
+pub enum CliValue {
+    Node(CliNode),
+    Json(Value),
+}
+
+impl CliValue {
+    pub fn as_node(&self) -> Option<&CliNode> {
+        match self {
+            Self::Node(node) => Some(node),
+            Self::Json(_) => None,
+        }
+    }
+
+    fn from_tql<T: VectorType>(value: TqlValue<T>) -> Self {
+        let json = match value {
+            TqlValue::Node(node) => return Self::Node(CliNode::from_view(node)),
+            TqlValue::Edge(edge) => {
+                let mut value = serde_json::json!({
+                    "type": "edge", "source": edge.source_id, "target": edge.target_id,
+                    "label": edge.label, "weight": edge.weight, "metadata": edge.metadata,
+                });
+                if let Some(graph_id) = edge.graph_id {
+                    value["graph_id"] = graph_id.into();
+                }
+                value
+            }
+            TqlValue::Int(value) => value.into(),
+            TqlValue::UInt(value) => value.into(),
+            TqlValue::Float(value) => value.into(),
+            TqlValue::String(value) => value.into(),
+            TqlValue::Bool(value) => value.into(),
+            TqlValue::Path(ids) => serde_json::json!(ids),
+            TqlValue::List(values) => Value::Array(values),
+            TqlValue::Object(object) => Value::Object(object),
+            TqlValue::Null => Value::Null,
+        };
+        Self::Json(json)
+    }
+}
+
+/// TQL 查询的一行：列名 → 投影值。
+pub type CliRow = HashMap<String, CliValue>;
 /// TQL 查询结果：多行绑定。
 pub type CliRows = Vec<CliRow>;
+
+pub fn primary_node(row: &CliRow) -> Option<&CliNode> {
+    row.iter()
+        .filter_map(|(name, value)| value.as_node().map(|node| (name, node)))
+        .min_by_key(|(name, _)| *name)
+        .map(|(_, node)| node)
+}
 
 /// TQL 写操作结果。
 #[derive(Debug, Clone, Default)]
@@ -107,11 +157,11 @@ macro_rules! dispatch {
     };
 }
 
-fn convert_rows<T: VectorType>(rows: Vec<HashMap<String, NodeView<T>>>) -> CliRows {
+fn convert_rows<T: VectorType>(rows: TqlValueResult<T>) -> CliRows {
     rows.into_iter()
         .map(|row| {
             row.into_iter()
-                .map(|(k, v)| (k, CliNode::from_view(v)))
+                .map(|(k, v)| (k, CliValue::from_tql(v)))
                 .collect()
         })
         .collect()
@@ -245,7 +295,7 @@ impl DbHandle {
     /// 执行只读 TQL 查询，结果转换为 dtype 无关的 [`CliRows`]。
     pub fn tql(&self, query: &str) -> Result<CliRows> {
         dispatch!(self, db => {
-            let rows = db.tql_nodes(query)?;
+            let rows = db.tql(query)?;
             Ok(convert_rows(rows))
         })
     }

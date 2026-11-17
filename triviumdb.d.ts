@@ -731,20 +731,20 @@ export class TriviumDB {
   /**
    * 整体替换节点的 payload（不影响向量与图谱关系）
    * @param id 节点 ID
-   * @param payload 新 payload
+   * @param payload 新 Payload。对象仅保存自有、可枚举的字符串键。
+   * 支持 i64::MIN 至 u64::MAX 范围内的 bigint，保存为精确 JSON 整数。
    */
   updatePayload(id: number, payload: any): void;
 
   /**
    * 部分更新节点 Payload（$set / $inc / $unset）
    *
-   * 只修改指定字段，其他字段保持不变。
+   * 顶层操作符和操作数全部通过校验后，一次提交整份补丁。
    *
    * ```js
    * db.patchPayload(id, { $set: { name: "Alice" } })
    * db.patchPayload(id, { $inc: { visits: 1 } })
    * db.patchPayload(id, { $unset: { oldField: true } })
-   * db.patchPayload(id, { name: "Bob" })  // 简写，等价于 $set
    * ```
    */
   patchPayload(id: number, patch: any): void;
