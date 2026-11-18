@@ -28,7 +28,7 @@ impl EdgeScanBudget {
         // 每个邻接表先取得实际能读取的前缀，所有并行 worker 共用余额。
         let remaining = self
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
                 Some(remaining.saturating_sub(count))
             })
             .unwrap_or_else(|remaining| remaining);
