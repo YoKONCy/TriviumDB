@@ -389,3 +389,18 @@ fn 图统计在_link_unlink_delete_和重启后保持一致() {
     assert_eq!(reopened.graph_stats().unwrap().node_count, 3);
     drop(reopened);
 }
+
+#[test]
+fn 公共图辅助函数拒绝虚构起点并尊重零结果上限() {
+    use triviumdb::graph::pathfinding::{k_hop_neighbors, variable_length_paths};
+    let mut mt = triviumdb::storage::memtable::MemTable::<f32>::new(1);
+    assert!(k_hop_neighbors(&mt, 7, 0, None).is_empty());
+    assert!(variable_length_paths(&mt, 7, 0, 0, None, 1).is_empty());
+    mt.insert_with_id(7, &[1.], serde_json::json!({})).unwrap();
+    assert!(variable_length_paths(&mt, 7, 0, 0, None, 0).is_empty());
+    assert_eq!(variable_length_paths(&mt, 7, 0, 0, None, 1), [(7, vec![7])]);
+    assert_eq!(
+        k_hop_neighbors(&mt, 7, 0, None),
+        std::collections::HashMap::from([(7, 0)])
+    );
+}

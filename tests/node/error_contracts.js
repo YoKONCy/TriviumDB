@@ -251,7 +251,12 @@ function runPreparedDiagnostics(root, { TriviumDB, ConsoleSession }) {
       } }
       assert.deepEqual(db.executePreparedTql(prepared, callbackParameters), [{ value: 42 }])
       assert.equal(callbacks, 1)
-      assert.deepEqual(db.executePreparedTql(prepared, Object.create({ x: 42 })), [{ value: 42 }])
+      assert.throws(() => db.executePreparedTql(prepared, Object.create({ x: 42 })), error => {
+        assert.equal(error.code, 'TDB_MISSING_QUERY_PARAMETER')
+        assert.equal(error.stage, 'bind')
+        assert.deepEqual(error.target, xTarget)
+        return true
+      })
       assert.deepEqual(db.executePreparedTql(prepared, Object.assign(Object.create(null), { x: 42 })), [{ value: 42 }])
       const cause = new Error('宿主映射原因')
       const sentinel = new TypeError('宿主参数 getter 失败', { cause })

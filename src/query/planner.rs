@@ -76,6 +76,10 @@ pub fn plan_filter_ordered<T: VectorType>(
     if let Some((field, op, inclusive, value)) = ordered_range(filter)
         && field == order_field
     {
+        // 范围索引可筛选候选，但只有精确顺序才能用于最终排序及分页。
+        if !mt.property_indexes().has_exact_ordered_index(field) {
+            return None;
+        }
         let candidates =
             mt.find_by_property_range(field, op, inclusive, &value, descending, limit)?;
         return Some(NodeAccessPlan {
@@ -366,28 +370,11 @@ pub fn plan_match<T: VectorType>(
 fn plan_pattern_start<T: VectorType>(pattern: &TqlPattern, mt: &MemTable<T>) -> NodeAccessPlan {
     let node = &pattern.nodes[0];
     if let Some(filter) = &node.filter {
-        if let Some(id) = extract_id(filter) {
-            return NodeAccessPlan {
-                access_path: AccessPath::PrimaryKey { id },
-                estimated_rows: usize::from(mt.contains(id)),
-                candidates: if mt.contains(id) {
-                    vec![id]
-                } else {
-                    Vec::new()
-                },
-            };
-        }
-        return match payload_candidate_filter(filter) {
-            Some(filter) => plan_filter(&filter, mt),
-            None => NodeAccessPlan {
-                access_path: AccessPath::FullNodeScan,
-                estimated_rows: mt.node_count(),
-                candidates: Vec::new(),
-            },
-        };
+        return plan_match_node_filter(filter, mt);
     }
     if let Some(edge) = pattern.edges.first()
         && !edge.labels.is_empty()
+        && edge.hop_range.is_none_or(|range| range.min > 0)
     {
         let candidates = label_candidates(edge, mt);
         return NodeAccessPlan {
@@ -402,6 +389,32 @@ fn plan_pattern_start<T: VectorType>(pattern: &TqlPattern, mt: &MemTable<T>) -> 
         access_path: AccessPath::FullNodeScan,
         estimated_rows: mt.node_count(),
         candidates: Vec::new(),
+    }
+}
+
+pub(crate) fn plan_match_node_filter<T: VectorType>(
+    filter: &Filter,
+    mt: &MemTable<T>,
+) -> NodeAccessPlan {
+    if let Some(id) = extract_id(filter) {
+        let candidates = mt
+            .contains(id)
+            .then_some(id)
+            .into_iter()
+            .collect::<Vec<_>>();
+        return NodeAccessPlan {
+            access_path: AccessPath::PrimaryKey { id },
+            estimated_rows: candidates.len(),
+            candidates,
+        };
+    }
+    match payload_candidate_filter(filter) {
+        Some(filter) => plan_filter(&filter, mt),
+        None => NodeAccessPlan {
+            access_path: AccessPath::FullNodeScan,
+            estimated_rows: mt.node_count(),
+            candidates: Vec::new(),
+        },
     }
 }
 

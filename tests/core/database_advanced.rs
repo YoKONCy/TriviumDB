@@ -556,3 +556,24 @@ fn COV2_21_insert_with_id_payload_too_large() {
 
     cleanup(&path);
 }
+#[test]
+fn 维度迁移重开后继续使用源库的节点ID高水位() {
+    use crate::support::TestDir;
+    use serde_json::json;
+    let root = TestDir::new("migration_next_id");
+    let mut source = triviumdb::Database::<f32>::open(&root.file("source.tdb"), 2).unwrap();
+    for expected in 1..=3 {
+        assert_eq!(source.insert(&[1., 0.], json!({})).unwrap(), expected);
+    }
+    source.delete(3).unwrap();
+    let target = root.file("target.tdb");
+    let (mut migrated, ids) = source.migrate_to(&target, 3).unwrap();
+    assert_eq!(ids, [1, 2]);
+    migrated.close().unwrap();
+    let mut reopened = triviumdb::Database::<f32>::open(&target, 3).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), [1, 2]);
+    assert_eq!(reopened.insert(&[1., 0., 0.], json!({})).unwrap(), 4);
+    assert_eq!(source.insert(&[1., 0.], json!({})).unwrap(), 4);
+    reopened.close().unwrap();
+    source.close().unwrap();
+}

@@ -113,6 +113,46 @@ fn 测试_聚合函数_AVG() {
 }
 
 #[test]
+fn 浮点SUM在中间溢出时返回可表示的总和() {
+    use triviumdb::query::tql_executor::TqlValue;
+
+    let path = tmp_db("float_sum_overflow");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, 1).unwrap();
+    for (index, value) in [1e308, 1e308, -1e308, -1e308, 1e-300]
+        .into_iter()
+        .enumerate()
+    {
+        db.insert_with_id(index as u64 + 1, &[1.], serde_json::json!({"x": value}))
+            .unwrap();
+    }
+    for (last_id, expected) in [(2, None), (3, Some(1e308)), (5, Some(1e-300))] {
+        let rows = db
+            .tql(&format!(
+                "MATCH (n) AS n WITH n WHERE n.id <= {last_id} RETURN SUM(n.x) AS total"
+            ))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        match &rows[0]["total"] {
+            TqlValue::Float(value) => assert_eq!(Some(*value), expected),
+            TqlValue::Null => assert_eq!(expected, None),
+            value => panic!("SUM 返回非预期值：{value:?}"),
+        }
+    }
+    for (index, value) in [f64::MAX, 1.1e292, -5e291, -6e291].into_iter().enumerate() {
+        db.insert_with_id(index as u64 + 6, &[1.], serde_json::json!({"x": value}))
+            .unwrap();
+    }
+    let rows = db
+        .tql("MATCH (n) AS n WITH n WHERE n.id >= 6 RETURN SUM(n.x) AS total")
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0]["total"], TqlValue::Float(value) if value == f64::MAX));
+    db.close().unwrap();
+    cleanup(&path);
+}
+
+#[test]
 fn 测试_聚合函数_SUM_MIN_MAX() {
     let path = tmp_db("agg_sum_min_max");
     let db = build_test_db(&path);

@@ -23,6 +23,50 @@ fn cleanup(path: &str) {
 // ════════════════════════════════════════════════════════════════
 
 #[test]
+fn 超限编码在单条和批量首帧前拒绝且仍可写入恢复() {
+    struct EncodedBlock;
+    impl serde::Serialize for EncodedBlock {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            // 重用静态数据，只计算编码长度，避免构建整个 256 MiB 帧。
+            static BLOCK: [u8; 1024 * 1024] = [0; 1024 * 1024];
+            serializer.serialize_bytes(&BLOCK)
+        }
+    }
+
+    let path = tmp_db("oversized_encoded_frame");
+    cleanup(&path);
+    {
+        let mut wal = Wal::open(&path).unwrap();
+        let first = WalEntry::<EncodedBlock>::Delete { id: 7 };
+        wal.append(&first).unwrap();
+        let wal_path = format!("{path}.wal");
+        let before = std::fs::read(&wal_path).unwrap();
+        let oversized = WalEntry::UpdateVector {
+            id: 7,
+            vector: (0..256).map(|_| EncodedBlock).collect(),
+        };
+        assert!(matches!(
+            wal.append(&oversized),
+            Err(triviumdb::TriviumError::InvalidInput(_))
+        ));
+        assert_eq!(std::fs::read(&wal_path).unwrap(), before);
+        assert!(matches!(
+            wal.append_batch(1, &[WalEntry::Delete { id: 9 }, oversized]),
+            Err(triviumdb::TriviumError::InvalidInput(_))
+        ));
+        assert_eq!(std::fs::read(&wal_path).unwrap(), before);
+        wal.append_batch(2, &[WalEntry::<u8>::Delete { id: 11 }])
+            .unwrap();
+    }
+    let (entries, _) = Wal::read_entries::<u8>(&path).unwrap();
+    assert!(matches!(
+        entries.as_slice(),
+        [WalEntry::Delete { id: 7 }, WalEntry::Delete { id: 11 }]
+    ));
+    cleanup(&path);
+}
+
+#[test]
 fn wal_append_和_read_entries_往返() {
     let path = tmp_db("roundtrip");
     cleanup(&path);

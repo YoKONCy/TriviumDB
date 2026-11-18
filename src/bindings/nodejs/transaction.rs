@@ -1,11 +1,51 @@
 //! 事务构建、提交及事务对象的语言生命周期。
 
-use super::arguments::{node_id_to_js, parse_safe_usize, validate_u64_component};
+use super::arguments::{
+    argument_object, node_id_to_js, parse_safe_usize, read_array, validate_u64_component,
+};
 use super::database::{DbBackend, TriviumDB};
 use super::errors::{argument_input_error, to_napi_error, with_napi_write_info};
-use super::json::NodeJson;
-use napi::{Env, JsUnknown};
+use super::json::{NodeJson, enumerable_own_keys, string_from_js};
+use napi::{Env, JsUnknown, ValueType};
 use napi_derive::napi;
+
+fn transaction_arguments(env: Env, operations: JsUnknown) -> napi::Result<Vec<serde_json::Value>> {
+    read_array(env, operations, "operations", |env, item, path| {
+        let operation = argument_object(env, item, path, None)?;
+        let keys = enumerable_own_keys(&operation)?;
+        let mut fields = serde_json::Map::new();
+        for index in 0..keys.get_array_length()? {
+            let key: JsUnknown = keys.get_element(index)?;
+            if key.get_type()? == ValueType::Symbol {
+                continue;
+            }
+            let key = string_from_js(key)?;
+            let field = crate::sdk::field_member(path, &key);
+            let value: JsUnknown = operation.get_property(env.create_string(&key)?)?;
+            let value = match key.as_str() {
+                "id" | "src" | "dst" | "weight" => transaction_number(env, value, &field)?,
+                "vector" => {
+                    serde_json::Value::Array(read_array(env, value, &field, transaction_number)?)
+                }
+                _ => NodeJson::from_js_field(env, value, &field, None)?.0,
+            };
+            fields.insert(key, value);
+        }
+        Ok(serde_json::Value::Object(fields))
+    })
+}
+
+fn transaction_number(env: Env, value: JsUnknown, field: &str) -> napi::Result<serde_json::Value> {
+    if value.get_type()? != ValueType::Number {
+        return Err(argument_input_error(
+            env,
+            field,
+            "事务参数必须是数字 (Transaction argument must be a number)",
+            None,
+        ));
+    }
+    NodeJson::from_js_field(env, value, field, None).map(|value| value.0)
+}
 
 fn build_transaction<T: crate::VectorType>(
     env: Env,
@@ -73,7 +113,10 @@ fn build_transaction<T: crate::VectorType>(
             "delete" => tx.delete(id("id")?),
             "updatePayload" => tx.update_payload(
                 id("id")?,
-                operation.get("payload").cloned().unwrap_or_default(),
+                operation
+                    .get("payload")
+                    .cloned()
+                    .ok_or_else(|| invalid("payload"))?,
             ),
             "updateVector" => tx.update_vector(id("id")?, &vector()?),
             "upsertEdge" | "link" => tx.upsert_edge(
@@ -123,19 +166,6 @@ impl TriviumDB {
                 error.with_write_info(crate::error::WriteErrorInfo::TRANSACTION_ADMISSION),
             )
         })?;
-        let write = crate::error::WriteErrorInfo {
-            phase: crate::error::WritePhase::Validation,
-            ..crate::error::WriteErrorInfo::TRANSACTION_ADMISSION
-        };
-        let operations = NodeJson::from_js_field(env, operations, "operations", Some(write))?.0;
-        let operations = operations.as_array().ok_or_else(|| {
-            argument_input_error(
-                env,
-                "operations",
-                "事务操作必须是数组 (Transaction operations must be an array)",
-                Some(write),
-            )
-        })?;
         let validation = |error| {
             with_napi_write_info(
                 env,
@@ -146,19 +176,20 @@ impl TriviumDB {
                 },
             )
         };
-        self.check_transaction_ids(env, operations)
+        let operations = transaction_arguments(env, operations).map_err(validation)?;
+        self.check_transaction_ids(env, &operations)
             .map_err(validation)?;
         let ids = match &mut self.inner {
             DbBackend::F32(db) => db.commit_tx(
-                build_transaction(env, operations, |value, _| Ok(value as f32))
+                build_transaction(env, &operations, |value, _| Ok(value as f32))
                     .map_err(validation)?,
             ),
             DbBackend::F16(db) => db.commit_tx(
-                build_transaction(env, operations, |value, _| Ok(half::f16::from_f64(value)))
+                build_transaction(env, &operations, |value, _| Ok(half::f16::from_f64(value)))
                     .map_err(validation)?,
             ),
             DbBackend::U64(db) => db.commit_tx(
-                build_transaction(env, operations, |value, field| {
+                build_transaction(env, &operations, |value, field| {
                     validate_u64_component(value)
                         .map_err(|error| to_napi_error(env, error.at_field(field)))
                 })

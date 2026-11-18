@@ -6,7 +6,28 @@ const path = require('node:path')
 const fixture = require('../contracts/search_filter_cases.json')
 const entries = require('../contracts/search_entry_cases.json')
 
+function verifyHybridWeights(root, TriviumDB) {
+  const db = new TriviumDB(path.join(root, 'hybrid-weights.tdb'), { dim: 2, autoBuildQuiver: false })
+  try {
+    db.insertWithId(1, [1, 0], { name: 'z' })
+    db.insertWithId(2, [0.8, 0.6], { name: 'a' })
+    db.indexText(2, 'rareword')
+    db.buildTextIndex()
+    const hybrid = alpha => db.searchHybrid([1, 0], 'rareword', 2, 0, 0, alpha, undefined, true)
+    assert.deepEqual(hybrid(1), db.searchExact([1, 0], 2))
+    assert.deepEqual(hybrid(0).map(hit => hit.id), [2])
+    assert.deepEqual(hybrid(0.2).map(hit => hit.id), [2, 1])
+    for (const alpha of [-1, 2, 1.00000001, NaN, Infinity]) {
+      assert.throws(() => hybrid(alpha), error => error.code === 'TDB_INVALID_INPUT')
+    }
+    assert.equal(db.tql('FIND {name: {$exists: true}} RETURN name ORDER BY name LIMIT 1')[0].name, 'a')
+  } finally {
+    db.close()
+  }
+}
+
 async function verifySearchEntries(root, TriviumDB) {
+  verifyHybridWeights(root, TriviumDB)
   const query = entries.query
   const records = new Map(entries.records.map(record => [record.id, record]))
   function verify(hits, item) {

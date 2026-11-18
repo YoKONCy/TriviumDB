@@ -159,6 +159,18 @@ pub(super) fn float_value(
     field: &str,
     write: Option<crate::error::WriteErrorInfo>,
 ) -> PyResult<f32> {
+    number_value(value, field, write)
+}
+
+pub(super) fn read_double(value: &Bound<'_, PyAny>, field: &str) -> PyResult<f64> {
+    number_value(value, field, None)
+}
+
+fn number_value<'py, T: FromPyObject<'py>>(
+    value: &Bound<'py, PyAny>,
+    field: &str,
+    write: Option<crate::error::WriteErrorInfo>,
+) -> PyResult<T> {
     let numeric = numeric_protocol(value, pyo3::ffi::Py_nb_index)
         || numeric_protocol(value, pyo3::ffi::Py_nb_float);
     if !numeric {

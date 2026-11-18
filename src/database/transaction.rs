@@ -1200,8 +1200,8 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         }
         {
             let mut w = lock_or_recover(&self.wal);
+            w.validate_batch(&wal_entries)?;
             let tx_id = next_transaction_id(&NEXT_TX_ID)?;
-            w.ensure_writable()?;
             if let Some(receipt) = &receipt {
                 mt.ensure_additional_memory(
                     self.memory_limit,
@@ -1219,7 +1219,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             }
             write.phase = crate::error::WritePhase::Wal;
             write.outcome = crate::error::WriteOutcome::Unknown;
-            w.append_batch(tx_id, &wal_entries)?;
+            w.append_validated_batch(tx_id, &wal_entries)?;
         }
         write.phase = crate::error::WritePhase::Apply;
         #[cfg(feature = "test-hooks")]

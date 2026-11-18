@@ -530,7 +530,7 @@ export interface SnapshotManifest {
   dim: number;
   node_count: number;
   complete: boolean;
-  files: Array<{ suffix: string; size: number; crc32: number }>;
+  files: Array<{ suffix: string; size: number; crc32: number; sha256?: string }>;
 }
 
 export function verifySnapshot(directory: string, runtime?: ResourceRuntime | null): SnapshotManifest;
@@ -620,7 +620,7 @@ export class TriviumDB {
     dtype: string;
     dim: number;
     nodeCount: number;
-    files: Array<{ suffix: string; size: number; crc32: number }>;
+    files: Array<{ suffix: string; size: number; crc32: number; sha256?: string }>;
     complete: boolean;
   };
 
@@ -687,7 +687,10 @@ export class TriviumDB {
   /** 使用自定义 ID 插入或原子覆盖节点 */
   upsertWithId(id: number, vector: Vector, payload: any): void;
 
-  /** 原子提交一组异构写操作，返回事务内插入节点的 ID */
+  /**
+   * 原子提交一组异构写操作，返回事务内插入节点的 ID。
+   * 节点 ID、向量分量和边权使用 number，updatePayload 显式提供 payload。
+   */
   commitTransaction(operations: TransactionOperation[]): number[];
 
   /** 返回图节点、边、孤立节点及标签统计 */
@@ -731,20 +734,20 @@ export class TriviumDB {
   /**
    * 整体替换节点的 payload（不影响向量与图谱关系）
    * @param id 节点 ID
-   * @param payload 新 payload
+   * @param payload 新 Payload。对象仅保存自有、可枚举的字符串键。
+   * 支持 i64::MIN 至 u64::MAX 范围内的 bigint，保存为精确 JSON 整数。
    */
   updatePayload(id: number, payload: any): void;
 
   /**
    * 部分更新节点 Payload（$set / $inc / $unset）
    *
-   * 只修改指定字段，其他字段保持不变。
+   * 顶层操作符和操作数全部通过校验后，一次提交整份补丁。
    *
    * ```js
    * db.patchPayload(id, { $set: { name: "Alice" } })
    * db.patchPayload(id, { $inc: { visits: 1 } })
    * db.patchPayload(id, { $unset: { oldField: true } })
-   * db.patchPayload(id, { name: "Bob" })  // 简写，等价于 $set
    * ```
    */
   patchPayload(id: number, patch: any): void;
@@ -874,7 +877,7 @@ export class TriviumDB {
    * @param topK        结果数
    * @param expandDepth 扩散深度
    * @param minScore    最小分数
-   * @param hybridAlpha 混合权重 (0.0~1.0)，越大向量占比越高。默认 0.7
+   * @param hybridAlpha 向量排名权重 [0, 1]，文本排名权重为 1 - hybridAlpha。默认 0.7
    */
   searchHybrid(queryVector: Vector, queryText: string, topK?: number | null, expandDepth?: number | null, minScore?: number | null, hybridAlpha?: number | null, payloadFilter?: Record<string, unknown> | null, exact?: boolean | null): JsSearchHit[];
 

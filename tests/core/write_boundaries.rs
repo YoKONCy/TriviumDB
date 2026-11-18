@@ -6,6 +6,33 @@ use triviumdb::database::{Config, StorageMode, TxBuilder};
 use triviumdb::{Database, TriviumError, VectorType};
 
 #[test]
+fn 未知操作符使混合补丁整体拒绝并保留持久数据() {
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let root = support::TestDir::new("unknown_patch_operator");
+        let path = root.file("db.tdb");
+        let cfg = config(mode, 0);
+        let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+        let original = json!({"count":10});
+        db.insert_with_id(1, &[1., 0.], original.clone()).unwrap();
+        let before = std::fs::read(format!("{path}.wal")).unwrap();
+        let error = db
+            .patch_payload(1, json!({"$set":{"changed":true},"$incc":{"count":1}}))
+            .unwrap_err();
+        assert_eq!(error.code(), "TDB_INVALID_INPUT");
+        assert_eq!(
+            serde_json::to_value(error.info()).unwrap()["target"],
+            json!({"field":"patch.$incc"})
+        );
+        assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), before);
+        assert_eq!(db.get_payload(1).unwrap(), Some(original.clone()));
+        db.close().unwrap();
+        let mut reopened = Database::<f32>::open_with_config(&path, cfg).unwrap();
+        assert_eq!(reopened.get_payload(1).unwrap(), Some(original));
+        reopened.close().unwrap();
+    }
+}
+
+#[test]
 fn 补丁操作数类型错误在写入前整体拒绝() {
     let root = support::TestDir::new("patch_operands");
     let fixture: Value =

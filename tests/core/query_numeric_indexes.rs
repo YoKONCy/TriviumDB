@@ -16,6 +16,54 @@ fn config(mode: StorageMode) -> Config {
         ..Default::default()
     }
 }
+
+#[test]
+fn 旧构建写出的相邻浮点唯一键可重开并按原位模式条件更新() {
+    let root = TestDir::new("exact_cold_json_float");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/float_payload_5046750");
+    let keys = [0.9837942006357281f64, 0.983794200635728f64];
+    for (name, mode) in [("rom", StorageMode::Rom), ("mmap", StorageMode::Mmap)] {
+        let directory = root.0.join(name);
+        std::fs::create_dir(&directory).unwrap();
+        for item in std::fs::read_dir(fixture.join(name)).unwrap() {
+            let entry = item.unwrap();
+            std::fs::copy(entry.path(), directory.join(entry.file_name())).unwrap();
+        }
+        let path = directory.join("sample.tdb");
+        let path = path.to_str().unwrap();
+        let cfg = config(mode);
+        let mut db = Database::<f32>::open_with_config(path, cfg).unwrap();
+        for (index, key) in keys.into_iter().enumerate() {
+            let id = index as u64 + 1;
+            assert_eq!(
+                db.get_payload(id).unwrap().unwrap()["key"]
+                    .as_f64()
+                    .unwrap()
+                    .to_bits(),
+                key.to_bits()
+            );
+            assert_eq!(
+                db.indexed_lookup(&[("key".into(), json!(key))], 10)
+                    .unwrap(),
+                [id]
+            );
+        }
+        db.compare_and_set_payload_field(1, "key", &json!(keys[0]), json!(0.5))
+            .unwrap();
+        db.close().unwrap();
+        let mut db = Database::<f32>::open_with_config(path, cfg).unwrap();
+        assert_eq!(db.get_payload(1).unwrap(), Some(json!({"key":0.5})));
+        assert_eq!(
+            db.get_payload(2).unwrap().unwrap()["key"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            keys[1].to_bits()
+        );
+        db.close().unwrap();
+    }
+}
 fn scalar(value: &TqlValue<f32>) -> Value {
     match value {
         TqlValue::Int(value) => json!(value),

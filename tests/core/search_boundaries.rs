@@ -713,3 +713,32 @@ fn 管线字段排序和标量别名保留u64精度() {
     }
     db.close().unwrap();
 }
+
+#[test]
+fn 加权混合检索端点与原始向量排序和文本匹配一致() {
+    let dir = super::support::TestDir::new("weighted-hybrid");
+    let mut db = triviumdb::Database::<f32>::open(&dir.file("data.tdb"), 2).unwrap();
+    db.insert_with_id(1, &[1., 0.], serde_json::json!({}))
+        .unwrap();
+    db.insert_with_id(2, &[0.8, 0.6], serde_json::json!({}))
+        .unwrap();
+    db.index_text(2, "rareword").unwrap();
+    db.build_text_index().unwrap();
+    let config = triviumdb::database::SearchConfig {
+        top_k: 2,
+        expand_depth: 0,
+        force_brute_force: true,
+        ..Default::default()
+    };
+    let run = |alpha| db.search_hybrid_weighted("rareword", &[1., 0.], &config, alpha);
+    let pure = run(1.).unwrap();
+    assert_eq!(pure.iter().map(|hit| hit.id).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(pure[0].score, 1.);
+    let text = run(0.).unwrap();
+    assert_eq!(text.iter().map(|hit| hit.id).collect::<Vec<_>>(), [2]);
+    let fused = run(0.2).unwrap();
+    assert_eq!(fused.iter().map(|hit| hit.id).collect::<Vec<_>>(), [2, 1]);
+    for invalid in [-1., 1.00000001, 2., f64::NAN, f64::INFINITY] {
+        assert_eq!(run(invalid).unwrap_err().code(), "TDB_INVALID_INPUT");
+    }
+}

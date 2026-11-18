@@ -1,7 +1,5 @@
 //! `info` 子命令：显示数据库元信息（文件头 + 实时统计）。
 
-use std::path::Path;
-
 use serde_json::json;
 use tabled::builder::Builder;
 use tabled::settings::Style;
@@ -13,7 +11,7 @@ use crate::util::{file_size, human_bytes_opt};
 
 /// 非交互入口：打开数据库后展示元信息。
 pub fn run(path: &str, dim: Option<usize>, dtype: DType, format: OutputFormat) -> CliResult {
-    let handle = DbHandle::open_auto(path, dim, dtype)?;
+    let handle = DbHandle::open_read_only(path, dim, dtype)?;
     print_info(&handle, path, format)
 }
 
@@ -26,10 +24,9 @@ pub fn print_info(handle: &DbHandle, path: &str, format: OutputFormat) -> CliRes
     let tdb_size = file_size(path);
     let vec_path = format!("{path}.vec");
     let wal_path = format!("{path}.wal");
-    let quiver_path = format!("{path}.quiver");
     let vec_size = file_size(&vec_path);
     let wal_size = file_size(&wal_path);
-    let quiver_exists = Path::new(&quiver_path).exists();
+    let quiver_exists = handle.has_persisted_quiver()?;
 
     let node_count = handle.node_count()?;
     let actual_dim = handle.dim();

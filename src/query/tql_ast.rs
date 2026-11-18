@@ -117,6 +117,25 @@ pub enum PipelineStage {
 }
 
 impl PipelineStage {
+    pub(crate) fn node_output(&self) -> Option<&str> {
+        match self {
+            Self::Expand(stage) => Some(&stage.output),
+            Self::Diversify(stage) => Some(&stage.output),
+            Self::Residual(stage) => Some(&stage.output),
+            Self::Topics(stage) => Some(&stage.output),
+            Self::SaPpr(stage) => Some(&stage.output),
+            Self::GraphAlgorithm(stage) => Some(&stage.output),
+            Self::AllPaths(stage) => Some(&stage.output),
+            Self::ShortestPaths(stage) => Some(&stage.output),
+            Self::WeightedPaths(stage) => Some(&stage.output),
+            Self::YenPaths(stage) => Some(&stage.output),
+            Self::NodeSimilarity(stage) => Some(&stage.output),
+            Self::SetCombine(stage) => Some(&stage.output),
+            Self::Iterate(stage) => Some(&stage.output),
+            Self::With(_) | Self::Filter(_) | Self::Rank(_) => None,
+        }
+    }
+
     pub(crate) fn node_input(&self) -> Option<&str> {
         match self {
             Self::Expand(stage) => Some(&stage.input),

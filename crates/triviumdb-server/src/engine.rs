@@ -8,7 +8,7 @@ use crate::protocol::{
 };
 use axum::http::StatusCode;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
@@ -23,10 +23,18 @@ use triviumdb::{
     graph::reachability::{ReachabilityConfig, ReachabilityOutput, SubgraphEdge, SubgraphResult},
     node::{NodeView, SearchHit},
     query::{tql_executor::QueryControl, tql_prepared::PreparedTql},
+    sdk::RequestContext,
 };
 use uuid::Uuid;
 
 pub type QueryRows = triviumdb::query::tql_executor::TqlValueResult<f32>;
+
+pub struct QueryResult {
+    pub rows: QueryRows,
+    pub version: VersionSnapshot,
+    pub columns: Vec<String>,
+    pub index_fields: Vec<String>,
+}
 
 #[derive(Debug)]
 pub struct EngineConfig {
@@ -52,20 +60,20 @@ const UNRECORDED_NANOS: u64 = u64::MAX;
 
 #[derive(Debug)]
 pub struct RequestTelemetry {
+    request_id: String,
     queue_wait_nanos: AtomicU64,
     execution_nanos: AtomicU64,
 }
 
-impl Default for RequestTelemetry {
-    fn default() -> Self {
+impl RequestTelemetry {
+    pub fn new(request_id: String) -> Self {
         Self {
+            request_id,
             queue_wait_nanos: AtomicU64::new(UNRECORDED_NANOS),
             execution_nanos: AtomicU64::new(UNRECORDED_NANOS),
         }
     }
-}
 
-impl RequestTelemetry {
     fn record_queue_wait(&self, duration: Duration) {
         self.queue_wait_nanos.store(
             u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX - 1),
@@ -350,6 +358,7 @@ enum StoredWriteResult {
 
 struct WriteCommand {
     deadline: Instant,
+    control: QueryControl,
     enqueued_at: Instant,
     telemetry: Option<Arc<RequestTelemetry>>,
     idempotency_key: Option<String>,
@@ -499,37 +508,67 @@ impl EngineHandle {
         }
     }
 
-    pub async fn query(
-        &self,
-        query: String,
-        deadline: Instant,
-    ) -> Result<(QueryRows, VersionSnapshot), ApiError> {
+    pub async fn query(&self, query: String, deadline: Instant) -> Result<QueryResult, ApiError> {
         let versions = self.inner.versions.clone();
         let control = QueryControl::with_deadline(deadline);
         self.run_read(deadline, control.clone(), move |database| {
             let rows = database
-                .tql_with_control(&query, control)
+                .tql_with_control(&query, control.clone())
                 .map_err(ApiError::from)?;
-            let version = lock_or_recover(&versions).snapshot();
-            Ok((rows, version))
+            let columns = if rows.is_empty() {
+                triviumdb::query::tql_parser::parse_tql_diagnostic(&query)
+                    .map(|parsed| triviumdb::query::tql_executor::result_columns(&parsed))
+                    .map_err(ApiError::from)?
+            } else {
+                Vec::new()
+            };
+            let index_fields = database
+                .index_info()
+                .map_err(ApiError::from)?
+                .into_iter()
+                .flat_map(|index| index.fields)
+                .collect();
+            control.check().map_err(ApiError::from)?;
+            Ok(QueryResult {
+                rows,
+                columns,
+                index_fields,
+                version: lock_or_recover(&versions).snapshot(),
+            })
         })
         .await
     }
 
-    pub fn prepare(&self, query: &str) -> Result<(String, Vec<String>), ApiError> {
-        let _operation = self.inner.enter_operation()?;
-        let prepared = {
-            let database = read_or_recover(&self.inner.database);
-            database.prepare_tql(query).map_err(ApiError::from)?
-        };
-        let parameters = prepared
-            .parameter_names()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        let id = Uuid::new_v4().simple().to_string();
-        lock_or_recover(&self.inner.prepared).insert(id.clone(), prepared);
-        Ok((id, parameters))
+    pub async fn prepare(
+        &self,
+        query: String,
+        deadline: Instant,
+    ) -> Result<(String, Vec<String>), ApiError> {
+        let inner = self.inner.clone();
+        if lock_or_recover(&inner.prepared).capacity == 0 {
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "TDB_PREPARED_DISABLED",
+                "Prepared 查询已禁用 (Prepared queries are disabled)",
+                "服务端的 Prepared 缓存容量为零 (Server prepared cache capacity is zero)",
+                false,
+            ));
+        }
+        let control = QueryControl::with_deadline(deadline);
+        self.run_read(deadline, control.clone(), move |database| {
+            let prepared = database.prepare_tql(&query).map_err(ApiError::from)?;
+            let parameters = prepared
+                .parameter_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let id = Uuid::new_v4().simple().to_string();
+            let mut cache = lock_or_recover(&inner.prepared);
+            control.check().map_err(ApiError::from)?;
+            cache.insert(id.clone(), prepared);
+            Ok((id, parameters))
+        })
+        .await
     }
 
     pub async fn execute_prepared(
@@ -537,7 +576,7 @@ impl EngineHandle {
         id: &str,
         parameters: serde_json::Map<String, serde_json::Value>,
         deadline: Instant,
-    ) -> Result<(QueryRows, VersionSnapshot), ApiError> {
+    ) -> Result<QueryResult, ApiError> {
         let prepared = lock_or_recover(&self.inner.prepared)
             .get(id)
             .ok_or_else(|| {
@@ -564,7 +603,16 @@ impl EngineHandle {
             let rows = database
                 .execute_prepared_tql_with_control(&prepared, &parameters, control)
                 .map_err(ApiError::from)?;
-            Ok((rows, lock_or_recover(&versions).snapshot()))
+            Ok(QueryResult {
+                columns: if rows.is_empty() {
+                    prepared.result_columns()
+                } else {
+                    Vec::new()
+                },
+                rows,
+                index_fields: Vec::new(),
+                version: lock_or_recover(&versions).snapshot(),
+            })
         })
         .await
     }
@@ -586,17 +634,6 @@ impl EngineHandle {
             Ok((hits, lock_or_recover(&versions).snapshot()))
         })
         .await
-    }
-
-    pub fn index_fields(&self) -> Result<Vec<String>, ApiError> {
-        let _operation = self.inner.enter_operation()?;
-        let database = read_or_recover(&self.inner.database);
-        Ok(database
-            .index_info()
-            .map_err(ApiError::from)?
-            .into_iter()
-            .flat_map(|index| index.fields)
-            .collect())
     }
 
     pub async fn indexed_lookup(
@@ -1074,6 +1111,7 @@ impl EngineHandle {
         }
         let database = self.inner.database.clone();
         let mut cancel_guard = QueryCancelGuard::new(control.clone());
+        let task_control = control.clone();
         let task_telemetry = telemetry;
         let metrics = &self.inner.metrics;
         metrics.active_blocking_tasks.fetch_add(1, Ordering::AcqRel);
@@ -1088,7 +1126,16 @@ impl EngineHandle {
             let guard = read_or_recover(&database);
             let execution_started = Instant::now();
             let result = match operation.take() {
-                Some(operation) => operation(&guard),
+                Some(operation) => RequestContext::new(
+                    task_telemetry
+                        .as_ref()
+                        .map_or("server-read", |telemetry| telemetry.request_id.as_str()),
+                    task_control,
+                    false,
+                )
+                .and_then(|context| context.run(|| Ok(operation(&guard))))
+                .map_err(ApiError::from)
+                .and_then(|result| result),
                 None => Err(ApiError::internal(
                     "读取操作状态无效 (Read operation state is invalid)",
                 )),
@@ -1135,8 +1182,11 @@ impl EngineHandle {
             .fetch_add(1, Ordering::AcqRel);
         let telemetry = current_telemetry();
         let enqueued_at = Instant::now();
+        let control = QueryControl::with_deadline(deadline);
+        let _cancel_on_drop = QueryCancelGuard::new(control.clone());
         match self.writes.try_send(WriteCommand {
             deadline,
+            control,
             enqueued_at,
             telemetry,
             idempotency_key,
@@ -1462,7 +1512,17 @@ async fn process_write_batch(inner: &Arc<EngineInner>, mut batch: Vec<WriteComma
                     } else if let Some(result) = lookup_idempotent_locked(&versions, &command) {
                         result
                     } else {
-                        let result = execute_write(database, &mut versions, command.operation);
+                        let request_id = command
+                            .telemetry
+                            .as_ref()
+                            .map_or("server-write", |telemetry| telemetry.request_id.as_str());
+                        let result = execute_write(
+                            database,
+                            &mut versions,
+                            command.operation,
+                            command.control,
+                            request_id,
+                        );
                         if let (Ok(result), Some(key)) = (&result, command.idempotency_key) {
                             versions
                                 .idempotency
@@ -1549,6 +1609,8 @@ fn execute_write(
     database: &mut Database<f32>,
     versions: &mut VersionState,
     operation: WriteOperation,
+    control: QueryControl,
+    request_id: &str,
 ) -> Result<StoredWriteResult, ApiError> {
     match operation {
         WriteOperation::Tql {
@@ -1556,13 +1618,12 @@ fn execute_write(
             expected_generation,
         } => {
             validate_global_precondition(versions, expected_generation.as_deref())?;
-            let mutation = database.tql_mut(&query).map_err(ApiError::from)?;
+            let mutation = RequestContext::new(request_id, control, true)
+                .and_then(|context| context.run(|| database.tql_mut(&query)))
+                .map_err(ApiError::from)?;
             versions.generation = versions.generation.saturating_add(1);
             // TQL 暂不返回完整 write-set，因此保守失效此前签发的全部细粒度 ETag。
-            versions.fine_grained_generation = versions.generation;
-            for id in &mutation.created_ids {
-                versions.node_versions.insert(*id, versions.generation);
-            }
+            versions.invalidate_entity_versions();
             Ok(StoredWriteResult::Mutation(WriteResult {
                 mutation: mutation.into(),
                 version: versions.snapshot(),
@@ -1598,18 +1659,7 @@ fn execute_write(
                 .delete_many_atomic(&request.ids)
                 .map_err(ApiError::from)?;
             versions.generation = versions.generation.saturating_add(1);
-            for id in request.ids {
-                versions.node_versions.insert(id, versions.generation);
-            }
-            for edge in touched_edges {
-                versions
-                    .node_versions
-                    .insert(edge.source, versions.generation);
-                versions
-                    .node_versions
-                    .insert(edge.target, versions.generation);
-                versions.edge_versions.insert(edge, versions.generation);
-            }
+            versions.update_entities(database, request.ids, touched_edges)?;
             Ok(StoredWriteResult::Mutation(WriteResult {
                 mutation: MutationResponse {
                     affected,
@@ -1644,7 +1694,7 @@ fn execute_write(
             }))
         }
         WriteOperation::Transaction(request) => {
-            validate_transaction_preconditions(versions, &request)?;
+            validate_transaction_preconditions(database, versions, &request)?;
             // 在借用事务前读取实际边，覆盖已持久化且尚未登记进版本表的关联边。
             let mut touched_edges = Vec::new();
             for operation in &request.operations {
@@ -1720,16 +1770,8 @@ fn execute_write(
             }
             let created_ids = transaction.commit().map_err(ApiError::from)?;
             versions.generation = versions.generation.saturating_add(1);
-            let generation = versions.generation;
             touched_nodes.extend(created_ids.iter().copied());
-            for id in touched_nodes {
-                versions.node_versions.insert(id, generation);
-            }
-            for edge in touched_edges {
-                versions.node_versions.insert(edge.source, generation);
-                versions.node_versions.insert(edge.target, generation);
-                versions.edge_versions.insert(edge, generation);
-            }
+            versions.update_entities(database, touched_nodes, touched_edges)?;
             Ok(StoredWriteResult::Transaction(TransactionResult {
                 created_ids: created_ids.into_iter().map(|id| id.to_string()).collect(),
                 version: versions.snapshot(),
@@ -1815,6 +1857,7 @@ fn validate_global_precondition(
 }
 
 fn validate_transaction_preconditions(
+    database: &Database<f32>,
     versions: &VersionState,
     request: &TransactionRequest,
 ) -> Result<(), ApiError> {
@@ -1822,7 +1865,7 @@ fn validate_transaction_preconditions(
     for (id, expected) in &request.expected_nodes {
         let current = versions.node_versions.get(id).copied().unwrap_or(0);
         let current_etag = versions.snapshot().node_etag(*id, current);
-        if expected != &current_etag {
+        if expected != &current_etag || !database.contains(*id).map_err(ApiError::from)? {
             return Err(ApiError::write_conflict(format!(
                 "节点 {id} 版本不匹配：期望 {expected}，当前 {current_etag} (Node {id} version mismatch: expected {expected}, current {current_etag})"
             )));
@@ -1837,7 +1880,12 @@ fn validate_transaction_preconditions(
             &key,
             current,
         );
-        if expected.etag != current_etag {
+        if expected.etag != current_etag
+            || database
+                .get_edge(key.source, key.target, &key.label)
+                .map_err(ApiError::from)?
+                .is_none()
+        {
             return Err(ApiError::write_conflict(format!(
                 "边版本不匹配：期望 {}，当前 {} (Edge version mismatch: expected {}, current {})",
                 expected.etag, current_etag, expected.etag, current_etag
@@ -1889,6 +1937,55 @@ impl EngineMetricState {
 }
 
 impl VersionState {
+    fn invalidate_entity_versions(&mut self) {
+        self.fine_grained_generation = self.generation;
+        self.node_versions = HashMap::new();
+        self.edge_versions = HashMap::new();
+    }
+
+    fn update_entities(
+        &mut self,
+        database: &Database<f32>,
+        nodes: Vec<u64>,
+        edges: Vec<EdgeKey>,
+    ) -> Result<(), ApiError> {
+        let mut nodes: HashSet<_> = nodes.into_iter().collect();
+        let edges: HashSet<_> = edges.into_iter().collect();
+        let result = (|| -> triviumdb::Result<()> {
+            for edge in edges {
+                nodes.extend([edge.source, edge.target]);
+                if database
+                    .get_edge(edge.source, edge.target, &edge.label)?
+                    .is_some()
+                {
+                    self.edge_versions.insert(edge, self.generation);
+                } else {
+                    self.edge_versions.remove(&edge);
+                }
+            }
+            for id in nodes {
+                if database.contains(id)? {
+                    self.node_versions.insert(id, self.generation);
+                } else {
+                    self.node_versions.remove(&id);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.invalidate_entity_versions();
+            return Err(ApiError::from(triviumdb::TriviumError::WriteFailure {
+                source: Box::new(error),
+                write: triviumdb::error::WriteErrorInfo {
+                    phase: triviumdb::error::WritePhase::Response,
+                    outcome: triviumdb::error::WriteOutcome::Committed,
+                    transaction_consumed: None,
+                },
+            }));
+        }
+        Ok(())
+    }
+
     fn snapshot(&self) -> VersionSnapshot {
         VersionSnapshot {
             epoch: self.epoch.clone(),
@@ -2052,6 +2149,7 @@ mod tests {
             receivers.push(receiver);
             batch.push(WriteCommand {
                 deadline: Instant::now() + Duration::from_secs(30),
+                control: QueryControl::default(),
                 enqueued_at: Instant::now(),
                 telemetry: None,
                 idempotency_key: None,
@@ -2234,6 +2332,7 @@ mod tests {
             receivers.push(receiver);
             batch.push(WriteCommand {
                 deadline: Instant::now() + Duration::from_secs(30),
+                control: QueryControl::default(),
                 enqueued_at: Instant::now(),
                 telemetry: None,
                 idempotency_key: None,
@@ -2314,6 +2413,7 @@ mod tests {
         let (response, result) = oneshot::channel();
         let mut batch = vec![WriteCommand {
             deadline: Instant::now() + Duration::from_secs(30),
+            control: QueryControl::default(),
             enqueued_at: Instant::now(),
             telemetry: None,
             idempotency_key: None,
@@ -2387,7 +2487,15 @@ mod tests {
         reading.abort();
         assert!(reading.await.unwrap_err().is_cancelled());
         assert_eq!(engine.readiness().reason, "shutting_down");
-        assert!(engine.prepare("MATCH (n) RETURN n").is_err());
+        assert!(
+            engine
+                .prepare(
+                    "MATCH (n) RETURN n".into(),
+                    Instant::now() + Duration::from_secs(30)
+                )
+                .await
+                .is_err()
+        );
         assert!(
             engine
                 .mutate(
@@ -2502,7 +2610,7 @@ mod tests {
             Database::<f32>::open(&path.to_string_lossy(), 2),
             Err(triviumdb::TriviumError::DatabaseLocked(_))
         ));
-        assert!(engine.index_fields().is_err());
+        assert!(engine.index_info().is_err());
         std::fs::remove_dir(&obstructed).unwrap();
         engine.shutdown().await.unwrap();
         let mut reopened = Database::<f32>::open(&path.to_string_lossy(), 2).unwrap();
@@ -2754,9 +2862,9 @@ mod tests {
         });
         drop(held);
         writer.await.unwrap().unwrap();
-        let (rows, _) = late_read.await.unwrap().unwrap();
+        let result = late_read.await.unwrap().unwrap();
         assert!(matches!(
-            rows[0].get("total"),
+            result.rows[0].get("total"),
             Some(triviumdb::query::tql_executor::TqlValue::Int(1))
         ));
         assert_eq!(engine.metrics().waiting_reads, 0);
@@ -2869,7 +2977,7 @@ mod tests {
             serde_json::json!({"phase":"admission","outcome":"not_committed"})
         );
         assert_eq!(body["retryable"], false);
-        let (rows, _) = engine
+        let result = engine
             .query(
                 "MATCH (n) RETURN count(*) AS total".into(),
                 Instant::now() + std::time::Duration::from_secs(2),
@@ -2877,7 +2985,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            rows[0].get("total"),
+            result.rows[0].get("total"),
             Some(triviumdb::query::tql_executor::TqlValue::Int(0))
         ));
     }
@@ -2903,6 +3011,7 @@ mod tests {
                 .writes
                 .try_send(WriteCommand {
                     deadline: Instant::now() + Duration::from_secs(30),
+                    control: QueryControl::default(),
                     enqueued_at: Instant::now(),
                     telemetry: None,
                     idempotency_key: None,

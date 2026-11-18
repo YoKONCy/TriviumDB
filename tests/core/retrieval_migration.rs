@@ -385,3 +385,124 @@ fn 新库迁移完整保存payload边元数据并可再次打开() {
     );
     source.close().unwrap();
 }
+
+#[test]
+fn 维度迁移及再次打开保留单字段和组合唯一约束() {
+    let root = TestDir::new("migration_unique");
+    let mut source = Database::<f32>::open(&root.file("source.tdb"), 1).unwrap();
+    source
+        .insert_with_id(1, &[1.], json!({"email":"one", "tenant":"t", "key":"k"}))
+        .unwrap();
+    source.create_unique_index("email").unwrap();
+    source
+        .create_unique_composite_index(&["tenant".into(), "key".into()])
+        .unwrap();
+
+    let path = root.file("target.tdb");
+    let (mut target, ids) = source.migrate_to(&path, 2).unwrap();
+    assert_eq!(ids, [1]);
+    let check = |db: &mut Database<f32>| {
+        assert_eq!(
+            db.list_unique_indexes().unwrap(),
+            [
+                vec!["email".to_owned()],
+                vec!["tenant".into(), "key".into()],
+            ]
+        );
+        for payload in [
+            json!({"email":"one", "tenant":"other", "key":"k"}),
+            json!({"email":"two", "tenant":"t", "key":"k"}),
+        ] {
+            let error = db.insert_with_id(2, &[0., 1.], payload).unwrap_err();
+            assert_eq!(error.code(), "TDB_UNIQUE_CONSTRAINT");
+        }
+        assert_eq!(db.all_node_ids().unwrap(), [1]);
+    };
+    check(&mut target);
+    target.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, 2).unwrap();
+    check(&mut reopened);
+    reopened
+        .insert_with_id(
+            3,
+            &[0., 1.],
+            json!({"email":"three", "tenant":"t", "key":"new"}),
+        )
+        .unwrap();
+    reopened.close().unwrap();
+    source.close().unwrap();
+}
+
+#[test]
+fn 维度迁移保留已加载和延迟加载的正文关键词及属性索引() {
+    use triviumdb::query::tql_executor::TqlValue;
+
+    let root = TestDir::new("migration_text_and_indexes");
+    let source_path = root.file("source.tdb");
+    let config = Config {
+        dim: 2,
+        load_text_index: true,
+        ..Default::default()
+    };
+    let mut source = Database::<f32>::open_with_config(&source_path, config).unwrap();
+    source
+        .insert_with_id(
+            1,
+            &[1., 0.],
+            json!({"name":"sample", "serial":"s1", "rank":3}),
+        )
+        .unwrap();
+    source.create_index("name").unwrap();
+    source.create_unique_index("serial").unwrap();
+    source.create_ordered_index("rank").unwrap();
+    source.index_text(1, "auditmanual").unwrap();
+    source.index_keyword(1, "auditkw").unwrap();
+    source.close().unwrap();
+
+    for load_text_index in [true, false] {
+        let mut source = Database::<f32>::open_with_config(
+            &source_path,
+            Config {
+                load_text_index,
+                ..config
+            },
+        )
+        .unwrap();
+        let target_path = root.file(&format!("target-{load_text_index}.tdb"));
+        let (mut target, ids) = source.migrate_to(&target_path, 3).unwrap();
+        assert_eq!(ids, [1]);
+        target.close().unwrap();
+        source.close().unwrap();
+
+        let mut target =
+            Database::<f32>::open_with_config(&target_path, Config { dim: 3, ..config }).unwrap();
+        assert_eq!(target.get(1).unwrap().unwrap().vector, [0., 0., 0.]);
+        assert_eq!(
+            target
+                .indexed_lookup(&[("name".into(), json!("sample"))], 5)
+                .unwrap(),
+            [1]
+        );
+        assert_eq!(
+            target.list_unique_indexes().unwrap(),
+            [vec!["serial".to_owned()]]
+        );
+        assert!(
+            target
+                .index_info()
+                .unwrap()
+                .iter()
+                .any(|index| index.fields == ["rank"]
+                    && index.kind == triviumdb::index::property::PropertyIndexKind::Ordered)
+        );
+        for query in [
+            "TEXT BM25 \"auditmanual\" TOP 5 AS h WITH h RETURN h.id AS id",
+            "TEXT AC \"auditkw\" TOP 5 AS h WITH h RETURN h.id AS id",
+        ] {
+            let rows = target.tql(query).unwrap();
+            assert_eq!(rows.len(), 1, "{query}");
+            assert!(matches!(rows[0]["id"], TqlValue::Int(1)));
+        }
+        target.close().unwrap();
+    }
+}

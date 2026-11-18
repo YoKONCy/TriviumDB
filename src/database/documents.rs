@@ -15,6 +15,31 @@ pub(super) fn stored_error(error: impl std::fmt::Display) -> TriviumError {
     ))
 }
 
+pub(super) fn validate_document_nodes<T: VectorType>(
+    mt: &MemTable<T>,
+    document: &DocumentWrite<T>,
+    snapshot: &DocumentSnapshot,
+    previous: &std::collections::HashSet<NodeId>,
+) -> Result<()> {
+    mt.validate_insert(&document.root.vector)
+        .map_err(|error| error.at_field("document.root.vector"))?;
+    for (index, block) in document.blocks.iter().enumerate() {
+        if let Some(node) = &block.node {
+            mt.validate_insert(&node.vector).map_err(|error| {
+                error.at_field(&format!("/document/blocks/{index}/node/vector"))
+            })?;
+        }
+    }
+    let mut ids = snapshot.node_ids()?.into_iter().collect::<Vec<_>>();
+    ids.sort_unstable();
+    for id in ids {
+        if mt.contains(id) && !previous.contains(&id) {
+            return Err(TriviumError::NodeAlreadyExists(id));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn read_snapshot<T: VectorType>(
     mt: &MemTable<T>,
     id: NodeId,
@@ -247,22 +272,7 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                 .transpose()?
                 .unwrap_or_default();
             let new_ids = snapshot.node_ids()?;
-            mt.validate_insert(&document.root.vector)
-                .map_err(|error| error.at_field("document.root.vector"))?;
-            for (index, block) in document.blocks.iter().enumerate() {
-                if let Some(node) = &block.node {
-                    mt.validate_insert(&node.vector).map_err(|error| {
-                        error.at_field(&format!("/document/blocks/{index}/node/vector"))
-                    })?;
-                }
-            }
-            let mut checked_ids = new_ids.iter().copied().collect::<Vec<_>>();
-            checked_ids.sort_unstable();
-            for id in &checked_ids {
-                if mt.contains(*id) && !old_ids.contains(id) {
-                    return Err(TriviumError::NodeAlreadyExists(*id));
-                }
-            }
+            validate_document_nodes(&mt, &document, &snapshot, &old_ids)?;
             let mut operations = Vec::new();
             if let Some(previous) = &previous {
                 for (src, dst, _) in previous.edges()? {

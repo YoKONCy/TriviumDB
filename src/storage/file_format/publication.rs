@@ -298,7 +298,7 @@ pub(crate) fn recover<T: VectorType>(path: &str, writable: bool) -> Result<bool>
             })?;
         }
         if writable {
-            validate_checkpoint_type::<T>(path, &vec_path_from_db(path), path)?;
+            validate_checkpoint_type::<T>(path, &vec_path_from_db(path))?;
             cleanup(path)?;
             if Path::new(&format!("{path}.idx")).exists() {
                 crate::storage::index_container::cleanup_components(path)?;
@@ -333,7 +333,7 @@ pub(crate) fn recover<T: VectorType>(path: &str, writable: bool) -> Result<bool>
         return Err(TriviumError::RecoveryRequired { wal_path: journal });
     }
     if files[0].is_some_and(|main| main.present) {
-        validate_checkpoint_type::<T>(&backup_path(path, 0), &backup_path(path, 1), path)?;
+        validate_checkpoint_type::<T>(&backup_path(path, 0), &backup_path(path, 1))?;
     }
     // 所有备份通过校验后才恢复正式文件；备份保留到恢复提交完成。
     for (index, saved) in files.iter().enumerate() {

@@ -14,6 +14,10 @@ def run_cognitive_boundaries(root: str) -> None:
             db.index_keyword(node_id, "alpha")
         weight = struct.unpack("f", struct.pack("f", 1e-40))[0]
         db.link(1, 2, "rel", weight)
+        assert db.get_edge(1, 2, "rel").weight == weight
+        assert [edge.weight for edge in db.get_edges(1)] == [weight]
+        assert [edge.weight for edge in db.get_incoming_edges(2)] == [weight]
+        assert [edge.weight for edge in db.get(1).edges] == [weight]
         prefix = "SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed"
         topics = [result.row for result in db.tql(f"{prefix} TOPICS seed K 2 ITERATIONS 8 AS ranked WITH ranked RETURN ranked.id AS id, topic(ranked) AS topic, topic_score(ranked) AS score ORDER BY id")]
         assert [row["id"] for row in topics] == [1, 2, 3]

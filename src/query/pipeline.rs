@@ -9,9 +9,8 @@ use crate::error::{Result, TriviumError};
 use crate::filter::Filter;
 use crate::graph::budget::{BudgetExhaustionPolicy, TraversalBudget};
 use crate::graph::reachability::{
-    ReachabilityConfig, ReachabilityDirection,
-    traverse_compact_parallel_view as traverse_compact_parallel,
-    traverse_compact_view as traverse_compact,
+    EdgeScanBudget, ReachabilityConfig, ReachabilityDirection,
+    traverse_compact_parallel_view as traverse_compact_parallel, traverse_compact_with_edge_budget,
 };
 use crate::graph::view::GraphRead;
 use crate::node::NodeId;
@@ -269,6 +268,8 @@ impl NodeSet {
         let document_ranked =
             !self.rows.is_empty() && self.rows.iter().all(|row| row.document_score.is_some());
         let ranked = !self.rows.is_empty() && self.rows.iter().all(|row| row.similarity.is_some());
+        let text_ranked =
+            !self.rows.is_empty() && self.rows.iter().all(|row| row.text_score.is_some());
         self.rows.sort_by(|left, right| {
             left.id
                 .cmp(&right.id)
@@ -312,6 +313,15 @@ impl NodeSet {
             });
         } else if ranked {
             self.rows.sort_by(compare_similarity);
+        } else if text_ranked {
+            self.rows.sort_by(|left, right| {
+                right
+                    .text_score
+                    .map_or(0.0, |score| score.value)
+                    .total_cmp(&left.text_score.map_or(0.0, |score| score.value))
+                    .then(left.id.cmp(&right.id))
+                    .then_with(|| compare_bindings(left, right))
+            });
         }
     }
 }
@@ -1606,8 +1616,16 @@ impl<T: VectorType> PipelineOperator<T> for Expand {
             exhaustion_policy: BudgetExhaustionPolicy::Error,
         };
         let request = context.graph_request()?;
+        let edge_budget = EdgeScanBudget::new(config.max_edges);
         let traverse_source = |&source_id: &NodeId| -> Result<ExpandSourceOutput> {
-            let reached = request.run(|| traverse_compact(&context.graph(), source_id, &config))?;
+            let reached = request.run(|| {
+                traverse_compact_with_edge_budget(
+                    &context.graph(),
+                    source_id,
+                    &config,
+                    &edge_budget,
+                )
+            })?;
             Ok(ExpandSourceOutput {
                 hits: reached
                     .results
@@ -1801,8 +1819,9 @@ impl<T: VectorType> PipelineOperator<T> for MultiAnchorExpand {
         let mut output = BTreeMap::<NodeId, NodeRow>::new();
         let mut visited_nodes = 0usize;
         let mut examined_edges = 0usize;
+        let edge_budget = EdgeScanBudget::new(context.budget.traversal.max_examined_edges);
         for source in input.rows {
-            let reached = traverse_compact(
+            let reached = traverse_compact_with_edge_budget(
                 &context.graph(),
                 source.id,
                 &ReachabilityConfig {
@@ -1816,6 +1835,7 @@ impl<T: VectorType> PipelineOperator<T> for MultiAnchorExpand {
                     max_frontier_size: context.budget.traversal.max_frontier_size,
                     exhaustion_policy: BudgetExhaustionPolicy::Error,
                 },
+                &edge_budget,
             )?;
             visited_nodes = visited_nodes.saturating_add(reached.visited_nodes);
             examined_edges = examined_edges.saturating_add(reached.traversed_edges);
@@ -1890,8 +1910,9 @@ impl<T: VectorType> PipelineOperator<T> for BatchShortestPaths {
         let mut output = BTreeMap::<NodeId, NodeRow>::new();
         let mut consumed_nodes = 0usize;
         let mut consumed_edges = 0usize;
+        let targets = unique_path_targets(&self.targets);
         for source in input.rows {
-            for &target in &self.targets {
+            for &target in &targets {
                 let result = crate::graph::pathfinding::shortest_path_bidirectional_view(
                     &context.graph(),
                     source.id,
@@ -1967,33 +1988,28 @@ impl<T: VectorType> PipelineOperator<T> for WeightedShortestPathsOperator {
             context.budget.traversal.max_examined_edges,
             context.budget.max_node_set_bytes,
         )?;
-        let request_count = input
-            .len()
-            .checked_mul(self.targets.len())
-            .ok_or_else(|| TriviumError::QueryExecution("加权最短路径请求数量溢出".into()))?;
-        let request_budget = context
-            .budget
-            .traversal
-            .max_examined_edges
-            .checked_div(request_count.max(1))
-            .unwrap_or(0);
+        let targets = unique_path_targets(&self.targets);
+        crate::graph::analytics::validate_weighted_graph(&workspace)?;
+        let mut work = 0;
         let mut rows = Vec::new();
         for source in input.rows {
-            for &target in &self.targets {
-                let Some(path) = crate::graph::analytics::weighted_dijkstra(
+            for &target in &targets {
+                let Some(path) = crate::graph::analytics::weighted_dijkstra_with_work(
                     &workspace,
                     source.id,
                     target,
-                    request_budget,
+                    &mut work,
+                    context.budget.traversal.max_examined_edges,
                 )?
                 else {
                     continue;
                 };
                 let mut row = NodeRow::new(target);
-                row.path = Some(path.nodes.clone());
+                row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+                row.path = Some(path.nodes);
                 row.path_count = Some(1);
                 row.provenance.source_ids = vec![source.id];
-                row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+
                 row.set_graph_metric(
                     GraphMetric::WeightedDistance,
                     ScoreValue {
@@ -2036,24 +2052,29 @@ impl<T: VectorType> PipelineOperator<T> for YenKShortestPathsOperator {
             context.budget.traversal.max_examined_edges,
             context.budget.max_node_set_bytes,
         )?;
+        let targets = unique_path_targets(&self.targets);
+        crate::graph::analytics::validate_weighted_graph(&workspace)?;
+        let mut work = 0;
         let mut rows = Vec::new();
         for source in input.rows {
-            for &target in &self.targets {
-                let paths = crate::graph::analytics::yen_k_shortest_paths(
+            for &target in &targets {
+                let paths = crate::graph::analytics::yen_k_shortest_paths_with_work(
                     &workspace,
                     source.id,
                     target,
                     self.k,
+                    &mut work,
                     context.budget.traversal.max_examined_edges,
                     context.budget.max_nodes,
                 )?;
                 for (rank, path) in paths.into_iter().enumerate() {
                     let mut row = NodeRow::new(target);
-                    row.path = Some(path.nodes.clone());
+                    row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+                    row.path = Some(path.nodes);
                     row.path_count = Some(1);
                     row.path_rank = Some(rank + 1);
                     row.provenance.source_ids = vec![source.id];
-                    row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+
                     row.set_graph_metric(
                         GraphMetric::WeightedDistance,
                         ScoreValue {
@@ -2123,6 +2144,21 @@ pub struct BoundedAllPaths {
     pub aggregation: PathStrengthAggregation,
 }
 
+fn unique_path_targets(targets: &[NodeId]) -> Vec<NodeId> {
+    let mut seen = BTreeSet::new();
+    targets
+        .iter()
+        .copied()
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
+fn path_score_overflow() -> TriviumError {
+    TriviumError::QueryExecution(
+        "路径聚合分数超出有限 f32 范围 (Path aggregate score exceeds the finite f32 range)".into(),
+    )
+}
+
 impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
     fn uses_graph(&self) -> bool {
         true
@@ -2132,11 +2168,15 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
     }
 
     fn apply(&self, input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
-        let mut output = BTreeMap::<NodeId, NodeRow>::new();
+        let mut output = Vec::new();
         let mut consumed_nodes = 0usize;
         let mut consumed_edges = 0usize;
-        for source in input.rows {
-            for &target in &self.targets {
+        for target in unique_path_targets(&self.targets) {
+            let mut row = NodeRow::new(target);
+            let mut count = 0usize;
+            let mut sum = crate::numeric::ExactSum::default();
+            let mut best_score = f32::NEG_INFINITY;
+            for source in &input.rows {
                 let result = crate::graph::pathfinding::bounded_all_paths_view(
                     &context.graph(),
                     source.id,
@@ -2159,68 +2199,61 @@ impl<T: VectorType> PipelineOperator<T> for BoundedAllPaths {
                 if result.paths.is_empty() {
                     continue;
                 }
-                let score = match self.aggregation {
-                    PathStrengthAggregation::MaxProduct => result
-                        .paths
-                        .iter()
-                        .map(|path| path.strength_product)
-                        .max_by(f32::total_cmp)
-                        .unwrap_or(0.0),
-                    PathStrengthAggregation::SumProduct => result
-                        .paths
-                        .iter()
-                        .map(|path| f64::from(path.strength_product))
-                        .sum::<f64>()
-                        as f32,
-                    PathStrengthAggregation::AverageWeight => {
-                        (result
-                            .paths
-                            .iter()
-                            .map(|path| f64::from(path.strength_average))
-                            .sum::<f64>()
-                            / result.paths.len() as f64) as f32
-                    }
-                };
-                if !score.is_finite() {
-                    return Err(TriviumError::QueryExecution(
-                        "路径聚合分数超出有限 f32 范围 (Path aggregate score exceeds the finite f32 range)".into(),
-                    ));
+                if count == 0 {
+                    row.provenance.property_origin = source.provenance.property_origin.clone();
+                } else if row.provenance.property_origin != source.provenance.property_origin {
+                    row.provenance.property_origin = None;
                 }
-                let best_path = result
-                    .paths
-                    .iter()
-                    .max_by(|left, right| {
-                        left.strength_product
-                            .total_cmp(&right.strength_product)
-                            .then_with(|| right.nodes.cmp(&left.nodes))
-                    })
-                    .map(|path| path.nodes.clone());
-                let depth = best_path
-                    .as_ref()
-                    .map_or(0, |path| path.len().saturating_sub(1));
-                let candidate = NodeRow {
-                    id: target,
-                    path_strength: Some(ScoreValue {
-                        value: f64::from(score),
-                        kind: ScoreKind::Exact,
-                    }),
-                    path_count: Some(result.paths.len()),
-                    path: best_path,
-                    provenance: Provenance {
-                        source_ids: vec![source.id],
-                        min_depth: Some(depth),
-                        property_origin: source.provenance.property_origin.clone(),
-                    },
-                    ..NodeRow::new(target)
-                };
-                if let Some(existing) = output.get_mut(&target) {
-                    merge_row(existing, &candidate);
-                } else {
-                    output.insert(target, candidate);
+                row.provenance.source_ids.push(source.id);
+                count = count.checked_add(result.paths.len()).ok_or_else(|| {
+                    TriviumError::QueryExecution("路径计数溢出 (Path count overflow)".into())
+                })?;
+                for path in result.paths {
+                    let score = match self.aggregation {
+                        PathStrengthAggregation::AverageWeight => path.strength_average,
+                        _ => path.strength_product,
+                    };
+                    if !score.is_finite() {
+                        return Err(path_score_overflow());
+                    }
+                    if !matches!(self.aggregation, PathStrengthAggregation::MaxProduct) {
+                        sum.push_float(f64::from(score));
+                    }
+                    let depth = path.nodes.len().saturating_sub(1);
+                    row.provenance.min_depth =
+                        Some(row.provenance.min_depth.map_or(depth, |n| n.min(depth)));
+                    if row.path.as_ref().is_none_or(|current| {
+                        score
+                            .total_cmp(&best_score)
+                            .then_with(|| current.cmp(&path.nodes))
+                            .is_gt()
+                    }) {
+                        best_score = score;
+                        row.path = Some(path.nodes);
+                    }
                 }
             }
+            if count == 0 {
+                continue;
+            }
+            let score = match self.aggregation {
+                PathStrengthAggregation::MaxProduct => best_score,
+                PathStrengthAggregation::SumProduct => sum.into_f32(1),
+                PathStrengthAggregation::AverageWeight => sum.into_f32(count),
+            };
+            if !score.is_finite() {
+                return Err(path_score_overflow());
+            }
+            row.provenance.source_ids.sort_unstable();
+            row.provenance.source_ids.dedup();
+            row.path_strength = Some(ScoreValue {
+                value: f64::from(score),
+                kind: ScoreKind::Exact,
+            });
+            row.path_count = Some(count);
+            output.push(row);
         }
-        Ok(NodeSet::from_rows(output.into_values().collect()))
+        Ok(NodeSet::from_rows(output))
     }
 }
 

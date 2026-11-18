@@ -1,7 +1,10 @@
 //! TriviumDB Server HTTP 协议、OCC 前置条件与稳定错误模型。
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize, Serializer,
+    ser::{SerializeMap, SerializeSeq, SerializeStruct},
+};
 use std::collections::BTreeMap;
 use triviumdb::error::TriviumError;
 use triviumdb::query::tql_executor::{TqlMutResult, TqlValue, TqlValueResult};
@@ -48,15 +51,6 @@ pub struct ExecutePreparedRequest {
     pub profile: bool,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TqlResponse {
-    pub rows: Vec<BTreeMap<String, serde_json::Value>>,
-    pub row_count: usize,
-    pub generation: String,
-    pub columns: Vec<ProjectionColumn>,
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectionColumn {
@@ -67,7 +61,52 @@ pub struct ProjectionColumn {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BatchGetRequest {
+    #[serde(deserialize_with = "deserialize_ids")]
     pub ids: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum InputId {
+    Number(u64),
+    Decimal(String),
+}
+
+impl InputId {
+    fn into_u64<E: serde::de::Error>(self) -> Result<u64, E> {
+        match self {
+            Self::Number(value) => Ok(value),
+            Self::Decimal(value)
+                if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                value.parse().map_err(E::custom)
+            }
+            Self::Decimal(_) => Err(E::custom(
+                "节点 ID 必须是十进制 u64 (Node ID must be a decimal u64)",
+            )),
+        }
+    }
+}
+
+fn deserialize_ids<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u64>, D::Error> {
+    Vec::<InputId>::deserialize(deserializer)?
+        .into_iter()
+        .map(InputId::into_u64)
+        .collect()
+}
+
+fn deserialize_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    InputId::deserialize(deserializer)?.into_u64()
+}
+
+fn deserialize_optional_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    Option::<InputId>::deserialize(deserializer)?
+        .map(InputId::into_u64)
+        .transpose()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -132,6 +171,7 @@ pub struct ConditionalMutationRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteManyRequest {
+    #[serde(deserialize_with = "deserialize_ids")]
     pub ids: Vec<u64>,
 }
 
@@ -159,7 +199,7 @@ fn default_lookup_limit() -> usize {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BulkNodeRecord {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_id")]
     pub id: Option<u64>,
     pub vector: Vec<f32>,
     pub payload: serde_json::Value,
@@ -168,7 +208,9 @@ pub struct BulkNodeRecord {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BulkEdgeRecord {
+    #[serde(deserialize_with = "deserialize_id")]
     pub source: u64,
+    #[serde(deserialize_with = "deserialize_id")]
     pub target: u64,
     pub label: String,
     pub weight: f32,
@@ -177,7 +219,9 @@ pub struct BulkEdgeRecord {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EdgePrecondition {
+    #[serde(deserialize_with = "deserialize_id")]
     pub source: u64,
+    #[serde(deserialize_with = "deserialize_id")]
     pub target: u64,
     pub label: String,
     pub etag: String,
@@ -187,26 +231,32 @@ pub struct EdgePrecondition {
 #[serde(tag = "op", rename_all = "camelCase", deny_unknown_fields)]
 pub enum TransactionOperation {
     Insert {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_optional_id")]
         id: Option<u64>,
         vector: Vec<f32>,
         payload: serde_json::Value,
     },
     UpdatePayload {
+        #[serde(deserialize_with = "deserialize_id")]
         id: u64,
         payload: serde_json::Value,
     },
     Delete {
+        #[serde(deserialize_with = "deserialize_id")]
         id: u64,
     },
     Link {
+        #[serde(deserialize_with = "deserialize_id")]
         source: u64,
+        #[serde(deserialize_with = "deserialize_id")]
         target: u64,
         label: String,
         weight: f32,
     },
     Unlink {
+        #[serde(deserialize_with = "deserialize_id")]
         source: u64,
+        #[serde(deserialize_with = "deserialize_id")]
         target: u64,
         #[serde(default)]
         label: Option<String>,
@@ -626,35 +676,11 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub fn encode_row(
-    row: std::collections::HashMap<String, TqlValue<f32>>,
-) -> Result<BTreeMap<String, serde_json::Value>, ApiError> {
-    row.into_iter()
-        .map(|(name, value)| Ok((name, encode_value(value)?)))
-        .collect()
-}
-
-pub fn encode_rows(rows: TqlValueResult<f32>, generation: String) -> Result<TqlResponse, ApiError> {
-    let row_count = rows.len();
-    let columns = projection_columns(&rows);
-    let rows = rows
-        .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .map(|(name, value)| Ok((name, encode_value(value)?)))
-                .collect::<Result<BTreeMap<_, _>, ApiError>>()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(TqlResponse {
-        rows,
-        row_count,
-        generation,
-        columns,
-    })
-}
-
-pub fn projection_columns(rows: &TqlValueResult<f32>) -> Vec<ProjectionColumn> {
-    let mut columns = BTreeMap::new();
+pub fn projection_columns(
+    rows: &TqlValueResult<f32>,
+    projected: Vec<String>,
+) -> Vec<ProjectionColumn> {
+    let mut columns: BTreeMap<_, _> = projected.into_iter().map(|name| (name, "null")).collect();
     for row in rows {
         for (name, value) in row {
             let kind = match value {
@@ -701,36 +727,200 @@ pub fn encode_node(node: triviumdb::node::NodeView<f32>) -> serde_json::Value {
     })
 }
 
-fn encode_value(value: TqlValue<f32>) -> Result<serde_json::Value, ApiError> {
-    Ok(match value {
-        TqlValue::Node(node) => encode_node(node),
-        TqlValue::Edge(edge) => {
-            let mut value = serde_json::json!({
-                "type": "edge",
-                "source": edge.source_id.to_string(),
-                "target": edge.target_id.to_string(),
-                "label": edge.label,
-                "weight": edge.weight,
-                "metadata": edge.metadata,
-            });
-            if let Some(graph_id) = &edge.graph_id {
-                value["graph_id"] = graph_id.clone().into();
-            }
-            value
+const JS_MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+struct DecimalId(u64);
+
+impl Serialize for DecimalId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&self.0)
+    }
+}
+
+struct EdgeList<'a>(&'a [triviumdb::node::Edge]);
+
+impl Serialize for EdgeList<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct NodeEdge<'a> {
+            target_id: DecimalId,
+            label: &'a str,
+            weight: f32,
+            metadata: &'a serde_json::Value,
         }
-        TqlValue::Int(value) => serde_json::json!({"type": "int", "value": value}),
-        TqlValue::UInt(value) => serde_json::json!({"type":"uint","value":value.to_string()}),
-        TqlValue::Float(value) => serde_json::json!({"type": "float", "value": value}),
-        TqlValue::String(value) => serde_json::json!({"type": "string", "value": value}),
-        TqlValue::Bool(value) => serde_json::json!({"type": "bool", "value": value}),
-        TqlValue::Path(ids) => serde_json::json!({
-            "type": "path",
-            "value": ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>()
-        }),
-        TqlValue::List(value) => serde_json::json!({"type": "list", "value": value}),
-        TqlValue::Object(value) => serde_json::json!({"type":"object","value":value}),
-        TqlValue::Null => serde_json::json!({"type": "null"}),
-    })
+
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for edge in self.0 {
+            sequence.serialize_element(&NodeEdge {
+                target_id: DecimalId(edge.target_id),
+                label: &edge.label,
+                weight: edge.weight,
+                metadata: &edge.metadata,
+            })?;
+        }
+        sequence.end()
+    }
+}
+
+struct PathIds<'a>(&'a [u64]);
+
+impl Serialize for PathIds<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().copied().map(DecimalId))
+    }
+}
+
+struct SafeJson<'a>(&'a serde_json::Value);
+
+impl Serialize for SafeJson<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            serde_json::Value::Array(values) => serializer.collect_seq(values.iter().map(SafeJson)),
+            serde_json::Value::Object(values) => {
+                serializer.collect_map(values.iter().map(|(name, value)| (name, SafeJson(value))))
+            }
+            serde_json::Value::Number(value)
+                if value
+                    .as_u64()
+                    .is_some_and(|value| value > JS_MAX_SAFE_INTEGER)
+                    || value
+                        .as_i64()
+                        .is_some_and(|value| value.unsigned_abs() > JS_MAX_SAFE_INTEGER) =>
+            {
+                serializer.collect_str(value)
+            }
+            value => value.serialize(serializer),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Tagged<V> {
+    r#type: &'static str,
+    value: V,
+}
+
+struct QueryValue<'a>(&'a TqlValue<f32>);
+
+impl Serialize for QueryValue<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use TqlValue::*;
+        match self.0 {
+            Node(node) => {
+                let mut value = serializer.serialize_struct("Node", 5)?;
+                value.serialize_field("type", "node")?;
+                value.serialize_field("id", &DecimalId(node.id))?;
+                value.serialize_field("vector", &node.vector)?;
+                value.serialize_field("payload", &node.payload)?;
+                value.serialize_field("edges", &EdgeList(&node.edges))?;
+                value.end()
+            }
+            Edge(edge) => {
+                let mut value = serializer
+                    .serialize_struct("Edge", 6 + usize::from(edge.graph_id.is_some()))?;
+                value.serialize_field("type", "edge")?;
+                value.serialize_field("source", &DecimalId(edge.source_id))?;
+                value.serialize_field("target", &DecimalId(edge.target_id))?;
+                value.serialize_field("label", &edge.label)?;
+                value.serialize_field("weight", &edge.weight)?;
+                value.serialize_field("metadata", &edge.metadata)?;
+                if let Some(graph_id) = &edge.graph_id {
+                    value.serialize_field("graph_id", graph_id)?;
+                }
+                value.end()
+            }
+            Int(value) if value.unsigned_abs() > JS_MAX_SAFE_INTEGER => Tagged {
+                r#type: "int",
+                value: value.to_string(),
+            }
+            .serialize(serializer),
+            Int(value) => Tagged {
+                r#type: "int",
+                value,
+            }
+            .serialize(serializer),
+            UInt(value) => Tagged {
+                r#type: "uint",
+                value: DecimalId(*value),
+            }
+            .serialize(serializer),
+            Float(value) => Tagged {
+                r#type: "float",
+                value,
+            }
+            .serialize(serializer),
+            String(value) => Tagged {
+                r#type: "string",
+                value,
+            }
+            .serialize(serializer),
+            Bool(value) => Tagged {
+                r#type: "bool",
+                value,
+            }
+            .serialize(serializer),
+            Path(ids) => Tagged {
+                r#type: "path",
+                value: PathIds(ids),
+            }
+            .serialize(serializer),
+            List(values) => {
+                struct ListValue<'a>(&'a [serde_json::Value]);
+                impl Serialize for ListValue<'_> {
+                    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                        serializer.collect_seq(self.0.iter().map(SafeJson))
+                    }
+                }
+                Tagged {
+                    r#type: "list",
+                    value: ListValue(values),
+                }
+                .serialize(serializer)
+            }
+            Object(values) => {
+                struct ObjectValue<'a>(&'a serde_json::Map<std::string::String, serde_json::Value>);
+                impl Serialize for ObjectValue<'_> {
+                    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                        serializer
+                            .collect_map(self.0.iter().map(|(name, value)| (name, SafeJson(value))))
+                    }
+                }
+                Tagged {
+                    r#type: "object",
+                    value: ObjectValue(values),
+                }
+                .serialize(serializer)
+            }
+            Null => {
+                let mut value = serializer.serialize_struct("Null", 1)?;
+                value.serialize_field("type", "null")?;
+                value.end()
+            }
+        }
+    }
+}
+
+type Row = std::collections::HashMap<String, TqlValue<f32>>;
+
+pub struct QueryRow<'a>(pub &'a Row);
+
+impl Serialize for QueryRow<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (name, value) in self.0 {
+            map.serialize_entry(name, &QueryValue(value))?;
+        }
+        map.end()
+    }
+}
+
+pub struct QueryRows<'a>(pub &'a [Row]);
+
+impl Serialize for QueryRows<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(QueryRow))
+    }
 }
 
 #[cfg(test)]
@@ -748,7 +938,7 @@ mod structured_error_tests {
             metadata: serde_json::json!({"owner":"event"}),
         };
         assert_eq!(
-            encode_value(TqlValue::Edge(edge.clone())).unwrap(),
+            serde_json::to_value(QueryValue(&TqlValue::Edge(edge.clone()))).unwrap(),
             serde_json::json!({
                 "type":"edge","source":"18446744073709551614",
                 "target":"18446744073709551613","label":"rel","weight":2.0,
@@ -760,7 +950,7 @@ mod structured_error_tests {
             ..edge
         };
         assert_eq!(
-            encode_value(TqlValue::Edge(default)).unwrap(),
+            serde_json::to_value(QueryValue(&TqlValue::Edge(default))).unwrap(),
             serde_json::json!({
                 "type":"edge","source":"18446744073709551614",
                 "target":"18446744073709551613","label":"rel","weight":2.0,

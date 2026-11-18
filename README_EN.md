@@ -29,9 +29,7 @@
 
 [**中文文档**](README.md) | **English**
 
-The current prerelease is **0.9.2-beta.1**, with a unified `.idx` index container, current-format admission, external migration, exact-search switches across the three SDKs, and data-correctness hardening. Python uses `0.9.2b1`, and npm uses the `beta` channel. See the [bilingual release notes](docs/changes/0.9.2-beta.1.md) for changes and upgrade steps.
-
-The current stable release is **0.9.1**, with document evidence retrieval, parsing and staged publication, unified document and named-graph TQL, QuIVer centered INT8/INT4 compressed reranking, Hot/SSD residency, and engineering hardening. See the [bilingual release notes](docs/changes/0.9.1.md) and the [ICDE evaluation archive](evaluation/README.md).
+The current stable release is **0.9.2**, with a unified `.idx` index container, external migration, exact search across all three SDKs, and hardening for snapshots, recovery, and data correctness. See the [bilingual release notes](docs/changes/0.9.2.md) for changes and upgrade steps.
 
 The development branch documents its [SDK contract inventory](docs/sdk-contract.md) and uses an [external migration tool](docs/migration.md) for database upgrades.
 
@@ -54,7 +52,7 @@ Our goal: **SQLite for AI applications.**
 - ❄️ **Tiered Payload storage** — Published raw JSON stays in an mmap cold base, writes/updates enter an in-memory delta, and parsed values use a byte-bounded LRU cache; ANN/BQ/Exact candidate generation performs zero Payload parsing
 - 🔗 **Node = everything** — Each node natively holds a dense vector, sparse text index, JSON metadata, and graph edges under one globally unique ID
 - 🧠 **AI-native** — Optional hybrid recall (AC-automaton BM25 + dense vector) triggers graph spreading activation, with built-in cognitive pipelines (FISTA / DPP / PPR)
-- 🛡️ **4-layer data safety** — Atomic replacement + WAL + dry-run transaction validation + mmap COW isolation; `.flush_ok` v3 binds `.tdb/.vec/.pld`, while prior-generation backups and an undo journal recover interrupted publication. Backups add disk I/O and temporary space; corrupted inputs still fail closed. See the [recovery protocol](docs/security.md#8-mmap-三文件一致性标记flush_ok-v3).
+- 🛡️ **4-layer data safety** — Atomic replacement + WAL + dry-run transaction validation + mmap COW isolation; `.flush_ok` binds `.tdb/.vec/.pld`, while prior-generation backups and an undo journal recover interrupted publication. Backups add disk I/O and temporary space; corrupted inputs still fail closed. See the [recovery protocol](docs/security.md#8-mmap-三文件一致性标记flush_ok).
 - 🐍 **Python / Node.js native** — `pip install` or `npm install`, MongoDB-style query syntax
 - ⚡ **High-performance search** — rayon parallel brute-force (100% exact at small scale) + in-house ANN index **QuIVer**; current source uses training-free SM-L2 navigation and cosine reranking, activated at 209–834 nodes by vector workload
 - 💾 **SSD-friendly** — Append-only WAL + background compaction + independent QuIVer persistence
@@ -159,7 +157,7 @@ Suppose you're building an **AI conversation memory system** and the user says "
 
 QuIVer ANN targets real semantic vectors produced by mainstream embedding models for text, code and image similarity retrieval. Query and database vectors should share the matching retrieval space defined by the model. The published evaluation covers data produced by Cohere, BGE-M3, MiniLM, Nomic and Jina models, with recall, throughput and parameters recorded separately for each dataset. [Evaluation data and paper](evaluation/README.md)
 
-For randomly synthesized vectors, handcrafted or concatenated features, and traditional non-negative descriptors, use full-scan exact retrieval. TriviumDB provides storage and exact queries for vectors satisfying its dtype and dimensionality contracts through `search_exact` in Python/Rust and `searchExact` in Node. Version `0.9.2-beta.1` also provides Python `exact=True`, Rust `SearchConfig::with_exact(true)` and the corresponding Node `exact` argument. [Exact-search API](docs/api-reference.md#search--纯向量图扩散检索-基础)
+For randomly synthesized vectors, handcrafted or concatenated features, and traditional non-negative descriptors, use full-scan exact retrieval. TriviumDB provides storage and exact queries for vectors satisfying its dtype and dimensionality contracts through `search_exact` in Python/Rust and `searchExact` in Node. Version `0.9.2` also provides Python `exact=True`, Rust `SearchConfig::with_exact(true)` and the corresponding Node `exact` argument. [Exact-search API](docs/api-reference.md#search--纯向量图扩散检索-基础)
 
 > **Recall guidance**　QuIVer recall depends on vector distribution, retrieval task and search budgets. Evaluate cross-model retrieval, cross-modal retrieval and custom vector transformations separately. Validate Recall@K on your own real workload and select suitable parameters or the exact-search route.
 
@@ -215,13 +213,13 @@ maturin develop --features python
 Recommended: use the blazing-fast [uv](https://github.com/astral-sh/uv) (millisecond install):
 
 ```bash
-uv pip install "triviumdb==0.9.2b1"
+uv pip install "triviumdb==0.9.2"
 ```
 
 Or traditional pip:
 
 ```bash
-pip install "triviumdb==0.9.2b1"
+pip install "triviumdb==0.9.2"
 ```
 
 ### 🌐 Node.js / Frontend Users
@@ -229,9 +227,9 @@ pip install "triviumdb==0.9.2b1"
 Cross-platform package includes pre-compiled `*.node` native extensions with full TypeScript completions:
 
 ```bash
-npm install triviumdb@0.9.2-beta.1
+npm install triviumdb@0.9.2
 # or
-pnpm add triviumdb@0.9.2-beta.1
+pnpm add triviumdb@0.9.2
 ```
 
 ### 🦀 Rust Native Users
@@ -239,10 +237,10 @@ pnpm add triviumdb@0.9.2-beta.1
 Use as a library dependency:
 
 ```bash
-cargo add triviumdb@0.9.2-beta.1
+cargo add triviumdb@0.9.2
 ```
 
-The API examples on this page target `0.9.2-beta.1`. Upgrade existing databases through the [external migration entry point](docs/migration.md) into a current-format destination. See the [release notes](docs/changes/0.9.2-beta.1.md) for complete upgrade conditions.
+The API examples on this page target `0.9.2`. Upgrade existing databases through the [external migration entry point](docs/migration.md) into a current-format destination. See the [release notes](docs/changes/0.9.2.md) for complete upgrade conditions.
 
 To add a management frontend to an embedded application, follow [Console host integration](docs/embedded-console.md) to reuse the same instance and file lock. The existing HTML still needs frontend-owned transport adaptation; the resource bundle declares that requirement and its CDN dependencies.
 
@@ -546,66 +544,6 @@ TriviumDB/
 ├── pyproject.toml          # Maturin build config
 └── README.md
 ```
-
----
-
-## Roadmap
-
-### v0.1 — Core Engine MVP ✅
-
-- [x] Node / Edge data structures + in-memory MemTable + BruteForce vector search
-- [x] Single-file `.tdb` serialization + `insert` / `link` / `search` / `delete` API
-
-### v0.2 — Persistence & Ecosystem ✅
-
-- [x] WAL crash recovery + background compaction + mmap zero-copy
-- [x] PyO3 Python bindings + rayon parallel scan + advanced payload filtering
-
-### v0.3 — Performance & Cross-Platform ✅
-
-- [x] Node.js bindings (napi-rs)
-- [x] AVX2 + FMA SIMD accelerated cosine similarity
-
-### v0.4 — Cognitive Pipeline + BQ Index ✅
-
-- [x] Mmap / Rom dual engine + dry-run transaction validation
-- [x] Cognitive retrieval pipeline (FISTA / PPR / DPP)
-- [x] BQ binary quantization index (auto-activate + auto-rebuild)
-
-### v0.5 — 10M-Scale Architecture + Hook System ✅
-
-- [x] Parallel Bit-Tag Array hardware-accelerated bloom filtering + Zero-Ghost tombstone reuse
-- [x] O(1) Reverse Hash Net reverse edge lookup
-- [x] 6-stage pipeline hook injection + FFI dynamic library plugins
-- [x] CI/CD pipeline + ASan / TSan / Miri + LibFuzzer; see [test scope and limitations](docs/testing.md)
-
-### v0.6 — TQL Query Language + Cross-Arch ✅
-
-- [x] TQL unified query language (MATCH graph / FIND document / SEARCH vector)
-- [x] TQL DML write operations (CREATE / SET / DELETE / DETACH DELETE)
-- [x] Property secondary index (O(1) inverted lookup + TQL auto-acceleration)
-- [x] ARM NEON SIMD adaptation + cross-platform CI (Apple Silicon / Linux ARM64)
-
-### v0.7 — QuIVer SOTA ANN Index ✅
-
-- [x] In-house **QuIVer** ANN graph index (BQ signatures + Vamana graph + hot/cold separation)
-- [x] Incremental graph maintenance: Insert / Delete (Tombstone) / Update — no full rebuild
-- [x] QuIVer persistence and compact routing reload, unified in `.idx` in the development version
-- [x] Transaction-safe separated timeline architecture (Phase 5 QuIVer Sync)
-- [x] CLI tool `triviumdb-cli` (command `tdb`): non-interactive commands + REPL (Tab completion / syntax highlighting / multi-line input) + config file
-- [x] Database visualization: terminal TUI (`tdb ui`, force-directed graph layout / k-hop expand / vector search playground)
-
-### v0.8 — DIY Hybrid Queries & Engineering Hardening ✅ (Current)
-
-- [x] **Unified TQL query system**: `FIND` / `MATCH` / `SEARCH`, composable `WITH`, Prepared parameters, expressions/aggregates/paths/set algebra, scientific notation, and atomic `SET VECTOR`
-- [x] **Bounded Cascades and graph computing**: deterministic statistics-aware physical plans, built-in graph algorithms, and estimated/actual metrics through `EXPLAIN ANALYZE`
-- [x] **Complete persistent index suite**: Hash / Ordered ART / Composite ART / Bitmap, graph blocks, AC+BM25, and QuIVer components; dynamic QuIVer thresholds select between 209 and 834 nodes by vector workload
-- [x] **Production-grade storage and safety**: `.flush_ok` v3 binds `.tdb/.vec/.pld` generation, sizes, and CRCs; no production-reachable panic, byte-level zero writes in ReadOnly/Immutable modes, WAL/generation atomicity, fail-closed query/traversal/memory/Payload budgets, and bounded real fault injection
-- [x] **Payload tiering phase 1**: generation-scoped `.pld` mmap raw base, in-memory delta/tombstones, bounded LRU parsed cache, late materialization, `ColdPayloadScan`, and cross-language cache configuration
-- [x] **Aligned Rust/Python/Node capabilities**: first-class TQL values, four property indexes, Prepared TQL, six-stage Hooks, FFI ABI v2, and explicit migration errors instead of silent legacy compatibility
-- [x] **Multi-instance management (0.9.0-beta.1)**: shared budgets and worker pools, protected maintenance memory, instance/maintenance diagnostics, controlled shutdown, consistent snapshots and restore, with aligned APIs and type declarations
-- [x] **Tools and nightly Server**: CLI/REPL/TUI plus a dependency-isolated HTTP Server with Writer Actor, Group Commit, OCC/idempotency, health supervision, index management, NDJSON import, binary vectors, and cross-platform releases
-
 
 ---
 

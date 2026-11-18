@@ -1526,6 +1526,11 @@ impl TqlParser {
                     if self.at(&TqlToken::LBrace) {
                         // 操作符对象: {$gt: 18}
                         self.advance();
+                        if self.at(&TqlToken::RBrace) {
+                            return Err(self.error_here(format!(
+                                "字段过滤运算符不能为空 (Field filter operators must not be empty): {field}"
+                            )));
+                        }
                         while !self.at(&TqlToken::RBrace) {
                             let operator_mark = self.source_mark();
                             let op = match self.advance() {
@@ -1804,6 +1809,11 @@ impl TqlParser {
         let kind = if let Some(func) = self.try_parse_agg_func() {
             self.expect(&TqlToken::LParen)?;
             let inner = if self.at(&TqlToken::Star) {
+                if func != AggFunc::Count || distinct {
+                    return Err(
+                        "星号聚合仅支持 COUNT(*) (Only COUNT(*) accepts an asterisk)".into(),
+                    );
+                }
                 let mark = self.source_mark();
                 self.advance();
                 self.finish_source("return_kind", mark);
@@ -2234,13 +2244,17 @@ impl TqlParser {
                 self.advance();
                 Ok(serde_json::Value::Null)
             }
-            TqlToken::LBracket => {
+            TqlToken::LBracket | TqlToken::LBrace => {
                 self.depth += 1;
                 if self.depth > 128 {
                     self.depth -= 1;
                     return Err("Parser recursion depth exceeded (JSON nesting too deep)".into());
                 }
-                let result = self.parse_json_array().map(serde_json::Value::Array);
+                let result = if self.at(&TqlToken::LBrace) {
+                    self.parse_json_object()
+                } else {
+                    self.parse_json_array().map(serde_json::Value::Array)
+                };
                 self.depth -= 1;
                 result
             }
@@ -2362,12 +2376,7 @@ impl TqlParser {
         loop {
             let node_mark = self.source_mark();
             self.expect(&TqlToken::LParen)?;
-            let mut current_var = if let TqlToken::Ident(name) = self.peek().clone() {
-                self.advance();
-                name
-            } else {
-                format!("_auto_{}", nodes.len())
-            };
+            let mut current_var = self.parse_create_node_identity(nodes.len());
             let payload = if self.at(&TqlToken::LBrace) {
                 self.parse_create_payload()?
             } else {
@@ -2398,11 +2407,12 @@ impl TqlParser {
                         }
                         let key = self.parse_field_name()?;
                         self.expect(&TqlToken::Colon)?;
-                        if key == "weight" {
-                            weight = self.parse_json_number()? as f32;
-                        } else {
-                            let _ = self.parse_json_value()?;
+                        if key != "weight" {
+                            return Err(self.error_here(format!(
+                                "未知 CREATE 边属性 (Unknown CREATE edge field): {key}"
+                            )));
                         }
+                        weight = self.parse_json_number()? as f32;
                         if self.at(&TqlToken::Comma) {
                             self.advance();
                         }
@@ -2413,15 +2423,7 @@ impl TqlParser {
                 self.expect(&TqlToken::Arrow)?;
                 let node_mark = self.source_mark();
                 self.expect(&TqlToken::LParen)?;
-                let dst_var = if let TqlToken::Ident(_) = self.peek() {
-                    if let TqlToken::Ident(name) = self.advance() {
-                        name
-                    } else {
-                        format!("_auto_{}", nodes.len())
-                    }
-                } else {
-                    format!("_auto_{}", nodes.len())
-                };
+                let dst_var = self.parse_create_node_identity(nodes.len());
                 let dst_payload = if self.at(&TqlToken::LBrace) {
                     self.parse_create_payload()?
                 } else {
@@ -2451,12 +2453,22 @@ impl TqlParser {
         Ok(CreateAction { nodes, edges })
     }
 
-    /// 解析 CREATE 节点的 payload: {key: val, ...} → serde_json::Value
-    fn parse_create_payload(&mut self) -> Result<serde_json::Value, String> {
-        self.sourced("payload", Self::parse_create_payload_source_inner)
+    fn parse_create_node_identity(&mut self, index: usize) -> String {
+        if let TqlToken::Ident(name) = self.peek().clone() {
+            self.advance();
+            name
+        } else {
+            // $ 前缀由词法器识别为操作符，用户变量无法占用该命名空间。
+            format!("$anon_{index}")
+        }
     }
 
-    fn parse_create_payload_source_inner(&mut self) -> Result<serde_json::Value, String> {
+    /// 解析 CREATE 节点的 payload: {key: val, ...} → serde_json::Value
+    fn parse_create_payload(&mut self) -> Result<serde_json::Value, String> {
+        self.sourced("payload", Self::parse_json_object)
+    }
+
+    fn parse_json_object(&mut self) -> Result<serde_json::Value, String> {
         self.expect(&TqlToken::LBrace)?;
         let mut map = serde_json::Map::new();
         while !self.at(&TqlToken::RBrace) {

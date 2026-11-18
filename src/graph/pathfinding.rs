@@ -348,6 +348,9 @@ pub(crate) fn variable_length_paths_view<T: VectorType>(
     label_filter: Option<&str>,
     limit: usize,
 ) -> Vec<(NodeId, Path)> {
+    if limit == 0 || !mt.contains(src) {
+        return Vec::new();
+    }
     let mut results = Vec::new();
     let mut visited = HashSet::new();
     visited.insert(src);
@@ -489,6 +492,13 @@ pub(crate) fn bounded_all_paths_view<T: VectorType>(
             "最大路径数必须大于 0 (max_paths must be greater than zero)".into(),
         ));
     }
+    if config.forbidden_nodes.contains(&src) || config.forbidden_nodes.contains(&dst) {
+        return Ok(BoundedPathsOutput {
+            paths: Vec::new(),
+            metrics: TraversalMetrics::default(),
+            truncated: false,
+        });
+    }
     let mut state = BoundedPathState {
         results: Vec::new(),
         visited: HashSet::from([src]),
@@ -523,6 +533,37 @@ struct BoundedPathState {
     truncated: bool,
 }
 
+fn path_product(weights: &[f32]) -> f32 {
+    let mut significand = 1.0;
+    let mut exponent = 0i128;
+    let mut negative = false;
+    let mut zero = false;
+    for &weight in weights {
+        negative ^= weight.is_sign_negative();
+        if weight == 0.0 {
+            zero = true;
+            continue;
+        }
+        // 有限的非零 f32 扩宽后均为正规 f64。分开累乘尾数和二进制指数。
+        let bits = f64::from(weight.abs()).to_bits();
+        exponent += i128::from(bits >> 52) - 1023;
+        significand *= f64::from_bits((bits & ((1 << 52) - 1)) | (1023 << 52));
+        if significand >= 2.0 {
+            significand *= 0.5;
+            exponent += 1;
+        }
+    }
+    // 完成累乘后再收窄到 f32，包含次正规值及其舍入边界。
+    let magnitude = if zero || exponent < -150 {
+        0.0
+    } else if exponent > 127 {
+        f32::INFINITY
+    } else {
+        (significand * 2.0f64.powi(exponent as i32)) as f32
+    };
+    if negative { -magnitude } else { magnitude }
+}
+
 fn bounded_path_dfs<T: VectorType>(
     mt: &impl GraphRead<T>,
     current: NodeId,
@@ -539,21 +580,26 @@ fn bounded_path_dfs<T: VectorType>(
     let depth = state.weights.len();
     state.metrics.depth_reached = state.metrics.depth_reached.max(depth);
     if current == dst {
-        let product = state.weights.iter().copied().product::<f32>();
+        if config
+            .label_sequence
+            .as_ref()
+            .is_some_and(|labels| labels.len() != depth)
+        {
+            return Ok(());
+        }
         state.results.push(BoundedPath {
             nodes: state.nodes.clone(),
             edge_weights: state.weights.clone(),
             labels: state.labels.clone(),
-            strength_product: product,
+            strength_product: path_product(&state.weights),
             strength_average: if state.weights.is_empty() {
                 1.0
             } else {
-                (state
-                    .weights
-                    .iter()
-                    .map(|weight| f64::from(*weight))
-                    .sum::<f64>()
-                    / state.weights.len() as f64) as f32
+                let mut sum = crate::numeric::ExactSum::default();
+                for weight in &state.weights {
+                    sum.push_float(f64::from(*weight));
+                }
+                sum.into_f32(state.weights.len())
             },
         });
         if state.results.len() >= config.max_paths {
@@ -561,7 +607,12 @@ fn bounded_path_dfs<T: VectorType>(
         }
         return Ok(());
     }
-    if depth >= config.max_depth {
+    if depth >= config.max_depth
+        || config
+            .label_sequence
+            .as_ref()
+            .is_some_and(|labels| labels.len() == depth)
+    {
         return Ok(());
     }
     let outgoing = mt.get_edges(current).unwrap_or_default();
@@ -752,6 +803,9 @@ pub(crate) fn k_hop_neighbors_view<T: VectorType>(
     k: usize,
     label_filter: Option<&str>,
 ) -> HashMap<NodeId, usize> {
+    if !mt.contains(src) {
+        return HashMap::new();
+    }
     let mut distances: HashMap<NodeId, usize> = HashMap::new();
     distances.insert(src, 0);
 

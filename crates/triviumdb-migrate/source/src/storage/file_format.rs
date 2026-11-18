@@ -315,6 +315,9 @@ const FLUSH_MARKER_V1_SIZE: usize = 29;
 const FLUSH_MARKER_V2_SIZE: usize = 41;
 /// magic(4) + version(1) + generation(8) + sizes(24) + file CRCs(12) + marker CRC(4)
 const FLUSH_MARKER_SIZE: usize = 53;
+/// 当前内核在外置 Payload 上记录 SHA-256，迁移只需在源副本读取该标记。
+const SHA256_FLUSH_MARKER_VERSION: u8 = 4;
+const SHA256_FLUSH_MARKER_SIZE: usize = 81;
 
 /// flush_ok v3 提交标记：generation、三份事实文件的长度与 CRC，以及标记自身的 CRC。
 /// 历史 v1/v2 标记按各自字段布局解码。
@@ -326,6 +329,7 @@ struct FlushMarker {
     tdb_crc32: Option<u32>,
     vec_crc32: Option<u32>,
     payload_crc32: Option<u32>,
+    payload_sha256: Option<[u8; 32]>,
 }
 
 /// 编码 flush marker 为固定字节数组
@@ -349,7 +353,7 @@ fn encode_flush_marker(marker: &FlushMarker) -> [u8; FLUSH_MARKER_SIZE] {
 fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
     if !matches!(
         bytes.len(),
-        FLUSH_MARKER_V1_SIZE | FLUSH_MARKER_V2_SIZE | FLUSH_MARKER_SIZE
+        FLUSH_MARKER_V1_SIZE | FLUSH_MARKER_V2_SIZE | FLUSH_MARKER_SIZE | SHA256_FLUSH_MARKER_SIZE
     ) {
         return Err(TriviumError::CorruptedFile(format!(
             "flush marker 长度无效：实际 {} 字节",
@@ -360,10 +364,13 @@ fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
         return Err(TriviumError::CorruptedFile("flush marker 魔数无效".into()));
     }
     let version = bytes[4];
-    if !matches!(version, 1 | 2 | FLUSH_MARKER_VERSION) {
+    if !matches!(
+        version,
+        1 | 2 | FLUSH_MARKER_VERSION | SHA256_FLUSH_MARKER_VERSION
+    ) {
         return Err(TriviumError::CorruptedFile(format!(
             "flush marker 版本无效：支持 1..={}，实际 {}",
-            FLUSH_MARKER_VERSION, version
+            SHA256_FLUSH_MARKER_VERSION, version
         )));
     }
     if version == 1 && bytes.len() != FLUSH_MARKER_V1_SIZE {
@@ -372,17 +379,17 @@ fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
         ));
     }
     if version >= 2 {
-        let expected_size = if version == 2 {
-            FLUSH_MARKER_V2_SIZE
-        } else {
-            FLUSH_MARKER_SIZE
+        let expected_size = match version {
+            2 => FLUSH_MARKER_V2_SIZE,
+            FLUSH_MARKER_VERSION => FLUSH_MARKER_SIZE,
+            _ => SHA256_FLUSH_MARKER_SIZE,
         };
         if bytes.len() != expected_size {
             return Err(TriviumError::CorruptedFile(
-                "flush marker v2 长度无效".into(),
+                "检查点标记长度无效 (Invalid checkpoint marker length)".into(),
             ));
         }
-        let crc_offset = if version == 2 { 37 } else { 49 };
+        let crc_offset = expected_size - 4;
         let stored_crc = read_u32_le(bytes, crc_offset, "flush marker crc")?;
         if crc32fast::hash(&bytes[..crc_offset]) != stored_crc {
             return Err(TriviumError::CorruptedFile(
@@ -415,17 +422,47 @@ fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
                 )
             })
             .transpose()?,
-        payload_crc32: (version >= 3)
+        payload_crc32: (version == FLUSH_MARKER_VERSION)
             .then(|| read_u32_le(bytes, 45, "flush marker payload_crc32"))
             .transpose()?,
+        payload_sha256: if version == SHA256_FLUSH_MARKER_VERSION {
+            Some(bytes[45..77].try_into().map_err(std::io::Error::other)?)
+        } else {
+            None
+        },
     })
 }
 
 /// 读取现有 flush_ok 标记的 generation 号（用于单调递增）
 /// 如果标记不存在或无效，返回 None
 fn read_marker_generation(marker_path: &str) -> Option<u64> {
-    let bytes = std::fs::read(marker_path).ok()?;
-    decode_flush_marker(&bytes).ok().map(|m| m.generation)
+    Some(read_flush_marker(marker_path)?.generation)
+}
+
+fn read_flush_marker(path: &str) -> Option<FlushMarker> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take((SHA256_FLUSH_MARKER_SIZE + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    decode_flush_marker(&bytes).ok()
+}
+
+fn payload_sha256(path: &str) -> std::io::Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(hasher.finalize().into());
+        }
+        hasher.update(&buffer[..count]);
+    }
 }
 
 /// 校验 flush_ok 标记是否有效
@@ -446,8 +483,7 @@ fn validated_flush_marker(
     vec_path: &str,
     payload_path: &str,
 ) -> Option<FlushMarker> {
-    let marker_bytes = std::fs::read(marker_path).ok()?;
-    let marker = decode_flush_marker(&marker_bytes).ok()?;
+    let marker = read_flush_marker(marker_path)?;
     let actual_tdb = std::fs::metadata(tdb_path).map(|m| m.len()).unwrap_or(0);
     let actual_vec = std::fs::metadata(vec_path).map(|m| m.len()).unwrap_or(0);
     if marker.tdb_size != actual_tdb || marker.vec_size != actual_vec {
@@ -455,7 +491,10 @@ fn validated_flush_marker(
     }
     if let Some(payload_size) = marker.payload_size
         && (std::fs::metadata(payload_path).map(|meta| meta.len()).ok() != Some(payload_size)
-            || file_crc32(payload_path).ok() != marker.payload_crc32)
+            || match marker.payload_sha256 {
+                Some(digest) => payload_sha256(payload_path).ok() != Some(digest),
+                None => file_crc32(payload_path).ok() != marker.payload_crc32,
+            })
     {
         return None;
     }
@@ -1033,6 +1072,7 @@ fn save_mmap<T: VectorType>(
         tdb_crc32: Some(file_crc32(path)?),
         vec_crc32: Some(file_crc32_or_empty(&vec_file_path)?),
         payload_crc32: Some(file_crc32(&payload_path)?),
+        payload_sha256: None,
     };
     Ok(marker)
 }
@@ -1540,9 +1580,7 @@ fn load_inner<T: VectorType>(
         // 检查 .flush_ok 标记是否存在且 magic/version/大小均吻合，防止撕裂写入。
         // 未完成发布已在可写打开时通过撤销日志恢复；无日志的事实损坏必须拒绝。
         let marker_path = flush_ok_path_from_db(path);
-        let marker = std::fs::read(&marker_path)
-            .ok()
-            .and_then(|bytes| decode_flush_marker(&bytes).ok());
+        let marker = read_flush_marker(&marker_path);
         let payload_path = marker
             .as_ref()
             .map(|marker| payload_path_for_generation(path, marker.generation))

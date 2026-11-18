@@ -29,7 +29,7 @@ pub(crate) fn publish_new_database<T: VectorType>(
     target: &str,
     write: &mut WriteErrorInfo,
 ) -> Result<()> {
-    validate_checkpoint_type::<T>(source, &vec_path_from_db(source), source)?;
+    validate_checkpoint_type::<T>(source, &vec_path_from_db(source))?;
     let generation = read_marker_generation(&flush_ok_path_from_db(source)).ok_or_else(|| {
         TriviumError::CorruptedFile(
             "迁移暂存库缺少提交标记 (Migration staging database has no commit marker)".into(),
@@ -151,17 +151,15 @@ pub(crate) fn initialize<T: VectorType>(path: &str, memtable: &mut MemTable<T>) 
     save(&mut checkpoint, path, StorageMode::Rom)
 }
 
-fn validate_vector_identity<T: VectorType>(
+fn validate_vector_identity(
     bytes: &[u8],
-    _version: u16,
+    (requested_tag, requested): (u16, &'static str),
     dim: usize,
     count: usize,
     vector_offset: usize,
     edge_offset: usize,
-    _path: &str,
     vec_path: &str,
 ) -> Result<()> {
-    let (requested_tag, requested) = vector_dtype::<T>()?;
     let elements = count.checked_mul(dim).ok_or_else(|| {
         TriviumError::CorruptedFile("向量几何溢出 (Vector geometry overflow)".into())
     })?;
@@ -223,30 +221,33 @@ fn validate_vector_identity<T: VectorType>(
 }
 
 /// 发布恢复写入前核对可信基础文件的类型；备份向量使用独立路径。
-fn validate_checkpoint_type<T: VectorType>(
-    main: &str,
-    vectors: &str,
-    wal_base: &str,
-) -> Result<()> {
+fn validate_checkpoint_type<T: VectorType>(main: &str, vectors: &str) -> Result<()> {
     use std::io::Read;
     let mut bytes = [0u8; HEADER_SIZE as usize];
     let mut file = File::open(main)?;
     file.read_exact(&mut bytes)?;
     let version = read_u16_le(&bytes, 4, "version")?;
     crate::storage::format::require("database", version.into(), CURRENT_VERSION.into())?;
-    validate_vector_identity::<T>(
-        &bytes,
-        version,
-        read_u32_le(&bytes, 6, "dim")? as usize,
-        usize::try_from(read_u64_le(&bytes, 18, "slots")?).map_err(|_| {
+    validate_checkpoint_vector_identity(&bytes, vector_dtype::<T>()?, vectors)
+}
+
+fn validate_checkpoint_vector_identity(
+    bytes: &[u8],
+    dtype: (u16, &'static str),
+    vectors: &str,
+) -> Result<()> {
+    validate_vector_identity(
+        bytes,
+        dtype,
+        read_u32_le(bytes, 6, "dim")? as usize,
+        usize::try_from(read_u64_le(bytes, 18, "slots")?).map_err(|_| {
             TriviumError::CorruptedFile("槽位数量溢出 (Slot count overflow)".into())
         })?,
-        usize::try_from(read_u64_le(&bytes, 34, "vectors")?).map_err(|_| {
+        usize::try_from(read_u64_le(bytes, 34, "vectors")?).map_err(|_| {
             TriviumError::CorruptedFile("向量偏移溢出 (Vector offset overflow)".into())
         })?,
-        usize::try_from(read_u64_le(&bytes, 42, "edges")?)
+        usize::try_from(read_u64_le(bytes, 42, "edges")?)
             .map_err(|_| TriviumError::CorruptedFile("边偏移溢出 (Edge offset overflow)".into()))?,
-        wal_base,
         vectors,
     )
 }
@@ -254,12 +255,13 @@ fn validate_checkpoint_type<T: VectorType>(
 // ══════ flush_ok 提交标记常量 ══════
 /// 标记魔数：Trivium Flush Marker
 const FLUSH_MARKER_MAGIC: &[u8; 4] = b"TFMK";
-/// 当前标记版本记录 `.tdb/.vec/.pld` 的长度、整文件 CRC32 和 marker 自身 CRC32。
-const FLUSH_MARKER_VERSION: u8 = 3;
-/// magic(4) + version(1) + generation(8) + sizes(24) + file CRCs(12) + marker CRC(4)
-const FLUSH_MARKER_SIZE: usize = 53;
+/// 标记保留主文件和向量 CRC32，Payload 使用独立的 SHA-256。
+pub(crate) const FLUSH_MARKER_VERSION: u8 = 4;
+const FLUSH_MARKER_SIZE: usize = 81;
+pub(crate) const LEGACY_FLUSH_MARKER_VERSION: u8 = 3;
+const LEGACY_FLUSH_MARKER_SIZE: usize = 53;
 
-/// flush_ok v3 提交标记：generation、三份事实文件的长度与 CRC，以及标记自身的 CRC。
+/// 检查点的文件组身份和完整性摘要。
 struct FlushMarker {
     generation: u64,
     tdb_size: u64,
@@ -268,6 +270,7 @@ struct FlushMarker {
     tdb_crc32: Option<u32>,
     vec_crc32: Option<u32>,
     payload_crc32: Option<u32>,
+    payload_sha256: Option<[u8; 32]>,
 }
 
 /// 编码 flush marker 为固定字节数组
@@ -281,25 +284,34 @@ fn encode_flush_marker(marker: &FlushMarker) -> [u8; FLUSH_MARKER_SIZE] {
     bytes[29..37].copy_from_slice(&marker.payload_size.unwrap_or_default().to_le_bytes());
     bytes[37..41].copy_from_slice(&marker.tdb_crc32.unwrap_or_default().to_le_bytes());
     bytes[41..45].copy_from_slice(&marker.vec_crc32.unwrap_or_default().to_le_bytes());
-    bytes[45..49].copy_from_slice(&marker.payload_crc32.unwrap_or_default().to_le_bytes());
-    let marker_crc = crc32fast::hash(&bytes[..49]);
-    bytes[49..53].copy_from_slice(&marker_crc.to_le_bytes());
+    bytes[45..77].copy_from_slice(&marker.payload_sha256.unwrap_or_default());
+    let marker_crc = crc32fast::hash(&bytes[..77]);
+    bytes[77..81].copy_from_slice(&marker_crc.to_le_bytes());
     bytes
 }
 
 /// 解码 flush marker，校验 magic 和 version，不匹配时返回错误
 fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
-    if bytes.len() != FLUSH_MARKER_SIZE || &bytes[..4] != FLUSH_MARKER_MAGIC {
+    let legacy = bytes.get(4) == Some(&LEGACY_FLUSH_MARKER_VERSION);
+    let size = if legacy {
+        LEGACY_FLUSH_MARKER_SIZE
+    } else {
+        FLUSH_MARKER_SIZE
+    };
+    if bytes.len() != size || &bytes[..4] != FLUSH_MARKER_MAGIC {
         return Err(TriviumError::CorruptedFile(
             "检查点标记长度或魔数无效 (Invalid checkpoint marker length or magic)".into(),
         ));
     }
-    crate::storage::format::require(
-        "checkpoint_marker",
-        bytes[4].into(),
-        FLUSH_MARKER_VERSION.into(),
-    )?;
-    if crc32fast::hash(&bytes[..49]) != read_u32_le(bytes, 49, "marker CRC")? {
+    if !legacy {
+        crate::storage::format::require(
+            "checkpoint_marker",
+            bytes[4].into(),
+            FLUSH_MARKER_VERSION.into(),
+        )?;
+    }
+    let crc_offset = size - 4;
+    if crc32fast::hash(&bytes[..crc_offset]) != read_u32_le(bytes, crc_offset, "marker CRC")? {
         return Err(TriviumError::CorruptedFile(
             "检查点标记 CRC 无效 (Invalid checkpoint marker CRC)".into(),
         ));
@@ -311,15 +323,47 @@ fn decode_flush_marker(bytes: &[u8]) -> Result<FlushMarker> {
         payload_size: Some(read_u64_le(bytes, 29, "payload size")?),
         tdb_crc32: Some(read_u32_le(bytes, 37, "main CRC")?),
         vec_crc32: Some(read_u32_le(bytes, 41, "vector CRC")?),
-        payload_crc32: Some(read_u32_le(bytes, 45, "payload CRC")?),
+        payload_crc32: legacy
+            .then(|| read_u32_le(bytes, 45, "payload CRC"))
+            .transpose()?,
+        payload_sha256: if legacy {
+            None
+        } else {
+            Some(bytes[45..77].try_into().map_err(std::io::Error::other)?)
+        },
     })
 }
 
 /// 读取现有 flush_ok 标记的 generation 号（用于单调递增）
 /// 如果标记不存在或无效，返回 None
-fn read_marker_generation(marker_path: &str) -> Option<u64> {
-    let bytes = std::fs::read(marker_path).ok()?;
-    decode_flush_marker(&bytes).ok().map(|m| m.generation)
+pub(crate) fn read_marker_generation(marker_path: &str) -> Option<u64> {
+    Some(read_flush_marker(marker_path)?.generation)
+}
+
+fn read_flush_marker(path: &str) -> Option<FlushMarker> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take((FLUSH_MARKER_SIZE + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    decode_flush_marker(&bytes).ok()
+}
+
+fn payload_sha256(path: impl AsRef<Path>) -> std::io::Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let len = file.read(&mut buffer)?;
+        if len == 0 {
+            return Ok(hasher.finalize().into());
+        }
+        hasher.update(&buffer[..len]);
+    }
 }
 
 /// 校验 flush_ok 标记是否有效
@@ -340,8 +384,7 @@ fn validated_flush_marker(
     vec_path: &str,
     payload_path: &str,
 ) -> Option<FlushMarker> {
-    let marker_bytes = std::fs::read(marker_path).ok()?;
-    let marker = decode_flush_marker(&marker_bytes).ok()?;
+    let marker = read_flush_marker(marker_path)?;
     let actual_tdb = std::fs::metadata(tdb_path).map(|m| m.len()).unwrap_or(0);
     let actual_vec = std::fs::metadata(vec_path).map(|m| m.len()).unwrap_or(0);
     if marker.tdb_size != actual_tdb || marker.vec_size != actual_vec {
@@ -349,7 +392,10 @@ fn validated_flush_marker(
     }
     if let Some(payload_size) = marker.payload_size
         && (std::fs::metadata(payload_path).map(|meta| meta.len()).ok() != Some(payload_size)
-            || file_crc32(payload_path).ok() != marker.payload_crc32)
+            || match marker.payload_sha256 {
+                Some(digest) => payload_sha256(payload_path).ok() != Some(digest),
+                None => file_crc32(payload_path).ok() != marker.payload_crc32,
+            })
     {
         return None;
     }
@@ -877,7 +923,8 @@ fn save_mmap<T: VectorType>(
         payload_size: Some(std::fs::metadata(&payload_path)?.len()),
         tdb_crc32: Some(file_crc32(path)?),
         vec_crc32: Some(file_crc32_or_empty(&vec_file_path)?),
-        payload_crc32: Some(file_crc32(&payload_path)?),
+        payload_crc32: None,
+        payload_sha256: Some(payload_sha256(&payload_path)?),
     };
     Ok(marker)
 }
@@ -1314,14 +1361,13 @@ fn load_inner<T: VectorType>(
             "文件块几何无效 (Invalid file block geometry)".into(),
         ));
     }
-    validate_vector_identity::<T>(
+    validate_vector_identity(
         bytes,
-        version,
+        vector_dtype::<T>()?,
         dim,
         node_count,
         vector_offset,
         edge_offset,
-        path,
         &vec_path_from_db(path),
     )?;
 
@@ -1356,9 +1402,7 @@ fn load_inner<T: VectorType>(
         // 检查 .flush_ok 标记是否存在且 magic/version/大小均吻合，防止撕裂写入。
         // 未完成发布已在可写打开时通过撤销日志恢复；无日志的事实损坏必须拒绝。
         let marker_path = flush_ok_path_from_db(path);
-        let marker = std::fs::read(&marker_path)
-            .ok()
-            .and_then(|bytes| decode_flush_marker(&bytes).ok());
+        let marker = read_flush_marker(&marker_path);
         let payload_path = marker
             .as_ref()
             .map(|marker| payload_path_for_generation(path, marker.generation))
@@ -2200,7 +2244,8 @@ fn load_quiver_index<T: VectorType>(
 
 /// 复用正式头部常量与解析函数，核对快照声明的基础事实，不物化数据库。
 pub(crate) fn validate_snapshot_metadata(
-    path: &std::path::Path,
+    path: &str,
+    expected_dtype: &str,
     expected_dim: usize,
     expected_nodes: usize,
 ) -> Result<()> {
@@ -2218,8 +2263,46 @@ pub(crate) fn validate_snapshot_metadata(
         || dim > 65536
     {
         return Err(TriviumError::ImmutableArtifactInvalid {
-            reason: "快照主文件头与 manifest 不匹配".into(),
+            reason: "快照主文件头与 manifest 不匹配 (Snapshot header does not match the manifest)"
+                .into(),
         });
+    }
+    let dtype = match expected_dtype {
+        "f32" => vector_dtype::<f32>(),
+        "u64" => vector_dtype::<u64>(),
+        name if name == std::any::type_name::<half::f16>() => vector_dtype::<half::f16>(),
+        _ => {
+            return Err(TriviumError::ImmutableArtifactInvalid {
+                reason: "快照 dtype 不受支持 (Unsupported snapshot dtype)".into(),
+            });
+        }
+    }?;
+    let vector_path = vec_path_from_db(path);
+    validate_checkpoint_vector_identity(&bytes, dtype, &vector_path).map_err(
+        |error| match error {
+            TriviumError::Io(_) => error,
+            _ => TriviumError::ImmutableArtifactInvalid {
+                reason: format!(
+                    "快照向量身份校验失败 (Snapshot vector identity validation failed): {error}"
+                ),
+            },
+        },
+    )?;
+    if read_u64_le(&bytes, 34, "vector offset")? == 0 {
+        let marker_path = flush_ok_path_from_db(path);
+        let valid = read_marker_generation(&marker_path).is_some_and(|generation| {
+            validate_flush_marker(
+                &marker_path,
+                path,
+                &vector_path,
+                &payload_path_for_generation(path, generation),
+            )
+        });
+        if !valid {
+            return Err(TriviumError::ImmutableArtifactInvalid {
+                reason: "快照检查点文件组不匹配 (Snapshot checkpoint file group mismatch)".into(),
+            });
+        }
     }
     Ok(())
 }

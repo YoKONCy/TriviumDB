@@ -158,15 +158,22 @@ fn main() {
 
     let result = run(cli, cfg);
     if let Err(e) = result {
-        if let Some(error) = e.downcast_ref::<triviumdb::TriviumError>() {
+        let info = e
+            .downcast_ref::<commands::CheckpointAfterCommit>()
+            .map(commands::CheckpointAfterCommit::info)
+            .or_else(|| {
+                e.downcast_ref::<triviumdb::TriviumError>()
+                    .map(triviumdb::TriviumError::info)
+            });
+        if let Some(info) = info {
             if error_format == OutputFormat::Json {
-                eprintln!("{}", serde_json::json!(error.info()));
+                eprintln!("{}", serde_json::json!(info));
             } else {
                 eprintln!(
                     "{} [{}] {}",
                     "错误 / Error:".red().bold(),
-                    error.code(),
-                    error
+                    info.code,
+                    info.message
                 );
             }
         } else if error_format == OutputFormat::Json {
@@ -242,7 +249,11 @@ fn run(cli: Cli, cfg: config::Config) -> CliResult {
             commands::info::run(&db.path, db.dim, resolve_dtype(&db.dtype, &cfg)?, format)
         }
         Commands::Exec { db, query, mutate } => {
-            let mut handle = open(&db, &cfg)?;
+            let mut handle = if mutate {
+                open(&db, &cfg)?
+            } else {
+                open_read_only(&db, &cfg)?
+            };
             commands::exec::run(&mut handle, &query, mutate, format)
         }
         Commands::Repair { action } => match action {
@@ -253,7 +264,7 @@ fn run(cli: Cli, cfg: config::Config) -> CliResult {
         },
         Commands::Export { db, output } => {
             commands::export::validate_output_path(&db.path, &output)?;
-            let handle = open(&db, &cfg)?;
+            let handle = open_read_only(&db, &cfg)?;
             commands::export::run(&handle, &db.path, &output)
         }
         Commands::Import { db, input } => {
@@ -299,6 +310,16 @@ fn open(
 ) -> Result<db_handle::DbHandle, Box<dyn std::error::Error>> {
     let dtype = resolve_dtype(&db.dtype, cfg)?;
     Ok(db_handle::DbHandle::open_auto(&db.path, db.dim, dtype)?)
+}
+
+fn open_read_only(
+    db: &DbArgs,
+    cfg: &config::Config,
+) -> Result<db_handle::DbHandle, Box<dyn std::error::Error>> {
+    let dtype = resolve_dtype(&db.dtype, cfg)?;
+    Ok(db_handle::DbHandle::open_read_only(
+        &db.path, db.dim, dtype,
+    )?)
 }
 
 /// 解析图字符渲染模式：配置缺失或不识别值都回退到 Auto。

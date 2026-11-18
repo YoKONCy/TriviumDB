@@ -191,7 +191,11 @@ fn detect_format(input: &DocumentParseInput) -> Result<DocumentFormat> {
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    let extension = name.rsplit('.').next().unwrap_or("");
+    let extension = name
+        .rsplit(['/', '\\'])
+        .next()
+        .and_then(|file_name| file_name.rsplit_once('.'))
+        .map_or("", |(_, extension)| extension);
     let by_media = match mime.as_str() {
         "text/plain" => Some(DocumentFormat::Plain),
         "text/markdown" => Some(DocumentFormat::Markdown),
@@ -398,9 +402,8 @@ impl<'a> Writer<'a> {
                 .collect::<Vec<_>>();
             for block in leaves {
                 let mut cursor = block.start_byte;
-                for (line, text) in self.text[block.start_byte..block.end_byte]
-                    .split_inclusive('\n')
-                    .enumerate()
+                for (line, text) in
+                    lines_with_endings(&self.text[block.start_byte..block.end_byte]).enumerate()
                 {
                     let end = cursor + text.trim_end_matches(['\n', '\r']).len();
                     if end > cursor {
@@ -424,6 +427,24 @@ impl<'a> Writer<'a> {
         }
         Ok(())
     }
+}
+
+fn lines_with_endings(mut text: &str) -> impl Iterator<Item = &str> {
+    std::iter::from_fn(move || {
+        if text.is_empty() {
+            return None;
+        }
+        let end = first_line_end(text);
+        let (line, rest) = text.split_at(end);
+        text = rest;
+        Some(line)
+    })
+}
+
+fn first_line_end(text: &str) -> usize {
+    text.find(['\r', '\n']).map_or(text.len(), |index| {
+        index + 1 + usize::from(text.as_bytes()[index..].starts_with(b"\r\n"))
+    })
 }
 
 fn plain(writer: &mut Writer<'_>) -> Result<()> {
@@ -450,9 +471,7 @@ fn plain(writer: &mut Writer<'_>) -> Result<()> {
     let mut paragraph = None;
     let mut paragraph_end = 0;
     while cursor < writer.text.len() {
-        let end = writer.text[cursor..]
-            .find('\n')
-            .map_or(writer.text.len(), |offset| cursor + offset + 1);
+        let end = cursor + first_line_end(&writer.text[cursor..]);
         let line = &writer.text[cursor..end];
         if line.trim().is_empty() {
             if let Some(first) = paragraph.take() {

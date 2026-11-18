@@ -208,6 +208,7 @@ fn kind_runtime<T: VectorType>(
     Ok(match kind {
         ReturnExprKind::Var(var) => {
             if matches!(scope.query.entry, QueryEntry::Find { .. })
+                && var != "_"
                 && let Input::Nodes(nodes, _) = input
                 && let Some(value) = nodes.get(var).and_then(|node| node.payload.get(var))
             {
@@ -250,6 +251,7 @@ pub(super) fn matches_predicate<T: VectorType>(
     predicate: &Predicate,
     input: &Input<'_, T>,
     scope: &Scope<'_, T>,
+    default_node: Option<&Node<T>>,
 ) -> bool {
     match predicate {
         Predicate::Compare { left, op, right } => compare_runtime(
@@ -258,12 +260,14 @@ pub(super) fn matches_predicate<T: VectorType>(
             &expression(right, input, scope),
         ),
         Predicate::And(a, b) => {
-            matches_predicate(a, input, scope) && matches_predicate(b, input, scope)
+            matches_predicate(a, input, scope, default_node)
+                && matches_predicate(b, input, scope, default_node)
         }
         Predicate::Or(a, b) => {
-            matches_predicate(a, input, scope) || matches_predicate(b, input, scope)
+            matches_predicate(a, input, scope, default_node)
+                || matches_predicate(b, input, scope, default_node)
         }
-        Predicate::Not(value) => !matches_predicate(value, input, scope),
+        Predicate::Not(value) => !matches_predicate(value, input, scope, default_node),
         Predicate::DocFilter { var, filter } => {
             let Input::Nodes(nodes, edge) = input else {
                 return false;
@@ -273,16 +277,10 @@ pub(super) fn matches_predicate<T: VectorType>(
             {
                 return filter.matches(&edge_json(edge));
             }
-            let node = var.as_ref().and_then(|var| nodes.get(var)).or_else(|| {
-                if var.is_none() {
-                    nodes
-                        .iter()
-                        .min_by_key(|(name, _)| *name)
-                        .map(|(_, node)| node)
-                } else {
-                    None
-                }
-            });
+            let node = match var {
+                Some(var) => nodes.get(var),
+                None => default_node,
+            };
             node.is_some_and(|node| filter.matches(&node.payload))
         }
     }
@@ -306,6 +304,7 @@ fn kind_value<T: VectorType>(
             {
                 TqlValue::Edge((*edge).clone())
             } else if matches!(scope.query.entry, QueryEntry::Find { .. })
+                && var != "_"
                 && let Some(v) = nodes.get(var).and_then(|n| n.payload.get(var))
             {
                 json_to_tql_value(v.clone())
@@ -481,7 +480,7 @@ fn order_value<T: VectorType>(
             if let Some(value) = row.values.get(var) {
                 runtime_property(&tql_value_runtime(value), field, scope.mt)
             } else if let ReturnClause::Expressions(items) = &scope.query.returns
-                && let Some(item) = items.iter().find(|item| item.alias.as_ref() == Some(var))
+                && let Some(item) = items.iter().find(|item| column_name(item) == *var)
                 && let Some(index) = row.source
             {
                 runtime_property(
@@ -499,14 +498,17 @@ fn order_value<T: VectorType>(
             if let Some(value) = row.values.get(alias) {
                 tql_value_runtime(value)
             } else if let ReturnClause::Expressions(items) = &scope.query.returns
-                && let Some(item) = items.iter().find(|item| item.alias.as_ref() == Some(alias))
+                && let Some(item) = items.iter().find(|item| column_name(item) == *alias)
                 && let Some(index) = row.source
             {
                 kind_runtime(&item.kind, &inputs[index], scope)?
             } else {
-                row.source.map_or(RuntimeValue::Null, |index| {
-                    expression(expr, &inputs[index], scope)
-                })
+                match row.source {
+                    Some(index) => {
+                        kind_runtime(&ReturnExprKind::Var(alias.clone()), &inputs[index], scope)?
+                    }
+                    None => RuntimeValue::Null,
+                }
             }
         }
         TqlExpr::Binary { left, op, right } => eval_binary(

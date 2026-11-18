@@ -1,7 +1,6 @@
 //! 绑定错误与数值表示的既有契约验收。
 
 use super::errors::to_py_error;
-use super::types::round_api_f32;
 
 #[test]
 fn 核心错误完整映射到_python异常() {
@@ -40,10 +39,4 @@ fn 核心错误完整映射到_python异常() {
             );
         }
     });
-}
-
-#[test]
-fn 边权重_api舍入到六位小数() {
-    assert_eq!(round_api_f32(0.9f32), 0.9);
-    assert_eq!(round_api_f32(0.12345678f32), 0.123457);
 }

@@ -95,18 +95,27 @@ pub enum WalEntry<T> {
     },
 }
 
-/// 写入当前格式的完整封条帧。
+fn check_entry_size(size: u64) -> Result<()> {
+    if size > MAX_WAL_ENTRY_SIZE as u64 {
+        return Err(TriviumError::InvalidInput(format!(
+            "WAL 记录编码长度 {size} 超过上限 {MAX_WAL_ENTRY_SIZE} 字节 (Encoded WAL entry exceeds the {MAX_WAL_ENTRY_SIZE}-byte limit): {size}"
+        )));
+    }
+    Ok(())
+}
+
+/// 写入当前格式的完整帧，返回编码体字节数。
 fn write_framed_entry<T: serde::Serialize>(
     writer: &mut impl Write,
     entry: &WalEntry<T>,
-) -> Result<()> {
+) -> Result<u64> {
     let data = bincode::serialize(entry).map_err(TriviumError::Serialization)?;
-    let len = u32::try_from(data.len())
-        .map_err(|_| TriviumError::InvalidInput("WAL 记录超过 u32 长度上限".into()))?;
+    check_entry_size(data.len() as u64)?;
+    let len = data.len() as u32;
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&data)?;
     writer.write_all(&crc32fast::hash(&data).to_le_bytes())?;
-    Ok(())
+    Ok(u64::from(len))
 }
 
 /// WAL 磁盘同步模式
@@ -279,6 +288,31 @@ impl Wal {
     /// 格式: [len: u32][bincode bytes][crc32: u32]
     /// 写入后立即 fsync，保证即使 OS 崩溃数据也不丢失
     pub fn append<T: serde::Serialize>(&mut self, entry: &WalEntry<T>) -> Result<()> {
+        self.validate_entry(entry)?;
+        self.append_validated(entry)
+    }
+
+    pub(crate) fn validate_entry<T: serde::Serialize>(
+        &mut self,
+        entry: &WalEntry<T>,
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        self.validate_entry_size(entry)
+    }
+
+    fn validate_entry_size<T: serde::Serialize>(&mut self, entry: &WalEntry<T>) -> Result<()> {
+        let size = bincode::serialized_size(entry).map_err(|error| {
+            // 序列化失败沿用 writer 隔离契约；长度超限属于可修正的输入错误。
+            self.release_writer();
+            TriviumError::Serialization(error)
+        })?;
+        check_entry_size(size)
+    }
+
+    pub(crate) fn append_validated<T: serde::Serialize>(
+        &mut self,
+        entry: &WalEntry<T>,
+    ) -> Result<()> {
         let result = self.append_inner(entry);
         if result.is_err() {
             // 写入结果不确定时隔离 writer，保留日志供重新打开恢复。
@@ -288,21 +322,12 @@ impl Wal {
     }
 
     fn append_inner<T: serde::Serialize>(&mut self, entry: &WalEntry<T>) -> Result<()> {
-        let data = bincode::serialize(entry).map_err(TriviumError::Serialization)?;
-        let checksum = crc32fast::hash(&data);
-        let len = data.len() as u32;
-        {
+        let len = {
             let writer = self.writer.as_mut().ok_or(TriviumError::WalClosed)?;
-            writer.write_all(&len.to_le_bytes())?;
-            writer.write_all(&data)?;
-            writer.write_all(&checksum.to_le_bytes())?;
-        }
-        self.cumulative_written_bytes = self
-            .cumulative_written_bytes
-            .saturating_add(8u64.saturating_add(data.len() as u64));
-        self.cumulative_logical_bytes = self
-            .cumulative_logical_bytes
-            .saturating_add(data.len() as u64);
+            write_framed_entry(writer, entry)?
+        };
+        self.cumulative_written_bytes = self.cumulative_written_bytes.saturating_add(8 + len);
+        self.cumulative_logical_bytes = self.cumulative_logical_bytes.saturating_add(len);
         if self.group_commit_active {
             self.group_commit_pending = true;
         } else {
@@ -319,6 +344,26 @@ impl Wal {
         tx_id: u64,
         entries: &[WalEntry<T>],
     ) -> Result<()> {
+        self.validate_batch(entries)?;
+        self.append_validated_batch(tx_id, entries)
+    }
+
+    pub(crate) fn validate_batch<T: serde::Serialize>(
+        &mut self,
+        entries: &[WalEntry<T>],
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        // 封条为固定长度，先检查全部数据帧再写 TxBegin。
+        entries
+            .iter()
+            .try_for_each(|entry| self.validate_entry_size(entry))
+    }
+
+    pub(crate) fn append_validated_batch<T: serde::Serialize>(
+        &mut self,
+        tx_id: u64,
+        entries: &[WalEntry<T>],
+    ) -> Result<()> {
         let result = self.append_batch_inner(tx_id, entries);
         if result.is_err() {
             self.release_writer();
@@ -331,26 +376,15 @@ impl Wal {
         tx_id: u64,
         entries: &[WalEntry<T>],
     ) -> Result<()> {
-        if self.writer.is_none() {
-            return Err(TriviumError::WalClosed);
-        }
         let batch_bytes = {
             let writer = self.writer.as_mut().ok_or(TriviumError::WalClosed)?;
-            let mut write_single = |entry: &WalEntry<T>| -> Result<u64> {
-                let data = bincode::serialize(entry).map_err(TriviumError::Serialization)?;
-                let checksum = crc32fast::hash(&data);
-                let len = data.len() as u32;
-                writer.write_all(&len.to_le_bytes())?;
-                writer.write_all(&data)?;
-                writer.write_all(&checksum.to_le_bytes())?;
-                Ok(8u64.saturating_add(data.len() as u64))
-            };
-
-            let mut batch_bytes = write_single(&WalEntry::TxBegin { tx_id })?;
+            let mut batch_bytes =
+                8 + write_framed_entry(writer, &WalEntry::<T>::TxBegin { tx_id })?;
             for entry in entries {
-                batch_bytes = batch_bytes.saturating_add(write_single(entry)?);
+                batch_bytes = batch_bytes.saturating_add(8 + write_framed_entry(writer, entry)?);
             }
-            batch_bytes.saturating_add(write_single(&WalEntry::TxCommit { tx_id })?)
+            batch_bytes
+                .saturating_add(8 + write_framed_entry(writer, &WalEntry::<T>::TxCommit { tx_id })?)
         };
 
         // 字节已经写入 BufWriter；必须先更新指标，避免后续 flush/sync 失败时漏报。

@@ -110,6 +110,11 @@ impl PreparedTql {
         self.parameters.iter().map(String::as_str).collect()
     }
 
+    /// 取得参数绑定前已确定的投影列。
+    pub fn result_columns(&self) -> Vec<String> {
+        super::tql_executor::result_columns(&self.query)
+    }
+
     /// 绑定全部参数；缺参、额外参数和非有限浮点均 fail-closed。
     pub fn bind(&self, values: &HashMap<String, TqlParamValue>) -> Result<TqlQuery, TriviumError> {
         self.bind_values(values)

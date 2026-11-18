@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use triviumdb::database::{Config, StorageMode};
 use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
-use triviumdb::{ConsoleHost, ConsoleOptions, Database};
+use triviumdb::{ConsoleHost, ConsoleOptions, Database, ResourceRuntime};
 
 fn wire(command: Value) -> String {
     json!({"version":1,"requestId":"同一写请求","command":command}).to_string()
@@ -22,7 +22,8 @@ fn 提交前取消归还工作区且请求可重用并在持有宿主时释放�
             auto_build_quiver: false,
             ..Default::default()
         };
-        let mut core = Database::<f32>::open_with_config(&path, config).unwrap();
+        let runtime = ResourceRuntime::new(Default::default()).unwrap();
+        let mut core = Database::<f32>::open_with_runtime(&path, config, runtime).unwrap();
         core.insert_with_id(1, &[1., 0.], json!({"saved":"原始事实"}))
             .unwrap();
         let database = Arc::new(Mutex::new(core));
