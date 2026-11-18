@@ -59,6 +59,25 @@ module.exports = function tqlBoundaries(root, TriviumDB) {
     }
   } finally { numeric.close() }
 
+  const cas = open('cas-exact-number')
+  try {
+    cas.insertWithId(1, [1], { whole: 0, legacy: 0 })
+    // 在内核中分别生成其他 SDK 可写入的整数和旧的整值浮点表示。
+    cas.tqlMut('MATCH (n {id:1}) SET n.whole == 4294967296, n.legacy == 4294967296.0')
+    const { whole, legacy } = cas.getPayload(1)
+    assert.deepEqual({ whole, legacy }, { whole: 2 ** 32, legacy: 2 ** 32 })
+    assert.throws(() => cas.compareAndSetPayloadField(1, 'whole', whole + 1, 0),
+      error => error.code === 'TDB_CONDITIONAL_UPDATE_NOT_MATCHED')
+    cas.compareAndSetPayloadField(1, 'whole', whole, Number.MAX_SAFE_INTEGER)
+    cas.compareAndSetPayloadField(1, 'legacy', legacy, -Number.MAX_SAFE_INTEGER)
+    assert.deepEqual(cas.getPayload(1), {
+      whole: Number.MAX_SAFE_INTEGER, legacy: -Number.MAX_SAFE_INTEGER,
+    })
+    // 以精确整数算术核对 Node 写入后的表示。
+    assert.deepEqual(cas.tql('MATCH (n {id:1}) RETURN n.whole + 2 AS a, n.legacy - 2 AS b'),
+      [{ a: '9007199254740993', b: '-9007199254740993' }])
+  } finally { cas.close() }
+
   const file = path.join(root, 'boundaries-full-id.tdb')
   new TriviumDB(file, { dim: 2, autoBuildQuiver: false }).close()
   fs.copyFileSync(path.join(__dirname, '../fixtures/numeric_ids/full_u64.bin'), file + '.wal')

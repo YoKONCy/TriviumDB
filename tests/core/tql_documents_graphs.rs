@@ -427,23 +427,30 @@ fn 文档压缩来源共用冷热精度并在重开后保留证据与只读零�
 fn 直接执行器控制句柄在图物化阶段传播取消() {
     use triviumdb::query::tql_executor::{QueryControl, TqlLimits, execute_tql_values_with_limits};
     use triviumdb::query::tql_parser::parse_tql;
+    use triviumdb::sdk::RequestContext;
     use triviumdb::storage::memtable::MemTable;
-    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_request};
     let query = parse_tql("GRAPH {include_default:true} MATCH (n) RETURN n").unwrap();
     let control = QueryControl::default();
     let worker_control = control.clone();
-    let gate = pause_at(ConcurrencyPoint::NamedGraphRead);
+    // 测试上下文只用于选择屏障，独立的取消控制仍从执行器的 TqlLimits 传递。
+    let context =
+        RequestContext::new("direct-graph-materialization", Default::default(), false).unwrap();
+    let gate = pause_at_request(ConcurrencyPoint::NamedGraphRead, context.request_id());
     let worker = std::thread::spawn(move || {
         let mt = MemTable::<f32>::new(2);
-        let error = execute_tql_values_with_limits(
-            &query,
-            &mt,
-            TqlLimits {
-                query_control: Some(worker_control),
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
+        let error = context
+            .run(|| {
+                execute_tql_values_with_limits(
+                    &query,
+                    &mt,
+                    TqlLimits {
+                        query_control: Some(worker_control),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap_err();
         assert_eq!(error.code(), "TDB_QUERY_CANCELLED");
         assert_eq!(
             error.info().stage,
@@ -464,7 +471,7 @@ fn 直接执行器控制句柄在图物化阶段传播取消() {
 #[cfg(feature = "test-hooks")]
 #[test]
 fn 组合查询在文档图读取与导航处取消均归还额度且允许完整重试() {
-    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_request};
     for (point, query) in [
         (
             ConcurrencyPoint::NamedGraphRead,
@@ -490,7 +497,7 @@ fn 组合查询在文档图读取与导航处取消均归还额度且允许完�
         let context =
             triviumdb::sdk::RequestContext::new("tql-document-cancel", Default::default(), false)
                 .unwrap();
-        let gate = pause_at(point);
+        let gate = pause_at_request(point, context.request_id());
         let db = std::sync::Arc::new(db);
         let worker_db = db.clone();
         let worker_context = context.clone();

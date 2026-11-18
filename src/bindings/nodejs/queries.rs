@@ -3,7 +3,7 @@
 use super::arguments::{parse_management_string, parse_string_argument};
 use super::database::{DbBackend, TriviumDB};
 use super::errors::to_napi_error;
-use super::json::NodeJson;
+use super::json::{NodeJson, enumerable_own_keys, string_from_js};
 use napi::bindgen_prelude::Either;
 use napi::{Env, JsObject, JsUnknown, ValueType};
 use napi_derive::napi;
@@ -106,14 +106,14 @@ fn collect_prepared_parameters(
     if object.is_array()? {
         return Err(invalid_container());
     }
-    let keys = object.get_property_names()?;
+    let keys = enumerable_own_keys(&object)?;
     let mut values = std::collections::HashMap::new();
     for index in 0..keys.get_array_length()? {
-        let name = keys
-            .get_element::<napi::JsString>(index)?
-            .into_utf8()?
-            .as_str()?
-            .to_owned();
+        let key: JsUnknown = keys.get_element(index)?;
+        if key.get_type()? == ValueType::Symbol {
+            continue;
+        }
+        let name = string_from_js(key)?;
         // 枚举与 getter 可执行宿主代码，原异常直接传播。
         let value: JsUnknown = object.get_property(env.create_string(&name)?)?;
         let invalid_value = || {

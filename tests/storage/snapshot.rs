@@ -132,3 +132,39 @@ fn 两种存储模式的完整索引快照恢复后事实一致() {
         db.close().unwrap();
     }
 }
+
+#[test]
+fn 清单dtype与主文件不一致时快照不能校验或发布恢复目录() {
+    let root = super::support::TestDir::new("snapshot_dtype");
+    let path = root.file("source.tdb");
+    let mut db = Database::<f32>::open(&path, 2).unwrap();
+    db.insert_with_id(1, &[1., 0.], serde_json::json!({"kind":"sample"}))
+        .unwrap();
+    let snapshot = root.file("snapshot");
+    let restored = root.file("restored");
+    db.create_snapshot(&snapshot, "snapshot-dtype").unwrap();
+    db.close().unwrap();
+    assert_eq!(verify_snapshot(&snapshot).unwrap().dtype, "f32");
+
+    let manifest_path = std::path::Path::new(&snapshot).join("database.tdb.manifest.json");
+    let original = std::fs::read(&manifest_path).unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    manifest["dtype"] = "u64".into();
+    let incorrect = serde_json::to_vec(&manifest).unwrap();
+    std::fs::write(&manifest_path, &incorrect).unwrap();
+    assert_eq!(
+        verify_snapshot(&snapshot).unwrap_err().code(),
+        "TDB_IMMUTABLE_ARTIFACT"
+    );
+    let error = restore_snapshot(&snapshot, &restored).unwrap_err();
+    assert_eq!(error.code(), "TDB_IMMUTABLE_ARTIFACT");
+    assert!(!std::path::Path::new(&restored).exists());
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), incorrect);
+
+    std::fs::write(&manifest_path, original).unwrap();
+    assert_eq!(restore_snapshot(&snapshot, &restored).unwrap().dtype, "f32");
+    let reader = Database::<f32>::open_immutable(&format!("{restored}/database.tdb"), 2).unwrap();
+    let node = reader.get(1).unwrap().unwrap();
+    assert_eq!(node.vector, [1., 0.]);
+    assert_eq!(node.payload, serde_json::json!({"kind":"sample"}));
+}

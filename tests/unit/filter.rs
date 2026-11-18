@@ -5,6 +5,28 @@
 use serde_json::json;
 use triviumdb::Filter;
 
+#[test]
+fn 字段运算符不能为空且显式对象等值有效() {
+    assert!(Filter::from_json(&json!({"kind":"match","absent":{}})).is_err());
+    let filter = Filter::from_json(&json!({"kind":"match","data":{"$eq":{}}})).unwrap();
+    assert!(filter.matches(&json!({"kind":"match","data":{}})));
+    assert!(!filter.matches(&json!({"kind":"match"})));
+}
+
+#[test]
+fn RFC3339支持宽时间范围和精确时区纳秒比较() {
+    let filter = Filter::from_json(&json!({"at":{"$before":"2000-01-01T00:00:00Z"}})).unwrap();
+    assert!(filter.matches(&json!({"at":"1600-01-01T00:00:00Z"})));
+    let filter = Filter::from_json(&json!({
+        "at": {"$afterEq":"2500-01-01T01:00:00.000000001+01:00",
+               "$before": "2500-01-01T00:00:00.000000003Z"}
+    }))
+    .unwrap();
+    assert!(filter.matches(&json!({"at":"2500-01-01T00:00:00.000000001Z"})));
+    assert!(!filter.matches(&json!({"at":"2500-01-01T00:00:00.000000000Z"})));
+    assert!(!filter.matches(&json!({"at":"2500-01-01T00:00:00.000000003Z"})));
+}
+
 // ════════════════════════════════════════════════════════════════
 //  Filter::matches — 14 种变体点到点
 // ════════════════════════════════════════════════════════════════

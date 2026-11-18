@@ -49,6 +49,47 @@ fn plan(db: &Database<f32>, query: &str) -> serde_json::Value {
 }
 
 #[test]
+fn 有序范围键碰撞时按完整精度排序再分页() {
+    use triviumdb::query::tql_executor::TqlValue;
+
+    let path = path("ordered_range_collision");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, 1).unwrap();
+    for (id, value) in [(1, (1u64 << 53) + 1), (2, 1 << 53), (3, (1 << 53) + 4)] {
+        db.insert_with_id(id, &[1.], json!({"n": value})).unwrap();
+    }
+    let check = |db: &Database<f32>| {
+        for (direction, expected) in [("ASC", [2, 1, 3]), ("DESC", [3, 1, 2])] {
+            let query =
+                format!("FIND {{n: {{$gt: 0}}}} RETURN _.id AS id ORDER BY _.n {direction}");
+            let ids = |query: &str| {
+                db.tql(query)
+                    .unwrap()
+                    .iter()
+                    .map(|row| match &row["id"] {
+                        TqlValue::Int(id) => *id,
+                        other => panic!("节点 ID 的值类型错误：{other:?}"),
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(ids(&query), expected);
+            for (offset, id) in expected.into_iter().enumerate() {
+                assert_eq!(ids(&format!("{query} LIMIT 1 OFFSET {offset}")), [id]);
+            }
+        }
+    };
+    check(&db);
+    db.create_ordered_index("n").unwrap();
+    check(&db);
+    db.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, 1).unwrap();
+    assert_eq!(reopened.index_info().unwrap()[0].fields, ["n"]);
+    check(&reopened);
+    reopened.close().unwrap();
+    cleanup(&path);
+}
+
+#[test]
 fn planner_投影排序和其他字段排序保留完整输入且解释一致() {
     use triviumdb::query::tql_executor::execute_tql;
     use triviumdb::query::tql_parser::parse_tql;

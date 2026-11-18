@@ -40,9 +40,14 @@ fn 测试_深层页撕裂_模拟写入一半断电截断() {
         }
         db.flush().unwrap();
     }
-    // 删除 WAL 和 flush_ok，隔离变量，只保留被截断的主数据文件
-    std::fs::remove_file(format!("{}.wal", path)).ok();
-    std::fs::remove_file(format!("{}.flush_ok", path)).ok();
+    // 保留有效检查点标记与 Payload 文件，只破坏主文件。
+    {
+        let db = Database::<f32>::open_read_only(&path, DIM).unwrap();
+        assert_eq!(db.node_count().unwrap(), 100);
+        let last = db.get(100).unwrap().unwrap();
+        assert_eq!(last.vector, [9.0, 9.0, 0.0, 0.0]);
+        assert_eq!(last.payload, serde_json::json!({"batch": 9, "val": 9}));
+    }
 
     // TriviumDB 的主数据文件就是 path 本身（不带 .tdb 后缀）
     let tdb_path = path.clone();
@@ -61,25 +66,11 @@ fn 测试_深层页撕裂_模拟写入一半断电截断() {
     file.set_len(torn_len).expect("系统截断文件长度失败");
     drop(file);
 
-    // 重新打开：撕裂的由于缺少 flush_ok 或元数据校验报错，必须优雅拦截
-    // 不能让 Mmap 去映射超出物理文件体积的心智虚假空间从而引发 Linux BusError 甚至导致进程 Segfault
-    let result = std::panic::catch_unwind(|| Database::<f32>::open(&path, DIM));
-
-    assert!(
-        result.is_ok(),
-        "引擎因为扇区撕裂触发了极危系统崩溃 (Segfault / Panic)！"
-    );
-    let load_res = result.unwrap();
-
-    // 加载可能 Err(Corrupted)，或者是 fallback 清空
-    if let Ok(db) = load_res {
-        // 如果它强行加载了，那至少不能是原本的 100个 节点，或者它的节点数应为 0（降级重建）
-        if db.node_count().unwrap() == 100 {
-            panic!(
-                "引擎毫无察觉地加载了一个被残忍撕裂的文件！存在极大概率访问未初始化的 Mmap 页！"
-            );
-        }
-    }
+    let error = match Database::<f32>::open_read_only(&path, DIM) {
+        Ok(_) => panic!("主文件截断后应拒绝打开"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "TDB_CORRUPTED_FILE", "{error}");
 
     cleanup(&path);
 }

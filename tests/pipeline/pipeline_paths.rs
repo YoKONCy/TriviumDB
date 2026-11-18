@@ -49,6 +49,172 @@ fn pipeline_budget() -> PipelineBudget {
 }
 
 #[test]
+fn 全路径跨起点聚合强度并返回相符的代表路径() {
+    let mut mt = MemTable::<f32>::new(2);
+    for id in 1..=5 {
+        mt.insert_with_id(id, &[1., 0.], json!({})).unwrap();
+    }
+    for (src, dst, weight) in [(1, 3, 2.), (3, 5, 4.), (2, 5, 1.)] {
+        mt.link(src, dst, "r".into(), weight).unwrap();
+    }
+    for (aggregation, expected) in [
+        (PathStrengthAggregation::MaxProduct, 8.),
+        (PathStrengthAggregation::SumProduct, 9.),
+        (PathStrengthAggregation::AverageWeight, 2.),
+    ] {
+        let mut context = PipelineContext::new(&mt, pipeline_budget());
+        let output = BoundedAllPaths {
+            targets: vec![5],
+            config: BoundedPathConfig {
+                max_depth: 3,
+                max_paths: 8,
+                label_sequence: None,
+                forbidden_nodes: BTreeSet::new(),
+            },
+            aggregation,
+        }
+        .apply(NodeSet::from_ids([2, 1]), &mut context)
+        .unwrap();
+        assert_eq!(output.rows().len(), 1);
+        let row = &output.rows()[0];
+        assert_eq!(row.path.as_deref(), Some(&[1, 3, 5][..]));
+        assert_eq!(row.path_count, Some(2));
+        assert_eq!(row.path_strength.unwrap().value, expected);
+        assert_eq!(row.provenance.source_ids, [1, 2]);
+    }
+}
+
+#[test]
+fn 单条路径平均权重保留极大值抵消后的尾项() {
+    let mut mt = MemTable::<f32>::new(2);
+    for id in 1..=4 {
+        mt.insert_with_id(id, &[1., 0.], json!({})).unwrap();
+    }
+    let big = 2f32.powi(100);
+    for (src, weight) in [(1, big), (2, 1.), (3, -big)] {
+        mt.link(src, src + 1, "r".into(), weight).unwrap();
+    }
+    let config = BoundedPathConfig {
+        max_depth: 3,
+        max_paths: 8,
+        label_sequence: None,
+        forbidden_nodes: BTreeSet::new(),
+    };
+    let paths = bounded_all_paths(&mt, 1, 4, &config, &budget())
+        .unwrap()
+        .paths;
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].nodes, [1, 2, 3, 4]);
+    assert_eq!(paths[0].strength_average, 1.0f32 / 3.0);
+}
+
+#[test]
+fn 三种最短路径查询中的重复目标只计算一次() {
+    use triviumdb::query::{
+        tql_executor::{TqlValue, execute_tql_values},
+        tql_parser::parse_tql,
+    };
+    let mt = graph();
+    for (operator, tail) in [
+        ("SHORTEST_PATHS", ""),
+        ("WEIGHTED_PATHS", ""),
+        ("YEN_PATHS", " K 2"),
+    ] {
+        let query = parse_tql(&format!(
+            "MATCH (a {{id:1}}) WITH a {operator} a TO [2,2]{tail} AS r WITH r RETURN path(r) AS p, path_count(r) AS n"
+        )).unwrap();
+        let rows = execute_tql_values(&query, &mt).unwrap();
+        assert_eq!(rows.len(), 1, "{operator}");
+        assert!(matches!(&rows[0]["p"], TqlValue::Path(path) if path == &[1,2]));
+        assert!(matches!(rows[0]["n"], TqlValue::Int(1)));
+    }
+}
+
+#[test]
+fn 路径别名从路径首节点继承即使终点也是起点() {
+    use triviumdb::query::{
+        tql_executor::{TqlValue, execute_tql_values},
+        tql_parser::parse_tql,
+    };
+    let mt = graph();
+    let query = parse_tql(
+        "MATCH (seed {id:{$lte:2}}) WITH seed, seed AS origin \
+         YEN_PATHS seed TO [2] K 3 AS r WITH r, origin \
+         RETURN origin.id AS source, path(r) AS p, path_rank(r) AS rank ORDER BY source",
+    )
+    .unwrap();
+    let rows = execute_tql_values(&query, &mt).unwrap();
+    assert_eq!(rows.len(), 2);
+    for (row, source, expected) in [(&rows[0], 1, &[1, 2][..]), (&rows[1], 2, &[2][..])] {
+        assert!(matches!(row["source"], TqlValue::Int(id) if id == source));
+        assert!(matches!(&row["p"], TqlValue::Path(path) if path == expected));
+        assert!(matches!(row["rank"], TqlValue::Int(1)));
+    }
+}
+
+#[test]
+fn 多路径乘积和保留抵消尾项并只处理一次重复目的地() {
+    let mut mt = MemTable::<f32>::new(2);
+    for id in 1..=5 {
+        mt.insert_with_id(id, &[1., 0.], json!({})).unwrap();
+    }
+    let large = 2.0f32.powi(100);
+    for (via, weight) in [(2, large), (3, 1.0), (4, -large)] {
+        mt.link(1, via, "a".into(), weight).unwrap();
+        mt.link(via, 5, "b".into(), 1.0).unwrap();
+    }
+    let mut context = PipelineContext::new(&mt, pipeline_budget());
+    let result = BoundedAllPaths {
+        targets: vec![5, 5],
+        config: BoundedPathConfig {
+            max_depth: 2,
+            max_paths: 10,
+            label_sequence: None,
+            forbidden_nodes: BTreeSet::new(),
+        },
+        aggregation: PathStrengthAggregation::SumProduct,
+    }
+    .apply(NodeSet::from_ids([1]), &mut context)
+    .unwrap();
+    assert_eq!(result.rows().len(), 1);
+    assert_eq!(result.rows()[0].id, 5);
+    assert_eq!(result.rows()[0].path_count, Some(3));
+    assert_eq!(result.rows()[0].path_strength.unwrap().value, 1.0);
+}
+
+#[test]
+fn 禁经集合覆盖端点且路径必须走完整标签序列() {
+    let mt = graph();
+    let mut config = BoundedPathConfig {
+        max_depth: 3,
+        max_paths: 10,
+        label_sequence: Some(vec!["a".to_owned(), "b".to_owned()]),
+        forbidden_nodes: BTreeSet::new(),
+    };
+    let paths = bounded_all_paths(&mt, 1, 4, &config, &budget()).unwrap();
+    assert_eq!(
+        paths
+            .paths
+            .into_iter()
+            .map(|path| path.nodes)
+            .collect::<Vec<_>>(),
+        [vec![1, 2, 4], vec![1, 3, 4]]
+    );
+    assert!(
+        bounded_all_paths(&mt, 1, 2, &config, &budget())
+            .unwrap()
+            .paths
+            .is_empty()
+    );
+    for excluded in [1, 4] {
+        config.forbidden_nodes = BTreeSet::from([excluded]);
+        let result = bounded_all_paths(&mt, 1, 4, &config, &budget()).unwrap();
+        assert!(result.paths.is_empty());
+        assert!(!result.truncated);
+    }
+}
+
+#[test]
 fn 查询深度与预算深度分别决定完整结果错误和部分标记() {
     use triviumdb::TriviumError;
     use triviumdb::graph::budget::BudgetDimension;
@@ -221,6 +387,41 @@ fn 有界路径确定性且强度与标签序列正确() {
     assert!((first.paths[0].strength_product - 0.4).abs() < 1e-6);
     assert!((first.paths[1].strength_product - 0.63).abs() < 1e-6);
     assert!(!first.truncated);
+}
+
+#[test]
+fn 全路径乘积在大指数抵消后保留最终有限值() {
+    use triviumdb::query::tql_executor::{TqlValue, execute_tql_values};
+    use triviumdb::query::tql_parser::parse_tql;
+
+    let high = 2.0f32.powi(100);
+    let low = 2.0f32.powi(-100);
+    for (a, b) in [(high, low), (low, high)] {
+        let mut mt = MemTable::<f32>::new(2);
+        // 十次连续累乘足以接近 f64 指数上限；十二次会超出 f64，即使最终乘积可表示。
+        let weights = [vec![a; 12], vec![b; 11]].concat();
+        let target = weights.len() as u64 + 1;
+        for id in 1..=target {
+            let vector = if id == 1 { [1., 0.] } else { [0., 1.] };
+            mt.insert_with_id(id, &vector, json!({})).unwrap();
+        }
+        for (index, weight) in weights.iter().enumerate() {
+            let from = index as u64 + 1;
+            mt.link(from, from + 1, "hop".into(), *weight).unwrap();
+        }
+        let query = parse_tql(&format!(
+            "SEARCH VECTOR [1,0] TOP 1 AS seed WITH seed \
+             ALL_PATHS seed TO [{target}] DEPTH 23 PATHS 10 AGGREGATE max_product AS route \
+             WITH route RETURN path_strength(route) AS score, path(route) AS path"
+        ))
+        .unwrap();
+        let rows = execute_tql_values(&query, &mt).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0]["score"], TqlValue::Float(value) if value == f64::from(a)));
+        assert!(
+            matches!(&rows[0]["path"], TqlValue::Path(path) if path == &(1..=target).collect::<Vec<_>>())
+        );
+    }
 }
 
 #[test]

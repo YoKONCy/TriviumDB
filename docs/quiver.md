@@ -1,6 +1,6 @@
 # QuIVer 向量索引
 
-> 本文介绍 `0.9.2-beta.1` 的 QuIVer 图导航、原始向量精排、可选压缩重排、冷热驻留、构建维护与资源计量。版本记录见[变更说明](changes/0.9.2-beta.1.md)，冻结研究资料见 [ICDE 复现归档](../evaluation/README.md)。
+> 本文介绍 `0.9.2` 的 QuIVer 图导航、原始向量精排、可选压缩重排、冷热驻留、构建维护与资源计量。版本记录见[变更说明](changes/0.9.2.md)，冻结研究资料见 [ICDE 复现归档](../evaluation/README.md)。
 
 ---
 
@@ -31,7 +31,7 @@ QuIVer 是 TriviumDB 的近似最近邻（ANN）图索引，使用紧凑量化�
 
 QuIVer ANN 面向主流 embedding 模型输出的真实语义向量，覆盖文本、代码和图像等语义近邻查询。查询与库向量沿用模型约定的匹配检索空间。公开评测包含 Cohere、BGE-M3、MiniLM、Nomic、Jina 等模型的数据，完整模型来源、任务、度量、参数和逐数据集结果保存在[评测归档](../evaluation/README.md)。
 
-随机合成向量、手工设计或拼接的特征、传统非负描述子等数据，建议采用全量精确检索。符合 dtype 与维度契约的向量通过 TriviumDB 存储并按对应度量查询。Python／Rust 的 `search_exact`、Node 的 `searchExact` 提供独立精确入口。`0.9.2-beta.1` 的统一 `exact` 参数复用带过滤及后续处理的检索管线，详见 [API 参考](api-reference.md#search--纯向量图扩散检索-基础)。
+随机合成向量、手工设计或拼接的特征、传统非负描述子等数据，建议采用全量精确检索。符合 dtype 与维度契约的向量通过 TriviumDB 存储并按对应度量查询。Python／Rust 的 `search_exact`、Node 的 `searchExact` 提供独立精确入口。`0.9.2` 的统一 `exact` 参数复用带过滤及后续处理的检索管线，详见 [API 参考](api-reference.md#search--纯向量图扩散检索-基础)。
 
 > **召回提醒**　ANN 效果由向量分布、检索任务与预算共同决定。跨模型、跨模态和自定义变换后的向量分别验收。业务数据上的 Recall@K、吞吐及资源用量按[性能评估](#性能评估)核验。
 

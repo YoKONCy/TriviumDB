@@ -68,6 +68,7 @@ pub fn search<T: VectorType>(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn search_filter_map<T: VectorType>(
     query: &[T],
     flat_db_vectors: &[T],
@@ -98,6 +99,34 @@ pub(crate) fn search_filter_map_segments<T: VectorType>(
     min_score: f32,
     id_filter_map: impl Fn(usize) -> Option<NodeId> + Sync,
 ) -> Vec<SearchHit> {
+    search_segments_controlled(
+        query,
+        base,
+        delta,
+        dim,
+        top_k,
+        min_score,
+        id_filter_map,
+        None,
+    )
+    .expect("未传入取消控制器时扫描无需执行取消检查")
+}
+
+/// 并行分片共享控制器，在批次检查点停止评分并传播请求错误。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_segments_controlled<T: VectorType>(
+    query: &[T],
+    base: &[T],
+    delta: &[T],
+    dim: usize,
+    top_k: usize,
+    min_score: f32,
+    id_filter_map: impl Fn(usize) -> Option<NodeId> + Sync,
+    control: Option<&crate::query::tql_executor::QueryControl>,
+) -> crate::Result<Vec<SearchHit>> {
+    if let Some(control) = control {
+        control.check()?;
+    }
     if dim == 0
         || top_k == 0
         || query.len() != dim
@@ -105,28 +134,36 @@ pub(crate) fn search_filter_map_segments<T: VectorType>(
         || !delta.len().is_multiple_of(dim)
         || query.iter().any(|v| !v.to_f32().is_finite())
     {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let heap = base
         .par_chunks(dim)
         .chain(delta.par_chunks(dim))
         .enumerate()
-        .filter_map(|(i, vector)| {
-            let id = id_filter_map(i)?;
-            let score = T::similarity(query, vector);
-            (score.is_finite() && score >= min_score).then_some(Candidate { id, score })
+        .try_fold(BinaryHeap::new, |mut heap, (slot, vector)| {
+            if slot % 64 == 0
+                && let Some(control) = control
+            {
+                control.check()?;
+            }
+            if let Some(id) = id_filter_map(slot) {
+                let score = T::similarity(query, vector);
+                if score.is_finite() && score >= min_score {
+                    retain_best(&mut heap, Candidate { id, score }, top_k);
+                }
+            }
+            Ok(heap)
         })
-        .fold(BinaryHeap::new, |mut heap, candidate| {
-            retain_best(&mut heap, candidate, top_k);
-            heap
-        })
-        .reduce(BinaryHeap::new, |mut left, right| {
+        .try_reduce(BinaryHeap::new, |mut left, right| {
             for candidate in right {
                 retain_best(&mut left, candidate, top_k);
             }
-            left
-        });
-    finish(heap)
+            Ok::<_, crate::TriviumError>(left)
+        })?;
+    if let Some(control) = control {
+        control.check()?;
+    }
+    Ok(finish(heap))
 }
 
 #[cfg(test)]

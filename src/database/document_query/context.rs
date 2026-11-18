@@ -44,7 +44,8 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                 scan(&mt, id, &mut cost, &query.limits)?;
                 #[derive(Deserialize)]
                 struct Count {
-                    blocks: Vec<serde::de::IgnoredAny>,
+                    blocks: Option<Vec<serde::de::IgnoredAny>>,
+                    archive: Option<String>,
                 }
                 reserve(
                     &mt,
@@ -62,8 +63,23 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                     )
                 })?;
                 let count: Count = serde_json::from_str(document.get()).map_err(stored_error)?;
-                examined = examined.saturating_add(count.blocks.len());
-                budget("document_candidates", examined, query.limits.max_candidates)?;
+                if let Some(archive) = count.archive {
+                    let upload = mt
+                        .document_publications
+                        .get(&archive)
+                        .map_err(stored_error)?;
+                    for chunk in &upload.chunks {
+                        crate::request::check_current()?;
+                        examined = examined.saturating_add(chunk.blocks.len());
+                        budget("document_candidates", examined, query.limits.max_candidates)?;
+                    }
+                } else {
+                    let blocks = count.blocks.ok_or_else(|| {
+                        stored_error("缺少文档块目录 (Document block directory is missing)")
+                    })?;
+                    examined = examined.saturating_add(blocks.len());
+                    budget("document_candidates", examined, query.limits.max_candidates)?;
+                }
                 let base = request_bytes
                     .saturating_add(returned.saturating_mul(4))
                     .saturating_add(raw.len().saturating_mul(32));

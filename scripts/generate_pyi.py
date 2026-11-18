@@ -152,9 +152,10 @@ for _ret, _quals in {
     "list[QueryRow]": "TriviumDB.tql TriviumDB.execute_prepared_tql",
     "list[str]": "PreparedTql.parameter_names",
     "list[list[str]]": "TriviumDB.list_unique_indexes",
+    "list[_PropertyIndexInfo]": "TriviumDB.index_info",
     "PreparedTql": "TriviumDB.prepare_tql",
     "dict[str, Any]": "verify_snapshot restore_snapshot TriviumDB.create_snapshot TriviumDB.request_shutdown TriviumDB.shutdown_status ResourceRuntime.stats TriviumDB.resource_stats TriviumDB.instance_stats TriviumDB.tql_mut TriviumDB.leiden_cluster TriviumDB.graph_stats "
-                      "TriviumDB.index_info TriviumDB.storage_info "
+                      "TriviumDB.storage_info "
                       "TriviumDB.validate_graph TriviumDB.repair_graph_indexes "
                       "TriviumDB.reachable_detailed TriviumDB.query_subgraph",
     "GroupedSearchResult": "TriviumDB.search_grouped",
@@ -185,7 +186,7 @@ HEADER = '''\
 
 from collections.abc import Mapping, Sequence
 from inspect import Signature
-from typing import Any, ClassVar, Literal, final
+from typing import Any, ClassVar, Literal, TypedDict, final
 
 Vector = Sequence[float | int]
 DType = Literal["f32", "f16", "u64"]
@@ -195,6 +196,16 @@ MissingIndexPolicy = Literal["fallback", "build_in_memory", "error"]
 RowOverflowPolicy = Literal["throw", "break"]
 EdgeDirection = Literal["out", "in", "both"]
 ReachabilityDirection = Literal["outgoing", "incoming", "both"]
+
+
+class _PropertyIndexInfo(TypedDict):
+    field: str
+    fields: list[str]
+    kind: Literal["hash", "ordered", "composite", "bitmap", "ngram"]
+    unique: bool
+    entry_count: int
+    distinct_count: int
+    null_count: int
 '''
 
 _EMPTY = inspect.Parameter.empty

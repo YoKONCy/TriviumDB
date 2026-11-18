@@ -1,12 +1,13 @@
 //! Immutable generation 的 manifest 构建与完整性校验。
 //!
-//! manifest 记录主文件及所有可发布 sidecar 的长度和 CRC32，发布前与打开时均按
+//! manifest 记录主文件及所有可发布 sidecar 的长度和内容摘要，发布前与打开时均按
 //! generation ID、dtype、维度和节点数校验。写入使用临时文件、fsync 和原子替换；
 //! 校验路径只读，确保 Immutable Reader 不修复、不补建、也不改变制品字节。
 
 use crate::error::{Result, TriviumError};
 use crate::storage::fs::robust_rename_and_sync;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 mod transfer;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,8 @@ pub use transfer::{
     restore_snapshot, restore_snapshot_with_runtime, verify_snapshot, verify_snapshot_with_runtime,
 };
 
-pub const MANIFEST_VERSION: u16 = 2;
+pub const MANIFEST_VERSION: u16 = 3;
+const LEGACY_MANIFEST_VERSION: u16 = 2;
 use crate::storage::artifacts::CHECKPOINT_SUFFIXES as GENERATION_SUFFIXES;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +25,8 @@ pub struct GenerationFile {
     pub suffix: String,
     pub size: u64,
     pub crc32: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,27 +44,56 @@ pub fn manifest_path(db_path: &str) -> PathBuf {
     PathBuf::from(format!("{db_path}.manifest.json"))
 }
 
-fn checksum_file(path: &Path) -> std::io::Result<(u64, u32)> {
+#[derive(Default)]
+struct FileDigest {
+    crc: crc32fast::Hasher,
+    sha: Sha256,
+}
+
+impl FileDigest {
+    fn update(&mut self, bytes: &[u8]) {
+        self.crc.update(bytes);
+        self.sha.update(bytes);
+    }
+
+    fn finish(self, size: u64, suffix: String) -> GenerationFile {
+        GenerationFile {
+            suffix,
+            size,
+            crc32: self.crc.finalize(),
+            sha256: Some(format!("{:x}", self.sha.finalize())),
+        }
+    }
+}
+
+fn checksum_file(path: &Path, suffix: String) -> std::io::Result<GenerationFile> {
+    let mut digest = FileDigest::default();
     let mut file = std::fs::File::open(path)?;
-    let size = file.metadata()?.len();
-    let mut hasher = crc32fast::Hasher::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut size = 0u64;
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
-            break;
+            return Ok(digest.finish(size, suffix));
         }
-        hasher.update(&buffer[..read]);
+        size += read as u64;
+        digest.update(&buffer[..read]);
     }
-    Ok((size, hasher.finalize()))
+}
+
+impl GenerationFile {
+    fn matches_digest(&self, actual: &Self) -> bool {
+        self.size == actual.size
+            && self.crc32 == actual.crc32
+            && self
+                .sha256
+                .as_ref()
+                .is_none_or(|sha| Some(sha) == actual.sha256.as_ref())
+    }
 }
 
 fn payload_generation_suffix(db_path: &str) -> Option<String> {
-    let marker = std::fs::read(format!("{db_path}.flush_ok")).ok()?;
-    if marker.len() != 53 || marker.get(..4) != Some(b"TFMK") || marker.get(4) != Some(&3) {
-        return None;
-    }
-    let generation = u64::from_le_bytes(marker.get(5..13)?.try_into().ok()?);
+    let generation = super::file_format::read_marker_generation(&format!("{db_path}.flush_ok"))?;
     Some(format!(".pld.{generation}"))
 }
 
@@ -109,14 +142,7 @@ pub(crate) fn write_manifest_with_write_info(
     validate_generation_id(generation_id)?;
     let files = generation_suffixes(db_path)
         .into_iter()
-        .map(|suffix| {
-            let (size, crc32) = checksum_file(Path::new(&format!("{db_path}{suffix}")))?;
-            Ok(GenerationFile {
-                suffix,
-                size,
-                crc32,
-            })
-        })
+        .map(|suffix| checksum_file(Path::new(&format!("{db_path}{suffix}")), suffix))
         .collect::<std::io::Result<Vec<_>>>()?;
     if !files.iter().any(|file| file.suffix.is_empty()) {
         return Err(TriviumError::ImmutableArtifactInvalid {
@@ -157,22 +183,41 @@ pub fn validate_manifest(
     expected_dtype: &str,
     expected_dim: usize,
 ) -> Result<GenerationManifest> {
+    let manifest = read_manifest(db_path)?;
+    if manifest.dtype != expected_dtype || manifest.dim != expected_dim {
+        return Err(TriviumError::ImmutableArtifactInvalid {
+            reason: "清单 dtype 或维度不匹配 (Manifest dtype or dimension mismatch)".into(),
+        });
+    }
+    validate_manifest_files(db_path, manifest)
+}
+
+fn read_manifest(db_path: &str) -> Result<GenerationManifest> {
     let path = manifest_path(db_path);
     let bytes =
-        read_manifest_bytes(&path).map_err(|error| TriviumError::ImmutableArtifactInvalid {
-            reason: format!("无法读取 {}: {error}", path.display()),
+        read_bounded_metadata(&path).map_err(|error| TriviumError::ImmutableArtifactInvalid {
+            reason: format!(
+                "无法读取 {} (Could not read {}): {error}",
+                path.display(),
+                path.display()
+            ),
         })?;
-    let manifest: GenerationManifest =
-        serde_json::from_slice(&bytes).map_err(|error| TriviumError::ImmutableArtifactInvalid {
-            reason: format!("manifest JSON 无效: {error}"),
-        })?;
-    if manifest.format_version != MANIFEST_VERSION
-        || !manifest.complete
-        || manifest.dtype != expected_dtype
-        || manifest.dim != expected_dim
+    serde_json::from_slice(&bytes).map_err(|error| TriviumError::ImmutableArtifactInvalid {
+        reason: format!("清单 JSON 无效 (Invalid manifest JSON): {error}"),
+    })
+}
+
+fn validate_manifest_files(
+    db_path: &str,
+    manifest: GenerationManifest,
+) -> Result<GenerationManifest> {
+    if !matches!(
+        manifest.format_version,
+        MANIFEST_VERSION | LEGACY_MANIFEST_VERSION
+    ) || !manifest.complete
     {
         return Err(TriviumError::ImmutableArtifactInvalid {
-            reason: "manifest 版本、完成状态、dtype 或维度不匹配".into(),
+            reason: "清单版本或完成状态无效 (Invalid manifest version or completion state)".into(),
         });
     }
     if !manifest.files.iter().any(|file| file.suffix.is_empty()) {
@@ -181,10 +226,12 @@ pub fn validate_manifest(
         });
     }
     let mut declared = std::collections::HashSet::new();
+    let payload_suffix = payload_generation_suffix(db_path);
     for file in &manifest.files {
-        let valid_payload = payload_generation_suffix(db_path).as_deref() == Some(&file.suffix);
+        let valid_payload = payload_suffix.as_deref() == Some(&file.suffix);
         if (!GENERATION_SUFFIXES.contains(&file.suffix.as_str()) && !valid_payload)
             || !declared.insert(file.suffix.as_str())
+            || manifest.format_version == MANIFEST_VERSION && file.sha256.is_none()
         {
             return Err(TriviumError::ImmutableArtifactInvalid {
                 reason: format!("manifest 包含非法或重复文件后缀: {}", file.suffix),
@@ -196,7 +243,7 @@ pub fn validate_manifest(
         .filter(|suffix| Path::new(&format!("{db_path}{suffix}")).exists())
         .map(str::to_string)
         .collect::<std::collections::HashSet<_>>();
-    if let Some(payload) = payload_generation_suffix(db_path)
+    if let Some(payload) = payload_suffix
         && Path::new(&format!("{db_path}{payload}")).exists()
     {
         expected.insert(payload);
@@ -208,11 +255,12 @@ pub fn validate_manifest(
     }
     for file in &manifest.files {
         let file_path = PathBuf::from(format!("{db_path}{}", file.suffix));
-        let (size, crc32) =
-            checksum_file(&file_path).map_err(|error| TriviumError::ImmutableArtifactInvalid {
+        let actual = checksum_file(&file_path, file.suffix.clone()).map_err(|error| {
+            TriviumError::ImmutableArtifactInvalid {
                 reason: format!("无法验证 {}: {error}", file_path.display()),
-            })?;
-        if size != file.size || crc32 != file.crc32 {
+            }
+        })?;
+        if !file.matches_digest(&actual) {
             return Err(TriviumError::ImmutableArtifactInvalid {
                 reason: format!("{} 大小或校验和不匹配", file_path.display()),
             });
@@ -225,14 +273,7 @@ pub fn validate_manifest_for_generation(
     db_path: &str,
     expected_generation_id: &str,
 ) -> Result<GenerationManifest> {
-    let path = manifest_path(db_path);
-    let bytes = std::fs::read(&path).map_err(|error| TriviumError::ImmutableArtifactInvalid {
-        reason: format!("无法读取 {}: {error}", path.display()),
-    })?;
-    let declared: GenerationManifest =
-        serde_json::from_slice(&bytes).map_err(|error| TriviumError::ImmutableArtifactInvalid {
-            reason: format!("manifest JSON 无效: {error}"),
-        })?;
+    let declared = read_manifest(db_path)?;
     if declared.generation_id != expected_generation_id {
         return Err(TriviumError::ImmutableArtifactInvalid {
             reason: format!(
@@ -241,17 +282,17 @@ pub fn validate_manifest_for_generation(
             ),
         });
     }
-    validate_manifest(db_path, &declared.dtype, declared.dim)
+    validate_manifest_files(db_path, declared)
 }
 
-fn read_manifest_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_bounded_metadata(path: &Path) -> std::io::Result<Vec<u8>> {
     let file = std::fs::File::open(path)?;
     let mut bytes = Vec::new();
     file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > 64 * 1024 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "manifest 超过 64 KiB 上限",
+            "元数据超过 64 KiB 上限 (Metadata exceeds 64 KiB limit)",
         ));
     }
     Ok(bytes)

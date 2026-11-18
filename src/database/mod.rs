@@ -122,6 +122,32 @@ fn normalized_database_path(path: &str) -> Result<PathBuf> {
     normalized_database_parent_path(path)
 }
 
+fn cas_value_matches(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (actual, expected) {
+        // JS 读出的 number 不携带 JSON 整数与浮点的编码区别。
+        (Value::Number(actual), Value::Number(expected)) => {
+            crate::filter::numeric_ordering(actual, expected).is_eq()
+        }
+        (Value::Array(actual), Value::Array(expected)) => {
+            actual.len() == expected.len()
+                && actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| cas_value_matches(a, b))
+        }
+        (Value::Object(actual), Value::Object(expected)) => {
+            actual.len() == expected.len()
+                && actual.iter().all(|(key, value)| {
+                    expected
+                        .get(key)
+                        .is_some_and(|expected| cas_value_matches(value, expected))
+                })
+        }
+        _ => actual == expected,
+    }
+}
+
 fn normalized_database_parent_path(path: &str) -> Result<PathBuf> {
     let requested = Path::new(path);
     let file_name = requested.file_name().ok_or_else(|| {
@@ -752,6 +778,7 @@ impl<T: VectorType> SearchHandle<T> {
                 Some(query),
                 search_config,
                 &mut ctx,
+                None,
             )
             .map(|output| output.combined_hits)
         };
@@ -1813,9 +1840,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::DirectWriteWalLockAcquired);
         crate::request::check_current()?;
+        wal.validate_entry(&entry)?;
         write.phase = WritePhase::Wal;
         write.outcome = WriteOutcome::Unknown;
-        wal.append(&entry)?;
+        wal.append_validated(&entry)?;
         drop(wal);
         write.phase = WritePhase::Apply;
         let guard = transaction::ApplicationGuard::direct(mt, &self.wal, &self.lifecycle.0);
@@ -2153,7 +2181,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 .get_payload(id)
                 .map(|payload| (*payload).clone())
                 .ok_or(TriviumError::NodeNotFound(id))?;
-            if payload.get(field) != Some(expected) {
+            if !payload
+                .get(field)
+                .is_some_and(|actual| cas_value_matches(actual, expected))
+            {
                 return Err(TriviumError::ConditionalUpdateNotMatched { id });
             }
             let object = payload.as_object_mut().ok_or_else(|| {
@@ -2715,6 +2746,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             query_vector,
             config,
             &mut ctx,
+            None,
         )?;
         Ok((results.combined_hits, ctx))
     }
@@ -2729,9 +2761,38 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         query_vector: Option<&[T]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchHit>> {
+        self.search_hybrid_impl(query_text, query_vector, config, None)
+    }
+
+    /// 以 alpha 和 1-alpha 融合向量与文本排名。端点只使用对应的召回来源。
+    pub fn search_hybrid_weighted(
+        &self,
+        query_text: &str,
+        query_vector: &[T],
+        config: &SearchConfig,
+        alpha: f64,
+    ) -> Result<Vec<SearchHit>> {
+        if !(0.0..=1.0).contains(&alpha) {
+            return Err(TriviumError::InvalidInput(
+                "hybrid_alpha 必须在 [0, 1] 内 (hybrid_alpha must be in [0, 1])".into(),
+            )
+            .at_field("hybrid_alpha"));
+        }
+        let mut config = config.clone();
+        config.enable_text_hybrid_search = alpha < 1.0;
+        self.search_hybrid_impl(Some(query_text), Some(query_vector), &config, Some(alpha))
+    }
+
+    fn search_hybrid_impl(
+        &self,
+        query_text: Option<&str>,
+        query_vector: Option<&[T]>,
+        config: &SearchConfig,
+        alpha: Option<f64>,
+    ) -> Result<Vec<SearchHit>> {
         self.require_reader_determinism(config)?;
         let _operation = self.enter_operation()?;
-        if query_vector.is_some() && !config.force_brute_force {
+        if alpha != Some(0.0) && query_vector.is_some() && !config.force_brute_force {
             self.prepare_quiver_rerank(false)?;
         }
         #[cfg(feature = "test-hooks")]
@@ -2755,6 +2816,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             query_vector,
             config,
             &mut ctx,
+            alpha,
         )
         .map(|output| output.combined_hits)
     }
@@ -2783,6 +2845,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             query_vector,
             config,
             &mut ctx,
+            None,
         )
         .map(|output| crate::node::GroupedSearchResult {
             semantic_hits: output.semantic_hits,
@@ -3290,6 +3353,12 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             });
             stats
         })
+    }
+
+    /// 检查当前检查点的统一索引容器是否登记 QuIVer 索引。
+    pub fn has_persisted_quiver(&self) -> Result<bool> {
+        let _operation = self.enter_operation()?;
+        Ok(crate::storage::index_container::open(&self.db_path, ".quiver")?.is_some())
     }
 
     /// 返回当前数据库格式、模式和 sidecar 存在状态；该操作只读且不会修复文件。

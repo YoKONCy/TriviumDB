@@ -531,7 +531,13 @@ fn 文档压缩取消归还组合额度并保持原文与重试结果() {
             false,
         )
         .unwrap();
-        let gate = triviumdb::test_hooks::pause_at(point);
+        let gate = if point == triviumdb::test_hooks::ConcurrencyPoint::QuiverColdBeforeRead {
+            let database = std::fs::canonicalize(root.file("data.tdb")).unwrap();
+            let cold_reader = format!("{}.qssd", database.display());
+            triviumdb::test_hooks::pause_at_path(point, &cold_reader)
+        } else {
+            triviumdb::test_hooks::pause_at_request(point, context.request_id())
+        };
         let db = std::sync::Arc::new(db);
         let worker_db = db.clone();
         let worker_context = context.clone();

@@ -19,6 +19,89 @@ fn cleanup(path: &str) {
     crate::cleanup_files::database(path);
 }
 
+#[test]
+fn 空字段运算符和未知边属性在写日志前拒绝() {
+    let path = tmp_db("invalid_write_fields");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let payload = serde_json::json!({"k":"v","obj":{"x":2}});
+    db.insert(&[1., 0., 0., 0.], payload.clone()).unwrap();
+    let wal = std::fs::read(format!("{path}.wal")).unwrap();
+    for query in [
+        r#"MATCH (n {k:"v",absent:{}}) SET n.touched == true"#,
+        r#"CREATE (a)-[:r {weigth:0.25}]->(b)"#,
+    ] {
+        assert_eq!(db.tql_mut(query).unwrap_err().code(), "TDB_QUERY_PARSE");
+        assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), wal);
+    }
+    let rows = db.tql(r#"FIND {obj:{$eq:{x:2}}} RETURN _"#).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["_"].as_node().unwrap().id, 1);
+    db.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, DIM).unwrap();
+    assert_eq!(reopened.all_node_ids().unwrap(), [1]);
+    assert_eq!(reopened.get_payload(1).unwrap(), Some(payload));
+    reopened.close().unwrap();
+    cleanup(&path);
+}
+
+#[test]
+fn 匿名CREATE节点与用户变量独立并持久化正确边() {
+    let path = tmp_db("anonymous_create_identity");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let result = db.tql_mut(r#"CREATE ()-[:r]->(_auto_0 {v:"x"})"#).unwrap();
+    assert_eq!(result.created_ids, [1, 2]);
+    db.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, DIM).unwrap();
+    assert_eq!(
+        reopened.get_payload(1).unwrap(),
+        Some(serde_json::json!({}))
+    );
+    assert_eq!(
+        reopened.get_payload(2).unwrap(),
+        Some(serde_json::json!({"v":"x"}))
+    );
+    let edges = reopened.get_edges(1).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!((edges[0].target_id, edges[0].label.as_str()), (2, "r"));
+    assert!(reopened.get_edges(2).unwrap().is_empty());
+    reopened.close().unwrap();
+    cleanup(&path);
+}
+
+#[test]
+fn 具名边默认文档谓词始终使用模式中的首个绑定() {
+    let path = tmp_db("named_edge_default_filter");
+    cleanup(&path);
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    for id in 1..=3 {
+        db.insert_with_id(id, &[1., 0., 0., 0.], serde_json::json!({"source":id==1}))
+            .unwrap();
+    }
+    for end in [2, 3] {
+        db.link(1, end, "r", 1.).unwrap();
+    }
+    for (edge, field) in [(":r", "anonymous"), ("e:r", "named")] {
+        let query = format!("MATCH (z)-[{edge}]->(a) WHERE {{source:true}} SET a.{field} == true");
+        assert_eq!(db.tql_mut(&query).unwrap().affected, 2);
+    }
+    db.close().unwrap();
+    let mut reopened = Database::<f32>::open(&path, DIM).unwrap();
+    assert_eq!(
+        reopened.get_payload(1).unwrap(),
+        Some(serde_json::json!({"source":true}))
+    );
+    for id in [2, 3] {
+        assert_eq!(
+            reopened.get_payload(id).unwrap(),
+            Some(serde_json::json!({"source":false,"anonymous":true,"named":true}))
+        );
+    }
+    reopened.close().unwrap();
+    cleanup(&path);
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  CREATE 节点
 // ═══════════════════════════════════════════════════════════════

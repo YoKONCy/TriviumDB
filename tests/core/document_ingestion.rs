@@ -31,6 +31,37 @@ fn parse(db: &mut Database<f32>, name: &str, content: &str) -> Value {
 }
 
 #[test]
+fn 扩展名缺失时按纯文本解析并保留CR对应的段落与行证据() {
+    let raw = "甲\r\r乙\r丙";
+    for source in ["json", "pdf", "nested.json/text"] {
+        let parsed = parsing::parse(
+            &serde_json::from_value(json!({
+                "source_id": source, "source_revision":"1","content":raw,
+                "config":{"normalize_newlines":false,"include_lines":true}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.text, raw);
+        assert!(parsed.source.original_text.is_none());
+        assert_eq!(parsed.source.media_type, "text/plain");
+        for (kind, expected) in [
+            ("paragraph", &[(0, 3), (5, 12)][..]),
+            ("line", &[(0, 3), (5, 8), (9, 12)][..]),
+        ] {
+            let actual = parsed
+                .blocks
+                .iter()
+                .filter(|block| block.kind == kind)
+                .map(|block| (block.start_byte, block.end_byte))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{source} {kind}");
+        }
+    }
+}
+
+#[test]
 fn 内置五种解析保留完整正文与独立预期来源范围() {
     let dir = TestDir::new("document-parsers");
     let mut db =
@@ -997,4 +1028,82 @@ fn 格式选择按显式格式媒体类型和扩展名确定正文() {
         assert!(error.info().write.is_none());
     }
     assert!(db.all_node_ids().unwrap().is_empty());
+}
+
+#[test]
+fn 归档文档上下文服从候选预算并能只读重开() {
+    let dir = TestDir::new("archived-context");
+    let mut cfg = config(StorageMode::Mmap);
+    let path = dir.file("data.tdb");
+    let revision = {
+        let mut db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+        let parsed = parse(&mut db, "archive.txt", "alpha");
+        let snapshot = request(
+            &mut db,
+            json!({
+                "operation":"put_parsed", "document":{"parsed":parsed,"root":{"id":"10","vector":[1,0],"payload":{}}}
+            }),
+        );
+        db.close().unwrap();
+        snapshot["revision"].clone()
+    };
+    cfg.access_mode = AccessMode::ReadOnly;
+    let db = Database::<f32>::open_with_config(&path, cfg).unwrap();
+    let mut query: DocumentContextQuery = serde_json::from_value(json!({
+        "seeds":[{"block_key":"block-0","reference":{"document_id":"10","revision":revision,"start_byte":0,"end_byte":5}}]
+    }))
+    .unwrap();
+    let context = db.document_context(&query).unwrap();
+    assert_eq!(context.len(), 1);
+    assert_eq!(context[0].block_keys, ["block-0"]);
+    assert_eq!(context[0].windows.len(), 1);
+    assert_eq!(context[0].windows[0].text, "alpha");
+    let spans = &context[0].windows[0].source_spans;
+    assert_eq!(spans.len(), 1);
+    assert_eq!((spans[0].source_start, spans[0].source_end), (0, 5));
+    query.seeds[0].block_key = None;
+    assert_eq!(
+        db.document_context(&query).unwrap()[0].windows[0].text,
+        "alpha"
+    );
+    query.limits.max_candidates = 1;
+    assert!(matches!(
+        db.document_context(&query).unwrap_err().underlying(),
+        triviumdb::TriviumError::ResourceBudgetExceeded { .. }
+    ));
+}
+
+#[test]
+fn 单次接入块ID冲突重试不写WAL且保留已有节点() {
+    let dir = TestDir::new("one-shot-conflict");
+    let path = dir.file("data.tdb");
+    let mut db = Database::<f32>::open_with_config(&path, config(StorageMode::Mmap)).unwrap();
+    db.insert_with_id(20, &[0., 1.], json!({"keep":true}))
+        .unwrap();
+    let parsed = parse(&mut db, "source.txt", "alpha");
+    let input = json!({
+        "operation":"put_parsed",
+        "document":{"parsed":parsed,"root":{"id":"10","vector":[1,0],"payload":{}},
+            "representations":[{"key":"block-0","node":{"id":"20","vector":[1,0],"payload":{}}}]}
+    });
+    let wal = format!("{path}.wal");
+    let original_wal = std::fs::read(&wal).unwrap();
+    for _ in 0..2 {
+        let error = triviumdb::sdk::documents::request(&mut db, &input.to_string()).unwrap_err();
+        assert_eq!(error.code(), "TDB_NODE_ALREADY_EXISTS", "{error}");
+        assert_eq!(
+            error.info().write.unwrap().outcome,
+            triviumdb::error::WriteOutcome::NotCommitted
+        );
+        assert!(db.list_document_uploads(None).unwrap().is_empty());
+        assert_eq!(std::fs::read(&wal).unwrap(), original_wal);
+    }
+    db.close().unwrap();
+    let mut reopened = Database::<f32>::open_read_only(&path, 2).unwrap();
+    assert!(reopened.list_document_uploads(None).unwrap().is_empty());
+    let node = reopened.get(20).unwrap().unwrap();
+    assert_eq!(node.vector, [0., 1.]);
+    assert_eq!(node.payload, json!({"keep":true}));
+    assert!(!reopened.contains(10).unwrap());
+    reopened.close().unwrap();
 }

@@ -1,7 +1,7 @@
 //! 宿主对象与 JSON 内容的无损转换。
 
 use napi::bindgen_prelude::{FromNapiValue, ToNapiValue, TypeName, ValidateNapiValue};
-use napi::{Env, JsObject, JsUnknown, NapiRaw, NapiValue, ValueType, sys};
+use napi::{Env, JsNumber, JsObject, JsUnknown, NapiRaw, NapiValue, ValueType, sys};
 use serde_json::Value;
 
 pub(super) fn node_json_value(value: impl serde::Serialize) -> serde_json::Result<NodeJson> {
@@ -43,6 +43,47 @@ pub(super) fn string_from_js(value: JsUnknown) -> napi::Result<String> {
             "字符串包含孤立 surrogate (String contains an isolated surrogate)",
         )
     })
+}
+
+fn number_from_js(value: JsUnknown) -> napi::Result<Value> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let number = JsNumber::try_from(value)?.get_double()?;
+    if number.fract() == 0.0 && number.abs() <= MAX_SAFE_INTEGER {
+        return Ok(Value::from(number as i64));
+    }
+    serde_json::Number::from_f64(number)
+        .map(Value::Number)
+        .ok_or_else(|| {
+            napi::Error::new(
+                napi::Status::InvalidArg,
+                "JSON 数值必须有限 (JSON numbers must be finite)",
+            )
+        })
+}
+
+fn bigint_from_js(value: JsUnknown) -> napi::Result<Value> {
+    // SAFETY: 调用方已经检查 BigInt 类型；句柄只在当前 JS 调用内转换。
+    let value = unsafe { value.cast::<napi::JsBigInt>() };
+    let (unsigned, fits_unsigned) = value.get_u64()?;
+    if fits_unsigned {
+        return Ok(Value::from(unsigned));
+    }
+    let (signed, fits_signed) = value.get_i64()?;
+    if fits_signed {
+        return Ok(Value::from(signed));
+    }
+    Err(napi::Error::new(
+        napi::Status::InvalidArg,
+        "JSON BigInt 必须在 i64::MIN 到 u64::MAX 之间 (JSON BigInt must fit i64::MIN through u64::MAX)",
+    ))
+}
+
+pub(super) fn enumerable_own_keys(object: &JsObject) -> napi::Result<JsObject> {
+    object.get_all_property_names(
+        napi::KeyCollectionMode::OwnOnly,
+        napi::KeyFilter::Enumerable,
+        napi::KeyConversion::NumbersToStrings,
+    )
 }
 
 impl From<Value> for NodeJson {
@@ -119,10 +160,14 @@ fn read_json(
                     }
                     Ok(Value::Array(values))
                 } else {
-                    let keys = object.get_property_names()?;
+                    let keys = enumerable_own_keys(&object)?;
                     let mut values = serde_json::Map::new();
                     for index in 0..keys.get_array_length()? {
-                        let key = string_from_js(keys.get_element(index)?)?;
+                        let key: JsUnknown = keys.get_element(index)?;
+                        if key.get_type()? == ValueType::Symbol {
+                            continue;
+                        }
+                        let key = string_from_js(key)?;
                         let value = object.get_property(env.create_string(&key)?)?;
                         let path = field.map(|field| crate::sdk::field_member(field, &key));
                         values.insert(
@@ -133,12 +178,9 @@ fn read_json(
                     Ok(Value::Object(values))
                 }
             }
-            ValueType::BigInt => Err(napi::Error::new(
-                napi::Status::InvalidArg,
-                "Payload BigInt 请使用十进制字符串 (Represent Payload BigInt as a decimal string)",
-            )),
+            ValueType::BigInt => bigint_from_js(value),
             ValueType::String => string_from_js(value).map(Value::String),
-            // 标量沿用 napi 既有数值与非法值边界，避免经 JSON.stringify 改写 NaN 等输入。
+            ValueType::Number => number_from_js(value),
             _ => unsafe {
                 // SAFETY: 句柄类型已由 napi 检测，标量转换不持有跨作用域引用。
                 Value::from_napi_value(env.raw(), value.raw())

@@ -29,9 +29,7 @@
 
 **中文** | [**English**](README_EN.md)
 
-当前预发布版本为 **0.9.2-beta.1**，包含统一 `.idx` 索引容器、单格式准入、外部迁移、三端精确检索开关与数据正确性加固。Python 版本为 `0.9.2b1`，npm 使用 `beta` 通道。完整变更与升级步骤见[双语发布说明](docs/changes/0.9.2-beta.1.md)。
-
-当前正式版本为 **0.9.1**，包含文档证据检索、解析与分批发布、文档与命名图统一 TQL、QuIVer 中心化 INT8／INT4 压缩重排、Hot／SSD 驻留及工程加固。完整内容见 [中英文版本说明](docs/changes/0.9.1.md)，研究测量见 [ICDE 复现归档](evaluation/README.md)。
+当前正式版本为 **0.9.2**，包含统一 `.idx` 索引容器、外部迁移、三端精确检索开关，以及快照、恢复和数据正确性加固。完整变更与升级步骤见[双语发布说明](docs/changes/0.9.2.md)。
 
 开发版的冻结范围见 [SDK 正式接口清单](docs/sdk-contract.md)，数据库升级使用[外部迁移工具](docs/migration.md)。
 
@@ -54,7 +52,7 @@ TriviumDB 是一个用纯 Rust 编写的**嵌入式三模数据库引擎**，将
 - ❄️ **Payload 冷热分层** —— 已发布 raw JSON 留在 mmap 冷基础层，新写入/更新进入内存 delta，解析结果进入有硬字节上限的 LRU Cache；ANN/BQ/Exact 候选阶段零 Payload 解析
 - 🔗 **节点即一切** —— 每个节点天然同时拥有限定长度的稠密向量、稀疏文本倒排词频、元数据和图关系，通过全局唯一 NodeId 关联
 - 🧠 **为 AI 而生** —— 可选启用“AC自动机+BM25稀疏文本”与“Dense Vector稠密向量”的**多路召回**来触发图谱扩散检索，并内置多层认知管线（FISTA / DPP / PPR）
-- 🛡️ **四层数据安全保障** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，`.flush_ok` v3 绑定 `.tdb/.vec/.pld`，发布前旧代备份与撤销日志支持中断恢复；备份增加磁盘读写与临时空间，损坏输入仍 fail-closed，详见[恢复协议](docs/security.md#8-mmap-三文件一致性标记flush_ok-v3)
+- 🛡️ **四层数据安全保障** —— 原子替换 + WAL日志 + 事务干跑验证（Dry-Run）+ Mmap COW 隔离，`.flush_ok` v3 绑定 `.tdb/.vec/.pld`，发布前旧代备份与撤销日志支持中断恢复；备份增加磁盘读写与临时空间，损坏输入仍 fail-closed，详见[恢复协议](docs/security.md#8-mmap-三文件一致性标记flush_ok)
 - 🐍 **Python / Node.js 原生** —— `pip install` 或 `npm install` 后直接使用，类 MongoDB 查询语法
 - ⚡ **高性能检索** —— rayon 并行暴力搜索（小规模 100% 精确）+ 自研 ANN 索引 **QuIVer**；默认采用无训练 SM-L2 导航与余弦精排，按向量工作量动态触发（209–834 节点）
 - 💾 **SSD 友好** —— Append-Only WAL + 后台 Compaction 线程 + QuIVer 索引独立持久化，杜绝随机写入磨损
@@ -162,13 +160,13 @@ flowchart TD
 推荐使用超快的 [uv](https://github.com/astral-sh/uv) （只需毫秒级）：
 
 ```bash
-uv pip install "triviumdb==0.9.2b1"
+uv pip install "triviumdb==0.9.2"
 ```
 
 或者使用传统 pip：
 
 ```bash
-pip install "triviumdb==0.9.2b1"
+pip install "triviumdb==0.9.2"
 ```
 
 ### 🌐 Node.js / 前端用户
@@ -176,9 +174,9 @@ pip install "triviumdb==0.9.2b1"
 跨平台包已自带 `*.node` 预编译拓展，并含有完整的 TypeScript 补全：
 
 ```bash
-npm install triviumdb@0.9.2-beta.1
+npm install triviumdb@0.9.2
 # 或者
-pnpm add triviumdb@0.9.2-beta.1
+pnpm add triviumdb@0.9.2
 ```
 
 ### 🦀 Rust 原生用户
@@ -186,10 +184,10 @@ pnpm add triviumdb@0.9.2-beta.1
 直接把我们当成 Library 依赖：
 
 ```bash
-cargo add triviumdb@0.9.2-beta.1
+cargo add triviumdb@0.9.2
 ```
 
-本页 API 以 `0.9.2-beta.1` 为基线。已有数据库通过[外部迁移入口](docs/migration.md)创建当前格式目标，完整升级条件见[发布说明](docs/changes/0.9.2-beta.1.md)。
+本页 API 以 `0.9.2` 为基线。已有数据库通过[外部迁移入口](docs/migration.md)创建当前格式目标，完整升级条件见[发布说明](docs/changes/0.9.2.md)。
 
 需要为嵌入式应用提供管理前端时，按[Console 宿主接入](docs/embedded-console.md)复用同一实例和文件锁；现有 HTML 仍需前端传输适配，资源包会标明这一条件及 CDN 依赖。
 
@@ -395,7 +393,7 @@ finally:
 
 QuIVer ANN 面向主流 embedding 模型输出的真实语义向量，服务于文本、代码和图像等语义近邻检索。查询向量与库向量应处于模型约定的匹配检索空间。公开评测覆盖 Cohere、BGE-M3、MiniLM、Nomic、Jina 等模型产生的数据，各数据集的召回、吞吐和参数均单独记录。[评测数据与论文](evaluation/README.md)
 
-随机合成向量、手工设计或拼接的特征、传统非负描述子等数据，建议使用全量精确检索。TriviumDB 对符合 dtype 与维度契约的向量提供存储和精确查询，Python／Rust 使用 `search_exact`，Node 使用 `searchExact`。`0.9.2-beta.1` 另提供 Python `exact=True`、Rust `SearchConfig::with_exact(true)` 与 Node 对应的 `exact` 参数。[精确检索 API](docs/api-reference.md#search--纯向量图扩散检索-基础)
+随机合成向量、手工设计或拼接的特征、传统非负描述子等数据，建议使用全量精确检索。TriviumDB 对符合 dtype 与维度契约的向量提供存储和精确查询，Python／Rust 使用 `search_exact`，Node 使用 `searchExact`。`0.9.2` 另提供 Python `exact=True`、Rust `SearchConfig::with_exact(true)` 与 Node 对应的 `exact` 参数。[精确检索 API](docs/api-reference.md#search--纯向量图扩散检索-基础)
 
 > **召回提醒**　QuIVer 的召回效果依赖向量分布、检索任务和搜索预算。跨模型、跨模态及自定义向量变换后的检索应单独验收。应用接入时使用自身真实数据核验 Recall@K，并选择对应参数或精确检索路径。
 
@@ -524,66 +522,6 @@ TriviumDB/
 ├── pyproject.toml          # Maturin 构建配置
 └── README.md
 ```
-
----
-
-## 路线图
-
-### v0.1 — 核心引擎 MVP ✅
-
-- [x] Node / Edge 数据结构 + 内存 MemTable + BruteForce 向量检索
-- [x] 单文件 `.tdb` 序列化 + `insert` / `link` / `search` / `delete` API
-
-### v0.2 — 持久化与生态 ✅
-
-- [x] WAL 崩溃恢复 + 后台 Compaction + mmap 零拷贝
-- [x] PyO3 Python 绑定 + rayon 并行扫描 + 高级 Payload 过滤
-
-### v0.3 — 性能与跨平台 ✅
-
-- [x] Node.js 绑定 (napi-rs)
-- [x] AVX2 + FMA SIMD 加速余弦相似度
-
-### v0.4 — 认知管线 + BQ 索引 ✅
-
-- [x] Mmap / Rom 双引擎 + 验证前置事务 (Dry-Run)
-- [x] 认知检索管线（FISTA / PPR / DPP）
-- [x] BQ 二进制量化索引（自动激活 + 自动重建）
-
-### v0.5 — 千万级架构 + Hook 系统 ✅
-
-- [x] Parallel Bit-Tag Array 硬件级布隆过滤 + Zero-Ghost 墓碑复用
-- [x] O(1) Reverse Hash Net 反向边查找
-- [x] 检索管线 6 阶段 Hook 注入 + FFI 动态库插件
-- [x] CI/CD 管线 + ASan / TSan / Miri + LibFuzzer 模糊测试；执行范围与限制见[测试实践](docs/testing.md)
-
-### v0.6 — TQL 查询语言 + 跨架构适配 ✅
-
-- [x] TQL 统一查询语言（MATCH 图遍历 / FIND 文档过滤 / SEARCH 向量检索）
-- [x] TQL DML 写操作（CREATE / SET / DELETE / DETACH DELETE）
-- [x] 属性二级索引（O(1) 倒排查找 + TQL 自动加速）
-- [x] ARM NEON SIMD 适配 + 跨平台 CI（Apple Silicon / Linux ARM64 via QEMU）
-- [x] Python / Node.js 绑定 API 补全（tql_mut / create_index / get_payload 等）
-
-### v0.7 — QuIVer SOTA ANN 索引 ✅
-
-- [x] 自研 **QuIVer** 近似最近邻图索引（BQ 签名 + Vamana 图导航 + 冷热分离）
-- [x] 增量图维护：Insert / Delete(Tombstone) / Update 全部增量，无需全量重建
-- [x] QuIVer 持久化与紧凑路由重载，当前开发版统一存入 `.idx`
-- [x] 事务安全的分离时间线架构（Phase 5 QuIVer Sync）
-- [x] CLI 工具 `triviumdb-cli`（命令 `tdb`）：非交互命令 + REPL（Tab 补全 / 语法高亮 / 多行输入）+ 配置文件
-- [x] 数据库可视化工具：终端 TUI（`tdb ui`，图谱力导向布局 / k-hop 展开 / 向量搜索 Playground）
-
-### v0.8 — 自由 DIY 混合查询与工程化时代 ✅（当前）
-
-- [x] **统一 TQL 查询系统**：`FIND` / `MATCH` / `SEARCH`、`WITH` 可组合管线、Prepared 参数、表达式/聚合/路径/集合代数、科学计数法和原子 `SET VECTOR`
-- [x] **有界 Cascades 与图计算**：确定性、统计感知的物理计划，内嵌 PageRank / WCC / Leiden / Betweenness / Degree / Label Propagation / SA-PPR，并通过 `EXPLAIN ANALYZE` 暴露估算与实际指标
-- [x] **完整持久化索引体系**：Hash / Ordered ART / Composite ART / Bitmap、业务图块、AC+BM25 与 QuIVer 组件；动态 QuIVer 阈值按向量工作量在 209–834 节点间自动选择
-- [x] **生产级存储与安全保证**：`.flush_ok` v3 绑定 `.tdb/.vec/.pld` generation、大小与 CRC；无生产可达 panic、ReadOnly/Immutable 字节级零写、WAL/代际原子发布、查询/遍历/内存/Payload 预算 fail-closed 与真实小型故障注入
-- [x] **Payload 冷热分离一期**：generation 化 `.pld` mmap raw base、内存 delta/tombstone、有界 LRU Parsed Cache、Late Materialization、ColdPayloadScan 与跨端 cache 配置
-- [x] **Rust/Python/Node 能力对齐**：一等 TQL 值、四类属性索引、Prepared TQL、六阶段 Hook 与 FFI ABI v2，清理静默历史兼容并提供稳定迁移错误
-- [x] **多实例运行管理（0.9.0-beta.1）**：共享资源预算与工作池、维护保护额度、实例/维护诊断、受控关闭、一致快照及恢复，三端接口和类型声明同步提供
-- [x] **工具与 Server nightly**：CLI/REPL/TUI，以及隔离于 Embedded 依赖树的 HTTP Server，提供 Writer Actor、Group Commit、OCC/幂等、健康监管、索引管理、NDJSON 导入、二进制向量和跨平台发布
 
 ---
 

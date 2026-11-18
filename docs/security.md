@@ -1,6 +1,6 @@
 # TriviumDB 安全特性详解
 
-> 本文说明 `0.9.2-beta.1` 内核的并发、数据完整性、格式校验、资源预算、ReadOnly/Immutable、输入验证与跨平台 I/O 实现。版本记录见[变更说明](changes/0.9.2-beta.1.md)，后续更新见[未发布变更](changes/unreleased.md)。
+> 本文说明 `0.9.2` 内核的并发、数据完整性、格式校验、资源预算、ReadOnly/Immutable、输入验证与跨平台 I/O 实现。版本记录见[变更说明](changes/0.9.2.md)，后续更新见[未发布变更](changes/unreleased.md)。
 
 ---
 
@@ -185,26 +185,25 @@ if len > 256 * 1024 * 1024 {
 
 ---
 
-### 8. Mmap 三文件一致性标记（`.flush_ok` v3）
+### 8. Mmap 三文件一致性标记（`.flush_ok`）
 
 **实现位置**：`storage/file_format.rs`（写与读取）
 
-Mmap 模式下，主数据、向量、generation 化 Payload 及索引文件均同步后，原子发布 `.flush_ok`。该标记校验 `.tdb`、`.vec` 和 `.pld.<generation>` 的代际与完整性。v3 标记共 53 字节：
+Mmap 模式下，主数据、向量、generation 化 Payload 及索引文件均同步后，原子发布 `.flush_ok`。该标记校验 `.tdb`、`.vec` 和 `.pld.<generation>` 的代际与完整性。当前标记共 81 字节，布局如下。
 
 ```text
 magic(4) + version(1) + generation(8)
 + tdb_size(8) + vec_size(8) + payload_size(8)
-+ tdb_crc32(4) + vec_crc32(4) + payload_crc32(4) + marker_crc32(4)
++ tdb_crc32(4) + vec_crc32(4) + payload_sha256(32) + marker_crc32(4)
 ```
 
-- 三个文件 CRC 可发现等长位翻转和扇区撕裂；`marker_crc32` 保护提交标记本身。
-- 只有 v3 marker 明确声明的 Payload generation 才允许加载；v1/v2 marker 旁的游离 `.pld` 不参与旧快照。
-- v1（29 字节）与 v2（41 字节）保持只读兼容；ReadWrite 在下一次显式 flush 时升级为 v3，打开时不隐式迁移。
+- 主文件、向量与标记使用 CRC32。Payload 使用整文件 SHA-256，校验时按标记声明的代际选择文件。
+- 旧 53 字节标记可打开，下一次成功的 Mmap 检查点写入当前标记。旧标记中的 Payload 整文件 CRC32 无法区分长度相同且内部 CRC 有效的两个文件。
 - generation 化 Payload 文件避免 Windows 上替换仍被 Reader mmap 的同名文件；marker 提交后旧 generation 才失去可见性，并在引用释放后 best-effort 回收。
 - 发布前流式保存旧文件组，随后同步并发布 `.publish` 撤销日志。当前 `TPUB` 格式 3 为 149 字节，将统一 `.idx` 纳入恢复目录，记录文件存在状态、长度、CRC、代际、存储模式和提交状态，并校验日志自身 CRC。延迟文本与已发布 SSD 组件随完整容器保留，复制采用固定大小缓冲。
 - Mmap 在全部索引同步后发布 marker；Rom 在文件组同步后原子更新日志提交状态，并记录新主文件的长度与 CRC。ReadWrite 打开时检查提交点：未提交则校验备份、恢复旧文件组并回放 WAL；已提交则验证新代并清理日志。恢复复制保留备份，全部恢复文件同步后才清理日志及备份，支持恢复途中再次中断。
 - ReadOnly/Immutable 不执行恢复或清理；有待恢复日志/WAL 时返回 `RecoveryRequired`，保持字节级零写。无有效恢复基础的文件损坏返回 `CorruptedFile`，不构造缺向量、缺 Payload 或空库的伪恢复状态；已提交新代损坏不能回滚旧代。
-- 旧代备份消耗纳入发布的文件组大小所对应的磁盘读写和临时空间，复制使用有界缓冲。映射有效时，同一句柄失败重试保留最初备份，向量映射在替换过程中失效时，实例进入待恢复状态，共享查询句柄统一拒绝后续操作。释放实例后由可写打开恢复文件组并回放 WAL。当前主文件格式为 14，marker 为 3，待恢复发布由支持对应日志版本的内核完成。布局与空间条件见[数据库文件组](storage-format.md)。
+- 旧代备份消耗纳入发布的文件组大小所对应的磁盘读写和临时空间，复制使用有界缓冲。映射有效时，同一句柄失败重试保留最初备份，向量映射在替换过程中失效时，实例进入待恢复状态，共享查询句柄统一拒绝后续操作。释放实例后由可写打开恢复文件组并回放 WAL。待恢复发布由支持对应日志版本的内核完成。布局与空间条件见[数据库文件组](storage-format.md)。
 - 默认 `storage::publication_recovery` 用独立日志字节 oracle 验证恢复、损坏拒绝、提交点与只读零写；`test-hooks` 强杀矩阵要求完整恢复所有 `Full` 模式已同步事务，打开失败不能算通过。
 - 唯一约束创建/删除持有写锁完成文件组检查点。发布失败隔离实例及共享查询句柄，保留原始错误；释放后可写重开按实际提交点恢复约束与 WAL。预检拒绝保持当前实例可用。
 - 属性组件以 JSON 数组保存复合字段列表，唯一约束以主文件定义为准。图目录组件在采用前完成边记录、反向/标签目录和主文件事实的逐项验证；验证与 JSON 解码峰值参与加载预算准入，异常副本返回结构化损坏错误。

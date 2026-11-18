@@ -29,6 +29,8 @@ dist/
 !tests/fixtures/release_091/*/sample.tdb.wal
 !tests/fixtures/document_schema1/*/sample.tdb
 !tests/fixtures/document_schema1/*/sample.tdb.wal
+!tests/fixtures/float_payload_5046750/*/sample.tdb
+!tests/fixtures/float_payload_5046750/*/sample.tdb.wal
 !tests/fixtures/pre_externalization_format14/*/sample.tdb
 !tests/fixtures/pre_externalization_format14/*/sample.tdb.wal
 !crates/triviumdb-migrate/Cargo.lock

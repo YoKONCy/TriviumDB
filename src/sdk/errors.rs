@@ -2,25 +2,6 @@
 
 use serde_json::Value;
 
-/// 混合权重适配保留既有有限输入映射，先拒绝会被 max 掩盖的非有限值。
-#[cfg(any(feature = "python", feature = "nodejs"))]
-pub(crate) fn hybrid_text_boost(alpha: f32) -> crate::Result<f32> {
-    if !alpha.is_finite() {
-        return Err(crate::TriviumError::InvalidInput(
-            "hybrid_alpha 必须是有限数值 (hybrid_alpha must be finite)".into(),
-        )
-        .at_field("hybrid_alpha"));
-    }
-    let boost = (1.0 - alpha).max(0.1) * 3.0;
-    if !boost.is_finite() {
-        return Err(crate::TriviumError::InvalidInput(
-            "hybrid_alpha 的权重换算溢出 (hybrid_alpha weight conversion overflowed)".into(),
-        )
-        .at_field("hybrid_alpha"));
-    }
-    Ok(boost)
-}
-
 /// 批量普通 API 的临时事务由绑定持有，公开结果只保留内核阶段和提交事实。
 pub(crate) fn direct_write_error(mut error: crate::TriviumError) -> crate::TriviumError {
     let mut source = &mut error;
@@ -219,22 +200,6 @@ mod tests {
     use super::direct_write_error;
     use crate::TriviumError;
     use crate::error::{WriteErrorInfo, WriteOutcome, WritePhase};
-
-    #[test]
-    fn hybrid_weight_preserves_finite_mapping_and_rejects_invalid_input() {
-        for (alpha, expected) in [(-1.0, 6.0), (0.0, 3.0), (0.5, 1.5), (1.0, 0.3), (2.0, 0.3)] {
-            assert_eq!(super::hybrid_text_boost(alpha).unwrap(), expected);
-        }
-        for alpha in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MIN] {
-            let error = super::hybrid_text_boost(alpha).unwrap_err().info();
-            assert_eq!(error.code, "TDB_INVALID_INPUT");
-            assert_eq!(
-                serde_json::to_value(error.target).unwrap(),
-                serde_json::json!({"field": "hybrid_alpha"})
-            );
-            assert!(error.write.is_none());
-        }
-    }
 
     #[test]
     fn direct_batch_preserves_kernel_failure_and_omits_internal_consumption() {

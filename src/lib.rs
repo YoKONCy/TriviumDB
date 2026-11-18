@@ -19,6 +19,7 @@ pub mod hook;
 pub mod index;
 pub mod named_graph;
 pub mod node;
+mod numeric;
 pub mod observability;
 pub mod query;
 mod request;

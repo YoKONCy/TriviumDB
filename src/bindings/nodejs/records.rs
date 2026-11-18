@@ -7,7 +7,7 @@ use super::arguments::{
 use super::database::{DbBackend, TriviumDB};
 use super::errors::{to_napi_error, write_input_error};
 use super::json::NodeJson;
-use super::types::{JsEdge, JsNodeView, round_api_f32};
+use super::types::{JsEdge, JsNodeView};
 use napi::bindgen_prelude::Either;
 use napi::{Env, JsUnknown};
 use napi_derive::napi;
@@ -270,7 +270,7 @@ impl TriviumDB {
                                 Ok(JsEdge {
                                     target_id: node_id_to_js(env, e.target_id)?,
                                     label: e.label.clone(),
-                                    weight: round_api_f32(e.weight),
+                                    weight: f64::from(e.weight),
                                     metadata: e.metadata.clone().into(),
                                 })
                             })
@@ -296,7 +296,7 @@ impl TriviumDB {
                                 Ok(JsEdge {
                                     target_id: node_id_to_js(env, e.target_id)?,
                                     label: e.label.clone(),
-                                    weight: round_api_f32(e.weight),
+                                    weight: f64::from(e.weight),
                                     metadata: e.metadata.clone().into(),
                                 })
                             })
@@ -322,14 +322,25 @@ impl TriviumDB {
                                 Ok(JsEdge {
                                     target_id: node_id_to_js(env, e.target_id)?,
                                     label: e.label.clone(),
-                                    weight: round_api_f32(e.weight),
+                                    weight: f64::from(e.weight),
                                     metadata: e.metadata.clone().into(),
                                 })
                             })
                             .collect::<napi::Result<_>>()?;
                         Ok(JsNodeView {
                             id: node_id_to_js(env, n.id)?,
-                            vector: n.vector.iter().map(|&x| x as f64).collect(),
+                            vector: n.vector.iter().enumerate().map(|(index, &value)| {
+                                let number = value as f64;
+                                if number >= 18_446_744_073_709_551_616.0 || number as u64 != value {
+                                    return Err(super::errors::argument_input_error(
+                                        env,
+                                        &format!("/vector/{index}"),
+                                        "u64 向量分量无法无损转换为 JavaScript number (u64 vector component cannot be represented exactly as a JavaScript number)",
+                                        None,
+                                    ));
+                                }
+                                Ok(number)
+                            }).collect::<napi::Result<_>>()?,
                             payload: n.payload.into(),
                             edges: edges_arr,
                             num_edges,

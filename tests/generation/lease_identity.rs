@@ -11,6 +11,49 @@ fn artifacts(path: &std::path::Path) -> std::collections::BTreeMap<std::ffi::OsS
         .collect()
 }
 
+#[cfg(windows)]
+#[test]
+fn windows代际大小写别名共享当前代保护和旧代租约() {
+    let parent = TestDir::new("generation_case_alias");
+    let store = GenerationStore::new(&parent.0);
+    publish(&store, "April", 1.);
+    store.publish_current("April", "data.tdb").unwrap();
+    let directory = parent.0.join("April");
+    let before = artifacts(&directory);
+    assert!(same_file::is_same_file(&directory, parent.0.join("april")).unwrap());
+    assert!(matches!(
+        store.reclaim_generation("april"),
+        Err(TriviumError::GenerationBusy { .. })
+    ));
+    assert!(matches!(
+        store.reclaim_generation("April/"),
+        Err(TriviumError::InvalidInput(_))
+    ));
+    assert_eq!(store.resolve_current().unwrap().generation_id, "April");
+    assert_eq!(artifacts(&directory), before);
+
+    let reader = store.open_current::<f32>(2).unwrap();
+    publish(&store, "May", 0.);
+    store.publish_current("May", "data.tdb").unwrap();
+    assert!(matches!(
+        store.reclaim_generation("april"),
+        Err(TriviumError::GenerationBusy { .. })
+    ));
+    assert_eq!(artifacts(&directory), before);
+    assert_eq!(
+        reader.get(1).unwrap().unwrap().payload["generation"],
+        "April"
+    );
+    drop(reader);
+    store.reclaim_generation("april").unwrap();
+    assert!(!directory.exists());
+    let current = store.open_current::<f32>(2).unwrap();
+    assert_eq!(
+        current.get(1).unwrap().unwrap().payload["generation"],
+        "May"
+    );
+}
+
 #[test]
 fn 根目录创建前后构造的默认store共享reader租约() {
     let parent = TestDir::new("generation_identity");

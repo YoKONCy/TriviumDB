@@ -6,14 +6,25 @@ use std::path::Path;
 use colored::Colorize;
 
 use crate::CliResult;
-use crate::db_handle::{CliRows, DType, DbHandle, sniff_header};
+use crate::db_handle::{CliRows, CliValue, DType, DbHandle, sniff_header};
 use crate::formatter::{OutputFormat, format_rows};
+
+fn inspect_inputs(path: &str) -> Result<(bool, bool), triviumdb::TriviumError> {
+    let main_exists = Path::new(path).try_exists()?;
+    let wal_exists = Path::new(&format!("{path}.wal")).try_exists()?;
+    if !main_exists && !wal_exists {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("主库和 WAL 均不存在 (Database and WAL are missing): {path}"),
+        )
+        .into());
+    }
+    Ok((main_exists, wal_exists))
+}
 
 /// 快速检查文件头与 WAL/主库存在性（不挂载数据库）。
 pub fn check(path: &str) -> CliResult {
-    let wal_path = format!("{path}.wal");
-    let tdb_exists = Path::new(path).exists();
-    let wal_exists = Path::new(&wal_path).exists();
+    let (tdb_exists, wal_exists) = inspect_inputs(path)?;
 
     println!(
         "{} {}",
@@ -37,10 +48,7 @@ pub fn check(path: &str) -> CliResult {
                 );
             }
             Err(e) => {
-                println!(
-                    "{} {e}",
-                    "头部探查失败（主库可能已物理损坏）/ Header inspection failed (database may be physically corrupted):".red()
-                );
+                return Err(e.into());
             }
         }
     } else {
@@ -55,28 +63,29 @@ pub fn check(path: &str) -> CliResult {
 
 /// 强制挂载并导出全部节点（维度从文件头嗅探，缺省回退为 4 以防 panic）。
 pub fn dump(path: &str, dtype: DType, format: OutputFormat) -> CliResult {
+    inspect_inputs(path)?;
     let dim = sniff_header(path).map(|h| h.dim).unwrap_or(4);
-    println!(
+    eprintln!(
         "尝试以维度 {dim} 强制挂载数据库 / Attempting forced database open with dimension {dim}..."
     );
 
     let handle = DbHandle::open(path, dim, dtype)?;
-    println!(
+    eprintln!(
         "{} 存活节点总数 / Live nodes: {}",
         "挂载成功 / Open succeeded!".green(),
         handle.node_count()?
     );
-    println!("{}", "─".repeat(50));
 
-    let mut rows: CliRows = Vec::new();
-    for id in handle.get_all_ids()? {
-        if let Some(node) = handle.get(id)? {
-            let mut row = HashMap::new();
-            row.insert("node".to_string(), node);
-            rows.push(row);
-        }
+    let mut ids = handle.get_all_ids()?;
+    ids.sort_unstable();
+    let mut rows = CliRows::with_capacity(ids.len());
+    for id in ids {
+        let node = handle
+            .get(id)?
+            .ok_or(triviumdb::TriviumError::NodeNotFound(id))?;
+        rows.push(HashMap::from([("node".to_string(), CliValue::Node(node))]));
     }
 
-    println!("{}", format_rows(&rows, format));
+    println!("{}", format_rows(&rows, format).trim_end_matches('\n'));
     Ok(())
 }

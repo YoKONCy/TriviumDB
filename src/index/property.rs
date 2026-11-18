@@ -345,6 +345,12 @@ fn ordered_key(value: &Value) -> Option<PropertyKey> {
 }
 
 impl OrderedPropertyIndex {
+    fn has_exact_order(&self) -> bool {
+        self.imprecise_keys == 0
+            && self.incomplete_count == 0
+            && (self.numeric_keys == 0 || self.string_keys == 0)
+    }
+
     fn insert(&mut self, id: NodeId, value: &Value) {
         if let Some(key) = ordered_key(value) {
             let before = posting_size(key.0.len(), self.entries.get(key.as_bytes()));
@@ -1399,11 +1405,16 @@ impl PropertyIndexRegistry {
         limit: Option<usize>,
     ) -> Option<Vec<NodeId>> {
         self.ordered_indexes.get(field).and_then(|index| {
-            (index.imprecise_keys == 0
-                && index.incomplete_count == 0
-                && (index.numeric_keys == 0 || index.string_keys == 0))
+            index
+                .has_exact_order()
                 .then(|| index.ordered_ids(descending, limit))
         })
+    }
+
+    pub(crate) fn has_exact_ordered_index(&self, field: &str) -> bool {
+        self.ordered_indexes
+            .get(field)
+            .is_some_and(OrderedPropertyIndex::has_exact_order)
     }
 
     pub fn contains_ordered(&self, field: &str) -> bool {

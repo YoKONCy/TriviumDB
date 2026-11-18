@@ -20,13 +20,15 @@ fn 精确扫描与图计算在内部检查点取消后归还资源并可重开()
         for operation in ["exact", "leiden", "pagerank", "label_propagation"] {
             let root = TestDir::new("algorithm-cancel");
             let path = root.file("db.tdb");
-            let mut database = Database::<f32>::open_with_config(
+            let runtime = triviumdb::ResourceRuntime::new(Default::default()).unwrap();
+            let mut database = Database::<f32>::open_with_runtime(
                 &path,
                 Config {
                     dim: 2,
                     auto_build_quiver: false,
                     ..Default::default()
                 },
+                runtime,
             )
             .unwrap();
             for id in 1..=4 {
@@ -212,7 +214,7 @@ fn 嵌套控制保留外层期限且错误后清空当前作用域() {
 fn 普通共享提交继承请求控制并在WAL前取消() {
     use triviumdb::SharedDatabase;
     use triviumdb::database::TxBuilder;
-    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_request};
     let root = TestDir::new("typed-commit");
     let path = root.file("db.tdb");
     let database = SharedDatabase::<f32>::open(&path, 2).unwrap();
@@ -220,7 +222,10 @@ fn 普通共享提交继承请求控制并在WAL前取消() {
     let worker_context = context.clone();
     let worker = database.clone();
     let before = std::fs::read(format!("{path}.wal")).unwrap();
-    let hook = pause_at(ConcurrencyPoint::TransactionWalLockAcquired);
+    let hook = pause_at_request(
+        ConcurrencyPoint::TransactionWalLockAcquired,
+        context.request_id(),
+    );
     let running = std::thread::spawn(move || {
         let mut transaction = TxBuilder::new();
         transaction.insert(&[1., 0.], json!({"body":"取消写入"}));
@@ -255,14 +260,17 @@ fn 普通共享提交继承请求控制并在WAL前取消() {
 #[cfg(feature = "test-hooks")]
 #[test]
 fn 直接写入在取得WAL锁后观察取消且保留自动ID() {
-    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_request};
     let root = TestDir::new("typed-direct-wal");
     let path = root.file("db.tdb");
     let mut database = Database::<f32>::open(&path, 2).unwrap();
     let before = std::fs::read(format!("{path}.wal")).unwrap();
     let context = RequestContext::new("direct", QueryControl::default(), true).unwrap();
     let worker_context = context.clone();
-    let hook = pause_at(ConcurrencyPoint::DirectWriteWalLockAcquired);
+    let hook = pause_at_request(
+        ConcurrencyPoint::DirectWriteWalLockAcquired,
+        context.request_id(),
+    );
     let running = std::thread::spawn(move || {
         let error = worker_context
             .run(|| database.insert(&[1., 0.], json!({"body":"取消"})))

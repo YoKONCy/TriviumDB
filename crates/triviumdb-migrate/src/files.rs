@@ -422,12 +422,18 @@ pub(crate) fn copy_source(
 }
 
 pub(crate) fn retain_current_group(database: &Path) -> Result<()> {
-    let marker = match std::fs::read(format!("{}.flush_ok", utf8(database)?)) {
-        Ok(bytes) => bytes,
+    let marker = match std::fs::File::open(format!("{}.flush_ok", utf8(database)?)) {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            file.take(82).read_to_end(&mut bytes)?;
+            bytes
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error.into()),
     };
-    let payload = if marker.len() == 53 && &marker[..5] == b"TFMK\x03" {
+    let payload = if (marker.len() == 53 && &marker[..5] == b"TFMK\x03")
+        || (marker.len() == 81 && &marker[..5] == b"TFMK\x04")
+    {
         Some(format!(
             ".pld.{}",
             u64::from_le_bytes(marker[5..13].try_into().map_err(std::io::Error::other)?)

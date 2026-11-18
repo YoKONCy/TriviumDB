@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tabled::builder::Builder;
 use tabled::settings::{Style, Width};
 
-use crate::db_handle::{CliNode, CliRows};
+use crate::db_handle::{CliNode, CliRows, CliValue, MutSummary};
 
 /// 输出格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,20 +36,47 @@ impl std::str::FromStr for OutputFormat {
     }
 }
 
-/// 把一个节点压缩成 `#id {payload}` 形式的单元格文本。
-fn node_cell(node: &CliNode) -> String {
-    format!("#{} {}", node.id, compact_json(&node.payload))
+/// 用紧凑文本显示投影值，节点显示为 `#id {payload}`。
+fn table_cell(value: &CliValue) -> String {
+    match value {
+        CliValue::Node(node) => format!("#{} {}", node.id, compact_text(node.payload.to_string())),
+        CliValue::Json(value) => compact_text(json_cell(value)),
+    }
 }
 
-/// 紧凑 JSON：对象去掉多余空格，过长时截断。
-fn compact_json(v: &Value) -> String {
-    let s = v.to_string();
+/// 表格显示对长文本做截断。
+fn compact_text(s: String) -> String {
     const MAX: usize = 120;
     if s.chars().count() > MAX {
         let truncated: String = s.chars().take(MAX).collect();
         format!("{truncated}…")
     } else {
         s
+    }
+}
+
+fn json_cell(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        value => value.to_string(),
+    }
+}
+
+pub fn format_mutation(summary: &MutSummary, format: OutputFormat) -> Option<String> {
+    match format {
+        OutputFormat::Json => Some(
+            json!({
+                "affected": summary.affected,
+                "created_ids": summary.created_ids,
+            })
+            .to_string(),
+        ),
+        OutputFormat::Csv => Some(format!(
+            "affected,created_ids\n{},{}",
+            summary.affected,
+            csv_escape(&json!(&summary.created_ids).to_string()),
+        )),
+        OutputFormat::Table => None,
     }
 }
 
@@ -69,17 +96,11 @@ fn collect_columns(rows: &CliRows) -> Vec<String> {
 
 /// 渲染 TQL 查询结果。
 pub fn format_rows(rows: &CliRows, format: OutputFormat) -> String {
-    if rows.is_empty() {
-        return match format {
-            OutputFormat::Json => "[]".to_string(),
-            _ => "(0 rows)".to_string(),
-        };
-    }
-
     match format {
         OutputFormat::Json => rows_to_json(rows),
+        OutputFormat::Table if rows.is_empty() => "(0 rows)".to_string(),
         OutputFormat::Table => rows_to_table(rows),
-        OutputFormat::Csv => rows_to_csv(rows),
+        OutputFormat::Csv => format_csv(rows, collect_columns(rows)),
     }
 }
 
@@ -102,7 +123,13 @@ fn rows_to_json(rows: &CliRows) -> String {
         .map(|row| {
             let obj: serde_json::Map<String, Value> = row
                 .iter()
-                .map(|(k, v)| (k.clone(), node_to_json(v)))
+                .map(|(name, value)| {
+                    let json = match value {
+                        CliValue::Node(node) => node_to_json(node),
+                        CliValue::Json(value) => value.clone(),
+                    };
+                    (name.clone(), json)
+                })
                 .collect();
             Value::Object(obj)
         })
@@ -124,7 +151,7 @@ fn rows_to_table(rows: &CliRows) -> String {
         record.push((i + 1).to_string());
         for col in &cols {
             match row.get(col) {
-                Some(node) => record.push(node_cell(node)),
+                Some(value) => record.push(table_cell(value)),
                 None => record.push(String::new()),
             }
         }
@@ -138,27 +165,28 @@ fn rows_to_table(rows: &CliRows) -> String {
     format!("{table}\n{} row(s)", rows.len())
 }
 
-fn rows_to_csv(rows: &CliRows) -> String {
-    let cols = collect_columns(rows);
+pub fn format_csv(rows: &CliRows, mut cols: Vec<String>) -> String {
+    cols.sort();
     let mut out = String::new();
 
     // header
-    out.push_str("#,");
-    out.push_str(
-        &cols
-            .iter()
-            .map(|c| csv_escape(c))
-            .collect::<Vec<_>>()
-            .join(","),
-    );
+    out.push('#');
+    for column in &cols {
+        out.push(',');
+        out.push_str(&csv_escape(column));
+    }
     out.push('\n');
 
     for (i, row) in rows.iter().enumerate() {
         out.push_str(&(i + 1).to_string());
         for col in &cols {
             out.push(',');
-            if let Some(node) = row.get(col) {
-                out.push_str(&csv_escape(&node_cell(node)));
+            if let Some(value) = row.get(col) {
+                let cell = match value {
+                    CliValue::Node(node) => format!("#{} {}", node.id, node.payload),
+                    CliValue::Json(value) => json_cell(value),
+                };
+                out.push_str(&csv_escape(&cell));
             }
         }
         out.push('\n');
@@ -166,9 +194,9 @@ fn rows_to_csv(rows: &CliRows) -> String {
     out
 }
 
-/// CSV 字段转义：含逗号/引号/换行时用双引号包裹并转义内部引号。
+/// CSV 字段转义：含逗号、引号或换行字符时用双引号包裹并转义内部引号。
 fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
+    if s.contains([',', '"', '\r', '\n']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
@@ -181,19 +209,19 @@ mod tests {
     use crate::db_handle::CliNode;
     use std::collections::HashMap;
 
-    fn make_node(id: u64, name: &str) -> CliNode {
-        CliNode {
+    fn make_node(id: u64, name: &str) -> CliValue {
+        CliValue::Node(CliNode {
             id,
             vector: vec![1.0, 0.0, 0.0, 0.0],
             payload: serde_json::json!({"name": name}),
             edges: vec![],
-        }
+        })
     }
 
     fn two_rows() -> CliRows {
-        let mut r1: HashMap<String, CliNode> = HashMap::new();
+        let mut r1 = HashMap::new();
         r1.insert("n".into(), make_node(1, "Alice"));
-        let mut r2: HashMap<String, CliNode> = HashMap::new();
+        let mut r2 = HashMap::new();
         r2.insert("n".into(), make_node(2, "Bob"));
         vec![r1, r2]
     }
@@ -207,7 +235,7 @@ mod tests {
 
     #[test]
     fn empty_rows_csv() {
-        assert_eq!(format_rows(&vec![], OutputFormat::Csv), "(0 rows)");
+        assert_eq!(format_csv(&vec![], vec!["id".into()]), "#,id\n");
     }
 
     // ── format_rows non-empty ──────────────────────────────────
@@ -261,10 +289,10 @@ mod tests {
 
     #[test]
     fn collect_columns_sorted_and_deduped() {
-        let mut r1: HashMap<String, CliNode> = HashMap::new();
+        let mut r1 = HashMap::new();
         r1.insert("b".into(), make_node(1, "X"));
         r1.insert("a".into(), make_node(2, "Y"));
-        let mut r2: HashMap<String, CliNode> = HashMap::new();
+        let mut r2 = HashMap::new();
         r2.insert("a".into(), make_node(3, "Z"));
         r2.insert("c".into(), make_node(4, "W"));
         let cols = collect_columns(&vec![r1, r2]);

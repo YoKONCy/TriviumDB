@@ -19,7 +19,7 @@ pub use crate::database::console::{ConsoleFeature, ConsoleOptions, ConsoleSessio
 pub use console::ConsoleHost;
 pub use errors::json_error_details;
 #[cfg(any(feature = "python", feature = "nodejs"))]
-pub(crate) use errors::{call_argument_info, direct_write_error, field_member, hybrid_text_boost};
+pub(crate) use errors::{call_argument_info, direct_write_error, field_member};
 #[cfg(any(feature = "python", feature = "nodejs"))]
 pub(crate) use errors::{request_admission, request_operation};
 pub use facade::{DatabaseReader, DatabaseWriter};

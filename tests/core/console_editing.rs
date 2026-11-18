@@ -367,7 +367,16 @@ fn 各业务写入入口与删除重建均使旧编辑版本失效() {
 fn 回执淘汰及无事实变化的事务都不能使旧请求重新执行() {
     let root = TestDir::new("edit-eviction");
     let path = root.0.join("sample.tdb");
-    let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+    let runtime = triviumdb::ResourceRuntime::new(Default::default()).unwrap();
+    let mut db = Database::<f32>::open_with_runtime(
+        path.to_str().unwrap(),
+        Config {
+            dim: 2,
+            ..Default::default()
+        },
+        runtime,
+    )
+    .unwrap();
     db.insert_with_id(1, &[1., 0.], json!({"value":"original"}))
         .unwrap();
     let session = ConsoleSession::from_json(r#"{"readOnly":false}"#).unwrap();
@@ -723,7 +732,7 @@ fn 已提交事务的重放响应失败保留确认结果() {
 #[cfg(feature = "test-hooks")]
 #[test]
 fn 提交进入WAL后卸载会话仍原子完成并可由新会话确认() {
-    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_request};
     let root = TestDir::new("edit-detach-wal");
     let path = root.0.join("sample.tdb");
     let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
@@ -739,9 +748,10 @@ fn 提交进入WAL后卸载会话仍原子完成并可由新会话确认() {
             {"op":"insert","vector":[0,1],"payload":{"state":"created"}}
         ]),
     );
-    let gate = pause_at(ConcurrencyPoint::AfterWalAppend);
+    let request_id = "提交后卸载专用请求";
+    let gate = pause_at_request(ConcurrencyPoint::AfterWalAppend, request_id);
     let worker_session = session.clone();
-    let raw = wire(command.clone());
+    let raw = json!({"version":1, "requestId":request_id, "command":command}).to_string();
     let worker = std::thread::spawn(move || {
         let result = db.console_request(&worker_session, &raw);
         (db, result)

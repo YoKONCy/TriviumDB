@@ -93,6 +93,30 @@ pub(crate) fn current() -> Option<RequestContext> {
     ACTIVE.with(|active| active.borrow().last().cloned())
 }
 
+/// 请求结束后只完成已开始操作的清理，退出时归还原执行控制。
+pub(crate) fn finish_cleanup<T>(cleanup: impl FnOnce() -> Result<T>) -> Result<T> {
+    let mut context = match current() {
+        Some(context) => context,
+        None => return cleanup(),
+    };
+    context.control = QueryControl::default();
+    ACTIVE.with(|active| {
+        let mut active = active.borrow_mut();
+        active
+            .try_reserve(1)
+            .map_err(|error| TriviumError::CapacityAllocationFailed {
+                reason: format!("清理上下文分配失败 (Cleanup context allocation failed): {error}"),
+            })?;
+        active.push(context);
+        Ok::<_, TriviumError>(())
+    })?;
+    let _scope = ContextScope {
+        _payload: None,
+        _thread: std::marker::PhantomData,
+    };
+    cleanup()
+}
+
 pub(crate) fn check_current() -> Result<()> {
     ACTIVE.with(|active| {
         active

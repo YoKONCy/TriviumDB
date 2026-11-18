@@ -6,7 +6,7 @@ use super::arguments::{
 use super::database::{DbBackend, PyTriviumDB, database_read, database_write};
 use super::errors::{to_py_error, write_admission_error, write_input_error};
 use super::json::{json_to_pyobject, write_json};
-use super::types::{PyEdge, PyNodeView, round_api_f32};
+use super::types::{PyEdge, PyNodeView};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -227,7 +227,7 @@ impl PyTriviumDB {
                                 Ok(PyEdge {
                                     target_id: e.target_id,
                                     label: e.label.clone(),
-                                    weight: round_api_f32(e.weight),
+                                    weight: f64::from(e.weight),
                                     metadata: json_to_pyobject(py, &e.metadata)?,
                                 })
                             })
@@ -250,7 +250,7 @@ impl PyTriviumDB {
                                 Ok(PyEdge {
                                     target_id: e.target_id,
                                     label: e.label.clone(),
-                                    weight: round_api_f32(e.weight),
+                                    weight: f64::from(e.weight),
                                     metadata: json_to_pyobject(py, &e.metadata)?,
                                 })
                             })
@@ -272,7 +272,7 @@ impl PyTriviumDB {
                                 Ok(PyEdge {
                                     target_id: e.target_id,
                                     label: e.label.clone(),
-                                    weight: round_api_f32(e.weight),
+                                    weight: f64::from(e.weight),
                                     metadata: json_to_pyobject(py, &e.metadata)?,
                                 })
                             })

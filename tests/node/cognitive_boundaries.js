@@ -16,6 +16,10 @@ module.exports = function cognitiveBoundaries(root, TriviumDB) {
       }
       const weight = Math.fround(1e-40)
       db.link(1, 2, 'rel', weight)
+      assert.equal(db.getEdge(1, 2, 'rel').weight, weight)
+      assert.deepEqual(db.getEdges(1).map(edge => edge.weight), [weight])
+      assert.deepEqual(db.getIncomingEdges(2).map(edge => edge.weight), [weight])
+      assert.deepEqual(db.get(1).edges.map(edge => edge.weight), [weight])
       const prefix = 'SEARCH VECTOR [1, 0] TOP 3 AS seed WITH seed'
       const topics = db.tql(`${prefix} TOPICS seed K 2 ITERATIONS 8 AS ranked WITH ranked RETURN ranked.id AS id, topic(ranked) AS topic, topic_score(ranked) AS score ORDER BY id`)
       assert.deepEqual(topics.map(row => row.id), [1, 2, 3])

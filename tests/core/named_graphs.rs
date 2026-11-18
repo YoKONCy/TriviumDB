@@ -38,6 +38,52 @@ fn seed<T: VectorType + Serialize + DeserializeOwned>(db: &mut Database<T>) {
     db.upsert_edge(A, C, "same", 9., json!({"owner":"default"}))
         .unwrap();
 }
+
+#[test]
+fn 命名图向量扩展与结构ID筛选使用同一图作用域() {
+    use triviumdb::query::tql_executor::TqlValue;
+    let dir = TestDir::new("named_graph_shorthand_scope");
+    let path = dir.file("db.tdb");
+    let mut db = Database::<f32>::open_with_config(&path, config(StorageMode::Mmap)).unwrap();
+    for (id, vector) in [(1, [1., 0.]), (2, [0., 1.]), (3, [0., -1.])] {
+        db.insert_with_id(id, &vector, json!({"id":20+id})).unwrap();
+    }
+    db.link(1, 2, "rel", 1.).unwrap();
+    let graph = serde_json::from_value(json!({
+        "graph_id":"g","members":["1","3"],"metadata":{},
+        "edges":[{"source_id":"1","target_id":"3","label":"rel","weight":1,"metadata":{}}],
+    }))
+    .unwrap();
+    db.put_named_graph(graph, None).unwrap();
+    let ids = |db: &Database<f32>, query: &str| {
+        db.tql(query)
+            .unwrap()
+            .into_iter()
+            .map(|row| match row["id"] {
+                TqlValue::Int(id) => id,
+                ref value => panic!("预期节点 ID，实际为 {value:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    for prefix in ["", r#"GRAPH {graph_ids:["g"]} "#] {
+        let query = format!(
+            "{prefix}SEARCH VECTOR [1,0] TOP 1 EXPAND [:rel*1..1] RETURN _.id AS id ORDER BY id"
+        );
+        assert_eq!(
+            ids(&db, &query),
+            if prefix.is_empty() {
+                vec![1, 2]
+            } else {
+                vec![1, 3]
+            }
+        );
+    }
+    let query = r#"GRAPH {graph_ids:["g"]} MATCH (a {id:{$lt:3}}) RETURN a.id AS id"#;
+    assert_eq!(ids(&db, query), [1]);
+    db.create_ordered_index("id").unwrap();
+    assert_eq!(ids(&db, query), [1]);
+    db.close().unwrap();
+}
 fn matrix<T: VectorType + Serialize + DeserializeOwned>() {
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
         let dir = TestDir::new("named_graph_matrix");
@@ -470,7 +516,9 @@ fn 只读查询保持完整文件组字节且关闭后拥有结果不占用映�
 fn 图读视图取消释放工作区并保留后续完整查询() {
     let dir = TestDir::new("named_graph_cancel");
     let path = dir.file("db.tdb");
-    let mut db = Database::<f32>::open_with_config(&path, config(StorageMode::Mmap)).unwrap();
+    let runtime = triviumdb::ResourceRuntime::new(Default::default()).unwrap();
+    let mut db =
+        Database::<f32>::open_with_runtime(&path, config(StorageMode::Mmap), runtime).unwrap();
     seed(&mut db);
     db.put_named_graph(graph(0), None).unwrap();
     let expected = db
@@ -480,8 +528,10 @@ fn 图读视图取消释放工作区并保留后续完整查询() {
     let context =
         triviumdb::sdk::RequestContext::new("named-graph-cancel", Default::default(), false)
             .unwrap();
-    let gate =
-        triviumdb::test_hooks::pause_at(triviumdb::test_hooks::ConcurrencyPoint::NamedGraphRead);
+    let gate = triviumdb::test_hooks::pause_at_request(
+        triviumdb::test_hooks::ConcurrencyPoint::NamedGraphRead,
+        context.request_id(),
+    );
     let worker_db = db.clone();
     let worker_context = context.clone();
     let worker = std::thread::spawn(move || {

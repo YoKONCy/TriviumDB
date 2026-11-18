@@ -1,15 +1,15 @@
 # 未发布变更
 
-> 后续开发以 `0.9.2-beta.1` 为基线，已交付内容见 [0.9.2-beta.1 中英文说明](0.9.2-beta.1.md)。
+**中文** | [**English**](#english)
 
 ---
 
 ## 中文说明
 
-后续变更在本节登记。
+已发布内容见 [0.9.2 双语发布说明](0.9.2.md)。
 
 ---
 
 ## English
 
-Subsequent development builds on `0.9.2-beta.1`. Delivered changes are recorded in the [bilingual release notes](0.9.2-beta.1.md). Future changes are recorded in this section.
+Published changes are recorded in the [0.9.2 bilingual release notes](0.9.2.md).

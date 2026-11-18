@@ -121,7 +121,11 @@ function runKernelBoundaries(root, TriviumDB = require('../../index.js').Trivium
     assert.deepEqual(db.tql('MATCH (n {id:3}) RETURN n')[0].n.payload, special)
     const cycle = {}; cycle.self = cycle
     const before = fs.readFileSync(file + '.wal')
-    for (const [invalid, field] of [[cycle, '/payload' + '/self'.repeat(257)], [{ value: 1n }, '/payload/value']]) {
+    for (const [invalid, field] of [
+      [cycle, '/payload' + '/self'.repeat(257)],
+      [{ value: 1n << 64n }, '/payload/value'],
+      [{ value: -(1n << 63n) - 1n }, '/payload/value']
+    ]) {
       assert.throws(() => db.insert([1, 0], invalid), error => {
         assert.equal(error.code, 'TDB_INVALID_INPUT')
         assert.deepEqual(error.target, { field })
@@ -130,7 +134,23 @@ function runKernelBoundaries(root, TriviumDB = require('../../index.js').Trivium
       })
       assert.deepEqual(fs.readFileSync(file + '.wal'), before)
     }
+    const payload = Object.assign(Object.create({ defaults: true }), {
+      local: 9007199254740993n,
+      bounds: [-(1n << 63n), (1n << 64n) - 1n],
+      2: 'numeric key'
+    })
+    Object.defineProperty(payload, 'hidden', { value: true })
+    payload[Symbol('extra')] = true
+    const expected = { local: payload.local, bounds: payload.bounds, 2: 'numeric key' }
+    db.updatePayload(3, payload)
+    const readBack = db.getPayload(3)
+    assert.deepEqual(readBack, expected)
+    db.updatePayload(3, readBack)
     db.close()
+    const reopened = new TriviumDB(file, { dim: 2, dtype, autoBuildQuiver: false })
+    try {
+      assert.deepEqual(reopened.getPayload(3), expected)
+    } finally { reopened.close() }
     for (const storageMode of ['rom', 'mmap']) {
       const file = path.join(root, `kernel-${dtype}-${storageMode}.tdb`)
       const options = { dim: 2, dtype, storageMode, autoBuildQuiver: false }

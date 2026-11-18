@@ -77,6 +77,15 @@ pub struct TextIndex {
 }
 
 impl TextIndex {
+    pub(crate) fn clone_facts(&self) -> Self {
+        Self {
+            keyword_to_nodes: self.keyword_to_nodes.clone(),
+            bm25_tf: self.bm25_tf.clone(),
+            doc_lengths: self.doc_lengths.clone(),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn write_facts(&self, writer: &mut impl std::io::Write) -> crate::Result<()> {
         use crate::database::inspection::record;
         let mut keywords = self.keyword_to_nodes.iter().collect::<Vec<_>>();

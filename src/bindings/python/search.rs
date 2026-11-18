@@ -1,8 +1,8 @@
 //! 向量、图优先、混合及高级检索入口。
 
 use super::arguments::{
-    boolean_argument, extract_argument, float_argument, integer_argument, read_float, read_id,
-    read_sequence, read_string, string_argument,
+    boolean_argument, extract_argument, float_argument, integer_argument, read_double, read_float,
+    read_id, read_sequence, read_string, string_argument,
 };
 use super::database::{DbBackend, PyTriviumDB, database_read};
 use super::errors::to_py_error;
@@ -539,7 +539,7 @@ impl PyTriviumDB {
         let (_request, borrowed) = database_read(slf)?;
         let this = &*borrowed;
         let min_score = read_float(min_score.bind(py), "min_score")?;
-        let hybrid_alpha = read_float(hybrid_alpha.bind(py), "hybrid_alpha")?;
+        let hybrid_alpha = read_double(hybrid_alpha.bind(py), "hybrid_alpha")?;
         let exact = extract_argument(py, exact.bind(py), "exact", None)?;
         let query_text: String = extract_argument(py, &query_text, "query_text", None)?;
         let top_k = extract_argument(py, top_k.bind(py), "top_k", None)?;
@@ -549,15 +549,10 @@ impl PyTriviumDB {
             None => None,
         };
 
-        // hybrid_alpha 越大，向量分数占比越高。
-        // TriviumDB 底层使用 text_boost = (1.0 - alpha) * 2.5 作为启发式倍率
-        let boost = crate::sdk::hybrid_text_boost(hybrid_alpha).map_err(to_py_error)?;
         let config = crate::database::SearchConfig {
             top_k,
             expand_depth,
             min_score,
-            enable_text_hybrid_search: true,
-            text_boost: boost,
             payload_filter: rust_filter,
             ..Default::default()
         }
@@ -566,16 +561,22 @@ impl PyTriviumDB {
         let results = match &this.inner {
             DbBackend::F32(db) => {
                 let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
-                py.allow_threads(|| db.search_hybrid(Some(&query_text), Some(&vec), &config))
+                py.allow_threads(|| {
+                    db.search_hybrid_weighted(&query_text, &vec, &config, hybrid_alpha)
+                })
             }
             DbBackend::F16(db) => {
                 let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
                 let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
-                py.allow_threads(|| db.search_hybrid(Some(&query_text), Some(&vec16), &config))
+                py.allow_threads(|| {
+                    db.search_hybrid_weighted(&query_text, &vec16, &config, hybrid_alpha)
+                })
             }
             DbBackend::U64(db) => {
                 let vec: Vec<u64> = read_sequence(&query_vector, "query_vector", read_id)?;
-                py.allow_threads(|| db.search_hybrid(Some(&query_text), Some(&vec), &config))
+                py.allow_threads(|| {
+                    db.search_hybrid_weighted(&query_text, &vec, &config, hybrid_alpha)
+                })
             }
         }
         .map_err(to_py_error)?;

@@ -1,6 +1,6 @@
 # 实例关闭、快照与恢复
 
-> 本文说明 `0.9.2-beta.1` 的实例关闭、目录快照与恢复接口。版本记录见[变更说明](changes/0.9.2-beta.1.md)，后续进展见[未发布变更](changes/unreleased.md)。
+> 本文说明 `0.9.2` 的实例关闭、目录快照与恢复接口。版本记录见[变更说明](changes/0.9.2.md)，后续进展见[未发布变更](changes/unreleased.md)。
 
 ---
 
@@ -135,7 +135,7 @@ while (!db.closeTimeout(0)) {
 
 ### 接口与返回值
 
-快照的 `generation_id` 保存为 manifest 中的代际标识。`GenerationStore` 使用单一路径组件命名代际目录和数据库文件，并在生成路径及解析 current 记录时校验名称。
+快照的 `generation_id` 保存为 manifest 中的代际标识。`GenerationStore` 的代际名和数据库文件名必须为单一路径组件，名称中的路径分隔符会被拒绝。当前代保护和 Reader 租约使用解析后的代际目录，Windows 上指向同一目录的大小写别名共享保护。
 
 | 能力 | Rust | Python | Node.js |
 | --- | --- | --- | --- |
@@ -143,7 +143,7 @@ while (!db.closeTimeout(0)) {
 | 校验 | `storage::snapshot::verify_snapshot(directory)` | `triviumdb.verify_snapshot(directory, runtime=None)` | `verifySnapshot(directory, runtime?)` |
 | 恢复 | `storage::snapshot::restore_snapshot(source, destination)` | `triviumdb.restore_snapshot(source, destination, runtime=None)` | `restoreSnapshot(source, destination, runtime?)` |
 
-Rust 校验和恢复还有接收 `&ResourceRuntime` 的 `_with_runtime` 入口。三端返回同一份 manifest，包含 generation ID、dtype、维度、节点数和各文件长度/CRC。
+Rust 校验和恢复还有接收 `&ResourceRuntime` 的 `_with_runtime` 入口。三端返回同一份 manifest，包含 generation ID、dtype、维度、节点数和各文件长度、CRC32 和 SHA-256。
 
 ### 目录与文件范围
 
@@ -155,7 +155,7 @@ Rust 校验和恢复还有接收 `&ResourceRuntime` 的 `_with_runtime` 入口�
 
 ### 发布过程与错误处理
 
-复制采用有界缓冲，逐文件 fsync，在隐藏暂存目录中生成并验证 manifest，最后通过目录 rename 和父目录同步发布。目录 rename 是目标的可见发布点。
+复制采用有界缓冲，逐文件 fsync，在隐藏暂存目录中生成并验证 manifest，最后通过排他目录重命名和父目录同步发布。目标在重命名成功时可见。在此之前创建的同名目录原样保留。
 
 > **恢复提醒**：发布前的普通错误清理本次暂存目录；强杀后可能留下隐藏暂存目录。正式快照由目标路径及有效 manifest 识别，目标父目录可能保留用于并发发布互斥的隐藏锁文件。
 
@@ -165,7 +165,9 @@ Rust 校验和恢复还有接收 `&ResourceRuntime` 的 `_with_runtime` 入口�
 
 维度迁移在独占暂存库中构建节点和边，并在公开目标之前预留最终实例配额。提交前失败且回滚清理完成时提供 `publish/not_committed`；提交标记重命名后同步失败为 `publish/unknown`；完成提交及目录同步后的清理失败为 `publish/committed`。根据结果校验目标，释放旧句柄后再重新打开。
 
-校验检查文件集合、长度、CRC 及主文件头的维度和节点数。打开数据库时继续执行内部格式校验。发布后的快照目录按不可变制品管理；创建和校验期间，宿主保持源文件与发布目录的内容稳定。
+校验检查文件集合、长度、CRC、主文件头的维度和节点数，并比对 manifest 的 dtype、主文件的类型与元素宽度及向量块长度。类型身份不一致时返回 `TDB_IMMUTABLE_ARTIFACT`，恢复在发布目标目录前完成同样的校验。发布后的快照目录按不可变制品管理。创建和校验期间，宿主保持源文件与发布目录的内容稳定。
+
+> **旧快照提醒**　旧版清单仍可验证和恢复，完整性以其原有摘要为准。旧 Mmap 清单与检查点标记使用 Payload CRC32，其值无法区分长度相同且内部 CRC 有效的 Payload 文件。重新创建快照可为已确认来源的文件写入 SHA-256。
 
 ### 创建、校验、恢复与打开
 

@@ -523,7 +523,7 @@ fn readonly_pending_wal_requires_recovery_before_cold_queries() {
 #[cfg(feature = "test-hooks")]
 #[test]
 fn sdk_shared_read_requests_remain_available_during_a_cold_query() {
-    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_path};
     let root = directory();
     let path = root.join("shared-read.tdb");
     let mut db = Database::<f32>::open(path.to_str().unwrap(), 1).unwrap();
@@ -533,7 +533,9 @@ fn sdk_shared_read_requests_remain_available_during_a_cold_query() {
         .unwrap();
     let baseline = db.configure_quiver(options()).unwrap().reserved_bytes;
     let shared = triviumdb::SharedDatabase::new(db);
-    let gate = pause_at(ConcurrencyPoint::QuiverColdBeforeRead);
+    let database = std::fs::canonicalize(&path).unwrap();
+    let cold_reader = format!("{}.qssd", database.display());
+    let gate = pause_at_path(ConcurrencyPoint::QuiverColdBeforeRead, &cold_reader);
     let worker_shared = shared.clone();
     let worker = std::thread::spawn(move || {
         worker_shared.try_read(|core| {

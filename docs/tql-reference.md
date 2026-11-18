@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> 本文介绍 `0.9.2-beta.1` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.2-beta.1.md)。
+> 本文介绍 `0.9.2` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.2.md)。
 
 ---
 
@@ -238,6 +238,8 @@ ORDER BY graph, source, target
 
 图作用域贯穿 `MATCH`、`OPTIONAL MATCH`、正反向及变长路径、`EXPAND`、路径算法和图算法。文档、属性、文本及向量来源按各自查询条件产生候选，图阶段选择其中属于作用域的输入节点。
 
+简写 `SEARCH … EXPAND` 与分段 `EXPAND` 使用相同的图作用域。模式中的 `{id: ...}` 匹配结构 NodeId。允许零跳的边模式可将合格节点绑定为自身，边标签只约束实际经过的边。
+
 ```sql
 GRAPH {graph_ids: ["events"]}
 DOCUMENTS {operation: "search", query: {text: $text, max_documents: 10}}
@@ -250,7 +252,7 @@ RETURN related, source.document_id AS document_id, source.evidence AS evidence
 
 `EXPLAIN` 提供 `graph_scope`、`graph_revisions`、`selected_graph_stats`、`named_graph_members` 访问路径和 Cascades 物理阶段。文档物理来源区分 `document_text_search`、`document_exact_search`、`document_ann_search`，通过 `document_source` 提供请求配置。`EXPLAIN ANALYZE` 执行相同管线并返回实际行数及算子观测。
 
-`EXPLAIN SEARCH` 通过 `vector_access_path` 表示向量访问选择，取值为 `ann_post_filter` 或 `exact_fallback`。结构化 `access_path` 保留节点／属性访问路径，两者分别描述各自阶段。字段名称调整见[版本说明](changes/0.9.2-beta.1.md)。
+`EXPLAIN SEARCH` 通过 `vector_access_path` 表示向量访问选择，取值为 `ann_post_filter` 或 `exact_fallback`。结构化 `access_path` 保留节点／属性访问路径，两者分别描述各自阶段。字段名称调整见[版本说明](changes/0.9.2.md)。
 
 Prepared 支持图身份、预期修订、文档文字、过滤条件及向量分量等配置叶节点。同名参数共用必需参数目录和首个真实引用范围，缺参、额外参数及转换错误使用既有结构化错误。来源配置、图作用域和执行算子的错误携带对应 UTF-8 范围。
 
@@ -351,6 +353,8 @@ LIMIT 10 OFFSET 20
 `MATCH` 入口沿图谱边进行模式匹配遍历，完全覆盖旧的 `db.query()` API，并新增可变长路径、多标签边等高级能力。
 
 匹配行按物理边计数：同一对端点的不同标签边各产生一行，双向单跳的同一自环产生一行。索引访问与 Planner 反向计划保留完整行重数，COUNT 与多段匹配采用相同规则。
+
+无变量限定的 `WHERE {…}` 使用模式中首个已绑定的节点。边变量和节点命名顺序只决定引用方式。字段级运算符对象需要至少一个运算符，使用 `{obj: {$eq: {x: 2}}}` 匹配对象值。CREATE 的每次匿名节点声明分配独立身份，边属性对象支持 `weight`。
 
 ### 基础语法
 
@@ -555,9 +559,11 @@ WHERE _.score > 0.8
 RETURN *
 ```
 
-> **提醒**：不带 `EXPAND` 且 `WHERE` 是已索引的等值或 AND 等值文档过滤时，Planner 会先取得属性索引候选，再在过滤集合内精确向量排序并返回 Top-K。这样 `TOP 10 WHERE {type: "event"}` 表示 event 集合中的 Top 10。
+> **提醒**　当查询省略 `EXPAND` 且 `WHERE` 是已索引的等值或 AND 等值文档过滤时，Planner 先取得属性索引候选，核对候选的实际 JSON 值和类型，再在合格集合内精确向量排序并返回 Top-K。
 >
 > 无可用属性索引、范围/OR/通用表达式或带 `EXPAND` 的查询保留候选后过滤路径；可能少于 TOP 指定数量，但始终执行最终精确谓词校验。
+
+简写 `SEARCH` 在 `WHERE` 和 `RETURN` 中通过 `similarity(_)` 访问当前节点的检索分数。组合管线保留各节点变量绑定时的相似度与路径值。使用 `WITH` 重命名节点时同步传递这些值。
 
 > `SEARCH`、`TEXT` 和认知阶段都进入统一 NodeSet/Cascades 管线；物理访问路径由统计、索引可用性和预算共同决定。需要组件可开关但顺序固定的官方认知模板、Hook 或有状态疲劳不应期时使用 `search_advanced()`；需要改变无状态算子顺序时使用 TQL。
 
@@ -697,6 +703,8 @@ RETURN 别名在 ORDER BY 中可用，也可参与排序算术；WHERE 与 RETUR
 
 `ORDER BY picked.rank` 在 `RETURN _.nested AS picked` 下读取投影对象的 `rank`。规划器按作用域核对索引等价性，投影排序完成后执行分页。排序键相等时，节点行按完整绑定名称和 NodeId、边行按图身份与端点和标签、管线行按节点与绑定及路径身份稳定比较；聚合行按分组键比较。该最终比较保持升序，`DESC` 作用于显式排序键。
 
+有序索引键无法保留完整的数值顺序时，范围索引仍可筛选候选，执行器按原始值精确排序后再执行 `OFFSET` 和 `LIMIT`。
+
 ---
 
 ## WITH 可组合管线
@@ -740,6 +748,8 @@ ORDER BY core DESC
 `SCC`、`K_CORE`、`ARTICULATION_POINTS`、`TRIANGLE_COUNT` 与 `HITS` 均消费命名 NodeSet。`MODE` 支持 `INDUCED`、`EXPAND HOPS n` 和 `BOUNDARY HOPS n`；扩张模式可指定 `OUTGOING`、`INCOMING` 或 `BOTH` 以及 `LABELS [...]`，算法读取边还可通过单值 `LABEL` 过滤。SCC 输出 `community()`；其余结果通过 `core_number()`、`triangle_count()`、`clustering_coefficient()`、`authority_score()` 和 `hub_score()` 投影。算法按 NodeId 稳定顺序串行执行，工作区分配、构图边访问、三角交集和 HITS 迭代均受硬预算约束，超限直接报错而不截断。
 
 ### 文本召回入口
+
+文本召回默认按分数降序排列，同分按 NodeId 升序。可用 `ORDER BY` 指定结果顺序。
 
 ```sql
 TEXT BM25 "rust memory safety" TOP 100 K1 1.2 B 0.75 AS hits
@@ -824,7 +834,7 @@ RETURN clustered, topic(clustered) AS topic_id, topic_score(clustered) AS confid
 
 整数之间的 `+ - *` 和整数 `SUM` 保留整数结果，超出整数域时返回 Null。含浮点操作数的算术、除法与 `AVG` 使用 binary64；除法仅将实际的正负零视为零分母，有限的小分母正常计算。`MIN/MAX` 保留选中数值的类型和值。
 
-`AVG` 使用补偿求和，在中间和溢出时按最大绝对值缩放，在同号大数及正负抵消时计算有限均值。例如两个 `1e308` 的平均值为 `1e308`。普通整数、零值与极小有限输入沿相同数值契约处理。
+含浮点值的 `SUM` 与所有数值 `AVG` 精确累加整数及 binary64 输入，在生成结果时统一舍入为 binary64，保留抵消后的可表示尾项。`AVG` 在舍入前除以计入的数值个数。超出有限浮点范围的总和返回 Null。
 
 Python 返回精确 `int`。Node 的整数标量在安全整数范围内返回 `number`，超范围时返回十进制字符串，`COLLECT` 等列表中的整数采用相同转换；整节点结果中的 ID 继续使用字符串。例如，`RETURN 18446744073709551613 AS value` 在 Python 中返回整数，在 Node 中返回字符串 `"18446744073709551613"`。
 
@@ -832,9 +842,9 @@ Python 返回精确 `int`。Node 的整数标量在安全整数范围内返回 `
 
 TQL 数值等值谓词采用相同的索引候选和精确复核语义：整数 `1` 与浮点 `1.0` 数值相等，2^53 以上的相邻整数保持可区分。文档 Filter 与 Hash/Bitmap 的 JSON 类型键继续按其文档值契约工作。
 
-聚合支持 `COUNT/SUM/AVG/MIN/MAX/COLLECT` 与 aggregate `DISTINCT`。RETURN 中非聚合表达式构成隐式分组键；`DISTINCT b.id`、`DISTINCT id(b)` 和 `DISTINCT b.field` 均按实际投影值去重。空输入 `COUNT(*)=0`，其他无值聚合返回 Null。Rust 的 `tql()` 与 Python/Node 动态语言入口均返回统一一等值；`tql_nodes()` 保留给只需要节点绑定的 Rust 调用方，`tql_values()` 是兼容别名。
+聚合支持 `COUNT/SUM/AVG/MIN/MAX/COLLECT` 与 aggregate `DISTINCT`。RETURN 中非聚合表达式构成隐式分组键，`DISTINCT b.id`、`DISTINCT id(b)` 和 `DISTINCT b.field` 按实际投影值去重。无值聚合中，`COUNT` 返回 `0`，`COLLECT` 返回 `[]`，数值聚合返回 Null。Rust 的 `tql()` 与 Python/Node 动态语言入口均返回统一一等值，`tql_nodes()` 保留给只需要节点绑定的 Rust 调用方，`tql_values()` 是兼容别名。
 
-`COUNT(*)` 统计匹配行，`COUNT(expr)` 统计求值后非 Null 的值；`0`、`false`、空字符串与空容器均为有效值。当前聚合去重语法为 `RETURN DISTINCT COUNT(n.g) AS total`，表示先对 `n.g` 的非 Null 值去重，再计数。单跳具名边按实际边产生行，多标签平行边分别参与计数。
+`COUNT(*)` 统计匹配行，`COUNT(expr)` 统计求值后非 Null 的值。`0`、`false`、空字符串与空容器均为有效值。使用 `RETURN DISTINCT COUNT(n.g) AS total` 可先对 `n.g` 的非 Null 值去重再计数。`DISTINCT COUNT(*)` 在解析阶段返回错误。单跳具名边按实际边产生行，多标签平行边分别参与计数。`FIND` 的隐式节点变量 `_` 可用于 `COUNT(_)`，同名 Payload 字段通过 `_._` 访问。
 
 写入操作沿匹配行生成事务。`MATCH … CREATE` 的零匹配产生零次创建，每条匹配拥有独立的新节点变量作用域；同一行内的边引用对应的新节点。多字段 SET 按文本顺序累计到同一节点，重复字段采用最后一次赋值，合并后提交一次 Payload 替换。整条 mutation 通过内核事务完成预检、预算准入与原子提交。
 
@@ -883,13 +893,17 @@ WITH route
 RETURN path(route) AS nodes, path_length(route) AS hops
 ```
 
-Path 当前是一等 NodeId 序列；`path_length` 返回边数。`WEIGHTED_PATHS` 使用非负有限边权执行确定性 Dijkstra，`weighted_distance()` 返回总成本；`YEN_PATHS ... K n` 返回最多 n 条最短简单路径，`path_rank()` 从 1 开始标记顺序。等成本路径按完整 NodeId 序列决胜。
+Path 是一等 NodeId 序列，`path_length` 返回边数。`WEIGHTED_PATHS` 使用非负有限边权执行确定性 Dijkstra，`weighted_distance()` 返回总成本。`YEN_PATHS ... K n` 返回最多 n 条最短简单路径，`path_rank()` 从 1 开始标记顺序，输出行从该路径起点继承绑定。等成本路径按完整 NodeId 序列决胜。
 
 `NODE_SIMILARITY input TOP n CUTOFF x [LABEL label] AS pairs` 在输入诱导无向图上计算邻居集合 Jaccard，相似节点对通过 `pair_left()`、`pair_right()` 与 `node_similarity()` 投影。PairSet 以 `(left,right)` 为行身份，两个节点共同参与去重；节点对数量、邻居交集工作量、结果数和临时字节均受硬预算约束。
 
 集合阶段公开 `UNION/INTERSECT/EXCEPT`，普通 NodeSet 仍按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。所有路径与集合算法均受节点数、字节和遍历预算约束。
 
-`ALL_PATHS` 的 `DEPTH` 限定查询范围。执行预算阻止继续扩展时返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`，TQL 管线采用完整结果的 Error 策略。Core `bounded_all_paths` 的 Partial 策略通过 `truncated` 标记部分结果。路径平均边权和多路径均值使用 `f64` 累加，输出为 `f32`；TQL 聚合分数超出有限表示范围时返回查询错误。
+`ALL_PATHS` 的 `DEPTH` 限定查询范围，重复的 `TO` 节点只处理一次。`AVOID` 排除经过指定节点的所有路径，包含起点和终点。`LABELS` 要求边标签依次匹配整个序列。执行预算阻止继续扩展时，TQL 返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`，Core `bounded_all_paths` 的 Partial 策略通过 `truncated` 标记部分结果。
+
+最短路径、加权最短路径和 Yen 路径查询也按唯一目标执行。全路径强度与计数按同一目标的全部来源计算。平均边权和跨路径聚合精确累加后舍入为 `f32`。乘积聚合返回乘积最大的代表路径，平均边权聚合返回平均边权最大的代表路径。同分按节点序列决胜。TQL 路径聚合分数超出有限表示范围时返回查询错误。
+
+路径乘积分开累乘尾数和二进制指数，在整条路径完成后转换为 `f32`。SCC 的 `community()` 保留分量节点标识的完整无符号范围。
 
 Rust `NodeRow.provenance.property_origin` 记录物理计划当前保留的单个等值属性入口，用于成本估算与执行审计。合并行的该字段一致时保留，来源有差异时清除。直接属性召回后精排可以保留入口；先全量评分再与属性召回求交，会按合并规则得到相应来源。比较这类等价物理计划时，分别验证各自预期的 `property_origin`，再按原始顺序精确比较其余完整字段，包括其他 provenance、分数值与分数类别。
 

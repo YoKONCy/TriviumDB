@@ -46,7 +46,13 @@ pub(crate) fn admit(path: &str) -> Result<()> {
             super::wal::WAL_VERSION as u32,
             "wal",
         ),
-        (".flush_ok", &b"TFMK"[..], 1, 3, "checkpoint_marker"),
+        (
+            ".flush_ok",
+            &b"TFMK"[..],
+            1,
+            u32::from(super::file_format::FLUSH_MARKER_VERSION),
+            "checkpoint_marker",
+        ),
     ] {
         let mut file = match File::open(format!("{path}{suffix}")) {
             Ok(file) => file,
@@ -96,7 +102,11 @@ pub(crate) fn admit(path: &str) -> Result<()> {
                 supported: current as u16,
             });
         }
-        require(component, found, current)?;
+        if component != "checkpoint_marker"
+            || found != u32::from(super::file_format::LEGACY_FLUSH_MARKER_VERSION)
+        {
+            require(component, found, current)?;
+        }
     }
     if !recovering && std::path::Path::new(path).is_file() {
         for (suffix, magic, offset, width, current, component) in [

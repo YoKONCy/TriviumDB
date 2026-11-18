@@ -7,8 +7,8 @@ use triviumdb::database::Database;
 fn 当前提交标记字段边界_crc及未知版本矩阵() {
     let source = seed("flush_marker_source");
     let marker = std::fs::read(format!("{source}.flush_ok")).unwrap();
-    assert_eq!(marker.len(), 53);
-    assert_eq!(marker[4], 3);
+    assert_eq!(marker.len(), 81);
+    assert_eq!(marker[4], 4);
     let control = Database::<f32>::open_read_only(&source, DIM).unwrap();
     assert_eq!(control.all_node_ids().unwrap(), [1, 2, 3, 4, 5, 6, 7, 8]);
     drop(control);
@@ -17,7 +17,7 @@ fn 当前提交标记字段边界_crc及未知版本矩阵() {
         .into_iter()
         .chain(truncation_mutations(marker.len(), FLUSH_MARKER))
         .chain([
-            Mutation::FlipBit { offset: 49, bit: 0 },
+            Mutation::FlipBit { offset: 77, bit: 0 },
             Mutation::Append(vec![0xa5; 8]),
         ])
         // 边界值可能恰好等于原字段；原始合法输入由上面的正向对照验证。
@@ -50,7 +50,7 @@ fn marker修复自身crc后_错误尺寸和文件crc仍被语义校验拒绝() {
         "payload_size",
         "tdb_crc",
         "vec_crc",
-        "payload_crc",
+        "payload_sha256",
     ] {
         let field = *FLUSH_MARKER
             .iter()

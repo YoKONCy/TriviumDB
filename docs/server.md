@@ -1,6 +1,6 @@
 # TriviumDB Server（HTTP 服务端版）
 
-> 本文说明 `0.9.2-beta.1` 源码中的 nightly Server，覆盖 HTTP 协议、并发调度、部署与关闭。服务端使用 Rust、Axum 和 Tokio，许可为 Apache-2.0。版本记录见[变更说明](changes/0.9.2-beta.1.md)。
+> 本文说明 `0.9.2` 源码中的 nightly Server，覆盖 HTTP 协议、并发调度、部署与关闭。服务端使用 Rust、Axum 和 Tokio，许可为 Apache-2.0。版本记录见[变更说明](changes/0.9.2.md)。
 
 ---
 
@@ -79,7 +79,7 @@ HTTP / JSON / NDJSON / 二进制 f32
 
 写请求错误的可选 `write` 字段记录阶段与结果。队列满、入队前过期和 Worker 明确拒绝的待执行请求返回 `admission/not_committed`；入队后等待响应超时或通道丢失返回 `response/unknown`。分组同步失败向已经执行成功的等待请求返回 `group_sync/unknown`，独立操作错误保留自身字段。携带写入上下文时 `retryable=false`，调用方依据回执和实际事实决定重新准入、重放或对账。字段说明见[公共错误契约](error-contracts.md#写入结果字段)。
 
-Writer 在取得实际数据库写锁后、每条操作开始前再次核对响应接收端和期限。等待者已经退出时跳过对应操作，到期时交回 `admission/not_committed`，同批其他有效请求继续执行。该检查覆盖等待写锁及前序操作期间的状态变化，已进入 Core 的提交按原子协议完成。
+Writer 在取得实际数据库写锁后、每条操作开始前再次核对响应接收端和期限。等待者已经退出时跳过对应操作，到期时交回 `admission/not_committed`，同批其他有效请求继续执行。TQL 写请求在规划与进入 WAL 前继续检查共享控制器，客户端退出及时传播取消信号。已进入提交点的请求按原子协议完成。向量搜索共享读请求的控制器和期限。
 
 ---
 
@@ -143,7 +143,7 @@ closed?;
 | `--idempotency-capacity` | `TRIVIUMDB_IDEMPOTENCY_CAPACITY` | `4096` | 进程内幂等缓存容量 |
 | `--max-write-batch-size` | `TRIVIUMDB_MAX_WRITE_BATCH_SIZE` | `64` | Group Commit 合批上限 |
 | `--max-write-batch-delay-us` | `TRIVIUMDB_MAX_WRITE_BATCH_DELAY_US` | `500` | 动态合批窗口（微秒） |
-| `--prepared-cache-capacity` | `TRIVIUMDB_PREPARED_CACHE_CAPACITY` | `1024` | Prepared TQL 缓存容量 |
+| `--prepared-cache-capacity` | `TRIVIUMDB_PREPARED_CACHE_CAPACITY` | `1024` | Prepared TQL 缓存容量，设为 0 时创建返回 `503 TDB_PREPARED_DISABLED` |
 | `--request-timeout-ms` | `TRIVIUMDB_REQUEST_TIMEOUT_MS` | `30000` | 请求 deadline（毫秒） |
 | `--max-body-bytes` | `TRIVIUMDB_MAX_BODY_BYTES` | `4194304` | HTTP 请求体硬上限 |
 
@@ -198,9 +198,13 @@ curl -X POST http://127.0.0.1:8080/v1/tql \
 
 Server 不为认知算子维护另一套 HTTP API；`TEXT`、`RESIDUAL`、`DIVERSIFY`、`TOPICS` 和 `SA_PPR_CONFIG` 均通过 `/v1/tql` 使用 Core 的相同 Parser、Cascades、预算和确定性语义。Refractory Fatigue 未开放为普通 TQL 算子，因为它会修改进程内检索状态。
 
-普通 JSON 查询响应有 16 MiB 硬上限。超限返回 `413 TDB_HTTP_RESPONSE_TOO_LARGE`，旧类别保存在 legacyCode。可使用属性投影、`LIMIT` 或 NDJSON 响应控制返回量。
+普通 JSON 查询响应在编码过程中实施 16 MiB 硬上限。超限返回 `413 TDB_HTTP_RESPONSE_TOO_LARGE`，旧类别保存在 legacyCode。可使用属性投影、`LIMIT` 或 NDJSON 响应控制返回量。
 
 请求头设置 `Accept: application/x-ndjson` 时，响应按 `meta → row... → summary` 输出；`meta.columns` 明确声明每个投影列的 `node`、`edge`、`path` 或标量类型。普通 JSON 响应也在顶层 `columns` 返回相同元数据。HTTP 输出逐行生成，但排序、聚合和 Top-K 等 Core 算子仍可能先物化结果。
+
+普通及 Prepared TQL 的空结果保留静态投影列名。没有结果值可推断类型时，`kind` 为 `null`。查询诊断的字节位置按客户端提交的原始 UTF-8 计算。
+
+节点详情和批量读取响应的 ID 均为十进制字符串。`batch-get`、事务和批量写入接受这些字符串与精确的 JSON 无符号整数。TQL 的 `uint` 值和超出 JavaScript 安全整数范围的 `int` 值使用十进制字符串，同一规则适用于列表和对象投影中的整数。
 
 ### 属性索引
 
@@ -271,7 +275,7 @@ Content-Type: application/vnd.triviumdb.vector+f32
 - 全局 ETag 为 `"<epoch>-g<n>"`，成功写入后递增；
 - `GET /v1/nodes/{id}` 返回节点和边 ETag；
 - `If-Match`、`expectedGeneration`、`expectedNodes` 和 `expectedEdges` 提供 OCC；
-- 删除节点和批量删除在提交成功后更新实际入边、出边及关联端点版本；不带标签的 `unlink` 更新该节点对的全部实际边版本。已持久化边按相同规则处理，无关边保留各自 ETag。失败事务保留提交前版本。
+- 删除节点或边后移除对应版本条目，并更新仍存在的关联节点版本。对已删除实体使用旧 ETag 会返回冲突。TQL 写入统一推进细粒度版本代际并释放旧版本表。
 - Core 版本不匹配返回 `409 TDB_WRITE_CONFLICT`，HTTP 前置头条件拒绝使用 `TDB_HTTP_PRECONDITION_FAILED` 并保留 `legacyCode=WRITE_CONFLICT`。
 - `Idempotency-Key` 同键同请求重放首次结果，同键不同请求返回 `409 TDB_IDEMPOTENCY_CONFLICT`，旧类别为 IDEMPOTENCY_KEY_REUSED。
 - 幂等缓存和 Server generation 是进程内状态，重启后 epoch 改变。

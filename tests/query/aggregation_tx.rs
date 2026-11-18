@@ -11,6 +11,75 @@
 
 use triviumdb::database::Database;
 
+#[test]
+fn SUM和AVG保留抵消后的整数及浮点尾项() {
+    use serde_json::json;
+    use triviumdb::query::tql_executor::TqlValue;
+
+    let path = tmp_db("exact_numeric_aggregates");
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let vector = [1., 0., 0., 0.];
+    for value in [
+        json!(9_007_199_254_740_993u64),
+        json!(-9_007_199_254_740_992i64),
+    ] {
+        db.insert(&vector, json!({"n":value,"group":"integer"}))
+            .unwrap();
+    }
+    let rows = db
+        .tql(r#"MATCH (n {group:"integer"}) RETURN SUM(n.n) AS total, AVG(n.n) AS mean"#)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0]["total"], TqlValue::Int(1)));
+    assert!(matches!(rows[0]["mean"], TqlValue::Float(0.5)));
+
+    db.insert(&vector, json!({"n":0.0,"group":"integer"}))
+        .unwrap();
+    let rows = db
+        .tql(r#"MATCH (n {group:"integer"}) RETURN SUM(n.n) AS total, AVG(n.n) AS mean"#)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0]["total"], TqlValue::Float(1.0)));
+    assert!(matches!(rows[0]["mean"], TqlValue::Float(value) if value == 1.0 / 3.0));
+
+    let tail = 2.0f64.powi(-500);
+    for value in [1.0e308, 1.0e308, -1.0e308, -1.0e308, tail] {
+        db.insert(&vector, json!({"n":value,"group":"float"}))
+            .unwrap();
+    }
+    let rows = db
+        .tql(r#"MATCH (n {group:"float"}) RETURN SUM(n.n) AS total, AVG(n.n) AS mean"#)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0]["total"], TqlValue::Float(value) if value == tail));
+    assert!(matches!(rows[0]["mean"], TqlValue::Float(value) if value == tail / 5.0));
+
+    db.close().unwrap();
+    cleanup(&path);
+}
+
+#[test]
+fn 空集合COLLECT保留列表且拒绝没有整行去重语义的星号聚合() {
+    use triviumdb::query::tql_executor::TqlValue;
+    let path = tmp_db("empty_collect");
+    let mut db = Database::<f32>::open(&path, DIM).unwrap();
+    let rows = db
+        .tql("MATCH (n) RETURN COUNT(*) AS total, COLLECT(n.n) AS items, AVG(n.n) AS mean")
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0]["total"], TqlValue::Int(0)));
+    assert!(matches!(&rows[0]["items"], TqlValue::List(values) if values.is_empty()));
+    assert!(matches!(rows[0]["mean"], TqlValue::Null));
+    assert_eq!(
+        db.tql("MATCH (n) RETURN DISTINCT COUNT(*)")
+            .unwrap_err()
+            .code(),
+        "TDB_QUERY_PARSE"
+    );
+    db.close().unwrap();
+    cleanup(&path);
+}
+
 const DIM: usize = 4;
 
 fn tmp_db(name: &str) -> String {

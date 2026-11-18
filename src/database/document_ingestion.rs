@@ -388,7 +388,25 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
             snapshot.schema_version = 2;
             snapshot.source = source.clone();
             snapshot.validate()?;
-            self.check_document_target(document.root.id, &document.source_id, expected_revision)?;
+            let previous = self.check_document_target(
+                document.root.id,
+                &document.source_id,
+                expected_revision,
+            )?;
+            let previous_ids = previous
+                .as_ref()
+                .map(DocumentSnapshot::node_ids)
+                .transpose()?
+                .unwrap_or_default();
+            {
+                let mt = read_or_recover(&self.memtable);
+                super::documents::validate_document_nodes(
+                    &mt,
+                    &document,
+                    &snapshot,
+                    &previous_ids,
+                )?;
+            }
             let upload_id = uuid::Uuid::new_v4().to_string();
             let descriptor = source.as_ref().map(|source| DocumentSourceDescriptor {
                 media_type: source.media_type.clone(),
@@ -396,71 +414,87 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                 artifact_hash: source.artifact_hash.clone(),
                 has_original_text: source.original_text.is_some(),
             });
-            self.begin_document_upload(DocumentUploadBegin {
-                upload_id: upload_id.clone(),
-                source_id: document.source_id,
-                source_revision: document.source_revision,
-                parser_id: document.parser_id,
-                content_hash: snapshot.content_hash,
-                root: document.root,
-                source: descriptor,
-                expected_revision: expected_revision.map(str::to_owned),
-            })?;
-            let mut sequence = 0;
-            for (original, text) in [
-                (false, document.content.as_str()),
-                (
-                    true,
-                    source
-                        .as_ref()
-                        .and_then(|source| source.original_text.as_deref())
-                        .unwrap_or(""),
-                ),
-            ] {
-                let mut first = 0;
-                while first < text.len() {
-                    let mut end = first.saturating_add(256 * 1024).min(text.len());
-                    while !text.is_char_boundary(end) {
-                        end -= 1;
+            let result = (|| {
+                self.begin_document_upload(DocumentUploadBegin {
+                    upload_id: upload_id.clone(),
+                    source_id: document.source_id,
+                    source_revision: document.source_revision,
+                    parser_id: document.parser_id,
+                    content_hash: snapshot.content_hash,
+                    root: document.root,
+                    source: descriptor,
+                    expected_revision: expected_revision.map(str::to_owned),
+                })?;
+                let mut sequence = 0;
+                for (original, text) in [
+                    (false, document.content.as_str()),
+                    (
+                        true,
+                        source
+                            .as_ref()
+                            .and_then(|source| source.original_text.as_deref())
+                            .unwrap_or(""),
+                    ),
+                ] {
+                    let mut first = 0;
+                    while first < text.len() {
+                        let mut end = first.saturating_add(256 * 1024).min(text.len());
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        let mut batch = empty_batch(sequence);
+                        if original {
+                            batch.original_text = text[first..end].into();
+                        } else {
+                            batch.content = text[first..end].into();
+                        }
+                        self.append_document_upload(&upload_id, batch)?;
+                        sequence += 1;
+                        first = end;
                     }
-                    let mut batch = empty_batch(sequence);
-                    if original {
-                        batch.original_text = text[first..end].into();
-                    } else {
-                        batch.content = text[first..end].into();
+                }
+                if let Some(source) = source {
+                    for mappings in source.mappings.chunks(1024) {
+                        let mut batch = empty_batch(sequence);
+                        batch.mappings = mappings.to_vec();
+                        self.append_document_upload(&upload_id, batch)?;
+                        sequence += 1;
                     }
-                    self.append_document_upload(&upload_id, batch)?;
-                    sequence += 1;
-                    first = end;
                 }
-            }
-            if let Some(source) = source {
-                for mappings in source.mappings.chunks(1024) {
-                    let mut batch = empty_batch(sequence);
-                    batch.mappings = mappings.to_vec();
-                    self.append_document_upload(&upload_id, batch)?;
-                    sequence += 1;
+                let mut batch = empty_batch(sequence);
+                let mut bytes = 0usize;
+                for block in document.blocks {
+                    let size = crate::storage::payload_store::serialized_json_len(&block)?;
+                    if !batch.blocks.is_empty()
+                        && (bytes.saturating_add(size) > 4 * 1024 * 1024
+                            || batch.blocks.len() >= 512)
+                    {
+                        self.append_document_upload(&upload_id, batch)?;
+                        sequence += 1;
+                        batch = empty_batch(sequence);
+                        bytes = 0;
+                    }
+                    bytes = bytes.saturating_add(size);
+                    batch.blocks.push(block);
                 }
-            }
-            let mut batch = empty_batch(sequence);
-            let mut bytes = 0usize;
-            for block in document.blocks {
-                let size = crate::storage::payload_store::serialized_json_len(&block)?;
-                if !batch.blocks.is_empty()
-                    && (bytes.saturating_add(size) > 4 * 1024 * 1024 || batch.blocks.len() >= 512)
+                if !batch.blocks.is_empty() {
+                    self.append_document_upload(&upload_id, batch)?;
+                }
+                self.publish_document_upload(&upload_id)
+            })();
+            if result.is_err() {
+                let pending = read_or_recover(&self.memtable)
+                    .document_publications
+                    .get(&upload_id)
+                    .is_ok_and(|upload| !upload.published);
+                if pending
+                    && let Err(error) =
+                        crate::request::finish_cleanup(|| self.abort_document_upload(&upload_id))
                 {
-                    self.append_document_upload(&upload_id, batch)?;
-                    sequence += 1;
-                    batch = empty_batch(sequence);
-                    bytes = 0;
+                    tracing::warn!(%upload_id, %error, "单次接入候选清理失败 (Failed to discard one-shot ingestion candidate)");
                 }
-                bytes = bytes.saturating_add(size);
-                batch.blocks.push(block);
             }
-            if !batch.blocks.is_empty() {
-                self.append_document_upload(&upload_id, batch)?;
-            }
-            self.publish_document_upload(&upload_id)
+            result
         })
     }
 
@@ -469,7 +503,7 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         id: NodeId,
         source_id: &str,
         expected: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<DocumentSnapshot>> {
         {
             let mt = read_or_recover(&self.memtable);
             if mt.contains(id)
@@ -486,12 +520,12 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                 if snapshot.source_id != source_id {
                     return Err(stored::conflict("source_id"));
                 }
+                Ok(Some(snapshot))
             }
-            Ok(None) if expected.is_none() => {}
-            Ok(None) => return Err(TriviumError::NodeNotFound(id)),
-            Err(error) => return Err(error),
+            Ok(None) if expected.is_none() => Ok(None),
+            Ok(None) => Err(TriviumError::NodeNotFound(id)),
+            Err(error) => Err(error),
         }
-        Ok(())
     }
     fn commit_document_record(&mut self, record: Record) -> Result<()> {
         let size = crate::storage::payload_store::serialized_json_len(&record)?;

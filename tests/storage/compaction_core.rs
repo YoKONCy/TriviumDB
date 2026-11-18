@@ -100,6 +100,7 @@ fn corrupt_flush_marker_size(path: &str) {
     let marker_crc_offset = match marker.len() {
         41 => 37,
         53 => 49,
+        81 => 77,
         length => panic!("未知 flush marker 长度: {length}"),
     };
     let marker_crc = crc32fast::hash(&marker[..marker_crc_offset]);

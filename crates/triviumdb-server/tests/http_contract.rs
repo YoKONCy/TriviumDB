@@ -2053,3 +2053,179 @@ async fn 读语句带mutation标志走读路径而不是500() {
     let body = json(response).await;
     assert!(body.get("rows").is_some(), "expected read rows, got {body}");
 }
+
+#[tokio::test]
+async fn 大节点ID从详情到批量读取和查询投影保持精确() {
+    let (app, _directory) = app("wide-http-id").await;
+    let id = 9_007_199_254_740_993u64;
+    let inserted = request(app.clone(), "POST", "/v1/transactions", Some(serde_json::json!({
+        "operations":[{"op":"insert","id":id.to_string(),"vector":[1,0],"payload":{"signed":-9_007_199_254_740_993_i64}}]
+    })), &[]).await;
+    assert_eq!(inserted.status(), StatusCode::OK);
+    let node = json(request(app.clone(), "GET", &format!("/v1/nodes/{id}"), None, &[]).await).await;
+    let returned = &node["node"]["id"];
+    assert_eq!(returned, "9007199254740993");
+    for input in [returned.clone(), serde_json::json!(id)] {
+        let response = request(
+            app.clone(),
+            "POST",
+            "/v1/nodes/batch-get",
+            Some(serde_json::json!({"ids":[input]})),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json(response).await["nodes"][0]["id"], returned.clone());
+    }
+    let expected = serde_json::json!({
+        "ident":{"type":"int","value":"9007199254740993"},
+        "signed":{"type":"int","value":"-9007199254740993"}
+    });
+    let query =
+        Some(serde_json::json!({"query":"MATCH (n) RETURN n.id AS ident, n.signed AS signed"}));
+    let normal = request(app.clone(), "POST", "/v1/tql", query.clone(), &[]).await;
+    assert_eq!(normal.status(), StatusCode::OK);
+    assert_eq!(json(normal).await["rows"], serde_json::json!([expected]));
+    let streamed = request(
+        app,
+        "POST",
+        "/v1/tql",
+        query,
+        &[("accept", "application/x-ndjson")],
+    )
+    .await;
+    assert_eq!(streamed.status(), StatusCode::OK);
+    let line = text(streamed).await;
+    let row: Value = serde_json::from_str(line.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(row["row"], expected);
+}
+
+#[tokio::test]
+async fn 空投影和CRLF诊断保留原始结构() {
+    let (app, _directory) = app("empty-columns-and-crlf").await;
+    let query = serde_json::json!({"query":"FIND {x:1} RETURN x AS field"});
+    let prepared = json(
+        request(
+            app.clone(),
+            "POST",
+            "/v1/prepared",
+            Some(query.clone()),
+            &[],
+        )
+        .await,
+    )
+    .await;
+    let id = prepared["preparedId"].as_str().unwrap();
+    for (route, input) in [
+        ("/v1/tql".to_owned(), query),
+        (format!("/v1/prepared/{id}/execute"), serde_json::json!({})),
+    ] {
+        let normal = request(app.clone(), "POST", &route, Some(input.clone()), &[]).await;
+        assert_eq!(normal.status(), StatusCode::OK);
+        let body = json(normal).await;
+        assert_eq!(
+            body["columns"],
+            serde_json::json!([{"name":"field","kind":"null"}])
+        );
+        assert_eq!(body["rows"], serde_json::json!([]));
+        let streamed = request(
+            app.clone(),
+            "POST",
+            &route,
+            Some(input),
+            &[("accept", "application/x-ndjson")],
+        )
+        .await;
+        assert_eq!(streamed.status(), StatusCode::OK);
+        let body = text(streamed).await;
+        let frames: Vec<Value> = body
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(
+            frames[0]["columns"],
+            serde_json::json!([{"name":"field","kind":"null"}])
+        );
+        assert_eq!(frames[1]["rowCount"], 0);
+    }
+    for route in ["/v1/tql", "/v1/prepared"] {
+        let response = request(
+            app.clone(),
+            "POST",
+            route,
+            Some(serde_json::json!({"query":"\r\n  MATCH (123) RETURN n"})),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = json(response).await;
+        assert_eq!(error["target"]["query_span"]["line"], 2);
+        assert_eq!(error["target"]["query_span"]["start_byte"], 11);
+    }
+}
+
+#[tokio::test]
+async fn 零容量不签发Prepared句柄() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("no-prepare.tdb");
+    let (app, shutdown) = triviumdb_server::build_app_with_shutdown(ServerConfig {
+        database_path: path,
+        database: Config {
+            dim: 2,
+            auto_build_quiver: false,
+            ..Default::default()
+        },
+        prepared_cache_capacity: 0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let result = request(
+        app,
+        "POST",
+        "/v1/prepared",
+        Some(serde_json::json!({"query":"MATCH (n) RETURN n"})),
+        &[],
+    )
+    .await;
+    assert_eq!(result.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let error = json(result).await;
+    assert_eq!(error["code"], "TDB_PREPARED_DISABLED");
+    assert!(!error["retryable"].as_bool().unwrap());
+    assert!(error.get("preparedId").is_none());
+    shutdown.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 写请求在WAL前断开时无业务副作用() {
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_request};
+    let (app, _directory) = app("cancel-in-core").await;
+    let gate = pause_at_request(ConcurrencyPoint::BeforeTransactionWal, "cancel-in-core");
+    let client = tokio::spawn(request(
+        app.clone(),
+        "POST",
+        "/v1/tql",
+        Some(serde_json::json!({
+            "query":r#"CREATE (n {name: "cancelled"})"#, "mutation":true
+        })),
+        &[("x-request-id", "cancel-in-core")],
+    ));
+    gate.wait_until_arrived();
+    client.abort();
+    assert!(client.await.unwrap_err().is_cancelled());
+    gate.release();
+    let response = request(
+        app,
+        "POST",
+        "/v1/tql",
+        Some(serde_json::json!({
+            "query":"MATCH (n) RETURN count(*) AS total"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await["rows"][0]["total"]["value"], 0);
+}

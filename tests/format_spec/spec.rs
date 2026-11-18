@@ -215,14 +215,14 @@ pub const FLUSH_MARKER: &[FieldSpec] = &[
         encoding: FieldEncoding::U32Le,
     },
     FieldSpec {
-        name: "payload_crc",
+        name: "payload_sha256",
         offset: 45,
-        width: 4,
-        encoding: FieldEncoding::U32Le,
+        width: 32,
+        encoding: FieldEncoding::Bytes,
     },
     FieldSpec {
         name: "marker_crc",
-        offset: 49,
+        offset: 77,
         width: 4,
         encoding: FieldEncoding::U32Le,
     },
@@ -355,7 +355,7 @@ pub const GRAPH_HEADER: &[FieldSpec] = &[
 fn 所有固定规格字段不重叠且完全落在声明头部内() {
     for (name, fields, size) in [
         ("tdb", TDB_HEADER, 110),
-        ("flush", FLUSH_MARKER, 53),
+        ("flush", FLUSH_MARKER, 81),
         ("wal", WAL_HEADER, 6),
         ("property", PROPERTY_HEADER, 48),
         ("graph", GRAPH_HEADER, 36),
