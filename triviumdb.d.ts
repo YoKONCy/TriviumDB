@@ -530,7 +530,7 @@ export interface SnapshotManifest {
   dim: number;
   node_count: number;
   complete: boolean;
-  files: Array<{ suffix: string; size: number; crc32: number }>;
+  files: Array<{ suffix: string; size: number; crc32: number; sha256?: string }>;
 }
 
 export function verifySnapshot(directory: string, runtime?: ResourceRuntime | null): SnapshotManifest;
@@ -620,7 +620,7 @@ export class TriviumDB {
     dtype: string;
     dim: number;
     nodeCount: number;
-    files: Array<{ suffix: string; size: number; crc32: number }>;
+    files: Array<{ suffix: string; size: number; crc32: number; sha256?: string }>;
     complete: boolean;
   };
 
@@ -877,7 +877,7 @@ export class TriviumDB {
    * @param topK        结果数
    * @param expandDepth 扩散深度
    * @param minScore    最小分数
-   * @param hybridAlpha 混合权重 (0.0~1.0)，越大向量占比越高。默认 0.7
+   * @param hybridAlpha 向量排名权重 [0, 1]，文本排名权重为 1 - hybridAlpha。默认 0.7
    */
   searchHybrid(queryVector: Vector, queryText: string, topK?: number | null, expandDepth?: number | null, minScore?: number | null, hybridAlpha?: number | null, payloadFilter?: Record<string, unknown> | null, exact?: boolean | null): JsSearchHit[];
 

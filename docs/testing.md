@@ -1,6 +1,6 @@
 # TriviumDB 测试实践
 
-> 本文说明 TriviumDB `0.9.2-beta.1` 的测试组织、契约设计、故障注入与验收证据。版本记录见[变更说明](changes/0.9.2-beta.1.md)，后续进展见[未发布变更](changes/unreleased.md)。
+> 本文说明 TriviumDB `0.9.2` 的测试组织、契约设计、故障注入与验收证据。版本记录见[变更说明](changes/0.9.2.md)，后续进展见[未发布变更](changes/unreleased.md)。
 
 ---
 
@@ -343,7 +343,7 @@ tests/
 ├── format_spec/                 # L4: 磁盘格式规格测试（独立字段规格 + 结构化 mutation）
 │   ├── spec.rs                  #   .tdb/.flush_ok/WAL/.pld/.pidx/.gidx 字段规格与不重叠校验
 │   ├── mutation.rs              #   字段边界/截断/位翻转/追加/CRC 修复变异
-│   ├── snapshot_spec.rs         #   .flush_ok v1/v2/v3、.tdb header、.vec/.pld 边界矩阵
+│   ├── snapshot_spec.rs         #   .flush_ok 摘要与字段边界、.tdb header、.vec/.pld 边界矩阵
 │   ├── wal_spec.rs              #   WAL header/帧/事务边界结构化损坏矩阵
 │   ├── sidecar_spec.rs          #   .pidx/.gidx header、CRC 修复后语义校验
 │   ├── cross_generation.rs      #   跨文件混代组合拒绝 + ReadOnly 零写 oracle

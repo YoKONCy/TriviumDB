@@ -348,6 +348,9 @@ pub(crate) fn variable_length_paths_view<T: VectorType>(
     label_filter: Option<&str>,
     limit: usize,
 ) -> Vec<(NodeId, Path)> {
+    if limit == 0 || !mt.contains(src) {
+        return Vec::new();
+    }
     let mut results = Vec::new();
     let mut visited = HashSet::new();
     visited.insert(src);
@@ -800,6 +803,9 @@ pub(crate) fn k_hop_neighbors_view<T: VectorType>(
     k: usize,
     label_filter: Option<&str>,
 ) -> HashMap<NodeId, usize> {
+    if !mt.contains(src) {
+        return HashMap::new();
+    }
     let mut distances: HashMap<NodeId, usize> = HashMap::new();
     distances.insert(src, 0);
 

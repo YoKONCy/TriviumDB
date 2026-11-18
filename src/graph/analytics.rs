@@ -517,7 +517,27 @@ pub struct WeightedPath {
     pub cost: f64,
 }
 
-type WeightedSearchState = (BTreeMap<NodeId, f64>, BTreeMap<NodeId, Vec<NodeId>>);
+type WeightedSearchState = (BTreeMap<NodeId, f64>, BTreeMap<NodeId, NodeId>);
+
+fn weighted_path_to(parents: &BTreeMap<NodeId, NodeId>, mut node: NodeId) -> Vec<NodeId> {
+    let mut path = vec![node];
+    while let Some(&parent) = parents.get(&node) {
+        path.push(parent);
+        node = parent;
+    }
+    path.reverse();
+    path
+}
+
+fn charge_edge(work: &mut usize, max_work: usize) -> Result<()> {
+    if *work >= max_work {
+        return Err(TriviumError::QueryExecution(
+            "加权路径超过工作预算 (Weighted path exceeds work budget)".into(),
+        ));
+    }
+    *work += 1;
+    Ok(())
+}
 
 fn shortest_weighted_path(
     graph: &GraphWorkspace,
@@ -532,12 +552,11 @@ fn shortest_weighted_path(
     control.check()?;
     let mut distances =
         BTreeMap::from_iter(graph.weighted.keys().copied().map(|id| (id, f64::INFINITY)));
-    let mut paths = BTreeMap::<NodeId, Vec<NodeId>>::new();
+    let mut parents = BTreeMap::<NodeId, NodeId>::new();
     if banned_nodes.contains(&source) || !distances.contains_key(&source) {
-        return Ok((distances, paths));
+        return Ok((distances, parents));
     }
     distances.insert(source, 0.0);
-    paths.insert(source, vec![source]);
     let mut settled = BTreeSet::new();
     loop {
         crate::graph::budget::check_control(&control)?;
@@ -547,7 +566,10 @@ fn shortest_weighted_path(
             .min_by(|left, right| {
                 left.1
                     .total_cmp(right.1)
-                    .then_with(|| paths.get(left.0).cmp(&paths.get(right.0)))
+                    .then_with(|| {
+                        weighted_path_to(&parents, *left.0)
+                            .cmp(&weighted_path_to(&parents, *right.0))
+                    })
                     .then_with(|| left.0.cmp(right.0))
             })
             .map(|(&id, &distance)| (id, distance));
@@ -558,19 +580,9 @@ fn shortest_weighted_path(
         if target == Some(node) {
             break;
         }
-        let Some(prefix) = paths.get(&node).cloned() else {
-            continue;
-        };
         for &(neighbor, weight) in graph.weighted.get(&node).into_iter().flatten() {
             crate::graph::budget::check_control(&control)?;
-            *work = work
-                .checked_add(1)
-                .ok_or_else(|| TriviumError::QueryExecution("加权路径工作预算溢出".into()))?;
-            if *work > max_work {
-                return Err(TriviumError::QueryExecution(
-                    "加权路径超过工作预算 (Weighted path exceeds work budget)".into(),
-                ));
-            }
+            charge_edge(work, max_work)?;
             if banned_nodes.contains(&neighbor)
                 || banned_edges.contains(&(node, neighbor))
                 || settled.contains(&neighbor)
@@ -578,24 +590,24 @@ fn shortest_weighted_path(
                 continue;
             }
             let candidate_distance = distance + weight;
-            let mut candidate_path = prefix.clone();
-            candidate_path.push(neighbor);
             let current_distance = distances.get(&neighbor).copied().unwrap_or(f64::INFINITY);
             let replace = candidate_distance < current_distance
-                || candidate_distance == current_distance
-                    && paths
-                        .get(&neighbor)
-                        .is_none_or(|current| candidate_path < *current);
+                || candidate_distance == current_distance && candidate_distance.is_finite() && {
+                    let mut candidate_path = weighted_path_to(&parents, node);
+                    candidate_path.push(neighbor);
+                    candidate_path < weighted_path_to(&parents, neighbor)
+                };
             if replace {
                 distances.insert(neighbor, candidate_distance);
-                paths.insert(neighbor, candidate_path);
+                // 父节点已确定，前缀在后续松弛中保持稳定。
+                parents.insert(neighbor, node);
             }
         }
     }
-    Ok((distances, paths))
+    Ok((distances, parents))
 }
 
-fn validate_weighted_graph(graph: &GraphWorkspace) -> Result<()> {
+pub(crate) fn validate_weighted_graph(graph: &GraphWorkspace) -> Result<()> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
     if graph
@@ -617,23 +629,34 @@ pub fn weighted_dijkstra(
     target: NodeId,
     max_work: usize,
 ) -> Result<Option<WeightedPath>> {
-    let control = crate::request::control().unwrap_or_default();
-    control.check()?;
     validate_weighted_graph(graph)?;
-    let mut work = 0usize;
-    let (distances, paths) = shortest_weighted_path(
+    weighted_dijkstra_with_work(graph, source, target, &mut 0, max_work)
+}
+
+pub(crate) fn weighted_dijkstra_with_work(
+    graph: &GraphWorkspace,
+    source: NodeId,
+    target: NodeId,
+    work: &mut usize,
+    max_work: usize,
+) -> Result<Option<WeightedPath>> {
+    let (distances, parents) = shortest_weighted_path(
         graph,
         source,
         Some(target),
         &BTreeSet::new(),
         &BTreeSet::new(),
-        &mut work,
+        work,
         max_work,
     )?;
-    Ok(paths.get(&target).cloned().map(|nodes| WeightedPath {
-        nodes,
-        cost: distances.get(&target).copied().unwrap_or(f64::INFINITY),
-    }))
+    Ok(distances
+        .get(&target)
+        .copied()
+        .filter(|cost| cost.is_finite())
+        .map(|cost| WeightedPath {
+            nodes: weighted_path_to(&parents, target),
+            cost,
+        }))
 }
 
 pub fn harmonic_centrality(
@@ -676,31 +699,30 @@ pub fn yen_k_shortest_paths(
     max_work: usize,
     max_candidates: usize,
 ) -> Result<Vec<WeightedPath>> {
+    validate_weighted_graph(graph)?;
+    yen_k_shortest_paths_with_work(graph, source, target, k, &mut 0, max_work, max_candidates)
+}
+
+pub(crate) fn yen_k_shortest_paths_with_work(
+    graph: &GraphWorkspace,
+    source: NodeId,
+    target: NodeId,
+    k: usize,
+    work: &mut usize,
+    max_work: usize,
+    max_candidates: usize,
+) -> Result<Vec<WeightedPath>> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
-    validate_weighted_graph(graph)?;
     if k == 0 || max_candidates == 0 {
         return Err(TriviumError::InvalidInput(
             "Yen 的 K 和候选上限必须大于 0 (Yen K and candidate limit must be positive)".into(),
         ));
     }
-    let mut work = 0usize;
-    let (distances, paths) = shortest_weighted_path(
-        graph,
-        source,
-        Some(target),
-        &BTreeSet::new(),
-        &BTreeSet::new(),
-        &mut work,
-        max_work,
-    )?;
-    let Some(first_nodes) = paths.get(&target).cloned() else {
+    let Some(first) = weighted_dijkstra_with_work(graph, source, target, work, max_work)? else {
         return Ok(Vec::new());
     };
-    let mut accepted = vec![WeightedPath {
-        nodes: first_nodes,
-        cost: distances.get(&target).copied().unwrap_or(f64::INFINITY),
-    }];
+    let mut accepted = vec![first];
     let mut candidates = BTreeMap::<Vec<NodeId>, f64>::new();
     while accepted.len() < k {
         crate::graph::budget::check_control(&control)?;
@@ -726,38 +748,38 @@ pub fn yen_k_shortest_paths(
                         .map(|next| (spur, next))
                 })
                 .collect::<BTreeSet<_>>();
-            let (_, spur_paths) = shortest_weighted_path(
+            let (spur_distances, spur_parents) = shortest_weighted_path(
                 graph,
                 spur,
                 Some(target),
                 &banned_nodes,
                 &banned_edges,
-                &mut work,
+                work,
                 max_work,
             )?;
-            let Some(spur_path) = spur_paths.get(&target) else {
+            let Some(spur_cost) = spur_distances
+                .get(&target)
+                .copied()
+                .filter(|cost| cost.is_finite())
+            else {
                 continue;
             };
             let mut nodes = root[..root.len().saturating_sub(1)].to_vec();
-            nodes.extend(spur_path.iter().copied());
+            nodes.extend(weighted_path_to(&spur_parents, target));
+            // 只重新查找现有路径的根前缀，后缀直接使用搜索得到的代价。
             let mut cost = 0.0;
-            let mut valid = true;
-            for edge in nodes.windows(2) {
+            for edge in root.windows(2) {
                 crate::graph::budget::check_control(&control)?;
-                let Some(weight) = graph
-                    .weighted
-                    .get(&edge[0])
-                    .into_iter()
-                    .flatten()
-                    .find(|(target, _)| *target == edge[1])
-                    .map(|(_, weight)| *weight)
-                else {
-                    valid = false;
-                    break;
-                };
-                cost += weight;
+                for &(neighbor, weight) in graph.weighted.get(&edge[0]).into_iter().flatten() {
+                    charge_edge(work, max_work)?;
+                    if neighbor == edge[1] {
+                        cost += weight;
+                        break;
+                    }
+                }
             }
-            if valid && !accepted.iter().any(|path| path.nodes == nodes) {
+            cost += spur_cost;
+            if !accepted.iter().any(|path| path.nodes == nodes) {
                 candidates.entry(nodes).or_insert(cost);
                 if candidates.len() > max_candidates {
                     return Err(TriviumError::QueryExecution(

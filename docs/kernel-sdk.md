@@ -1,6 +1,6 @@
 # 内核 SDK 与存储内核分层
 
-> 本文定义 `0.9.2-beta.1` 嵌入式调用的职责、共享所有权、请求失败与关闭边界。实现入口见 [`src/sdk/`](../src/sdk/mod.rs)，变更记录见[版本说明](changes/0.9.2-beta.1.md)。
+> 本文定义 `0.9.2` 嵌入式调用的职责、共享所有权、请求失败与关闭边界。实现入口见 [`src/sdk/`](../src/sdk/mod.rs)，变更记录见[版本说明](changes/0.9.2.md)。
 
 ---
 
@@ -76,7 +76,7 @@ SDK 冻结覆盖调用签名、公开导入、参数与默认值、数据表示�
 
 当前格式的 WAL 回放、事务恢复、文件组恢复及正常派生索引重建由内核维护。迁移范围覆盖 TDB 管理的数据与版本化制品，应用业务配置和业务规则由宿主管理。历史解码与来源恢复后端在独立迁移 workspace 中维护独立源码，[外部入口](migration.md)在副本恢复并统一文档结构，再通过逻辑事实协议调用当前内核建立目标。`database::inspection::transfer` 维护工具协议及目标导入，`database::inspection` 核验完整事实。生产内核的模块装配维护当前格式路径。
 
-本版正式命名采用 `QuIVer::batch_build`、`quiver::sm::SmIndex` 与 `quiver::runtime::QuiverRuntime`。TSNG 对照入口、旧构图变体和消融特性移入独立研究快照，Rust 根导出与类型化 Reader 仅承接当前生产能力。单元测试内部保留独立标量参考，硬件派发和当前格式故障验证继续维护。调用变化见[版本说明](changes/0.9.2-beta.1.md)，正式使用方式见 [QuIVer](quiver.md)。
+本版正式命名采用 `QuIVer::batch_build`、`quiver::sm::SmIndex` 与 `quiver::runtime::QuiverRuntime`。TSNG 对照入口、旧构图变体和消融特性移入独立研究快照，Rust 根导出与类型化 Reader 仅承接当前生产能力。单元测试内部保留独立标量参考，硬件派发和当前格式故障验证继续维护。调用变化见[版本说明](changes/0.9.2.md)，正式使用方式见 [QuIVer](quiver.md)。
 
 > **交付提醒**：SDK 冻结以正式接口清单、跨语言制品验收及外部迁移工具交付为完成条件。`1.0.0` 再验收内核正式接口和持久化契约。磁盘布局保留显式格式身份，已有数据库在升级前保留完整备份。
 
@@ -103,7 +103,7 @@ Python 与 Node 的原生绑定分别位于 [`src/bindings/python/`](../src/bind
 
 Python 通过 PyO3 的 `multiple-pymethods` 特性，将同一类的公开方法按职责注册。每个 `#[pyclass]` 在所属模块定义一次，方法实现分布在对应职责文件。Node 的 `#[napi]` 方法实现采用相同的职责划分。Python 的 `.pyi` 从已安装 wheel 生成，npm 的公开声明由 `triviumdb.d.ts` 提供。
 
-Node 的 CommonJS 入口 `index.js` 在包装原生对象后显式导出 `TriviumDB`、`PreparedTql`、`ResourceRuntime`、`ConsoleSession`、`RequestContext`、`verifySnapshot` 和 `restoreSnapshot`，供 CommonJS 与 ESM 使用同一对象及构造器。`JsPreparedTql` 是 `PreparedTql` 的兼容别名。原生 Prepared 类型按公开名称注册，Rust 兼容路径继续导出 `JsPreparedTql`。变更记录见[版本说明](changes/0.9.2-beta.1.md)。
+Node 的 CommonJS 入口 `index.js` 在包装原生对象后显式导出 `TriviumDB`、`PreparedTql`、`ResourceRuntime`、`ConsoleSession`、`RequestContext`、`verifySnapshot` 和 `restoreSnapshot`，供 CommonJS 与 ESM 使用同一对象及构造器。`JsPreparedTql` 是 `PreparedTql` 的兼容别名。原生 Prepared 类型按公开名称注册，Rust 兼容路径继续导出 `JsPreparedTql`。变更记录见[版本说明](changes/0.9.2.md)。
 
 Node 原生注册在 napi-rs 2 装配类之前统一登记 `TriviumDB` 名称，将构造器及各职责实现块的属性装配到同一公开类。注册回调使用 Node 提供的当前环境，并随每个模块实例初始化执行。
 

@@ -156,6 +156,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     query_vector: Option<&[T]>,
     config: &SearchConfig,
     ctx: &mut HookContext,
+    alpha: Option<f64>,
 ) -> Result<PipelineOutput> {
     crate::request::check_current()?;
     #[cfg(feature = "test-hooks")]
@@ -169,7 +170,11 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             crate::vector::validate_query_vector(query, mt.dim())?;
         }
         // 精确请求直接扫描存储向量，自动建图仅服务当前需要 ANN 的向量请求。
-        if query_vector.is_some() && !config.force_brute_force && mt.auto_quiver_build_needed() {
+        if alpha != Some(0.0)
+            && query_vector.is_some()
+            && !config.force_brute_force
+            && mt.auto_quiver_build_needed()
+        {
             let projected = mt
                 .estimated_memory_bytes()
                 .saturating_add(mt.quiver_build_peak_bytes(&quiver_config));
@@ -270,6 +275,7 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         None
     };
 
+    let query_vector = query_vector.filter(|_| alpha != Some(0.0));
     let config = &safe_cfg;
     if crate::vector::is_binary_vector::<T>()
         && config.enable_advanced_pipeline
@@ -324,9 +330,14 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         } else {
             0
         };
-        runtime
-            .pool(runtime.parallelism())?
-            .install(|| recall_vector_ranked(&mt, config, query_vector, &mut dense_ranking))?;
+        let request = crate::request::current();
+        runtime.pool(runtime.parallelism())?.install(|| {
+            let _scope = request
+                .as_ref()
+                .map(crate::request::RequestContext::enter)
+                .transpose()?;
+            recall_vector_ranked(&mt, config, query_vector, &mut dense_ranking)
+        })?;
         ctx.record_timing("vector_recall", vector_recall_started.elapsed());
         ctx.record_observation("vector_route_quiver", route);
         ctx.record_observation("vector_recall_candidates", dense_ranking.len() as u64);
@@ -335,12 +346,17 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             effective_recall_k(config).max(1).saturating_mul(8) as u64,
         );
         // FISTA 基于稠密召回候选，融合后再追加影子排名。
-        fuse_rankings_rrf(
-            &mut seed_map,
-            &dense_ranking,
-            &sparse_ranking,
-            config.text_boost,
-        );
+        if let Some(alpha) = alpha.filter(|alpha| *alpha < 1.0 && !sparse_ranking.is_empty()) {
+            add_rrf(&mut seed_map, &dense_ranking, alpha as f32);
+            add_rrf(&mut seed_map, &sparse_ranking, (1.0 - alpha) as f32);
+        } else {
+            fuse_rankings_rrf(
+                &mut seed_map,
+                &dense_ranking,
+                &sparse_ranking,
+                config.text_boost,
+            );
+        }
         let _residual_workspace =
             if config.enable_advanced_pipeline && config.enable_sparse_residual {
                 let n = seed_map.len();
@@ -359,12 +375,18 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
             } else {
                 None
             };
-        runtime
-            .pool(runtime.parallelism())?
-            .install(|| recall_residual(&mt, config, query_vector, &mut seed_map))?;
+        runtime.pool(runtime.parallelism())?.install(|| {
+            let _scope = request
+                .as_ref()
+                .map(crate::request::RequestContext::enter)
+                .transpose()?;
+            recall_residual(&mt, config, query_vector, &mut seed_map)
+        })?;
     }
 
     // 内置召回已在分支内完成 RRF；自定义召回保留调用方给出的原始分数。
+
+    crate::request::check_current()?;
 
     // 将 seed_map 聚合为 anchor_hits
     aggregate_seeds(&mt, config, &seed_map, &mut anchor_hits);
@@ -413,8 +435,8 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
     //  L6 + L7: SA-PPR 有限深度图谱扩散 + 不应期/侧向抑制
     // ═══════════════════════════════════════════════════════
     let t_graph = std::time::Instant::now();
-    let mut expanded = crate::graph::traversal::expand_graph_with_labels(
-        &mt,
+    let mut expanded = crate::graph::traversal::expand_graph_with_labels_checked(
+        &*mt,
         seeds,
         config.expand_depth,
         config.teleport_alpha,
@@ -426,7 +448,8 @@ pub(crate) fn execute_pipeline_with_limit<T: VectorType>(
         config.max_edges_per_node,
         config.min_edge_weight,
         config.edge_direction,
-    );
+        crate::request::check_current,
+    )?;
     ctx.record_timing("graph_expand", t_graph.elapsed());
 
     // L8 (时间衰减与多维重排) 已被设计哲学剥离：交由上层 Hook 或 Agent 侧处理。
@@ -587,24 +610,22 @@ pub(super) fn fuse_rankings_rrf(
     sparse: &[(NodeId, f32)],
     sparse_weight: f32,
 ) {
-    const RRF_K: f32 = 60.0;
     output.clear();
     if sparse.is_empty() {
         output.extend(dense.iter().copied());
         return;
     }
-    if dense.is_empty() {
-        let weight = sparse_weight.max(0.0);
-        for (rank, &(id, _)) in sparse.iter().enumerate() {
-            output.insert(id, weight * (RRF_K / (RRF_K + rank as f32 + 1.0)));
-        }
-        return;
-    }
-    for (rank, &(id, _)) in dense.iter().enumerate() {
-        *output.entry(id).or_insert(0.0) += RRF_K / (RRF_K + rank as f32 + 1.0);
-    }
-    let weight = sparse_weight.max(0.0);
-    for (rank, &(id, _)) in sparse.iter().enumerate() {
+    add_rrf(output, dense, 1.0);
+    add_rrf(output, sparse, sparse_weight.max(0.0));
+}
+
+fn add_rrf(
+    output: &mut std::collections::HashMap<NodeId, f32>,
+    ranking: &[(NodeId, f32)],
+    weight: f32,
+) {
+    const RRF_K: f32 = 60.0;
+    for (rank, &(id, _)) in ranking.iter().enumerate() {
         *output.entry(id).or_insert(0.0) += weight * (RRF_K / (RRF_K + rank as f32 + 1.0));
     }
 }
@@ -641,13 +662,13 @@ fn recall_vector_ranked<T: VectorType>(
                 requested = config.top_k,
                 "QuIVer 过滤结果不足，回退精确扫描 (Insufficient filtered QuIVer results, falling back to exact scan)"
             );
-            brute_force_pipeline(mt, config, query_vector, dim)
+            brute_force_pipeline(mt, config, query_vector, dim)?
         } else {
             approximate_hits
         }
     } else {
         // 分段精确扫描保持全局 slot 顺序，不创建全库连续副本。
-        brute_force_pipeline(mt, config, query_vector, dim)
+        brute_force_pipeline(mt, config, query_vector, dim)?
     };
 
     ranking.extend(vector_hits.into_iter().map(|hit| (hit.id, hit.score)));
@@ -660,7 +681,7 @@ fn brute_force_pipeline<T: VectorType + Sync>(
     config: &SearchConfig,
     query_vector: &[T],
     dim: usize,
-) -> Vec<SearchHit> {
+) -> Result<Vec<SearchHit>> {
     let bloom_mask = config
         .payload_filter
         .as_ref()
@@ -668,26 +689,17 @@ fn brute_force_pipeline<T: VectorType + Sync>(
         .unwrap_or(0);
     let (base, delta) = mt.vec_pool().vector_segments();
     let id_filter_map = |idx| eligible_node_id(mt, config.payload_filter.as_ref(), bloom_mask, idx);
-    if delta.is_empty() {
-        brute_force::search_filter_map(
-            query_vector,
-            base,
-            dim,
-            effective_recall_k(config),
-            config.min_score,
-            id_filter_map,
-        )
-    } else {
-        brute_force::search_filter_map_segments(
-            query_vector,
-            base,
-            delta,
-            dim,
-            effective_recall_k(config),
-            config.min_score,
-            id_filter_map,
-        )
-    }
+    let control = crate::request::control();
+    brute_force::search_segments_controlled(
+        query_vector,
+        base,
+        delta,
+        dim,
+        effective_recall_k(config),
+        config.min_score,
+        id_filter_map,
+        control.as_ref(),
+    )
 }
 
 /// QuIVer 管线：BQ-native Vamana 图搜索（替代三级火箭）
@@ -963,6 +975,7 @@ fn execute_pipeline<T: VectorType>(
         query_vector,
         config,
         ctx,
+        None,
     )
     .map(|output| output.combined_hits)
 }

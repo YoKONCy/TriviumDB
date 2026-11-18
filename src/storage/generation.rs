@@ -191,10 +191,11 @@ impl GenerationStore {
     pub fn resolve_current(&self) -> Result<CurrentGeneration> {
         self.ensure_path()?;
         let path = self.root.join("current.json");
-        let bytes =
-            std::fs::read(&path).map_err(|error| TriviumError::ImmutableArtifactInvalid {
+        let bytes = super::snapshot::read_bounded_metadata(&path).map_err(|error| {
+            TriviumError::ImmutableArtifactInvalid {
                 reason: format!("无法读取 {}: {error}", path.display()),
-            })?;
+            }
+        })?;
         let current: CurrentGeneration = serde_json::from_slice(&bytes).map_err(|error| {
             TriviumError::ImmutableArtifactInvalid {
                 reason: format!("current.json 无效: {error}"),

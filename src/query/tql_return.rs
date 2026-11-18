@@ -480,7 +480,7 @@ fn order_value<T: VectorType>(
             if let Some(value) = row.values.get(var) {
                 runtime_property(&tql_value_runtime(value), field, scope.mt)
             } else if let ReturnClause::Expressions(items) = &scope.query.returns
-                && let Some(item) = items.iter().find(|item| item.alias.as_ref() == Some(var))
+                && let Some(item) = items.iter().find(|item| column_name(item) == *var)
                 && let Some(index) = row.source
             {
                 runtime_property(
@@ -498,14 +498,17 @@ fn order_value<T: VectorType>(
             if let Some(value) = row.values.get(alias) {
                 tql_value_runtime(value)
             } else if let ReturnClause::Expressions(items) = &scope.query.returns
-                && let Some(item) = items.iter().find(|item| item.alias.as_ref() == Some(alias))
+                && let Some(item) = items.iter().find(|item| column_name(item) == *alias)
                 && let Some(index) = row.source
             {
                 kind_runtime(&item.kind, &inputs[index], scope)?
             } else {
-                row.source.map_or(RuntimeValue::Null, |index| {
-                    expression(expr, &inputs[index], scope)
-                })
+                match row.source {
+                    Some(index) => {
+                        kind_runtime(&ReturnExprKind::Var(alias.clone()), &inputs[index], scope)?
+                    }
+                    None => RuntimeValue::Null,
+                }
             }
         }
         TqlExpr::Binary { left, op, right } => eval_binary(

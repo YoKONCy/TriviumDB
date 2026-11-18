@@ -71,6 +71,7 @@ impl Mutation {
                 let checksum_offset = match output.len() {
                     41 => Some(37),
                     53 => Some(49),
+                    81 => Some(77),
                     _ => None,
                 };
                 if let Some(checksum_offset) = checksum_offset {

@@ -778,6 +778,7 @@ impl<T: VectorType> SearchHandle<T> {
                 Some(query),
                 search_config,
                 &mut ctx,
+                None,
             )
             .map(|output| output.combined_hits)
         };
@@ -2745,6 +2746,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             query_vector,
             config,
             &mut ctx,
+            None,
         )?;
         Ok((results.combined_hits, ctx))
     }
@@ -2759,9 +2761,38 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         query_vector: Option<&[T]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchHit>> {
+        self.search_hybrid_impl(query_text, query_vector, config, None)
+    }
+
+    /// 以 alpha 和 1-alpha 融合向量与文本排名。端点只使用对应的召回来源。
+    pub fn search_hybrid_weighted(
+        &self,
+        query_text: &str,
+        query_vector: &[T],
+        config: &SearchConfig,
+        alpha: f64,
+    ) -> Result<Vec<SearchHit>> {
+        if !(0.0..=1.0).contains(&alpha) {
+            return Err(TriviumError::InvalidInput(
+                "hybrid_alpha 必须在 [0, 1] 内 (hybrid_alpha must be in [0, 1])".into(),
+            )
+            .at_field("hybrid_alpha"));
+        }
+        let mut config = config.clone();
+        config.enable_text_hybrid_search = alpha < 1.0;
+        self.search_hybrid_impl(Some(query_text), Some(query_vector), &config, Some(alpha))
+    }
+
+    fn search_hybrid_impl(
+        &self,
+        query_text: Option<&str>,
+        query_vector: Option<&[T]>,
+        config: &SearchConfig,
+        alpha: Option<f64>,
+    ) -> Result<Vec<SearchHit>> {
         self.require_reader_determinism(config)?;
         let _operation = self.enter_operation()?;
-        if query_vector.is_some() && !config.force_brute_force {
+        if alpha != Some(0.0) && query_vector.is_some() && !config.force_brute_force {
             self.prepare_quiver_rerank(false)?;
         }
         #[cfg(feature = "test-hooks")]
@@ -2785,6 +2816,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             query_vector,
             config,
             &mut ctx,
+            alpha,
         )
         .map(|output| output.combined_hits)
     }
@@ -2813,6 +2845,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             query_vector,
             config,
             &mut ctx,
+            None,
         )
         .map(|output| crate::node::GroupedSearchResult {
             semantic_hits: output.semantic_hits,

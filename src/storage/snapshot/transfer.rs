@@ -64,16 +64,14 @@ fn verify(directory: &Path) -> Result<GenerationManifest> {
     let database = directory.join(DATABASE_FILE);
     let manifest_path = manifest_path(&database.to_string_lossy());
     regular(&manifest_path)?;
-    let declared: GenerationManifest =
-        serde_json::from_slice(&read_manifest_bytes(&manifest_path)?)
-            .map_err(|error| invalid(format!("快照 manifest 无效：{error}")))?;
+    let declared = read_manifest(&database.to_string_lossy())?;
     if declared.generation_id.trim().is_empty() || declared.generation_id.len() > 256 {
         return Err(invalid(
             "快照 generation_id 无效 (Invalid snapshot generation_id)",
         ));
     }
     // 先校验受支持的后缀，再按声明访问文件，避免由 manifest 指定任意路径。
-    let manifest = validate_manifest(&database.to_string_lossy(), &declared.dtype, declared.dim)?;
+    let manifest = validate_manifest_files(&database.to_string_lossy(), declared)?;
     let mut expected = std::collections::BTreeSet::from([format!("{DATABASE_FILE}.manifest.json")]);
     for file in &manifest.files {
         let name = format!("{DATABASE_FILE}{}", file.suffix);
@@ -106,13 +104,17 @@ pub fn restore_snapshot_with_runtime(
         let _task = runtime.enter_maintenance_task()?;
         write.phase = WritePhase::Validation;
         let _workspace = runtime.reserve_maintenance_workspace(TRANSFER_BYTES)?;
+        let manifest = verify(Path::new(source))?;
         let source = std::fs::canonicalize(source)?;
-        let manifest = verify(&source)?;
         let stage = Stage::new(destination, Some(&source))?;
         for file in &manifest.files {
             let name = format!("{DATABASE_FILE}{}", file.suffix);
-            let copied = copy_file(&source.join(&name), &stage.directory.join(&name))?;
-            if copied != (file.size, file.crc32) {
+            let copied = copy_file(
+                &source.join(&name),
+                &stage.directory.join(&name),
+                file.suffix.clone(),
+            )?;
+            if !file.matches_digest(&copied) {
                 return Err(invalid("恢复复制期间源快照发生变化"));
             }
         }
@@ -139,15 +141,11 @@ pub(crate) fn copy_database_snapshot(
     let files = generation_suffixes(source)
         .into_iter()
         .map(|suffix| {
-            let (size, crc32) = copy_file(
+            copy_file(
                 Path::new(&format!("{source}{suffix}")),
                 &stage.directory.join(format!("{DATABASE_FILE}{suffix}")),
-            )?;
-            Ok(GenerationFile {
                 suffix,
-                size,
-                crc32,
-            })
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     let manifest = GenerationManifest {
@@ -165,7 +163,7 @@ pub(crate) fn copy_database_snapshot(
     Ok(manifest)
 }
 
-fn copy_file(source: &Path, target: &Path) -> Result<(u64, u32)> {
+fn copy_file(source: &Path, target: &Path, suffix: String) -> Result<GenerationFile> {
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::SnapshotCopy)?;
     regular(source)?;
@@ -177,7 +175,7 @@ fn copy_file(source: &Path, target: &Path) -> Result<(u64, u32)> {
         .create_new(true)
         .open(target)?;
     let mut buffer = [0u8; 64 * 1024];
-    let mut hasher = crc32fast::Hasher::new();
+    let mut digest = FileDigest::default();
     let mut size = 0u64;
     loop {
         let read = input.read(&mut buffer)?;
@@ -188,7 +186,7 @@ fn copy_file(source: &Path, target: &Path) -> Result<(u64, u32)> {
             .checked_add(read as u64)
             .ok_or_else(|| invalid("快照文件长度溢出"))?;
         output.write_all(&buffer[..read])?;
-        hasher.update(&buffer[..read]);
+        digest.update(&buffer[..read]);
     }
     let mut extra = [0u8; 1];
     if size != length || input.into_inner().read(&mut extra)? != 0 {
@@ -197,7 +195,7 @@ fn copy_file(source: &Path, target: &Path) -> Result<(u64, u32)> {
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::SnapshotSync)?;
     output.sync_all()?;
-    Ok((size, hasher.finalize()))
+    Ok(digest.finish(size, suffix))
 }
 
 fn write_copied_manifest(directory: &Path, manifest: &GenerationManifest) -> Result<()> {
@@ -283,21 +281,28 @@ impl Stage {
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeSnapshotPublish);
         write.phase = WritePhase::Publish;
-        write.outcome = WriteOutcome::Unknown;
-        let published = (|| -> std::io::Result<()> {
-            crate::storage::fs::robust_rename(&self.directory, &self.target)?;
-            #[cfg(feature = "test-hooks")]
-            crate::test_hooks::io_result(crate::test_hooks::IoPoint::SnapshotDirectorySync)?;
-            crate::storage::fs::sync_parent_directory(&self.target)
-        })();
-        if let Err(error) = published {
-            if self.target.is_dir() && !self.directory.exists() {
-                return Err(TriviumError::SnapshotPublicationUncertain {
+        if let Err(error) = crate::storage::fs::rename_new(&self.directory, &self.target) {
+            if error.kind() == std::io::ErrorKind::AlreadyExists
+                || self.target.symlink_metadata().is_ok()
+            {
+                return Err(TriviumError::SnapshotDestinationExists {
                     path: self.target.to_string_lossy().into_owned(),
-                    reason: error.to_string(),
                 });
             }
             return Err(error.into());
+        }
+        write.outcome = WriteOutcome::Unknown;
+        #[cfg(feature = "test-hooks")]
+        let synced =
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::SnapshotDirectorySync)
+                .and_then(|()| crate::storage::fs::sync_parent_directory(&self.target));
+        #[cfg(not(feature = "test-hooks"))]
+        let synced = crate::storage::fs::sync_parent_directory(&self.target);
+        if let Err(error) = synced {
+            return Err(TriviumError::SnapshotPublicationUncertain {
+                path: self.target.to_string_lossy().into_owned(),
+                reason: error.to_string(),
+            });
         }
         write.outcome = WriteOutcome::Committed;
         #[cfg(feature = "test-hooks")]

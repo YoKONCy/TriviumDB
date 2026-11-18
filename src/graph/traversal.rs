@@ -118,11 +118,7 @@ pub(crate) fn expand_graph_with_labels_view<T: crate::VectorType>(
     min_edge_weight: f32,
     edge_direction: EdgeDirection,
 ) -> Vec<SearchHit> {
-    if max_depth == 0 || seeds.is_empty() {
-        return seeds;
-    }
-    // 兼容入口使用不可失败的准入器；受预算约束的查询共享同一评分循环。
-    let scores = match expand_graph_checked(
+    match expand_graph_with_labels_checked(
         db,
         seeds,
         max_depth,
@@ -135,21 +131,58 @@ pub(crate) fn expand_graph_with_labels_view<T: crate::VectorType>(
         max_edges_per_node,
         min_edge_weight,
         edge_direction,
-        |_| Ok::<(), std::convert::Infallible>(()),
+        || Ok::<(), std::convert::Infallible>(()),
     ) {
         Ok(scores) => scores,
         Err(never) => match never {},
-    };
-    scores
-        .into_iter()
-        .filter_map(|(id, score)| {
-            db.facts().get_payload(id).map(|payload| SearchHit {
+    }
+}
+
+pub(crate) fn expand_graph_with_labels_checked<T: crate::VectorType, E>(
+    db: &impl GraphRead<T>,
+    seeds: Vec<SearchHit>,
+    max_depth: usize,
+    restart_alpha: f32,
+    enable_inverse_inhibition: bool,
+    lateral_inhibition_threshold: usize,
+    enable_refractory_fatigue: bool,
+    diffusion_bias: Option<&[f32]>,
+    expand_labels: Option<&[String]>,
+    max_edges_per_node: usize,
+    min_edge_weight: f32,
+    edge_direction: EdgeDirection,
+    mut check: impl FnMut() -> Result<(), E>,
+) -> Result<Vec<SearchHit>, E> {
+    if max_depth == 0 || seeds.is_empty() {
+        return Ok(seeds);
+    }
+    let scores = expand_graph_checked(
+        db,
+        seeds,
+        max_depth,
+        restart_alpha,
+        enable_inverse_inhibition,
+        lateral_inhibition_threshold,
+        enable_refractory_fatigue,
+        diffusion_bias,
+        expand_labels,
+        max_edges_per_node,
+        min_edge_weight,
+        edge_direction,
+        |_| check(),
+    )?;
+    let mut hits = Vec::with_capacity(scores.len());
+    for (id, score) in scores {
+        check()?;
+        if let Some(payload) = db.facts().get_payload(id) {
+            hits.push(SearchHit {
                 id,
                 score,
                 payload: (*payload).clone(),
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    Ok(hits)
 }
 
 fn activate<E>(

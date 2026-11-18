@@ -762,3 +762,52 @@ fn 图算法预算超限_fail_closed() {
         .is_err()
     );
 }
+
+#[test]
+fn 加权和Yen按整个算子的实扫边数计量() {
+    use triviumdb::query::pipeline::{WeightedShortestPathsOperator, YenKShortestPathsOperator};
+    let mut mt = MemTable::<f32>::new(1);
+    for id in 1..=4 {
+        mt.insert_with_id(id, &[1.], json!({})).unwrap();
+    }
+    for id in 1..4 {
+        mt.link(id, id + 1, "road".into(), 1.).unwrap();
+    }
+    let mut budget = PipelineBudget::default();
+    budget.traversal.max_examined_edges = 3;
+    let mut context = PipelineContext::new(&mt, budget);
+    let weighted = WeightedShortestPathsOperator {
+        targets: vec![1, 4],
+        label_filter: None,
+    };
+    let result = weighted
+        .apply(NodeSet::from_ids([1]), &mut context)
+        .unwrap();
+    let paths: Vec<_> = result
+        .rows()
+        .iter()
+        .map(|row| row.path.as_deref().unwrap())
+        .collect();
+    assert_eq!(paths, [&[1][..], &[1, 2, 3, 4][..]]);
+
+    let yen = YenKShortestPathsOperator {
+        targets: vec![3, 4],
+        k: 1,
+        label_filter: None,
+    };
+    let error = yen.apply(NodeSet::from_ids([1]), &mut context).unwrap_err();
+    assert_eq!(error.code(), "TDB_QUERY_EXECUTION");
+    budget.traversal.max_examined_edges = 5;
+    let result = yen
+        .apply(
+            NodeSet::from_ids([1]),
+            &mut PipelineContext::new(&mt, budget),
+        )
+        .unwrap();
+    let paths: Vec<_> = result
+        .rows()
+        .iter()
+        .map(|row| row.path.as_deref().unwrap())
+        .collect();
+    assert_eq!(paths, [&[1, 2, 3][..], &[1, 2, 3, 4][..]]);
+}

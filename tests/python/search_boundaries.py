@@ -84,7 +84,34 @@ def verify_filters(db, fixture):
             assert hit.score == 1
 
 
+def verify_hybrid_weights(root):
+    db = triviumdb.TriviumDB(str(Path(root) / "hybrid-weights.tdb"), dim=2, auto_build_quiver=False)
+    try:
+        db.insert_with_id(1, [1, 0], {"name": "z"})
+        db.insert_with_id(2, [0.8, 0.6], {"name": "a"})
+        db.index_text(2, "rareword")
+        db.build_text_index()
+
+        def search(alpha):
+            return db.search_hybrid([1, 0], "rareword", top_k=2, expand_depth=0, hybrid_alpha=alpha, exact=True)
+
+        expected = [(hit.id, hit.score) for hit in db.search_exact([1, 0], 2)]
+        assert [(hit.id, hit.score) for hit in search(1)] == expected
+        assert [hit.id for hit in search(0)] == [2]
+        assert [hit.id for hit in search(0.2)] == [2, 1]
+        for alpha in [-1, 2, 1.00000001, float("nan"), float("inf")]:
+            try:
+                search(alpha)
+            except triviumdb.InvalidInputError as exc:
+                assert exc.code == "TDB_INVALID_INPUT"
+            else:
+                raise AssertionError(f"混合权重超出范围：{alpha}")
+    finally:
+        db.close()
+
+
 def run_search_boundaries(root):
+    verify_hybrid_weights(root)
     verify_search_entries(root)
     fixture = json.loads((Path(__file__).parents[1] / "contracts/search_filter_cases.json").read_text(encoding="utf-8"))
     file = str(Path(root) / "search-filter.tdb")

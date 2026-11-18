@@ -1989,33 +1989,27 @@ impl<T: VectorType> PipelineOperator<T> for WeightedShortestPathsOperator {
             context.budget.max_node_set_bytes,
         )?;
         let targets = unique_path_targets(&self.targets);
-        let request_count = input
-            .len()
-            .checked_mul(targets.len())
-            .ok_or_else(|| TriviumError::QueryExecution("加权最短路径请求数量溢出".into()))?;
-        let request_budget = context
-            .budget
-            .traversal
-            .max_examined_edges
-            .checked_div(request_count.max(1))
-            .unwrap_or(0);
+        crate::graph::analytics::validate_weighted_graph(&workspace)?;
+        let mut work = 0;
         let mut rows = Vec::new();
         for source in input.rows {
             for &target in &targets {
-                let Some(path) = crate::graph::analytics::weighted_dijkstra(
+                let Some(path) = crate::graph::analytics::weighted_dijkstra_with_work(
                     &workspace,
                     source.id,
                     target,
-                    request_budget,
+                    &mut work,
+                    context.budget.traversal.max_examined_edges,
                 )?
                 else {
                     continue;
                 };
                 let mut row = NodeRow::new(target);
-                row.path = Some(path.nodes.clone());
+                row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+                row.path = Some(path.nodes);
                 row.path_count = Some(1);
                 row.provenance.source_ids = vec![source.id];
-                row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+
                 row.set_graph_metric(
                     GraphMetric::WeightedDistance,
                     ScoreValue {
@@ -2059,24 +2053,28 @@ impl<T: VectorType> PipelineOperator<T> for YenKShortestPathsOperator {
             context.budget.max_node_set_bytes,
         )?;
         let targets = unique_path_targets(&self.targets);
+        crate::graph::analytics::validate_weighted_graph(&workspace)?;
+        let mut work = 0;
         let mut rows = Vec::new();
         for source in input.rows {
             for &target in &targets {
-                let paths = crate::graph::analytics::yen_k_shortest_paths(
+                let paths = crate::graph::analytics::yen_k_shortest_paths_with_work(
                     &workspace,
                     source.id,
                     target,
                     self.k,
+                    &mut work,
                     context.budget.traversal.max_examined_edges,
                     context.budget.max_nodes,
                 )?;
                 for (rank, path) in paths.into_iter().enumerate() {
                     let mut row = NodeRow::new(target);
-                    row.path = Some(path.nodes.clone());
+                    row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+                    row.path = Some(path.nodes);
                     row.path_count = Some(1);
                     row.path_rank = Some(rank + 1);
                     row.provenance.source_ids = vec![source.id];
-                    row.provenance.min_depth = Some(path.nodes.len().saturating_sub(1));
+
                     row.set_graph_metric(
                         GraphMetric::WeightedDistance,
                         ScoreValue {

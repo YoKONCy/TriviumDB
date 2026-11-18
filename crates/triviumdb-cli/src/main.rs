@@ -158,15 +158,22 @@ fn main() {
 
     let result = run(cli, cfg);
     if let Err(e) = result {
-        if let Some(error) = e.downcast_ref::<triviumdb::TriviumError>() {
+        let info = e
+            .downcast_ref::<commands::CheckpointAfterCommit>()
+            .map(commands::CheckpointAfterCommit::info)
+            .or_else(|| {
+                e.downcast_ref::<triviumdb::TriviumError>()
+                    .map(triviumdb::TriviumError::info)
+            });
+        if let Some(info) = info {
             if error_format == OutputFormat::Json {
-                eprintln!("{}", serde_json::json!(error.info()));
+                eprintln!("{}", serde_json::json!(info));
             } else {
                 eprintln!(
                     "{} [{}] {}",
                     "错误 / Error:".red().bold(),
-                    error.code(),
-                    error
+                    info.code,
+                    info.message
                 );
             }
         } else if error_format == OutputFormat::Json {

@@ -79,7 +79,7 @@ fn run_typed<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(
         }
     }
     database.commit_tx(builder)?;
-    database.flush()?;
+    super::checkpoint_after_commit(|| database.flush())?;
     println!(
         "{} 已导入 {inserted} 个节点、{linked} 条边 / Imported {inserted} nodes and {linked} edges <- {input}",
         "✓".green().bold()

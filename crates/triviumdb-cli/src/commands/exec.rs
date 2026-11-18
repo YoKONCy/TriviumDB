@@ -48,7 +48,7 @@ pub fn run(handle: &mut DbHandle, query: &str, mutate: bool, format: OutputForma
 
     if mutate {
         let summary = handle.tql_mut(query)?;
-        handle.flush()?;
+        super::checkpoint_after_commit(|| handle.flush())?;
         if let Some(output) = format_mutation(&summary, format) {
             println!("{output}");
         } else {

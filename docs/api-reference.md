@@ -1,6 +1,6 @@
 # TriviumDB API 完整参考
 
-> 本文记录 `0.9.2-beta.1` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本说明见 [0.9.2-beta.1 变更](changes/0.9.2-beta.1.md)，后续开发见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
+> 本文记录 `0.9.2` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本说明见 [0.9.2 变更](changes/0.9.2.md)，后续开发见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
 
 开发版的应用支持范围见 [SDK 正式接口清单](sdk-contract.md)。历史数据库由[外部迁移入口](migration.md)转换到当前文件组；普通打开通过 `TDB_MIGRATION_REQUIRED` 提供结构化指引。
 
@@ -167,7 +167,7 @@ Writer 可在完成持久化后原子生成 generation manifest：
 db.publish_generation_manifest("generation-42")?;
 ```
 
-Python 使用 `db.publish_generation_manifest("generation-42")`，Node.js 使用 `db.publishGenerationManifest("generation-42")`。该操作先执行安全 `flush()`，随后为当前主文件、`.idx` 及 Mmap 模式的 `.vec`、`.pld.<generation>`、`.flush_ok` 记录文件大小和 CRC32，最后原子发布 `<path>.manifest.json`。
+Python 使用 `db.publish_generation_manifest("generation-42")`，Node.js 使用 `db.publishGenerationManifest("generation-42")`。该操作先执行安全 `flush()`，随后为当前主文件、`.idx` 及 Mmap 模式的 `.vec`、`.pld.<generation>`、`.flush_ok` 记录文件大小、CRC32 和 SHA-256，最后原子发布 `<path>.manifest.json`。
 
 同步模式和 generation 标识采用字符串参数。已覆盖的绑定类型拒绝提供 `TDB_INVALID_INPUT`、`target.field` 与 `validation/not_committed`，Python 保留原异常类型。generation 字段按语言入口使用 `generation_id` 或 `generationId`。manifest 回调重入提供 `admission/not_committed`，发布中的错误继续依据 Core 完成点判断。
 
@@ -185,7 +185,7 @@ db = TriviumDB(path, dim=768, access_mode="immutable")
 const db = new TriviumDB(path, { dim: 768, accessMode: "immutable" })
 ```
 
-Immutable 会在加载前验证 manifest 版本、完成状态、dtype、维度、文件存在性、大小和 CRC32，不创建锁文件或 WAL，也不修复任何文件。句柄存活期间禁止原地修改、覆盖或删除 generation 中的文件；正确发布方式是构建新目录或新路径，然后由应用原子切换 `current` 指针。
+Immutable 会在加载前验证 manifest 版本、完成状态、dtype、维度、文件存在性、大小与内容摘要，不创建锁文件或 WAL，也不修复任何文件。句柄存活期间禁止原地修改、覆盖或删除 generation 中的文件；正确发布方式是构建新目录或新路径，然后由应用原子切换 `current` 指针。
 
 `Config.missing_index_policy` 控制 Reader 遇到 QuIVer/TextIndex 缺失、错配或损坏时的行为：
 
@@ -291,7 +291,7 @@ db.set_sync_mode(SyncMode::Off)?;
 
 数据访问统一执行生命周期检查：Rust 的 `get`、`get_payload`、`get_edge`、`get_edges`、`get_incoming_edges`、`get_all_ids`、`all_node_ids`、`node_count`、`contains`、`neighbors`、`neighbors_with_labels`、`shortest_path`、`graph_stats`、`validate_graph`、`list_indexes`、`list_unique_indexes`、`index_info` 与 `clear_search_state` 返回 `Result`；`set_hook` 也返回 `Result<()>`。调用方使用 `?` 或显式处理错误。Python/Node 的打开状态返回类型保持一致，关闭后抛错。状态、资源统计和配置诊断继续可读。
 
-`flush()` 通过 `.publish` 撤销日志管理主数据、向量与统一 `.idx` 容器。Mmap 在各文件同步后提交 marker，Rom 在同步后提交日志状态。ReadWrite `open()` 先完成中断恢复，再流式回放 WAL。备份使用有界缓冲，额外磁盘空间包含旧文件组、候选容器与暂存组件。当前开发主文件格式为 14，marker 为 3，发布日志为 3。命名图、文档候选／归档和有界编辑回执随主文件一同发布，布局与资源条件见[数据库文件组](storage-format.md)。
+`flush()` 通过 `.publish` 撤销日志管理主数据、向量与统一 `.idx` 容器。Mmap 在各文件同步后提交 marker，Rom 在同步后提交日志状态。ReadWrite `open()` 先完成中断恢复，再流式回放 WAL。备份使用有界缓冲，额外磁盘空间包含旧文件组、候选容器与暂存组件。当前主文件格式为 15，Mmap 检查点标记为 81 字节，发布日志格式为 3。命名图、文档候选／归档和有界编辑回执随主文件一同发布，布局与资源条件见[数据库文件组](storage-format.md)。
 
 WAL 的完整帧发生 CRC、解码或超长字段损坏时，`open()` 返回 `CorruptedFile` 并保留完整日志；物理未写完的尾帧继续按提交边界恢复。QuIVer 元数据 v2 将索引绑定到主文件、向量内容及活跃 ID/slot；失配按 `missing_index_policy` 回退或报错。底层 BQ Rust 距离、签名读取和原始存储解码接口返回 `Result`，详见 [QuIVer 边界](quiver.md#索引事实绑定与-bq-边界)。
 
@@ -344,7 +344,7 @@ Python 关闭等待释放 GIL。Node `closeTimeout()` 同步等待；需要继�
 
 Rust 独立校验与恢复提供接收 `&ResourceRuntime` 的 `_with_runtime` 版本。创建快照使用可写实例；目标采用已存在的父目录和全新的子目录。恢复目录中的数据库文件固定为 `database.tdb`，宿主按 manifest 中的维度和原数据库 dtype 显式打开。
 
-manifest 包含 generation ID、dtype、维度、节点数、制品长度和 CRC。已有目标、发布后目录同步失败及校验失败的错误映射见[一致快照](lifecycle-snapshots.md#一致快照)。
+manifest 包含 generation ID、dtype、维度、节点数、制品长度、CRC32 和 SHA-256。已有目标、发布后目录同步失败及校验失败的错误映射见[一致快照](lifecycle-snapshots.md#一致快照)。
 
 ---
 
@@ -1016,9 +1016,11 @@ let results = db.search_advanced(&query_vec, &config)?;
 | `dpp_quality_weight` | `f32` | `1.0` | DPP 质量权重幂次 |
 | `enable_text_hybrid_search`| `bool`| `false`| 是否开启 BM25/AC 双路混合搜索 |
 | `text_boost` | `f32` | `1.5` | 加权 RRF 中的稀疏排名权重；不再与余弦分数直接相加 |
-| `hybrid_alpha` | `f32` | `0.7` | 混合检索中向量权重 (0~1)，(1-alpha) 为稀疏文本权重 |
+| `hybrid_alpha` | `number` | `0.7` | 混合检索中向量权重 (0~1)，(1-alpha) 为稀疏文本权重 |
 | `custom_query_text` | `str`| `None` | (可选) 手动传入用于文本匹配的原始文本 |
 | `force_brute_force` | `bool` | `false`| 强制使用暴力搜索，禁用 QuIVer 图索引（用于基准测试和需要精确结果的场景） |
+
+当向量与文本均参与召回时，按归一化后的倒数排名分别应用 `alpha` 和 `1 - alpha`。设为 `1` 时直接使用向量召回及其原始分数，设为 `0` 时仅使用文本召回。查询无文本命中时保留纯向量分数。范围外的权重返回 `TDB_INVALID_INPUT`。Rust 可调用 `search_hybrid_weighted`，现有 `SearchConfig.text_boost` 入口继续按原有权重规则运行。
 
 > `search_advanced()` 提供“组件可开关、顺序固定”的便利模板：文本/向量召回 → FISTA 残差 → SA-PPR → Payload 过滤 → DPP。TQL 提供“组件与顺序均可编排”的无状态管线，并增加 NMF 主题分配；Refractory Fatigue 和 Hook 仍保留在高级 API，因为它们具有状态或回调语义。
 
@@ -1030,7 +1032,7 @@ let results = db.search_advanced(&query_vec, &config)?;
 
 ## QuIVer 压缩运行时
 
-Rust 的 `Database` 与 `DatabaseReader` 通过 `configure_quiver(QuiverRuntimeOptions)`、`search_quiver(query, config)`、`quiver_stats()` 和 `close_quiver()` 使用压缩检索。类型从 `triviumdb::index::quiver::runtime` 导入，库编码、查询精度和冷热驻留通过配置选择。可写数据库另提供 `collect_quiver_temporary()`。Rust 名称调整见[版本说明](changes/0.9.2-beta.1.md)。
+Rust 的 `Database` 与 `DatabaseReader` 通过 `configure_quiver(QuiverRuntimeOptions)`、`search_quiver(query, config)`、`quiver_stats()` 和 `close_quiver()` 使用压缩检索。类型从 `triviumdb::index::quiver::runtime` 导入，库编码、查询精度和冷热驻留通过配置选择。可写数据库另提供 `collect_quiver_temporary()`。Rust 名称调整见[版本说明](changes/0.9.2.md)。
 
 Python 的 `quiver_request(request_json: str) -> str` 与 Node 的 `quiverRequest(requestJson: string): string` 共享 JSON 命令。`configure` 接收 `options`，支持 `encoding`、`query_precision`、`residency`、`cache_bytes`、`io_mode`、`io_depth` 及 `use_for_ann`。编码支持 `int8`、`centered_int8`、`centered_int4`，查询表示支持 `fp32`、`int8`、`int4`。`search` 接收 `vector`、`top_k`、`ef_search` 和可选 `rerank_limit`，结果中的 NodeId 使用十进制字符串。`stats` 返回活动 Reader 统计或 `null`，`close` 释放当前运行时，`collect_temporary` 返回 `removed` 数量。
 
@@ -1355,7 +1357,7 @@ for row in &rows {
 
 ### prepare_tql / execute_prepared_tql
 
-Node 的 Prepared 句柄由 `db.prepareTql()` 创建，公开构造器名称为 `PreparedTql`。CommonJS 使用 `const { PreparedTql } = require('triviumdb')`，ESM 使用 `import { PreparedTql } from 'triviumdb'`，返回句柄可通过 `instanceof PreparedTql` 核对。兼容名称 `JsPreparedTql` 引用同一构造器及类型，导出修复见[版本说明](changes/0.9.2-beta.1.md)。
+Node 的 Prepared 句柄由 `db.prepareTql()` 创建，公开构造器名称为 `PreparedTql`。CommonJS 使用 `const { PreparedTql } = require('triviumdb')`，ESM 使用 `import { PreparedTql } from 'triviumdb'`，返回句柄可通过 `instanceof PreparedTql` 核对。兼容名称 `JsPreparedTql` 引用同一构造器及类型，导出修复见[版本说明](changes/0.9.2.md)。
 
 ```python
 prepared = db.prepare_tql(
@@ -1797,7 +1799,7 @@ QuIVer 支持增量 Insert/Delete/Update，并保护入口导航树，入口升�
 
 ## 维度迁移
 
-> **格式提醒**　当前开发主文件格式为 14，统一索引容器格式为 1。Mmap raw Payload 位于 generation 绑定的 `.pld`，详见[数据库文件组](storage-format.md)。ReadOnly/Immutable 按物理零写契约打开。切换内核前备份完整文件组，旧内核环境使用升级前备份。单格式准入与外部迁移脚本仍在后续收敛范围内，交付阶段见[两阶段冻结目标](kernel-sdk.md#两阶段冻结目标)。
+> **格式提醒**　当前主文件格式为 15，统一索引容器格式为 1。Mmap raw Payload 位于 generation 绑定的 `.pld`，详见[数据库文件组](storage-format.md)。ReadOnly/Immutable 按物理零写契约打开。切换内核前备份完整文件组，旧内核环境使用升级前备份。历史格式升级使用[外部迁移工具](migration.md)。
 
 复合索引字段列表按 JSON 数组保存，支持 NUL 和 Unicode 字段名；字段名总长度上限为 1 MiB，字段数量上限为 65,535。旧复合 posting 通过事实扫描保持结果，唯一约束从主文件恢复；普通复合索引可按原字段列表重新创建。唯一约束创建或删除在发布失败后返回原始错误，并将实例标为待恢复，后续读写返回 `TDB_WAL_CLOSED`。释放实例后可写重开，由发布提交点决定恢复旧定义或采用新定义。
 
@@ -1914,6 +1916,8 @@ Python 通过 `db.transaction()` 暴露缓冲提交语义，Node.js 通过 `comm
 
 节点的完整视图，通过 `get()` 或 `filter_where()` 返回。
 
+Node.js 的 `get().vector` 返回 `number[]`。对于 `u64` dtype，任一分量无法装入 `number` 并精确往返时返回 `TDB_INVALID_INPUT`，并在 `target.field` 标记分量位置。
+
 | 属性 (Python) | 属性 (Rust) | 类型 | 说明 |
 | --------------- | ------------- | ------ | ------ |
 | `id` | `id` | `u64` | 全局唯一节点 ID |
@@ -1995,7 +1999,7 @@ WAL 追加、flush 或同步失败时返回原始错误并隔离该 writer。后
 ## 持久化类型、解析与打开准入
 
 - 文件头保存 dtype、元素宽度与 CRC32。ReadWrite/ReadOnly 使用其他 dtype 打开返回 `TDB_DTYPE_MISMATCH`，详情包含 `stored` 和 `requested`，取值为 `f32`、`f16`、`u64`。Rom 与 Mmap 共用此契约。
-- 当前检查点和 WAL 按持久化 dtype 及完整向量几何验证类型。当前主文件格式为 14，WAL 为 7；格式及迁移范围见[数据库文件组](storage-format.md)。切换到旧内核时使用升级前的完整备份。
+- 当前检查点和 WAL 按持久化 dtype 及完整向量几何验证类型。当前主文件格式为 15，WAL 为 7；格式及迁移范围见[数据库文件组](storage-format.md)。切换到旧内核时使用升级前的完整备份。
 - 发生向量文件替换或重映射失败时，原调用保留 I/O 错误。映射已经失效的实例及其共享句柄随后返回 `TDB_WAL_CLOSED`；释放这些实例后，重新以可写模式打开，恢复发布基础并回放 WAL。
 - TQL 字符串入口完整消费输入，语句尾部非法内容在生成写操作前返回 `TDB_QUERY_PARSE`。输入上限为 4 MiB、262,144 个 token、128 层括号嵌套和 128 个表达式运算符；已有递归预算共同约束表达式与谓词。向量及 JSON 字面量中的负号按字面量处理。
 - `memory_limit` 覆盖打开时的节点与图目录、Rom 向量堆副本、Payload 解码、派生索引恢复和 WAL 暂存。各阶段在分配前进行保守峰值准入，打开完成前核对总估算占用；预算不足返回 `TDB_CAPACITY_RESERVATION_REJECTED`，本次共享资源预留释放。原始 mmap 向量和 Payload 映射按文件映射管理，堆目录及解码工作区参与准入。

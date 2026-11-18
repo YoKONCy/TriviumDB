@@ -234,3 +234,91 @@ fn 异步关闭继承故障注入并保留可重试状态() {
     assert_eq!(db.shutdown_status().phase, ShutdownPhase::Closed);
     assert!(db.shutdown_status().last_failure.is_none());
 }
+
+#[test]
+fn 快照和检查点拒绝长度相同且内部CRC有效的Payload串档() {
+    let root = root();
+    let make = |name: &str, text: &str| {
+        let live = root.join(format!("{name}.tdb"));
+        let snap = root.join(name);
+        let mut db = Database::<f32>::open(live.to_str().unwrap(), 2).unwrap();
+        db.insert_with_id(1, &[1., 0.], serde_json::json!({"text":text}))
+            .unwrap();
+        db.create_snapshot(snap.to_str().unwrap(), name).unwrap();
+        db.close().unwrap();
+        let manifest = verify_snapshot(snap.to_str().unwrap()).unwrap();
+        let payload = manifest
+            .files
+            .into_iter()
+            .find(|file| file.suffix.starts_with(".pld."))
+            .unwrap();
+        (live, snap, payload)
+    };
+    let (live, first, payload) = make("first", "alpha");
+    let (_, second, other) = make("second", "bravo");
+    assert_eq!(payload.size, other.size);
+    assert_eq!(payload.crc32, other.crc32);
+    assert_ne!(
+        payload.sha256.as_ref().unwrap(),
+        other.sha256.as_ref().unwrap()
+    );
+    let first_file = first.join(format!("database.tdb{}", payload.suffix));
+    let second_file = second.join(format!("database.tdb{}", other.suffix));
+    let original = std::fs::read(&first_file).unwrap();
+    let marker = std::fs::read(format!("{}.flush_ok", live.display())).unwrap();
+    let generation = u64::from_le_bytes(marker[5..13].try_into().unwrap());
+    let live_payload = format!("{}.pld.{generation}", live.display());
+    std::fs::copy(&second_file, &first_file).unwrap();
+    std::fs::copy(&second_file, &live_payload).unwrap();
+    let error = verify_snapshot(first.to_str().unwrap()).unwrap_err();
+    assert_eq!(error.code(), "TDB_IMMUTABLE_ARTIFACT");
+    let restored = root.join("restored");
+    let error = restore_snapshot(first.to_str().unwrap(), restored.to_str().unwrap()).unwrap_err();
+    assert_eq!(error.code(), "TDB_IMMUTABLE_ARTIFACT");
+    assert!(!restored.exists());
+    let error = Database::<f32>::open_read_only(live.to_str().unwrap(), 2)
+        .err()
+        .expect("检查点必须拒绝串档");
+    assert_eq!(error.code(), "TDB_CORRUPTED_FILE", "{error}");
+    std::fs::write(first_file, &original).unwrap();
+    std::fs::write(live_payload, original).unwrap();
+    restore_snapshot(first.to_str().unwrap(), restored.to_str().unwrap()).unwrap();
+    let restored_db = restored.join("database.tdb");
+    let mut db = Database::<f32>::open(restored_db.to_str().unwrap(), 2).unwrap();
+    assert_eq!(
+        db.get(1).unwrap().unwrap().payload,
+        serde_json::json!({"text":"alpha"})
+    );
+    db.close().unwrap();
+}
+
+#[test]
+fn 同名空目录在发布瞬间出现时保持原样() {
+    let root = root();
+    let destination = root.join("raced");
+    let path = root.join("source.tdb");
+    let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+    db.insert_with_id(1, &[1., 0.], serde_json::json!({"source":true}))
+        .unwrap();
+    let scope =
+        triviumdb::sdk::RequestContext::with_timeout("snapshot-rename-race", Duration::ZERO, true)
+            .unwrap();
+    let gate = triviumdb::test_hooks::pause_at_request(
+        ConcurrencyPoint::BeforeSnapshotPublish,
+        "snapshot-rename-race",
+    );
+    std::thread::scope(|tasks| {
+        let publish = tasks
+            .spawn(|| scope.run(|| db.create_snapshot(destination.to_str().unwrap(), "raced")));
+        gate.wait_until_arrived();
+        std::fs::create_dir(&destination).unwrap();
+        gate.release();
+        let error = publish.join().unwrap().unwrap_err();
+        assert_eq!(error.code(), "TDB_SNAPSHOT_EXISTS");
+        assert_eq!(
+            error.info().write.unwrap().outcome,
+            triviumdb::error::WriteOutcome::NotCommitted
+        );
+    });
+    assert_eq!(std::fs::read_dir(destination).unwrap().count(), 0);
+}

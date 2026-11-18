@@ -1,6 +1,6 @@
 # 嵌入式 Console 宿主接入
 
-> 本文说明 `0.9.2-beta.1` 嵌入式 Console 的宿主协议、权限、文件锁、生命周期和前端接入。版本记录见[变更说明](changes/0.9.2-beta.1.md)。
+> 本文说明 `0.9.2` 嵌入式 Console 的宿主协议、权限、文件锁、生命周期和前端接入。版本记录见[变更说明](changes/0.9.2.md)。
 
 ---
 
@@ -21,7 +21,7 @@
 
 ## 接入概述
 
-嵌入式 Console 提供版本保护事务与持久回执确认，完整变更见[版本说明](changes/0.9.2-beta.1.md)。Rust、Python、Node 的宿主协议属于嵌入式接口，HTTP 适配及现有 WebUI 采用 nightly 开发通道。
+嵌入式 Console 提供版本保护事务与持久回执确认，完整变更见[版本说明](changes/0.9.2.md)。Rust、Python、Node 的宿主协议属于嵌入式接口，HTTP 适配及现有 WebUI 采用 nightly 开发通道。
 
 Console v1 为 Rust、Python 和 Node.js 提供同一份 JSON 请求协议，直接操作宿主已经打开的 Embedded Database。HTTP 适配位于独立的 nightly Server crate，桌面 IPC 可原样转发字符串；宿主按需引入相应框架。
 
@@ -259,7 +259,7 @@ const status = rpc('confirm-1', { ...original, operation: 'transactionStatus' })
 
 重新打开会生成新的编辑版本身份。保留的原事务回执继续确认历史提交，后续编辑从当前快照取得版本令牌。回执缺失或已淘汰时返回 unknown，旧版本条件按当前实例校验。无事实变化的受保护事务也消耗一个版本并保存回执，进入 WAL 后的未知结果通过恢复完成后再确认。
 
-> **恢复提醒**　回执受容量和淘汰约束，unknown 的事务按业务身份核对完整事实。切换内核前保留完整文件组备份，旧内核环境通过升级前备份恢复。当前布局见[数据库文件组](storage-format.md)，版本变更见[发布说明](changes/0.9.2-beta.1.md)。
+> **恢复提醒**　回执受容量和淘汰约束，unknown 的事务按业务身份核对完整事实。切换内核前保留完整文件组备份，旧内核环境通过升级前备份恢复。当前布局见[数据库文件组](storage-format.md)，版本变更见[发布说明](changes/0.9.2.md)。
 
 `info.transport` 与 console-contract.json 公布这些能力及上限。旧的 transaction、mutate、importNodes/importEdges 保持无版本前置条件的原语义；这些写入会使旧编辑令牌失效。版本条件和幂等处理由 guardedTransaction 提供。
 

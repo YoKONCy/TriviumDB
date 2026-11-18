@@ -20,8 +20,7 @@ use protocol::{
     ApiError, BatchGetRequest, BulkEdgeRecord, BulkNodeRecord, ConditionalMutationRequest,
     DeleteManyRequest, ExecutePreparedRequest, HealthDetailsResponse, HealthResponse, IndexRequest,
     IndexedLookupRequest, PrepareRequest, SubstringLookupRequest, TqlRequest, TransactionOperation,
-    TransactionRequest, TransactionResponse, encode_node, encode_row, encode_rows,
-    projection_columns,
+    TransactionRequest, TransactionResponse, encode_node, projection_columns,
 };
 use serde::Deserialize;
 use std::{
@@ -145,10 +144,11 @@ fn default_path_hops() -> usize {
 
 impl RequestContext {
     fn new(id: String) -> Self {
+        let telemetry = Arc::new(engine::RequestTelemetry::new(id.clone()));
         Self {
             id,
             started: Instant::now(),
-            telemetry: Arc::new(engine::RequestTelemetry::default()),
+            telemetry,
         }
     }
 }
@@ -654,7 +654,10 @@ async fn prepare(
             "query 不得为空 (query must not be empty)",
         ));
     }
-    let (id, parameters) = state.engine.prepare(request.query.trim())?;
+    let (id, parameters) = state
+        .engine
+        .prepare(request.query, Instant::now() + state.request_timeout)
+        .await?;
     Ok(Json(serde_json::json!({
         "preparedId": id,
         "parameters": parameters,
@@ -669,7 +672,7 @@ async fn execute_prepared(
 ) -> Result<Response, ApiError> {
     let Json(request) = decode_json(request)?;
     let started = std::time::Instant::now();
-    let (rows, version) = state
+    let result = state
         .engine
         .execute_prepared(
             &id,
@@ -677,15 +680,7 @@ async fn execute_prepared(
             started + state.request_timeout,
         )
         .await?;
-    query_response(
-        rows,
-        version.global_etag(),
-        &headers,
-        request.profile,
-        true,
-        started,
-        None,
-    )
+    query_response(result, &headers, request.profile, true, started, None)
 }
 
 async fn search_vector(
@@ -770,8 +765,8 @@ async fn tql(
     request: Result<Json<TqlRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let Json(request) = decode_json(request)?;
-    let query = request.query.trim();
-    if query.is_empty() {
+    let query = request.query.as_str();
+    if query.trim().is_empty() {
         return Err(ApiError::invalid_request(
             "query 不得为空 (query must not be empty)",
         ));
@@ -780,10 +775,11 @@ async fn tql(
     // mutation 标志是「允许写入」，不是「强制走写路径」：读语句即使带了 mutation=true
     // 也必须走读查询。否则 tql_mut(read query) 会以 500「API 已移除」返回，
     // 而 UI 的写入模式复选框是粘性的，用户写过一次 CREATE 后所有查询都会 500。
-    let read_statement = matches!(
-        triviumdb::query::tql_parser::parse_tql_statement(query),
-        Ok(triviumdb::query::tql_ast::TqlStatement::Query(_))
-    );
+    let read_statement = request.mutation
+        && matches!(
+            triviumdb::query::tql_parser::parse_tql_statement(query),
+            Ok(triviumdb::query::tql_ast::TqlStatement::Query(_))
+        );
     if request.mutation && !read_statement {
         let result = state
             .engine
@@ -805,20 +801,101 @@ async fn tql(
         Ok(response)
     } else {
         let started = std::time::Instant::now();
-        let (rows, version) = state.engine.query(query.to_owned(), deadline).await?;
+        let result = state.engine.query(query.to_owned(), deadline).await?;
         query_response(
-            rows,
-            version.global_etag(),
+            result,
             &headers,
             request.profile,
             false,
             started,
-            Some((query, state.engine.index_fields()?)),
+            Some(query),
         )
     }
 }
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+fn encode_bounded_json(
+    value: &impl serde::Serialize,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ApiError> {
+    struct BoundedBody {
+        bytes: Vec<u8>,
+        max_bytes: usize,
+        exceeded: bool,
+    }
+    impl std::io::Write for BoundedBody {
+        fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+            if input.len() > self.max_bytes - self.bytes.len() {
+                self.exceeded = true;
+                return Err(std::io::Error::other(
+                    "响应体超过上限 (Response body exceeds limit)",
+                ));
+            }
+            let required = self.bytes.len() + input.len();
+            if required > self.bytes.capacity() {
+                let capacity = required
+                    .max(self.bytes.capacity().saturating_mul(2))
+                    .min(self.max_bytes);
+                self.bytes
+                    .try_reserve_exact(capacity - self.bytes.len())
+                    .map_err(std::io::Error::other)?;
+            }
+            self.bytes.extend_from_slice(input);
+            Ok(input.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = BoundedBody {
+        bytes: Vec::new(),
+        max_bytes,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if writer.exceeded {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "RESPONSE_TOO_LARGE",
+                "响应体超过上限 (Response too large)",
+                "请使用属性投影、LIMIT 或 NDJSON 流式响应 (Use property projection, LIMIT, or NDJSON streaming)",
+                false,
+            ));
+        }
+        return Err(ApiError::internal(error.to_string()));
+    }
+    Ok(writer.bytes)
+}
+
+#[cfg(test)]
+#[test]
+fn JSON编码达到字节上限后停止遍历结果() {
+    use serde::ser::{Serialize, SerializeSeq, Serializer};
+    use std::cell::Cell;
+
+    struct Rows<'a>(&'a Cell<usize>);
+    impl Serialize for Rows<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut rows = serializer.serialize_seq(Some(3))?;
+            for row in ["a", "超过字节上限", "本行不应编码"] {
+                self.0.set(self.0.get() + 1);
+                rows.serialize_element(row)?;
+            }
+            rows.end()
+        }
+    }
+    assert_eq!(encode_bounded_json(&["a"], 5).unwrap(), br#"["a"]"#);
+    let seen = Cell::new(0);
+    let error = encode_bounded_json(&Rows(&seen), 12).unwrap_err();
+    assert_eq!(
+        error.into_response().status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(seen.get(), 2);
+}
 
 fn request_profile(started: Instant, prepared_cache_hit: bool) -> serde_json::Value {
     let (queue_wait_micros, execution_micros) = engine::REQUEST_TELEMETRY
@@ -838,17 +915,20 @@ fn request_profile(started: Instant, prepared_cache_hit: bool) -> serde_json::Va
 }
 
 fn query_response(
-    rows: engine::QueryRows,
-    etag: String,
+    result: engine::QueryResult,
     headers: &HeaderMap,
     profile: bool,
     prepared_cache_hit: bool,
     started: std::time::Instant,
-    advice_context: Option<(&str, Vec<String>)>,
+    advice_query: Option<&str>,
 ) -> Result<Response, ApiError> {
     let profile_value = profile.then(|| request_profile(started, prepared_cache_hit));
     let index_advice =
-        advice_context.map_or_else(Vec::new, |(query, indexed)| index_advice(query, &indexed));
+        advice_query.map_or_else(Vec::new, |query| index_advice(query, &result.index_fields));
+    let rows = result.rows;
+    let row_count = rows.len();
+    let columns = projection_columns(&rows, result.columns);
+    let etag = result.version.global_etag();
     let wants_ndjson = headers
         .get(header::ACCEPT)
         .and_then(|value| value.to_str().ok())
@@ -858,8 +938,6 @@ fn query_response(
                 .any(|item| item.trim() == "application/x-ndjson")
         });
     if wants_ndjson {
-        let row_count = rows.len();
-        let columns = projection_columns(&rows);
         let stream_etag = etag.clone();
         let stream = async_stream::stream! {
             yield Ok::<_, std::convert::Infallible>(bytes::Bytes::from(
@@ -870,11 +948,15 @@ fn query_response(
                 }))
             ));
             for row in rows {
-                let line = match encode_row(row) {
-                    Ok(row) => serde_json::json!({"type": "row", "row": row}),
-                    Err(error) => serde_json::json!({"type": "error", "detail": error.to_string()}),
-                };
-                yield Ok(bytes::Bytes::from(format!("{line}\n")));
+                #[derive(serde::Serialize)]
+                struct Line<'a> {
+                    r#type: &'static str,
+                    row: protocol::QueryRow<'a>,
+                }
+                let mut line = serde_json::to_vec(&Line { r#type: "row", row: protocol::QueryRow(&row) })
+                    .unwrap_or_else(|_| r#"{"type":"error","detail":"查询行编码失败 (Query row encoding failed)"}"#.as_bytes().to_vec());
+                line.push(b'\n');
+                yield Ok(bytes::Bytes::from(line));
             }
             let summary = serde_json::json!({
                 "type": "summary",
@@ -893,26 +975,29 @@ fn query_response(
         return Ok(response);
     }
 
-    let encoded = encode_rows(rows, etag.clone())?;
-    let mut value =
-        serde_json::to_value(encoded).map_err(|error| ApiError::internal(error.to_string()))?;
-    if let Some(object) = value.as_object_mut() {
-        if let Some(profile) = profile_value {
-            object.insert("profile".into(), profile);
-        }
-        object.insert("indexAdvice".into(), serde_json::json!(index_advice));
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BodyFields<'a> {
+        rows: protocol::QueryRows<'a>,
+        row_count: usize,
+        generation: &'a str,
+        columns: &'a [protocol::ProjectionColumn],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        profile: Option<serde_json::Value>,
+        index_advice: Vec<serde_json::Value>,
     }
-    let encoded_bytes =
-        serde_json::to_vec(&value).map_err(|error| ApiError::internal(error.to_string()))?;
-    if encoded_bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(ApiError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "RESPONSE_TOO_LARGE",
-            "响应体超过上限 (Response too large)",
-            "请使用属性投影、LIMIT 或 NDJSON 流式响应 (Use property projection, LIMIT, or NDJSON streaming)",
-            false,
-        ));
-    }
+
+    let encoded_bytes = encode_bounded_json(
+        &BodyFields {
+            rows: protocol::QueryRows(&rows),
+            row_count,
+            generation: &etag,
+            columns: &columns,
+            profile: profile_value,
+            index_advice,
+        },
+        MAX_RESPONSE_BYTES,
+    )?;
     let mut response = Response::new(Body::from(encoded_bytes));
     response.headers_mut().insert(
         header::CONTENT_TYPE,

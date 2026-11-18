@@ -1,6 +1,6 @@
 # TriviumDB 最佳实践
 
-> 本文介绍 TriviumDB `0.9.2-beta.1` 的项目集成、数据建模、检索配置和资源管理。版本记录见[变更说明](changes/0.9.2-beta.1.md)。
+> 本文介绍 TriviumDB `0.9.2` 的项目集成、数据建模、检索配置和资源管理。版本记录见[变更说明](changes/0.9.2.md)。
 
 ---
 
@@ -38,7 +38,7 @@ NPM 包内部自带 `triviumdb.d.ts` 提供全量的 TS 类型注解，支持主
 
 ```bash
 # 推荐使用 NPM 或者 PNPM 一键提包：
-npm install triviumdb@0.9.2-beta.1
+npm install triviumdb@0.9.2
 
 # 验证安装
 node -e "console.log(require('triviumdb').TriviumDB.name)"
@@ -50,10 +50,10 @@ node -e "console.log(require('triviumdb').TriviumDB.name)"
 
 ```bash
 # 推荐使用超快速的 uv (支持 3.9 ~ 3.12)
-uv pip install "triviumdb==0.9.2b1"
+uv pip install "triviumdb==0.9.2"
 
 # 或者传统 pip
-pip install "triviumdb==0.9.2b1"
+pip install "triviumdb==0.9.2"
 
 # 验证安装
 python -c "import triviumdb; print('OK')"
@@ -64,14 +64,14 @@ python -c "import triviumdb; print('OK')"
 通过 `cargo add` 引入本文对应的公开测试版本。
 
 ```bash
-cargo add triviumdb@0.9.2-beta.1
+cargo add triviumdb@0.9.2
 ```
 
 在 `Cargo.toml` 中也会自动生成如下配置：
 
 ```toml
 [dependencies]
-triviumdb = "0.9.2-beta.1"
+triviumdb = "0.9.2"
 ```
 
 ### 30 秒入门模板
@@ -770,7 +770,7 @@ db_b = triviumdb.TriviumDB("shared.tdb", dim=768)  # 💥 文件锁冲突!
 
 ### 数据库文件版本策略
 
-- 当前开发主文件格式为 14，WAL 为 7，索引与登记文本统一保存在 `.idx`，完整布局见[数据库文件组](storage-format.md)。
+- 当前主文件格式为 15，WAL 为 7，索引与登记文本统一保存在 `.idx`，完整布局见[数据库文件组](storage-format.md)。
 - ReadOnly/Immutable 保持物理零写，Immutable 的 manifest 必须与完整文件组匹配。
 - 格式之外的版本返回结构化错误并保留原文件。单格式准入与外部迁移脚本仍属后续收敛工作，按[SDK 冻结与内核冻结两个阶段](kernel-sdk.md#两阶段冻结目标)交付。
 

@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> 本文介绍 `0.9.2-beta.1` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.2-beta.1.md)。
+> 本文介绍 `0.9.2` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.2.md)。
 
 ---
 
@@ -252,7 +252,7 @@ RETURN related, source.document_id AS document_id, source.evidence AS evidence
 
 `EXPLAIN` 提供 `graph_scope`、`graph_revisions`、`selected_graph_stats`、`named_graph_members` 访问路径和 Cascades 物理阶段。文档物理来源区分 `document_text_search`、`document_exact_search`、`document_ann_search`，通过 `document_source` 提供请求配置。`EXPLAIN ANALYZE` 执行相同管线并返回实际行数及算子观测。
 
-`EXPLAIN SEARCH` 通过 `vector_access_path` 表示向量访问选择，取值为 `ann_post_filter` 或 `exact_fallback`。结构化 `access_path` 保留节点／属性访问路径，两者分别描述各自阶段。字段名称调整见[版本说明](changes/0.9.2-beta.1.md)。
+`EXPLAIN SEARCH` 通过 `vector_access_path` 表示向量访问选择，取值为 `ann_post_filter` 或 `exact_fallback`。结构化 `access_path` 保留节点／属性访问路径，两者分别描述各自阶段。字段名称调整见[版本说明](changes/0.9.2.md)。
 
 Prepared 支持图身份、预期修订、文档文字、过滤条件及向量分量等配置叶节点。同名参数共用必需参数目录和首个真实引用范围，缺参、额外参数及转换错误使用既有结构化错误。来源配置、图作用域和执行算子的错误携带对应 UTF-8 范围。
 

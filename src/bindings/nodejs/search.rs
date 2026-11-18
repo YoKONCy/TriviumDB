@@ -339,18 +339,12 @@ impl TriviumDB {
 
         let expand_depth = parse_search_usize(env, expand_depth, 2.0, "expandDepth", false)?;
         let min_score = optional_number(env, min_score, 0.0, "minScore")? as f32;
-        let alpha = optional_number(env, hybrid_alpha, 0.7, "hybridAlpha")? as f32;
+        let alpha = optional_number(env, hybrid_alpha, 0.7, "hybridAlpha")?;
         let payload_filter = parse_payload_filter(env, payload_filter)?;
-        // 简单的启发式权重换算
-        let boost =
-            crate::sdk::hybrid_text_boost(alpha).map_err(|error| to_napi_error(env, error))?;
-
         let core_config = crate::database::SearchConfig {
             top_k,
             expand_depth,
             min_score,
-            enable_text_hybrid_search: true,
-            text_boost: boost,
             payload_filter,
             ..Default::default()
         }
@@ -359,18 +353,18 @@ impl TriviumDB {
         let hits = match &self.inner {
             DbBackend::F32(db) => {
                 let v: Vec<f32> = query_vector.iter().map(|&x| x as f32).collect();
-                db.search_hybrid(Some(&query_text), Some(&v), &core_config)
+                db.search_hybrid_weighted(&query_text, &v, &core_config, alpha)
             }
             DbBackend::F16(db) => {
                 let v: Vec<half::f16> = query_vector
                     .iter()
                     .map(|&x| half::f16::from_f64(x))
                     .collect();
-                db.search_hybrid(Some(&query_text), Some(&v), &core_config)
+                db.search_hybrid_weighted(&query_text, &v, &core_config, alpha)
             }
             DbBackend::U64(db) => {
                 let v: Vec<u64> = parse_u64_vector(env, &query_vector)?;
-                db.search_hybrid(Some(&query_text), Some(&v), &core_config)
+                db.search_hybrid_weighted(&query_text, &v, &core_config, alpha)
             }
         }
         .map_err(|error| to_napi_error(env, error))?;
