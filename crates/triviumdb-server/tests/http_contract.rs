@@ -2100,7 +2100,7 @@ async fn 读语句带mutation标志走读路径而不是500() {
 }
 
 #[tokio::test]
-async fn 大节点ID从详情到批量读取和查询投影保持精确() {
+async fn http_preserves_large_node_ids_across_writes_reads_and_projections() {
     let (app, _directory) = app("wide-http-id").await;
     let id = 9_007_199_254_740_993u64;
     let inserted = request(app.clone(), "POST", "/v1/transactions", Some(serde_json::json!({
@@ -2146,7 +2146,7 @@ async fn 大节点ID从详情到批量读取和查询投影保持精确() {
 }
 
 #[tokio::test]
-async fn 空投影和CRLF诊断保留原始结构() {
+async fn empty_projection_and_crlf_diagnostics_preserve_source() {
     let (app, _directory) = app("empty-columns-and-crlf").await;
     let query = serde_json::json!({"query":"FIND {x:1} RETURN x AS field"});
     let prepared = json(
@@ -2211,7 +2211,7 @@ async fn 空投影和CRLF诊断保留原始结构() {
 }
 
 #[tokio::test]
-async fn 零容量不签发Prepared句柄() {
+async fn zero_prepared_capacity_rejects_registration() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("no-prepare.tdb");
     let (app, shutdown) = triviumdb_server::build_app_with_shutdown(ServerConfig {

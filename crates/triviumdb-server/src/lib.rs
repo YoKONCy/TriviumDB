@@ -888,7 +888,7 @@ fn encode_bounded_json(
 
 #[cfg(test)]
 #[test]
-fn JSON编码达到字节上限后停止遍历结果() {
+fn json_encoding_stops_at_byte_limit() {
     use serde::ser::{Serialize, SerializeSeq, Serializer};
     use std::cell::Cell;
 
