@@ -25,6 +25,34 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn legacy_linux_alignment_reads_the_pinned_file_at_a_nonzero_offset() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileExt;
+
+    let fixture = Fixture::new();
+    let direct = open_linux_direct(&fixture.file()).unwrap();
+    let alignment = alignment::xfs_or_conservative(&direct).unwrap();
+
+    // SAFETY: fstatfs独占写入POD，文件与返回结构均在调用中存活。
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::fstatfs(direct.as_raw_fd(), &mut fs) }, 0);
+    if fs.f_type == libc::XFS_SUPER_MAGIC {
+        assert!(alignment.detected);
+        assert!(alignment.offset >= fs.f_bsize as usize);
+    } else {
+        assert!(!alignment.detected);
+        assert_eq!(alignment.offset, WINDOW_LIMIT);
+    }
+    let grain = alignment.offset;
+    let buffer = Aligned::new(grain, alignment.memory).unwrap();
+    // SAFETY: 分配已对齐且覆盖完整切片，本测试独占缓冲直到同步读取完成。
+    let bytes = unsafe { std::slice::from_raw_parts_mut(buffer.ptr, grain) };
+    assert_eq!(direct.read_at(bytes, grain as u64).unwrap(), grain);
+    assert_eq!(bytes, &fixture.bytes[grain..2 * grain]);
+}
+
 #[test]
 fn native_window_reuses_complete_bytes_and_invalidates_after_short_read() {
     let fixture = Fixture::new();

@@ -310,7 +310,7 @@ Hot 模式把所选编码的记录预热到内存，两种驻留策略采用相�
 
 Linux 直读使用同一已打开文件的 `/proc/self/fd` 路径和 `O_DIRECT`。默认原生直读走内核 AIO，异常时通过 `io_destroy` 排空。显式设置 `io_mode="io_uring"` 后，单调度线程注册只读文件和固定缓冲池，经 `READ_FIXED` 批量读取。该模式需要一个空闲 Runtime I/O 线程、内核和文件系统直读支持，以及足够的 `RLIMIT_MEMLOCK`。初始化、注册或探测失败保留系统错误。[Linux AIO 排空契约](https://man7.org/linux/man-pages/man2/io_destroy.2.html)、[固定缓冲 API](https://docs.rs/io-uring/latest/io_uring/struct.Submitter.html)。
 
-Direct I/O 从固定代际的文件句柄查询对齐。Windows 使用文件存储扇区信息及文件内存对齐要求，Linux 使用 `statx(STATX_DIOALIGN)` 并结合文件系统块大小选择读取粒度。缺少查询能力时使用 64 KiB 保守对齐，再执行真实原生读取探测。当前后端支持最大 64 KiB 的文件偏移和缓冲地址对齐。跨窗口、文件末尾及大记录按逻辑长度返回完整内容。[Windows 存储信息](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_storage_info)、[Windows 对齐信息](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_alignment_info)、[Linux statx](https://man7.org/linux/man-pages/man2/statx.2.html)。
+Direct I/O 从固定代际的文件句柄查询对齐。Windows 使用文件存储扇区信息及文件内存对齐要求。Linux 优先使用 `statx(STATX_DIOALIGN)`。旧内核的 XFS 可通过 `XFS_IOC_DIOINFO` 取得文件的最小传输粒度和内存对齐，再结合文件系统块大小确定读取窗口。缺少对齐信息时使用 64 KiB 保守对齐。后端安装前执行实际原生读取探测。当前支持最大 64 KiB 的偏移和缓冲地址对齐，跨窗口、文件末尾及大记录按逻辑长度返回内容。[Windows 存储信息](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_storage_info)、[Windows 对齐信息](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_alignment_info)、[Linux statx](https://man7.org/linux/man-pages/man2/statx.2.html)、[XFS 对齐接口](https://man7.org/linux/man-pages/man2/open.2.html#NOTES)。
 
 IOCP 和 `io_uring` 按设备对齐分配固定缓冲。小槽位有 `io_depth` 个，每个槽位取文件偏移对齐和内存对齐的较大值。小槽位低于 64 KiB 时，再预留 `ceil(io_depth / 8)` 个 64 KiB 的大槽位。每批在途请求受 `io_depth` 限制，大槽位满时分波处理。Windows 对超过 64 KiB 的对齐范围按传输预算临时分配，Linux 分成至多 64 KiB 的读取。以 4 KiB 对齐、深度 256 为例，固定池的载荷约为 3 MiB。缓冲在完成后归还，取消等已提交的读取排空后返回。关闭时排空队列并等待调度线程退出，再释放文件和线程额度。
 
