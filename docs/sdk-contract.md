@@ -47,7 +47,7 @@
 | 文本与属性索引 | 数据库登记、重建、创建、删除、查找与统计方法；`index::text::TextIndexDocument`，这些方法签名引用的 `index::property` 配置和统计类型 | 登记正文与关键词、普通及唯一索引定义、查询结果 |
 | TQL | 数据库 `tql`、`tql_values`、`tql_nodes`、`query`、写查询与 Prepared 方法；其签名引用的 `TqlValue`、结果、`QueryControl`、Prepared 与参数类型 | 查询值、绑定、定位、计划解释、执行与取消 |
 | 图计算 | 数据库图算法方法及其配置、结果类型；根导出的 Reachability/Subgraph 类型、`GraphStats`、`GraphIntegrityReport`、`GraphRepairReport` | 遍历预算、路径、修复与图算法结果 |
-| 压缩运行时 | 数据库 QuIVer 配置、切换、关闭和统计方法；`sdk::quiver::request` 及这些方法引用的配置和结果类型 | 热内存/SSD、缓存字节预算、中心化 INT8/INT4、FP32/INT8/INT4 查询 |
+| 压缩运行时 | 数据库 QuIVer 配置、切换、关闭和统计方法；`sdk::quiver::{request, measure_io, QuiverIoStats}` 及这些方法引用的配置和结果类型 | 热内存/SSD、缓存字节预算、请求级 I/O、中心化 INT8/INT4、FP32/INT8/INT4 查询 |
 | Hook | `SearchHook`、`HookContext`、`CompositeHook`、`NoopHook`、`FfiHook` 与已声明 FFI ABI | 同步回调、错误传播、重入拒绝、动态库所有权 |
 | 资源与维护 | `ResourceRuntime`、`ResourceLimits`、`ResourceStats`、`ResourceFailure`、`ResourceBudgetDetails`；实例统计、关闭和维护状态类型 | 实例/宿主预算、后台工作、排空、关闭、内存与维护观测 |
 | 快照与代际 | 数据库快照方法；`storage::snapshot` 的 `verify_snapshot`、`restore_snapshot` 及其 runtime 变体和返回类型；根导出的 `GenerationStore`、`CurrentGeneration`、`GenerationReader` | 完整文件组、目标排他发布、Immutable 代际与读取租约 |

@@ -82,7 +82,11 @@ fn batched_reranking_merges_reads_and_preserves_independent_scores() {
     ] {
         let directory = TestDir::new("ssd_batch");
         let path = directory.0.join("index.qssd");
-        let runtime = runtime();
+        let runtime = ResourceRuntime::new(crate::ResourceLimits {
+            max_threads: 3,
+            ..Default::default()
+        })
+        .unwrap();
         let (index, vectors) = fixture(129);
         publish(&path, &index, &vectors, SOURCE, &runtime);
         let mut reader = QuiverRuntime::open(
@@ -92,13 +96,22 @@ fn batched_reranking_merges_reads_and_preserves_independent_scores() {
             runtime.clone(),
         )
         .unwrap();
-        reader
-            .configure(QuiverRuntimeOptions {
-                io_mode: mode,
-                io_depth: 2,
-                ..Default::default()
-            })
-            .unwrap();
+        let options = QuiverRuntimeOptions {
+            io_mode: mode,
+            io_depth: 2,
+            ..Default::default()
+        };
+        #[cfg(windows)]
+        if mode == IoMode::Direct {
+            let baseline = reader.stats().reserved_bytes;
+            reader.set_database_capacity(baseline + crate::storage::quiver_io::STARTUP_BYTES);
+            assert_eq!(reader.configure(options).unwrap_err().code(), "QueueFull");
+            assert_eq!(reader.stats().reserved_bytes, baseline);
+            assert_eq!(reader.stats().io_fixed_buffer_bytes, 0);
+            assert_eq!(runtime.stats().allocated_worker_threads, 0);
+            reader.set_database_capacity(0);
+        }
+        reader.configure(options).unwrap();
         let batch = reader.load_records(&[3, 1, 0, 2]).unwrap();
         let query = Int8Query::new(&vectors[1]).unwrap();
         assert_eq!(
@@ -110,6 +123,15 @@ fn batched_reranking_merges_reads_and_preserves_independent_scores() {
         );
         drop(batch);
         let stats = reader.stats();
+        #[cfg(windows)]
+        if mode == IoMode::Direct {
+            let grain = stats
+                .io_alignment_bytes
+                .max(stats.io_memory_alignment_bytes);
+            let large = if grain < 64 * 1024 { 64 * 1024 } else { 0 };
+            assert_eq!(stats.io_fixed_buffer_bytes, 2 * grain + large);
+            assert_eq!(runtime.stats().allocated_worker_threads, 1);
+        }
         assert_eq!(stats.cold_read_calls, 4);
         assert_eq!(
             stats.cold_read_bytes,
@@ -126,11 +148,75 @@ fn batched_reranking_merges_reads_and_preserves_independent_scores() {
             .collect::<Vec<_>>();
         assert_eq!(scores, [-1., -1., 1., 1.]);
         assert_eq!(reader.stats().cold_read_calls - before, 2);
+        reader
+            .configure(QuiverRuntimeOptions {
+                residency: Residency::Hot,
+                ..options
+            })
+            .unwrap();
+        assert_eq!(reader.stats().io_fixed_buffer_bytes, 0);
+        assert_eq!(runtime.stats().allocated_worker_threads, 0);
+        assert_eq!(reader.search(&vectors[1], &config()).unwrap(), expected());
+        reader.configure(options).unwrap();
+        assert_eq!(
+            reader.stats().io_fixed_buffer_bytes,
+            stats.io_fixed_buffer_bytes
+        );
         reader.close();
+        assert_eq!(reader.stats().io_fixed_buffer_bytes, 0);
         std::fs::remove_file(path).unwrap();
         drop(pinned);
         assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
     }
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn scores_ready_rows_before_unrelated_read_completion() {
+    use crate::test_hooks::{ConcurrencyPoint, pause_at};
+    let directory = TestDir::new("ssd_batch_ready");
+    let path = directory.0.join("index.qssd");
+    let runtime = runtime();
+    let (index, vectors) = fixture(129);
+    let metadata = publish(&path, &index, &vectors, SOURCE, &runtime);
+    let mut reader =
+        QuiverRuntime::open(&path, SOURCE, QuiverArtifactOptions::default(), runtime).unwrap();
+    reader
+        .configure(QuiverRuntimeOptions {
+            cache_bytes: 2 * (metadata.record_bytes + 512),
+            io_depth: 1,
+            ..Default::default()
+        })
+        .unwrap();
+    drop(reader.load_records(&[0]).unwrap());
+    let query = Int8Query::new(&vectors[1]).unwrap();
+    let completed = pause_at(ConcurrencyPoint::QuiverColdIoCompleted);
+    let (send, ready) = std::sync::mpsc::sync_channel(1);
+    std::thread::scope(|scope| {
+        let request = scope.spawn(move || {
+            let rows = reader
+                .load_records_routed_during(
+                    &[0, 1],
+                    reader.routing(None).unwrap(),
+                    None,
+                    |loaded| {
+                        assert!(loaded[1].is_none());
+                        send.send(loaded[0].as_ref().unwrap().score(&query).unwrap())
+                            .unwrap();
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            rows.iter()
+                .map(|row| row.score(&query).unwrap())
+                .collect::<Vec<_>>()
+        });
+        completed.wait_until_arrived();
+        let cached_score = ready.recv();
+        completed.release();
+        assert_eq!(cached_score.unwrap(), 1.);
+        assert_eq!(request.join().unwrap(), [1., -1.]);
+    });
 }
 
 #[test]
@@ -268,18 +354,21 @@ fn cancelled_multi_range_batch_drains_every_submission_and_releases_pending_rows
     .unwrap();
     let worker_context = context.clone();
     let worker_reader = reader.clone();
-    let worker =
-        std::thread::spawn(move || worker_context.run(|| worker_reader.load_records(&[0, 3])));
+    let worker = std::thread::spawn(move || {
+        crate::sdk::quiver::measure_io(|| {
+            worker_context.run(|| worker_reader.load_records(&[0, 3]))
+        })
+    });
     submitted.wait_until_arrived();
     completed.wait_until_arrived();
     context.cancel();
     drop(submitted);
     drop(completed);
-    assert_eq!(
-        worker.join().unwrap().err().unwrap().code(),
-        "TDB_QUERY_CANCELLED"
-    );
-    assert_eq!(reader.stats().physical_read_calls, 2);
+    let (result, io) = worker.join().unwrap();
+    assert_eq!(result.err().unwrap().code(), "TDB_QUERY_CANCELLED");
+    assert_eq!(io.cold_read_calls, 0);
+    assert_eq!(io.physical_read_calls, 2);
+    assert_eq!(io.physical_read_bytes, reader.stats().physical_read_bytes);
     assert_eq!(reader.stats().reserved_bytes, baseline);
     assert!(
         crate::database::lock_or_recover(&reader.cache)
@@ -548,19 +637,41 @@ fn zero_cache_coalesces_pending_reads() {
         path.to_str().unwrap(),
     );
     let owner_reader = reader.clone();
-    let owner = std::thread::spawn(move || owner_reader.row(9));
+    let owner = std::thread::spawn(move || crate::sdk::quiver::measure_io(|| owner_reader.row(9)));
     owner_gate.wait_until_arrived();
     let waiter_gate = pause_at(ConcurrencyPoint::QuiverColdCoalesced);
     let waiter_reader = reader.clone();
-    let waiter = std::thread::spawn(move || waiter_reader.row(9));
+    let waiter =
+        std::thread::spawn(move || crate::sdk::quiver::measure_io(|| waiter_reader.row(9)));
     waiter_gate.wait_until_arrived();
     drop(owner_gate);
-    let owned = owner.join().unwrap().unwrap();
+    let (owned, owner_io) = owner.join().unwrap();
     drop(waiter_gate);
-    let waited = waiter.join().unwrap().unwrap();
+    let (waited, waiter_io) = waiter.join().unwrap();
+    use crate::sdk::quiver::QuiverIoStats;
+    let record_bytes = reader.metadata.record_bytes as u64;
+    assert_eq!(
+        owner_io,
+        QuiverIoStats {
+            cold_read_calls: 1,
+            cold_read_bytes: record_bytes,
+            physical_read_calls: 1,
+            physical_read_bytes: record_bytes,
+            ..Default::default()
+        }
+    );
+    assert_eq!(
+        waiter_io,
+        QuiverIoStats {
+            coalesced_row_reads: 1,
+            ..Default::default()
+        }
+    );
     assert_eq!(reader.stats().cold_read_calls, 1);
     assert_eq!(reader.stats().cache_used_bytes, 0);
     assert_eq!(reader.stats().coalesced_reads, 1);
+    let owned = owned.unwrap();
+    let waited = waited.unwrap();
     assert_eq!(
         owned.score(&Int8Query::new(&vectors[1]).unwrap()).unwrap(),
         1.

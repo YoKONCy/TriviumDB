@@ -245,9 +245,12 @@ fn 文档压缩的预算拒绝发生于取数前并可完整重试() {
         hits_per_document: 1,
         ..Default::default()
     };
-    let full = db
-        .search_documents_vector(&query, &query_vector::<f32>(), &options())
-        .unwrap();
+    let (full, io) = triviumdb::sdk::quiver::measure_io(|| {
+        db.search_documents_vector(&query, &query_vector::<f32>(), &options())
+    });
+    let full = full.unwrap();
+    assert!(io.cold_read_calls >= 3);
+    assert!(io.physical_read_calls > 0);
     check(
         &full,
         case,
@@ -264,9 +267,11 @@ fn 文档压缩的预算拒绝发生于取数前并可完整重试() {
         let mut limited = query.clone();
         limited.limits.max_vector_scores = vector_limit;
         limited.limits.max_ann_visits = nav_limit;
-        let error = db
-            .search_documents_vector(&limited, &query_vector::<f32>(), &options())
-            .unwrap_err();
+        let (result, io) = triviumdb::sdk::quiver::measure_io(|| {
+            db.search_documents_vector(&limited, &query_vector::<f32>(), &options())
+        });
+        let error = result.unwrap_err();
+        assert_eq!(io, Default::default());
         assert_eq!(error.code(), "QueueFull");
         assert_eq!(error.details()["resource"], resource);
         let after = db.quiver_stats().unwrap().unwrap();

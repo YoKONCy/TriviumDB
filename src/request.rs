@@ -2,6 +2,7 @@
 
 use crate::error::WriteErrorInfo;
 use crate::query::tql_executor::QueryControl;
+use crate::storage::quiver_io::{IoMeter, QuiverIoStats};
 use crate::{Result, TriviumError};
 use std::cell::RefCell;
 use std::sync::{
@@ -135,12 +136,38 @@ pub(crate) fn control() -> Option<QueryControl> {
     })
 }
 
+pub(crate) fn quiver_io_meter() -> Option<Arc<IoMeter>> {
+    ACTIVE.with(|active| {
+        active
+            .borrow()
+            .last()
+            .and_then(|context| context.quiver_io_meter.clone())
+    })
+}
+
+pub(crate) fn measure_quiver_io<T>(
+    operation: impl FnOnce() -> Result<T>,
+) -> (Result<T>, QuiverIoStats) {
+    let meter = Arc::new(IoMeter::default());
+    let mut context = current().unwrap_or_else(|| RequestContext {
+        request_id: "quiver_io".into(),
+        control: QueryControl::default(),
+        write: false,
+        payload_meter: None,
+        quiver_io_meter: None,
+    });
+    context.quiver_io_meter = Some(meter.clone());
+    let result = context.run(operation);
+    (result, meter.snapshot())
+}
+
 #[derive(Clone)]
 pub struct RequestContext {
     request_id: String,
     control: QueryControl,
     write: bool,
     payload_meter: Option<Arc<PayloadMeter>>,
+    quiver_io_meter: Option<Arc<IoMeter>>,
 }
 
 impl RequestContext {
@@ -185,6 +212,9 @@ impl RequestContext {
                 if context.payload_meter.is_none() {
                     context.payload_meter = parent.payload_meter.clone();
                 }
+                if context.quiver_io_meter.is_none() {
+                    context.quiver_io_meter = parent.quiver_io_meter.clone();
+                }
             }
             active
                 .try_reserve(1)
@@ -218,6 +248,7 @@ impl RequestContext {
             control,
             write,
             payload_meter: None,
+            quiver_io_meter: None,
         })
     }
 

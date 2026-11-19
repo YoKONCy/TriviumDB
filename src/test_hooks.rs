@@ -12,6 +12,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 pub enum ConcurrencyPoint {
     QuiverColdBeforeRead,
     QuiverColdCoalesced,
+    QuiverColdPageCoalesced,
     QuiverColdIoCompleted,
     QuiverColdBatchSubmitted,
     QuiverColdAfterRead,

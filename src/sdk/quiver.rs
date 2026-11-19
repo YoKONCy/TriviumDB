@@ -4,6 +4,13 @@ use crate::index::quiver::{QuIVerSearchConfig, runtime::QuiverRuntimeOptions};
 use crate::{Database, Result, TriviumError, VectorType};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+pub use crate::storage::quiver_io::QuiverIoStats;
+
+/// 计量一次同步请求的压缩 QuIVer 冷读。即使操作失败，仍返回已完成的计量。
+pub fn measure_io<T>(operation: impl FnOnce() -> Result<T>) -> (Result<T>, QuiverIoStats) {
+    crate::request::measure_quiver_io(operation)
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
@@ -16,6 +23,8 @@ enum Command {
         top_k: usize,
         ef_search: usize,
         rerank_limit: Option<usize>,
+        #[serde(default)]
+        profile_io: bool,
     },
     Stats {},
     Close {},
@@ -32,8 +41,14 @@ struct Hit {
 #[serde(untagged)]
 enum Response {
     Stats(Option<Box<crate::index::quiver::runtime::QuiverRuntimeStats>>),
-    Hits { hits: Vec<Hit> },
-    Collected { removed: usize },
+    Hits {
+        hits: Vec<Hit>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        io: Option<QuiverIoStats>,
+    },
+    Collected {
+        removed: usize,
+    },
     Closed,
 }
 
@@ -75,6 +90,7 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
             top_k,
             ef_search,
             rerank_limit,
+            profile_io,
         } => {
             let rows = crate::database::read_or_recover(&db.memtable).node_count();
             let output_bytes = top_k.min(rows).checked_mul(256).ok_or_else(|| {
@@ -83,14 +99,18 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
                 }
             })?;
             output_workspace = Some(runtime.reserve_workspace(output_bytes)?);
-            let hits = db.search_quiver(
-                &vector,
-                &QuIVerSearchConfig {
-                    top_k,
-                    ef_search,
-                    rerank_limit,
-                },
-            )?;
+            let config = QuIVerSearchConfig {
+                top_k,
+                ef_search,
+                rerank_limit,
+            };
+            let search = || db.search_quiver(&vector, &config);
+            let (hits, io) = if profile_io {
+                let (hits, io) = measure_io(search);
+                (hits?, Some(io))
+            } else {
+                (search()?, None)
+            };
             Response::Hits {
                 hits: hits
                     .into_iter()
@@ -99,6 +119,7 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
                         score,
                     })
                     .collect(),
+                io,
             }
         }
         Command::Stats {} => Response::Stats(db.quiver_stats()?.map(Box::new)),
