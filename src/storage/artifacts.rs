@@ -15,7 +15,7 @@ pub(crate) const CHECKPOINT_SUFFIXES: [&str; 10] = [
 ];
 
 /// 统一容器中的组件顺序及其历史独立文件名。
-pub(crate) const INDEX_SUFFIXES: [&str; 7] = [
+pub(crate) const INDEX_SUFFIXES: [&str; 9] = [
     ".quiver",
     ".quiver.meta",
     ".text",
@@ -23,6 +23,8 @@ pub(crate) const INDEX_SUFFIXES: [&str; 7] = [
     ".pidx",
     ".gidx",
     ".qssd",
+    ".pelorus.meta",
+    ".pelorus",
 ];
 
 /// 固定制品及其暂存、代际名称族。用于路径保护，不能据此无条件删除文件。

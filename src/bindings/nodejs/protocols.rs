@@ -59,6 +59,14 @@ impl TriviumDB {
             .map_err(|error| to_napi_error(env, error))
     }
 
+    /// 使用共享的双曲索引构建及检索协议。
+    #[napi]
+    pub fn pelorus_request(&self, env: Env, request_json: JsUnknown) -> napi::Result<String> {
+        let request_json = read_string(env, request_json, "requestJson")?;
+        dispatch!(self, db => crate::sdk::pelorus::request(db, &request_json))
+            .map_err(|error| to_napi_error(env, error))
+    }
+
     /// 命名图JSON适配复用Core的成员、独立边、修订及作用域契约。
     #[napi]
     pub fn graph_request(&mut self, env: Env, request_json: JsUnknown) -> napi::Result<String> {

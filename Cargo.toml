@@ -57,6 +57,7 @@ usearch = { version = "2.25.1", default-features = false, optional = true }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 html5gum = { version = "0.9.1", default-features = false }
 rpds = { version = "1.2.1", default-features = false }
+tempfile = "3.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

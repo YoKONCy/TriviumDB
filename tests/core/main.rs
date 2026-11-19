@@ -21,6 +21,7 @@ mod index_maintenance;
 mod lifecycle_resources;
 mod management;
 mod named_graphs;
+mod pelorus;
 mod proptest_core;
 mod public_api_alignment;
 mod query_cancellation;

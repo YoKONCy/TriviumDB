@@ -84,6 +84,8 @@ TQL 的文档来源、命名图作用域、文本/向量/图算子共享 Planner
 
 文档、命名图与 QuIVer JSON 请求的操作名、字段和响应由 `sdk` 适配层维护。Console 数据协议的版本、字符串 ID、权限、条件写入与回执沿现有协议维护；HTML 样式和界面结构沿前端发布流程维护。
 
+[Pelorus](pelorus.md) 提供独立的双曲索引配置、驻留切换、单次和批量检索。Rust 暴露类型化入口，Python 与 Node 共用 JSON 协议。TQL 保留命名图作用域及同度量重排。
+
 文档快照及片段标签统一使用结构 2。普通文档与解析文档共享这一输出结构，已有持久化结构 1 沿外部入口升级，正文、范围、节点身份、文档修订与回执保持迁移契约。
 
 普通打开只接受[当前格式家族](storage-format.md)。历史身份返回 `TDB_MIGRATION_REQUIRED`，`details` 包含 `component`、`found`、`current`、`migration_entrypoint`。应用统一通过 [`scripts/migrate.py`](migration.md)显式发起迁移；当前格式的 WAL 恢复和文件组中断恢复继续由内核执行。

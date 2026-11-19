@@ -104,6 +104,8 @@ pub enum PhysicalOperator {
     DocumentAnnSearch,
     ExactVectorSearch,
     QuiverVectorSearch,
+    PelorusVectorSearch,
+    PelorusExactSearch,
     NodeScan,
     PropertyHashLookup,
     PropertyOrderedLookup,
@@ -1072,6 +1074,8 @@ fn estimate_source_for(operator: &PhysicalOperator) -> EstimateSource {
     match operator {
         PhysicalOperator::ExactVectorSearch
         | PhysicalOperator::QuiverVectorSearch
+        | PhysicalOperator::PelorusVectorSearch
+        | PhysicalOperator::PelorusExactSearch
         | PhysicalOperator::NodeScan
         | PhysicalOperator::ScopeProjection
         | PhysicalOperator::RankAlreadyOrdered => EstimateSource::Exact,
@@ -1124,6 +1128,11 @@ fn source_rows(query: &TqlQuery, node_count: usize) -> usize {
             .unwrap_or(node_count)
             .min(node_count),
         QueryEntry::Search { top_k, .. } => (*top_k).min(node_count),
+        QueryEntry::Pelorus { request } => crate::query::tql_pelorus::parse(request)
+            .ok()
+            .and_then(|request| request.options.top_k)
+            .unwrap_or_else(|| crate::index::pelorus::PelorusSearchOptions::default().top_k)
+            .min(node_count),
         QueryEntry::Text { clause } => clause.top_k.min(node_count),
         QueryEntry::Find { .. } | QueryEntry::Match { .. } | QueryEntry::OptionalMatch { .. } => {
             node_count
@@ -1364,13 +1373,23 @@ fn source_alternative<T: VectorType>(
         QueryEntry::Documents { request } => {
             match crate::query::tql_documents::DocumentRequest::<T>::parse(request)
                 .ok()
-                .and_then(|request| request.vector_options().cloned())
-            {
+                .and_then(|request| {
+                    request
+                        .vector_options()
+                        .cloned()
+                        .map(|options| (options, request.pelorus()))
+                }) {
                 None => PhysicalOperator::DocumentTextSearch,
-                Some(options)
+                Some((options, pelorus))
                     if options.strategy == crate::document::DocumentVectorStrategy::Exact
                         || crate::vector::is_binary_vector::<T>()
-                        || mt.quiver().is_none() =>
+                        || if pelorus {
+                            mt.pelorus
+                                .as_ref()
+                                .is_none_or(|state| state.index.is_none())
+                        } else {
+                            mt.quiver().is_none()
+                        } =>
                 {
                     PhysicalOperator::DocumentExactSearch
                 }
@@ -1379,6 +1398,20 @@ fn source_alternative<T: VectorType>(
         }
         QueryEntry::Search { .. } if mt.quiver().is_some() => PhysicalOperator::QuiverVectorSearch,
         QueryEntry::Search { .. } => PhysicalOperator::ExactVectorSearch,
+        QueryEntry::Pelorus { request } => {
+            let exact = crate::query::tql_pelorus::parse(request)
+                .is_ok_and(|request| request.options.exact);
+            if !exact
+                && mt
+                    .pelorus
+                    .as_ref()
+                    .is_some_and(|state| state.index.is_some())
+            {
+                PhysicalOperator::PelorusVectorSearch
+            } else {
+                PhysicalOperator::PelorusExactSearch
+            }
+        }
         QueryEntry::Find { filter } => match filter {
             crate::filter::Filter::Eq(field, _) if mt.has_property_index(field) => {
                 PhysicalOperator::PropertyHashLookup
@@ -1399,7 +1432,9 @@ fn source_alternative<T: VectorType>(
     };
     let approximate = matches!(
         operator,
-        PhysicalOperator::QuiverVectorSearch | PhysicalOperator::DocumentAnnSearch
+        PhysicalOperator::QuiverVectorSearch
+            | PhysicalOperator::PelorusVectorSearch
+            | PhysicalOperator::DocumentAnnSearch
     );
     let text_source = matches!(
         operator,
@@ -1535,14 +1570,18 @@ fn properties_for(operator: &PhysicalOperator) -> PhysicalProperties {
             ScoreProperty::Document,
             PathProperty::Unavailable,
         ),
-        PhysicalOperator::ExactVectorSearch | PhysicalOperator::ExactRerankHeap => (
+        PhysicalOperator::ExactVectorSearch
+        | PhysicalOperator::PelorusExactSearch
+        | PhysicalOperator::ExactRerankHeap => (
             OrderingProperty::SimilarityDesc,
             ExactnessProperty::Exact,
             MaterializationProperty::Materialized,
             ScoreProperty::ExactSimilarity,
             PathProperty::Unavailable,
         ),
-        PhysicalOperator::QuiverVectorSearch | PhysicalOperator::AnnExactRerank => (
+        PhysicalOperator::QuiverVectorSearch
+        | PhysicalOperator::PelorusVectorSearch
+        | PhysicalOperator::AnnExactRerank => (
             OrderingProperty::SimilarityDesc,
             ExactnessProperty::Approximate,
             MaterializationProperty::Materialized,

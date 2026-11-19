@@ -64,6 +64,8 @@ enum Command<T: VectorType> {
         vector: Vec<T>,
         #[serde(default)]
         options: DocumentVectorOptions,
+        #[serde(default)]
+        pelorus: bool,
     },
     SearchHybrid {
         query: DocumentSearchQuery,
@@ -71,6 +73,8 @@ enum Command<T: VectorType> {
         vector: Vec<T>,
         #[serde(default)]
         options: DocumentHybridOptions,
+        #[serde(default)]
+        pelorus: bool,
     },
     Context {
         query: DocumentContextQuery,
@@ -241,12 +245,33 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
                 query,
                 vector,
                 options,
-            } => encode(db, &db.search_documents_vector(&query, &vector, &options)?),
+                pelorus,
+            } => encode(
+                db,
+                &if pelorus {
+                    db.search_documents_pelorus(&query, &vector, &options, None)?
+                } else {
+                    db.search_documents_vector(&query, &vector, &options)?
+                },
+            ),
             Command::SearchHybrid {
                 query,
                 vector,
                 options,
-            } => encode(db, &db.search_documents_hybrid(&query, &vector, &options)?),
+                pelorus,
+            } => encode(
+                db,
+                &if pelorus {
+                    db.search_documents_pelorus(
+                        &query,
+                        &vector,
+                        &options.vector,
+                        Some(options.text_weight),
+                    )?
+                } else {
+                    db.search_documents_hybrid(&query, &vector, &options)?
+                },
+            ),
             Command::Context { query } => encode(db, &db.document_context(&query)?),
             Command::ClearIndex => {
                 db.clear_document_index()?;

@@ -483,6 +483,7 @@ pub struct PipelineContext<'a, T: VectorType> {
     pub(crate) workspace_limit: usize,
     pub(crate) database_memory_limit: usize,
     pub(crate) graph_scope: Option<Arc<crate::graph::view::ScopedGraph>>,
+    pub(crate) pelorus_curvature: Option<f64>,
     profile: bool,
     stages: usize,
     vector_read_bytes: usize,
@@ -505,6 +506,7 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
             workspace_limit: 0,
             database_memory_limit: 0,
             graph_scope: None,
+            pelorus_curvature: None,
             profile,
             stages: 0,
             vector_read_bytes: 0,
@@ -1401,6 +1403,10 @@ impl<T: VectorType> PipelineOperator<T> for ExactRerank<T> {
     fn apply(&self, mut input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
         crate::vector::validate_query_vector(&self.query, context.memtable.dim())?;
         context.charge_vectors(input.len())?;
+        let curvature = context.pelorus_curvature;
+        let query_factor = curvature
+            .map(|c| crate::index::pelorus::boundary_factor(c, &self.query))
+            .transpose()?;
         let threads = context.budget.parallelism.threads(input.len());
         let control = context.graph_request()?.control().clone();
         let score_row = |mut rows: Vec<NodeRow>, mut row: NodeRow| -> Result<Vec<NodeRow>> {
@@ -1408,7 +1414,15 @@ impl<T: VectorType> PipelineOperator<T> for ExactRerank<T> {
             if let Some(vector) = context.memtable.get_vector(row.id) {
                 row.document_score = None;
                 row.similarity = Some(ScoreValue {
-                    value: f64::from(T::similarity(&self.query, vector)),
+                    value: match (curvature, query_factor) {
+                        (Some(curvature), Some(factor)) => -crate::index::pelorus::distance(
+                            curvature,
+                            &self.query,
+                            factor,
+                            vector,
+                        )?,
+                        _ => f64::from(T::similarity(&self.query, vector)),
+                    },
                     kind: ScoreKind::Exact,
                 });
                 rows.push(row);
@@ -2841,6 +2855,7 @@ impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
             .saturating_mul(2)
             .saturating_add(256)
             .saturating_add(input.len().saturating_mul(8));
+        let pelorus_curvature = context.pelorus_curvature;
         let mut admit = |projected: crate::graph::budget::TraversalMetrics| -> Result<()> {
             crate::graph::budget::check_control(&control)?;
             let dimension = if projected.visited_nodes > traversal.max_visited_nodes {
@@ -2906,10 +2921,10 @@ impl<T: VectorType> PipelineOperator<T> for SaPprOperator {
             .iter()
             .filter(|row| graph.contains(row.id))
             .map(|row| {
-                let score = row
-                    .similarity
-                    .or(row.graph_score)
-                    .map_or(1.0, |score| score.value.max(0.0)) as f32;
+                let score = match (pelorus_curvature, row.similarity) {
+                    (Some(_), Some(score)) => 1.0 / (1.0 + (-score.value).max(0.0)),
+                    _ => row.similarity.or(row.graph_score).map_or(1.0, |score| score.value.max(0.0)),
+                } as f32;
                 if !score.is_finite() {
                     return Err(TriviumError::QueryExecution(
                         "SA-PPR 种子分数超出有限 f32 范围 (SA-PPR seed score exceeds the finite f32 range)".into(),

@@ -616,6 +616,8 @@ pub struct MemTable<T: VectorType> {
     //    冷热分离：QuIVer 内部 BQ sigs + 图拓扑 = hot，f32 向量 = cold
     //    事务安全：事务 commit 期间暂停 QuIVer 同步，commit 后由事务层统一同步
     quiver_index: Option<QuIVer>,
+    pub(crate) pelorus: Option<crate::index::pelorus::PelorusState>,
+    pub(crate) pelorus_policy: crate::database::MissingIndexPolicy,
     pub(crate) quiver_ssd: Option<crate::database::quiver_runtime::DatabaseQuiverRuntime>,
     auto_build_quiver: bool,
     /// 事务同步暂停标记：为 true 时 insert/delete/update_vector 不触发 QuIVer 增量操作
@@ -698,6 +700,8 @@ impl<T: VectorType> MemTable<T> {
             fast_tags: Vec::new(),
             free_slots: Vec::new(),
             quiver_index: None,
+            pelorus: None,
+            pelorus_policy: crate::database::MissingIndexPolicy::Fallback,
             quiver_ssd: None,
             auto_build_quiver: true,
             quiver_sync_paused: false,
@@ -766,6 +770,8 @@ impl<T: VectorType> MemTable<T> {
             fast_tags: Vec::new(),
             free_slots: Vec::new(),
             quiver_index: None,
+            pelorus: None,
+            pelorus_policy: crate::database::MissingIndexPolicy::Fallback,
             quiver_ssd: None,
             auto_build_quiver: true,
             quiver_sync_paused: false,
@@ -839,6 +845,13 @@ impl<T: VectorType> MemTable<T> {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clear();
         }
+    }
+
+    fn mark_vector_changed(&mut self, id: NodeId) {
+        if let Some(pelorus) = &mut self.pelorus {
+            pelorus.record_change(id);
+        }
+        self.mark_changed(true);
     }
 
     fn rebuild_graph_stats_state(&mut self) {
@@ -1015,7 +1028,7 @@ impl<T: VectorType> MemTable<T> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .node_added(id);
         self.mark_graph_changed();
-        self.mark_changed(true);
+        self.mark_vector_changed(id);
         Ok(())
     }
 
@@ -1139,7 +1152,7 @@ impl<T: VectorType> MemTable<T> {
             }
         }
 
-        self.mark_changed(true);
+        self.mark_vector_changed(id);
         self.next_id = next_id;
         Ok(id)
     }
@@ -1211,7 +1224,7 @@ impl<T: VectorType> MemTable<T> {
             }
         }
 
-        self.mark_changed(true);
+        self.mark_vector_changed(id);
         Ok(())
     }
 
@@ -1222,7 +1235,15 @@ impl<T: VectorType> MemTable<T> {
                 got: vector.len(),
             });
         }
-        Self::validate_vector(vector)
+        Self::validate_vector(vector)?;
+        self.validate_pelorus_vector(vector)
+    }
+
+    pub(crate) fn validate_pelorus_vector(&self, vector: &[T]) -> Result<()> {
+        if let Some(pelorus) = &self.pelorus {
+            crate::index::pelorus::boundary_factor(pelorus.config.curvature, vector)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_insert_with_id(&self, id: NodeId, vector: &[T]) -> Result<()> {
@@ -1418,6 +1439,7 @@ impl<T: VectorType> MemTable<T> {
             });
         }
         Self::validate_vector(vector)?;
+        self.validate_pelorus_vector(vector)?;
         self.validate_delete(id)
     }
 
@@ -3146,7 +3168,7 @@ impl<T: VectorType> MemTable<T> {
         if !self.document_updates_paused {
             self.document_publications.delete_node(id);
         }
-        self.mark_changed(true);
+        self.mark_vector_changed(id);
 
         Ok(())
     }
@@ -3424,7 +3446,7 @@ impl<T: VectorType> MemTable<T> {
                         );
                     }
                 }
-                self.mark_changed(true);
+                self.mark_vector_changed(id);
                 Ok(())
             }
             None => Err(TriviumError::NodeNotFound(id)),
@@ -3529,11 +3551,17 @@ impl<T: VectorType> MemTable<T> {
     /// v0.4 改进：VecPool 的 mmap 部分不计入堆内存（由 OS PageCache 管理），
     /// 只计算增量层和合并缓存的实际堆分配。
     pub fn estimated_memory_bytes(&self) -> usize {
-        self.base_memory_bytes().saturating_add(
-            self.quiver_ssd
-                .as_ref()
-                .map_or(0, |active| active.reader.reserved_bytes()),
-        )
+        self.base_memory_bytes()
+            .saturating_add(
+                self.quiver_ssd
+                    .as_ref()
+                    .map_or(0, |active| active.reader.reserved_bytes()),
+            )
+            .saturating_add(
+                self.pelorus
+                    .as_ref()
+                    .map_or(0, |state| state.reserved_io_bytes()),
+            )
     }
 
     pub(crate) fn base_memory_bytes(&self) -> usize {
@@ -3568,6 +3596,7 @@ impl<T: VectorType> MemTable<T> {
             + self.pending_text_mutations.capacity() * std::mem::size_of::<PendingTextMutation>()
             + self.pending_text_bytes;
         let property_index_bytes = self.property_indexes.estimated_memory_bytes();
+        let pelorus_bytes = self.pelorus.as_ref().map_or(0, |index| index.heap_bytes());
         vec_bytes
             + self.editing.memory_bytes()
             + self.named_graphs.memory_bytes()
@@ -3577,6 +3606,7 @@ impl<T: VectorType> MemTable<T> {
             + edge_bytes
             + index_bytes
             + quiver_bytes
+            + pelorus_bytes
             + text_bytes
             + property_index_bytes
     }

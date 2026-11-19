@@ -15,6 +15,7 @@ pub(crate) mod document_query;
 mod documents;
 pub(crate) mod editing;
 mod named_graphs;
+mod pelorus;
 pub(crate) mod quiver_runtime;
 pub use crate::sdk::facade;
 /// 离线工具使用的内核检查边界；应用侧 SDK 支持范围见正式接口清单。
@@ -645,6 +646,7 @@ pub struct Database<T: VectorType> {
     /// 生命周期和已进入操作计数；Closing 阻止新操作并等待现有操作退出。
     lifecycle: Arc<(Mutex<LifecycleState>, Condvar)>,
     access_mode: AccessMode,
+    missing_index_policy: MissingIndexPolicy,
 }
 
 pub(crate) struct SearchHandle<T: VectorType> {
@@ -1021,6 +1023,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             });
         }
         memtable.set_text_memory_limit(config.memory_limit);
+        memtable.pelorus_policy = config.missing_index_policy;
         // 恢复必须从第一条记录开始使用调用方预算，避免先填充默认解析缓存再淘汰。
         memtable.begin_loading(config.memory_limit);
         memtable.attach_resources(runtime.clone(), reservation);
@@ -1170,6 +1173,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 Condvar::new(),
             )),
             access_mode: config.access_mode,
+            missing_index_policy: config.missing_index_policy,
         })
     }
 

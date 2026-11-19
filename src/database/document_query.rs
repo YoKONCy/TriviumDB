@@ -911,6 +911,7 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                 vector: query_vector,
                 options,
                 text_weight: None,
+                pelorus: false,
             }),
         )
     }
@@ -927,6 +928,26 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                 vector: query_vector,
                 options: &options.vector,
                 text_weight: Some(options.text_weight),
+                pelorus: false,
+            }),
+        )
+    }
+
+    /// 对文档向量显式使用 Poincaré 度量。传入文本权重时按排名融合。
+    pub fn search_documents_pelorus(
+        &self,
+        query: &DocumentSearchQuery,
+        query_vector: &[T],
+        options: &DocumentVectorOptions,
+        text_weight: Option<f32>,
+    ) -> Result<DocumentSearchResult> {
+        self.search_document_query(
+            query,
+            Some(vector::Recall {
+                vector: query_vector,
+                options,
+                text_weight,
+                pelorus: true,
             }),
         )
     }
@@ -939,10 +960,9 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         self.read_operation(|| {
             let mut mt = read_or_recover(&self.memtable);
             validate_search(&mt, query, recall.as_ref())?;
-            if recall
-                .as_ref()
-                .is_some_and(|recall| recall.options.rerank == DocumentVectorRerank::Compressed)
-            {
+            if recall.as_ref().is_some_and(|recall| {
+                !recall.pelorus && recall.options.rerank == DocumentVectorRerank::Compressed
+            }) {
                 drop(mt);
                 self.prepare_quiver_rerank(true)?;
                 mt = read_or_recover(&self.memtable);

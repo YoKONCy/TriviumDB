@@ -368,6 +368,7 @@ struct WriteCommand {
 }
 
 enum WriteOperation {
+    BuildPelorus(triviumdb::index::pelorus::PelorusConfig),
     Tql {
         query: String,
         expected_generation: Option<String>,
@@ -864,6 +865,27 @@ impl EngineHandle {
         };
         match self
             .send_write(operation, None, Vec::new(), deadline)
+            .await?
+        {
+            StoredWriteResult::Mutation(result) => Ok(result.version),
+            StoredWriteResult::Transaction(_) => Err(ApiError::internal(
+                "索引操作结果类型不匹配 (Index operation result type mismatch)",
+            )),
+        }
+    }
+
+    pub async fn build_pelorus(
+        &self,
+        config: triviumdb::index::pelorus::PelorusConfig,
+        deadline: Instant,
+    ) -> Result<VersionSnapshot, ApiError> {
+        match self
+            .send_write(
+                WriteOperation::BuildPelorus(config),
+                None,
+                Vec::new(),
+                deadline,
+            )
             .await?
         {
             StoredWriteResult::Mutation(result) => Ok(result.version),
@@ -1671,6 +1693,21 @@ fn execute_write(
         }
         WriteOperation::CreateIndex(request) => {
             apply_index_change(database, &request, true)?;
+            versions.generation = versions.generation.saturating_add(1);
+            Ok(StoredWriteResult::Mutation(WriteResult {
+                mutation: MutationResponse {
+                    affected: 1,
+                    created_ids: Vec::new(),
+                },
+                version: versions.snapshot(),
+                replayed: false,
+            }))
+        }
+        WriteOperation::BuildPelorus(config) => {
+            database
+                .build_pelorus_index(config)
+                .map_err(ApiError::from)?;
+            database.flush().map_err(ApiError::from)?;
             versions.generation = versions.generation.saturating_add(1);
             Ok(StoredWriteResult::Mutation(WriteResult {
                 mutation: MutationResponse {

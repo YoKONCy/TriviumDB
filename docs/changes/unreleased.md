@@ -10,6 +10,7 @@
 - Windows QuIVer SSD 直读接入 IOCP，单调度线程批量提交并逐项回收完成。IOCP 和 `io_uring` 按设备对齐和读取跨度分配固定缓冲槽位。运行状态通过 `io_fixed_buffer_bytes` 单独报告固定池占用。
 - QuIVer 压缩精排支持请求级 I/O 计量。逻辑冷读、系统读取和行／页复用按请求归属。Rust 通过 `measure_io` 读取计量，Python 和 Node 的压缩检索可用 `profile_io` 返回本次计数。
 - 旧 Linux 内核的 XFS 可通过 `XFS_IOC_DIOINFO` 取得直接读取约束。QuIVer 使用经原生读取验证的文件系统粒度，减少 64 KiB 保守窗口带来的读取放大。
+- 新增可显式选择的 [Pelorus 双曲索引](../pelorus.md)。固定曲率配置、构图和几何感知导航与 Poincaré 精确扫描共用原始向量。支持文档、命名图、Hot／Mmap／SSD 和统一索引容器。普通查询默认选择 QuIVer。
 
 已发布内容见 [0.9.2 双语发布说明](0.9.2.md)。
 
@@ -21,5 +22,6 @@
 - Windows QuIVer SSD direct reads use IOCP to submit batches and handle individual completions on one dispatcher thread. IOCP and `io_uring` size fixed buffer slots according to device alignment and read span. Runtime statistics expose the fixed buffer payload size in `io_fixed_buffer_bytes`.
 - QuIVer compressed reranking can measure logical cold reads, system reads, and row and page reuse per request. Rust exposes the counters through `measure_io`. Python and Node callers can set `profile_io` on compressed searches to retrieve the counters with their results.
 - On Linux kernels without `STATX_DIOALIGN`, QuIVer can obtain XFS direct-read alignment with `XFS_IOC_DIOINFO`. A native read validates the selected geometry, reducing read amplification from the conservative 64 KiB window.
+- Added an opt-in [Pelorus hyperbolic index](../pelorus.md). Fixed-curvature graph construction, geometry-aware navigation, and exact Poincaré scans use the same stored vector facts. Pelorus supports document and named-graph scopes, Hot/Mmap/SSD residency, and the unified index container. Ordinary searches default to QuIVer.
 
 Published changes are recorded in the [0.9.2 bilingual release notes](0.9.2.md).

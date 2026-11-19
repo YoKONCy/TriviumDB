@@ -12,6 +12,16 @@ use std::path::{Path, PathBuf};
 const HEADER: usize = 512;
 const ALIGNMENT: u64 = 65536;
 const MAGIC: &[u8; 8] = b"TDBINDEX";
+const BASE_COMPONENTS: usize = 7;
+const COMPONENTS: usize = INDEX_SUFFIXES.len();
+
+fn entry_offset(index: usize) -> usize {
+    if index < BASE_COMPONENTS {
+        32 + index * 32
+    } else {
+        288 + (index - BASE_COMPONENTS) * 32
+    }
+}
 
 fn invalid() -> io::Error {
     io::Error::new(
@@ -28,7 +38,7 @@ struct Entry {
 }
 
 struct Directory {
-    entries: [Entry; 7],
+    entries: [Entry; COMPONENTS],
     main_length: u64,
     main_crc: u32,
     database_id: [u8; 16],
@@ -50,17 +60,17 @@ impl Directory {
             || crc32fast::hash(&bytes[..508])
                 != u32::from_le_bytes(bytes[508..].try_into().unwrap())
             || bytes[28..32] != [0; 4]
-            || bytes[288..508].iter().any(|b| *b != 0)
+            || bytes[entry_offset(COMPONENTS)..508].iter().any(|b| *b != 0)
             || bytes[256..272] == [0; 16]
             || bytes[272..288] == [0; 16]
         {
             return Err(invalid());
         }
         let size = file.metadata()?.len();
-        let mut entries = [Entry::default(); 7];
+        let mut entries = [Entry::default(); COMPONENTS];
         let mut end = HEADER as u64;
         for (index, entry) in entries.iter_mut().enumerate() {
-            let at = 32 + index * 32;
+            let at = entry_offset(index);
             let flags = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
             if flags == 0 {
                 if bytes[at..at + 32].iter().any(|b| *b != 0) {
@@ -94,6 +104,7 @@ impl Directory {
         }
         if (entries[0].length == 0) != (entries[1].length == 0)
             || (entries[2].length == 0) != (entries[3].length == 0)
+            || (entries[8].length != 0 && entries[7].length == 0)
         {
             return Err(invalid());
         }
@@ -121,7 +132,7 @@ impl Directory {
             .enumerate()
             .filter(|(_, e)| e.length != 0)
         {
-            let at = 32 + index * 32;
+            let at = entry_offset(index);
             bytes[at..at + 4].copy_from_slice(&((index + 1) as u32).to_le_bytes());
             bytes[at + 8..at + 16].copy_from_slice(&entry.offset.to_le_bytes());
             bytes[at + 16..at + 24].copy_from_slice(&entry.length.to_le_bytes());
@@ -142,6 +153,16 @@ pub(crate) struct Part {
 }
 
 impl Part {
+    pub(crate) fn staged(file: File) -> io::Result<Self> {
+        let length = file.metadata()?.len();
+        Ok(Self {
+            file,
+            offset: 0,
+            length,
+            crc: None,
+        })
+    }
+
     pub fn reader(mut self) -> io::Result<std::io::Take<File>> {
         self.file.seek(SeekFrom::Start(self.offset))?;
         Ok(self.file.take(self.length))
@@ -268,22 +289,27 @@ pub(crate) fn validate_bound(
 }
 
 /// 从本次写出的组件和保持不变的旧文本构建候选。调用方持有数据库写租约及发布日志。
-pub(crate) fn publish_checkpoint(db_path: &str, preserve_text: bool) -> io::Result<()> {
-    let mut parts = Vec::with_capacity(7);
-    for suffix in INDEX_SUFFIXES {
+pub(crate) fn publish_checkpoint(
+    db_path: &str,
+    preserve_text: bool,
+    pelorus: [Option<Part>; 2],
+) -> io::Result<()> {
+    let mut parts = Vec::with_capacity(COMPONENTS);
+    for suffix in INDEX_SUFFIXES.into_iter().take(BASE_COMPONENTS) {
         parts.push(if suffix == ".text" && preserve_text || suffix == ".qssd" {
             open(db_path, suffix)?
         } else {
             standalone(Path::new(&format!("{db_path}{suffix}")))?
         });
     }
+    parts.extend(pelorus);
     publish(db_path, parts)
 }
 
 /// 派生 SSD 更新保持同一事实身份与其他组件，旧 Reader 继续持有旧代文件。
 pub(crate) fn publish_ssd(db_path: &str) -> io::Result<()> {
     validate(db_path, true)?;
-    let mut parts = Vec::with_capacity(7);
+    let mut parts = Vec::with_capacity(COMPONENTS);
     for suffix in INDEX_SUFFIXES {
         parts.push(if suffix == ".qssd" {
             standalone(Path::new(&format!("{db_path}{suffix}")))?
@@ -328,7 +354,7 @@ fn publish(db_path: &str, parts: Vec<Option<Part>>) -> io::Result<()> {
     file.write_all(&[0u8; HEADER])?;
     let (database_id, checkpoint_id) = identities(db_path)?;
     let mut directory = Directory {
-        entries: [Entry::default(); 7],
+        entries: [Entry::default(); COMPONENTS],
         database_id,
         checkpoint_id,
         main_length: std::fs::metadata(db_path)?.len(),
@@ -380,7 +406,7 @@ fn publish(db_path: &str, parts: Vec<Option<Part>>) -> io::Result<()> {
 
 /// 只在文件组提交成功之后删除已归入容器的独立组件。
 pub(crate) fn cleanup_components(db_path: &str) -> io::Result<()> {
-    for suffix in INDEX_SUFFIXES {
+    for suffix in INDEX_SUFFIXES.into_iter().take(BASE_COMPONENTS) {
         match std::fs::remove_file(format!("{db_path}{suffix}")) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}

@@ -852,7 +852,12 @@ fn save_inner<T: VectorType>(
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::GraphSidecarWrite)?;
     crate::storage::graph_blocks::save(memtable, path)?;
 
-    crate::storage::index_container::publish_checkpoint(path, memtable.text_index_is_deferred())?;
+    let pelorus = crate::index::pelorus::persistence::stage(memtable, path)?;
+    crate::storage::index_container::publish_checkpoint(
+        path,
+        memtable.text_index_is_deferred(),
+        pelorus,
+    )?;
 
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::hit_for_path(
@@ -1449,6 +1454,7 @@ fn load_inner<T: VectorType>(
                 missing_index_policy,
                 Some(&verified_checkpoint),
             )?;
+            crate::index::pelorus::persistence::load(&mut mt, path, missing_index_policy)?;
             if load_text_sidecar {
                 load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             } else if crate::storage::index_container::open(path, ".text")?.is_some() {
@@ -1487,6 +1493,7 @@ fn load_inner<T: VectorType>(
         load_unique_constraints(&mut mt, bytes, version, bq_layout)?;
         // 尝试加载 QuIVer 索引
         load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy, None)?;
+        crate::index::pelorus::persistence::load(&mut mt, path, missing_index_policy)?;
         if load_text_sidecar {
             load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
         } else if crate::storage::index_container::open(path, ".text")?.is_some() {

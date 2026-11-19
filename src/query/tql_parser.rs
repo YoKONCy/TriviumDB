@@ -779,6 +779,12 @@ impl TqlParser {
 
     fn parse_search_entry_source_inner(&mut self) -> Result<QueryEntry, String> {
         self.expect(&TqlToken::Search)?;
+        if matches!(self.peek(), TqlToken::Ident(name) if name.eq_ignore_ascii_case("pelorus")) {
+            self.advance();
+            return Ok(QueryEntry::Pelorus {
+                request: self.parse_source_json()?,
+            });
+        }
         self.expect(&TqlToken::Vector)?;
 
         // 向量元素支持数字字面量或 Prepared 标量参数。
@@ -2836,7 +2842,12 @@ fn validate_pipeline_scope_origin(
     query: &TqlQuery,
     origin: &mut Option<SourceSelector>,
 ) -> Result<(), String> {
-    if query.pipeline.is_empty() && !matches!(query.entry, QueryEntry::Documents { .. }) {
+    if query.pipeline.is_empty()
+        && !matches!(
+            query.entry,
+            QueryEntry::Documents { .. } | QueryEntry::Pelorus { .. }
+        )
+    {
         let pattern = match &query.entry {
             QueryEntry::Match { pattern } | QueryEntry::OptionalMatch { pattern } => pattern,
             _ => return Ok(()),

@@ -305,7 +305,12 @@ impl ExecutionContext {
         memory: &QueryMemory,
         workspaces: &[crate::resources::WorkspaceReservation],
     ) {
-        if self.graph.is_some() || matches!(query.entry, QueryEntry::Documents { .. }) {
+        if self.graph.is_some()
+            || matches!(
+                query.entry,
+                QueryEntry::Documents { .. } | QueryEntry::Pelorus { .. }
+            )
+        {
             let bytes = workspaces.iter().fold(
                 mt.estimated_memory_bytes().saturating_add(
                     self.graph
@@ -745,7 +750,10 @@ fn execute_binding_rows_inner<T: VectorType>(
             )?,
             false,
         ),
-        QueryEntry::Search { .. } | QueryEntry::Text { .. } | QueryEntry::Documents { .. } => {
+        QueryEntry::Search { .. }
+        | QueryEntry::Text { .. }
+        | QueryEntry::Documents { .. }
+        | QueryEntry::Pelorus { .. } => {
             return Err(TriviumError::QueryExecution(
                 "检索入口需要管线执行 (Retrieval entry requires pipeline execution)".into(),
             ));
@@ -826,7 +834,10 @@ fn uses_pipeline(query: &TqlQuery) -> bool {
     !query.pipeline.is_empty()
         || matches!(
             query.entry,
-            QueryEntry::Search { .. } | QueryEntry::Text { .. } | QueryEntry::Documents { .. }
+            QueryEntry::Search { .. }
+                | QueryEntry::Text { .. }
+                | QueryEntry::Documents { .. }
+                | QueryEntry::Pelorus { .. }
         )
 }
 
@@ -855,8 +866,19 @@ fn execute_pipeline_set<T: VectorType>(
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?;
+    let pelorus_source = match &query.entry {
+        QueryEntry::Pelorus { request } => Some(
+            crate::query::tql_pelorus::PelorusSource::<T>::new(request).map_err(|error| {
+                limits.error(error, QueryErrorStage::Plan, SourceSelector::Entry)
+            })?,
+        ),
+        _ => None,
+    };
     let source_vector = match &query.entry {
         QueryEntry::Search { vector, .. } => Some(vector.as_slice()),
+        QueryEntry::Pelorus { .. } => pelorus_source
+            .as_ref()
+            .map(|source| source.vector_literals.as_slice()),
         _ => document_vector.as_deref(),
     };
     let document_vector_budget = document_request
@@ -930,6 +952,9 @@ fn execute_pipeline_set<T: VectorType>(
                                 request,
                             )?,
                         })]
+                    }
+                    (QueryEntry::Pelorus { .. }, _) => {
+                        vec![Box::new(pelorus_source.clone().expect("已解析 Pelorus 来源"))]
                     }
                     (QueryEntry::Text { clause }, _) => {
                         vec![Box::new(crate::query::pipeline::TextSearchSource {
@@ -1044,7 +1069,7 @@ fn execute_pipeline_set<T: VectorType>(
             .map(|stage| &stage.operator)
     };
     let mut operator_origins = vec![limits.origin(SourceSelector::Entry); operators.len()];
-    if shorthand_search {
+    if shorthand_search || (pelorus_source.is_some() && query.pipeline.is_empty()) {
         if let Some(predicate) = &query.predicate {
             operators.push(Box::new(PipelinePredicateFilter {
                 predicate: predicate.clone(),
@@ -1606,7 +1631,16 @@ fn execute_pipeline_set<T: VectorType>(
                 .max(document_vector_budget)
                 .saturating_mul(mt.dim())
                 .saturating_mul(std::mem::size_of::<T>())
-                .saturating_mul(query.pipeline.len().saturating_add(1)),
+                .saturating_mul(
+                    query
+                        .pipeline
+                        .len()
+                        .saturating_add(1)
+                        .saturating_add(usize::from(pelorus_source.is_some()))
+                        .saturating_add(usize::from(
+                            pelorus_source.is_some() && query.rank.is_some(),
+                        )),
+                ),
             traversal: crate::graph::budget::TraversalBudget {
                 max_visited_nodes: MAX_BUDGET,
                 max_examined_edges: MAX_BUDGET,
@@ -1627,13 +1661,23 @@ fn execute_pipeline_set<T: VectorType>(
     );
     context.query_control = limits.query_control.clone();
     context.workspace_limit = limits.memory_limit;
-    context.database_memory_limit =
-        if matches!(query.entry, QueryEntry::Documents { .. }) || limits.graph.is_some() {
-            limits.memory_limit
-        } else {
-            0
-        };
+    context.database_memory_limit = if matches!(
+        query.entry,
+        QueryEntry::Documents { .. } | QueryEntry::Pelorus { .. }
+    ) || limits.graph.is_some()
+    {
+        limits.memory_limit
+    } else {
+        0
+    };
     context.graph_scope = limits.graph.clone();
+    if pelorus_source.is_some()
+        || document_request
+            .as_ref()
+            .is_some_and(|request| request.pelorus())
+    {
+        context.pelorus_curvature = mt.pelorus.as_ref().map(|state| state.config.curvature);
+    }
     let (set, workspaces) =
         crate::query::pipeline::execute_pipeline_with_workspace(&mut context, &operators)?;
     limits.check_cancelled()?;
@@ -3960,6 +4004,7 @@ fn generate_explain_plan<T: VectorType>(
 
     // 入口类型
     let (entry_type, entry_detail) = match &query.entry {
+        QueryEntry::Pelorus { .. } => ("SEARCH PELORUS".to_owned(), "Poincaré".to_owned()),
         QueryEntry::Documents { .. } => (
             "DOCUMENTS".to_owned(),
             "文档分组与来源证据 (Document groups and source evidence)".to_owned(),
@@ -4006,9 +4051,10 @@ fn generate_explain_plan<T: VectorType>(
             let planned = scoped_match_plan(pattern, mt, true, limits);
             (planned.access_path, planned.estimated_rows, false)
         }
-        QueryEntry::Search { .. } | QueryEntry::Text { .. } | QueryEntry::Documents { .. } => {
-            (AccessPath::FullNodeScan, mt.node_count(), false)
-        }
+        QueryEntry::Search { .. }
+        | QueryEntry::Text { .. }
+        | QueryEntry::Documents { .. }
+        | QueryEntry::Pelorus { .. } => (AccessPath::FullNodeScan, mt.node_count(), false),
     };
     plan.insert(
         "access_path".into(),
@@ -4044,7 +4090,12 @@ fn generate_explain_plan<T: VectorType>(
     plan.insert("candidate_strategy".into(), serde_json::json!(strategy));
     plan.insert("estimated_rows".into(), serde_json::json!(estimated_rows));
     plan.insert("reversed".into(), serde_json::json!(reversed));
-    if !query.pipeline.is_empty() || matches!(query.entry, QueryEntry::Documents { .. }) {
+    if !query.pipeline.is_empty()
+        || matches!(
+            query.entry,
+            QueryEntry::Documents { .. } | QueryEntry::Pelorus { .. }
+        )
+    {
         let cascades = crate::query::cascades::optimize_pipeline_scoped(
             query,
             mt,

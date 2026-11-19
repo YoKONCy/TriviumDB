@@ -208,6 +208,16 @@ impl DbHandle {
         dispatch!(self, db => db.has_persisted_quiver())
     }
 
+    pub fn build_pelorus(
+        &mut self,
+        config: triviumdb::index::pelorus::PelorusConfig,
+    ) -> Result<()> {
+        dispatch!(self, db => {
+            db.build_pelorus_index(config)?;
+            db.flush()
+        })
+    }
+
     /// 当前句柄的 dtype。
     pub fn dtype(&self) -> DType {
         match self {

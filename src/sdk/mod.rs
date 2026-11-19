@@ -8,6 +8,7 @@ pub mod documents;
 mod errors;
 pub mod facade;
 pub mod named_graphs;
+pub mod pelorus;
 pub mod quiver;
 mod shared;
 pub use crate::request::RequestContext;

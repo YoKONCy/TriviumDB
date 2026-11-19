@@ -80,6 +80,19 @@ impl PyTriviumDB {
             .map_err(to_py_error)
     }
 
+    /// 使用共享的双曲索引构建及检索协议。
+    fn pelorus_request(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        request_json: Bound<'_, PyAny>,
+    ) -> PyResult<String> {
+        let (_request, borrowed) = database_read(slf)?;
+        let this = &*borrowed;
+        let request_json = read_string(&request_json, "request_json")?;
+        py.allow_threads(|| dispatch!(this, db => crate::sdk::pelorus::request(db, &request_json)))
+            .map_err(to_py_error)
+    }
+
     /// 命名图JSON适配复用Core的成员、独立边、修订及作用域契约。
     fn graph_request(
         slf: &Bound<'_, Self>,
