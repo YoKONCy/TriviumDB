@@ -1,6 +1,5 @@
 """三端共享的 ID、边绑定、容器表达式与精确向量边界。"""
 import json
-import shutil
 from pathlib import Path
 import triviumdb
 
@@ -82,7 +81,9 @@ def run_tql_boundaries(root: str) -> None:
         db.close()
     file = Path(root) / 'boundaries-full-id.tdb'
     triviumdb.TriviumDB(str(file), dim=2, auto_build_quiver=False).close()
-    shutil.copyfile(Path(__file__).parents[1] / 'fixtures/numeric_ids/full_u64.bin', str(file)+'.wal')
+    sample = Path(__file__).parents[1] / 'fixtures/numeric_ids/full_u64.bin'
+    with Path(str(file) + '.wal').open('ab') as wal:
+        wal.write(sample.read_bytes()[6:])
     db = triviumdb.TriviumDB(str(file), dim=2, auto_build_quiver=False)
     try:
         before = Path(str(file)+'.wal').read_bytes()

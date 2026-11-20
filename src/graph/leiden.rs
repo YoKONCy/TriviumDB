@@ -368,28 +368,52 @@ pub fn compute_centroids(
     vectors: &HashMap<NodeId, Vec<f32>>,
     dim: usize,
 ) {
-    // 按簇聚合
-    let mut cluster_sums: HashMap<u32, Vec<f64>> = HashMap::new();
-    let mut cluster_counts: HashMap<u32, usize> = HashMap::new();
+    compute_centroids_checked(result, vectors, dim, &|| {
+        Ok::<_, std::convert::Infallible>(())
+    })
+    .unwrap_or_else(|never| match never {});
+}
 
-    for (&node_id, &cluster_id) in &result.node_to_cluster {
-        if let Some(vec) = vectors.get(&node_id) {
-            let sum = cluster_sums
-                .entry(cluster_id)
-                .or_insert_with(|| vec![0.0f64; dim]);
-            for i in 0..dim.min(vec.len()) {
-                sum[i] += vec[i] as f64;
-            }
-            *cluster_counts.entry(cluster_id).or_insert(0) += 1;
+pub(crate) fn compute_centroids_checked<E>(
+    result: &mut LeidenResult,
+    vectors: &HashMap<NodeId, Vec<f32>>,
+    dim: usize,
+    check: &impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    let mut members = BTreeMap::<u32, Vec<&[f32]>>::new();
+    for (&id, &cluster) in &result.node_to_cluster {
+        check()?;
+        if let Some(vector) = vectors.get(&id) {
+            members.entry(cluster).or_default().push(vector);
         }
     }
-
-    // 平均化
-    for (&c, sum) in &cluster_sums {
-        let count = cluster_counts.get(&c).copied().unwrap_or(1) as f64;
-        let centroid: Vec<f32> = sum.iter().map(|&s| (s / count) as f32).collect();
-        result.centroids.insert(c, centroid);
+    for (cluster, members) in members {
+        let mut centroid = Vec::with_capacity(dim);
+        for axis in 0..dim {
+            check()?;
+            let mut sum = crate::numeric::ExactSum::default();
+            let mut nonfinite = 0.0f32;
+            for (index, vector) in members.iter().enumerate() {
+                if index.is_multiple_of(1024) {
+                    check()?;
+                }
+                if let Some(&value) = vector.get(axis) {
+                    if value.is_finite() {
+                        sum.push_float(f64::from(value));
+                    } else {
+                        nonfinite += value;
+                    }
+                }
+            }
+            centroid.push(if nonfinite.is_finite() {
+                sum.into_f32(members.len())
+            } else {
+                nonfinite
+            });
+        }
+        result.centroids.insert(cluster, centroid);
     }
+    Ok(())
 }
 
 // ============================================================================

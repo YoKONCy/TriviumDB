@@ -46,7 +46,7 @@ pub struct JsReachabilityStep {
 pub struct JsReachabilityResult {
     pub source_id: f64,
     pub target_id: f64,
-    pub depth: u32,
+    pub depth: f64,
     pub path: Vec<f64>,
     pub steps: Vec<JsReachabilityStep>,
 }
@@ -129,7 +129,7 @@ pub struct JsNodeView {
     pub vector: Vec<f64>,
     pub payload: NodeJson,
     pub edges: Vec<JsEdge>,
-    pub num_edges: u32,
+    pub num_edges: f64,
 }
 
 /// Leiden 聚类结果结构
@@ -184,7 +184,7 @@ pub(super) fn to_js_reachability(
     Ok(JsReachabilityResult {
         source_id: node_id_to_js(env, result.source_id)?,
         target_id: node_id_to_js(env, result.target_id)?,
-        depth: result.depth as u32,
+        depth: super::arguments::count_to_js(env, result.depth, "depth")?,
         path: result
             .path
             .into_iter()

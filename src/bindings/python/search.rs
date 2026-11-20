@@ -2,7 +2,7 @@
 
 use super::arguments::{
     boolean_argument, extract_argument, float_argument, integer_argument, read_double, read_float,
-    read_id, read_sequence, read_string, string_argument,
+    read_half, read_id, read_sequence, read_string, string_argument,
 };
 use super::database::{DbBackend, PyTriviumDB, database_read};
 use super::errors::to_py_error;
@@ -67,8 +67,8 @@ impl PyTriviumDB {
                 py.allow_threads(|| db.search_hybrid_with_context(None, Some(&vec), &config))
             }
             DbBackend::F16(db) => {
-                let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
-                let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                let vec16: Vec<half::f16> =
+                    read_sequence(&query_vector, "query_vector", read_half)?;
                 py.allow_threads(|| db.search_hybrid_with_context(None, Some(&vec16), &config))
             }
             DbBackend::U64(db) => {
@@ -172,8 +172,8 @@ impl PyTriviumDB {
                 py.allow_threads(|| db.search_hybrid(None, Some(&vec), &config))
             }
             DbBackend::F16(db) => {
-                let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
-                let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                let vec16: Vec<half::f16> =
+                    read_sequence(&query_vector, "query_vector", read_half)?;
                 py.allow_threads(|| db.search_hybrid(None, Some(&vec16), &config))
             }
             DbBackend::U64(db) => {
@@ -245,8 +245,8 @@ impl PyTriviumDB {
                 py.allow_threads(|| db.search_hybrid_grouped(None, Some(&vector), &config))
             }
             DbBackend::F16(db) => {
-                let vector: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
-                let vector: Vec<half::f16> = vector.into_iter().map(half::f16::from_f32).collect();
+                let vector: Vec<half::f16> =
+                    read_sequence(&query_vector, "query_vector", read_half)?;
                 py.allow_threads(|| db.search_hybrid_grouped(None, Some(&vector), &config))
             }
             DbBackend::U64(db) => {
@@ -319,14 +319,10 @@ impl PyTriviumDB {
                 py.allow_threads(|| db.search_batch(&queries, &config, &batch_config))
             }
             DbBackend::F16(db) => {
-                let queries: Vec<Vec<f32>> =
+                let queries: Vec<Vec<half::f16>> =
                     read_sequence(&query_vectors, "query_vectors", |value, field| {
-                        read_sequence(value, field, read_float)
+                        read_sequence(value, field, read_half)
                     })?;
-                let queries: Vec<Vec<half::f16>> = queries
-                    .into_iter()
-                    .map(|query| query.into_iter().map(half::f16::from_f32).collect())
-                    .collect();
                 py.allow_threads(|| db.search_batch(&queries, &config, &batch_config))
             }
             DbBackend::U64(db) => {
@@ -500,8 +496,8 @@ impl PyTriviumDB {
                 py.allow_threads(|| db.search_hybrid(q_text, Some(&vec), &config))
             }
             DbBackend::F16(db) => {
-                let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
-                let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                let vec16: Vec<half::f16> =
+                    read_sequence(&query_vector, "query_vector", read_half)?;
                 py.allow_threads(|| db.search_hybrid(q_text, Some(&vec16), &config))
             }
             DbBackend::U64(db) => {
@@ -566,8 +562,8 @@ impl PyTriviumDB {
                 })
             }
             DbBackend::F16(db) => {
-                let vec: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
-                let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                let vec16: Vec<half::f16> =
+                    read_sequence(&query_vector, "query_vector", read_half)?;
                 py.allow_threads(|| {
                     db.search_hybrid_weighted(&query_text, &vec16, &config, hybrid_alpha)
                 })
@@ -614,8 +610,8 @@ impl PyTriviumDB {
                 db.search_graph_first(&query, &anchor_ids, top_k, max_anchor_nodes)
             }
             DbBackend::F16(db) => {
-                let query: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
-                let query: Vec<half::f16> = query.into_iter().map(half::f16::from_f32).collect();
+                let query: Vec<half::f16> =
+                    read_sequence(&query_vector, "query_vector", read_half)?;
                 db.search_graph_first(&query, &anchor_ids, top_k, max_anchor_nodes)
             }
             DbBackend::U64(db) => {
@@ -652,8 +648,8 @@ impl PyTriviumDB {
                 db.search_exact(&query, top_k)
             }
             DbBackend::F16(db) => {
-                let query: Vec<f32> = read_sequence(&query_vector, "query_vector", read_float)?;
-                let query: Vec<half::f16> = query.into_iter().map(half::f16::from_f32).collect();
+                let query: Vec<half::f16> =
+                    read_sequence(&query_vector, "query_vector", read_half)?;
                 db.search_exact(&query, top_k)
             }
             DbBackend::U64(db) => {

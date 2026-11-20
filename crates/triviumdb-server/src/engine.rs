@@ -393,6 +393,16 @@ impl EngineHandle {
                 "读并发数、写队列容量和批量上限必须大于 0 (Read concurrency, write queue capacity, and batch size must be greater than zero)",
             ));
         }
+        let max_concurrent_reads = u32::try_from(config.max_concurrent_reads).map_err(|_| {
+            ApiError::invalid_request("读并发数过大 (Read concurrency is too large)")
+        })?;
+        if config.max_concurrent_reads > Semaphore::MAX_PERMITS
+            || config.write_queue_capacity > Semaphore::MAX_PERMITS
+        {
+            return Err(ApiError::invalid_request(
+                "调度容量超过信号量上限 (Scheduling capacity exceeds semaphore limit)",
+            ));
+        }
         let path = config.database_path.to_string_lossy().into_owned();
         let database = tokio::task::spawn_blocking(move || {
             Database::<f32>::open_with_config(&path, config.database).map_err(ApiError::from)
@@ -423,9 +433,7 @@ impl EngineHandle {
             batch_before_execute: Mutex::new(None),
             database,
             read_slots,
-            max_concurrent_reads: u32::try_from(config.max_concurrent_reads).map_err(|_| {
-                ApiError::invalid_request("读并发数过大 (Read concurrency is too large)")
-            })?,
+            max_concurrent_reads,
             waiting_writers: AtomicUsize::new(0),
             writer_released: Notify::new(),
             versions,
@@ -895,18 +903,23 @@ impl EngineHandle {
         }
     }
 
-    pub fn index_info(
+    pub async fn index_info(
         &self,
+        deadline: Instant,
     ) -> Result<Vec<triviumdb::index::property::PropertyIndexStats>, ApiError> {
-        let _operation = self.inner.enter_operation()?;
-        read_or_recover(&self.inner.database)
-            .index_info()
-            .map_err(ApiError::from)
+        self.run_read(deadline, QueryControl::with_deadline(deadline), |db| {
+            db.index_info().map_err(ApiError::from)
+        })
+        .await
     }
 
     pub async fn build_quiver(&self, deadline: Instant) -> Result<bool, ApiError> {
         let operation = self.inner.enter_operation()?;
-        let handle = read_or_recover(&self.inner.database).quiver_build_handle();
+        let handle = self
+            .run_read(deadline, QueryControl::with_deadline(deadline), |db| {
+                Ok(db.quiver_build_handle())
+            })
+            .await?;
         self.inner
             .metrics
             .warmup_state
@@ -1266,7 +1279,6 @@ fn start_quiver_warmup(inner: Arc<EngineInner>) {
     let Ok(operation) = inner.enter_operation() else {
         return;
     };
-    let handle = read_or_recover(&inner.database).quiver_build_handle();
     inner
         .metrics
         .warmup_state
@@ -1279,6 +1291,7 @@ fn start_quiver_warmup(inner: Arc<EngineInner>) {
         let _operation = operation;
         let _blocking_guard =
             AtomicGaugeGuard::enter_existing(&inner.metrics.active_blocking_tasks);
+        let handle = read_or_recover(&inner.database).quiver_build_handle();
         let build = match handle.prepare_auto_build() {
             Ok(Some(build)) => build,
             Ok(None) => {
@@ -2792,7 +2805,12 @@ mod tests {
             Database::<f32>::open(&path.to_string_lossy(), 2),
             Err(triviumdb::TriviumError::DatabaseLocked(_))
         ));
-        assert!(engine.index_info().is_err());
+        assert!(
+            engine
+                .index_info(Instant::now() + Duration::from_secs(5))
+                .await
+                .is_err()
+        );
         std::fs::remove_dir(&obstructed).unwrap();
         engine.shutdown().await.unwrap();
         let mut reopened = Database::<f32>::open(&path.to_string_lossy(), 2).unwrap();
@@ -2803,6 +2821,33 @@ mod tests {
             serde_json::json!({"name":"persisted"})
         );
         reopened.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn 非法调度容量在创建数据库之前返回错误() {
+        let directory = tempfile::tempdir().unwrap();
+        for (queue, reads) in [(usize::MAX, 1), (1, usize::MAX)] {
+            let result = EngineHandle::start(EngineConfig {
+                database_path: directory.path().join("new.tdb"),
+                database: Config {
+                    dim: 1,
+                    ..Default::default()
+                },
+                write_queue_capacity: queue,
+                max_concurrent_reads: reads,
+                idempotency_capacity: 0,
+                max_write_batch_size: 1,
+                max_write_batch_delay: Duration::ZERO,
+                prepared_cache_capacity: 0,
+            })
+            .await;
+            use axum::response::IntoResponse;
+            assert_eq!(
+                result.err().unwrap().into_response().status(),
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        }
     }
 
     async fn test_engine(

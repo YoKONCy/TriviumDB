@@ -85,6 +85,9 @@ pub fn weakly_connected_components<T: VectorType>(mt: &MemTable<T>) -> Vec<Vec<N
     }
 
     let mut result: Vec<Vec<NodeId>> = components.into_values().collect();
-    result.sort_by(|a, b| b.len().cmp(&a.len()));
+    for component in &mut result {
+        component.sort_unstable();
+    }
+    result.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     result
 }

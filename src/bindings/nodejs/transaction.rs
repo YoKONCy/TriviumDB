@@ -6,6 +6,7 @@ use super::arguments::{
 use super::database::{DbBackend, TriviumDB};
 use super::errors::{argument_input_error, to_napi_error, with_napi_write_info};
 use super::json::{NodeJson, enumerable_own_keys, string_from_js};
+use crate::VectorType;
 use napi::{Env, JsUnknown, ValueType};
 use napi_derive::napi;
 
@@ -185,8 +186,10 @@ impl TriviumDB {
                     .map_err(validation)?,
             ),
             DbBackend::F16(db) => db.commit_tx(
-                build_transaction(env, &operations, |value, _| Ok(half::f16::from_f64(value)))
-                    .map_err(validation)?,
+                build_transaction(env, &operations, |value, _| {
+                    Ok(half::f16::from_f64_component(value))
+                })
+                .map_err(validation)?,
             ),
             DbBackend::U64(db) => db.commit_tx(
                 build_transaction(env, &operations, |value, field| {

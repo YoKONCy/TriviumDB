@@ -340,8 +340,13 @@ mod tests {
             std::fs::write(root.0.join(stored), "保留既有文件内容".as_bytes()).unwrap();
             // 独立查询夹具路径是否实际解析为已有条目，不假定操作系统或卷的大小写规则。
             let occupied = root.0.join(lookup).try_exists().unwrap();
+            let source = root.0.join("source.tdb");
+            std::fs::write(&source, b"source").unwrap();
             let before = root.files();
-            let result = Destination::new(root.0.join(requested).to_str().unwrap());
+            let result = Destination::new(
+                source.to_str().unwrap(),
+                root.0.join(requested).to_str().unwrap(),
+            );
             if occupied {
                 assert!(
                     matches!(result, Err(TriviumError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists),

@@ -483,7 +483,7 @@ async fn list_indexes(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(
-        serde_json::json!({ "indexes": state.engine.index_info()? }),
+        serde_json::json!({ "indexes": state.engine.index_info(Instant::now() + state.request_timeout).await? }),
     ))
 }
 

@@ -339,9 +339,12 @@ fn COV_04E_compact成功_wal清理前断电_已提交数据不丢() {
     let mut all_expected = expected.clone();
     all_expected.extend(more);
 
-    let wal_before = std::fs::read(format!("{}.wal", path)).unwrap();
-    db.flush().unwrap();
-    drop(db);
+    let mut wal_before = std::fs::read(format!("{}.wal", path)).unwrap();
+    db.close().unwrap();
+    // 发布前已经同步了新检查点封条；替换前的日志包含旧事务与这个封条。
+    let clean = std::fs::read(format!("{path}.wal")).unwrap();
+    assert_eq!(clean.len(), 34);
+    wal_before.extend_from_slice(&clean[6..]);
     std::fs::write(format!("{}.wal", path), wal_before).unwrap();
 
     let db = Database::<f32>::open(&path, DIM).unwrap();

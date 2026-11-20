@@ -268,7 +268,7 @@ TriviumDB 的存储层针对 Windows 文件共享和映射生命周期提供以�
 | ------ | ------ | ---------- |
 | Mmap 模式 flush 100% 失败 | Windows 不允许 rename 覆盖正在被映射的文件 | `flush()` 前强制 `self.mmap = None`，解除内核映射锁 |
 | 偶发 rename 失败 | 杀毒软件（Defender/火绒）扫描新文件时短暂独占句柄 | `robust_rename()`：对 `ERROR_ACCESS_DENIED(5)` / `ERROR_SHARING_VIOLATION(32)` 进行指数退避重试（最多 10 次，1→50ms） |
-| WAL clear 触发重复扫描 | `remove + create` 使杀毒软件将重建的文件视为新文件再次扫描 | WAL 清空改为 `truncate(true)` 语义，文件句柄不变，不触发新文件扫描 |
+| WAL 清理中断 | 检查点已发布，旧日志仍包含已覆盖的事务 | 同步带检查点封条的短日志，再原子替换旧日志 |
 
 > **设计决策**：上述加固无需引入 Manifest/多版本文件系统等重型机制。TriviumDB 是单进程嵌入式数据库（通过 `fs2::try_lock_exclusive` 保证），不存在多进程并发持有同一 mmap 的场景。正确管理单进程内的 mmap 生命周期（先释放再 rename）即可解决根本问题。
 
@@ -577,8 +577,8 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 ```text
 1. ReadWrite 持有排他锁后检查 .publish；Mmap marker 或 Rom 日志尚未提交时恢复旧文件组
 2. 验证 .tdb/.vec/.pld/.flush_ok 同代；已提交的新代不得回滚
-3. 校验 WAL 的 TVWL + v7 版本头，Writer 按对应历史布局处理 v2/v3/v4/v5/v6 的升级
-4. 逐条读取长度、记录体与 CRC32，只回放有效前缀中的已提交事务
+3. 校验 WAL 的 TVWL + v7 版本头与检查点封条，历史格式由外部迁移工具转换
+4. 校验帧长度、记录体与 CRC32，恢复该检查点之后已提交的事务
 5. 遇到截断、非法长度、CRC 或反序列化错误时停止，不越过损坏边界
 ```
 
@@ -597,7 +597,7 @@ TriviumDB 的数据安全建立在 WAL + 原子写入的双重保障上：
 
 ### WAL 记录类型
 
-WAL 文件以 `TVWL + u16 version` 版本头开场，当前开发为 v7。受保护事务的回执、命名图和文档批次分别作为记录置于同一事务封条内，恢复接纳完整事务中的全部事实。ReadWrite 持有排他锁时，v2 按独立历史布局校验并转换，v3/v4/v5/v6 流式验证完整提交前缀并复制到 v7。文本检查点在文件组发布前同步唯一封条，清理后的空日志保留基准封条；TMET v2 将其绑定至主文件与文本快照。完整帧损坏返回结构化错误。ReadOnly/Immutable 按物理零写契约处理历史文件，迁移及中断恢复由 Writer 完成。默认图写入提供 `(src,dst,label)` 唯一边的 weight upsert 和指定标签 `UnlinkLabel` 记录。
+WAL 文件以 `TVWL + u16 version` 开场，当前版本为 v7。写入回执、命名图和文档批次随所属事务一起恢复。主检查点在发布前同步唯一封条，清理后的短日志保留该封条。文本元数据另将文本快照绑定到主文件。完整帧损坏返回结构化错误。ReadOnly 和 Immutable 保持物理零写，ReadWrite 执行当前格式的中断恢复。历史格式升级见[外部迁移工具](migration.md)。默认图写入支持按 `(src,dst,label)` 更新边权，以及通过 `UnlinkLabel` 删除指定标签的边。
 
 | 类型 | 内容 |
 | ------ | ------ |

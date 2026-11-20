@@ -269,6 +269,7 @@ fn validate_manifest_files(
             });
         }
     }
+    super::file_format::validate_snapshot_metadata(db_path, &manifest)?;
     Ok(manifest)
 }
 

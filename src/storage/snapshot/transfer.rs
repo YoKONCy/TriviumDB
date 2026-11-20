@@ -84,10 +84,6 @@ fn verify(directory: &Path) -> Result<GenerationManifest> {
     if actual != expected {
         return Err(invalid("快照包含未声明文件、WAL 或临时制品"));
     }
-    crate::storage::file_format::validate_snapshot_metadata(
-        &database.to_string_lossy(),
-        &manifest,
-    )?;
     crate::request::check_current()?;
     Ok(manifest)
 }

@@ -8,6 +8,7 @@ use super::database::{DbBackend, TriviumDB};
 use super::errors::{to_napi_error, write_input_error};
 use super::json::NodeJson;
 use super::types::{JsEdge, JsNodeView};
+use crate::VectorType;
 use napi::bindgen_prelude::Either;
 use napi::{Env, JsUnknown};
 use napi_derive::napi;
@@ -30,7 +31,10 @@ impl TriviumDB {
                     .and_then(|value| node_id_to_js(env, value))
             }
             DbBackend::F16(db) => {
-                let v: Vec<half::f16> = vector.iter().map(|&x| half::f16::from_f64(x)).collect();
+                let v: Vec<half::f16> = vector
+                    .iter()
+                    .map(|&x| half::f16::from_f64_component(x))
+                    .collect();
                 db.insert(&v, payload)
                     .map_err(|error| to_napi_error(env, error))
                     .and_then(|value| node_id_to_js(env, value))
@@ -82,7 +86,12 @@ impl TriviumDB {
             DbBackend::F16(db) => {
                 let converted: Vec<Vec<half::f16>> = vectors
                     .into_iter()
-                    .map(|vector| vector.into_iter().map(half::f16::from_f64).collect())
+                    .map(|vector| {
+                        vector
+                            .into_iter()
+                            .map(half::f16::from_f64_component)
+                            .collect()
+                    })
                     .collect();
                 let mut tx = crate::database::TxBuilder::new();
                 for (vector, payload) in converted.iter().zip(payloads) {
@@ -157,7 +166,12 @@ impl TriviumDB {
             DbBackend::F16(db) => {
                 let converted: Vec<Vec<half::f16>> = vectors
                     .into_iter()
-                    .map(|vector| vector.into_iter().map(half::f16::from_f64).collect())
+                    .map(|vector| {
+                        vector
+                            .into_iter()
+                            .map(half::f16::from_f64_component)
+                            .collect()
+                    })
                     .collect();
                 let mut tx = crate::database::TxBuilder::new();
                 for ((id, vector), payload) in parsed_ids.iter().zip(converted.iter()).zip(payloads)
@@ -206,7 +220,10 @@ impl TriviumDB {
                     .map_err(|error| to_napi_error(env, error))
             }
             DbBackend::F16(db) => {
-                let v: Vec<half::f16> = vector.iter().map(|&x| half::f16::from_f64(x)).collect();
+                let v: Vec<half::f16> = vector
+                    .iter()
+                    .map(|&x| half::f16::from_f64_component(x))
+                    .collect();
                 db.insert_with_id(id, &v, payload)
                     .map_err(|error| to_napi_error(env, error))
             }
@@ -241,7 +258,7 @@ impl TriviumDB {
             DbBackend::F16(db) => {
                 let vector = vector
                     .into_iter()
-                    .map(half::f16::from_f64)
+                    .map(half::f16::from_f64_component)
                     .collect::<Vec<_>>();
                 db.upsert_with_id(id, &vector, payload)
             }
@@ -262,7 +279,7 @@ impl TriviumDB {
                     .get(id)
                     .map_err(|error| to_napi_error(env, error))?
                     .map(|n| {
-                        let num_edges = n.edges.len() as u32;
+                        let num_edges = super::arguments::count_to_js(env, n.edges.len(), "numEdges")?;
                         let edges_arr = n
                             .edges
                             .into_iter()
@@ -288,7 +305,7 @@ impl TriviumDB {
                     .get(id)
                     .map_err(|error| to_napi_error(env, error))?
                     .map(|n| {
-                        let num_edges = n.edges.len() as u32;
+                        let num_edges = super::arguments::count_to_js(env, n.edges.len(), "numEdges")?;
                         let edges_arr = n
                             .edges
                             .into_iter()
@@ -314,7 +331,7 @@ impl TriviumDB {
                     .get(id)
                     .map_err(|error| to_napi_error(env, error))?
                     .map(|n| {
-                        let num_edges = n.edges.len() as u32;
+                        let num_edges = super::arguments::count_to_js(env, n.edges.len(), "numEdges")?;
                         let edges_arr = n
                             .edges
                             .into_iter()
@@ -399,7 +416,10 @@ impl TriviumDB {
                     .map_err(|error| to_napi_error(env, error))
             }
             DbBackend::F16(db) => {
-                let v: Vec<half::f16> = vector.iter().map(|&x| half::f16::from_f64(x)).collect();
+                let v: Vec<half::f16> = vector
+                    .iter()
+                    .map(|&x| half::f16::from_f64_component(x))
+                    .collect();
                 db.update_vector(id, &v)
                     .map_err(|error| to_napi_error(env, error))
             }

@@ -18,6 +18,8 @@ pub(crate) use shared::RequestScope;
 
 pub use crate::database::console::{ConsoleFeature, ConsoleOptions, ConsoleSession};
 pub use console::ConsoleHost;
+#[cfg(feature = "nodejs")]
+pub(crate) use errors::js_count;
 pub use errors::json_error_details;
 #[cfg(any(feature = "python", feature = "nodejs"))]
 pub(crate) use errors::{call_argument_info, direct_write_error, field_member};

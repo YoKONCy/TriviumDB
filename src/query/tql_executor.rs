@@ -1577,6 +1577,7 @@ fn execute_pipeline_set<T: VectorType>(
                 columns.insert(current_name.clone());
                 operators.push(Box::new(TqlOutputBinding {
                     inner,
+                    set_operation: matches!(stage, PipelineStage::SetCombine(_)),
                     name: current_name.clone(),
                 }));
             }
@@ -2144,6 +2145,8 @@ struct TqlScopeProjection {
 
 // 作用域内部的指标键独立于用户变量，和绑定快照共用内存计量及行身份。
 const CURRENT_BINDING: &str = "\0current";
+// 关系匹配的每一行在普通投影中保留重数；节点集仍按绑定归一化。
+pub(super) const MATCH_ROW: &str = "\0match_row";
 
 #[derive(Clone, Copy, Debug)]
 enum BoundMetric {
@@ -2319,7 +2322,10 @@ impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlMatchSour
         };
         let mut output = Vec::with_capacity(rows.len());
         for source in rows {
-            let mut bindings = BTreeMap::from([("_".into(), BindingValue::Node(source.anchor))]);
+            let mut bindings = BTreeMap::from([
+                ("_".into(), BindingValue::Node(source.anchor)),
+                (MATCH_ROW.into(), BindingValue::Bool(true)),
+            ]);
             for node in &pattern.nodes {
                 if let Some(name) = &node.var {
                     bindings.insert(
@@ -2373,6 +2379,13 @@ impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlScopeProj
                     )
                 })
                 .collect();
+            if row
+                .bindings
+                .as_ref()
+                .is_some_and(|bindings| bindings.contains_key(MATCH_ROW))
+            {
+                values.insert(MATCH_ROW.into(), RuntimeValue::Bool(true));
+            }
             for item in &self.projection.items {
                 if let TqlExpr::Variable(var) = &item.expr
                     && matches!(values.get(&item.alias), Some(RuntimeValue::Node(_)))
@@ -2402,6 +2415,7 @@ impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlScopeProj
 }
 
 struct TqlOutputBinding<T: VectorType> {
+    set_operation: bool,
     inner: Box<dyn crate::query::pipeline::PipelineOperator<T>>,
     name: String,
 }
@@ -2424,8 +2438,13 @@ impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlOutputBin
                 let mut bindings = bindings.as_ref().clone();
                 let active = current_binding(row);
                 BoundMetric::copy_all(row, active, active, &mut bindings);
+                if self.set_operation {
+                    bindings.remove(MATCH_ROW);
+                }
                 let bindings = Arc::new(bindings);
-                origins.entry(row.id).or_default().push(bindings.clone());
+                if !self.set_operation {
+                    origins.entry(row.id).or_default().push(bindings.clone());
+                }
                 row.bindings = Some(bindings);
             }
         }
@@ -2503,23 +2522,26 @@ impl<T: VectorType> crate::query::pipeline::PipelineOperator<T> for TqlSetCombin
         input: crate::query::pipeline::NodeSet,
         context: &mut crate::query::pipeline::PipelineContext<'_, T>,
     ) -> Result<crate::query::pipeline::NodeSet, TriviumError> {
-        if let Some(id) = self
-            .ids
-            .iter()
-            .find(|id| context.memtable.get_payload(**id).is_none())
-        {
+        let mut right_ids: BTreeSet<_> = self.ids.iter().copied().collect();
+        if let Some(id) = right_ids.iter().find(|id| !context.memtable.contains(**id)) {
             return Err(TriviumError::QueryExecution(format!(
                 "集合运算节点 {id} 不存在 (Set operation node {id} does not exist)"
             )));
         }
         let operation = match self.operation {
-            TqlSetOperation::Union => crate::query::pipeline::SetOperation::Union,
+            TqlSetOperation::Union => {
+                // IDS 只提供节点身份；交叠的节点沿用左侧已有的绑定与分数。
+                for row in input.rows() {
+                    right_ids.remove(&row.id);
+                }
+                crate::query::pipeline::SetOperation::Union
+            }
             TqlSetOperation::Intersect => crate::query::pipeline::SetOperation::Intersect,
             TqlSetOperation::Except => crate::query::pipeline::SetOperation::Difference,
         };
         Ok(crate::query::pipeline::combine_sets(
             input,
-            crate::query::pipeline::NodeSet::from_ids(self.ids.iter().copied()),
+            crate::query::pipeline::NodeSet::from_ids(right_ids),
             operation,
         ))
     }
@@ -2967,7 +2989,7 @@ fn execute_find<T: VectorType>(
 
         // WHERE 二次过滤（FIND 场景下 var=None 作用于当前节点）
         if let Some(pred) = &query.predicate
-            && !eval_predicate_single(pred, id, mt)
+            && !eval_predicate_single(pred, id, &payload)
         {
             continue;
         }
@@ -2978,27 +3000,8 @@ fn execute_find<T: VectorType>(
             None => continue,
         };
 
-        // RETURN 投影
-        let mut row = HashMap::new();
-        match &query.returns {
-            ReturnClause::All => {
-                row.insert("_".into(), node);
-            }
-            ReturnClause::Variables(vars) => {
-                // FIND 场景下只有一个隐式节点，绑定到第一个变量
-                if let Some(var) = vars.first() {
-                    row.insert(var.clone(), node);
-                }
-            }
-            ReturnClause::Expressions(exprs) => {
-                // Expressions 场景：将隐式节点绑定到第一个变量引用
-                if let Some(var) = extract_first_var_from_exprs(exprs) {
-                    row.insert(var, node);
-                } else {
-                    row.insert("_".into(), node);
-                }
-            }
-        }
+        // FIND 的节点身份固定绑定到 _，返回列和聚合分别从同一个输入求值。
+        let row = HashMap::from([("_".to_owned(), node)]);
         results.push(row);
     }
 
@@ -3010,9 +3013,7 @@ fn plan_find_filter<T: VectorType>(
     mt: &MemTable<T>,
     row_limit: usize,
 ) -> NodeAccessPlan {
-    let candidate_limit = (query.predicate.is_none()
-        && !matches!(filter, Filter::Eq(field, _) if field == "id"))
-    .then_some(row_limit);
+    let candidate_limit = query.predicate.is_none().then_some(row_limit);
     plan_filter_with_limit(filter, candidate_limit, mt)
 }
 
@@ -3263,25 +3264,24 @@ fn eval_predicate_env<T: VectorType>(
 }
 
 /// 在单节点上下文中评估谓词（FIND / SEARCH 场景）
-fn eval_predicate_single<T: VectorType>(pred: &Predicate, id: NodeId, mt: &MemTable<T>) -> bool {
+fn eval_predicate_single(pred: &Predicate, id: NodeId, payload: &serde_json::Value) -> bool {
     match pred {
         Predicate::Compare { left, op, right } => {
             // 单节点场景下，属性访问的 var 被忽略，直接用当前 id
-            let lval = eval_tql_expr_single(left, id, mt);
-            let rval = eval_tql_expr_single(right, id, mt);
+            let lval = eval_tql_expr_single(left, id, payload);
+            let rval = eval_tql_expr_single(right, id, payload);
             compare_runtime(&lval, op, &rval)
         }
 
-        Predicate::DocFilter { filter, .. } => match mt.get_payload(id) {
-            Some(payload) => filter.matches(&payload),
-            None => false,
-        },
+        Predicate::DocFilter { filter, .. } => filter.matches(payload),
 
         Predicate::And(a, b) => {
-            eval_predicate_single(a, id, mt) && eval_predicate_single(b, id, mt)
+            eval_predicate_single(a, id, payload) && eval_predicate_single(b, id, payload)
         }
-        Predicate::Or(a, b) => eval_predicate_single(a, id, mt) || eval_predicate_single(b, id, mt),
-        Predicate::Not(inner) => !eval_predicate_single(inner, id, mt),
+        Predicate::Or(a, b) => {
+            eval_predicate_single(a, id, payload) || eval_predicate_single(b, id, payload)
+        }
+        Predicate::Not(inner) => !eval_predicate_single(inner, id, payload),
     }
 }
 
@@ -3393,26 +3393,23 @@ fn eval_tql_expr<T: VectorType>(
     }
 }
 
-fn eval_tql_expr_single<T: VectorType>(
-    expr: &TqlExpr,
-    id: NodeId,
-    mt: &MemTable<T>,
-) -> RuntimeValue {
+fn eval_tql_expr_single(expr: &TqlExpr, id: NodeId, payload: &serde_json::Value) -> RuntimeValue {
     match expr {
-        TqlExpr::Variable(_) => RuntimeValue::Node(id),
+        TqlExpr::Variable(var) if var == "_" => RuntimeValue::Node(id),
+        TqlExpr::Variable(var) => json_to_runtime(&payload[var]),
         TqlExpr::Parameter(_) => RuntimeValue::Null,
         TqlExpr::Binary { left, op, right } => eval_binary(
-            eval_tql_expr_single(left, id, mt),
+            eval_tql_expr_single(left, id, payload),
             *op,
-            eval_tql_expr_single(right, id, mt),
+            eval_tql_expr_single(right, id, payload),
         ),
         TqlExpr::Coalesce(values) => values
             .iter()
-            .map(|value| eval_tql_expr_single(value, id, mt))
+            .map(|value| eval_tql_expr_single(value, id, payload))
             .find(|value| !matches!(value, RuntimeValue::Null))
             .unwrap_or(RuntimeValue::Null),
         TqlExpr::IsNull { expr, negated } => RuntimeValue::Bool(
-            matches!(eval_tql_expr_single(expr, id, mt), RuntimeValue::Null) != *negated,
+            matches!(eval_tql_expr_single(expr, id, payload), RuntimeValue::Null) != *negated,
         ),
         TqlExpr::Similarity { .. }
         | TqlExpr::GraphScore { .. }
@@ -3435,10 +3432,7 @@ fn eval_tql_expr_single<T: VectorType>(
             if field == "id" {
                 return runtime_u64(id);
             }
-            if let Some(payload) = mt.get_payload(id) {
-                return json_to_runtime(&payload[field]);
-            }
-            RuntimeValue::Null
+            json_to_runtime(&payload[field])
         }
         TqlExpr::Literal(lit) => lit_to_runtime(lit),
     }
@@ -3784,16 +3778,6 @@ fn extract_vars_from_exprs(exprs: &[ReturnExpr]) -> Vec<String> {
     vars
 }
 
-/// 从 Expressions 中提取第一个变量（用于 FIND 隐式绑定）
-fn extract_first_var_from_exprs(exprs: &[ReturnExpr]) -> Option<String> {
-    for expr in exprs {
-        if let Some(var) = first_var_from_kind(&expr.kind) {
-            return Some(var);
-        }
-    }
-    None
-}
-
 fn expr_first_var(expr: &TqlExpr) -> Option<&String> {
     match expr {
         TqlExpr::Variable(var)
@@ -3871,15 +3855,6 @@ fn collect_vars_from_kind(kind: &ReturnExprKind, out: &mut Vec<String>) {
             }
         }
         ReturnExprKind::Aggregate(_, inner) => collect_vars_from_kind(inner, out),
-    }
-}
-
-fn first_var_from_kind(kind: &ReturnExprKind) -> Option<String> {
-    match kind {
-        ReturnExprKind::Var(v) => Some(v.clone()),
-        ReturnExprKind::Property(v, _) => Some(v.clone()),
-        ReturnExprKind::Scalar(expr) => expr_first_var(expr).cloned(),
-        ReturnExprKind::Aggregate(_, inner) => first_var_from_kind(inner),
     }
 }
 
@@ -4331,6 +4306,10 @@ fn generate_explain_plan<T: VectorType>(
                         "elapsed_ns": metrics.elapsed_ns,
                         "node_set_bytes": metrics.node_set_bytes,
                         "vector_read_bytes": metrics.vector_read_bytes,
+                        "payload_lookups": metrics.payload_lookups,
+                        "payload_parsed_bytes": metrics.payload_parsed_bytes,
+                        "visited_nodes": metrics.visited_nodes,
+                        "examined_edges": metrics.examined_edges,
                         "estimate_source": planned.map(|stage| stage.estimate_source),
                         "estimate_confidence": planned.map(|stage| stage.estimate_confidence),
                     })

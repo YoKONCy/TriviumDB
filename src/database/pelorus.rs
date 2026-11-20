@@ -5,7 +5,7 @@ use crate::error::{WriteErrorInfo, WriteOutcome, WritePhase};
 use crate::index::pelorus::{
     self, PelorusConfig, PelorusHit, PelorusRuntimeOptions, PelorusSearchOptions, PelorusState,
 };
-use crate::resources::WorkspaceReservation;
+use crate::resources::RequestWorkspace;
 use crate::{Result, TriviumError, VectorType};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -159,7 +159,7 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         mt: &crate::storage::memtable::MemTable<T>,
         state: &PelorusState,
     ) -> Result<()> {
-        let current_bytes = mt.estimated_memory_bytes();
+        let current_bytes = mt.resident_memory_bytes();
         let replaced_bytes = mt.pelorus.as_ref().map_or(0, PelorusState::heap_bytes);
         let required_bytes = current_bytes
             .saturating_sub(replaced_bytes)
@@ -197,11 +197,11 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         &self,
         query: &[T],
         options: &PelorusSearchOptions,
-    ) -> Result<(Vec<PelorusHit>, WorkspaceReservation)> {
+    ) -> Result<(Vec<PelorusHit>, RequestWorkspace)> {
         let _operation = self.enter_operation()?;
         self.prepare_pelorus_search(options)?;
         let mt = read_or_recover(&self.memtable);
-        let mut response = self.resource_runtime.reserve_workspace(0)?;
+        let mut response = mt.reserve_request_workspace(self.memory_limit, 0)?;
         let hits = search_locked(&mt, query, options, self.memory_limit, &mut response)?;
         Ok((hits, response))
     }
@@ -220,7 +220,7 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         &self,
         queries: &[Vec<T>],
         options: &PelorusSearchOptions,
-    ) -> Result<(Vec<Vec<PelorusHit>>, WorkspaceReservation)> {
+    ) -> Result<(Vec<Vec<PelorusHit>>, RequestWorkspace)> {
         let _operation = self.enter_operation()?;
         pelorus::validate_dtype::<T>()?;
         self.prepare_pelorus_search(options)?;
@@ -228,8 +228,7 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         let response_bytes = queries
             .len()
             .saturating_mul(std::mem::size_of::<Vec<PelorusHit>>());
-        mt.ensure_additional_memory(self.memory_limit, response_bytes)?;
-        let mut response = self.resource_runtime.reserve_workspace(response_bytes)?;
+        let mut response = mt.reserve_request_workspace(self.memory_limit, response_bytes)?;
         let hits = queries
             .iter()
             .map(|query| search_locked(&mt, query, options, self.memory_limit, &mut response))
@@ -264,7 +263,7 @@ fn search_locked<T: VectorType>(
     query: &[T],
     options: &PelorusSearchOptions,
     memory_limit: usize,
-    response: &mut crate::resources::WorkspaceReservation,
+    response: &mut RequestWorkspace,
 ) -> Result<Vec<PelorusHit>> {
     let hits = pelorus::search(
         mt,
@@ -278,11 +277,18 @@ fn search_locked<T: VectorType>(
             None => Ok(true),
         },
     )?;
-    let bytes = response
-        .bytes()
-        .saturating_add(hits.len().saturating_mul(std::mem::size_of::<PelorusHit>()));
-    mt.ensure_additional_memory(memory_limit, bytes)?;
-    response.resize(bytes)?;
+    let grow = |response: &mut RequestWorkspace, bytes| {
+        let resident = if memory_limit == 0 {
+            0
+        } else {
+            mt.resident_memory_bytes()
+        };
+        response.grow_by(resident, memory_limit, bytes)
+    };
+    grow(
+        response,
+        hits.len().saturating_mul(std::mem::size_of::<PelorusHit>()),
+    )?;
     hits.into_iter()
         .map(|(id, distance)| {
             crate::request::check_current()?;
@@ -291,11 +297,10 @@ fn search_locked<T: VectorType>(
                     "Pelorus 命中缺少 Payload (Pelorus hit has no payload)".into(),
                 )
             })?;
-            let bytes = response.bytes().saturating_add(
+            grow(
+                response,
                 crate::storage::payload_store::estimate_json_memory(&payload),
-            );
-            mt.ensure_additional_memory(memory_limit, bytes)?;
-            response.resize(bytes)?;
+            )?;
             Ok(PelorusHit {
                 id,
                 distance,

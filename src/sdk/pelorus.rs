@@ -3,7 +3,7 @@
 use crate::index::pelorus::{
     PelorusConfig, PelorusHit, PelorusRuntimeOptions, WireSearchOptions, convert_query,
 };
-use crate::resources::WorkspaceReservation;
+use crate::resources::RequestWorkspace;
 use crate::{Database, Result, TriviumError, VectorType};
 use serde::{Deserialize, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::{Number, Value};
@@ -70,10 +70,7 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
 ) -> Result<String> {
     db.check_request_admission()?;
     crate::request::check_current()?;
-    let runtime = crate::database::read_or_recover(&db.memtable)
-        .resource_runtime()
-        .clone();
-    let _workspace = runtime.reserve_workspace(json.len().saturating_mul(32))?;
+    let _workspace = db.reserve_request_workspace(json.len().saturating_mul(32))?;
     let command = serde_json::from_str(json).map_err(|error| {
         TriviumError::InvalidInput(format!(
             "Pelorus 请求无效 (Invalid Pelorus request): {error}"
@@ -137,15 +134,13 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
 
 fn encode<T: VectorType + Serialize + DeserializeOwned>(
     db: &Database<T>,
-    mut workspace: WorkspaceReservation,
+    _hits_workspace: RequestWorkspace,
     response: &impl Serialize,
 ) -> Result<String> {
     crate::request::check_current()?;
     let bytes = crate::storage::payload_store::serialized_json_len(response)?;
     crate::request::check_current()?;
-    let peak = workspace.bytes().saturating_add(bytes);
-    db.ensure_incremental_memory_budget(peak)?;
-    workspace.resize(peak)?;
+    let _encoded = db.reserve_request_workspace(bytes)?;
     let mut buffer = Vec::new();
     buffer
         .try_reserve_exact(bytes)

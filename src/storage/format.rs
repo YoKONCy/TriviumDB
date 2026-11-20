@@ -15,6 +15,19 @@ pub(crate) fn require(component: &'static str, found: u32, current: u32) -> Resu
             current,
         });
     }
+    if component == "database" {
+        return Err(TriviumError::UnsupportedDatabaseVersion {
+            found: found as u16,
+            minimum_supported: current as u16,
+            current: current as u16,
+        });
+    }
+    if component == "wal" {
+        return Err(TriviumError::UnsupportedWalVersion {
+            found: found as u16,
+            supported: current as u16,
+        });
+    }
     Err(TriviumError::UnsupportedSidecarVersion {
         component,
         found,
@@ -89,24 +102,14 @@ pub(crate) fn admit(path: &str) -> Result<()> {
         } else {
             u32::from(u16::from_le_bytes([header[4], header[5]]))
         };
-        if component == "database" && (found == 0 || found > current) {
-            return Err(TriviumError::UnsupportedDatabaseVersion {
-                found: found as u16,
-                minimum_supported: current as u16,
-                current: current as u16,
-            });
-        }
-        if component == "wal" && (found == 0 || found > current) {
-            return Err(TriviumError::UnsupportedWalVersion {
-                found: found as u16,
-                supported: current as u16,
-            });
-        }
         if component != "checkpoint_marker"
             || found != u32::from(super::file_format::LEGACY_FLUSH_MARKER_VERSION)
         {
             require(component, found, current)?;
         }
+    }
+    if !recovering && !std::path::Path::new(path).try_exists()? {
+        super::artifacts::ensure_new_database(std::path::Path::new(path))?;
     }
     if !recovering && std::path::Path::new(path).is_file() {
         for (suffix, magic, offset, width, current, component) in [

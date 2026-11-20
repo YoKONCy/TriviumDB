@@ -181,11 +181,7 @@ impl DbHandle {
     pub fn open_auto(path: &str, dim: Option<usize>, dtype: DType) -> Result<Self> {
         let dim = match dim {
             Some(d) => d,
-            None => sniff_header(path).map(|h| h.dim).map_err(|_| {
-                TriviumError::InvalidInput(format!(
-                    "无法从 '{path}' 嗅探维度（文件不存在或损坏），请用 --dim 显式指定"
-                ))
-            })?,
+            None => sniff_header(path)?.dim,
         };
         Self::open(path, dim, dtype)
     }

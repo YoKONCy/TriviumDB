@@ -774,7 +774,8 @@ fn 加权和Yen按整个算子的实扫边数计量() {
         mt.link(id, id + 1, "road".into(), 1.).unwrap();
     }
     let mut budget = PipelineBudget::default();
-    budget.traversal.max_examined_edges = 3;
+    // 三条原始边各读取一次；从 1 到 4 的松弛再读取三条。
+    budget.traversal.max_examined_edges = 6;
     let mut context = PipelineContext::new(&mt, budget);
     let weighted = WeightedShortestPathsOperator {
         targets: vec![1, 4],
@@ -797,7 +798,8 @@ fn 加权和Yen按整个算子的实扫边数计量() {
     };
     let error = yen.apply(NodeSet::from_ids([1]), &mut context).unwrap_err();
     assert_eq!(error.code(), "TDB_QUERY_EXECUTION");
-    budget.traversal.max_examined_edges = 5;
+    // 两个目标分别松弛两条和三条边，加上共享构图的三条边。
+    budget.traversal.max_examined_edges = 8;
     let result = yen
         .apply(
             NodeSet::from_ids([1]),
@@ -810,4 +812,91 @@ fn 加权和Yen按整个算子的实扫边数计量() {
         .map(|row| row.path.as_deref().unwrap())
         .collect();
     assert_eq!(paths, [&[1, 2, 3][..], &[1, 2, 3, 4][..]]);
+}
+
+#[test]
+fn 路径扫描上限与成功阶段的实际计数一致() {
+    use triviumdb::query::pipeline::{
+        NodeIdsSource, WeightedShortestPathsOperator, YenKShortestPathsOperator, execute_pipeline,
+    };
+    let mut mt = MemTable::<f32>::new(1);
+    for id in [1, 2] {
+        mt.insert_with_id(id, &[1.], json!({})).unwrap();
+    }
+    mt.link(1, 2, "way".into(), 1.).unwrap();
+    for end in [
+        Box::new(WeightedShortestPathsOperator {
+            targets: vec![2],
+            label_filter: None,
+        }) as Box<dyn PipelineOperator<f32>>,
+        Box::new(YenKShortestPathsOperator {
+            targets: vec![2],
+            label_filter: None,
+            k: 1,
+        }),
+    ] {
+        let stages = vec![
+            Box::new(NodeIdsSource { ids: vec![1] }) as Box<dyn PipelineOperator<f32>>,
+            end,
+        ];
+        let mut budget = PipelineBudget::default();
+        budget.traversal.max_examined_edges = 1;
+        let mut context = PipelineContext::with_profile(&mt, budget, true);
+        assert_eq!(
+            execute_pipeline(&mut context, &stages).unwrap_err().code(),
+            "TDB_QUERY_EXECUTION"
+        );
+        budget.traversal.max_examined_edges = 2;
+        let mut context = PipelineContext::with_profile(&mt, budget, true);
+        let result = execute_pipeline(&mut context, &stages).unwrap();
+        assert_eq!(result.rows().len(), 1);
+        assert_eq!(result.rows()[0].path.as_deref(), Some([1, 2].as_slice()));
+        assert_eq!(context.metrics[1].examined_edges, 2);
+    }
+}
+
+#[test]
+fn 调和中心性与单轮_hits_按构图加实际邻接扫描计费() {
+    use std::collections::BTreeMap;
+    use triviumdb::query::pipeline::{GraphMetric, NodeIdsSource, execute_pipeline};
+    let mut mt = MemTable::<f32>::new(1);
+    for id in [1, 2] {
+        mt.insert_with_id(id, &[1.], json!({})).unwrap();
+    }
+    mt.link(1, 2, "way".into(), 1.).unwrap();
+    for (algorithm, metric, limit) in [
+        (
+            StructuralAlgorithm::HarmonicCentrality,
+            GraphMetric::HarmonicCentrality,
+            2,
+        ),
+        (StructuralAlgorithm::Hits, GraphMetric::Hub, 3),
+    ] {
+        let stages: Vec<Box<dyn PipelineOperator<f32>>> = vec![
+            Box::new(NodeIdsSource { ids: vec![1, 2] }),
+            Box::new(StructuralGraphOperator {
+                algorithm,
+                mode: GraphSubsetMode::Induced,
+                label_filter: None,
+                max_iterations: 1,
+                tolerance: 1e-8,
+            }),
+        ];
+        let mut limits = budget(limit - 1);
+        let mut context = PipelineContext::with_profile(&mt, limits, true);
+        assert_eq!(
+            execute_pipeline(&mut context, &stages).unwrap_err().code(),
+            "TDB_QUERY_EXECUTION"
+        );
+        limits.traversal.max_examined_edges = limit;
+        let mut context = PipelineContext::with_profile(&mt, limits, true);
+        let result = execute_pipeline(&mut context, &stages).unwrap();
+        let scores: BTreeMap<_, _> = result
+            .rows()
+            .iter()
+            .map(|row| (row.id, row.graph_metric(metric).unwrap().value))
+            .collect();
+        assert_eq!(scores, [(1, 1.), (2, 0.)].into_iter().collect());
+        assert_eq!(context.metrics[1].examined_edges, limit);
+    }
 }

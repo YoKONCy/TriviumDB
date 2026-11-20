@@ -507,3 +507,103 @@ fn PageRank_降序排列() {
         assert!(window[0].1 >= window[1].1, "PageRank 结果应按分数降序排列");
     }
 }
+
+#[test]
+fn 全图并列项按身份排序且零采样贡献为零() {
+    let mut mt = MemTable::<f32>::new(1);
+    for id in [9, 2, 7, 1] {
+        mt.insert_with_id(id, &[0.], Default::default()).unwrap();
+    }
+    assert_eq!(
+        pagerank(&mt, &Default::default(), None),
+        [(1, 0.25), (2, 0.25), (7, 0.25), (9, 0.25)]
+    );
+    assert_eq!(
+        weakly_connected_components(&mt),
+        [vec![1], vec![2], vec![7], vec![9]]
+    );
+    assert_eq!(
+        betweenness_centrality(&mt, None, Some(0)),
+        HashMap::from([(1, 0.), (2, 0.), (7, 0.), (9, 0.)])
+    );
+    mt.link(7, 9, "边".into(), 1.).unwrap();
+    let ids = [1, 2, 7, 9].into_iter().collect();
+    for result in [
+        triviumdb::graph::subset::subset_betweenness(&mt, &ids, None, Some(1), 1),
+        triviumdb::graph::subset::subset_betweenness_parallel(&mt, &ids, None, Some(1), 1),
+    ] {
+        let result = result.unwrap();
+        assert_eq!(result.examined_edges, 1);
+        assert_eq!(result.scores, [(1, 0.), (2, 0.), (7, 0.), (9, 0.)]);
+    }
+}
+
+#[test]
+fn 指数路径数的对称分层图每个节点分得下一层以后目标的一半() {
+    // 每层都有两个节点，与下一层完全连接。第 1024 层以后路径数超出 f64。
+    let layers = 1030u64;
+    let n = 2 * layers + 1;
+    let mut mt = MemTable::<f32>::new(1);
+    let ids: std::collections::BTreeSet<_> = (1..=n).collect();
+    for &id in &ids {
+        mt.insert_with_id(id, &[0.], Default::default()).unwrap();
+    }
+    let mut previous = vec![1];
+    for layer in 1..=layers {
+        let next = vec![2 * layer, 2 * layer + 1];
+        for &src in &previous {
+            for &dst in &next {
+                mt.link(src, dst, "边".into(), 1.).unwrap();
+            }
+        }
+        previous = next;
+    }
+    let result =
+        triviumdb::graph::subset::subset_betweenness(&mt, &ids, None, Some(1), 10_000).unwrap();
+    assert_eq!(result.scores.len(), n as usize);
+    for (id, score) in result.scores {
+        let expected = if id == 1 {
+            0.0
+        } else {
+            (layers - id / 2) as f64 * n as f64 / ((n - 1) * (n - 2)) as f64
+        };
+        assert!(
+            (score - expected).abs() < 1e-10,
+            "节点 {id} 的中介分数为 {score}，预期 {expected}"
+        );
+    }
+}
+
+#[test]
+fn 质心精确抵消且实例配额在复制向量之前准入() {
+    use triviumdb::graph::leiden::{LeidenResult, compute_centroids};
+    let vectors = HashMap::from([(1, vec![1e30f32]), (2, vec![-1e30f32]), (3, vec![1.])]);
+    let mut result = LeidenResult {
+        node_to_cluster: HashMap::from([(3, 1), (2, 1), (1, 1)]),
+        cluster_sizes: HashMap::from([(1, 3)]),
+        centroids: HashMap::new(),
+        num_clusters: 1,
+    };
+    compute_centroids(&mut result, &vectors, 1);
+    assert_eq!(result.centroids[&1], [1.0f32 / 3.0]);
+    let dir = super::support::TestDir::new("centroid_limit");
+    let mut db = triviumdb::Database::<f32>::open(&dir.file("db"), 256).unwrap();
+    for id in 1..=4 {
+        db.insert_with_id(id, &[1.; 256], Default::default())
+            .unwrap();
+    }
+    db.set_memory_limit(db.estimated_memory() + 1024).unwrap();
+    assert!(matches!(
+        db.leiden_cluster(1, Some(2), Some(true))
+            .unwrap_err()
+            .underlying(),
+        triviumdb::TriviumError::CapacityReservationRejected { .. }
+    ));
+    db.set_memory_limit(0).unwrap();
+    let result = db.leiden_cluster(1, Some(2), Some(true)).unwrap();
+    assert_eq!(result.centroids.len(), 4);
+    for center in result.centroids.values() {
+        assert_eq!(center, &[1.; 256]);
+    }
+    db.close().unwrap();
+}

@@ -174,6 +174,10 @@ fn expression<T: VectorType>(
                 && *name == var
             {
                 RuntimeValue::Edge((*edge).clone())
+            } else if var != "_" && matches!(scope.query.entry, QueryEntry::Find { .. }) {
+                nodes.get("_").map_or(RuntimeValue::Null, |node| {
+                    json_to_runtime(&node.payload[var])
+                })
             } else {
                 nodes
                     .get(var)
@@ -183,7 +187,7 @@ fn expression<T: VectorType>(
         TqlExpr::Property { var, field } => {
             let node = nodes.get(var).or_else(|| {
                 if matches!(scope.query.entry, QueryEntry::Find { .. }) {
-                    nodes.values().next()
+                    nodes.get("_")
                 } else {
                     None
                 }
@@ -206,17 +210,7 @@ fn kind_runtime<T: VectorType>(
     scope: &Scope<'_, T>,
 ) -> Result<RuntimeValue, TriviumError> {
     Ok(match kind {
-        ReturnExprKind::Var(var) => {
-            if matches!(scope.query.entry, QueryEntry::Find { .. })
-                && var != "_"
-                && let Input::Nodes(nodes, _) = input
-                && let Some(value) = nodes.get(var).and_then(|node| node.payload.get(var))
-            {
-                json_to_runtime(value)
-            } else {
-                expression(&TqlExpr::Variable(var.clone()), input, scope)
-            }
-        }
+        ReturnExprKind::Var(var) => expression(&TqlExpr::Variable(var.clone()), input, scope),
         ReturnExprKind::Property(var, field) => expression(
             &TqlExpr::Property {
                 var: var.clone(),
@@ -303,11 +297,12 @@ fn kind_value<T: VectorType>(
                 && *name == var
             {
                 TqlValue::Edge((*edge).clone())
-            } else if matches!(scope.query.entry, QueryEntry::Find { .. })
-                && var != "_"
-                && let Some(v) = nodes.get(var).and_then(|n| n.payload.get(var))
-            {
-                json_to_tql_value(v.clone())
+            } else if matches!(scope.query.entry, QueryEntry::Find { .. }) && var != "_" {
+                nodes
+                    .get("_")
+                    .and_then(|node| node.payload.get(var))
+                    .cloned()
+                    .map_or(TqlValue::Null, json_to_tql_value)
             } else {
                 nodes
                     .get(var)
@@ -315,32 +310,8 @@ fn kind_value<T: VectorType>(
                     .map_or(TqlValue::Null, TqlValue::Node)
             }
         }
-        ReturnExprKind::Property(var, field) => {
-            if edge.is_some_and(|(name, _)| name == var) {
-                runtime_to_tql_value(
-                    expression(
-                        &TqlExpr::Property {
-                            var: var.clone(),
-                            field: field.clone(),
-                        },
-                        input,
-                        scope,
-                    ),
-                    scope.mt,
-                    scope.memory,
-                )?
-            } else {
-                nodes.get(var).map_or(TqlValue::Null, |node| {
-                    json_to_tql_value(if field == "id" {
-                        serde_json::json!(node.id)
-                    } else {
-                        node.payload
-                            .get(field)
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null)
-                    })
-                })
-            }
+        ReturnExprKind::Property(..) => {
+            runtime_to_tql_value(kind_runtime(kind, input, scope)?, scope.mt, scope.memory)?
         }
         ReturnExprKind::Scalar(expr) => {
             runtime_to_tql_value(expression(expr, input, scope), scope.mt, scope.memory)?
@@ -766,6 +737,15 @@ pub(super) fn into_nodes<T: VectorType>(
             }
         };
         if let Some(retained) = retained {
+            // 旧节点容器使用首个投影名标记 FIND 的来源节点，标量求值仍使用隐式绑定。
+            if matches!(scope.query.entry, QueryEntry::Find { .. })
+                && scope.pipeline.is_none()
+                && !retained.iter().any(|name| name == "_")
+                && let Some(name) = retained.first()
+                && let Some(node) = bindings.remove("_")
+            {
+                bindings.insert(name.clone(), node);
+            }
             bindings.retain(|name, _| retained.contains(name));
         }
         if let ReturnClause::Expressions(items) = &scope.query.returns {

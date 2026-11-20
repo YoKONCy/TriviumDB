@@ -168,3 +168,39 @@ fn 清单dtype与主文件不一致时快照不能校验或发布恢复目录() 
     assert_eq!(node.vector, [1., 0.]);
     assert_eq!(node.payload, serde_json::json!({"kind":"sample"}));
 }
+
+#[test]
+fn 快照与不可变打开共用存活节点数并跳过墓碑() {
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        let dir = super::support::TestDir::new("live_manifest");
+        let path = dir.file("source.tdb");
+        let mut db = Database::<f32>::open_with_config(
+            &path,
+            Config {
+                dim: 1,
+                storage_mode: mode,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for id in [1, 2] {
+            db.insert_with_id(id, &[1.], serde_json::json!(id)).unwrap();
+        }
+        db.delete(1).unwrap();
+        db.create_snapshot(&dir.file("copy"), "gen").unwrap();
+        assert_eq!(verify_snapshot(&dir.file("copy")).unwrap().node_count, 1);
+        db.publish_generation_manifest("gen").unwrap();
+        db.close().unwrap();
+        let mut reader = Database::<f32>::open_immutable(&path, 1).unwrap();
+        assert_eq!(reader.all_node_ids().unwrap(), [2]);
+        reader.close().unwrap();
+        triviumdb::storage::snapshot::write_manifest(&path, "gen", "f32", 1, 2).unwrap();
+        assert_eq!(
+            Database::<f32>::open_immutable(&path, 1)
+                .err()
+                .unwrap()
+                .code(),
+            "TDB_IMMUTABLE_ARTIFACT"
+        );
+    }
+}

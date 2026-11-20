@@ -164,3 +164,33 @@ fn 当前主文件中的历史组件在创建锁前给出迁移诊断() {
         db.close().unwrap();
     }
 }
+
+#[test]
+fn 缺少主文件时逐项保留数据库制品并拒绝初始化() {
+    for suffix in [
+        ".vec",
+        ".pld.7",
+        ".idx",
+        ".manifest.json",
+        ".wal",
+        ".pelorus.meta",
+    ] {
+        let dir = TestDir::new("orphan_artifact");
+        let path = dir.file("base.tdb");
+        let artifact = format!("{path}{suffix}");
+        let bytes: &[u8] = if suffix == ".wal" {
+            b"TVWL\x07\x00"
+        } else {
+            b"preserve"
+        };
+        std::fs::write(&artifact, bytes).unwrap();
+        let error = Database::<f32>::open(&path, 3).err().unwrap();
+        assert_eq!(error.code(), "TDB_CORRUPTED_FILE", "{suffix}");
+        let mut offline = triviumdb::storage::memtable::MemTable::<f32>::new(3);
+        let error = triviumdb::storage::file_format::save(&mut offline, &path, StorageMode::Rom)
+            .unwrap_err();
+        assert_eq!(error.code(), "TDB_CORRUPTED_FILE", "{suffix}");
+        assert_eq!(std::fs::read(artifact).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
+}

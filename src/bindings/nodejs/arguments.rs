@@ -495,6 +495,10 @@ pub(super) fn parse_positive_usize(env: Env, value: f64, name: &str) -> napi::Re
     Ok(value)
 }
 
+pub(super) fn count_to_js(env: Env, count: usize, field: &'static str) -> napi::Result<f64> {
+    crate::sdk::js_count(count, field).map_err(|error| to_napi_error(env, error))
+}
+
 pub(super) fn node_id_to_js(env: Env, id: u64) -> napi::Result<f64> {
     if id > 9_007_199_254_740_991 {
         return Err(to_napi_error(env, crate::TriviumError::InvalidInput("节点 ID 超出 JavaScript 安全整数范围，请使用字符串 ID 的 TQL 接口 (Node ID exceeds the JavaScript safe-integer range; use TQL string IDs)".into())));

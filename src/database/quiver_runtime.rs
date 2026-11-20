@@ -416,6 +416,7 @@ impl<T: VectorType> crate::storage::memtable::MemTable<T> {
         query: &[f32],
         config: &QuIVerSearchConfig,
         eligible: &dyn Fn(u64) -> bool,
+        observer: Option<&dyn Fn(crate::index::quiver::runtime::SearchStage) -> Result<()>>,
     ) -> Result<Option<Vec<(u64, f32)>>> {
         let Some(active) = self
             .quiver_ssd
@@ -430,15 +431,14 @@ impl<T: VectorType> crate::storage::memtable::MemTable<T> {
                 resource: "quiver_rerank_generation",
             });
         }
-        active
-            .reader
-            .search_bound(
-                query,
-                config,
-                eligible,
-                self.quiver().ok_or(TriviumError::DatabaseClosed)?,
-            )
-            .map(Some)
+        let index = self.quiver().ok_or(TriviumError::DatabaseClosed)?;
+        match observer {
+            Some(observer) => active
+                .reader
+                .search_bound_observed(query, config, index, eligible, observer, 0),
+            None => active.reader.search_bound(query, config, eligible, index),
+        }
+        .map(Some)
     }
     /// 在事实文件组提交之后刷新启用的派生索引；失败保留原Reader并允许重试checkpoint。
     pub(crate) fn refresh_quiver_ssd_after_checkpoint(&mut self, path: &str) -> Result<()> {

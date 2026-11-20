@@ -357,6 +357,15 @@ pub(crate) fn recover<T: VectorType>(path: &str, writable: bool) -> Result<bool>
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::AfterPublicationRestore);
     }
+    if !state.rom {
+        // 提交标记仍指向上一代，日志中这一代的 Payload 属于尚未发布的候选。
+        let payload = payload_path_for_generation(path, generation);
+        match std::fs::remove_file(&payload) {
+            Ok(()) => sync_parent_directory(Path::new(&payload))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     cleanup(path)?;
     Ok(true)
 }

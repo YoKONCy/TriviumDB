@@ -508,22 +508,23 @@ impl TextIndex {
         tokens.sort_unstable();
         tokens.dedup();
 
-        let n = self.total_docs as f32;
-        let avg_dl = self.avg_dl;
+        let n = self.total_docs as f64;
+        let (k1, b) = (f64::from(k1), f64::from(b));
+        let avg_dl = f64::from(self.avg_dl);
 
         for token in tokens {
             if let Some(docs) = self.bm25_tf.get(token) {
-                let df = docs.len() as f32;
+                let df = docs.len() as f64;
                 // IDF 平滑 (BM25 标准)
                 let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
 
                 for (&id, &tf) in docs {
-                    let dl = *self.doc_lengths.get(&id).unwrap_or(&0) as f32;
-                    let tf_f32 = tf as f32;
+                    let dl = *self.doc_lengths.get(&id).unwrap_or(&0) as f64;
+                    let frequency = tf as f64;
                     // Okapi BM25 打分公式
                     let tf_norm =
-                        (tf_f32 * (k1 + 1.0)) / (tf_f32 + k1 * (1.0 - b + b * dl / avg_dl));
-                    emit(id, idf * tf_norm)?;
+                        (frequency * (k1 + 1.0)) / (frequency + k1 * (1.0 - b + b * dl / avg_dl));
+                    emit(id, (idf * tf_norm) as f32)?;
                 }
             }
         }

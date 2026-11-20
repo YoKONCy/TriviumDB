@@ -59,9 +59,6 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
 ) -> Result<String> {
     db.check_request_admission()?;
     crate::request::check_current()?;
-    let runtime = crate::database::read_or_recover(&db.memtable)
-        .resource_runtime()
-        .clone();
     let bytes = json
         .len()
         .checked_mul(64)
@@ -69,7 +66,7 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
         .ok_or_else(|| TriviumError::CapacityAllocationFailed {
             reason: "SSD请求容量溢出 (SSD request capacity overflow)".into(),
         })?;
-    let _workspace = runtime.reserve_workspace(bytes)?;
+    let _workspace = db.reserve_request_workspace(bytes)?;
     let command: Command = serde_json::from_str(json).map_err(|error| {
         TriviumError::InvalidInput(format!(
             "SSD请求JSON无效 (Invalid SSD request JSON): {error}"
@@ -98,7 +95,7 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
                     reason: "SSD响应容量溢出 (SSD response capacity overflow)".into(),
                 }
             })?;
-            output_workspace = Some(runtime.reserve_workspace(output_bytes)?);
+            output_workspace = Some(db.reserve_request_workspace(output_bytes)?);
             let config = QuIVerSearchConfig {
                 top_k,
                 ef_search,

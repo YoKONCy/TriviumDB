@@ -231,6 +231,7 @@ fn publication_point(name: &str) -> ConcurrencyPoint {
         "after_tdb" => ConcurrencyPoint::AfterTdbPersisted,
         "before_marker" => ConcurrencyPoint::BeforeFlushMarkerRename,
         "after_marker" => ConcurrencyPoint::AfterFlushMarkerRename,
+        "before_wal_replace" => ConcurrencyPoint::BeforeWalReplace,
         "during_restore" => ConcurrencyPoint::AfterPublicationRestore,
         other => panic!("未知发布阶段: {other}"),
     }
@@ -364,6 +365,7 @@ fn PWR_00A_发布阶段强杀必须恢复全部已同步事务() {
             "after_tdb",
             "before_marker",
             "after_marker",
+            "before_wal_replace",
             "during_restore",
         ] {
             let path = tmp_db(&format!(

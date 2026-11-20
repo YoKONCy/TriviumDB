@@ -137,7 +137,16 @@ fn batched_reranking_merges_reads_and_preserves_independent_scores() {
             stats.cold_read_bytes,
             4 * stats.metadata.record_bytes as u64
         );
-        assert_eq!(stats.physical_read_calls, 1);
+        if mode == IoMode::Buffered {
+            assert_eq!(stats.physical_read_calls, 1);
+        } else {
+            // 四条连续记录可以合并，也可按设备扇区共享；每个覆盖的扇区至多读取一次。
+            let end = std::fs::metadata(&path).unwrap().len();
+            let start = end - stats.cold_read_bytes;
+            let sector = stats.io_alignment_bytes as u64;
+            let covered = (end - 1) / sector - start / sector + 1;
+            assert!((1..=covered).contains(&stats.physical_read_calls));
+        }
         assert!(stats.physical_read_bytes >= stats.cold_read_bytes);
         assert_eq!(reader.search(&vectors[1], &config()).unwrap(), expected());
         let before = reader.stats().cold_read_calls;

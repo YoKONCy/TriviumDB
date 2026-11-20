@@ -251,65 +251,61 @@ pub fn shortest_path<T: VectorType>(
     max_depth: usize,
     label_filter: Option<&str>,
 ) -> Option<Path> {
-    shortest_path_view(mt, src, dst, max_depth, label_filter)
+    shortest_path_checked(mt, src, dst, max_depth, label_filter, || {
+        Ok::<_, std::convert::Infallible>(())
+    })
+    .unwrap_or_else(|never| match never {})
 }
 
-pub(crate) fn shortest_path_view<T: VectorType>(
+pub(crate) fn shortest_path_checked<T: VectorType, E>(
     mt: &impl GraphRead<T>,
     src: NodeId,
     dst: NodeId,
     max_depth: usize,
     label_filter: Option<&str>,
-) -> Option<Path> {
+    check: impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<Option<Path>, E> {
+    check()?;
     if !mt.contains(src) || !mt.contains(dst) {
-        return None;
+        return Ok(None);
     }
     if src == dst {
-        return Some(vec![src]);
+        return Ok(Some(vec![src]));
     }
-    if max_depth == 0 {
-        return None;
-    }
-
-    let mut visited: HashSet<NodeId> = HashSet::new();
-    visited.insert(src);
-
-    // BFS 队列：(当前节点, 从起点到当前节点的路径)
-    let mut queue: VecDeque<(NodeId, Vec<NodeId>)> = VecDeque::new();
-    queue.push_back((src, vec![src]));
-
-    while let Some((current, path)) = queue.pop_front() {
-        if path.len() > max_depth {
+    let mut parents = HashMap::from([(src, src)]);
+    let mut queue = VecDeque::from([(src, 0usize)]);
+    while let Some((id, depth)) = queue.pop_front() {
+        check()?;
+        if depth >= max_depth {
             break;
         }
-
-        if let Some(edges) = mt.get_edges(current) {
-            for edge in edges {
-                // 标签过滤
-                if let Some(lf) = label_filter
-                    && edge.label != lf
-                {
-                    continue;
+        for edge in mt.get_edges(id).unwrap_or_default() {
+            check()?;
+            if label_filter.is_some_and(|label| label != edge.label) {
+                continue;
+            }
+            let next = edge.target_id;
+            let std::collections::hash_map::Entry::Vacant(slot) = parents.entry(next) else {
+                continue;
+            };
+            slot.insert(id);
+            if next == dst {
+                let mut path = vec![dst];
+                let mut current = dst;
+                while current != src {
+                    check()?;
+                    current = parents[&current];
+                    path.push(current);
                 }
-
-                let next = edge.target_id;
-                if next == dst {
-                    let mut result = path.clone();
-                    result.push(dst);
-                    return Some(result);
-                }
-
-                if !visited.contains(&next) && path.len() < max_depth {
-                    visited.insert(next);
-                    let mut new_path = path.clone();
-                    new_path.push(next);
-                    queue.push_back((next, new_path));
-                }
+                path.reverse();
+                return Ok(Some(path));
+            }
+            if depth + 1 < max_depth {
+                queue.push_back((next, depth + 1));
             }
         }
     }
-
-    None
+    Ok(None)
 }
 
 /// 可变长路径遍历：找到从 src 出发、跳数在 [min_depth, max_depth] 范围内的所有可达终点

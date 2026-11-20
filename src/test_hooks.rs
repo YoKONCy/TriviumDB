@@ -22,6 +22,7 @@ pub enum ConcurrencyPoint {
     /// 命名图复制前的受控读视图，用于取消和资源归还验收。
     NamedGraphRead,
     /// 文档精确向量评分及ANN导航的受控执行点。
+    DocumentRecordCommitted,
     DocumentVectorStep,
     DocumentAnnStep,
     /// 文档成员posting访问中断点，用于受控取消交错。
@@ -50,7 +51,7 @@ pub enum ConcurrencyPoint {
     BeforeMemtableApply,
     BeforeCompactionSave,
     BeforeWalClear,
-    AfterWalTruncate,
+    BeforeWalReplace,
     AfterVecPersisted,
     AfterTdbPersisted,
     BeforeFlushMarkerRename,

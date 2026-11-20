@@ -48,6 +48,7 @@ pub const RESERVED_SUFFIXES: &[&str] = &[
     ".publish",
     ".migration",
     ".qssd",
+    ".pelorus",
     ".tmp",
 ];
 
@@ -138,6 +139,22 @@ pub fn validate_destination(source: &Path, destination: &Path) -> Result<PathBuf
         }
     }
     Ok(target)
+}
+
+/// 只有租约可以独立于数据库存在。其余保留名称均可能包含待恢复的事实。
+pub(crate) fn ensure_new_database(path: &Path) -> Result<()> {
+    let database = name(path)?;
+    let lock = format!("{database}.lock");
+    for entry in std::fs::read_dir(parent(path))? {
+        let leaf = entry?.file_name();
+        let leaf = leaf.to_string_lossy();
+        if !names_equal(&leaf, &lock) && is_reserved_name(&leaf, database) {
+            return Err(TriviumError::CorruptedFile(format!(
+                "缺少主检查点且存在数据库制品 (Missing base checkpoint with surviving database artifact): {leaf}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn parent(path: &Path) -> &Path {

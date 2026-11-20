@@ -64,7 +64,8 @@ def run_index_graph_boundaries(root: str) -> None:
     file = Path(root) / "full-ids.tdb"
     sample = Path(__file__).parent.parent / "fixtures/numeric_ids/wal.bin"
     triviumdb.TriviumDB(str(file), dim=2, auto_build_quiver=False).close()
-    Path(str(file) + ".wal").write_bytes(sample.read_bytes())
+    with Path(str(file) + ".wal").open("ab") as wal:
+        wal.write(sample.read_bytes()[6:])
     db = triviumdb.TriviumDB(str(file), dim=2, auto_build_quiver=False)
     try:
         expected = [1, 2**53 - 1, 2**53, 2**53 + 1]

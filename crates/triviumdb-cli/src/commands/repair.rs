@@ -9,65 +9,49 @@ use crate::CliResult;
 use crate::db_handle::{CliRows, CliValue, DType, DbHandle, sniff_header};
 use crate::formatter::{OutputFormat, format_rows};
 
-fn inspect_inputs(path: &str) -> Result<(bool, bool), triviumdb::TriviumError> {
-    let main_exists = Path::new(path).try_exists()?;
+/// 两个诊断命令共用基础检查点准入，保持原始 I/O 与格式错误类别。
+fn inspect_inputs(path: &str) -> Result<bool, triviumdb::TriviumError> {
     let wal_exists = Path::new(&format!("{path}.wal")).try_exists()?;
-    if !main_exists && !wal_exists {
+    if !Path::new(path).try_exists()? {
+        if wal_exists {
+            return Err(triviumdb::TriviumError::CorruptedFile(
+                "缺少带类型的基础检查点，请保留 WAL 并使用原库的基础检查点恢复 (Typed base checkpoint missing; preserve the WAL and recover with the original database's base checkpoint)".into(),
+            ));
+        }
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("主库和 WAL 均不存在 (Database and WAL are missing): {path}"),
         )
         .into());
     }
-    Ok((main_exists, wal_exists))
+    Ok(wal_exists)
 }
 
-/// 快速检查文件头与 WAL/主库存在性（不挂载数据库）。
+/// 快速检查文件头与 WAL 是否存在。
 pub fn check(path: &str) -> CliResult {
-    let (tdb_exists, wal_exists) = inspect_inputs(path)?;
-
+    let wal_exists = inspect_inputs(path)?;
+    let header = sniff_header(path)?;
     println!(
         "{} {}",
         "扫描数据库环境 / Scanning database environment:".bold(),
         path
     );
     println!("   ├─ WAL 日志文件存在 / WAL file exists: {wal_exists}");
-    println!("   ├─ TDB 主库文件存在 / TDB database file exists: {tdb_exists}");
-
-    if tdb_exists {
-        match sniff_header(path) {
-            Ok(h) => {
-                println!(
-                    "   └─ 架构参数 / Schema => 版本 / Version: v{}, 维度 / Dimension: {}",
-                    h.version, h.dim
-                );
-                println!(
-                    "{}",
-                    "当前格式文件头校验通过。/ Current-format database header validated.".green()
-                );
-            }
-            Err(e) => {
-                return Err(e.into());
-            }
-        }
-    } else {
-        return Err(triviumdb::TriviumError::CorruptedFile(
-            "缺少带类型的基础检查点，请保留 WAL 并使用原库的基础检查点恢复 (Typed base checkpoint missing; preserve the WAL and recover with the original database's base checkpoint)".into(),
-        ).into());
-    }
-
+    println!(
+        "   └─ 架构参数 / Schema => 版本 / Version: v{}, 维度 / Dimension: {}",
+        header.version, header.dim
+    );
+    println!(
+        "{}",
+        "当前格式文件头校验通过。/ Current-format database header validated.".green()
+    );
     Ok(())
 }
 
-/// 强制挂载并导出全部节点（维度从文件头嗅探，缺省回退为 4 以防 panic）。
+/// 从已发布的检查点只读导出节点。
 pub fn dump(path: &str, dtype: DType, format: OutputFormat) -> CliResult {
     inspect_inputs(path)?;
-    let dim = sniff_header(path).map(|h| h.dim).unwrap_or(4);
-    eprintln!(
-        "尝试以维度 {dim} 强制挂载数据库 / Attempting forced database open with dimension {dim}..."
-    );
-
-    let handle = DbHandle::open(path, dim, dtype)?;
+    let handle = DbHandle::open_read_only(path, None, dtype)?;
     eprintln!(
         "{} 存活节点总数 / Live nodes: {}",
         "挂载成功 / Open succeeded!".green(),

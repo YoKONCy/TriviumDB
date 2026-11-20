@@ -17,6 +17,26 @@ impl TestDir {
     pub fn file(&self, name: &str) -> String {
         self.0.join(name).to_str().unwrap().to_owned()
     }
+
+    /// 在隔离目录复制同一检查点，保留主库、索引和日志之间的身份关系。
+    #[allow(dead_code)]
+    pub fn copy_checkpoint(&self, source: &str, target: &str) {
+        let base = std::path::Path::new(source)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        for entry in std::fs::read_dir(&self.0).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let Some(suffix) = name.to_str().unwrap().strip_prefix(base) else {
+                continue;
+            };
+            if (suffix.is_empty() || suffix.starts_with('.')) && suffix != ".lock" {
+                std::fs::copy(entry.path(), format!("{target}{suffix}")).unwrap();
+            }
+        }
+    }
 }
 
 impl Drop for TestDir {

@@ -729,6 +729,53 @@ impl Drop for DatabaseReservation {
     }
 }
 
+/// SDK 编解码与核心调用同时存活，实例与共享运行时的额度随同一凭证归还。
+pub(crate) struct RequestWorkspace {
+    ledger: Arc<AtomicUsize>,
+    shared: WorkspaceReservation,
+}
+
+impl RequestWorkspace {
+    pub(crate) fn reserve(
+        runtime: &ResourceRuntime,
+        ledger: &Arc<AtomicUsize>,
+        resident: usize,
+        limit: usize,
+        bytes: usize,
+    ) -> Result<Self> {
+        let shared = runtime.reserve_workspace(bytes)?;
+        ledger
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes)
+                    .filter(|&next| limit == 0 || resident.saturating_add(next) <= limit)
+            })
+            .map_err(|used| TriviumError::CapacityReservationRejected {
+                requested_nodes: 0,
+                estimated_bytes: bytes,
+                current_bytes: resident.saturating_add(used),
+                memory_limit: limit,
+            })?;
+        Ok(Self {
+            ledger: Arc::clone(ledger),
+            shared,
+        })
+    }
+
+    /// 先取得增量额度，再转入同一凭证。任一准入失败时原凭证原样保留。
+    pub(crate) fn grow_by(&mut self, resident: usize, limit: usize, bytes: usize) -> Result<()> {
+        let mut added = Self::reserve(&self.shared.runtime, &self.ledger, resident, limit, bytes)?;
+        self.shared.bytes += added.shared.bytes;
+        added.shared.bytes = 0;
+        Ok(())
+    }
+}
+
+impl Drop for RequestWorkspace {
+    fn drop(&mut self) {
+        self.ledger.fetch_sub(self.shared.bytes(), Ordering::AcqRel);
+    }
+}
+
 pub(crate) struct WorkspaceReservation {
     runtime: ResourceRuntime,
     bytes: usize,
@@ -875,6 +922,34 @@ impl ResourcePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 并发请求共享实例额度且两层凭证均可归还() {
+        let runtime = ResourceRuntime::new(Default::default()).unwrap();
+        let ledger = Arc::new(AtomicUsize::new(0));
+        let held = RequestWorkspace::reserve(&runtime, &ledger, 10, 100, 60).unwrap();
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert!(matches!(
+                        RequestWorkspace::reserve(&runtime, &ledger, 10, 100, 31),
+                        Err(TriviumError::CapacityReservationRejected {
+                            current_bytes: 70,
+                            ..
+                        })
+                    ));
+                    let _at_limit =
+                        RequestWorkspace::reserve(&runtime, &ledger, 10, 100, 30).unwrap();
+                    assert_eq!(runtime.stats().reserved_workspace_bytes, 90);
+                })
+                .join()
+                .unwrap();
+        });
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 60);
+        drop(held);
+        assert_eq!(ledger.load(Ordering::Acquire), 0);
+        assert_eq!(runtime.stats().reserved_workspace_bytes, 0);
+    }
     use rayon::prelude::*;
 
     #[test]

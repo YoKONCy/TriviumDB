@@ -59,13 +59,15 @@ fn repair_check明确拒绝只有_wal_的数据库() {
     let wal = std::fs::read(format!("{source}.wal")).unwrap();
     let copied_wal = format!("{untyped}.wal");
     std::fs::write(&copied_wal, &wal).unwrap();
-    let output = tdb()
-        .args(["--format=json", "repair", "check", untyped])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(error["code"], "TDB_CORRUPTED_FILE");
+    for command in ["check", "dump"] {
+        let output = tdb()
+            .args(["--format=json", "repair", command, untyped])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["code"], "TDB_CORRUPTED_FILE");
+    }
     assert_eq!(std::fs::read(copied_wal).unwrap(), wal);
     assert!(!std::path::Path::new(untyped).exists());
 }
