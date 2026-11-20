@@ -6,6 +6,59 @@ use triviumdb::test_hooks::{ConcurrencyPoint, IoPoint, fail_io_at, pause_at_path
 use triviumdb::{Database, ShutdownPhase, TriviumError};
 
 #[test]
+fn 已取消的校验请求保留快照和维护配额() {
+    use triviumdb::sdk::RequestContext;
+    use triviumdb::storage::snapshot::verify_snapshot_with_runtime;
+
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.tdb");
+    let snapshot = root.path().join("snapshot");
+    let snapshot = snapshot.to_str().unwrap();
+    let mut db = Database::<f32>::open(source.to_str().unwrap(), 2).unwrap();
+    db.insert_with_id(1, &[1.0, 0.0], serde_json::json!({"value":1}))
+        .unwrap();
+    let manifest = db.create_snapshot(snapshot, "snapshot").unwrap();
+    let runtime = triviumdb::ResourceRuntime::new(triviumdb::ResourceLimits::default()).unwrap();
+    let request =
+        RequestContext::with_timeout("cancel-snapshot-check", Duration::ZERO, false).unwrap();
+    let error = request
+        .run(|| {
+            request.cancel();
+            verify_snapshot_with_runtime(snapshot, &runtime)
+        })
+        .unwrap_err();
+    assert_eq!(error.code(), "TDB_QUERY_CANCELLED");
+    assert_eq!(runtime.stats().active_tasks, 0);
+    assert_eq!(runtime.stats().reserved_maintenance_bytes, 0);
+    let checked = verify_snapshot_with_runtime(snapshot, &runtime).unwrap();
+    assert_eq!(checked.node_count, 1);
+    assert_eq!(
+        serde_json::to_value(checked).unwrap(),
+        serde_json::to_value(manifest).unwrap()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn 快照拒绝Unicode大小写别名指向的源库制品() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("ÜBER.tdb");
+    let source = source.to_str().unwrap();
+    let target = root.path().join("über.tdb.publish");
+    let mut db = Database::<f32>::open(source, 2).unwrap();
+    db.insert_with_id(1, &[1.0, 0.0], serde_json::json!(1))
+        .unwrap();
+    let error = db
+        .create_snapshot(target.to_str().unwrap(), "snapshot")
+        .unwrap_err();
+    assert_eq!(error.code(), "TDB_INVALID_INPUT");
+    assert!(!target.exists());
+    db.close().unwrap();
+    let reopened = Database::<f32>::open(source, 2).unwrap();
+    assert_eq!(reopened.get_payload(1).unwrap(), Some(serde_json::json!(1)));
+}
+
+#[test]
 fn 快照拒绝占用源库制品路径并保留未刷盘写入() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("source.tdb");

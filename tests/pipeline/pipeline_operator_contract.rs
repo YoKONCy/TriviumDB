@@ -170,6 +170,46 @@ fn 属性并行扫描将工作线程用量归入所属查询() {
 }
 
 #[test]
+fn 过滤扫描在下一行超出节点或字节预算时停止() {
+    use triviumdb::query::pipeline::FilteredNodeScanSource;
+
+    let mut mt = MemTable::<f32>::new(2);
+    for id in 1..=5 {
+        mt.insert_with_id(id, &[1.0, 0.0], json!({"kind":"match"}))
+            .unwrap();
+    }
+    let operators: Vec<Box<dyn PipelineOperator<f32>>> = vec![Box::new(FilteredNodeScanSource {
+        filter: Filter::eq("kind", json!("match")),
+    })];
+    let row_bytes = std::mem::size_of::<NodeRow>();
+    for (nodes, bytes) in [(1, row_bytes * 5), (5, row_bytes)] {
+        let mut context = PipelineContext::new(
+            &mt,
+            PipelineBudget {
+                max_nodes: nodes,
+                max_node_set_bytes: bytes,
+                max_payload_lookups: 2,
+                ..budget()
+            },
+        );
+        assert_eq!(
+            execute_pipeline(&mut context, &operators)
+                .unwrap_err()
+                .code(),
+            "TDB_QUERY_EXECUTION"
+        );
+        context.budget.max_nodes = 5;
+        context.budget.max_node_set_bytes = row_bytes * 5;
+        context.budget.max_payload_lookups = 5;
+        let rows = execute_pipeline(&mut context, &operators).unwrap();
+        assert_eq!(
+            rows.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+    }
+}
+
+#[test]
 fn 耗尽解析预算的查询不把原始Payload加载进缓存() {
     use triviumdb::query::pipeline::FilteredNodeScanSource;
 

@@ -3807,9 +3807,9 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             wal.ensure_writable()?;
             write.phase = WritePhase::Validation;
             crate::storage::snapshot::validate_generation_id(generation_id)?;
-            crate::storage::snapshot::validate_database_snapshot_destination(
-                &self.db_path,
-                destination,
+            crate::storage::artifacts::validate_destination(
+                std::path::Path::new(&self.db_path),
+                std::path::Path::new(destination),
             )?;
             file_format::checkpoint(&mut mt, &mut wal, &self.db_path, self.storage_mode, false)?;
             crate::storage::snapshot::copy_database_snapshot(

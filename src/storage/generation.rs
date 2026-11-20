@@ -98,7 +98,7 @@ impl GenerationStore {
 
     pub fn generation_dir(&self, generation_id: &str) -> Result<PathBuf> {
         self.ensure_path()?;
-        validate_component(generation_id, "generation_id")?;
+        validate_generation_name(generation_id)?;
         Ok(self.root.join(generation_id))
     }
 
@@ -112,7 +112,16 @@ impl GenerationStore {
         let directory = path
             .parent()
             .ok_or_else(|| TriviumError::InvalidInput("generation 数据库路径缺少父目录".into()))?;
-        std::fs::create_dir_all(directory)?;
+        std::fs::create_dir_all(&self.root)?;
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(TriviumError::GenerationBusy {
+                    generation_id: generation_id.into(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        }
         Ok(path)
     }
 
@@ -173,7 +182,7 @@ impl GenerationStore {
                 reason: "current.json 版本不受支持".into(),
             });
         }
-        validate_component(&current.generation_id, "generation_id")?;
+        validate_generation_name(&current.generation_id)?;
         validate_component(&current.database_file, "database_file")?;
         Ok(current)
     }
@@ -220,7 +229,7 @@ impl GenerationStore {
     }
 
     pub fn reclaim_generation(&self, generation_id: &str) -> Result<()> {
-        validate_component(generation_id, "generation_id")?;
+        validate_generation_name(generation_id)?;
         let _management = self.lock_management_exclusive()?;
         let current = self.resolve_current()?;
         if current.generation_id == generation_id {
@@ -438,6 +447,19 @@ fn validate_component(value: &str, field: &str) -> Result<()> {
         return Err(TriviumError::InvalidInput(format!(
             "{field} 必须是不含路径分隔符的单一安全名称"
         )));
+    }
+    Ok(())
+}
+
+fn validate_generation_name(value: &str) -> Result<()> {
+    validate_component(value, "generation_id")?;
+    #[cfg(windows)]
+    let value = value.trim_end_matches(['.', ' ']);
+    if super::artifacts::names_equal(value, "current.json") {
+        return Err(TriviumError::InvalidInput(
+            "代际名称占用当前指针路径 (Generation name conflicts with the current pointer)".into(),
+        )
+        .at_field("generation_id"));
     }
     Ok(())
 }

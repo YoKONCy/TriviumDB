@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 mod transfer;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-pub(crate) use transfer::{copy_database_snapshot, validate_database_snapshot_destination};
+pub(crate) use transfer::copy_database_snapshot;
 pub use transfer::{
     restore_snapshot, restore_snapshot_with_runtime, verify_snapshot, verify_snapshot_with_runtime,
 };
@@ -66,12 +66,13 @@ impl FileDigest {
     }
 }
 
-fn checksum_file(path: &Path, suffix: String) -> std::io::Result<GenerationFile> {
+pub(super) fn checksum_file(path: &Path, suffix: String) -> Result<GenerationFile> {
     let mut digest = FileDigest::default();
     let mut file = std::fs::File::open(path)?;
     let mut buffer = vec![0u8; 64 * 1024];
     let mut size = 0u64;
     loop {
+        crate::request::check_current()?;
         let read = file.read(&mut buffer)?;
         if read == 0 {
             return Ok(digest.finish(size, suffix));
@@ -143,7 +144,7 @@ pub(crate) fn write_manifest_with_write_info(
     let files = generation_suffixes(db_path)
         .into_iter()
         .map(|suffix| checksum_file(Path::new(&format!("{db_path}{suffix}")), suffix))
-        .collect::<std::io::Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()?;
     if !files.iter().any(|file| file.suffix.is_empty()) {
         return Err(TriviumError::ImmutableArtifactInvalid {
             reason: "manifest 缺少主数据库文件".into(),
@@ -255,11 +256,13 @@ fn validate_manifest_files(
     }
     for file in &manifest.files {
         let file_path = PathBuf::from(format!("{db_path}{}", file.suffix));
-        let actual = checksum_file(&file_path, file.suffix.clone()).map_err(|error| {
-            TriviumError::ImmutableArtifactInvalid {
-                reason: format!("无法验证 {}: {error}", file_path.display()),
-            }
-        })?;
+        let actual =
+            checksum_file(&file_path, file.suffix.clone()).map_err(|error| match error {
+                TriviumError::Io(_) => TriviumError::ImmutableArtifactInvalid {
+                    reason: format!("无法验证 {}: {error}", file_path.display()),
+                },
+                other => other,
+            })?;
         if !file.matches_digest(&actual) {
             return Err(TriviumError::ImmutableArtifactInvalid {
                 reason: format!("{} 大小或校验和不匹配", file_path.display()),

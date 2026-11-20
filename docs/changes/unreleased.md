@@ -15,6 +15,10 @@
 - 快照拒绝占用源库制品路径，校验主库与索引容器的绑定，并在恢复发布前检查取消。旧代回收校验当前库与目标代际。CLI 在仅有 WAL 时报告缺少基础检查点。
 - 检查点的内部编码使用维护配额。查询在读取和解析 Payload 前检查预算。简单路径保持节点唯一，有界路径仅在确认遗漏或耗尽遍历预算时标记截断。
 
+- Pelorus 懒重建在安装派生索引前复核配置和向量代际。SDK 按实际 JSON 编码字节数准入响应，文档分数超出 `f32` 有限范围时返回查询错误。
+- 快照、维度迁移和 CLI 导出共用源库制品保护，识别 Windows Unicode 大小写别名。校验快照及发布迁移时响应请求取消。`prepare_generation()` 拒绝已存在的代际和保留的 `current.json` 名称。
+- 扫描在创建超预算的结果行前停止。双向最短路的部分模式保留已经找到的路径。CLI 修复检查校验完整文件头，底层恢复插入拒绝重复 ID，自动分配从有效 ID 开始。
+
 已发布内容见 [0.9.2 双语发布说明](0.9.2.md)。
 
 ---
@@ -29,5 +33,9 @@
 - Successful Pelorus builds persist the curvature, which is included in the durable fact fingerprint. The Server updates its ETag according to the publication outcome. Pelorus validates options even for empty batches, budgets the cumulative response payload, and compares document thresholds at the precision of the returned score. Node.js provides a structured diagnostic for missing arguments to `pelorusRequest()`.
 - Snapshots protect the source artifact paths, validate that the index container belongs to the database, and check cancellation before publishing a restore. Generation reclamation validates both the active database and the target generation. The CLI reports a missing base checkpoint when only a WAL is present.
 - Checkpoint encoding uses the maintenance quota. Queries check their budgets before reading or parsing payloads. Simple paths contain unique nodes. Bounded path queries report truncation upon finding an omitted path or exhausting the traversal budget.
+
+- Pelorus lazy rebuilds recheck the configuration and vector generation before installing derived indexes. The SDK budgets actual JSON response bytes. Document queries report a query error for scores outside the finite `f32` range.
+- Snapshots, dimension migration, and CLI exports share source artifact protection, including Windows Unicode case aliases. Snapshot verification and migration publication honor request cancellation. `prepare_generation()` rejects existing generations and the reserved `current.json` name.
+- Scans stop before allocating a result row beyond the budget. Partial bidirectional shortest-path queries retain paths already found. The CLI repair check validates the full header. Low-level recovery inserts reject duplicate IDs and automatic allocation starts at a valid ID.
 
 Published changes are recorded in the [0.9.2 bilingual release notes](0.9.2.md).

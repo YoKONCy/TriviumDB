@@ -26,6 +26,7 @@ pub fn verify_snapshot_with_runtime(
     directory: &str,
     runtime: &ResourceRuntime,
 ) -> Result<GenerationManifest> {
+    crate::request::check_current()?;
     let _task = runtime.enter_maintenance_task()?;
     let _workspace = runtime.reserve_maintenance_workspace(TRANSFER_BYTES)?;
     verify(Path::new(directory))
@@ -42,12 +43,14 @@ fn regular(path: &Path) -> Result<()> {
 }
 
 fn verify(directory: &Path) -> Result<GenerationManifest> {
+    crate::request::check_current()?;
     if !std::fs::symlink_metadata(directory)?.file_type().is_dir() {
         return Err(invalid("快照必须是实际目录，不能是符号链接"));
     }
     // 在读取和校验任何制品前拒绝链接、管道和目录，同时限制可枚举文件数。
     let mut actual = std::collections::BTreeSet::new();
     for entry in std::fs::read_dir(directory)? {
+        crate::request::check_current()?;
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             return Err(invalid("快照只能包含普通文件"));
@@ -83,10 +86,9 @@ fn verify(directory: &Path) -> Result<GenerationManifest> {
     }
     crate::storage::file_format::validate_snapshot_metadata(
         &database.to_string_lossy(),
-        &manifest.dtype,
-        manifest.dim,
-        manifest.node_count,
+        &manifest,
     )?;
+    crate::request::check_current()?;
     Ok(manifest)
 }
 
@@ -101,6 +103,7 @@ pub fn restore_snapshot_with_runtime(
     runtime: &ResourceRuntime,
 ) -> Result<GenerationManifest> {
     WriteErrorInfo::capture_destination(|write| {
+        crate::request::check_current()?;
         let _task = runtime.enter_maintenance_task()?;
         write.phase = WritePhase::Validation;
         let _workspace = runtime.reserve_maintenance_workspace(TRANSFER_BYTES)?;
@@ -163,56 +166,6 @@ pub(crate) fn copy_database_snapshot(
     Ok(manifest)
 }
 
-pub(crate) fn validate_database_snapshot_destination(
-    source: &str,
-    destination: &str,
-) -> Result<()> {
-    let source = Path::new(source);
-    let destination = Path::new(destination);
-    let database_name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            TriviumError::InvalidInput(
-                "源数据库缺少文件名 (Source database has no filename)".into(),
-            )
-        })?;
-    let leaf = destination.file_name().ok_or_else(|| {
-        TriviumError::InvalidInput(
-            "快照目标必须有目录名称 (Snapshot destination requires a directory name)".into(),
-        )
-    })?;
-    let source_parent = source
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
-        .canonicalize()?;
-    let target_parent = destination
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
-        .canonicalize()?;
-    let target = target_parent.join(leaf);
-    for candidate in target.ancestors() {
-        let (Some(name), Some(parent)) = (candidate.file_name(), candidate.parent()) else {
-            continue;
-        };
-        let name = name.to_string_lossy();
-        #[cfg(windows)]
-        let name = name.trim_end_matches(['.', ' ']);
-        #[cfg(not(windows))]
-        let name = name.as_ref();
-        if super::super::artifacts::is_reserved_name(name, database_name)
-            && (parent == source_parent || same_file::is_same_file(parent, &source_parent)?)
-        {
-            return Err(TriviumError::InvalidInput(
-                "快照目标与源库制品冲突 (Snapshot destination conflicts with a source database artifact)".into(),
-            ).at_field("destination"));
-        }
-    }
-    Ok(())
-}
-
 fn copy_file(source: &Path, target: &Path, suffix: String) -> Result<GenerationFile> {
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::SnapshotCopy)?;
@@ -228,6 +181,7 @@ fn copy_file(source: &Path, target: &Path, suffix: String) -> Result<GenerationF
     let mut digest = FileDigest::default();
     let mut size = 0u64;
     loop {
+        crate::request::check_current()?;
         let read = input.read(&mut buffer)?;
         if read == 0 {
             break;

@@ -112,7 +112,6 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
             &backward_frontier
         };
         let mut next_frontier = Vec::new();
-        let mut meeting = Vec::new();
         for &current in frontier {
             crate::graph::budget::check_control(&control)?;
             let current_depth = if expand_forward {
@@ -150,17 +149,14 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
                     neighbors.push(neighbor);
                 }
             }
-            if truncated {
-                break;
-            }
             neighbors.sort_unstable();
             neighbors.dedup();
             for neighbor in neighbors {
                 crate::graph::budget::check_control(&control)?;
-                let own = if expand_forward {
-                    &mut forward
+                let (own, other) = if expand_forward {
+                    (&mut forward, &backward)
                 } else {
-                    &mut backward
+                    (&mut backward, &forward)
                 };
                 if let std::collections::hash_map::Entry::Vacant(entry) = own.entry(neighbor) {
                     if metrics.visited_nodes >= budget.max_visited_nodes {
@@ -188,9 +184,12 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
                     next_frontier.push(neighbor);
                     metrics.peak_frontier_size = metrics.peak_frontier_size.max(next_size);
                 }
-                let other = if expand_forward { &backward } else { &forward };
-                if other.contains_key(&neighbor) {
-                    meeting.push(neighbor);
+                if let Some(&(other_depth, _)) = other.get(&neighbor) {
+                    let own_depth = own[&neighbor].0;
+                    let candidate = (own_depth + other_depth, neighbor);
+                    if best_meeting.is_none_or(|best| candidate < best) {
+                        best_meeting = Some(candidate);
+                    }
                 }
             }
             if truncated {
@@ -199,15 +198,6 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
         }
         if truncated {
             break;
-        }
-        if !meeting.is_empty() {
-            for node in meeting {
-                crate::graph::budget::check_control(&control)?;
-                let candidate = (forward[&node].0 + backward[&node].0, node);
-                if best_meeting.is_none_or(|best| candidate < best) {
-                    best_meeting = Some(candidate);
-                }
-            }
         }
         next_frontier.sort_unstable();
         next_frontier.dedup();

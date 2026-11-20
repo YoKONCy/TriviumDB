@@ -3,8 +3,9 @@
 use crate::index::pelorus::{
     PelorusConfig, PelorusHit, PelorusRuntimeOptions, WireSearchOptions, convert_query,
 };
+use crate::resources::WorkspaceReservation;
 use crate::{Database, Result, TriviumError, VectorType};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::{Number, Value};
 
 #[derive(Deserialize)]
@@ -33,20 +34,34 @@ enum Command {
 }
 
 #[derive(Serialize)]
-struct Hit {
-    id: String,
+struct WireHit<'a> {
+    #[serde(serialize_with = "serialize_id")]
+    id: u64,
     distance: f64,
-    payload: Value,
+    payload: &'a Value,
 }
 
-impl From<PelorusHit> for Hit {
-    fn from(hit: PelorusHit) -> Self {
-        Self {
-            id: hit.id.to_string(),
+fn serialize_id<S: Serializer>(id: &u64, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    serializer.collect_str(id)
+}
+
+struct WireRows<'a>(&'a [PelorusHit]);
+
+impl Serialize for WireRows<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(|hit| WireHit {
+            id: hit.id,
             distance: hit.distance,
-            payload: hit.payload,
-        }
+            payload: &hit.payload,
+        }))
     }
+}
+
+fn serialize_groups<S: Serializer>(
+    groups: &[Vec<PelorusHit>],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.collect_seq(groups.iter().map(|hits| WireRows(hits)))
 }
 
 pub fn request<T: VectorType + Serialize + DeserializeOwned>(
@@ -81,46 +96,71 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
         } => {
             let vector = convert_query(&vector)?;
             let options = options.into_core()?;
-            let search = || db.search_pelorus(&vector, &options);
-            let (hits, io) = if profile_io {
+            let search = || db.search_pelorus_with_workspace(&vector, &options);
+            let ((hits, workspace), io) = if profile_io {
                 let (hits, io) = super::quiver::measure_io(search);
                 (hits?, Some(io))
             } else {
                 (search()?, None)
             };
-            let hits = hits.into_iter().map(Hit::from).collect::<Vec<_>>();
             #[derive(Serialize)]
-            struct Response {
-                hits: Vec<Hit>,
+            struct Response<'a> {
+                hits: WireRows<'a>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 io: Option<super::quiver::QuiverIoStats>,
             }
-            encode(&Response { hits, io })
+            encode(
+                db,
+                workspace,
+                &Response {
+                    hits: WireRows(&hits),
+                    io,
+                },
+            )
         }
         Command::SearchBatch { vectors, options } => {
             let vectors = vectors
                 .iter()
                 .map(|v| convert_query(v))
                 .collect::<Result<Vec<_>>>()?;
-            let groups = db
-                .search_pelorus_batch(&vectors, &options.into_core()?)?
-                .into_iter()
-                .map(|hits| hits.into_iter().map(Hit::from).collect::<Vec<_>>())
-                .collect::<Vec<_>>();
+            let (groups, workspace) =
+                db.search_pelorus_batch_with_workspace(&vectors, &options.into_core()?)?;
             #[derive(Serialize)]
-            struct BatchResponse {
-                results: Vec<Vec<Hit>>,
+            struct BatchResponse<'a> {
+                #[serde(serialize_with = "serialize_groups")]
+                results: &'a [Vec<PelorusHit>],
             }
-            encode(&BatchResponse { results: groups })
+            encode(db, workspace, &BatchResponse { results: &groups })
         }
     }
 }
 
-fn encode(response: &impl Serialize) -> Result<String> {
+fn encode<T: VectorType + Serialize + DeserializeOwned>(
+    db: &Database<T>,
+    mut workspace: WorkspaceReservation,
+    response: &impl Serialize,
+) -> Result<String> {
     crate::request::check_current()?;
-    serde_json::to_string(response).map_err(|error| {
+    let bytes = crate::storage::payload_store::serialized_json_len(response)?;
+    crate::request::check_current()?;
+    let peak = workspace.bytes().saturating_add(bytes);
+    db.ensure_incremental_memory_budget(peak)?;
+    workspace.resize(peak)?;
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(bytes)
+        .map_err(|error| TriviumError::CapacityAllocationFailed {
+            reason: format!("Pelorus 响应分配失败 (Pelorus response allocation failed): {error}"),
+        })?;
+    serde_json::to_writer(&mut buffer, response).map_err(|error| {
         TriviumError::InvalidInput(format!(
             "Pelorus 响应编码失败 (Failed to encode Pelorus response): {error}"
+        ))
+    })?;
+    crate::request::check_current()?;
+    String::from_utf8(buffer).map_err(|error| {
+        TriviumError::QueryExecution(format!(
+            "Pelorus 响应不是有效 UTF-8 (Pelorus response is not valid UTF-8): {error}"
         ))
     })
 }

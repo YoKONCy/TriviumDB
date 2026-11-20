@@ -31,6 +31,8 @@ Rust 使用 `Database::build_pelorus_index(PelorusConfig { .. })` 构建并发�
 
 Rust 的 `search_pelorus` 和 `search_pelorus_batch` 返回 `f64` 测地距离。距离从小到大排列，同距离按节点 ID 升序。可用 `max_distance` 限制半径，用 `payload_filter` 限制候选。批量查询共享同一事实读视图，按输入顺序返回。
 
+文档检索以 `f32` 返回负距离分数。超出该类型有限范围的分数返回 `TDB_QUERY_EXECUTION`。SDK 的 JSON 响应在分配编码缓冲区前核算实际字节数，包含转义字符占用。
+
 Python 使用 `pelorus_request`，Node 使用 `pelorusRequest`。JSON 协议支持 `build`、`configure`、`search` 和 `search_batch`。响应以十进制字符串承载节点 ID。
 
 ```python

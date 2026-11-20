@@ -46,6 +46,31 @@ fn generous_budget() -> TraversalBudget {
 }
 
 #[test]
+fn 双向部分结果保留耗尽预算前找到的路径() {
+    let mut mt = triviumdb::storage::memtable::MemTable::<f32>::new(2);
+    for id in 1..=4 {
+        mt.insert_with_id(id, &[1.0, 0.0], serde_json::Value::Null)
+            .unwrap();
+    }
+    for dst in 2..=4 {
+        mt.link(1, dst, "edge".into(), 1.0).unwrap();
+    }
+    for (nodes, edges) in [(3, 8), (8, 1)] {
+        let budget = triviumdb::graph::budget::TraversalBudget {
+            max_visited_nodes: nodes,
+            max_examined_edges: edges,
+            exhaustion_policy: triviumdb::graph::budget::BudgetExhaustionPolicy::Partial,
+            ..Default::default()
+        };
+        let result =
+            triviumdb::graph::pathfinding::shortest_path_bidirectional(&mt, 1, 2, None, &budget)
+                .unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.path, Some(vec![1, 2]));
+    }
+}
+
+#[test]
 fn 双向初始状态和扩展前沿均在预算内准入() {
     let mt = graph();
     for (dimension, budget) in [

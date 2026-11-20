@@ -597,7 +597,50 @@ fn repair_check_valid_db() {
         .args(["repair", "check", &path, "--color", "never"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("完好"));
+        .stdout(predicate::str::contains("文件头校验通过"));
+}
+
+#[test]
+fn repair_check拒绝截断的当前格式文件头() {
+    let (dir, source) = seed_db();
+    let prefix = std::fs::read(source).unwrap()[..10].to_vec();
+    let file = dir.path().join("truncated.tdb");
+    std::fs::write(&file, &prefix).unwrap();
+    let result = tdb()
+        .args(["--format=json", "repair", "check", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
+    assert_eq!(error["code"], "TDB_CORRUPTED_FILE");
+    assert_eq!(std::fs::read(&file).unwrap(), prefix);
+}
+
+#[cfg(windows)]
+#[test]
+fn export拒绝源库发布文件的_unicode_大小写别名() {
+    let root = TempDir::new().unwrap();
+    let source = root.path().join("ÜBER.tdb");
+    let source = source.to_str().unwrap();
+    let target = root.path().join("über.tdb.publish");
+    let mut db = triviumdb::Database::<f32>::open(source, 2).unwrap();
+    db.insert_with_id(1, &[1.0, 0.0], json!({"name":"source"}))
+        .unwrap();
+    db.close().unwrap();
+    tdb()
+        .args([
+            "export",
+            source,
+            target.to_str().unwrap(),
+            "--color",
+            "never",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("拒绝导出到数据库相关文件"));
+    assert!(!target.exists());
+    let db = triviumdb::Database::<f32>::open(source, 2).unwrap();
+    assert_eq!(db.get_payload(1).unwrap(), Some(json!({"name":"source"})));
 }
 
 #[test]

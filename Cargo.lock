@@ -2700,7 +2700,6 @@ dependencies = [
  "predicates",
  "ratatui",
  "rustyline",
- "same-file",
  "serde",
  "serde_json",
  "tabled",

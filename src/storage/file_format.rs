@@ -76,6 +76,7 @@ pub(crate) fn publish_new_database<T: VectorType>(
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::MigrationBeforeCommit);
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationPublishMarker)?;
+        crate::request::check_current()?;
         crate::storage::fs::rename_new(
             Path::new(&flush_ok_path_from_db(source)),
             Path::new(&flush_ok_path_from_db(target)),
@@ -181,6 +182,19 @@ fn validate_vector_identity(
             TriviumError::CorruptedFile("向量块边界倒置 (Reversed vector block bounds)".into())
         })?
     };
+    let (stored_tag, stored, width) = header_vector_type(bytes)?;
+    if stored_tag != requested_tag {
+        return Err(TriviumError::DtypeMismatch { stored, requested });
+    }
+    if elements.checked_mul(width) != Some(vector_bytes) {
+        return Err(TriviumError::CorruptedFile(
+            "向量块精确长度不符 (Vector block exact length mismatch)".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn header_vector_type(bytes: &[u8]) -> Result<(u16, &'static str, usize)> {
     if bytes.len() < HEADER_SIZE as usize
         || &bytes[58..62] != b"VTYP"
         || read_u32_le(bytes, 66, "dtype reserved")? != 0
@@ -209,15 +223,38 @@ fn validate_vector_identity(
             "向量类型与元素宽度不符 (Vector dtype and element width disagree)".into(),
         ));
     }
-    if stored_tag != requested_tag {
-        return Err(TriviumError::DtypeMismatch { stored, requested });
-    }
-    if elements.checked_mul(width) != Some(vector_bytes) {
+    Ok((stored_tag, stored, width))
+}
+
+/// 检查当前格式的完整文件头，返回格式版本和维度。
+pub fn read_database_header(path: &str) -> Result<(u16, usize)> {
+    use std::io::{ErrorKind, Read};
+    let mut file = File::open(path)?;
+    let mut bytes = [0u8; HEADER_SIZE as usize];
+    let read_error = |error: std::io::Error| {
+        if error.kind() == ErrorKind::UnexpectedEof {
+            TriviumError::CorruptedFile("数据库文件头被截断 (Truncated database header)".into())
+        } else {
+            error.into()
+        }
+    };
+    file.read_exact(&mut bytes[..6]).map_err(read_error)?;
+    if &bytes[..4] != MAGIC {
         return Err(TriviumError::CorruptedFile(
-            "向量块精确长度不符 (Vector block exact length mismatch)".into(),
+            "数据库文件魔数无效 (Invalid database file magic)".into(),
         ));
     }
-    Ok(())
+    let version = read_u16_le(&bytes, 4, "version")?;
+    crate::storage::format::require("database", version.into(), CURRENT_VERSION.into())?;
+    file.read_exact(&mut bytes[6..]).map_err(read_error)?;
+    header_vector_type(&bytes)?;
+    let dim = read_u32_le(&bytes, 6, "dim")? as usize;
+    if !(1..=65_536).contains(&dim) {
+        return Err(TriviumError::CorruptedFile(
+            "数据库文件头的维度无效 (Invalid dimension in database header)".into(),
+        ));
+    }
+    Ok((version, dim))
 }
 
 /// 发布恢复写入前核对可信基础文件的类型；备份向量使用独立路径。
@@ -1359,6 +1396,7 @@ fn load_inner<T: VectorType>(
     let bq_offset = read_u64_le(bytes, 50, "header bq_offset")? as usize;
 
     if dim == 0
+        || next_id == 0
         || payload_offset < HEADER_SIZE as usize
         || (vector_offset != 0 && vector_offset < payload_offset)
         || edge_offset < payload_offset
@@ -2253,9 +2291,7 @@ fn load_quiver_index<T: VectorType>(
 /// 复用正式头部常量与解析函数，核对快照声明的基础事实，不物化数据库。
 pub(crate) fn validate_snapshot_metadata(
     path: &str,
-    expected_dtype: &str,
-    expected_dim: usize,
-    expected_nodes: usize,
+    manifest: &crate::storage::snapshot::GenerationManifest,
 ) -> Result<()> {
     use std::io::Read;
     let mut bytes = [0u8; HEADER_SIZE as usize];
@@ -2265,8 +2301,8 @@ pub(crate) fn validate_snapshot_metadata(
     let nodes = read_u64_le(&bytes, 18, "快照头部节点数")?;
     if &bytes[..4] != MAGIC
         || version != CURRENT_VERSION
-        || dim != expected_dim
-        || nodes != expected_nodes as u64
+        || dim != manifest.dim
+        || nodes != manifest.node_count as u64
         || dim == 0
         || dim > 65536
     {
@@ -2275,7 +2311,7 @@ pub(crate) fn validate_snapshot_metadata(
                 .into(),
         });
     }
-    let dtype = match expected_dtype {
+    let dtype = match manifest.dtype.as_str() {
         "f32" => vector_dtype::<f32>(),
         "u64" => vector_dtype::<u64>(),
         name if name == std::any::type_name::<half::f16>() => vector_dtype::<half::f16>(),
@@ -2296,21 +2332,44 @@ pub(crate) fn validate_snapshot_metadata(
             },
         },
     )?;
+    let part = |suffix: &str| manifest.files.iter().find(|file| file.suffix == suffix);
+    let main = part("").ok_or_else(|| TriviumError::ImmutableArtifactInvalid {
+        reason: "快照缺少主文件摘要 (Snapshot is missing the database digest)".into(),
+    })?;
     if read_u64_le(&bytes, 34, "vector offset")? == 0 {
         let marker_path = flush_ok_path_from_db(path);
-        let valid = read_marker_generation(&marker_path).is_some_and(|generation| {
-            validate_flush_marker(
-                &marker_path,
-                path,
-                &vector_path,
-                &payload_path_for_generation(path, generation),
-            )
-        });
-        if !valid {
-            return Err(TriviumError::ImmutableArtifactInvalid {
-                reason: "快照检查点文件组不匹配 (Snapshot checkpoint file group mismatch)".into(),
-            });
+        let mismatch = || TriviumError::ImmutableArtifactInvalid {
+            reason: "快照检查点文件组不匹配 (Snapshot checkpoint file group mismatch)".into(),
+        };
+        let marker = read_flush_marker(&marker_path).ok_or_else(mismatch)?;
+        let (vector_size, vector_crc) = part(".vec").map_or((0, 0), |file| (file.size, file.crc32));
+        let suffix = format!(".pld.{}", marker.generation);
+        let payload = part(&suffix).ok_or_else(mismatch)?;
+        if marker.tdb_size != main.size
+            || marker.tdb_crc32 != Some(main.crc32)
+            || marker.vec_size != vector_size
+            || marker.vec_crc32 != Some(vector_crc)
+            || marker.payload_size != Some(payload.size)
+        {
+            return Err(mismatch());
+        }
+        let payload_matches = if let Some(sha) = marker.payload_sha256 {
+            let expected = format!("{:x}", sha2::digest::Output::<sha2::Sha256>::from(sha));
+            match payload.sha256.as_deref() {
+                Some(actual) => actual == expected,
+                None => {
+                    super::snapshot::checksum_file(Path::new(&format!("{path}{suffix}")), suffix)?
+                        .sha256
+                        .as_deref()
+                        == Some(&expected)
+                }
+            }
+        } else {
+            marker.payload_crc32 == Some(payload.crc32)
+        };
+        if !payload_matches {
+            return Err(mismatch());
         }
     }
-    validate_index_container(path, version, None)
+    validate_index_container(path, version, Some(main.crc32))
 }

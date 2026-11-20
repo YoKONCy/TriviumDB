@@ -108,6 +108,34 @@ fn 活跃reader阻止旧代回收释放后可以回收() {
 }
 
 #[test]
+fn 代际准备保留已发布内容并拒绝占用当前指针() {
+    let root = tempfile::tempdir().unwrap();
+    let store = GenerationStore::new(root.path());
+    #[cfg(windows)]
+    let reserved = ["current.json", "CURRENT.JSON", "current.json. "];
+    #[cfg(not(windows))]
+    let reserved = ["current.json"];
+    for name in reserved {
+        let error = store.prepare_generation(name, "data.tdb").unwrap_err();
+        assert_eq!(error.code(), "TDB_INVALID_INPUT");
+    }
+    assert!(!root.path().join("current.json").exists());
+    publish(&store, "first", 0.25);
+    store.publish_current("first", "data.tdb").unwrap();
+    let original = store.open_current::<f32>(2).unwrap();
+    for file in ["data.tdb", "alternate.tdb"] {
+        let error = store.prepare_generation("first", file).unwrap_err();
+        assert_eq!(error.code(), "TDB_GENERATION_BUSY");
+    }
+    let next = store.open_current::<f32>(2).unwrap();
+    for reader in [&original, &next] {
+        let node = reader.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, [0.25, 0.75]);
+        assert_eq!(node.payload, json!({"generation":"first"}));
+    }
+}
+
+#[test]
 fn 当前代永远不能被回收() {
     let root = tmp_store("current_busy");
     std::fs::remove_dir_all(&root).ok();

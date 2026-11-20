@@ -61,6 +61,7 @@ pub enum ConcurrencyPoint {
     AfterPublicationCommitted,
     MigrationFilePublished,
     MigrationBeforeCommit,
+    PelorusBeforeLazyRebuild,
     MigrationCommitted,
     TqlPathStep,
     BeforeTqlProjection,

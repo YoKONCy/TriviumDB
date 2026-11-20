@@ -116,6 +116,114 @@ fn Pelorus曲率更新可随已确认向量写入恢复() {
 }
 
 #[cfg(feature = "test-hooks")]
+#[test]
+fn Pelorus懒重建保留已发布曲率并恢复随后写入() {
+    use triviumdb::database::{Config, MissingIndexPolicy, StorageMode};
+    use triviumdb::index::pelorus::{PelorusConfig, PelorusSearchOptions};
+    use triviumdb::sdk::RequestContext;
+    use triviumdb::storage::wal::SyncMode;
+    use triviumdb::test_hooks::pause_at_request;
+
+    let config = |mode: &str| Config {
+        dim: 2,
+        storage_mode: if mode == "rom" {
+            StorageMode::Rom
+        } else {
+            StorageMode::Mmap
+        },
+        sync_mode: SyncMode::Full,
+        missing_index_policy: MissingIndexPolicy::BuildInMemory,
+        auto_build_quiver: false,
+        ..Default::default()
+    };
+    let tight = PelorusConfig {
+        curvature: 4.0,
+        ..Default::default()
+    };
+    if let Some(path) = std::env::var_os("TRIVIUM_LAZY_PELORUS_RECOVERY_PATH") {
+        let mode = std::env::var("TRIVIUM_LAZY_PELORUS_RECOVERY_MODE").unwrap();
+        let mut db =
+            Database::<f32>::open_with_config(path.to_str().unwrap(), config(&mode)).unwrap();
+        db.insert_with_id(1, &[0.125, 0.0], serde_json::json!(1))
+            .unwrap();
+        db.build_pelorus_index(PelorusConfig::default()).unwrap();
+        // 超过变更节点上限，使原曲率配置保留且索引进入懒重建路径。
+        for id in 2..=68 {
+            db.insert_with_id(id, &[id as f32 / 1024.0, 0.0], serde_json::json!(id))
+                .unwrap();
+        }
+        let context =
+            RequestContext::with_timeout("pelorus-rebuild", std::time::Duration::ZERO, false)
+                .unwrap();
+        let gate = pause_at_request(
+            ConcurrencyPoint::PelorusBeforeLazyRebuild,
+            "pelorus-rebuild",
+        );
+        std::thread::scope(|threads| {
+            let lazy = threads.spawn(|| {
+                context.run(|| {
+                    db.search_pelorus(
+                        &[0.125, 0.0],
+                        &PelorusSearchOptions {
+                            top_k: 1,
+                            ..Default::default()
+                        },
+                    )
+                })
+            });
+            while !gate.is_arrived() {
+                assert!(!lazy.is_finished(), "查询没有进入懒重建");
+                std::thread::yield_now();
+            }
+            let published = db.build_pelorus_index(tight);
+            gate.release();
+            published.unwrap();
+            let hits = lazy.join().unwrap().unwrap();
+            assert_eq!((hits[0].id, hits[0].distance), (1, 0.0));
+        });
+        assert_eq!(
+            db.update_vector(1, &[0.75, 0.0]).unwrap_err().code(),
+            "TDB_INVALID_VECTOR"
+        );
+        db.update_vector(1, &[0.375, 0.0]).unwrap();
+        // 仅依赖检查点和 WAL，跳过关闭与析构。
+        std::process::exit(0);
+    }
+    let directory = tempfile::tempdir().unwrap();
+    for mode in ["rom", "mmap"] {
+        let path = directory.path().join(format!("{mode}.tdb"));
+        let path = path.to_str().unwrap();
+        let output = child_command()
+            .args(["--exact", "Pelorus懒重建保留已发布曲率并恢复随后写入"])
+            .env("TRIVIUM_LAZY_PELORUS_RECOVERY_PATH", path)
+            .env("TRIVIUM_LAZY_PELORUS_RECOVERY_MODE", mode)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
+        let mut db = Database::<f32>::open_with_config(path, config(mode)).unwrap();
+        assert_eq!(
+            db.update_vector(1, &[0.75, 0.0]).unwrap_err().code(),
+            "TDB_INVALID_VECTOR"
+        );
+        let hits = db
+            .search_pelorus(
+                &[0.375, 0.0],
+                &PelorusSearchOptions {
+                    top_k: 1,
+                    exact: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!((hits[0].id, hits[0].distance), (1, 0.0));
+        assert_eq!(hits[0].payload, serde_json::json!(1));
+        db.close().unwrap();
+        let reopened = Database::<f32>::open_with_config(path, config(mode)).unwrap();
+        assert_eq!(reopened.get(1).unwrap().unwrap().vector, [0.375, 0.0]);
+    }
+}
+
+#[cfg(feature = "test-hooks")]
 fn publication_point(name: &str) -> ConcurrencyPoint {
     match name {
         "after_backup" => ConcurrencyPoint::AfterPublicationPrepared,

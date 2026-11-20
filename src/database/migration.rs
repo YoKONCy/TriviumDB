@@ -97,8 +97,9 @@ pub(super) fn ensure_empty(target: &str) -> Result<()> {
 }
 
 impl Destination {
-    fn new(path: &str) -> Result<Self> {
+    fn new(source: &str, path: &str) -> Result<Self> {
         let requested = Path::new(path);
+        crate::storage::artifacts::validate_destination(Path::new(source), requested)?;
         let leaf = requested.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
             TriviumError::InvalidInput("迁移目标必须有有效 UTF-8 文件名 (Migration destination requires a UTF-8 file name)".into())
         })?;
@@ -108,6 +109,7 @@ impl Destination {
             .unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         let parent = parent.canonicalize()?;
+        crate::storage::artifacts::validate_destination(Path::new(source), &parent.join(leaf))?;
         let target = parent
             .join(leaf)
             .to_str()
@@ -172,7 +174,7 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
             "迁移维度必须介于 1 和 65536 (Migration dimension must be between 1 and 65536)".into(),
         ));
     }
-    let mut destination = Destination::new(path)?;
+    let mut destination = Destination::new(&source.db_path, path)?;
     let stage_path = destination
         .directory
         .join("database.tdb")

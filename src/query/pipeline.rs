@@ -646,14 +646,13 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
     }
 
     fn validate_output(&self, output: &NodeSet) -> Result<()> {
-        let bytes = output.estimated_bytes();
-        if output.len() > self.budget.max_nodes || bytes > self.budget.max_node_set_bytes {
+        self.validate_output_size(output.len(), output.estimated_bytes())
+    }
+
+    fn validate_output_size(&self, rows: usize, bytes: usize) -> Result<()> {
+        if rows > self.budget.max_nodes || bytes > self.budget.max_node_set_bytes {
             return Err(TriviumError::QueryExecution(format!(
-                "管线 NodeSet 超过预算：{} 个节点，{} 字节 (Pipeline NodeSet exceeds budget: {} nodes, {} bytes)",
-                output.len(),
-                bytes,
-                output.len(),
-                bytes
+                "管线 NodeSet 超过预算：{rows} 个节点，{bytes} 字节 (Pipeline NodeSet exceeds budget: {rows} nodes, {bytes} bytes)",
             )));
         }
         Ok(())
@@ -777,7 +776,7 @@ impl<T: VectorType> PipelineOperator<T> for FullNodeScanSource {
     }
 
     fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
-        Ok(NodeSet::from_ids(context.memtable.active_node_ids()))
+        scan_nodes(context, None)
     }
 }
 
@@ -791,19 +790,44 @@ impl<T: VectorType> PipelineOperator<T> for FilteredNodeScanSource {
     }
 
     fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
-        let mut ids = Vec::new();
-        for id in context.memtable.active_node_ids() {
-            crate::request::check_current()?;
-            if context
+        scan_nodes(context, Some(&self.filter))
+    }
+}
+
+fn scan_nodes<T: VectorType>(
+    context: &PipelineContext<'_, T>,
+    filter: Option<&Filter>,
+) -> Result<NodeSet> {
+    let row_bytes = std::mem::size_of::<NodeRow>();
+    let max_rows = context
+        .budget
+        .max_nodes
+        .min(context.budget.max_node_set_bytes / row_bytes);
+    let mut rows = Vec::<NodeRow>::new();
+    for id in context.memtable.active_node_ids() {
+        crate::request::check_current()?;
+        if let Some(filter) = filter
+            && !context
                 .memtable
                 .try_get_payload(id)?
-                .is_some_and(|payload| self.filter.matches(&payload))
-            {
-                ids.push(id);
-            }
+                .is_some_and(|payload| filter.matches(&payload))
+        {
+            continue;
         }
-        Ok(NodeSet::from_ids(ids))
+        let next = rows.len() + 1;
+        context.validate_output_size(next, next.saturating_mul(row_bytes))?;
+        if rows.capacity() == rows.len() {
+            let capacity = rows.len().saturating_mul(2).max(1).min(max_rows);
+            rows.try_reserve_exact(capacity - rows.len())
+                .map_err(|error| TriviumError::CapacityAllocationFailed {
+                    reason: format!(
+                        "管线扫描行分配失败 (Pipeline scan row allocation failed): {error}"
+                    ),
+                })?;
+        }
+        rows.push(NodeRow::new(id));
     }
+    Ok(NodeSet { rows })
 }
 
 pub struct NodeIdsSource {

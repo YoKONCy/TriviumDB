@@ -43,8 +43,7 @@ pub fn check(path: &str) -> CliResult {
                 );
                 println!(
                     "{}",
-                    "数据库头部完好，可安全挂载。/ Database header is intact and safe to open."
-                        .green()
+                    "当前格式文件头校验通过。/ Current-format database header validated.".green()
                 );
             }
             Err(e) => {

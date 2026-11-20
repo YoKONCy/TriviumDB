@@ -711,7 +711,7 @@ impl<T: VectorType> MemTable<T> {
     /// 从持久化文件恢复时使用：指定起始 ID
     pub fn new_with_next_id(dim: usize, next_id: NodeId) -> Self {
         let mut mt = Self::new(dim);
-        mt.next_id = next_id;
+        mt.next_id = next_id.max(1);
         mt
     }
 
@@ -719,7 +719,7 @@ impl<T: VectorType> MemTable<T> {
     pub fn new_with_vec_pool(dim: usize, next_id: NodeId, vec_pool: VecPool<T>) -> Self {
         Self {
             dim,
-            next_id,
+            next_id: next_id.max(1),
             generation: 0,
             checkpoint_dirty: true,
             editing: Default::default(),
@@ -995,7 +995,12 @@ impl<T: VectorType> MemTable<T> {
         payload: serde_json::Value,
     ) -> Result<()> {
         if id == 0 || id == NodeId::MAX {
-            return Err(TriviumError::InvalidInput("节点 ID 0 为内部保留值".into()));
+            return Err(TriviumError::InvalidInput(
+                "节点 ID 0 与 u64::MAX 为保留值 (Node IDs 0 and u64::MAX are reserved)".into(),
+            ));
+        }
+        if self.ids_to_indices.contains_key(&id) {
+            return Err(TriviumError::NodeAlreadyExists(id));
         }
         if vector.len() != self.dim {
             return Err(TriviumError::DimensionMismatch {

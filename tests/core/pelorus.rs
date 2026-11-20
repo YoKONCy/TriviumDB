@@ -4,6 +4,104 @@ use triviumdb::index::pelorus::{PelorusConfig, PelorusSearchOptions, PoincareNav
 use triviumdb::{Database, DatabaseReader, Filter};
 
 #[test]
+fn Pelorus批量编码按JSON转义后的大小准入() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("encode.tdb");
+    let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+    let payload = json!("\0".repeat(256 * 1024));
+    db.insert_with_id(1, &[0.25, 0.0], payload.clone()).unwrap();
+    db.build_pelorus_index(PelorusConfig::default()).unwrap();
+    let limit = 12 * 1024 * 1024;
+    db.set_memory_limit(limit).unwrap();
+    let options = PelorusSearchOptions {
+        top_k: 1,
+        exact: true,
+        ..Default::default()
+    };
+    let vectors = vec![vec![0.25, 0.0]; 12];
+    let hits = db.search_pelorus_batch(&vectors, &options).unwrap();
+    assert_eq!(hits.len(), 12);
+    assert_eq!(hits[11][0].payload, payload);
+    drop(hits);
+    let request = |vectors| {
+        json!({
+            "operation": "search_batch",
+            "vectors": vectors,
+            "options": {"top_k": 1, "exact": true}
+        })
+        .to_string()
+    };
+    let error = triviumdb::sdk::pelorus::request(&db, &request(vectors.clone())).unwrap_err();
+    assert!(
+        matches!(error, triviumdb::TriviumError::CapacityReservationRejected {
+        estimated_bytes, memory_limit, ..
+    } if memory_limit == limit && estimated_bytes >= 12 * 6 * 256 * 1024)
+    );
+    let response = triviumdb::sdk::pelorus::request(&db, &request(vectors[..1].to_vec())).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&response).unwrap(),
+        json!({"results": [[{"id": "1", "distance": 0.0, "payload": payload}]]})
+    );
+}
+
+#[test]
+fn Pelorus文档评分超出表示范围时返回查询错误() {
+    use triviumdb::document::{DocumentSearchQuery, DocumentVectorOptions, DocumentVectorStrategy};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("document-score.tdb");
+    let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+    db.put_document(
+        serde_json::from_value(json!({
+            "source_id": "notes://score-range",
+            "source_revision": "first",
+            "parser_id": "plain",
+            "content": "alpha",
+            "root": {"id":"1", "vector":[2e38_f32, 0.0], "payload":{"doc":true}},
+            "blocks": []
+        }))
+        .unwrap(),
+        None,
+    )
+    .unwrap();
+    db.build_pelorus_index(PelorusConfig {
+        curvature: 1e-80,
+        ..Default::default()
+    })
+    .unwrap();
+    let query = &[-2e38_f32, 0.0];
+    let exact = db
+        .search_pelorus(
+            query,
+            &PelorusSearchOptions {
+                exact: true,
+                top_k: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(exact[0].id, 1);
+    assert!(exact[0].distance.is_finite() && exact[0].distance > f64::from(f32::MAX));
+    let document: DocumentSearchQuery =
+        serde_json::from_value(json!({"level":"document"})).unwrap();
+    let error = db
+        .search_documents_pelorus(
+            &document,
+            query,
+            &DocumentVectorOptions {
+                strategy: DocumentVectorStrategy::Exact,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "TDB_QUERY_EXECUTION");
+    let payload = db.get_payload(1).unwrap().unwrap();
+    assert_eq!(payload["data"], json!({"doc":true}));
+    assert_eq!(payload["_tdb_document"]["content"], "alpha");
+}
+
+#[test]
 fn 曲率参与持久化事实指纹() {
     use triviumdb::database::inspection::fingerprint;
 

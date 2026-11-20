@@ -5,8 +5,14 @@ use crate::error::{WriteErrorInfo, WriteOutcome, WritePhase};
 use crate::index::pelorus::{
     self, PelorusConfig, PelorusHit, PelorusRuntimeOptions, PelorusSearchOptions, PelorusState,
 };
+use crate::resources::WorkspaceReservation;
 use crate::{Result, TriviumError, VectorType};
 use serde::{Serialize, de::DeserializeOwned};
+
+enum PelorusBuild<'a> {
+    Publish(&'a mut WriteErrorInfo),
+    Rebuild { generation: u64 },
+}
 
 impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
     /// 在当前向量代际上构建显式 Poincaré 索引。常规检索继续使用默认路由。
@@ -15,24 +21,31 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
             let _operation = self.enter_maintenance_operation()?;
             self.require_write_access("build_pelorus_index")?;
             write.phase = WritePhase::Validation;
-            self.prepare_pelorus(config, Some(write))
+            self.prepare_pelorus(config, PelorusBuild::Publish(write))
         })
     }
 
-    fn prepare_pelorus(
-        &self,
-        config: PelorusConfig,
-        write: Option<&mut WriteErrorInfo>,
-    ) -> Result<()> {
+    fn prepare_pelorus(&self, config: PelorusConfig, build: PelorusBuild<'_>) -> Result<()> {
         pelorus::validate_dtype::<T>()?;
+        let needs_rebuild = |mt: &crate::storage::memtable::MemTable<T>, generation| {
+            mt.vector_generation() == generation
+                && mt
+                    .pelorus
+                    .as_ref()
+                    .is_some_and(|state| state.config == config && state.index.is_none())
+        };
         let (generation, previous, dim, ids, vectors, workspace) = {
             let mt = read_or_recover(&self.memtable);
             mt.ensure_readable()?;
+            match build {
+                PelorusBuild::Rebuild { generation } if !needs_rebuild(&mt, generation) => {
+                    return Ok(());
+                }
+                PelorusBuild::Publish(_) => lock_or_recover(&self.wal).ensure_writable()?,
+                PelorusBuild::Rebuild { .. } => {}
+            }
             let dim = mt.dim();
             config.validate(dim)?;
-            if write.is_some() {
-                lock_or_recover(&self.wal).ensure_writable()?;
-            }
             let count = mt.active_vector_count();
             let per_node = dim
                 .saturating_mul(40)
@@ -79,6 +92,20 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
 
         let mut mt = write_or_recover(&self.memtable);
         mt.ensure_readable()?;
+        let write = match build {
+            PelorusBuild::Publish(write) => write,
+            PelorusBuild::Rebuild { generation } => {
+                if needs_rebuild(&mt, generation) {
+                    drop(workspace);
+                    Self::reserve_pelorus_install(&mt, &state)?;
+                    if let Some(current) = &mut mt.pelorus {
+                        current.index = state.index;
+                        current.changed.clear();
+                    }
+                }
+                return Ok(());
+            }
+        };
         if mt.vector_generation() != generation
             || mt.pelorus.as_ref().map(|state| state.config) != previous
         {
@@ -86,12 +113,6 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                 resource: "pelorus_source_generation",
             });
         }
-        let Some(write) = write else {
-            drop(workspace);
-            Self::reserve_pelorus_install(&mt, &state)?;
-            mt.pelorus = Some(state);
-            return Ok(());
-        };
         let mut wal = lock_or_recover(&self.wal);
         wal.ensure_writable()?;
         if previous.map(|old| old.curvature) != Some(config.curvature)
@@ -168,11 +189,21 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         query: &[T],
         options: &PelorusSearchOptions,
     ) -> Result<Vec<PelorusHit>> {
+        self.search_pelorus_with_workspace(query, options)
+            .map(|(hits, _)| hits)
+    }
+
+    pub(crate) fn search_pelorus_with_workspace(
+        &self,
+        query: &[T],
+        options: &PelorusSearchOptions,
+    ) -> Result<(Vec<PelorusHit>, WorkspaceReservation)> {
         let _operation = self.enter_operation()?;
         self.prepare_pelorus_search(options)?;
         let mt = read_or_recover(&self.memtable);
         let mut response = self.resource_runtime.reserve_workspace(0)?;
-        search_locked(&mt, query, options, self.memory_limit, &mut response)
+        let hits = search_locked(&mt, query, options, self.memory_limit, &mut response)?;
+        Ok((hits, response))
     }
 
     /// 在同一事实读视图内按输入顺序执行一批 Poincaré 查询。
@@ -181,6 +212,15 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         queries: &[Vec<T>],
         options: &PelorusSearchOptions,
     ) -> Result<Vec<Vec<PelorusHit>>> {
+        self.search_pelorus_batch_with_workspace(queries, options)
+            .map(|(hits, _)| hits)
+    }
+
+    pub(crate) fn search_pelorus_batch_with_workspace(
+        &self,
+        queries: &[Vec<T>],
+        options: &PelorusSearchOptions,
+    ) -> Result<(Vec<Vec<PelorusHit>>, WorkspaceReservation)> {
         let _operation = self.enter_operation()?;
         pelorus::validate_dtype::<T>()?;
         self.prepare_pelorus_search(options)?;
@@ -190,22 +230,29 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
             .saturating_mul(std::mem::size_of::<Vec<PelorusHit>>());
         mt.ensure_additional_memory(self.memory_limit, response_bytes)?;
         let mut response = self.resource_runtime.reserve_workspace(response_bytes)?;
-        queries
+        let hits = queries
             .iter()
             .map(|query| search_locked(&mt, query, options, self.memory_limit, &mut response))
-            .collect()
+            .collect::<Result<_>>()?;
+        Ok((hits, response))
     }
 
     fn prepare_pelorus_search(&self, options: &PelorusSearchOptions) -> Result<()> {
         options.validate()?;
         if !options.exact && self.missing_index_policy == MissingIndexPolicy::BuildInMemory {
-            let pending = read_or_recover(&self.memtable)
-                .pelorus
-                .as_ref()
-                .filter(|state| state.index.is_none())
-                .map(|state| state.config);
-            if let Some(config) = pending {
-                self.prepare_pelorus(config, None)?;
+            let pending = {
+                let mt = read_or_recover(&self.memtable);
+                mt.pelorus
+                    .as_ref()
+                    .filter(|state| state.index.is_none())
+                    .map(|state| (state.config, mt.vector_generation()))
+            };
+            if let Some((config, generation)) = pending {
+                #[cfg(feature = "test-hooks")]
+                crate::test_hooks::hit(
+                    crate::test_hooks::ConcurrencyPoint::PelorusBeforeLazyRebuild,
+                );
+                self.prepare_pelorus(config, PelorusBuild::Rebuild { generation })?;
             }
         }
         Ok(())

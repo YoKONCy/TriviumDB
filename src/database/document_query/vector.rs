@@ -597,7 +597,13 @@ fn recall_pelorus<T: VectorType>(
         control.info.ann_rounds += usize::from(use_ann);
         let mut output = BTreeMap::new();
         for (id, distance) in hits {
-            insert(&mut output, id, -distance as f32, query, recall.options)?;
+            let score = -distance as f32;
+            if !score.is_finite() {
+                return Err(TriviumError::QueryExecution(
+                    "Pelorus 文档分数超出 f32 有限范围 (Pelorus document score exceeds the finite f32 range)".into(),
+                ));
+            }
+            insert(&mut output, id, score, query, recall.options)?;
         }
         let groups = output
             .keys()
