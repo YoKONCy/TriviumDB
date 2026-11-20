@@ -15,6 +15,39 @@ fn config(mode: StorageMode) -> Config {
     }
 }
 
+#[test]
+fn 文档字段id的索引在重开前后与结构身份独立() {
+    for mode in [StorageMode::Rom, StorageMode::Mmap] {
+        for bitmap in [false, true] {
+            let root = TestDir::new("indexed_payload_id");
+            let path = root.file("records.tdb");
+            let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+            db.insert_with_id(1, &[1., 0.], json!({"id":11})).unwrap();
+            db.insert_with_id(11, &[0., 1.], json!({"id":1})).unwrap();
+            if bitmap {
+                db.create_bitmap_index("id").unwrap();
+            } else {
+                db.create_index("id").unwrap();
+            }
+            let check = |db: &Database<f32>| {
+                assert_eq!(
+                    db.indexed_lookup(&[("id".into(), json!(11))], 5).unwrap(),
+                    [1]
+                );
+                assert_eq!(ids(db, "FIND {id:11} RETURN *"), [1]);
+                let rows = db.tql_nodes("MATCH (n {id:11}) RETURN n").unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0]["n"].id, 11);
+            };
+            check(&db);
+            db.close().unwrap();
+            let mut reopened = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
+            check(&reopened);
+            reopened.close().unwrap();
+        }
+    }
+}
+
 fn ids(db: &Database<f32>, query: &str) -> Vec<u64> {
     let mut ids: Vec<_> = db
         .tql_nodes(query)
@@ -48,9 +81,12 @@ fn 跨端wal样本保留完整id向量payload和边() {
         .unwrap()
         .close()
         .unwrap();
-    std::fs::write(
-        format!("{path}.wal"),
-        include_bytes!("../fixtures/numeric_ids/wal.bin"),
+    std::io::Write::write_all(
+        &mut std::fs::OpenOptions::new()
+            .append(true)
+            .open(format!("{path}.wal"))
+            .unwrap(),
+        &include_bytes!("../fixtures/numeric_ids/wal.bin")[6..],
     )
     .unwrap();
     let mut db = Database::<f32>::open_with_config(&path, config(StorageMode::Mmap)).unwrap();

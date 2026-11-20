@@ -9,8 +9,7 @@ use crate::CliResult;
 use crate::db_handle::DbHandle;
 
 pub fn run(handle: &DbHandle, db_path: &str, output: &str) -> CliResult {
-    validate_output_path(db_path, output)?;
-    let output_path = normalized_path(Path::new(output))?;
+    let output_path = validate_output_path(db_path, output)?;
     let parent = output_path
         .parent()
         .ok_or("导出路径缺少目录 (Export path has no parent)")?;
@@ -43,82 +42,15 @@ pub fn run(handle: &DbHandle, db_path: &str, output: &str) -> CliResult {
     Ok(())
 }
 
-// 固定制品及其临时、代际文件共享受保护的名称族。
-use triviumdb::storage::artifacts::{
-    RESERVED_SUFFIXES as PROTECTED_SUFFIXES, is_reserved_name as protected_name,
-};
-
-pub(crate) fn validate_output_path(db_path: &str, output: &str) -> CliResult {
-    let database = normalized_path(Path::new(db_path))?;
-    let output_path = normalized_path(Path::new(output))?;
-    let parent = database
-        .parent()
-        .ok_or("数据库路径缺少目录 (Database path has no parent)")?;
-    let name = database
-        .file_name()
-        .ok_or("数据库路径缺少文件名 (Database path has no file name)")?
-        .to_string_lossy();
-    let mut protected = vec![database.clone()];
-    protected.extend(
-        PROTECTED_SUFFIXES
-            .iter()
-            .map(|suffix| parent.join(format!("{name}{suffix}"))),
-    );
-    for entry in std::fs::read_dir(parent)? {
-        let entry = entry?;
-        if protected_name(&entry.file_name().to_string_lossy(), &name) {
-            protected.push(entry.path());
-        }
-    }
-    let reserved_name = output_path
-        .parent()
-        .is_some_and(|directory| paths_equal(directory, parent))
-        && output_path
-            .file_name()
-            .is_some_and(|file| protected_name(&file.to_string_lossy(), &name));
-    let mut conflicts = reserved_name;
-    for path in protected {
-        let resolved = normalized_path(&path)?;
-        conflicts |= paths_equal(&output_path, &resolved)
-            || output_path.starts_with(&resolved) && path.is_dir();
-        if output_path.try_exists()? && path.try_exists()? {
-            conflicts |= same_file::is_same_file(&output_path, &path)?;
-        }
-    }
-    if conflicts {
-        return Err(format!(
-            "拒绝导出到数据库相关文件 (Refusing to export to a database-related file): {output}"
-        )
-        .into());
-    }
-    Ok(())
-}
-
-fn normalized_path(path: &Path) -> std::io::Result<PathBuf> {
-    if path.try_exists()? {
-        return path.canonicalize();
-    }
-    let name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "路径缺少文件名 (Path has no file name)",
-        )
-    })?;
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    Ok(parent.canonicalize()?.join(name))
-}
-
-fn paths_equal(a: &Path, b: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        a.to_string_lossy()
-            .eq_ignore_ascii_case(&b.to_string_lossy())
-    }
-    #[cfg(not(windows))]
-    {
-        a == b
-    }
+pub(crate) fn validate_output_path(db_path: &str, output: &str) -> triviumdb::Result<PathBuf> {
+    triviumdb::storage::artifacts::validate_destination(Path::new(db_path), Path::new(output))
+        .map_err(|error| {
+            if matches!(error.underlying(), triviumdb::TriviumError::InvalidInput(_)) {
+                triviumdb::TriviumError::InvalidInput(format!(
+                    "拒绝导出到数据库相关文件 (Refusing to export to a database-related file): {error}"
+                )).at_field("destination")
+            } else {
+                error
+            }
+        })
 }

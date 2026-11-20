@@ -5,6 +5,61 @@ use triviumdb::database::{Config, StorageMode};
 use triviumdb::test_hooks::{IoPoint, fail_io_at};
 
 #[test]
+fn 迁移取消在提交标记前撤销文件组且可重试() {
+    use triviumdb::sdk::RequestContext;
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_request};
+
+    let directory = tempfile::tempdir().unwrap();
+    let origin = directory.path().join("source.tdb");
+    let target = directory.path().join("target.tdb");
+    let target = target.to_str().unwrap();
+    let mut source = Database::<f32>::open(origin.to_str().unwrap(), 2).unwrap();
+    source
+        .insert_with_id(7, &[1.0, 0.0], json!({"source":true}))
+        .unwrap();
+    let request =
+        RequestContext::with_timeout("cancel-migration-publish", std::time::Duration::ZERO, true)
+            .unwrap();
+    let hook = pause_at_request(
+        ConcurrencyPoint::MigrationBeforeCommit,
+        "cancel-migration-publish",
+    );
+    let error = std::thread::scope(|threads| {
+        let worker = threads.spawn(|| request.run(|| source.migrate_to(target, 3)));
+        while !hook.is_arrived() {
+            assert!(!worker.is_finished(), "迁移还未到达提交点");
+            std::thread::yield_now();
+        }
+        request.cancel();
+        hook.release();
+        worker
+            .join()
+            .unwrap()
+            .err()
+            .expect("提交标记发布前取消必须失败")
+    });
+    assert_eq!(error.code(), "TDB_QUERY_CANCELLED");
+    assert_eq!(
+        error.info().write.unwrap().outcome,
+        triviumdb::error::WriteOutcome::NotCommitted
+    );
+    let mut names = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with("source.tdb"))
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["target.tdb.lock"]);
+    let (mut copy, ids) = source.migrate_to(target, 3).unwrap();
+    assert_eq!(ids, [7]);
+    copy.close().unwrap();
+    let reopened = Database::<f32>::open(target, 3).unwrap();
+    let node = reopened.get(7).unwrap().unwrap();
+    assert_eq!(node.vector, [0.0, 0.0, 0.0]);
+    assert_eq!(node.payload, json!({"source":true}));
+}
+
+#[test]
 fn 发布持有目标锁且文件碰撞只回收本次移动的文件() {
     use triviumdb::test_hooks::{ConcurrencyPoint, pause_at};
     let source_root = TestDir::new("migration_collision_source");

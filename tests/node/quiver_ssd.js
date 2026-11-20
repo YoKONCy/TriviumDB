@@ -19,7 +19,11 @@ function runQuiverSsd(root, { TriviumDB } = require('../..')) {
     assert.equal(stats.metadata.dimension, fixture.dimension)
     assert.equal(stats.residency, 'ssd')
     const search = { ...fixture.search, vector: vector(1) }
-    assert.deepEqual(request(search), { hits: fixture.expected_hits })
+    const profiled = request({ ...search, profile_io: true })
+    assert.deepEqual(profiled.hits, fixture.expected_hits)
+    assert.equal(profiled.io.cold_read_calls, 4)
+    assert.equal(profiled.io.cold_read_bytes, 4 * stats.metadata.record_bytes)
+    assert.equal(profiled.io.physical_read_calls, 1)
     const first = request({ operation: 'stats' })
     assert.ok(first.physical_read_calls > 0)
     assert.ok(first.physical_read_bytes >= first.cold_read_bytes)
@@ -33,6 +37,9 @@ function runQuiverSsd(root, { TriviumDB } = require('../..')) {
       assert.equal(first.io_window_bytes, 0)
     }
     assert.deepEqual(request(search), { hits: fixture.expected_hits })
+    const profiledCache = request({ ...search, profile_io: true })
+    assert.equal(profiledCache.io.row_cache_hits, 4)
+    assert.equal(profiledCache.io.physical_read_calls, 0)
     const cached = request({ operation: 'stats' })
     assert.equal(cached.cold_read_calls, first.cold_read_calls)
     assert.equal(cached.physical_read_calls, first.physical_read_calls)

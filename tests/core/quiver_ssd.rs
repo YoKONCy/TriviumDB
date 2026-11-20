@@ -110,14 +110,21 @@ fn centered_presets_share_public_precisions_normal_ann_and_readonly_reopen() {
                 };
                 assert!(db.configure_quiver(opts).unwrap().routing_shared);
                 assert_hits(db.search_quiver(&vector, &full).unwrap(), &expected);
+                let (hits, io) =
+                    triviumdb::sdk::quiver::measure_io(|| db.search(&vector, 4, 0, -1.));
                 assert_hits(
-                    db.search(&vector, 4, 0, -1.)
-                        .unwrap()
+                    hits.unwrap()
                         .into_iter()
                         .map(|hit| (hit.id, hit.score))
                         .collect(),
                     &expected,
                 );
+                if residency == Residency::Ssd {
+                    assert_eq!(io.cold_read_calls, 4);
+                    assert_eq!(io.physical_read_calls, 1);
+                } else {
+                    assert_eq!(io, Default::default());
+                }
             }
         }
         db.update_vector(40, &vector).unwrap();
@@ -301,6 +308,24 @@ fn sdk_protocol_preserves_ids_unknown_fields_and_closed_admission() {
     assert_eq!(
         hits,
         serde_json::json!({"hits":[{"id":"9007199254740993","score":1.0}]})
+    );
+    let profiled: serde_json::Value = serde_json::from_str(
+        &request(
+            &db,
+            r#"{"operation":"search","vector":[1,0],"top_k":1,"ef_search":4,"profile_io":true}"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(profiled["hits"], hits["hits"]);
+    assert_eq!(
+        profiled["io"],
+        serde_json::json!({
+            "cold_read_calls": 0, "cold_read_bytes": 0,
+            "physical_read_calls": 0, "physical_read_bytes": 0,
+            "window_reuse_hits": 0, "window_reuse_bytes": 0,
+            "row_cache_hits": 1, "coalesced_row_reads": 0, "coalesced_page_reads": 0
+        })
     );
     let error = request(
         &db,

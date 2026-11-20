@@ -1,6 +1,6 @@
 # TriviumDB 文档来源与结构
 
-> 本文说明 `0.9.2` 的文档身份、修订、UTF-8 证据范围、结构清单与原子更新。文档事实由 Rust Core 管理，Python 和 Node 通过共享 SDK JSON 适配调用。版本说明见[变更说明](changes/0.9.2.md)。
+> 本文说明 `0.9.3-beta.1` 的文档身份、修订、UTF-8 证据范围、结构清单与原子更新。文档事实由 Rust Core 管理，Python 和 Node 通过共享 SDK JSON 适配调用。版本说明见[变更说明](changes/0.9.3-beta.1.md)。
 
 ---
 

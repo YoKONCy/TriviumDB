@@ -442,6 +442,21 @@ fn 禁经节点与最大路径数严格生效() {
     .unwrap();
     assert_eq!(restricted.paths.len(), 1);
     assert_eq!(restricted.paths[0].nodes, [1, 2, 4]);
+    let exactly_one = bounded_all_paths(
+        &mt,
+        1,
+        4,
+        &BoundedPathConfig {
+            max_depth: 3,
+            max_paths: 1,
+            label_sequence: None,
+            forbidden_nodes: BTreeSet::from([3]),
+        },
+        &budget(),
+    )
+    .unwrap();
+    assert_eq!(exactly_one.paths, restricted.paths);
+    assert!(!exactly_one.truncated);
 
     let limited = bounded_all_paths(
         &mt,
@@ -458,6 +473,12 @@ fn 禁经节点与最大路径数严格生效() {
     .unwrap();
     assert_eq!(limited.paths.len(), 1);
     assert!(limited.truncated);
+}
+
+#[test]
+fn 简单路径不允许经过重复的起点() {
+    let mt = graph();
+    assert!(triviumdb::graph::pathfinding::all_paths(&mt, 1, 1, 2, None, 5).is_empty());
 }
 
 #[test]

@@ -195,6 +195,36 @@ pub fn json_error_details(value: Value) -> Value {
     }
 }
 
+/// JavaScript 数量字段使用 number，须在整数域内检查后再转换。
+#[cfg(any(feature = "nodejs", test))]
+pub(crate) fn js_count(count: usize, field: &'static str) -> crate::Result<f64> {
+    if count as u64 > 9_007_199_254_740_991 {
+        return Err(crate::TriviumError::InvalidInput(
+            "计数超过 JavaScript 安全整数范围 (Count exceeds the JavaScript safe integer range)"
+                .into(),
+        )
+        .at_field(field));
+    }
+    Ok(count as f64)
+}
+
+#[cfg(all(test, target_pointer_width = "64"))]
+#[test]
+fn 数量转换保留完整安全整数并拒绝越界值() {
+    assert_eq!(
+        js_count(1usize << 32, "nodeCount").unwrap(),
+        4_294_967_296.0
+    );
+    assert_eq!(
+        js_count((1usize << 53) - 1, "nodeCount").unwrap(),
+        9_007_199_254_740_991.0
+    );
+    assert_eq!(
+        js_count(1usize << 53, "nodeCount").unwrap_err().code(),
+        "TDB_INVALID_INPUT"
+    );
+}
+
 #[cfg(all(test, any(feature = "python", feature = "nodejs")))]
 mod tests {
     use super::direct_write_error;

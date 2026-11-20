@@ -108,7 +108,6 @@ pub fn plan_filter_with_limit<T: VectorType>(
     mt: &MemTable<T>,
 ) -> NodeAccessPlan {
     if let Filter::Eq(field, value) = filter
-        && field != "id"
         && let Some(candidates) = mt.find_by_property_index_limit(field, value, limit)
     {
         return NodeAccessPlan {
@@ -507,7 +506,7 @@ fn bitmap_filter_candidates<T: VectorType>(
         universe: &mut Option<Vec<NodeId>>,
     ) -> Option<(HashSet<String>, Vec<NodeId>)> {
         match filter {
-            Filter::Eq(field, value) if field != "id" => Some((
+            Filter::Eq(field, value) => Some((
                 HashSet::from([field.clone()]),
                 mt.find_by_bitmap_property_index(field, value)?,
             )),
@@ -592,7 +591,7 @@ fn difference_sorted(left: &[NodeId], right: &[NodeId]) -> Vec<NodeId> {
 
 fn filter_equalities(filter: &Filter) -> Vec<(String, serde_json::Value)> {
     match filter {
-        Filter::Eq(field, value) if field != "id" => vec![(field.clone(), value.clone())],
+        Filter::Eq(field, value) => vec![(field.clone(), value.clone())],
         Filter::And(filters) => filters.iter().flat_map(filter_equalities).collect(),
         _ => Vec::new(),
     }
@@ -603,7 +602,7 @@ fn indexed_equalities<T: VectorType>(
     mt: &MemTable<T>,
 ) -> Vec<(String, serde_json::Value, Vec<NodeId>)> {
     match filter {
-        Filter::Eq(field, value) if field != "id" => mt
+        Filter::Eq(field, value) => mt
             .find_by_property_index(field, value)
             .or_else(|| mt.find_by_bitmap_property_index(field, value))
             .map(|ids| vec![(field.clone(), value.clone(), ids.to_vec())])
@@ -611,9 +610,7 @@ fn indexed_equalities<T: VectorType>(
         Filter::And(filters) => filters
             .iter()
             .filter_map(|filter| {
-                if let Filter::Eq(field, value) = filter
-                    && field != "id"
-                {
+                if let Filter::Eq(field, value) = filter {
                     return mt
                         .find_by_property_index(field, value)
                         .or_else(|| mt.find_by_bitmap_property_index(field, value))

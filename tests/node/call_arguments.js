@@ -41,6 +41,7 @@ function runCallArguments(root, api) {
       }
       assert.throws(() => db.commitTransaction(), invalid('operations', { ...validation, transaction_consumed: false }))
       assert.throws(() => db.setMemoryLimit(), invalid('mb', validation))
+      assert.throws(() => db.pelorusRequest(), invalid('requestJson'))
       assert.throws(() => verifySnapshot(), invalid('directory'))
       assert.throws(() => restoreSnapshot('unused'), invalid('destination', validation))
       assert.throws(() => new ConsoleSession().cancel(), invalid('requestId'))

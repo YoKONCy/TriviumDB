@@ -65,10 +65,13 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                 expected_revision: input.expected_revision,
                 fingerprint,
             };
-            self.commit_document_record(Record::Begin {
-                header,
-                root: Some(root),
-            })?;
+            self.commit_document_record(
+                write,
+                Record::Begin {
+                    header,
+                    root: Some(root),
+                },
+            )?;
             self.document_upload_status(&upload_id)
         })
     }
@@ -120,18 +123,21 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                 }
             }
             let nodes = serde_json::to_string(&nodes).map_err(super::documents::stored_error)?;
-            self.commit_document_record(Record::Append {
-                upload_id: upload_id.into(),
-                sequence: batch.sequence,
-                fingerprint,
-                chunk: Chunk {
-                    content: batch.content,
-                    original_text: batch.original_text,
-                    mappings: batch.mappings,
-                    blocks,
+            self.commit_document_record(
+                write,
+                Record::Append {
+                    upload_id: upload_id.into(),
+                    sequence: batch.sequence,
+                    fingerprint,
+                    chunk: Chunk {
+                        content: batch.content,
+                        original_text: batch.original_text,
+                        mappings: batch.mappings,
+                        blocks,
+                    },
+                    nodes: Some(nodes),
                 },
-                nodes: Some(nodes),
-            })?;
+            )?;
             self.document_upload_status(upload_id)
         })
     }
@@ -279,9 +285,12 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
                     return Err(stored::conflict("upload_id"));
                 }
             }
-            self.commit_document_record(Record::Forget {
-                upload_id: upload_id.into(),
-            })
+            self.commit_document_record(
+                write,
+                Record::Forget {
+                    upload_id: upload_id.into(),
+                },
+            )
         })
     }
 
@@ -527,7 +536,11 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
             Err(error) => Err(error),
         }
     }
-    fn commit_document_record(&mut self, record: Record) -> Result<()> {
+    fn commit_document_record(
+        &mut self,
+        write: &mut crate::error::WriteErrorInfo,
+        record: Record,
+    ) -> Result<()> {
         let size = crate::storage::payload_store::serialized_json_len(&record)?;
         budget("document_record_bytes", size, stored::MAX_RECORD_BYTES)?;
         self.ensure_incremental_memory_budget(size.saturating_mul(64))?;
@@ -541,6 +554,12 @@ impl<T: VectorType + Serialize + DeserializeOwned> Database<T> {
         self.commit_ops(vec![super::transaction::TxOp::DocumentPublication {
             bytes,
         }])?;
+        *write = self.response_write_info();
+        #[cfg(feature = "test-hooks")]
+        crate::test_hooks::hit_for_path(
+            crate::test_hooks::ConcurrencyPoint::DocumentRecordCommitted,
+            &self.db_path,
+        );
         Ok(())
     }
 }
@@ -549,23 +568,25 @@ fn visible<T: VectorType>(
     mt: &crate::storage::memtable::MemTable<T>,
     upload: &stored::Upload,
 ) -> Result<bool> {
+    if !upload.published {
+        return Ok(false);
+    }
     if let Some(raw) = mt.get_payload_raw(upload.header.document_id) {
         let extra = raw.len().saturating_mul(32);
         mt.check_load_allocation(extra)?;
         let _workspace = mt.resource_runtime().reserve_workspace(extra)?;
-        return Ok(upload.published
-            && mt
-                .try_get_payload(upload.header.document_id)?
-                .is_some_and(|payload| {
-                    payload
-                        .pointer("/_tdb_document/archive")
+        return Ok(mt
+            .try_get_payload(upload.header.document_id)?
+            .is_some_and(|payload| {
+                payload
+                    .pointer("/_tdb_document/archive")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(upload.header.upload_id.as_str())
+                    && payload
+                        .pointer("/_tdb_document/revision")
                         .and_then(serde_json::Value::as_str)
-                        == Some(upload.header.upload_id.as_str())
-                        && payload
-                            .pointer("/_tdb_document/revision")
-                            .and_then(serde_json::Value::as_str)
-                            == Some(upload.header.revision.as_str())
-                }));
+                        == Some(upload.header.revision.as_str())
+            }));
     }
     Ok(false)
 }

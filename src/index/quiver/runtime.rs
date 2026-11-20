@@ -110,13 +110,7 @@ impl QuiverRuntimeOptions {
         }
     }
     pub(crate) fn validate(&self) -> Result<()> {
-        if !(1..=32).contains(&self.io_depth) {
-            return Err(
-                invalid("I/O深度须在1至32之间 (I/O depth must be between 1 and 32)")
-                    .at_field("io_depth"),
-            );
-        }
-        Ok(())
+        self.io_mode.validate_depth(self.io_depth)
     }
 }
 
@@ -158,6 +152,8 @@ pub struct QuiverRuntimeStats {
     pub io_memory_alignment_bytes: usize,
     pub io_alignment_detected: bool,
     pub io_window_bytes: u64,
+    /// 完成队列独占的固定对齐缓冲载荷，不含共享页缓存。
+    pub io_fixed_buffer_bytes: usize,
     pub window_reuse_hits: u64,
     pub window_reuse_bytes: u64,
     pub residency: Residency,
@@ -634,20 +630,6 @@ impl QuiverRuntime {
             && (!self.active()?.file.has_async_io()
                 || options.io_mode != self.runtime_options.io_mode
                 || options.io_depth != self.runtime_options.io_depth);
-        let io_bytes = options
-            .io_depth
-            .min(self.memory.runtime.max_threads().saturating_sub(1))
-            .max(1)
-            .checked_mul(256 * 1024)
-            .ok_or_else(capacity)?;
-        let mut io_memory = if change_io {
-            Some(
-                self.memory
-                    .reserve(io_bytes.checked_add(131072).ok_or_else(capacity)?)?,
-            )
-        } else {
-            None
-        };
         let mut warm = None;
         let mut directory = None;
         if options.residency == Residency::Hot && self.hot_rows.is_none() {
@@ -670,18 +652,37 @@ impl QuiverRuntime {
                 for (offset, row) in batch[..count].iter_mut().enumerate() {
                     *row += offset;
                 }
-                rows.extend(self.load_records_routed(&batch[..count], route)?);
+                rows.extend(self.load_records_routed_during(
+                    &batch[..count],
+                    route,
+                    None,
+                    |_| Ok(()),
+                )?);
             }
             warm = Some(rows);
         }
         crate::request::check_current()?;
-        if let Some(mut memory) = io_memory.take() {
-            self.state
+        if change_io {
+            use crate::storage::quiver_io::STARTUP_BYTES;
+            // 先准入对齐探测，再按实际设备几何准入固定池。旧后端保留到新后端就绪。
+            let mut memory = self.memory.reserve(STARTUP_BYTES)?;
+            let mut retained = 0;
+            let file = &mut self
+                .state
                 .as_mut()
                 .ok_or(TriviumError::DatabaseClosed)?
-                .file
-                .configure_io(options.io_mode, options.io_depth, &self.memory.runtime)?;
-            memory.resize(io_bytes)?;
+                .file;
+            file.configure_io(
+                options.io_mode,
+                options.io_depth,
+                &self.memory.runtime,
+                |bytes| {
+                    memory.resize(bytes.max(STARTUP_BYTES))?;
+                    retained = bytes;
+                    Ok(())
+                },
+            )?;
+            memory.resize(retained)?;
             self.io_memory = Some(memory);
         }
         if options.residency == Residency::Hot {
@@ -748,6 +749,10 @@ impl QuiverRuntime {
             io_window_bytes: self.state.as_ref().map_or(0, |state| {
                 state.file.physical.window_bytes.load(Ordering::Relaxed)
             }),
+            io_fixed_buffer_bytes: self
+                .state
+                .as_ref()
+                .map_or(0, |state| state.file.fixed_buffer_bytes()),
             window_reuse_hits: self.state.as_ref().map_or(0, |state| {
                 state.file.physical.window_hits.load(Ordering::Relaxed)
             }),
@@ -945,7 +950,7 @@ struct Source<'a> {
     reader: &'a QuiverRuntime,
     query: RerankQuery,
     error: Option<TriviumError>,
-    prefetched: Vec<(usize, SsdRow)>,
+    prefetched: Vec<(usize, f32)>,
     _prefetch_memory: Option<MemoryLease>,
     eligible: &'a dyn Fn(u64) -> bool,
     observer: Option<&'a dyn Fn(SearchStage) -> Result<()>>,
@@ -953,10 +958,7 @@ struct Source<'a> {
 impl Source<'_> {
     fn score(&mut self, row: usize) -> Result<Option<f32>> {
         if let Ok(position) = self.prefetched.binary_search_by_key(&row, |&(id, _)| id) {
-            return self.prefetched[position]
-                .1
-                .score_prepared(&self.query)
-                .map(Some);
+            return Ok(Some(self.prefetched[position].1));
         }
         let identity = self.route.identity(row)?;
         if identity.deleted || !(self.eligible)(identity.node_id) {
@@ -1017,7 +1019,7 @@ impl Source<'_> {
         self._prefetch_memory = Some(
             self.reader.memory.reserve(
                 count
-                    .checked_mul(std::mem::size_of::<(usize, SsdRow)>() + 8)
+                    .checked_mul(std::mem::size_of::<(usize, f32)>() + 8)
                     .ok_or_else(capacity)?,
             )?,
         );
@@ -1035,9 +1037,35 @@ impl Source<'_> {
         for _ in &ids {
             self.observe(SearchStage::Score)?;
         }
+        let meter = crate::request::quiver_io_meter();
         for batch in ids.chunks(64) {
-            let loaded = self.reader.load_records_routed(batch, self.route)?;
-            self.prefetched.extend(batch.iter().copied().zip(loaded));
+            let mut scores = [None; 64];
+            let loaded = self.reader.load_records_routed_during(
+                batch,
+                self.route,
+                meter.as_ref(),
+                |ready| {
+                    for (score, row) in scores.iter_mut().zip(ready) {
+                        if score.is_none()
+                            && let Some(row) = row
+                        {
+                            crate::request::check_current()?;
+                            *score = Some(row.score_prepared(&self.query)?);
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+            for ((&id, row), score) in batch.iter().zip(loaded).zip(scores) {
+                crate::request::check_current()?;
+                self.prefetched.push((
+                    id,
+                    match score {
+                        Some(value) => value,
+                        None => row.score_prepared(&self.query)?,
+                    },
+                ));
+            }
         }
         self.prefetched.sort_by_key(|&(row, _)| row);
         Ok(())

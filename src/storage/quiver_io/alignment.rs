@@ -106,25 +106,75 @@ pub(super) fn query(file: &File) -> io::Result<IoAlignment> {
     if result != 0 {
         let error = io::Error::last_os_error();
         return if super::unsupported(&error) {
-            Ok(IoAlignment::conservative())
+            xfs_or_conservative(file)
         } else {
             Err(error)
         };
     }
     if info.stx_mask & libc::STATX_DIOALIGN == 0 {
-        return Ok(IoAlignment::conservative());
+        return xfs_or_conservative(file);
     }
     // 使用通用DIO约束兼容提供更宽松只读约束的新内核；按文件系统块大小减少零碎读取。
-    let offset = info.stx_dio_offset_align as usize;
-    let memory = info.stx_dio_mem_align as usize;
+    linux_alignment(
+        info.stx_dio_offset_align as usize,
+        info.stx_dio_mem_align as usize,
+        info.stx_blksize as usize,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_alignment(offset: usize, memory: usize, block: usize) -> io::Result<IoAlignment> {
     IoAlignment::detected(offset, memory)?;
-    let block = info.stx_blksize as usize;
     let grain = if block.is_power_of_two() && block <= WINDOW_LIMIT {
         offset.max(block)
     } else {
         offset
     };
     IoAlignment::detected(grain, memory.max(grain))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn xfs_or_conservative(file: &File) -> io::Result<IoAlignment> {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct DioAttr {
+        memory_alignment: u32,
+        minimum_io_size: u32,
+        _maximum_io_size: u32,
+    }
+
+    let fd = file.as_raw_fd();
+    // SAFETY: statfs是允许全零初始化的POD；文件句柄在查询期间保持存活，内核独占写入结构。
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatfs(fd, &mut fs) } != 0 {
+        let error = io::Error::last_os_error();
+        return if super::unsupported(&error) {
+            Ok(IoAlignment::conservative())
+        } else {
+            Err(error)
+        };
+    }
+    if fs.f_type != libc::XFS_SUPER_MAGIC {
+        return Ok(IoAlignment::conservative());
+    }
+    let mut dio = DioAttr::default();
+    let dioinfo = libc::_IOR::<DioAttr>(u32::from(b'X'), 30);
+    // SAFETY: 文件系统已确认为XFS，句柄固定代际，DioAttr按内核dioattr布局提供12字节独占输出。
+    if unsafe { libc::ioctl(fd, dioinfo, &mut dio) } != 0 {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ENOTTY) || super::unsupported(&error) {
+            Ok(IoAlignment::conservative())
+        } else {
+            Err(error)
+        };
+    }
+    linux_alignment(
+        dio.minimum_io_size as usize,
+        dio.memory_alignment as usize,
+        fs.f_bsize as usize,
+    )
 }
 
 #[cfg(test)]

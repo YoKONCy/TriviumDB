@@ -107,6 +107,29 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
         self.inner.search_exact(query_vector, top_k)
     }
 
+    pub fn search_pelorus(
+        &self,
+        query: &[T],
+        options: &crate::index::pelorus::PelorusSearchOptions,
+    ) -> Result<Vec<crate::index::pelorus::PelorusHit>> {
+        self.inner.search_pelorus(query, options)
+    }
+
+    pub fn configure_pelorus_runtime(
+        &self,
+        options: crate::index::pelorus::PelorusRuntimeOptions,
+    ) -> Result<()> {
+        self.inner.configure_pelorus_runtime(options)
+    }
+
+    pub fn search_pelorus_batch(
+        &self,
+        queries: &[Vec<T>],
+        options: &crate::index::pelorus::PelorusSearchOptions,
+    ) -> Result<Vec<Vec<crate::index::pelorus::PelorusHit>>> {
+        self.inner.search_pelorus_batch(queries, options)
+    }
+
     pub fn resource_stats(&self) -> crate::resources::ResourceStats {
         self.inner.resource_stats()
     }
@@ -263,6 +286,17 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> DatabaseRea
         options: &crate::document::DocumentHybridOptions,
     ) -> Result<crate::document::DocumentSearchResult> {
         self.inner.search_documents_hybrid(query, vector, options)
+    }
+
+    pub fn search_documents_pelorus(
+        &self,
+        query: &crate::document::DocumentSearchQuery,
+        vector: &[T],
+        options: &crate::document::DocumentVectorOptions,
+        text_weight: Option<f32>,
+    ) -> Result<crate::document::DocumentSearchResult> {
+        self.inner
+            .search_documents_pelorus(query, vector, options, text_weight)
     }
 
     pub fn clear_document_index(&self) -> Result<()> {

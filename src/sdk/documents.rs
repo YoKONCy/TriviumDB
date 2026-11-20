@@ -64,6 +64,8 @@ enum Command<T: VectorType> {
         vector: Vec<T>,
         #[serde(default)]
         options: DocumentVectorOptions,
+        #[serde(default)]
+        pelorus: bool,
     },
     SearchHybrid {
         query: DocumentSearchQuery,
@@ -71,6 +73,8 @@ enum Command<T: VectorType> {
         vector: Vec<T>,
         #[serde(default)]
         options: DocumentHybridOptions,
+        #[serde(default)]
+        pelorus: bool,
     },
     Context {
         query: DocumentContextQuery,
@@ -92,10 +96,7 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
 ) -> Result<String> {
     db.check_request_admission()?;
     crate::request::check_current()?;
-    let runtime = crate::database::read_or_recover(&db.memtable)
-        .resource_runtime()
-        .clone();
-    let _request_workspace = runtime.reserve_workspace(request_json.len().saturating_mul(64))?;
+    let _request_workspace = db.reserve_request_workspace(request_json.len().saturating_mul(64))?;
     #[derive(Deserialize)]
     struct Header {
         operation: String,
@@ -241,12 +242,33 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
                 query,
                 vector,
                 options,
-            } => encode(db, &db.search_documents_vector(&query, &vector, &options)?),
+                pelorus,
+            } => encode(
+                db,
+                &if pelorus {
+                    db.search_documents_pelorus(&query, &vector, &options, None)?
+                } else {
+                    db.search_documents_vector(&query, &vector, &options)?
+                },
+            ),
             Command::SearchHybrid {
                 query,
                 vector,
                 options,
-            } => encode(db, &db.search_documents_hybrid(&query, &vector, &options)?),
+                pelorus,
+            } => encode(
+                db,
+                &if pelorus {
+                    db.search_documents_pelorus(
+                        &query,
+                        &vector,
+                        &options.vector,
+                        Some(options.text_weight),
+                    )?
+                } else {
+                    db.search_documents_hybrid(&query, &vector, &options)?
+                },
+            ),
             Command::Context { query } => encode(db, &db.document_context(&query)?),
             Command::ClearIndex => {
                 db.clear_document_index()?;
@@ -298,13 +320,13 @@ fn validate_vector<T: VectorType>(value: &serde_json::Value, field: &str) -> Res
     Ok(())
 }
 
-fn encode<T: VectorType, V: Serialize>(db: &Database<T>, value: &V) -> Result<String> {
+fn encode<T: VectorType + Serialize + DeserializeOwned, V: Serialize>(
+    db: &Database<T>,
+    value: &V,
+) -> Result<String> {
     crate::request::check_current()?;
     let bytes = crate::storage::payload_store::serialized_json_len(value)?;
-    let mt = crate::database::read_or_recover(&db.memtable);
-    mt.check_load_allocation(bytes)?;
-    let _workspace = mt.resource_runtime().reserve_workspace(bytes)?;
-    drop(mt);
+    let _workspace = db.reserve_request_workspace(bytes)?;
     serde_json::to_string(value).map_err(|error| {
         TriviumError::InvalidInput(format!(
             "文档响应编码失败 (Document response encoding failed): {error}"

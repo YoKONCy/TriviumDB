@@ -107,7 +107,8 @@ fn reject<T: VectorType + serde::Serialize + serde::de::DeserializeOwned>(
                         }
                     }
                     let (decoded, _) = Wal::read_entries::<T>(&path).unwrap();
-                    assert_eq!(decoded.len(), if checkpoint { 2 } else { 4 });
+                    assert!(matches!(decoded.first(), Some(WalEntry::Checkpoint { .. })));
+                    assert_eq!(decoded[1..].len(), if checkpoint { 2 } else { 4 });
                     // 可写打开使用锁文件；预先建立它，随后逐字节比较完整文件集合。
                     std::fs::OpenOptions::new()
                         .create(true)

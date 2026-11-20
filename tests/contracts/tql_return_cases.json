@@ -20,6 +20,7 @@
     ],
     "indexes": ["rank", "v", "same"],
     "cases": [
+      {"query":"FIND {rank:2} WHERE rank == 2 RETURN seed, rank, missing, _.id AS node", "rows":[{"seed":false,"rank":2,"missing":null,"node":2}]},
       {"query":"FIND {rank: {$gt:0}} RETURN _.nested AS picked ORDER BY picked.rank LIMIT 1", "rows":[{"picked":{"rank":10}}]},
       {"query":"FIND {rank: {$gt:0}} RETURN AVG(_.huge) AS average", "rows":[{"average":1e308}]},
       {"query":"FIND {rank: {$gt:0}} RETURN _.nested AS _ ORDER BY _.rank DESC LIMIT 1 OFFSET 1", "rows":[{"_":{"rank":20}}]},

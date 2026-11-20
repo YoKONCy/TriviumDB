@@ -22,7 +22,12 @@ def run_quiver_ssd(root: str) -> None:
         assert stats["metadata"]["dimension"] == fixture["dimension"]
         assert stats["residency"] == "ssd"
         search = dict(fixture["search"], vector=vector(1))
-        assert request(search) == {"hits": fixture["expected_hits"]}
+        profiled = request(dict(search, profile_io=True))
+        assert profiled["hits"] == fixture["expected_hits"]
+        record_bytes = stats["metadata"]["record_bytes"]
+        assert profiled["io"]["cold_read_calls"] == 4
+        assert profiled["io"]["cold_read_bytes"] == 4 * record_bytes
+        assert profiled["io"]["physical_read_calls"] == 1
         first = request({"operation": "stats"})
         assert first["physical_read_calls"] > 0
         assert first["physical_read_bytes"] >= first["cold_read_bytes"]
@@ -35,6 +40,9 @@ def run_quiver_ssd(root: str) -> None:
             assert first["io_alignment_bytes"] == 0
             assert first["io_window_bytes"] == 0
         assert request(search) == {"hits": fixture["expected_hits"]}
+        profiled = request(dict(search, profile_io=True))
+        assert profiled["io"]["row_cache_hits"] == 4
+        assert profiled["io"]["physical_read_calls"] == 0
         cached = request({"operation": "stats"})
         assert cached["cold_read_calls"] == first["cold_read_calls"]
         assert cached["physical_read_calls"] == first["physical_read_calls"]

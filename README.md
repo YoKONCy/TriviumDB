@@ -29,9 +29,9 @@
 
 **中文** | [**English**](README_EN.md)
 
-当前正式版本为 **0.9.2**，包含统一 `.idx` 索引容器、外部迁移、三端精确检索开关，以及快照、恢复和数据正确性加固。完整变更与升级步骤见[双语发布说明](docs/changes/0.9.2.md)。
+当前预发布版本为 **0.9.3-beta.1**，新增可选的 Pelorus 双曲向量检索、QuIVer SSD 请求级 I/O 计量，并改进检查点恢复和图查询预算。Python 版本为 `0.9.3b1`，npm 使用 `beta` 通道。完整变更与升级步骤见[双语发布说明](docs/changes/0.9.3-beta.1.md)。
 
-开发版的冻结范围见 [SDK 正式接口清单](docs/sdk-contract.md)，数据库升级使用[外部迁移工具](docs/migration.md)。
+SDK 的支持范围见 [SDK 正式接口清单](docs/sdk-contract.md)，历史磁盘格式通过[外部迁移工具](docs/migration.md)升级。
 
 向量检索的数据选型与精确检索入口见 [QuIVer 适用范围](#quiver-适用范围)。
 
@@ -41,7 +41,7 @@
 
 ## 一句话介绍
 
-TriviumDB 是一个用纯 Rust 编写的**嵌入式三模数据库引擎**，将**向量检索（Vector）**、**属性图谱（Graph）**和**文档型元数据（Document）**原生融合在同一个存储内核中。Rom 将向量与 Payload 内嵌于主文件；默认 Mmap 模式分离向量与 Payload。当前开发版将索引和登记文本集中在 `.idx`，文件组通过统一发布协议保持一致。
+TriviumDB 是一个用纯 Rust 编写的**嵌入式三模数据库引擎**，将**向量检索（Vector）**、**属性图谱（Graph）**和**文档型元数据（Document）**原生融合在同一个存储内核中。Rom 将向量与 Payload 内嵌于主文件；默认 Mmap 模式分离向量与 Payload。内核将索引和登记文本集中在 `.idx`，文件组通过统一发布协议保持一致。
 
 我们的目标是成为 **AI 应用领域的 SQLite**：
 
@@ -160,13 +160,13 @@ flowchart TD
 推荐使用超快的 [uv](https://github.com/astral-sh/uv) （只需毫秒级）：
 
 ```bash
-uv pip install "triviumdb==0.9.2"
+uv pip install "triviumdb==0.9.3b1"
 ```
 
 或者使用传统 pip：
 
 ```bash
-pip install "triviumdb==0.9.2"
+pip install "triviumdb==0.9.3b1"
 ```
 
 ### 🌐 Node.js / 前端用户
@@ -174,9 +174,9 @@ pip install "triviumdb==0.9.2"
 跨平台包已自带 `*.node` 预编译拓展，并含有完整的 TypeScript 补全：
 
 ```bash
-npm install triviumdb@0.9.2
+npm install triviumdb@0.9.3-beta.1
 # 或者
-pnpm add triviumdb@0.9.2
+pnpm add triviumdb@0.9.3-beta.1
 ```
 
 ### 🦀 Rust 原生用户
@@ -184,10 +184,10 @@ pnpm add triviumdb@0.9.2
 直接把我们当成 Library 依赖：
 
 ```bash
-cargo add triviumdb@0.9.2
+cargo add triviumdb@0.9.3-beta.1
 ```
 
-本页 API 以 `0.9.2` 为基线。已有数据库通过[外部迁移入口](docs/migration.md)创建当前格式目标，完整升级条件见[发布说明](docs/changes/0.9.2.md)。
+本页示例使用 `0.9.3-beta.1`。采用当前格式的 0.9.2 数据库可直接打开。打开时若返回 `TDB_MIGRATION_REQUIRED`，按[外部迁移指南](docs/migration.md)创建并核验目标库。
 
 需要为嵌入式应用提供管理前端时，按[Console 宿主接入](docs/embedded-console.md)复用同一实例和文件锁；现有 HTML 仍需前端传输适配，资源包会标明这一条件及 CDN 依赖。
 
@@ -421,7 +421,23 @@ TriviumDB 采用**智能自适应双引擎**向量索引。自动 QuIVer 阈值�
 - ✅ **增量 Update**：soft_delete + incremental_insert，原子替换
 - ✅ **事务安全**：分离时间线架构，事务 commit 不可失败，QuIVer 同步无需回滚
 
-**持久化与重载**：当前开发版将 QuIVer 图和默认 SM 紧凑路由快照保存于统一 `.idx` 容器。打开时验证检查点身份、组件校验和事实绑定，按运行时配置加载路由及重排数据。完整文件组、备份和资源条件见[存储布局](docs/storage-format.md)与[QuIVer 重载说明](docs/quiver.md#增量维护重载与内存)。
+**持久化与重载**：内核将 QuIVer 图和默认 SM 紧凑路由快照保存于统一 `.idx` 容器。打开时验证检查点身份、组件校验和事实绑定，按运行时配置加载路由及重排数据。完整文件组、备份和资源条件见[存储布局](docs/storage-format.md)与[QuIVer 重载说明](docs/quiver.md#增量维护重载与内存)。
+
+---
+
+## Pelorus 双曲向量索引
+
+普通向量查询的默认 ANN 是 QuIVer。如果模型输出固定曲率 Poincaré 球坐标，可以显式选择 **Pelorus**，按球内的测地距离查找近邻。构建索引时使用与模型相同的曲率参数。默认导航保留径向信息，用 2-bit 编码表示方向。
+
+在已构建 Pelorus 索引的二维库中，以下 TQL 显式选择双曲检索。`similarity(_)` 返回负测地距离，分数越大表示越近。
+
+```sql
+SEARCH PELORUS {vector: [0.12, 0.0], options: {top_k: 5}}
+RETURN _.id AS id, similarity(_) AS score
+ORDER BY score DESC, id
+```
+
+构建步骤、精确检索选项和 Hot／Mmap／SSD 驻留配置见 [Pelorus 使用说明](docs/pelorus.md)。
 
 ---
 

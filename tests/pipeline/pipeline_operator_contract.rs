@@ -155,7 +155,7 @@ fn 属性并行扫描将工作线程用量归入所属查询() {
         execute_pipeline(&mut context, &operators).unwrap_err(),
         triviumdb::TriviumError::PayloadQueryBudgetExceeded {
             dimension: "lookups",
-            used: 3,
+            used: 2,
             budget: 1
         }
     ));
@@ -167,6 +167,84 @@ fn 属性并行扫描将工作线程用量归入所属查询() {
     );
     assert_eq!(context.metrics[0].payload_lookups, 3);
     assert_eq!(context.metrics[0].payload_parsed_bytes, 21);
+}
+
+#[test]
+fn 过滤扫描在下一行超出节点或字节预算时停止() {
+    use triviumdb::query::pipeline::FilteredNodeScanSource;
+
+    let mut mt = MemTable::<f32>::new(2);
+    for id in 1..=5 {
+        mt.insert_with_id(id, &[1.0, 0.0], json!({"kind":"match"}))
+            .unwrap();
+    }
+    let operators: Vec<Box<dyn PipelineOperator<f32>>> = vec![Box::new(FilteredNodeScanSource {
+        filter: Filter::eq("kind", json!("match")),
+    })];
+    let row_bytes = std::mem::size_of::<NodeRow>();
+    for (nodes, bytes) in [(1, row_bytes * 5), (5, row_bytes)] {
+        let mut context = PipelineContext::new(
+            &mt,
+            PipelineBudget {
+                max_nodes: nodes,
+                max_node_set_bytes: bytes,
+                max_payload_lookups: 2,
+                ..budget()
+            },
+        );
+        assert_eq!(
+            execute_pipeline(&mut context, &operators)
+                .unwrap_err()
+                .code(),
+            "TDB_QUERY_EXECUTION"
+        );
+        context.budget.max_nodes = 5;
+        context.budget.max_node_set_bytes = row_bytes * 5;
+        context.budget.max_payload_lookups = 5;
+        let rows = execute_pipeline(&mut context, &operators).unwrap();
+        assert_eq!(
+            rows.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+    }
+}
+
+#[test]
+fn 耗尽解析预算的查询不把原始Payload加载进缓存() {
+    use triviumdb::query::pipeline::FilteredNodeScanSource;
+
+    let mut mt = MemTable::<f32>::new(2);
+    mt.configure_payload_cache(0, 0);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[0.25, 0.0], json!({"kind": "match"}))
+            .unwrap();
+    }
+    mt.configure_payload_cache(8192, 8192);
+    let operands: Vec<Box<dyn PipelineOperator<f32>>> = vec![Box::new(FilteredNodeScanSource {
+        filter: Filter::eq("kind", json!("match")),
+    })];
+    for _ in 0..2 {
+        let mut context = PipelineContext::new(
+            &mt,
+            PipelineBudget {
+                max_payload_parsed_bytes: 0,
+                ..budget()
+            },
+        );
+        assert!(matches!(
+            execute_pipeline(&mut context, &operands),
+            Err(triviumdb::TriviumError::PayloadQueryBudgetExceeded {
+                dimension: "parsed_bytes",
+                ..
+            })
+        ));
+    }
+    let mut context = PipelineContext::new(&mt, budget());
+    let rows = execute_pipeline(&mut context, &operands).unwrap();
+    assert_eq!(
+        rows.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
 }
 
 #[path = "../../benches/support/pipeline_results.rs"]
@@ -837,4 +915,105 @@ fn 管线阶段节点向量图与_payload_预算均提前拒绝() {
             ..
         })
     ));
+}
+
+#[test]
+fn 命中解析缓存与冷读消耗相同的请求预算() {
+    let mut mt = MemTable::<f32>::new(DIM);
+    mt.configure_payload_cache(0, 0);
+    mt.insert_with_id(1, &[1., 0., 0., 0.], json!({"v":1}))
+        .unwrap();
+    mt.configure_payload_cache(4096, 4096);
+    for hot in [false, true] {
+        if hot {
+            assert_eq!(*mt.get_payload(1).unwrap(), json!({"v":1}));
+        }
+        let mut ctx = PipelineContext::new(
+            &mt,
+            PipelineBudget {
+                max_payload_parsed_bytes: 1,
+                ..budget()
+            },
+        );
+        let filter = PayloadFilter {
+            filter: Filter::eq("v", json!(1)),
+        };
+        let error = execute_pipeline(
+            &mut ctx,
+            &[Box::new(NodeIdsSource { ids: vec![1] }), Box::new(filter)],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            triviumdb::TriviumError::PayloadQueryBudgetExceeded {
+                used: 7,
+                budget: 1,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn 精排向量读取按候选数准入并计量() {
+    use triviumdb::query::pipeline::QuiverVectorSearch;
+    let mut mt = MemTable::<f32>::new(DIM);
+    for id in 1..=24 {
+        mt.insert_with_id(id, &[1., id as f32 / 24., 0.5, 0.25], json!(null))
+            .unwrap();
+    }
+    mt.build_quiver(&Default::default());
+    let search = || QuiverVectorSearch {
+        query: vec![1., 0.25, 0.5, 0.25],
+        top_k: 1,
+        ef_search: 8,
+    };
+    let bytes = DIM * std::mem::size_of::<f32>();
+    let mut ctx = PipelineContext::with_profile(
+        &mt,
+        PipelineBudget {
+            max_vector_read_bytes: bytes,
+            ..budget()
+        },
+        true,
+    );
+    assert!(execute_pipeline(&mut ctx, &[Box::new(search())]).is_err());
+    ctx.budget.max_vector_read_bytes = 8 * bytes;
+    let result = execute_pipeline(&mut ctx, &[Box::new(search())]).unwrap();
+    assert_eq!(result.rows()[0].id, 6);
+    assert_eq!(ctx.metrics[0].vector_read_bytes, 8 * bytes);
+}
+
+#[test]
+fn 扩展阶段只报告本阶段实际遍历工作() {
+    let mut mt = MemTable::<f32>::new(1);
+    for id in [1, 2] {
+        mt.insert_with_id(id, &[1.], serde_json::Value::Null)
+            .unwrap();
+    }
+    mt.link(1, 2, "边".into(), 1.).unwrap();
+    let mut ctx = PipelineContext::with_profile(&mt, budget(), true);
+    let result = execute_pipeline(
+        &mut ctx,
+        &[
+            Box::new(NodeIdsSource { ids: vec![1] }),
+            Box::new(Expand {
+                min_depth: 1,
+                max_depth: 1,
+                labels: None,
+                direction: Default::default(),
+                include_input: false,
+            }),
+            Box::new(Limit { limit: 1 }),
+        ],
+    )
+    .unwrap();
+    assert_eq!(result.rows()[0].id, 2);
+    assert_eq!(
+        ctx.metrics
+            .iter()
+            .map(|m| (m.visited_nodes, m.examined_edges))
+            .collect::<Vec<_>>(),
+        [(0, 0), (2, 1), (0, 0)]
+    );
 }

@@ -7,6 +7,7 @@ use super::arguments::{
 use super::database::{DbBackend, TriviumDB};
 use super::errors::to_napi_error;
 use super::types::{JsSearchHit, search_hit_to_js};
+use crate::VectorType;
 use napi::bindgen_prelude::Either;
 use napi::{Env, JsUnknown};
 use napi_derive::napi;
@@ -59,7 +60,7 @@ impl napi::Task for BatchSearchTask {
                     .map(|query| {
                         query
                             .iter()
-                            .map(|value| half::f16::from_f64(*value))
+                            .map(|value| half::f16::from_f64_component(*value))
                             .collect()
                     })
                     .collect::<Vec<Vec<half::f16>>>();

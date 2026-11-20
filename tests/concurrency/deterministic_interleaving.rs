@@ -155,7 +155,10 @@ fn 压实交错_主数据已保存但WAL未清理时释放后可完整重载() {
     let id = db
         .insert(&[1.0, 2.0, 3.0, 4.0], json!({"state": "must-survive"}))
         .unwrap();
-    let waiter = pause_at(ConcurrencyPoint::BeforeWalClear);
+    let waiter = triviumdb::test_hooks::pause_at_path(
+        ConcurrencyPoint::BeforeWalClear,
+        std::fs::canonicalize(&path).unwrap().to_str().unwrap(),
+    );
 
     let thread = std::thread::spawn(move || {
         db.compact().unwrap();

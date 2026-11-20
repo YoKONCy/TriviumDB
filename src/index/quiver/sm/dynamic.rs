@@ -302,15 +302,18 @@ impl DynamicQuery {
         let threshold = q.iter().map(|x| x.abs() as f64).sum::<f64>() / q.len() as f64;
         let mut sums = [0f64; 2];
         let mut count = 0usize;
-        let mut start = 0;
         #[cfg(target_arch = "x86_64")]
-        if optimized && simd_available() {
-            unsafe {
-                start = self.encode_avx512(q, threshold, &mut sums, &mut count);
-            }
-        }
+        let start = if optimized && simd_available() {
+            // SAFETY: 已检测所需指令集，输出位图按查询维度向上对齐并完成分配。
+            unsafe { self.encode_avx512(q, threshold, &mut sums, &mut count) }
+        } else {
+            0
+        };
         #[cfg(not(target_arch = "x86_64"))]
-        let _ = optimized;
+        let start = {
+            let _ = optimized;
+            0
+        };
         for (j, &v) in q.iter().enumerate().skip(start) {
             let group = usize::from(v.abs() as f64 >= threshold);
             count += group;

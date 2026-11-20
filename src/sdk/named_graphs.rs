@@ -55,12 +55,8 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
         request_json.len(),
         MAX_GRAPH_BYTES,
     )?;
-    let runtime = crate::database::read_or_recover(&db.memtable)
-        .resource_runtime()
-        .clone();
     let request_bytes = request_json.len().saturating_mul(64);
-    db.ensure_incremental_memory_budget(request_bytes)?;
-    let _workspace = runtime.reserve_workspace(request_bytes)?;
+    let _workspace = db.reserve_request_workspace(request_bytes)?;
     #[derive(Deserialize)]
     struct Header {
         operation: String,
@@ -143,12 +139,7 @@ fn encode<T: VectorType + Serialize + DeserializeOwned, V: Serialize>(
 ) -> Result<String> {
     crate::request::check_current()?;
     let bytes = crate::storage::payload_store::serialized_json_len(value)?;
-    db.ensure_incremental_memory_budget(bytes.saturating_mul(2))?;
-    let mt = crate::database::read_or_recover(&db.memtable);
-    mt.check_load_allocation(bytes)?;
-    let _workspace = mt
-        .resource_runtime()
-        .reserve_workspace(bytes.saturating_mul(2))?;
+    let _workspace = db.reserve_request_workspace(bytes.saturating_mul(2))?;
     serde_json::to_string(value).map_err(|error| {
         TriviumError::InvalidInput(format!(
             "图响应编码失败 (Graph response encoding failed): {error}"

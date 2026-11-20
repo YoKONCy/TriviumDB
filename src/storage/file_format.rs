@@ -41,6 +41,12 @@ pub(crate) fn publish_new_database<T: VectorType>(
                 .into(),
         ));
     }
+    // 已关闭的暂存库只发布检查点事实；目标首次可写打开从检查点创建本地 WAL。
+    if super::wal::Wal::needs_recovery(source) {
+        return Err(TriviumError::RecoveryRequired {
+            wal_path: format!("{source}.wal"),
+        });
+    }
     let mut created = Vec::new();
     let mut committed = false;
     write.phase = WritePhase::Publish;
@@ -52,7 +58,6 @@ pub(crate) fn publish_new_database<T: VectorType>(
             .iter()
             .filter(|suffix| suffix.as_str() != ".flush_ok")
             .map(String::as_str)
-            .chain(std::iter::once(".wal"))
         {
             #[cfg(feature = "test-hooks")]
             crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationPublishFile)?;
@@ -76,6 +81,7 @@ pub(crate) fn publish_new_database<T: VectorType>(
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::MigrationBeforeCommit);
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::io_result(crate::test_hooks::IoPoint::MigrationPublishMarker)?;
+        crate::request::check_current()?;
         crate::storage::fs::rename_new(
             Path::new(&flush_ok_path_from_db(source)),
             Path::new(&flush_ok_path_from_db(target)),
@@ -142,13 +148,12 @@ pub(crate) fn vector_dtype<T: VectorType>() -> Result<(u16, &'static str)> {
 
 /// 新库在接收第一条 WAL 前持久化类型身份；空的 Rom 布局适用于两种存储模式。
 pub(crate) fn initialize<T: VectorType>(path: &str, memtable: &mut MemTable<T>) -> Result<()> {
-    if crate::storage::wal::Wal::needs_recovery(path) {
-        return Err(TriviumError::CorruptedFile("缺少带类型的基础检查点，请用原版本恢复并导出 (Typed checkpoint missing; recover and export with the original version)".into()));
-    }
     // 基础检查点使用独立空表，保持已准入实例的维护配额与运行期状态。
     let mut checkpoint = MemTable::<T>::new(memtable.dim());
     checkpoint.storage_id = memtable.storage_id;
-    save(&mut checkpoint, path, StorageMode::Rom)
+    save(&mut checkpoint, path, StorageMode::Rom)?;
+    memtable.checkpoint_token = checkpoint.checkpoint_token;
+    Ok(())
 }
 
 fn validate_vector_identity(
@@ -181,6 +186,19 @@ fn validate_vector_identity(
             TriviumError::CorruptedFile("向量块边界倒置 (Reversed vector block bounds)".into())
         })?
     };
+    let (stored_tag, stored, width) = header_vector_type(bytes)?;
+    if stored_tag != requested_tag {
+        return Err(TriviumError::DtypeMismatch { stored, requested });
+    }
+    if elements.checked_mul(width) != Some(vector_bytes) {
+        return Err(TriviumError::CorruptedFile(
+            "向量块精确长度不符 (Vector block exact length mismatch)".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn header_vector_type(bytes: &[u8]) -> Result<(u16, &'static str, usize)> {
     if bytes.len() < HEADER_SIZE as usize
         || &bytes[58..62] != b"VTYP"
         || read_u32_le(bytes, 66, "dtype reserved")? != 0
@@ -209,15 +227,38 @@ fn validate_vector_identity(
             "向量类型与元素宽度不符 (Vector dtype and element width disagree)".into(),
         ));
     }
-    if stored_tag != requested_tag {
-        return Err(TriviumError::DtypeMismatch { stored, requested });
-    }
-    if elements.checked_mul(width) != Some(vector_bytes) {
+    Ok((stored_tag, stored, width))
+}
+
+/// 检查当前格式的完整文件头，返回格式版本和维度。
+pub fn read_database_header(path: &str) -> Result<(u16, usize)> {
+    use std::io::{ErrorKind, Read};
+    let mut file = File::open(path)?;
+    let mut bytes = [0u8; HEADER_SIZE as usize];
+    let read_error = |error: std::io::Error| {
+        if error.kind() == ErrorKind::UnexpectedEof {
+            TriviumError::CorruptedFile("数据库文件头被截断 (Truncated database header)".into())
+        } else {
+            error.into()
+        }
+    };
+    file.read_exact(&mut bytes[..6]).map_err(read_error)?;
+    if &bytes[..4] != MAGIC {
         return Err(TriviumError::CorruptedFile(
-            "向量块精确长度不符 (Vector block exact length mismatch)".into(),
+            "数据库文件魔数无效 (Invalid database file magic)".into(),
         ));
     }
-    Ok(())
+    let version = read_u16_le(&bytes, 4, "version")?;
+    crate::storage::format::require("database", version.into(), CURRENT_VERSION.into())?;
+    file.read_exact(&mut bytes[6..]).map_err(read_error)?;
+    header_vector_type(&bytes)?;
+    let dim = read_u32_le(&bytes, 6, "dim")? as usize;
+    if !(1..=65_536).contains(&dim) {
+        return Err(TriviumError::CorruptedFile(
+            "数据库文件头的维度无效 (Invalid dimension in database header)".into(),
+        ));
+    }
+    Ok((version, dim))
 }
 
 /// 发布恢复写入前核对可信基础文件的类型；备份向量使用独立路径。
@@ -710,10 +751,28 @@ pub fn save<T: VectorType>(
     path: &str,
     mode: StorageMode,
 ) -> Result<()> {
+    if !Path::new(path).try_exists()? {
+        super::artifacts::ensure_new_database(Path::new(path))?;
+    }
     let mut write = WriteErrorInfo {
         transaction_consumed: None,
         ..WriteErrorInfo::TRANSACTION_ADMISSION
     };
+    let wal_path = format!("{path}.wal");
+    if Path::new(&wal_path).try_exists()? {
+        if super::wal::Wal::needs_recovery(path) {
+            return Err(TriviumError::RecoveryRequired { wal_path });
+        }
+        let mut wal = super::wal::Wal::open_bound(
+            path,
+            super::wal::SyncMode::Full,
+            memtable.checkpoint_token,
+        )?;
+        wal.ensure_checkpoint_base(memtable.checkpoint_token)?;
+        return checkpoint_with_write_info(memtable, &mut wal, path, mode, false, &mut write);
+    }
+    // 独立保存也生成唯一身份；首次打开可从主文件创建绑定的 WAL。
+    memtable.checkpoint_token = Some(super::wal::new_checkpoint_token());
     save_with_write_info(memtable, path, mode, &mut write)
 }
 
@@ -731,11 +790,7 @@ pub(crate) fn save_with_write_info<T: VectorType>(
         .ok_or_else(|| TriviumError::CapacityAllocationFailed {
             reason: "保存工作区估算溢出".into(),
         })?;
-    let _workspace = if runtime.is_maintenance_task() {
-        runtime.reserve_maintenance_workspace(peak)?
-    } else {
-        runtime.reserve_workspace(peak)?
-    };
+    let _workspace = runtime.reserve_task_workspace(peak)?;
     memtable.ensure_readable()?;
     let result = save_inner(memtable, path, mode, write);
     if result.is_err() && memtable.vec_pool().recovery_required() {
@@ -759,7 +814,7 @@ fn save_inner<T: VectorType>(
         let peak = memtable.quiver_build_peak_bytes(&config);
         memtable.ensure_additional_memory(limit, peak)?;
         let runtime = memtable.resource_runtime().clone();
-        let _workspace = runtime.reserve_workspace(peak)?;
+        let _workspace = runtime.reserve_task_workspace(peak)?;
         runtime
             .pool(runtime.parallelism())?
             .install(|| memtable.build_quiver(&config));
@@ -772,6 +827,7 @@ fn save_inner<T: VectorType>(
     }
     // 保留原 CRC，不以重新计算校验和的方式“认可”未加载文件中的损坏。
     let preserved_text_meta = memtable.deferred_text_metadata();
+    crate::request::check_current()?;
     write.phase = WritePhase::Publish;
     write.outcome = WriteOutcome::Unknown;
     if mode == StorageMode::Rom && publication::pending(path) {
@@ -818,14 +874,14 @@ fn save_inner<T: VectorType>(
         if let Some(mut meta) = preserved_text_meta {
             meta.main_size = std::fs::metadata(path)?.len();
             meta.main_crc = Some(file_crc32(path)?);
-            meta.checkpoint_token = memtable.text_checkpoint_token;
+            meta.checkpoint_token = memtable.checkpoint_token;
             write_text_index_metadata(path, meta)?;
             updated_text_meta = Some(meta);
         }
     } else {
         memtable.text_index().save_to_file(Path::new(&text_path))?;
         if Path::new(&text_path).exists() {
-            write_text_index_meta(path, memtable.text_checkpoint_token)?;
+            write_text_index_meta(path, memtable.checkpoint_token)?;
         } else {
             match std::fs::remove_file(text_index_meta_path_from_db(path)) {
                 Ok(()) => {}
@@ -852,7 +908,12 @@ fn save_inner<T: VectorType>(
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::GraphSidecarWrite)?;
     crate::storage::graph_blocks::save(memtable, path)?;
 
-    crate::storage::index_container::publish_checkpoint(path, memtable.text_index_is_deferred())?;
+    let pelorus = crate::index::pelorus::persistence::stage(memtable, path)?;
+    crate::storage::index_container::publish_checkpoint(
+        path,
+        memtable.text_index_is_deferred(),
+        pelorus,
+    )?;
 
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::hit_for_path(
@@ -862,6 +923,7 @@ fn save_inner<T: VectorType>(
     if let Some(marker) = marker {
         publish_mmap_marker(path, &marker)?;
     } else {
+        crate::request::check_current()?;
         publication::commit_rom(path)?;
     }
     write.outcome = WriteOutcome::Committed;
@@ -949,6 +1011,7 @@ fn publish_mmap_marker(path: &str, marker: &FlushMarker) -> Result<()> {
         crate::test_hooks::ConcurrencyPoint::BeforeFlushMarkerRename,
         path,
     );
+    crate::request::check_current()?;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::MarkerRename)?;
 
@@ -1085,7 +1148,11 @@ fn save_tdb<T: VectorType>(
     let header_crc = crc32fast::hash(&header);
     header.extend_from_slice(&header_crc.to_le_bytes());
     header.extend_from_slice(&memtable.storage_id);
-    header.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    header.extend_from_slice(&memtable.checkpoint_token.ok_or_else(|| {
+        TriviumError::CorruptedFile(
+            "缺少待发布的检查点封条 (Missing checkpoint publication seal)".into(),
+        )
+    })?);
     let identity_crc = crc32fast::hash(&header);
     header.extend_from_slice(&identity_crc.to_le_bytes());
     w.write_all(&header)?;
@@ -1183,13 +1250,15 @@ fn save_tdb<T: VectorType>(
             })?;
     let _graph_workspace = memtable
         .resource_runtime()
-        .reserve_workspace(graph_encoding_bytes)?;
+        .reserve_task_workspace(graph_encoding_bytes)?;
     crate::storage::named_graphs::save(&memtable.named_graphs, &mut w)?;
+    drop(_graph_workspace);
     let _document_workspace = memtable
         .resource_runtime()
-        .reserve_workspace(memtable.document_publications.encoding_workspace()?)?;
+        .reserve_task_workspace(memtable.document_publications.encoding_workspace()?)?;
     crate::storage::document_publications::save(&memtable.document_publications, &mut w)?;
-    let _receipt_workspace = memtable.resource_runtime().reserve_workspace(
+    drop(_document_workspace);
+    let _receipt_workspace = memtable.resource_runtime().reserve_task_workspace(
         memtable
             .editing
             .memory_bytes()
@@ -1291,9 +1360,7 @@ pub(crate) fn checkpoint_with_write_info<T: VectorType>(
     memtable.ensure_readable()?;
     wal.ensure_writable()?;
     if !skip_clean || memtable.needs_checkpoint() {
-        memtable.text_checkpoint_token = wal.seal_checkpoint(
-            memtable.text_index_is_deferred() || !memtable.text_index().is_empty(),
-        )?;
+        memtable.checkpoint_token = Some(wal.seal_checkpoint()?);
         if let Err(error) = save_with_write_info(memtable, path, mode, write) {
             if memtable.ensure_readable().is_err() {
                 // 关闭 writer，拦住失效前已准入、仍在等待 MemTable 锁的写操作。
@@ -1302,7 +1369,13 @@ pub(crate) fn checkpoint_with_write_info<T: VectorType>(
             return Err(error);
         }
         #[cfg(feature = "test-hooks")]
-        crate::test_hooks::io_result(crate::test_hooks::IoPoint::CheckpointWalClear)?;
+        {
+            crate::test_hooks::hit_for_path(
+                crate::test_hooks::ConcurrencyPoint::BeforeWalClear,
+                path,
+            );
+            crate::test_hooks::io_result(crate::test_hooks::IoPoint::CheckpointWalClear)?;
+        }
         wal.clear()?;
         memtable.mark_checkpoint_clean();
     }
@@ -1353,6 +1426,7 @@ fn load_inner<T: VectorType>(
     let bq_offset = read_u64_le(bytes, 50, "header bq_offset")? as usize;
 
     if dim == 0
+        || next_id == 0
         || payload_offset < HEADER_SIZE as usize
         || (vector_offset != 0 && vector_offset < payload_offset)
         || edge_offset < payload_offset
@@ -1449,6 +1523,7 @@ fn load_inner<T: VectorType>(
                 missing_index_policy,
                 Some(&verified_checkpoint),
             )?;
+            crate::index::pelorus::persistence::load(&mut mt, path, missing_index_policy)?;
             if load_text_sidecar {
                 load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
             } else if crate::storage::index_container::open(path, ".text")?.is_some() {
@@ -1487,6 +1562,7 @@ fn load_inner<T: VectorType>(
         load_unique_constraints(&mut mt, bytes, version, bq_layout)?;
         // 尝试加载 QuIVer 索引
         load_quiver_index(&mut mt, path, repair_sidecars, missing_index_policy, None)?;
+        crate::index::pelorus::persistence::load(&mut mt, path, missing_index_policy)?;
         if load_text_sidecar {
             load_text_index(&mut mt, path, repair_sidecars, missing_index_policy)?;
         } else if crate::storage::index_container::open(path, ".text")?.is_some() {
@@ -1542,6 +1618,14 @@ fn install_payload_sidecar_if_present<T: VectorType>(
     memtable.install_payload_sidecar(mmap, records)
 }
 
+/// 输入已经过完整头长度与身份 CRC 校验，旧检查点沿用原有的文本恢复边界。
+fn restore_checkpoint_identity<T: VectorType>(mt: &mut MemTable<T>, header: &[u8]) {
+    mt.storage_id.copy_from_slice(&header[74..90]);
+    let mut token = [0; 16];
+    token.copy_from_slice(&header[90..106]);
+    mt.checkpoint_token = super::wal::is_main_checkpoint(&token).then_some(token);
+}
+
 /// 分离向量 .vec 文件的加载
 fn load_mapped<T: VectorType>(
     bytes: &[u8],
@@ -1558,7 +1642,7 @@ fn load_mapped<T: VectorType>(
 ) -> Result<MemTable<T>> {
     let vec_pool = VecPool::<T>::open(Path::new(vec_file_path), dim, node_count)?;
     let mut memtable = MemTable::new_with_vec_pool(dim, next_id, vec_pool);
-    memtable.storage_id.copy_from_slice(&bytes[74..90]);
+    restore_checkpoint_identity(&mut memtable, bytes);
     memtable.begin_loading(memory_limit);
     load_payload_slots(
         &mut memtable,
@@ -1592,7 +1676,7 @@ fn load_rom<T: VectorType>(
     memory_limit: usize,
 ) -> Result<MemTable<T>> {
     let mut memtable = MemTable::new_with_next_id(dim, next_id);
-    memtable.storage_id.copy_from_slice(&bytes[74..90]);
+    restore_checkpoint_identity(&mut memtable, bytes);
     memtable.begin_loading(memory_limit);
     let vector_bytes_per_elem = std::mem::size_of::<T>();
     let vector_elements = node_count.checked_mul(dim).ok_or_else(|| {
@@ -2245,20 +2329,19 @@ fn load_quiver_index<T: VectorType>(
 /// 复用正式头部常量与解析函数，核对快照声明的基础事实，不物化数据库。
 pub(crate) fn validate_snapshot_metadata(
     path: &str,
-    expected_dtype: &str,
-    expected_dim: usize,
-    expected_nodes: usize,
+    manifest: &crate::storage::snapshot::GenerationManifest,
 ) -> Result<()> {
-    use std::io::Read;
+    use std::io::{BufReader, Read, Seek, SeekFrom};
     let mut bytes = [0u8; HEADER_SIZE as usize];
-    std::fs::File::open(path)?.read_exact(&mut bytes)?;
+    let mut file = BufReader::new(File::open(path)?);
+    file.read_exact(&mut bytes)?;
     let version = read_u16_le(&bytes, 4, "快照头部版本")?;
     let dim = read_u32_le(&bytes, 6, "快照头部维度")? as usize;
     let nodes = read_u64_le(&bytes, 18, "快照头部节点数")?;
     if &bytes[..4] != MAGIC
         || version != CURRENT_VERSION
-        || dim != expected_dim
-        || nodes != expected_nodes as u64
+        || dim != manifest.dim
+        || nodes < manifest.node_count as u64
         || dim == 0
         || dim > 65536
     {
@@ -2267,7 +2350,7 @@ pub(crate) fn validate_snapshot_metadata(
                 .into(),
         });
     }
-    let dtype = match expected_dtype {
+    let dtype = match manifest.dtype.as_str() {
         "f32" => vector_dtype::<f32>(),
         "u64" => vector_dtype::<u64>(),
         name if name == std::any::type_name::<half::f16>() => vector_dtype::<half::f16>(),
@@ -2288,21 +2371,86 @@ pub(crate) fn validate_snapshot_metadata(
             },
         },
     )?;
+    // 文件头记录物理槽位数，清单记录存活节点数。删除留下的槽位须从计数中剔除。
+    let start = read_u64_le(&bytes, 26, "payload offset")?;
+    let vectors = read_u64_le(&bytes, 34, "vector offset")?;
+    let end = if vectors == 0 {
+        read_u64_le(&bytes, 42, "edge offset")?
+    } else {
+        vectors
+    };
+    let mismatch = || TriviumError::ImmutableArtifactInvalid {
+        reason: "快照节点目录与清单不符 (Snapshot node directory does not match manifest)".into(),
+    };
+    if start != HEADER_SIZE
+        || end > file.get_ref().metadata()?.len()
+        || end < start
+        || nodes > (end - start) / 12
+    {
+        return Err(mismatch());
+    }
+    file.seek(SeekFrom::Start(start))?;
+    let mut cursor = start;
+    let mut live = 0u64;
+    let mut slot = [0; 12];
+    for _ in 0..nodes {
+        crate::request::check_current()?;
+        file.read_exact(&mut slot)?;
+        let id = read_u64_le(&slot, 0, "node id")?;
+        let length = read_u32_le(&slot, 8, "payload length")?;
+        cursor = cursor
+            .checked_add(12 + u64::from(length))
+            .filter(|&value| value <= end)
+            .ok_or_else(mismatch)?;
+        if length != 0 {
+            if vectors == 0 || id == 0 {
+                return Err(mismatch());
+            }
+            file.seek_relative(i64::from(length))?;
+        }
+        live += u64::from(id != 0);
+    }
+    if cursor != end || live != manifest.node_count as u64 {
+        return Err(mismatch());
+    }
+    let part = |suffix: &str| manifest.files.iter().find(|file| file.suffix == suffix);
+    let main = part("").ok_or_else(|| TriviumError::ImmutableArtifactInvalid {
+        reason: "快照缺少主文件摘要 (Snapshot is missing the database digest)".into(),
+    })?;
     if read_u64_le(&bytes, 34, "vector offset")? == 0 {
         let marker_path = flush_ok_path_from_db(path);
-        let valid = read_marker_generation(&marker_path).is_some_and(|generation| {
-            validate_flush_marker(
-                &marker_path,
-                path,
-                &vector_path,
-                &payload_path_for_generation(path, generation),
-            )
-        });
-        if !valid {
-            return Err(TriviumError::ImmutableArtifactInvalid {
-                reason: "快照检查点文件组不匹配 (Snapshot checkpoint file group mismatch)".into(),
-            });
+        let mismatch = || TriviumError::ImmutableArtifactInvalid {
+            reason: "快照检查点文件组不匹配 (Snapshot checkpoint file group mismatch)".into(),
+        };
+        let marker = read_flush_marker(&marker_path).ok_or_else(mismatch)?;
+        let (vector_size, vector_crc) = part(".vec").map_or((0, 0), |file| (file.size, file.crc32));
+        let suffix = format!(".pld.{}", marker.generation);
+        let payload = part(&suffix).ok_or_else(mismatch)?;
+        if marker.tdb_size != main.size
+            || marker.tdb_crc32 != Some(main.crc32)
+            || marker.vec_size != vector_size
+            || marker.vec_crc32 != Some(vector_crc)
+            || marker.payload_size != Some(payload.size)
+        {
+            return Err(mismatch());
+        }
+        let payload_matches = if let Some(sha) = marker.payload_sha256 {
+            let expected = format!("{:x}", sha2::digest::Output::<sha2::Sha256>::from(sha));
+            match payload.sha256.as_deref() {
+                Some(actual) => actual == expected,
+                None => {
+                    super::snapshot::checksum_file(Path::new(&format!("{path}{suffix}")), suffix)?
+                        .sha256
+                        .as_deref()
+                        == Some(&expected)
+                }
+            }
+        } else {
+            marker.payload_crc32 == Some(payload.crc32)
+        };
+        if !payload_matches {
+            return Err(mismatch());
         }
     }
-    Ok(())
+    validate_index_container(path, version, Some(main.crc32))
 }

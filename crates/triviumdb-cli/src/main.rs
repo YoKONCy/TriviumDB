@@ -113,6 +113,15 @@ enum Commands {
 
     /// 手动触发压缩（compaction）
     Compact(DbArgs),
+
+    /// 构建并保存显式 Poincaré 向量索引
+    BuildPelorus {
+        #[command(flatten)]
+        db: DbArgs,
+        /// Pelorus 构建配置的 JSON 对象
+        #[arg(long, default_value = "{}")]
+        config: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -274,6 +283,18 @@ fn run(cli: Cli, cfg: config::Config) -> CliResult {
         Commands::Compact(db) => {
             let mut handle = open(&db, &cfg)?;
             commands::compact::run(&mut handle)
+        }
+        Commands::BuildPelorus { db, config } => {
+            let options = serde_json::from_str(&config).map_err(|error| {
+                triviumdb::TriviumError::InvalidInput(format!(
+                    "Pelorus 构建配置无效 (Invalid Pelorus build config): {error}"
+                ))
+                .at_field("config")
+            })?;
+            let mut handle = open(&db, &cfg)?;
+            handle.build_pelorus(options)?;
+            println!("{}", serde_json::json!({ "status": "published" }));
+            Ok(())
         }
     }
 }

@@ -88,6 +88,11 @@ pub trait VectorType:
     /// 从 f32 构造单元素（用于产生数学计算后的残差向量等机制）
     fn from_f32(v: f32) -> Self;
 
+    /// 从宿主双精度分量舍入到目标类型；半精度覆盖此入口以保留中点两侧的差异。
+    fn from_f64_component(value: f64) -> Self {
+        Self::from_f32(value as f32)
+    }
+
     /// 文档SDK的JSON数值表示；整数类型覆盖以保留完整位模式。
     fn to_json_number(self) -> crate::Result<serde_json::Number> {
         serde_json::Number::from_f64(f64::from(self.to_f32())).ok_or_else(|| {
@@ -104,7 +109,7 @@ pub trait VectorType:
             .ok_or_else(|| crate::TriviumError::InvalidVector {
                 reason: "向量分量必须为数值 (Vector components must be numeric)".into(),
             })?;
-        let converted = Self::from_f32(number as f32);
+        let converted = Self::from_f64_component(number);
         if !(number as f32).is_finite() || !converted.to_f32().is_finite() {
             return Err(crate::TriviumError::InvalidVector {
                 reason: "向量分量超出目标类型的有限范围 (Vector component exceeds the finite range of its dtype)".into(),
@@ -541,6 +546,43 @@ impl VectorType for f16 {
     fn from_f32(v: f32) -> Self {
         half::f16::from_f32(v)
     }
+
+    #[inline]
+    fn from_f64_component(value: f64) -> Self {
+        // 首步精度损失时采用奇数舍入，避免在 binary16 中点制造虚假的平局。
+        let nearest = value as f32;
+        let intermediate = if nearest.to_bits() & 1 == 0 {
+            match f64::from(nearest).partial_cmp(&value) {
+                Some(std::cmp::Ordering::Less) => nearest.next_up(),
+                Some(std::cmp::Ordering::Greater) => nearest.next_down(),
+                _ => nearest,
+            }
+        } else {
+            nearest
+        };
+        f16::from_f32(intermediate)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn 双精度到半精度覆盖全部有限相邻值的中点与两侧() {
+    for lower in 0u16..0x7bff {
+        let a = f16::from_bits(lower).to_f64();
+        let b = f16::from_bits(lower + 1).to_f64();
+        let middle = (a + b) / 2.;
+        for (value, bits) in [
+            (middle.next_down(), lower),
+            (middle, lower + (lower & 1)),
+            (middle.next_up(), lower + 1),
+        ] {
+            assert_eq!(f16::from_f64_component(value).to_bits(), bits);
+            assert_eq!(f16::from_f64_component(-value).to_bits(), bits | 0x8000);
+        }
+    }
+    assert_eq!(f16::from_f64_component(-0.).to_bits(), 0x8000);
+    assert_eq!(f16::from_f64_component(65520f64.next_down()), f16::MAX);
+    assert_eq!(f16::from_f64_component(65520.), f16::INFINITY);
 }
 
 // ════════ u64：二进制哈希向量（如 SimHash 或其他指纹） ════════

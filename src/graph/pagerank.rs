@@ -39,7 +39,8 @@ pub fn pagerank<T: VectorType>(
     config: &PageRankConfig,
     label_filter: Option<&str>,
 ) -> Vec<(NodeId, f64)> {
-    let all_ids = mt.all_node_ids();
+    let mut all_ids = mt.all_node_ids();
+    all_ids.sort_unstable();
     let n = all_ids.len();
     if n == 0 {
         return Vec::new();
@@ -115,6 +116,6 @@ pub fn pagerank<T: VectorType>(
     }
 
     let mut result: Vec<(NodeId, f64)> = scores.into_iter().collect();
-    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    result.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     result
 }

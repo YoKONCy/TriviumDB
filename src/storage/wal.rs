@@ -16,6 +16,17 @@ pub const WAL_VERSION: u16 = 7;
 const WAL_HEADER_SIZE: u64 = 6;
 const MAX_WAL_ENTRY_SIZE: usize = 256 * 1024 * 1024;
 
+/// UUID 自定义版本标记主文件中需要 WAL 封条的检查点，旧文件使用随机 UUID v4。
+pub(crate) fn new_checkpoint_token() -> [u8; 16] {
+    let mut token = *uuid::Uuid::new_v4().as_bytes();
+    token[6] = (token[6] & 0x0f) | 0x80;
+    token
+}
+
+pub(crate) fn is_main_checkpoint(token: &[u8; 16]) -> bool {
+    token[6] >> 4 == 8
+}
+
 fn checkpoint_base(bytes: &[u8]) -> Option<[u8; 16]> {
     // 长度字段、枚举判别值、UUID 与 CRC 共同组成 28 字节封条帧。
     if bytes.len() != 34
@@ -224,7 +235,16 @@ impl Wal {
 
     /// 创建或打开 WAL 文件，指定同步模式
     pub fn open_with_sync(db_path: &str, sync_mode: SyncMode) -> Result<Self> {
+        Self::open_bound(db_path, sync_mode, None)
+    }
+
+    pub(crate) fn open_bound(
+        db_path: &str,
+        sync_mode: SyncMode,
+        token: Option<[u8; 16]>,
+    ) -> Result<Self> {
         let wal_path = PathBuf::from(format!("{}.wal", db_path));
+        let mut clean_token = None;
         let existing_len = match File::open(&wal_path) {
             Ok(mut existing) => {
                 let length = existing.metadata()?.len();
@@ -247,26 +267,27 @@ impl Wal {
                     });
                 }
                 crate::storage::format::require("wal", u32::from(found), u32::from(WAL_VERSION))?;
+                if length == WAL_HEADER_SIZE + 28 {
+                    let mut base = [0; 34];
+                    base[..header.len()].copy_from_slice(&header);
+                    existing.read_exact(&mut base[header.len()..])?;
+                    clean_token = checkpoint_base(&base);
+                }
                 length
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => return Err(error.into()),
         };
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&wal_path)?;
         if existing_len == 0 {
-            file.write_all(WAL_MAGIC)?;
-            file.write_all(&WAL_VERSION.to_le_bytes())?;
-            file.flush()?;
+            Self::publish_base(&wal_path, token, false)?;
         }
+        let file = OpenOptions::new().append(true).open(&wal_path)?;
         Ok(Self {
             wal_path,
             writer: Some(BufWriter::new(file)),
             sync_mode,
             cumulative_written_bytes: if existing_len == 0 {
-                WAL_HEADER_SIZE
+                WAL_HEADER_SIZE + if token.is_some() { 28 } else { 0 }
             } else {
                 0
             },
@@ -274,7 +295,7 @@ impl Wal {
             group_commit_active: false,
             group_commit_pending: false,
             cumulative_sync_count: 0,
-            checkpoint_token: None,
+            checkpoint_token: token.or(clean_token),
         })
     }
 
@@ -761,31 +782,40 @@ impl Wal {
     }
 
     /// 封条先于文件组发布持久化，Off 模式也须满足检查点的跨文件提交顺序。
-    pub(crate) fn seal_checkpoint(&mut self, has_text: bool) -> Result<Option<[u8; 16]>> {
-        if !has_text {
-            self.checkpoint_token = None;
-            return Ok(None);
-        }
-        let token = *uuid::Uuid::new_v4().as_bytes();
+    pub(crate) fn seal_checkpoint(&mut self) -> Result<[u8; 16]> {
+        let token = new_checkpoint_token();
         self.write_checkpoint_seal(token)?;
-        Ok(Some(token))
+        Ok(token)
+    }
+
+    /// 可写、只读打开共用清洁日志的身份核对。脏日志由事务回放核对已发布封条。
+    pub(crate) fn validate_clean_base(
+        path: &std::path::Path,
+        token: Option<[u8; 16]>,
+    ) -> Result<()> {
+        let Some(token) = token else { return Ok(()) };
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if file.metadata()?.len() == 34 {
+            let mut bytes = [0; 34];
+            file.read_exact(&mut bytes)?;
+            if checkpoint_base(&bytes).is_some_and(|base| base != token) {
+                return Err(TriviumError::CorruptedFile(
+                    "WAL 基准封条与检查点失配 (WAL base seal does not match the checkpoint)".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn ensure_checkpoint_base(&mut self, token: Option<[u8; 16]>) -> Result<()> {
-        if let Some(token) = token {
-            match std::fs::metadata(&self.wal_path)?.len() {
-                WAL_HEADER_SIZE => self.write_checkpoint_seal(token)?,
-                34 => {
-                    let mut bytes = [0; 34];
-                    File::open(&self.wal_path)?.read_exact(&mut bytes)?;
-                    if checkpoint_base(&bytes).is_some_and(|base| base != token) {
-                        return Err(TriviumError::CorruptedFile(
-                            "WAL 基准封条与文本检查点失配 (WAL base seal does not match the text checkpoint)".into(),
-                        ));
-                    }
-                }
-                _ => {}
-            }
+        Self::validate_clean_base(&self.wal_path, token)?;
+        self.checkpoint_token = token;
+        if token.is_some() && std::fs::metadata(&self.wal_path)?.len() == WAL_HEADER_SIZE {
+            self.clear()?;
         }
         Ok(())
     }
@@ -811,44 +841,44 @@ impl Wal {
         Ok(())
     }
 
-    /// flush 成功后清除 WAL 文件
-    ///
-    /// 使用 truncate（截断）语义而非 remove + create：
-    ///   - 避免 Windows 杀毒软件对"新建文件"的扫描锁定
-    ///   - 文件 inode/句柄不变，减少系统调用次数
+    /// 用同步完成的短日志替换旧日志。发布前中断时，旧日志与检查点封条仍完整。
     pub fn clear(&mut self) -> Result<()> {
         self.ensure_writable()?;
-        // 关闭当前 writer
         self.writer.take();
-        let mode = self.sync_mode;
+        Self::publish_base(&self.wal_path, self.checkpoint_token, true)?;
+        self.writer = Some(BufWriter::new(
+            OpenOptions::new().append(true).open(&self.wal_path)?,
+        ));
+        Ok(())
+    }
 
-        // 截断清空 WAL（而非删除重建）
-        // 对于已存在的文件，truncate 不会触发杀软的"新文件扫描"
-        {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&self.wal_path)?;
+    fn publish_base(path: &std::path::Path, token: Option<[u8; 16]>, replace: bool) -> Result<()> {
+        let stage = path.with_added_extension("tmp");
+        // 单写租约保护固定暂存名；上次中断遗留的暂存文件从未作为正式日志发布。
+        match std::fs::remove_file(&stage) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let mut file = File::create_new(&stage)?;
+        file.write_all(WAL_MAGIC)?;
+        file.write_all(&WAL_VERSION.to_le_bytes())?;
+        if let Some(token) = token {
+            write_framed_entry(&mut file, &WalEntry::<u8>::Checkpoint { token })?;
+        }
+        file.sync_all()?;
+        drop(file);
+        if replace {
             #[cfg(feature = "test-hooks")]
             crate::test_hooks::hit_for_path(
-                crate::test_hooks::ConcurrencyPoint::AfterWalTruncate,
-                &self.wal_path.to_string_lossy(),
+                crate::test_hooks::ConcurrencyPoint::BeforeWalReplace,
+                &path.to_string_lossy(),
             );
-            file.write_all(WAL_MAGIC)?;
-            file.write_all(&WAL_VERSION.to_le_bytes())?;
-            if let Some(token) = self.checkpoint_token {
-                write_framed_entry(&mut file, &WalEntry::<u8>::Checkpoint { token })?;
-            }
-            file.sync_all()?;
+            super::fs::robust_rename_and_sync(&stage, path)?;
+        } else {
+            super::fs::rename_new(&stage, path)?;
+            super::fs::sync_parent_directory(path)?;
         }
-
-        // 重新以追加模式打开
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.wal_path)?;
-        self.writer = Some(BufWriter::new(file));
-        self.sync_mode = mode;
         Ok(())
     }
 

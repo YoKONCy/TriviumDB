@@ -56,7 +56,7 @@ fn open(
 }
 
 #[test]
-fn WAL截断期间重开只报告租约冲突且清理后恢复完整事实() {
+fn WAL替换期间重开只报告租约冲突且清理后恢复完整事实() {
     for storage_mode in [StorageMode::Rom, StorageMode::Mmap] {
         let root = TestDir::new("open_wal_truncate");
         let path = root.file("sample.tdb");
@@ -76,7 +76,7 @@ fn WAL截断期间重开只报告租约冲突且清理后恢复完整事实() {
         let wal = format!("{path}.wal");
         let wal_scope = std::fs::canonicalize(&wal).unwrap();
         let pause = pause_at_path(
-            ConcurrencyPoint::AfterWalTruncate,
+            ConcurrencyPoint::BeforeWalReplace,
             wal_scope.to_str().unwrap(),
         );
         let writer = std::thread::spawn(move || {
@@ -84,7 +84,7 @@ fn WAL截断期间重开只报告租约冲突且清理后恢复完整事实() {
             owner
         });
         pause.wait_until_arrived();
-        let truncated_length = std::fs::metadata(&wal).map(|metadata| metadata.len());
+        let has_recoverable_log = triviumdb::storage::wal::Wal::needs_recovery(&path);
         let before = snapshot(&root.0);
         let attempts = [AccessMode::ReadWrite, AccessMode::ReadOnly].map(|access_mode| {
             Database::<f32>::open_with_config(
@@ -100,11 +100,7 @@ fn WAL截断期间重开只报告租约冲突且清理后恢复完整事实() {
         let after = snapshot(&root.0);
         pause.release();
         let mut owner = writer.join().unwrap();
-        assert_eq!(
-            truncated_length.unwrap(),
-            0,
-            "交错点必须实际处于空 WAL 窗口"
-        );
+        assert!(has_recoverable_log, "替换前旧日志必须保持可恢复");
         assert_eq!(before, after);
         for result in attempts {
             assert!(

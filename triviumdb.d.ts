@@ -976,6 +976,7 @@ export class TriviumDB {
    * stats.routing_shared表示数据库路由借用，reserved_hot_bytes统计Reader自有热区预算。
    */
   quiverRequest(requestJson: string): string;
+  pelorusRequest(requestJson: string): string;
   /** 命名图、共享成员、独立边及显式联合查询的Core JSON入口。 */
   graphRequest(requestJson: string): string;
   prepareTql(query: string): PreparedTql;

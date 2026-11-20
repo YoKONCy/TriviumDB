@@ -1,5 +1,6 @@
 //! 有界批次先完成自己持有的读取，再等待其他请求，避免交叉Pending形成等待环。
 use super::*;
+use crate::storage::quiver_io::IoMeter;
 
 struct PendingRead<'a> {
     reader: &'a QuiverRuntime,
@@ -69,6 +70,17 @@ impl QuiverRuntime {
         rows: &[usize],
         route: RoutingView<'_>,
     ) -> Result<Vec<SsdRow>> {
+        let meter = crate::request::quiver_io_meter();
+        self.load_records_routed_during(rows, route, meter.as_ref(), |_| Ok(()))
+    }
+
+    pub(super) fn load_records_routed_during(
+        &self,
+        rows: &[usize],
+        route: RoutingView<'_>,
+        meter: Option<&Arc<IoMeter>>,
+        mut ready: impl FnMut(&[Option<SsdRow>]) -> Result<()>,
+    ) -> Result<Vec<SsdRow>> {
         let state = self.active()?;
         if rows.len() > 64 || rows.iter().any(|&row| row >= self.metadata.rows) {
             return Err(invalid("SSD批次范围无效 (Invalid SSD batch range)"));
@@ -103,6 +115,9 @@ impl QuiverRuntime {
                     }
                     if let Some((value, tick)) = cache.rows.get(&row).cloned() {
                         cache.hits += 1;
+                        if let Some(meter) = meter {
+                            meter.row_cache_hits.fetch_add(1, Ordering::Relaxed);
+                        }
                         cache.lru.remove(&(tick, row));
                         cache.clock = cache.clock.wrapping_add(1);
                         let tick = cache.clock;
@@ -134,7 +149,10 @@ impl QuiverRuntime {
                     .iter()
                     .map(|read| Ok((read.row, route.identity(read.row)?)))
                     .collect::<Result<Vec<_>>>()?;
-                let buffers = state.file.read_records(&requests, &state.center.values)?;
+                let buffers =
+                    state
+                        .file
+                        .read_records(&requests, &state.center.values, meter, || ready(&loaded))?;
                 if buffers.len() != reads.len() {
                     return Err(capacity());
                 }
@@ -142,6 +160,8 @@ impl QuiverRuntime {
                     let position = read.position;
                     loaded[position] = Some(read.complete(bytes)?);
                 }
+            } else {
+                ready(&loaded)?;
             }
             for (position, flight) in waiters {
                 #[cfg(feature = "test-hooks")]
@@ -156,6 +176,11 @@ impl QuiverRuntime {
                     crate::request::check_current()?;
                 }
                 loaded[position] = completed.1.clone();
+                if let Some(meter) = meter
+                    && loaded[position].is_some()
+                {
+                    meter.coalesced_row_reads.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         crate::request::check_current()?;

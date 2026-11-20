@@ -8,6 +8,13 @@ import triviumdb
 
 
 def verify_search_entries(root):
+    half_path = str(Path(root) / "half-rounding.tdb")
+    with triviumdb.TriviumDB(half_path, dim=2, dtype="f16") as half:
+        half.insert_with_id(1, [1 + 2**-11 + 2**-28, 65519.9999], {})
+    with triviumdb.TriviumDB(half_path, dim=2, dtype="f16") as half:
+        assert half.get(1).vector == [1.0009765625, 65504.0]
+        assert [h.id for h in half.search_exact([1.0009765625, 65519.9999], 1)] == [1]
+
     fixture = json.loads((Path(__file__).parents[1] / "contracts/search_entry_cases.json").read_text(encoding="utf-8"))
     records = {record["id"]: record for record in fixture["records"]}
     query = fixture["query"]

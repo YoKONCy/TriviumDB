@@ -89,9 +89,8 @@ fn 复合唯一键仅反映事务最终状态且wal恢复保留其他所有者()
         for ending in ["new", "original", "delete", "chain"] {
             let path = root.file(&format!("{mode:?}_{ending}.tdb"));
             let replay = root.file(&format!("replay_{mode:?}_{ending}.tdb"));
-            // 两个独立检查点具有相同事实，回放样本只复制本轮事务 WAL。
-            for base in [&path, &replay] {
-                let mut db = Database::<f32>::open_with_config(base, config(mode)).unwrap();
+            {
+                let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
                 for (id, key) in [(1, "a"), (2, "b"), (3, "c")] {
                     db.insert_with_id(id, &[1., 0.], json!({"tenant":"t","key":key}))
                         .unwrap();
@@ -100,6 +99,7 @@ fn 复合唯一键仅反映事务最终状态且wal恢复保留其他所有者()
                     .unwrap();
                 db.close().unwrap();
             }
+            root.copy_checkpoint(&path, &replay);
             let mut db = Database::<f32>::open_with_config(&path, config(mode)).unwrap();
             let mut tx = TxBuilder::new();
             tx.update_payload(1, json!({"tenant":"t","key":"b"}));
@@ -392,9 +392,12 @@ fn 独立编码的无符号wal样本保留原始事实与嵌套整数() {
         .unwrap()
         .close()
         .unwrap();
-    std::fs::write(
-        format!("{path}.wal"),
-        include_bytes!("../fixtures/numeric_ids/full_u64.bin"),
+    std::io::Write::write_all(
+        &mut std::fs::OpenOptions::new()
+            .append(true)
+            .open(format!("{path}.wal"))
+            .unwrap(),
+        &include_bytes!("../fixtures/numeric_ids/full_u64.bin")[6..],
     )
     .unwrap();
     let mut db = Database::<f32>::open_with_config(&path, config(StorageMode::Mmap)).unwrap();

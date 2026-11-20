@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> 本文介绍 `0.9.2` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.2.md)。
+> 本文介绍 `0.9.3-beta.1` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.3-beta.1.md)。
 
 ---
 
@@ -485,6 +485,8 @@ OPTIONAL MATCH 首先筛选符合起点条件的节点；每个起点沿满足�
 
 ## SEARCH — 向量检索
 
+普通向量 ANN 使用 QuIVer。对已构建 Pelorus 索引的固定曲率 Poincaré 球向量，使用 `SEARCH PELORUS`。命名图成员约束在截取前 K 个候选之前生效，`similarity(_)` 为负测地距离。文档的 `search_vector` 和 `search_hybrid` 请求可设置 `pelorus: true` 使用相同度量。构建和查询示例见 [Pelorus 检索入口](pelorus.md#检索入口)。
+
 `SEARCH` 入口执行向量相似度检索，并可选通过 `EXPAND` 子句沿图谱扩散，将语义锚点与结构关系融合。
 
 ### 基础语法
@@ -672,6 +674,7 @@ RETURN COUNT(*) AS total, AVG(a.score) AS avg_score
 ```
 
 - `FIND` / `SEARCH` 场景下，`RETURN *` 将节点绑定到隐式变量 `_`
+- 普通 `FIND` 的裸字段名读取 Payload，缺失字段返回 Null。例如 `RETURN name, age, _.id` 分别返回两个业务字段和结构 ID。交换列的位置保留各列的值。
 - `MATCH` 场景下，`RETURN *` 返回模式中具名节点与单跳具名边变量
 
 普通查询、WITH 管线与单跳具名边共用返回处理。计算表达式按实际值参与去重与分组；返回列与输入绑定分别保存，聚合别名可与输入节点变量同名。省略 `AS` 时，列名采用表达式文本，例如 `Count(*)`、`n.x`。
@@ -724,6 +727,8 @@ ORDER BY sim DESC LIMIT 10
 可组合阶段包括 `EXPAND`、`FILTER/WHERE`、`RANK`、PageRank、WCC、SCC、K-Core、Articulation Points、Triangle Count、Local Clustering Coefficient、HITS、Harmonic Centrality、Node Similarity、Degree/Betweenness、Leiden、Label Propagation、SA-PPR、`TEXT BM25/AC/HYBRID`、`RESIDUAL`、`DIVERSIFY`、`TOPICS`、`SA_PPR_CONFIG`、`WEIGHTED_PATHS`、`YEN_PATHS`、`ALL_PATHS`、`SHORTEST_PATHS`、`UNION/INTERSECT/EXCEPT` 与 `ITERATE`。每阶段接受预算切片，并在 EXPLAIN 中暴露成本、预计行数、临时字节和物理实现。
 
 WITH 在执行位置对每行求值并保存带类型的投影快照。同一 WITH 的所有右值读取进入该阶段时的作用域，再同时安装别名；后续 WITH 仅保留显式投影的列。表达式递归检查全部变量，标量重命名保留标量类型。
+
+普通投影和过滤保留匹配行的重数。例如两个节点之间有两条不同标签的边，`MATCH (a)-[]->(b) WITH a,b RETURN COUNT(*)` 计为两行。`RETURN DISTINCT` 按返回值去重，集合运算按节点与绑定身份合并。
 
 EXPAND 将起点快照传给扩展结果；多个起点汇合到同一节点时，不同的投影环境保持独立逻辑行。节点别名保留原节点身份和属性，数组、对象及标量保留投影值，分组与过滤读取相同快照。保存的投影内容计入实例查询工作区及共享运行时配额。
 
@@ -895,9 +900,11 @@ RETURN path(route) AS nodes, path_length(route) AS hops
 
 Path 是一等 NodeId 序列，`path_length` 返回边数。`WEIGHTED_PATHS` 使用非负有限边权执行确定性 Dijkstra，`weighted_distance()` 返回总成本。`YEN_PATHS ... K n` 返回最多 n 条最短简单路径，`path_rank()` 从 1 开始标记顺序，输出行从该路径起点继承绑定。等成本路径按完整 NodeId 序列决胜。
 
+加权最短路径、Yen 和调和中心性的单阶段边预算涵盖构图和所有起点的搜索。HITS 的同一预算涵盖构图和每轮入边、出边扫描。构图时被标签筛掉的边也计入扫描数。PROFILE 返回成功阶段的累计值。
+
 `NODE_SIMILARITY input TOP n CUTOFF x [LABEL label] AS pairs` 在输入诱导无向图上计算邻居集合 Jaccard，相似节点对通过 `pair_left()`、`pair_right()` 与 `node_similarity()` 投影。PairSet 以 `(left,right)` 为行身份，两个节点共同参与去重；节点对数量、邻居交集工作量、结果数和临时字节均受硬预算约束。
 
-集合阶段公开 `UNION/INTERSECT/EXCEPT`，普通 NodeSet 仍按 NodeId 稳定归一化并保留确定性 provenance/score 合并语义。所有路径与集合算法均受节点数、字节和遍历预算约束。
+集合阶段支持 `UNION/INTERSECT/EXCEPT`。在 `UNION … IDS` 中，左右共有的节点沿用左侧绑定与分数，仅在右侧出现的节点各补入一次。普通 NodeSet 按 NodeId 稳定归一化。路径与集合算法均受节点数、字节和遍历预算约束。
 
 `ALL_PATHS` 的 `DEPTH` 限定查询范围，重复的 `TO` 节点只处理一次。`AVOID` 排除经过指定节点的所有路径，包含起点和终点。`LABELS` 要求边标签依次匹配整个序列。执行预算阻止继续扩展时，TQL 返回 `TDB_TRAVERSAL_BUDGET_EXCEEDED`，Core `bounded_all_paths` 的 Partial 策略通过 `truncated` 标记部分结果。
 

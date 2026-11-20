@@ -8,6 +8,7 @@ pub mod bq;
 pub mod brute_force;
 pub(crate) mod document;
 pub mod exact;
+pub mod pelorus;
 pub mod property;
 pub mod quiver;
 pub mod text;

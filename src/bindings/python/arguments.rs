@@ -166,6 +166,27 @@ pub(super) fn read_double(value: &Bound<'_, PyAny>, field: &str) -> PyResult<f64
     number_value(value, field, None)
 }
 
+pub(super) fn half_value(
+    value: &Bound<'_, PyAny>,
+    field: &str,
+    write: Option<crate::error::WriteErrorInfo>,
+) -> PyResult<half::f16> {
+    use crate::VectorType;
+    number_value(value, field, write).map(half::f16::from_f64_component)
+}
+
+pub(super) fn read_half(value: &Bound<'_, PyAny>, field: &str) -> PyResult<half::f16> {
+    half_value(value, field, None)
+}
+
+pub(super) fn write_half(value: &Bound<'_, PyAny>, field: &str) -> PyResult<half::f16> {
+    half_value(
+        value,
+        field,
+        Some(crate::error::WriteErrorInfo::MAINTENANCE_VALIDATION),
+    )
+}
+
 fn number_value<'py, T: FromPyObject<'py>>(
     value: &Bound<'py, PyAny>,
     field: &str,

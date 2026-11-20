@@ -734,9 +734,12 @@ fn quiver_pipeline<T: VectorType + Sync>(
     // 转为 f32 写入复用缓冲区。整个查询只触达 ~ef 个候选，
     // 不再物化全量 f32 数组（不触发 merged 缓存），冷数据始终留在 OS PageCache。
     let vec_pool = mt.vec_pool();
-    let configured = mt.configured_quiver_search(&q_f32, &search_cfg, &|id| {
-        matches_payload_filter(mt, filter_ref, id)
-    })?;
+    let configured = mt.configured_quiver_search(
+        &q_f32,
+        &search_cfg,
+        &|id| matches_payload_filter(mt, filter_ref, id),
+        None,
+    )?;
     let raw_results = if let Some(hits) = configured {
         hits
     } else {

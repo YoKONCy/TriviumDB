@@ -10,7 +10,7 @@
 use crate::VectorType;
 use crate::node::NodeId;
 use crate::storage::memtable::MemTable;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 // ═══════════════════════════════════════════════════════════════════════
 //  度中心性 (Degree Centrality)
@@ -55,7 +55,11 @@ pub fn degree_centrality<T: VectorType>(mt: &MemTable<T>) -> Vec<DegreeCentralit
         })
         .collect();
 
-    results.sort_by(|a, b| b.total_degree.cmp(&a.total_degree));
+    results.sort_by(|a, b| {
+        b.total_degree
+            .cmp(&a.total_degree)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     results
 }
 
@@ -67,6 +71,7 @@ pub fn degree_centrality<T: VectorType>(mt: &MemTable<T>) -> Vec<DegreeCentralit
 ///
 /// - 如果 `label_filter` 为 Some，只沿匹配标签的边计算
 /// - 如果 `sample_size` 为 Some(k)，只从 k 个源节点出发（近似计算，降低大图开销）
+/// - 零采样时所有节点的贡献为零。
 /// - 返回 `HashMap<NodeId, f64>`，值为归一化后的中心性分数
 /// - 用途：发现信息瓶颈节点——移除该节点后最大程度破坏图连通性
 pub fn betweenness_centrality<T: VectorType>(
@@ -74,112 +79,117 @@ pub fn betweenness_centrality<T: VectorType>(
     label_filter: Option<&str>,
     sample_size: Option<usize>,
 ) -> HashMap<NodeId, f64> {
-    let all_ids = mt.all_node_ids();
-    let n = all_ids.len();
-    if n < 2 {
-        return all_ids.into_iter().map(|id| (id, 0.0)).collect();
+    let mut ids = mt.all_node_ids();
+    ids.sort_unstable();
+    let n = ids.len();
+    let sources = sample_size.unwrap_or(n).min(n);
+    let mut scores: HashMap<_, _> = ids.iter().map(|&id| (id, 0.0)).collect();
+    if sources == 0 || n < 3 {
+        return scores;
     }
-
-    let mut centrality: HashMap<NodeId, f64> = all_ids.iter().map(|&id| (id, 0.0)).collect();
-
-    // 确定源节点集合
-    let sources: Vec<NodeId> = if let Some(k) = sample_size {
-        let mut sorted = all_ids.clone();
-        sorted.sort_unstable();
-        sorted.into_iter().take(k).collect()
-    } else {
-        all_ids.clone()
-    };
-
-    let id_set: HashSet<NodeId> = all_ids.iter().copied().collect();
-
-    for &s in &sources {
-        // Brandes 单源 BFS
-        let mut stack: Vec<NodeId> = Vec::new();
-        let mut predecessors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        let mut sigma: HashMap<NodeId, f64> = HashMap::new();
-        let mut dist: HashMap<NodeId, i64> = HashMap::new();
-
-        for &id in &all_ids {
-            sigma.insert(id, 0.0);
-            dist.insert(id, -1);
+    let adjacency = ids
+        .iter()
+        .map(|&id| {
+            let neighbors = mt
+                .get_edges(id)
+                .unwrap_or_default()
+                .iter()
+                .filter(|edge| label_filter.is_none_or(|label| edge.label == label))
+                .filter(|edge| mt.contains(edge.target_id))
+                .map(|edge| edge.target_id)
+                .collect::<Vec<_>>();
+            (id, neighbors)
+        })
+        .collect();
+    for &source in &ids[..sources] {
+        let partial = brandes_source(
+            &adjacency,
+            source,
+            |_| Ok::<_, std::convert::Infallible>(()),
+        )
+        .unwrap_or_else(|never| match never {});
+        for (id, value) in partial {
+            if let Some(score) = scores.get_mut(&id) {
+                *score += value;
+            }
         }
-        sigma.insert(s, 1.0);
-        dist.insert(s, 0);
+    }
+    for value in scores.values_mut() {
+        *value = normalize(*value, n, sources);
+    }
+    scores
+}
 
-        let mut queue: VecDeque<NodeId> = VecDeque::new();
-        queue.push_back(s);
+pub(super) fn normalize(value: f64, nodes: usize, sources: usize) -> f64 {
+    if nodes < 3 || sources == 0 {
+        return 0.0;
+    }
+    value / ((nodes - 1) as f64 * (nodes - 2) as f64) * (nodes as f64 / sources as f64)
+}
 
-        while let Some(v) = queue.pop_front() {
-            stack.push(v);
-            let d_v = dist[&v];
+#[derive(Default)]
+struct Visit {
+    depth: usize,
+    log_paths: f64,
+    predecessors: Vec<NodeId>,
+    dependency: f64,
+}
 
-            if let Some(edges) = mt.get_edges(v) {
-                for edge in edges {
-                    if let Some(lf) = label_filter
-                        && edge.label != lf
-                    {
-                        continue;
-                    }
-                    let w = edge.target_id;
-                    if !id_set.contains(&w) {
-                        continue;
-                    }
-
-                    if dist[&w] < 0 {
-                        dist.insert(w, d_v + 1);
-                        queue.push_back(w);
-                    }
-                    if dist[&w] == d_v + 1 {
-                        let sigma_v = sigma[&v];
-                        if let Some(s) = sigma.get_mut(&w) {
-                            *s += sigma_v;
-                        }
-                        predecessors.entry(w).or_default().push(v);
-                    }
+/// 在对数域累积最短路径条数，回溯只需要前驱与目标的条数比值。
+pub(super) fn brandes_source<E>(
+    adjacency: &HashMap<NodeId, Vec<NodeId>>,
+    source: NodeId,
+    mut admit: impl FnMut(usize) -> std::result::Result<(), E>,
+) -> std::result::Result<Vec<(NodeId, f64)>, E> {
+    use std::collections::hash_map::Entry;
+    let mut visits = HashMap::from([(source, Visit::default())]);
+    let mut stack = Vec::new();
+    let mut queue = VecDeque::from([source]);
+    while let Some(id) = queue.pop_front() {
+        stack.push(id);
+        let depth = visits[&id].depth + 1;
+        let log_paths = visits[&id].log_paths;
+        let neighbors = &adjacency[&id];
+        admit(neighbors.len())?;
+        for &target in neighbors {
+            admit(0)?;
+            match visits.entry(target) {
+                Entry::Vacant(entry) => {
+                    entry.insert(Visit {
+                        depth,
+                        log_paths,
+                        predecessors: vec![id],
+                        dependency: 0.0,
+                    });
+                    queue.push_back(target);
                 }
-            }
-        }
-
-        // 回溯累积
-        let mut delta: HashMap<NodeId, f64> = all_ids.iter().map(|&id| (id, 0.0)).collect();
-        while let Some(w) = stack.pop() {
-            if let Some(preds) = predecessors.get(&w) {
-                let sigma_w = sigma[&w];
-                if sigma_w > 0.0 {
-                    for &v in preds {
-                        let coeff = (sigma[&v] / sigma_w) * (1.0 + delta[&w]);
-                        if let Some(d) = delta.get_mut(&v) {
-                            *d += coeff;
-                        }
-                    }
+                Entry::Occupied(mut entry) if entry.get().depth == depth => {
+                    let target = entry.get_mut();
+                    let previous = target.log_paths;
+                    target.log_paths =
+                        previous.max(log_paths) + (-(previous - log_paths).abs()).exp().ln_1p();
+                    target.predecessors.push(id);
                 }
-            }
-            if w != s
-                && let Some(c) = centrality.get_mut(&w)
-            {
-                *c += delta[&w];
+                _ => {}
             }
         }
     }
-
-    // 归一化：对有向图，分母为 (N-1)(N-2)
-    let norm = ((n - 1) * (n - 2)) as f64;
-    if norm > 0.0 {
-        for val in centrality.values_mut() {
-            *val /= norm;
+    let mut partial = Vec::new();
+    while let Some(id) = stack.pop() {
+        admit(0)?;
+        let visit = visits
+            .remove(&id)
+            .expect("每个入栈节点在逆序回溯时恰好出栈一次");
+        for predecessor in visit.predecessors {
+            admit(0)?;
+            if let Some(parent) = visits.get_mut(&predecessor) {
+                parent.dependency +=
+                    (parent.log_paths - visit.log_paths).exp() * (1.0 + visit.dependency);
+            }
+        }
+        if id != source && visit.dependency != 0.0 {
+            partial.push((id, visit.dependency));
         }
     }
-
-    // 若使用采样，按比例放大
-    if let Some(k) = sample_size
-        && k < n
-    {
-        let scale = n as f64 / k as f64;
-        for val in centrality.values_mut() {
-            *val *= scale;
-        }
-    }
-
-    centrality
+    Ok(partial)
 }
