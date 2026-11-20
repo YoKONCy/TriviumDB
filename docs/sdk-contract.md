@@ -1,6 +1,6 @@
 # SDK 正式接口清单
 
-> 本文登记应用侧 SDK 的支持范围与兼容边界，作为 `1.0.0-beta.1` SDK 冻结的审查基线。当前交付版本为 `0.9.2`，完整内容见[版本说明](changes/0.9.2.md)。
+> 本文登记应用侧 SDK 的支持范围与兼容边界，作为 `1.0.0-beta.1` SDK 冻结的审查基线。当前交付版本为 `0.9.3-beta.1`，完整内容见[版本说明](changes/0.9.3-beta.1.md)。
 
 ---
 
@@ -25,7 +25,7 @@
 | Python | [`__init__.pyi`](../python/triviumdb/__init__.pyi)，wheel 内附带 `py.typed` | `import triviumdb` |
 | Node | [`triviumdb.d.ts`](../triviumdb.d.ts)，由 `package.json.types` 指向 | `require('triviumdb')` 或包名导入 |
 | TQL | [语言参考](tql-reference.md) 与 Prepared 参数类型 | 数据库查询方法 |
-| JSON 请求 | [文档](document-ingestion.md)、[命名图](named-graphs.md)、[QuIVer](quiver.md)、[嵌入控制台数据协议](embedded-console.md) | SDK 请求方法 |
+| JSON 请求 | [文档](document-ingestion.md)、[命名图](named-graphs.md)、[QuIVer](quiver.md)、[Pelorus](pelorus.md)、[嵌入控制台数据协议](embedded-console.md) | SDK 请求方法 |
 | 错误 | [`ErrorInfo`](../src/error.rs) 与 [错误契约](error-contracts.md) | Rust 错误对象、Python 异常、Node Error |
 
 > **使用提醒**：直接从源码内部路径导入的对象，需要按下文的应用范围或内核扩展范围核对支持状态。以 `_` 开头的绑定桥接与构建生成的 `index.d.ts` 供内部装配使用。
@@ -82,7 +82,7 @@ Node 正式运行对象和函数以 `triviumdb.d.ts` 的 `export class`、`expor
 
 TQL 的文档来源、命名图作用域、文本/向量/图算子共享 Planner 和执行器。Prepared 参数和 AST 范围按[定位契约](error-contracts.md)返回。应用依赖语义、结果、预算和来源定位；成本估计数值及内部物理算子拆分按实现与数据调整。
 
-文档、命名图与 QuIVer JSON 请求的操作名、字段和响应由 `sdk` 适配层维护。Console 数据协议的版本、字符串 ID、权限、条件写入与回执沿现有协议维护；HTML 样式和界面结构沿前端发布流程维护。
+文档、命名图、QuIVer 与 Pelorus JSON 请求的操作名、字段和响应由 `sdk` 适配层维护。Console 数据协议的版本、字符串 ID、权限、条件写入与回执沿现有协议维护；HTML 样式和界面结构沿前端发布流程维护。
 
 [Pelorus](pelorus.md) 提供独立的双曲索引配置、驻留切换、单次和批量检索。Rust 暴露类型化入口，Python 与 Node 共用 JSON 协议。TQL 保留命名图作用域及同度量重排。
 

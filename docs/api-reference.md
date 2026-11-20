@@ -1,8 +1,10 @@
 # TriviumDB API 完整参考
 
-> 本文记录 `0.9.2` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本说明见 [0.9.2 变更](changes/0.9.2.md)，后续开发见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
+> 本文记录 `0.9.3-beta.1` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本说明见 [0.9.3-beta.1 变更](changes/0.9.3-beta.1.md)，后续开发见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
 
-开发版的应用支持范围见 [SDK 正式接口清单](sdk-contract.md)。历史数据库由[外部迁移入口](migration.md)转换到当前文件组；普通打开通过 `TDB_MIGRATION_REQUIRED` 提供结构化指引。
+应用支持范围见 [SDK 正式接口清单](sdk-contract.md)。历史数据库由[外部迁移入口](migration.md)转换到当前文件组。普通打开通过 `TDB_MIGRATION_REQUIRED` 提供结构化指引。
+
+普通 ANN 默认使用 QuIVer。固定曲率 Poincaré 球检索通过 Rust 的 `search_pelorus`、Python 的 `pelorus_request`、Node.js 的 `pelorusRequest` 或 TQL 的 `SEARCH PELORUS` 显式选择。构建参数、批量查询及距离与分数的约定见 [Pelorus 双曲向量索引](pelorus.md)。
 
 ---
 

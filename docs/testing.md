@@ -1,6 +1,6 @@
 # TriviumDB 测试实践
 
-> 本文说明 TriviumDB `0.9.2` 的测试组织、契约设计、故障注入与验收证据。版本记录见[变更说明](changes/0.9.2.md)，后续进展见[未发布变更](changes/unreleased.md)。
+> 本文说明 TriviumDB `0.9.3-beta.1` 的测试组织、契约设计、故障注入与验收证据。版本记录见[变更说明](changes/0.9.3-beta.1.md)，后续进展见[未发布变更](changes/unreleased.md)。
 
 ---
 

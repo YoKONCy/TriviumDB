@@ -1,6 +1,6 @@
 # QuIVer 向量索引
 
-> 本文介绍 `0.9.2` 的 QuIVer 图导航、原始向量精排、可选压缩重排、冷热驻留、构建维护与资源计量。版本记录见[变更说明](changes/0.9.2.md)，冻结研究资料见 [ICDE 复现归档](../evaluation/README.md)。
+> 本文介绍 `0.9.3-beta.1` 的 QuIVer 图导航、原始向量精排、可选压缩重排、冷热驻留、构建维护与资源计量。版本记录见[变更说明](changes/0.9.3-beta.1.md)，冻结研究资料见 [ICDE 复现归档](../evaluation/README.md)。
 
 ---
 

@@ -1,6 +1,6 @@
 # TQL (Trivium Query Language) 完整参考
 
-> 本文介绍 `0.9.2` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.2.md)。
+> 本文介绍 `0.9.3-beta.1` 的 TQL 语法与执行语义，涵盖文档来源、命名图、属性过滤、向量检索和统一查询管线。TQL 使用 Rust 实现，版本记录见[变更说明](changes/0.9.3-beta.1.md)。
 
 ---
 
@@ -484,6 +484,8 @@ OPTIONAL MATCH 首先筛选符合起点条件的节点；每个起点沿满足�
 ---
 
 ## SEARCH — 向量检索
+
+普通向量 ANN 使用 QuIVer。对已构建 Pelorus 索引的固定曲率 Poincaré 球向量，使用 `SEARCH PELORUS`。命名图成员约束在截取前 K 个候选之前生效，`similarity(_)` 为负测地距离。文档的 `search_vector` 和 `search_hybrid` 请求可设置 `pelorus: true` 使用相同度量。构建和查询示例见 [Pelorus 检索入口](pelorus.md#检索入口)。
 
 `SEARCH` 入口执行向量相似度检索，并可选通过 `EXPAND` 子句沿图谱扩散，将语义锚点与结构关系融合。
 
