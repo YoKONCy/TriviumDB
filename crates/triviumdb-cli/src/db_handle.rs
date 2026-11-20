@@ -212,10 +212,7 @@ impl DbHandle {
         &mut self,
         config: triviumdb::index::pelorus::PelorusConfig,
     ) -> Result<()> {
-        dispatch!(self, db => {
-            db.build_pelorus_index(config)?;
-            db.flush()
-        })
+        dispatch!(self, db => db.build_pelorus_index(config))
     }
 
     /// 当前句柄的 dtype。

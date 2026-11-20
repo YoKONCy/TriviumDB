@@ -155,7 +155,7 @@ fn 属性并行扫描将工作线程用量归入所属查询() {
         execute_pipeline(&mut context, &operators).unwrap_err(),
         triviumdb::TriviumError::PayloadQueryBudgetExceeded {
             dimension: "lookups",
-            used: 3,
+            used: 2,
             budget: 1
         }
     ));
@@ -167,6 +167,44 @@ fn 属性并行扫描将工作线程用量归入所属查询() {
     );
     assert_eq!(context.metrics[0].payload_lookups, 3);
     assert_eq!(context.metrics[0].payload_parsed_bytes, 21);
+}
+
+#[test]
+fn 耗尽解析预算的查询不把原始Payload加载进缓存() {
+    use triviumdb::query::pipeline::FilteredNodeScanSource;
+
+    let mut mt = MemTable::<f32>::new(2);
+    mt.configure_payload_cache(0, 0);
+    for id in 1..=3 {
+        mt.insert_with_id(id, &[0.25, 0.0], json!({"kind": "match"}))
+            .unwrap();
+    }
+    mt.configure_payload_cache(8192, 8192);
+    let operands: Vec<Box<dyn PipelineOperator<f32>>> = vec![Box::new(FilteredNodeScanSource {
+        filter: Filter::eq("kind", json!("match")),
+    })];
+    for _ in 0..2 {
+        let mut context = PipelineContext::new(
+            &mt,
+            PipelineBudget {
+                max_payload_parsed_bytes: 0,
+                ..budget()
+            },
+        );
+        assert!(matches!(
+            execute_pipeline(&mut context, &operands),
+            Err(triviumdb::TriviumError::PayloadQueryBudgetExceeded {
+                dimension: "parsed_bytes",
+                ..
+            })
+        ));
+    }
+    let mut context = PipelineContext::new(&mt, budget());
+    let rows = execute_pipeline(&mut context, &operands).unwrap();
+    assert_eq!(
+        rows.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
 }
 
 #[path = "../../benches/support/pipeline_results.rs"]

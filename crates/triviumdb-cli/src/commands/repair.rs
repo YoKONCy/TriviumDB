@@ -52,10 +52,9 @@ pub fn check(path: &str) -> CliResult {
             }
         }
     } else {
-        println!(
-            "{}",
-            "警告：主库文件不存在！若仅有 WAL，下次启动会尝试仅依靠 WAL 恢复数据。/ Warning: The database file is missing. If only the WAL exists, the next startup will attempt WAL-only recovery.".yellow()
-        );
+        return Err(triviumdb::TriviumError::CorruptedFile(
+            "缺少带类型的基础检查点，请保留 WAL 并使用原库的基础检查点恢复 (Typed base checkpoint missing; preserve the WAL and recover with the original database's base checkpoint)".into(),
+        ).into());
     }
 
     Ok(())

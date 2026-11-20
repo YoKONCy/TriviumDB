@@ -39,6 +39,38 @@ fn tdb() -> Command {
 }
 
 #[test]
+fn repair_check明确拒绝只有_wal_的数据库() {
+    let directory = TempDir::new().unwrap();
+    let source = directory.path().join("source.tdb");
+    let source = source.to_str().unwrap();
+    let mut db = triviumdb::Database::<f32>::open_with_config(
+        source,
+        triviumdb::database::Config {
+            dim: 2,
+            sync_mode: triviumdb::storage::wal::SyncMode::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert_with_id(1, &[0.25, 0.0], json!({"value":1}))
+        .unwrap();
+    let untyped = directory.path().join("untyped.tdb");
+    let untyped = untyped.to_str().unwrap();
+    let wal = std::fs::read(format!("{source}.wal")).unwrap();
+    let copied_wal = format!("{untyped}.wal");
+    std::fs::write(&copied_wal, &wal).unwrap();
+    let output = tdb()
+        .args(["--format=json", "repair", "check", untyped])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["code"], "TDB_CORRUPTED_FILE");
+    assert_eq!(std::fs::read(copied_wal).unwrap(), wal);
+    assert!(!std::path::Path::new(untyped).exists());
+}
+
+#[test]
 fn json模式统一命令解析与输入文件错误() {
     let (directory, path) = seed_db();
     let malformed = directory.path().join("malformed.jsonl");

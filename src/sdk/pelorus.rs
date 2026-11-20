@@ -107,7 +107,11 @@ pub fn request<T: VectorType + Serialize + DeserializeOwned>(
                 .into_iter()
                 .map(|hits| hits.into_iter().map(Hit::from).collect::<Vec<_>>())
                 .collect::<Vec<_>>();
-            encode(&serde_json::json!({ "results": groups }))
+            #[derive(Serialize)]
+            struct BatchResponse {
+                results: Vec<Vec<Hit>>,
+            }
+            encode(&BatchResponse { results: groups })
         }
     }
 }

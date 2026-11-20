@@ -641,22 +641,8 @@ impl<'a, T: VectorType> PipelineContext<'a, T> {
     }
 
     fn validate_payload_budget(&self) -> Result<(u64, u64)> {
-        let (lookups, parsed_bytes) = self.payload_usage();
-        if lookups > self.budget.max_payload_lookups {
-            return Err(TriviumError::PayloadQueryBudgetExceeded {
-                dimension: "lookups",
-                used: lookups,
-                budget: self.budget.max_payload_lookups,
-            });
-        }
-        if parsed_bytes > self.budget.max_payload_parsed_bytes {
-            return Err(TriviumError::PayloadQueryBudgetExceeded {
-                dimension: "parsed_bytes",
-                used: parsed_bytes,
-                budget: self.budget.max_payload_parsed_bytes,
-            });
-        }
-        Ok((lookups, parsed_bytes))
+        self.payload_meter.check()?;
+        Ok(self.payload_usage())
     }
 
     fn validate_output(&self, output: &NodeSet) -> Result<()> {
@@ -721,7 +707,10 @@ pub(crate) fn execute_pipeline_with_workspace<T: VectorType>(
     workspace.metrics.clear();
     workspace.stages = 0;
     workspace.vector_read_bytes = 0;
-    workspace.payload_meter = Arc::default();
+    workspace.payload_meter = Arc::new(crate::request::PayloadMeter::new(
+        workspace.budget.max_payload_lookups,
+        workspace.budget.max_payload_parsed_bytes,
+    ));
     let request = workspace.graph_request()?;
     let _scope = request.enter()?;
     let context = &mut *workspace;
@@ -749,7 +738,10 @@ pub(crate) fn execute_pipeline_with_workspace<T: VectorType>(
         }
         let input_rows = context.profile.then(|| current.len());
         let started = context.profile.then(Instant::now);
-        current = operator.apply(current, context).map_err(locate)?;
+        let result = operator.apply(current, context);
+        let (payload_lookups, payload_parsed_bytes) =
+            context.validate_payload_budget().map_err(locate)?;
+        current = result.map_err(locate)?;
         if let Some(control) = &context.query_control {
             control.check().map_err(locate)?;
         }
@@ -758,8 +750,6 @@ pub(crate) fn execute_pipeline_with_workspace<T: VectorType>(
         context
             .reserve_row_workspace(current.estimated_bytes())
             .map_err(locate)?;
-        let (payload_lookups, payload_parsed_bytes) =
-            context.validate_payload_budget().map_err(locate)?;
         if let (Some(input_rows), Some(started)) = (input_rows, started) {
             context.metrics.push(PipelineStageMetrics {
                 operator: operator.name(),
@@ -801,14 +791,18 @@ impl<T: VectorType> PipelineOperator<T> for FilteredNodeScanSource {
     }
 
     fn apply(&self, _input: NodeSet, context: &mut PipelineContext<'_, T>) -> Result<NodeSet> {
-        Ok(NodeSet::from_ids(
-            context.memtable.active_node_ids().filter(|id| {
-                context
-                    .memtable
-                    .get_payload(*id)
-                    .is_some_and(|payload| self.filter.matches(&payload))
-            }),
-        ))
+        let mut ids = Vec::new();
+        for id in context.memtable.active_node_ids() {
+            crate::request::check_current()?;
+            if context
+                .memtable
+                .try_get_payload(id)?
+                .is_some_and(|payload| self.filter.matches(&payload))
+            {
+                ids.push(id);
+            }
+        }
+        Ok(NodeSet::from_ids(ids))
     }
 }
 

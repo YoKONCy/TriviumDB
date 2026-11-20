@@ -381,6 +381,14 @@ impl ResourceRuntime {
         })
     }
 
+    pub(crate) fn reserve_task_workspace(&self, bytes: usize) -> Result<WorkspaceReservation> {
+        if self.is_maintenance_task() {
+            self.reserve_maintenance_workspace(bytes)
+        } else {
+            self.reserve_workspace(bytes)
+        }
+    }
+
     pub(crate) fn reserve_maintenance_workspace(
         &self,
         bytes: usize,

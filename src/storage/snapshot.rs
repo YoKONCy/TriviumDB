@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 mod transfer;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-pub(crate) use transfer::copy_database_snapshot;
+pub(crate) use transfer::{copy_database_snapshot, validate_database_snapshot_destination};
 pub use transfer::{
     restore_snapshot, restore_snapshot_with_runtime, verify_snapshot, verify_snapshot_with_runtime,
 };

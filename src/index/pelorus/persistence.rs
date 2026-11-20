@@ -35,7 +35,7 @@ pub(crate) fn stage<T: VectorType>(mt: &MemTable<T>, path: &str) -> Result<[Opti
     let mut metadata = tempfile::tempfile_in(parent)?;
     let _metadata_workspace = mt
         .resource_runtime()
-        .reserve_workspace(state.changed.len().saturating_mul(16))?;
+        .reserve_task_workspace(state.changed.len().saturating_mul(16))?;
     let mut changed = state.changed.iter().copied().collect::<Vec<_>>();
     changed.sort_unstable();
     serde_json::to_writer(
@@ -54,7 +54,7 @@ pub(crate) fn stage<T: VectorType>(mt: &MemTable<T>, path: &str) -> Result<[Opti
     let Some(index) = &state.index else {
         return Ok([Some(metadata), None]);
     };
-    let _workspace = mt.resource_runtime().reserve_workspace(
+    let _workspace = mt.resource_runtime().reserve_task_workspace(
         index
             .navigation_storage_bytes()
             .saturating_mul(4)

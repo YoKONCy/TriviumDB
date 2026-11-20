@@ -579,10 +579,6 @@ fn recall_pelorus<T: VectorType>(
         let options = PelorusSearchOptions {
             top_k: width,
             ef_search: Some(recall.options.ef_search.max(width)),
-            max_distance: recall
-                .options
-                .min_score
-                .map(|score| (-f64::from(score)).max(0.0)),
             exact: !use_ann,
             ..Default::default()
         };

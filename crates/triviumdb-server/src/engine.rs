@@ -1704,11 +1704,17 @@ fn execute_write(
             }))
         }
         WriteOperation::BuildPelorus(config) => {
-            database
-                .build_pelorus_index(config)
-                .map_err(ApiError::from)?;
-            database.flush().map_err(ApiError::from)?;
-            versions.generation = versions.generation.saturating_add(1);
+            let result = RequestContext::new(request_id, control, true)
+                .and_then(|context| context.run(|| database.build_pelorus_index(config)));
+            if result.as_ref().err().is_none_or(|error| {
+                error
+                    .info()
+                    .write
+                    .is_some_and(|write| write.outcome == triviumdb::error::WriteOutcome::Committed)
+            }) {
+                versions.generation = versions.generation.saturating_add(1);
+            }
+            result.map_err(ApiError::from)?;
             Ok(StoredWriteResult::Mutation(WriteResult {
                 mutation: MutationResponse {
                     affected: 1,
@@ -2161,6 +2167,145 @@ fn engine_stopped() -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "test-hooks")]
+    #[tokio::test]
+    async fn 双曲构建取消在检查点发布前生效() {
+        use triviumdb::index::pelorus::{PelorusConfig, PelorusSearchOptions};
+        use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_path};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pelorus-cancel.tdb");
+        let path = path.to_str().unwrap();
+        let mut database = Database::<f32>::open(path, 2).unwrap();
+        database
+            .insert_with_id(1, &[0.25, 0.0], serde_json::json!({"value":1}))
+            .unwrap();
+        database
+            .build_pelorus_index(PelorusConfig {
+                curvature: 4.0,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut versions = VersionState {
+            epoch: "pelorus-cancel".into(),
+            generation: 0,
+            fine_grained_generation: 0,
+            node_versions: HashMap::new(),
+            edge_versions: HashMap::new(),
+            idempotency: IdempotencyCache::new(8),
+        };
+        let control = QueryControl::default();
+        let canonical = std::fs::canonicalize(path).unwrap();
+        let gate = pause_at_path(
+            ConcurrencyPoint::AfterSidecarsPersisted,
+            canonical.to_str().unwrap(),
+        );
+        let error = std::thread::scope(|threads| {
+            let build = threads.spawn(|| {
+                execute_write(
+                    &mut database,
+                    &mut versions,
+                    WriteOperation::BuildPelorus(PelorusConfig::default()),
+                    control.clone(),
+                    "late-pelorus-cancel",
+                )
+            });
+            while !gate.is_arrived() {
+                assert!(!build.is_finished(), "构建在到达发布边界前退出");
+                std::thread::yield_now();
+            }
+            control.cancel();
+            gate.release();
+            build.join().unwrap().err().expect("发布前取消必须中止构建")
+        });
+        assert_eq!(error_body(error).await["code"], "TDB_QUERY_CANCELLED");
+        assert_eq!(versions.generation, 0);
+        drop(database);
+        let database = Database::<f32>::open(path, 2).unwrap();
+        assert_eq!(
+            database.get_payload(1).unwrap(),
+            Some(serde_json::json!({"value":1}))
+        );
+        assert_eq!(
+            database
+                .search_pelorus(&[0.75, 0.0], &PelorusSearchOptions::default())
+                .unwrap_err()
+                .code(),
+            "TDB_INVALID_VECTOR"
+        );
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[tokio::test]
+    async fn 双曲构建按实际发布结果更新_etag() {
+        use triviumdb::index::pelorus::{PelorusConfig, PelorusSearchOptions};
+        use triviumdb::test_hooks::{IoPoint, fail_io_at};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pelorus-etag.tdb");
+        let mut database = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+        database
+            .insert_with_id(1, &[0.25, 0.0], serde_json::json!({"id":1}))
+            .unwrap();
+        database
+            .build_pelorus_index(PelorusConfig {
+                curvature: 4.0,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut versions = VersionState {
+            epoch: "pelorus-test".into(),
+            generation: 3,
+            fine_grained_generation: 0,
+            node_versions: HashMap::new(),
+            edge_versions: HashMap::new(),
+            idempotency: IdempotencyCache::new(8),
+        };
+        let etag = versions.snapshot().global_etag();
+        let control = QueryControl::default();
+        control.cancel();
+        let build = || WriteOperation::BuildPelorus(PelorusConfig::default());
+        let error = execute_write(
+            &mut database,
+            &mut versions,
+            build(),
+            control,
+            "cancelled-pelorus",
+        )
+        .err()
+        .expect("已取消的 Pelorus 构建必须失败");
+        assert_eq!(error_body(error).await["code"], "TDB_QUERY_CANCELLED");
+        assert_eq!(versions.snapshot().global_etag(), etag);
+        assert_eq!(
+            database
+                .search_pelorus(&[0.75, 0.0], &PelorusSearchOptions::default())
+                .unwrap_err()
+                .code(),
+            "TDB_INVALID_VECTOR"
+        );
+
+        let error = {
+            let _failure = fail_io_at(IoPoint::CheckpointWalClear);
+            execute_write(
+                &mut database,
+                &mut versions,
+                build(),
+                QueryControl::default(),
+                "committed-pelorus",
+            )
+            .err()
+            .expect("WAL 清理故障必须返回错误")
+        };
+        assert_eq!(error_body(error).await["write"]["outcome"], "committed");
+        assert_ne!(versions.snapshot().global_etag(), etag);
+        assert!(validate_global_precondition(&versions, Some(&etag)).is_err());
+        let hits = database
+            .search_pelorus(&[0.75, 0.0], &PelorusSearchOptions::default())
+            .unwrap();
+        assert_eq!(hits[0].id, 1);
+        assert_eq!(hits[0].payload, serde_json::json!({"id":1}));
+    }
 
     async fn error_body(error: ApiError) -> serde_json::Value {
         use axum::response::IntoResponse;

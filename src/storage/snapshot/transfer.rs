@@ -163,6 +163,56 @@ pub(crate) fn copy_database_snapshot(
     Ok(manifest)
 }
 
+pub(crate) fn validate_database_snapshot_destination(
+    source: &str,
+    destination: &str,
+) -> Result<()> {
+    let source = Path::new(source);
+    let destination = Path::new(destination);
+    let database_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            TriviumError::InvalidInput(
+                "源数据库缺少文件名 (Source database has no filename)".into(),
+            )
+        })?;
+    let leaf = destination.file_name().ok_or_else(|| {
+        TriviumError::InvalidInput(
+            "快照目标必须有目录名称 (Snapshot destination requires a directory name)".into(),
+        )
+    })?;
+    let source_parent = source
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .canonicalize()?;
+    let target_parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .canonicalize()?;
+    let target = target_parent.join(leaf);
+    for candidate in target.ancestors() {
+        let (Some(name), Some(parent)) = (candidate.file_name(), candidate.parent()) else {
+            continue;
+        };
+        let name = name.to_string_lossy();
+        #[cfg(windows)]
+        let name = name.trim_end_matches(['.', ' ']);
+        #[cfg(not(windows))]
+        let name = name.as_ref();
+        if super::super::artifacts::is_reserved_name(name, database_name)
+            && (parent == source_parent || same_file::is_same_file(parent, &source_parent)?)
+        {
+            return Err(TriviumError::InvalidInput(
+                "快照目标与源库制品冲突 (Snapshot destination conflicts with a source database artifact)".into(),
+            ).at_field("destination"));
+        }
+    }
+    Ok(())
+}
+
 fn copy_file(source: &Path, target: &Path, suffix: String) -> Result<GenerationFile> {
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::SnapshotCopy)?;
@@ -280,6 +330,7 @@ impl Stage {
         }
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeSnapshotPublish);
+        crate::request::check_current()?;
         write.phase = WritePhase::Publish;
         if let Err(error) = crate::storage::fs::rename_new(&self.directory, &self.target) {
             if error.kind() == std::io::ErrorKind::AlreadyExists

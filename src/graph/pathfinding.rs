@@ -587,6 +587,10 @@ fn bounded_path_dfs<T: VectorType>(
         {
             return Ok(());
         }
+        if state.results.len() == config.max_paths {
+            state.truncated = true;
+            return Ok(());
+        }
         state.results.push(BoundedPath {
             nodes: state.nodes.clone(),
             edge_weights: state.weights.clone(),
@@ -602,9 +606,6 @@ fn bounded_path_dfs<T: VectorType>(
                 sum.into_f32(state.weights.len())
             },
         });
-        if state.results.len() >= config.max_paths {
-            state.truncated = true;
-        }
         return Ok(());
     }
     if depth >= config.max_depth
@@ -744,11 +745,10 @@ fn dfs_all_paths<T: VectorType>(
             }
 
             let next = edge.target_id;
-            if visited.contains(&next) && next != dst {
+            if visited.contains(&next) {
                 continue;
             }
 
-            // 允许到达 dst（即使 dst 可能在 visited 中不存在，因为我们不提前加入它）
             if next == dst {
                 let mut result_path = path.clone();
                 result_path.push(dst);

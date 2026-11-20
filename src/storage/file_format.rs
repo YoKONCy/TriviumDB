@@ -731,11 +731,7 @@ pub(crate) fn save_with_write_info<T: VectorType>(
         .ok_or_else(|| TriviumError::CapacityAllocationFailed {
             reason: "保存工作区估算溢出".into(),
         })?;
-    let _workspace = if runtime.is_maintenance_task() {
-        runtime.reserve_maintenance_workspace(peak)?
-    } else {
-        runtime.reserve_workspace(peak)?
-    };
+    let _workspace = runtime.reserve_task_workspace(peak)?;
     memtable.ensure_readable()?;
     let result = save_inner(memtable, path, mode, write);
     if result.is_err() && memtable.vec_pool().recovery_required() {
@@ -759,7 +755,7 @@ fn save_inner<T: VectorType>(
         let peak = memtable.quiver_build_peak_bytes(&config);
         memtable.ensure_additional_memory(limit, peak)?;
         let runtime = memtable.resource_runtime().clone();
-        let _workspace = runtime.reserve_workspace(peak)?;
+        let _workspace = runtime.reserve_task_workspace(peak)?;
         runtime
             .pool(runtime.parallelism())?
             .install(|| memtable.build_quiver(&config));
@@ -772,6 +768,7 @@ fn save_inner<T: VectorType>(
     }
     // 保留原 CRC，不以重新计算校验和的方式“认可”未加载文件中的损坏。
     let preserved_text_meta = memtable.deferred_text_metadata();
+    crate::request::check_current()?;
     write.phase = WritePhase::Publish;
     write.outcome = WriteOutcome::Unknown;
     if mode == StorageMode::Rom && publication::pending(path) {
@@ -867,6 +864,7 @@ fn save_inner<T: VectorType>(
     if let Some(marker) = marker {
         publish_mmap_marker(path, &marker)?;
     } else {
+        crate::request::check_current()?;
         publication::commit_rom(path)?;
     }
     write.outcome = WriteOutcome::Committed;
@@ -954,6 +952,7 @@ fn publish_mmap_marker(path: &str, marker: &FlushMarker) -> Result<()> {
         crate::test_hooks::ConcurrencyPoint::BeforeFlushMarkerRename,
         path,
     );
+    crate::request::check_current()?;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::MarkerRename)?;
 
@@ -1188,13 +1187,15 @@ fn save_tdb<T: VectorType>(
             })?;
     let _graph_workspace = memtable
         .resource_runtime()
-        .reserve_workspace(graph_encoding_bytes)?;
+        .reserve_task_workspace(graph_encoding_bytes)?;
     crate::storage::named_graphs::save(&memtable.named_graphs, &mut w)?;
+    drop(_graph_workspace);
     let _document_workspace = memtable
         .resource_runtime()
-        .reserve_workspace(memtable.document_publications.encoding_workspace()?)?;
+        .reserve_task_workspace(memtable.document_publications.encoding_workspace()?)?;
     crate::storage::document_publications::save(&memtable.document_publications, &mut w)?;
-    let _receipt_workspace = memtable.resource_runtime().reserve_workspace(
+    drop(_document_workspace);
+    let _receipt_workspace = memtable.resource_runtime().reserve_task_workspace(
         memtable
             .editing
             .memory_bytes()
@@ -2311,5 +2312,5 @@ pub(crate) fn validate_snapshot_metadata(
             });
         }
     }
-    Ok(())
+    validate_index_container(path, version, None)
 }

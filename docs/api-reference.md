@@ -252,7 +252,7 @@ generations/
     └── data.tdb...
 ```
 
-`publish_current()` 使用临时文件、文件 `fsync`、原子 rename 和父目录同步，并在切换前完整验证 manifest、文件 checksum、generation ID 与实际 node count。`open_current()` 在解析 current 与获取 generation 共享租约期间持有管理共享锁，避免与切代或回收竞态。`GenerationReader` 在整个生命周期持有外部 runtime 共享租约；`reclaim_generation()` 只有取得排他租约后才删除旧代际，并且在 current 损坏时 fail closed。
+`publish_current()` 使用临时文件、文件 `fsync`、原子 rename 和父目录同步，并在切换前验证 manifest、文件校验和、代际 ID 与实际节点数。`open_current()` 在解析 current 与获取代际共享租约期间持有管理共享锁，避免与切代或回收竞态。`GenerationReader` 在整个生命周期持有外部 runtime 共享租约。`reclaim_generation()` 取得排他租约后，校验当前库可用、回收目标是有效的旧代际且只包含该代际的数据库制品，然后删除旧目录。
 
 租约写入独立 runtime 目录，generation root 保持只读。默认 runtime 位于系统临时目录的 `triviumdb-runtime/store-<hash>`，也可使用 `GenerationStore::with_runtime_dir(root, runtime_dir)` 指定可写位置。
 

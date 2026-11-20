@@ -239,6 +239,7 @@ pub(super) fn commit_rom(path: &str) -> Result<()> {
     drop(output);
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::PublicationCommitRename)?;
+    crate::request::check_current()?;
     robust_rename_and_sync(Path::new(&temporary), Path::new(&target))?;
     Ok(())
 }

@@ -120,6 +120,27 @@ pub(crate) fn search<T: VectorType>(
     )
 }
 
+impl PelorusSearchOptions {
+    pub(crate) fn validate(&self) -> Result<usize> {
+        let top_k = self.top_k;
+        let ef_search = self.ef_search.unwrap_or_else(|| top_k.max(64));
+        if top_k == 0 || ef_search < top_k || self.rerank_limit.is_some_and(|k| k < top_k) {
+            return Err(TriviumError::InvalidInput(
+            "Pelorus 要求 top_k > 0 且搜索与精排宽度至少为 top_k (Pelorus requires top_k > 0 and search and rerank widths at least top_k)".into(),
+        )
+        .at_field("options"));
+        }
+        if self.max_distance.is_some_and(|d| !d.is_finite() || d < 0.0) {
+            return Err(TriviumError::InvalidInput(
+            "最大测地距离须为非负有限数 (Maximum geodesic distance must be finite and nonnegative)"
+                .into(),
+        )
+        .at_field("max_distance"));
+        }
+        Ok(ef_search)
+    }
+}
+
 pub(crate) fn search_bounded<T: VectorType>(
     mt: &MemTable<T>,
     query: &[T],
@@ -132,24 +153,8 @@ pub(crate) fn search_bounded<T: VectorType>(
     super::validate_dtype::<T>()?;
     mt.ensure_readable()?;
     crate::vector::validate_query_vector(query, mt.dim())?;
+    let ef_search = options.validate()?;
     let top_k = options.top_k;
-    let ef_search = options.ef_search.unwrap_or_else(|| top_k.max(64));
-    if top_k == 0 || ef_search < top_k || options.rerank_limit.is_some_and(|k| k < top_k) {
-        return Err(TriviumError::InvalidInput(
-            "Pelorus 要求 top_k > 0 且搜索与精排宽度至少为 top_k (Pelorus requires top_k > 0 and search and rerank widths at least top_k)".into(),
-        )
-        .at_field("options"));
-    }
-    if options
-        .max_distance
-        .is_some_and(|d| !d.is_finite() || d < 0.0)
-    {
-        return Err(TriviumError::InvalidInput(
-            "最大测地距离须为非负有限数 (Maximum geodesic distance must be finite and nonnegative)"
-                .into(),
-        )
-        .at_field("max_distance"));
-    }
     let state = mt.pelorus.as_ref().ok_or_else(missing_index)?;
     let curvature = state.config.curvature;
     let query_factor = boundary_factor(curvature, query).map_err(|e| e.at_field("query"))?;

@@ -122,6 +122,49 @@ fn 当前代永远不能被回收() {
 }
 
 #[test]
+fn 回收拒绝普通目录与失效当前代并保留原文件() {
+    let root = tempfile::tempdir().unwrap();
+    let store = GenerationStore::new(root.path());
+    publish(&store, "old", 1.0);
+    publish(&store, "active", 0.0);
+    store.publish_current("active", "data.tdb").unwrap();
+    let unrelated = root.path().join("notes");
+    std::fs::create_dir(&unrelated).unwrap();
+    let note = unrelated.join("keep.txt");
+    std::fs::write(&note, b"user data").unwrap();
+    assert!(matches!(
+        store.reclaim_generation("notes"),
+        Err(TriviumError::ImmutableArtifactInvalid { .. })
+    ));
+    assert_eq!(std::fs::read(note).unwrap(), b"user data");
+
+    let unrelated_suffix = root.path().join("old").join("data.tdb.wal.notes");
+    std::fs::write(&unrelated_suffix, b"retention notes").unwrap();
+    assert!(matches!(
+        store.reclaim_generation("old"),
+        Err(TriviumError::ImmutableArtifactInvalid { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&unrelated_suffix).unwrap(),
+        b"retention notes"
+    );
+    std::fs::remove_file(unrelated_suffix).unwrap();
+
+    let current_path = root.path().join("current.json");
+    let mut current = store.resolve_current().unwrap();
+    current.database_file = "missing.tdb".into();
+    std::fs::write(current_path, serde_json::to_vec(&current).unwrap()).unwrap();
+    assert!(store.reclaim_generation("old").is_err());
+    let old = root.path().join("old").join("data.tdb");
+    let reader =
+        triviumdb::DatabaseReader::<f32>::open_immutable(old.to_str().unwrap(), 2).unwrap();
+    assert_eq!(
+        reader.get(1).unwrap().unwrap().payload,
+        json!({"generation":"old"})
+    );
+}
+
+#[test]
 fn current拒绝路径穿越和损坏指针() {
     let root = tmp_store("traversal");
     std::fs::remove_dir_all(&root).ok();

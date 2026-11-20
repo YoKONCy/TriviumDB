@@ -23,7 +23,7 @@
 tdb build-pelorus notes.tdb --config '{"curvature":1.0,"navigation":"geometry_bq2"}'
 ```
 
-Rust 使用 `Database::build_pelorus_index(PelorusConfig { .. })`，再调用 `flush()` 发布检查点。Server 使用 `POST /v1/indexes/pelorus` 接收同一配置，发布后返回当前代际。
+Rust 使用 `Database::build_pelorus_index(PelorusConfig { .. })` 构建并发布检查点。Python 和 Node.js 的构建请求共用这一提交点。Server 使用 `POST /v1/indexes/pelorus` 接收同一配置，发布后返回当前代际。
 
 ---
 
@@ -87,4 +87,6 @@ ORDER BY score DESC, id
 
 新建 Pelorus 索引后，写入使用对应曲率校验向量。事务和批处理在写 WAL 前检查，ReadOnly 与 Immutable 继续按只读规则执行。
 
-> **驻留提醒**：SSD 模式需要已发布的图映像。初次构建和向量更新后，写入方先完成检查点，再切换驻留方式。
+> **发布提醒**：切换曲率时，内核先封存使用旧曲率的待恢复写入，再发布新检查点。若新检查点已经发布而 WAL 清理失败，错误返回 `write.outcome = "committed"`，Server 会更新全局 ETag。收到 `unknown` 时，重新打开数据库确认发布结果。
+
+> **驻留提醒**：SSD 模式需要已发布的图映像。构建成功后可以切换驻留方式。后续更新向量时，写入方先完成检查点，再切换驻留方式。

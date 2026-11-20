@@ -47,6 +47,74 @@ fn child_command() -> Command {
     }
 }
 
+#[test]
+fn Pelorus曲率更新可随已确认向量写入恢复() {
+    use triviumdb::database::{Config, StorageMode};
+    use triviumdb::index::pelorus::{PelorusConfig, PelorusSearchOptions};
+    use triviumdb::storage::wal::SyncMode;
+
+    let config = |mode: &str| Config {
+        dim: 2,
+        storage_mode: if mode == "mmap" {
+            StorageMode::Mmap
+        } else {
+            StorageMode::Rom
+        },
+        sync_mode: SyncMode::Full,
+        auto_build_quiver: false,
+        ..Default::default()
+    };
+    if let Some(path) = std::env::var_os("TRIVIUM_PELORUS_RECOVERY_PATH") {
+        let mode = std::env::var("TRIVIUM_PELORUS_RECOVERY_MODE").unwrap();
+        let mut db =
+            Database::<f32>::open_with_config(path.to_str().unwrap(), config(&mode)).unwrap();
+        db.insert_with_id(1, &[0.25, 0.0], serde_json::json!({"value":1}))
+            .unwrap();
+        db.build_pelorus_index(PelorusConfig {
+            curvature: 4.0,
+            ..Default::default()
+        })
+        .unwrap();
+        db.build_pelorus_index(PelorusConfig::default()).unwrap();
+        db.insert_with_id(2, &[0.75, 0.0], serde_json::json!({"value":2}))
+            .unwrap();
+        // 已确认写入直接退出，跳过数据库关闭和析构。
+        std::process::exit(0);
+    }
+    let directory = tempfile::tempdir().unwrap();
+    for mode in ["rom", "mmap"] {
+        let path = directory.path().join(format!("{mode}.tdb"));
+        let path = path.to_str().unwrap();
+        let child = child_command()
+            .args(["--exact", "Pelorus曲率更新可随已确认向量写入恢复"])
+            .env("TRIVIUM_PELORUS_RECOVERY_PATH", path)
+            .env("TRIVIUM_PELORUS_RECOVERY_MODE", mode)
+            .output()
+            .unwrap();
+        assert!(child.status.success(), "{mode}: {child:?}");
+        let mut db = Database::<f32>::open_with_config(path, config(mode)).unwrap();
+        assert_eq!(
+            db.get_payload(1).unwrap(),
+            Some(serde_json::json!({"value":1}))
+        );
+        assert_eq!(
+            db.get_payload(2).unwrap(),
+            Some(serde_json::json!({"value":2}))
+        );
+        let hits = db
+            .search_pelorus(&[0.75, 0.0], &PelorusSearchOptions::default())
+            .unwrap();
+        assert_eq!((hits[0].id, hits[0].distance), (2, 0.0));
+        assert_eq!(hits[0].payload, serde_json::json!({"value":2}));
+        db.close().unwrap();
+        let reopened = Database::<f32>::open_with_config(path, config(mode)).unwrap();
+        assert_eq!(
+            reopened.get_payload(2).unwrap(),
+            Some(serde_json::json!({"value":2}))
+        );
+    }
+}
+
 #[cfg(feature = "test-hooks")]
 fn publication_point(name: &str) -> ConcurrencyPoint {
     match name {

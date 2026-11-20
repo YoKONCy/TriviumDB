@@ -6,7 +6,7 @@ use crate::storage::quiver_io::{IoMeter, QuiverIoStats};
 use crate::{Result, TriviumError};
 use std::cell::RefCell;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -15,13 +15,70 @@ thread_local! {
     static PAYLOAD_METER: RefCell<Option<Arc<PayloadMeter>>> = const { RefCell::new(None) };
 }
 
-#[derive(Default)]
 pub(crate) struct PayloadMeter {
     lookups: AtomicU64,
     parsed_bytes: AtomicU64,
+    max_lookups: u64,
+    max_parsed_bytes: u64,
+    exhausted: OnceLock<PayloadBudgetFailure>,
+}
+
+#[derive(Clone, Copy)]
+struct PayloadBudgetFailure {
+    dimension: &'static str,
+    used: u64,
+    budget: u64,
+}
+
+impl Default for PayloadMeter {
+    fn default() -> Self {
+        Self::new(u64::MAX, u64::MAX)
+    }
 }
 
 impl PayloadMeter {
+    pub(crate) fn new(max_lookups: u64, max_parsed_bytes: u64) -> Self {
+        Self {
+            lookups: AtomicU64::new(0),
+            parsed_bytes: AtomicU64::new(0),
+            max_lookups,
+            max_parsed_bytes,
+            exhausted: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn check(&self) -> Result<()> {
+        if let Some(failure) = self.exhausted.get() {
+            return Err(TriviumError::PayloadQueryBudgetExceeded {
+                dimension: failure.dimension,
+                used: failure.used,
+                budget: failure.budget,
+            });
+        }
+        Ok(())
+    }
+
+    fn charge(
+        &self,
+        counter: &AtomicU64,
+        bytes: u64,
+        budget: u64,
+        dimension: &'static str,
+    ) -> Result<()> {
+        self.check()?;
+        if let Err(used) = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(bytes).filter(|used| *used <= budget)
+        }) {
+            self.exhausted.get_or_init(|| PayloadBudgetFailure {
+                dimension,
+                used: used.saturating_add(bytes),
+                budget,
+            });
+            return self.check();
+        }
+        Ok(())
+    }
+
     pub(crate) fn usage(&self) -> (u64, u64) {
         (
             self.lookups.load(Ordering::Relaxed),
@@ -52,28 +109,25 @@ pub(crate) fn payload_meter() -> Option<Arc<PayloadMeter>> {
     PAYLOAD_METER.with(|active| active.borrow().clone())
 }
 
-pub(crate) fn record_payload_lookup() {
+pub(crate) fn record_payload_lookup() -> Result<()> {
     PAYLOAD_METER.with(|active| {
-        if let Some(meter) = active.borrow().as_ref() {
-            let _ = meter
-                .lookups
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    Some(value.saturating_add(1))
-                });
-        }
-    });
+        active.borrow().as_ref().map_or(Ok(()), |meter| {
+            meter.charge(&meter.lookups, 1, meter.max_lookups, "lookups")
+        })
+    })
 }
 
-pub(crate) fn record_payload_parse(bytes: u64) {
+pub(crate) fn record_payload_parse(bytes: u64) -> Result<()> {
     PAYLOAD_METER.with(|active| {
-        if let Some(meter) = active.borrow().as_ref() {
-            let _ = meter
-                .parsed_bytes
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    Some(value.saturating_add(bytes))
-                });
-        }
-    });
+        active.borrow().as_ref().map_or(Ok(()), |meter| {
+            meter.charge(
+                &meter.parsed_bytes,
+                bytes,
+                meter.max_parsed_bytes,
+                "parsed_bytes",
+            )
+        })
+    })
 }
 
 // TLS 归还必须在创建作用域的线程执行。

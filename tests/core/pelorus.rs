@@ -4,6 +4,174 @@ use triviumdb::index::pelorus::{PelorusConfig, PelorusSearchOptions, PoincareNav
 use triviumdb::{Database, DatabaseReader, Filter};
 
 #[test]
+fn 曲率参与持久化事实指纹() {
+    use triviumdb::database::inspection::fingerprint;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fingerprint.tdb");
+    let path = path.to_str().unwrap();
+    let mut db = Database::<f32>::open(path, 2).unwrap();
+    db.insert_with_id(1, &[0.25, 0.0], json!({"id": 1}))
+        .unwrap();
+    db.build_pelorus_index(PelorusConfig {
+        curvature: 4.0,
+        ..Default::default()
+    })
+    .unwrap();
+    let first = fingerprint(&db).unwrap().sha256;
+    db.build_pelorus_index(PelorusConfig::default()).unwrap();
+    let second = fingerprint(&db).unwrap().sha256;
+    assert_ne!(first, second);
+    db.close().unwrap();
+    let db = Database::<f32>::open(path, 2).unwrap();
+    assert_eq!(fingerprint(&db).unwrap().sha256, second);
+    assert_eq!(db.get_payload(1).unwrap(), Some(json!({"id": 1})));
+}
+
+#[test]
+fn Pelorus空批次同样校验选项() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("batch.tdb");
+    let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+    db.insert_with_id(1, &[0.25, 0.0], json!(1)).unwrap();
+    db.build_pelorus_index(PelorusConfig::default()).unwrap();
+    let invalid = PelorusSearchOptions {
+        top_k: 0,
+        ..Default::default()
+    };
+    assert_eq!(
+        db.search_pelorus_batch(&[], &invalid).unwrap_err().code(),
+        "TDB_INVALID_INPUT"
+    );
+    assert!(
+        db.search_pelorus_batch(&[], &PelorusSearchOptions::default())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn Pelorus批次按累计响应Payload计费() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("batch.tdb");
+    let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+    let payload = json!("x".repeat(256 * 1024));
+    db.insert_with_id(1, &[0.25, 0.0], payload.clone()).unwrap();
+    db.build_pelorus_index(PelorusConfig::default()).unwrap();
+    db.set_memory_limit(8 * 1024 * 1024).unwrap();
+    let options = PelorusSearchOptions {
+        top_k: 1,
+        ..Default::default()
+    };
+    let queries = vec![vec![0.25, 0.0]; 64];
+    let error = db.search_pelorus_batch(&queries, &options).unwrap_err();
+    assert!(matches!(
+        error,
+        triviumdb::TriviumError::CapacityReservationRejected {
+            memory_limit: 8_388_608,
+            ..
+        }
+    ));
+    let hits = db.search_pelorus_batch(&queries[..1], &options).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].len(), 1);
+    assert_eq!((hits[0][0].id, hits[0][0].distance), (1, 0.0));
+    assert_eq!(hits[0][0].payload, payload);
+}
+
+#[test]
+fn 前台额度用完后仍能检查点和关闭() {
+    let mib = 1024 * 1024;
+    for pelorus in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("maintenance.tdb");
+        let path = path.to_str().unwrap();
+        let runtime = triviumdb::ResourceRuntime::new(triviumdb::ResourceLimits {
+            memory_limit: 64 * mib,
+            maintenance_memory_limit: 16 * mib,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut db = Database::<f32>::open_with_runtime(
+            path,
+            Config {
+                dim: 2,
+                memory_limit: 8 * mib,
+                ..Default::default()
+            },
+            runtime,
+        )
+        .unwrap();
+        db.insert_with_id(1, &[0.25, 0.0], json!(1)).unwrap();
+        if pelorus {
+            db.build_pelorus_index(PelorusConfig::default()).unwrap();
+        }
+        db.set_memory_limit(48 * mib).unwrap();
+        assert_eq!(db.resource_stats().available_foreground_bytes, Some(0));
+        db.flush().unwrap();
+        db.set_memory_limit(8 * mib).unwrap();
+        db.update_payload(1, json!(2)).unwrap();
+        db.set_memory_limit(48 * mib).unwrap();
+        db.close().unwrap();
+        let reopened = Database::<f32>::open(path, 2).unwrap();
+        assert_eq!(reopened.get_payload(1).unwrap(), Some(json!(2)));
+        if pelorus {
+            let hits = reopened
+                .search_pelorus(&[0.25, 0.0], &PelorusSearchOptions::default())
+                .unwrap();
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| (hit.id, hit.distance))
+                    .collect::<Vec<_>>(),
+                [(1, 0.0)]
+            );
+        }
+    }
+}
+
+#[test]
+fn 文档Pelorus阈值与公开的分数精度一致() {
+    use triviumdb::document::{DocumentSearchQuery, DocumentVectorOptions, DocumentVectorStrategy};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("threshold.tdb");
+    let mut db = Database::<f32>::open(path.to_str().unwrap(), 2).unwrap();
+    db.put_document(
+        serde_json::from_value(json!({
+            "source_id": "notes://threshold",
+            "source_revision": "first",
+            "parser_id": "plain",
+            "content": "alpha",
+            "root": {"id":"1", "vector":[0.1, 0.0], "payload":{}},
+            "blocks": []
+        }))
+        .unwrap(),
+        None,
+    )
+    .unwrap();
+    db.build_pelorus_index(PelorusConfig::default()).unwrap();
+    let query: DocumentSearchQuery = serde_json::from_value(json!({"level":"document"})).unwrap();
+    let expected = (2.0 * (f64::from(0.1_f32).atanh() - 0.25_f64.atanh())) as f32;
+    for strategy in [DocumentVectorStrategy::Exact, DocumentVectorStrategy::Ann] {
+        let result = db
+            .search_documents_pelorus(
+                &query,
+                &[0.25, 0.0],
+                &DocumentVectorOptions {
+                    strategy,
+                    min_score: Some(expected),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].document_id, 1);
+        assert_eq!(result.groups[0].hits[0].score, expected);
+    }
+}
+
+#[test]
 fn pelorus_uses_native_distance_and_preserves_default_search() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("native.tdb");

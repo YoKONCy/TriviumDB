@@ -5,6 +5,110 @@ use triviumdb::storage::snapshot::{restore_snapshot, verify_snapshot};
 use triviumdb::test_hooks::{ConcurrencyPoint, IoPoint, fail_io_at, pause_at_path};
 use triviumdb::{Database, ShutdownPhase, TriviumError};
 
+#[test]
+fn 快照拒绝占用源库制品路径并保留未刷盘写入() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("source.tdb");
+    let path = path.to_str().unwrap();
+    let mut db = Database::<f32>::open(path, 2).unwrap();
+    db.insert_with_id(1, &[1.0, 0.0], serde_json::json!({"source": true}))
+        .unwrap();
+    let wal = format!("{path}.wal");
+    let wal_before = std::fs::read(&wal).unwrap();
+    let reserved = format!("{path}.publish");
+    let error = db.create_snapshot(&reserved, "snapshot").unwrap_err();
+    assert_eq!(error.code(), "TDB_INVALID_INPUT");
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_before);
+    assert!(!std::path::Path::new(&reserved).exists());
+    db.flush().unwrap();
+    db.close().unwrap();
+    let db = Database::<f32>::open(path, 2).unwrap();
+    assert_eq!(
+        db.get_payload(1).unwrap(),
+        Some(serde_json::json!({"source":true}))
+    );
+}
+
+#[test]
+fn 快照拒绝有完整清单但索引与主库串档() {
+    use triviumdb::storage::snapshot::write_manifest;
+    let root = tempfile::tempdir().unwrap();
+    let make = |name: &str, vector: &[f32]| {
+        let file = root.path().join(format!("{name}.tdb"));
+        let snapshot = root.path().join(name);
+        let mut db = Database::<f32>::open(file.to_str().unwrap(), 2).unwrap();
+        db.insert_with_id(1, vector, serde_json::json!({"name":name}))
+            .unwrap();
+        db.create_snapshot(snapshot.to_str().unwrap(), name)
+            .unwrap();
+        snapshot
+    };
+    let first = make("first", &[0.25, 0.0]);
+    let second = make("second", &[0.75, 0.0]);
+    std::fs::copy(
+        second.join("database.tdb.idx"),
+        first.join("database.tdb.idx"),
+    )
+    .unwrap();
+    let mismatched_main = first.join("database.tdb");
+    write_manifest(mismatched_main.to_str().unwrap(), "first", "f32", 2, 1).unwrap();
+    let restore = root.path().join("restored");
+    assert_eq!(
+        verify_snapshot(first.to_str().unwrap()).unwrap_err().code(),
+        "TDB_CORRUPTED_FILE"
+    );
+    assert_eq!(
+        restore_snapshot(first.to_str().unwrap(), restore.to_str().unwrap())
+            .unwrap_err()
+            .code(),
+        "TDB_CORRUPTED_FILE"
+    );
+    assert!(!restore.exists());
+}
+
+#[test]
+fn 恢复在发布前取消时目标保持缺失且可以重试() {
+    use triviumdb::query::tql_executor::QueryControl;
+    use triviumdb::sdk::RequestContext;
+
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("live.tdb");
+    let snapshot = root.path().join("backup");
+    let destination = root.path().join("restore");
+    let mut db = Database::<f32>::open(source.to_str().unwrap(), 2).unwrap();
+    db.insert_with_id(1, &[1.0, 0.0], serde_json::json!({"source":true}))
+        .unwrap();
+    db.create_snapshot(snapshot.to_str().unwrap(), "backup")
+        .unwrap();
+    let request =
+        RequestContext::new("cancel-restore-publication", QueryControl::default(), true).unwrap();
+    let restore = || restore_snapshot(snapshot.to_str().unwrap(), destination.to_str().unwrap());
+    let gate = triviumdb::test_hooks::pause_at_request(
+        ConcurrencyPoint::BeforeSnapshotPublish,
+        request.request_id(),
+    );
+    std::thread::scope(|threads| {
+        let worker = threads.spawn(|| request.run(restore));
+        gate.wait_until_arrived();
+        request.cancel();
+        gate.release();
+        let error = worker.join().unwrap().unwrap_err();
+        assert_eq!(error.code(), "TDB_QUERY_CANCELLED");
+        assert_eq!(
+            error.info().write.unwrap().outcome,
+            triviumdb::error::WriteOutcome::NotCommitted
+        );
+    });
+    assert!(!destination.exists());
+    restore().unwrap();
+    let file = destination.join("database.tdb");
+    let restored = Database::<f32>::open(file.to_str().unwrap(), 2).unwrap();
+    assert_eq!(
+        restored.get_payload(1).unwrap(),
+        Some(serde_json::json!({"source":true}))
+    );
+}
+
 fn root() -> std::path::PathBuf {
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
