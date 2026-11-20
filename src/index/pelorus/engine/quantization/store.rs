@@ -432,9 +432,9 @@ impl Bq2Store {
 
     #[inline]
     pub fn distance_to_sig_cheap(&self, idx: usize, other: &Bq2Signature, dim: usize) -> u32 {
-        let (pa, sa) = self.node_ptrs(idx);
         #[cfg(target_arch = "x86_64")]
         {
+            let (pa, sa) = self.node_ptrs(idx);
             match *X86_BIT_KERNEL {
                 #[cfg(not(coverage))]
                 X86BitKernel::Avx512Vpopcnt => {
