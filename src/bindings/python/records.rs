@@ -1,7 +1,7 @@
 //! 节点读取、批量写入与 CRUD 参数转换。
 
 use super::arguments::{
-    extract_argument, write_float, write_id, write_list, write_sequence, write_string,
+    extract_argument, write_float, write_half, write_id, write_list, write_sequence, write_string,
 };
 use super::database::{DbBackend, PyTriviumDB, database_read, database_write};
 use super::errors::{to_py_error, write_admission_error, write_input_error};
@@ -27,8 +27,7 @@ impl PyTriviumDB {
                 db.insert(&vec, json).map_err(to_py_error)
             }
             DbBackend::F16(db) => {
-                let vec: Vec<f32> = write_sequence(&vector, "vector", write_float)?;
-                let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                let vec16: Vec<half::f16> = write_sequence(&vector, "vector", write_half)?;
                 db.insert(&vec16, json).map_err(to_py_error)
             }
             DbBackend::U64(db) => {
@@ -55,8 +54,7 @@ impl PyTriviumDB {
                 db.insert_with_id(id, &vec, json)
             }
             DbBackend::F16(db) => {
-                let vec: Vec<f32> = write_sequence(&vector, "vector", write_float)?;
-                let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                let vec16: Vec<half::f16> = write_sequence(&vector, "vector", write_half)?;
                 db.insert_with_id(id, &vec16, json)
             }
             DbBackend::U64(db) => {
@@ -82,10 +80,7 @@ impl PyTriviumDB {
                 db.upsert_with_id(id, &write_sequence(&vector, "vector", write_float)?, json)
             }
             DbBackend::F16(db) => {
-                let vector = write_sequence(&vector, "vector", write_float)?
-                    .into_iter()
-                    .map(half::f16::from_f32)
-                    .collect::<Vec<_>>();
+                let vector = write_sequence(&vector, "vector", write_half)?;
                 db.upsert_with_id(id, &vector, json)
             }
             DbBackend::U64(db) => {
@@ -176,8 +171,7 @@ impl PyTriviumDB {
                 db.update_vector(id, &vec).map_err(to_py_error)
             }
             DbBackend::F16(db) => {
-                let vec: Vec<f32> = write_sequence(&vector, "vector", write_float)?;
-                let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                let vec16: Vec<half::f16> = write_sequence(&vector, "vector", write_half)?;
                 db.update_vector(id, &vec16).map_err(to_py_error)
             }
             DbBackend::U64(db) => {
@@ -343,8 +337,7 @@ impl PyTriviumDB {
                     let vec_obj = vectors
                         .get_item(i)
                         .map_err(|error| write_input_error(error, &path))?;
-                    let vec: Vec<f32> = write_sequence(&vec_obj, &path, write_float)?;
-                    let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                    let vec16: Vec<half::f16> = write_sequence(&vec_obj, &path, write_half)?;
                     tx.insert(
                         &vec16,
                         write_json(
@@ -465,8 +458,7 @@ impl PyTriviumDB {
                     let value = vectors
                         .get_item(i)
                         .map_err(|error| write_input_error(error, &path))?;
-                    let vec: Vec<f32> = write_sequence(&value, &path, write_float)?;
-                    let vec16: Vec<half::f16> = vec.into_iter().map(half::f16::from_f32).collect();
+                    let vec16: Vec<half::f16> = write_sequence(&value, &path, write_half)?;
                     let id = ids.get(i).copied().ok_or_else(|| {
                         write_input_error(
                             PyValueError::new_err(

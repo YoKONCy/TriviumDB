@@ -5,6 +5,21 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 module.exports = async function numericBoundaries(root, TriviumDB) {
+  const halfPath = path.join(root, 'half-rounding.tdb')
+  const halfOptions = { dim: 2, dtype: 'f16' }
+  const half = new TriviumDB(halfPath, halfOptions)
+  try {
+    half.insertWithId(1, [1 + 2 ** -11 + 2 ** -28, 65519.9999], {})
+  } finally {
+    half.close()
+  }
+  const reopenedHalf = new TriviumDB(halfPath, halfOptions)
+  try {
+    assert.deepEqual(reopenedHalf.get(1).vector, [1.0009765625, 65504])
+    assert.deepEqual(reopenedHalf.searchExact([1.0009765625, 65519.9999], 1).map(hit => hit.id), [1])
+  } finally {
+    reopenedHalf.close()
+  }
   require('./cognitive_boundaries.js')(root, TriviumDB)
   await require('./search_boundaries.js')(root, TriviumDB)
   require('./query_numeric_indexes.js')(root, TriviumDB)
@@ -44,7 +59,7 @@ module.exports = async function numericBoundaries(root, TriviumDB) {
   for (const storageMode of ['rom', 'mmap']) {
     const file = path.join(root, `numeric-outputs-${storageMode}.tdb`)
     new TriviumDB(file, { ...options, storageMode }).close()
-    fs.copyFileSync(path.join(__dirname, '../fixtures/numeric_ids/wal.bin'), file + '.wal')
+    fs.appendFileSync(file + '.wal', fs.readFileSync(path.join(__dirname, '../fixtures/numeric_ids/wal.bin')).subarray(6))
     const db = new TriviumDB(file, { ...options, storageMode })
     try {
       const expected = ['1', '9007199254740991', '9007199254740992', '9007199254740993']

@@ -1,6 +1,6 @@
 # QuIVer 向量索引
 
-> 本文介绍 `0.9.2` 的 QuIVer 图导航、原始向量精排、可选压缩重排、冷热驻留、构建维护与资源计量。版本记录见[变更说明](changes/0.9.2.md)，冻结研究资料见 [ICDE 复现归档](../evaluation/README.md)。
+> 本文介绍 `0.9.3-beta.1` 的 QuIVer 图导航、原始向量精排、可选压缩重排、冷热驻留、构建维护与资源计量。版本记录见[变更说明](changes/0.9.3-beta.1.md)，冻结研究资料见 [ICDE 复现归档](../evaluation/README.md)。
 
 ---
 
@@ -24,6 +24,8 @@
 ## 概述
 
 QuIVer 是 TriviumDB 的近似最近邻（ANN）图索引，使用紧凑量化表示完成图导航，再从原始向量计算余弦相似度。SM-L2 导航从 `0.8.9` 起默认启用，`0.8.10` 增加构图连通性与增量维护保护，详见 [版本变更](changes/0.8.10.md)。
+
+Poincaré 球向量可使用显式的 [Pelorus 双曲索引](pelorus.md)。
 
 ---
 
@@ -272,8 +274,10 @@ request({"operation": "configure", "options": {
     "residency": "ssd", "cache_bytes": 64 * 1024 * 1024,
     "io_mode": "auto", "io_depth": 4
 }})
-hits = request({"operation": "search", "vector": query_vector,
-                "top_k": 10, "ef_search": 128, "rerank_limit": 64})
+result = request({"operation": "search", "vector": query_vector,
+                  "top_k": 10, "ef_search": 128, "rerank_limit": 64,
+                  "profile_io": True})
+hits, io = result["hits"], result["io"]
 request({"operation": "configure", "options": {
     "residency": "hot", "cache_bytes": 0, "io_mode": "auto", "io_depth": 4
 }})
@@ -281,14 +285,14 @@ stats = request({"operation": "stats"})
 request({"operation": "close"})
 ```
 
-协议命令为 `configure`、`search`、`stats`、`close` 和 `collect_temporary`。搜索结果为 `{"hits":[{"id":"9007199254740993","score":1.0}]}`，ID 使用十进制字符串。`configure.options` 支持下面四项，省略时使用默认值，未知字段及非法枚举直接拒绝。
+协议命令为 `configure`、`search`、`stats`、`close` 和 `collect_temporary`。搜索结果为 `{"hits":[{"id":"9007199254740993","score":1.0}]}`，ID 使用十进制字符串。下表是 `configure.options` 的驻留与 I/O 设置。省略时使用默认值，未知字段及非法枚举直接拒绝。
 
 | 字段 | 默认值 | 契约 |
 | --- | --- | --- |
 | `residency` | `ssd` | `ssd` 按需读取，`hot` 预热全部所选编码记录 |
 | `cache_bytes` | `0` | SSD Ready 行缓存的预算，含记录字节和每行 512 字节目录及租约额度 |
-| `io_mode` | `buffered` | `buffered`、`auto`、`direct` |
-| `io_depth` | `4` | `1..=32`，实际工作线程数受共享 Runtime 上限约束 |
+| `io_mode` | `buffered` | `buffered`、`auto`、`direct`、Linux `io_uring` |
+| `io_depth` | `4` | `io_uring` 的在途上限为 `1..=256`，其余模式为 `1..=32`。Windows IOCP 使用单调度线程，其他异步后端的线程数受共享 Runtime 上限约束 |
 
 ### 缓存、驻留与 I/O 生命周期
 
@@ -300,21 +304,33 @@ request({"operation": "close"})
 
 缓存按行维护 LRU，命中返回共享行租约，同代际同一行的 Pending 请求合并读取。`cache_bytes=0` 保留在途合并能力。Reader 热区额度包含 4 KiB 固定目录，覆盖缓存账本、空树根及读取计数器。调小缓存时立即淘汰缓存引用，外部持有的行继续占用其真实额度。每行在分配前准入记录、目录和传输峰值，完成后收缩为持有额度。
 
-最终重排按成功评分预算预取候选，过滤拒绝和墓碑在预取前排除。每个读取批次至多 64 行，批量 I/O 与评分 SIMD 分别派发。缓冲后端合并相邻记录，Direct I/O 后端同时合并相邻记录和重叠的实际对齐窗口，其余范围进入有界读取队列。批内请求先提交，再逐项等待实际完成并恢复输入顺序。每条记录独立验证身份、slot、墓碑和 CRC，查询持有本次预取行的租约。批次先完成自身持有的 Pending，再等待其他请求，预算拒绝、读取失败和取消均释放本批登记并唤醒等待者。
+最终重排按成功评分预算预取候选，过滤拒绝和墓碑在预取前排除。每个读取批次至多 64 行，批量 I/O 与评分 SIMD 分别派发。缓冲后端合并相邻记录，Direct I/O 还会合并重叠的对齐窗口。缺失范围入队后先评分已验证的命中行，剩余行在读取完成后评分。每行仍核对身份、slot、墓碑和 CRC，最终候选与顺序沿用原查询契约。双层缓存都先完成当前批次自己持有的读取，再等待其他批次。预算拒绝、读取失败和取消均释放本批登记并唤醒等待者。
 
 Hot 模式把所选编码的记录预热到内存，两种驻留策略采用相同评分。预热沿当前读取后端完成，成功后释放异步 I/O 后端、工作线程及其额度。`io_active` 表示当前异步后端是否已安装，Hot 状态为 `false`。切回 SSD 时重新准备请求的后端与额度，准备失败保留 Hot 状态及查询能力。切换成功后释放 Hot 持有，已取得的行租约按自身生命周期归还额度。转换与代际刷新需要旧状态和候选状态的峰值预算，资源不足时返回 `QueueFull`。
 
-异步读取使用有界队列。Windows 后端通过 `ReOpenFile` 固定原文件代际，使用 `FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING`、独立事件及完成等待。Linux 后端使用同一已打开文件的 `/proc/self/fd` 路径、`O_DIRECT` 和内核 AIO，异常排空通过 `io_destroy` 等待全部未取消操作完成。线程、传输副本和对齐缓冲纳入 Runtime 准入。取消在实际 I/O 完成和缓冲归还后返回，关闭排空队列、join 工作线程，再释放文件与线程额度。[Windows 读取契约](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile)、[Linux AIO 排空契约](https://man7.org/linux/man-pages/man2/io_destroy.2.html)。
+异步读取使用有界队列。Windows 通过 `ReOpenFile` 固定原文件代际，使用 `FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING`。直读深度至少为 2 且共享 Runtime 有空闲 I/O 线程时，由单线程批量调用 `ReadFile`，通过 IOCP 逐项回收完成包。槽位复用 `OVERLAPPED` 和缓冲，端口异常时取消并通过槽位的独立事件等待实际完成。深度为 1 或系统拒绝 IOCP 能力时沿用事件式读取。[Windows 完成端口](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatus)、[Windows 取消与完成](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)。
 
-Direct I/O 从固定代际的文件句柄查询对齐。Windows 使用文件存储扇区信息及文件内存对齐要求，Linux 使用 `statx(STATX_DIOALIGN)` 并结合文件系统块大小选择读取粒度。缺少查询能力时使用 64 KiB 保守对齐，再执行真实原生读取探测。当前后端支持最大 64 KiB 的请求和内存对齐，超出范围提供能力拒绝。跨窗口、文件末尾及大记录按逻辑长度返回完整内容。[Windows 存储信息](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_storage_info)、[Windows 对齐信息](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_alignment_info)、[Linux statx](https://man7.org/linux/man-pages/man2/statx.2.html)。
+Linux 直读使用同一已打开文件的 `/proc/self/fd` 路径和 `O_DIRECT`。默认原生直读走内核 AIO，异常时通过 `io_destroy` 排空。显式设置 `io_mode="io_uring"` 后，单调度线程注册只读文件和固定缓冲池，经 `READ_FIXED` 批量读取。该模式需要一个空闲 Runtime I/O 线程、内核和文件系统直读支持，以及足够的 `RLIMIT_MEMLOCK`。初始化、注册或探测失败保留系统错误。[Linux AIO 排空契约](https://man7.org/linux/man-pages/man2/io_destroy.2.html)、[固定缓冲 API](https://docs.rs/io-uring/latest/io_uring/struct.Submitter.html)。
 
-每个原生后端按实际请求大小分配并复用一个最多 64 KiB 的对齐读取窗口，后续请求完整落入有效内容时直接复制。窗口绑定该后端的文件句柄，重新读取前失效旧内容，短读和失败保留失效状态。更大的请求使用临时对齐缓冲，完成后归还。窗口及对齐余量计入每后端预留的 256 KiB I/O 工作区，该额度同时覆盖 128 KiB 线程栈。`cache_bytes` 控制 Ready 行缓存，设为零时仍可复用有界 I/O 窗口及合并 Pending。Hot 切换和关闭释放全部窗口。
+Direct I/O 从固定代际的文件句柄查询对齐。Windows 使用文件存储扇区信息及文件内存对齐要求。Linux 优先使用 `statx(STATX_DIOALIGN)`。旧内核的 XFS 可通过 `XFS_IOC_DIOINFO` 取得文件的最小传输粒度和内存对齐，再结合文件系统块大小确定读取窗口。缺少对齐信息时使用 64 KiB 保守对齐。后端安装前执行实际原生读取探测。当前支持最大 64 KiB 的偏移和缓冲地址对齐，跨窗口、文件末尾及大记录按逻辑长度返回内容。[Windows 存储信息](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_storage_info)、[Windows 对齐信息](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_alignment_info)、[Linux statx](https://man7.org/linux/man-pages/man2/statx.2.html)、[XFS 对齐接口](https://man7.org/linux/man-pages/man2/open.2.html#NOTES)。
+
+IOCP 和 `io_uring` 按设备对齐分配固定缓冲。小槽位有 `io_depth` 个，每个槽位取文件偏移对齐和内存对齐的较大值。小槽位低于 64 KiB 时，再预留 `ceil(io_depth / 8)` 个 64 KiB 的大槽位。每批在途请求受 `io_depth` 限制，大槽位满时分波处理。Windows 对超过 64 KiB 的对齐范围按传输预算临时分配，Linux 分成至多 64 KiB 的读取。以 4 KiB 对齐、深度 256 为例，固定池的载荷约为 3 MiB。缓冲在完成后归还，取消等已提交的读取排空后返回。关闭时排空队列并等待调度线程退出，再释放文件和线程额度。
+
+IOCP、多 worker 直读和 `io_uring` 在同一文件代际共享对齐页，跨查询对同页缺失只提交一次。小范围可跨页组装，大的连续范围仍使用合并读取。共享页容量受 I/O 工作区限制，每个并行槽位预留至多一个 64 KiB 窗口及其目录，最多按 32 个槽位预留。事件式单 worker 或请求线程直读复用本地窗口。短读丢弃本批未完成页，行校验失败清空共享页。行缓存由 `cache_bytes` 单独配置，设为零时仍可复用对齐页。Hot 切换和关闭释放全部窗口。
 
 I/O 后台线程为 CPU 维护保留一个共享线程额度。线程上限为 1 或共享 I/O 线程额度已用满时，请求线程执行原生提交和完成等待，图重建、刷新和关闭复用 CPU 工作线程。`auto` 对明确的平台／文件系统能力拒绝选择缓冲后端，`direct` 保留系统错误。`stats.io_mode` 返回实际后端，另提供缓存预算、缓存用量、命中、未命中、合并读取、冷区逻辑读取和总预留额度。
 
 `cold_read_calls` 和 `cold_read_bytes` 统计已完成传输的逻辑记录请求及记录字节。`physical_read_calls` 统计冷区系统读取尝试，`physical_read_bytes` 统计系统实际返回的字节，包含对齐窗口和短读，排除打开热区及配置探测。`window_reuse_hits` 和 `window_reuse_bytes` 统计窗口命中的逻辑范围数及复制字节。缓冲后端可能由 OS PageCache 满足，设备侧流量通过系统或存储工具另行采集。Reader 重开后累计计数从零开始。
 
-`io_alignment_bytes` 返回当前原生读取粒度，`io_memory_alignment_bytes` 返回缓冲对齐，`io_alignment_detected` 表示成功取得文件约束。缓冲模式或 Hot 状态的两项粒度为零。`io_window_bytes` 返回当前保留窗口的分配字节，数值受后端数乘以 64 KiB 约束，Hot 切换和关闭后归零。对齐填充及线程等资源通过总预留额度观察。
+#### 请求级 I/O 计量
+
+Python 和 Node 的 `search` 请求可设置 `profile_io: true`，成功响应在 `hits` 之外返回 `io`。Rust 使用 `triviumdb::sdk::quiver::measure_io(|| db.search_quiver(query, &config))`，也可包裹使用压缩重排的普通 ANN、文档或 TQL 调用。Rust 返回 `(Result<T>, QuiverIoStats)`，取消或失败时可同时读取错误与已发生的 I/O。
+
+请求统计使用上文的冷读、物理读和窗口复用字段，并提供 `row_cache_hits`（已就绪的行）、`coalesced_row_reads`（复用在途行后收到的记录）和 `coalesced_page_reads`（复用在途页后复制的范围）。`coalesced_page_reads` 包含在 `window_reuse_hits` 中，取差可得已就绪窗口的命中数。逻辑冷读按完成传输的批次累计，行缓存命中和同行合并直接复用记录。短读和取消的批次仍记录已提交的系统读取及取回的字节。
+
+系统读取归提交它的请求。等待者取得共享页时只计复用，当原读取取消或失败并由等待者重读时，重读归等待者。请求计量覆盖压缩精排使用的冷区，排除制品打开、刷新准备、探测及 Hot 预热。Hot 查询的请求级 I/O 为零。`stats` 继续提供 Reader 累计统计，其中包含预热产生的冷读。
+
+`io_alignment_bytes` 返回当前原生读取粒度，`io_memory_alignment_bytes` 返回缓冲对齐，`io_alignment_detected` 表示成功取得文件约束。缓冲模式或 Hot 状态的两项粒度为零。`io_window_bytes` 汇总后端保留窗口与共享页缓存的载荷，`io_fixed_buffer_bytes` 单独返回 IOCP 或 `io_uring` 固定缓冲的载荷。两项字节统计在 Hot 切换和关闭后归零。固定池、目录、对齐填充和线程一起计入 `reserved_bytes`。
 
 发布与回收使用 `<制品路径>.publish-lock` 管理租约。每个 UUID 暂存候选持有独立 `.tmp.lease`，活跃发布者继续工作。可写配置、发布和显式回收扫描同目标命名空间，仅删除已取得独占租约的遗留候选，普通完成和失败立即回收本次候选。进程强杀后的租约由 OS 释放，下次可写入口自动回收。只读入口只访问正式制品。
 

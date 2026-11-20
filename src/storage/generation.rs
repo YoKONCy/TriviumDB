@@ -98,7 +98,7 @@ impl GenerationStore {
 
     pub fn generation_dir(&self, generation_id: &str) -> Result<PathBuf> {
         self.ensure_path()?;
-        validate_component(generation_id, "generation_id")?;
+        validate_generation_name(generation_id)?;
         Ok(self.root.join(generation_id))
     }
 
@@ -112,7 +112,16 @@ impl GenerationStore {
         let directory = path
             .parent()
             .ok_or_else(|| TriviumError::InvalidInput("generation 数据库路径缺少父目录".into()))?;
-        std::fs::create_dir_all(directory)?;
+        std::fs::create_dir_all(&self.root)?;
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(TriviumError::GenerationBusy {
+                    generation_id: generation_id.into(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        }
         Ok(path)
     }
 
@@ -128,40 +137,7 @@ impl GenerationStore {
         let database_path = self
             .canonical_generation_dir(generation_id)?
             .join(database_file);
-        let manifest = crate::storage::snapshot::validate_manifest_for_generation(
-            &database_path.to_string_lossy(),
-            generation_id,
-        )?;
-        let actual_node_count = match manifest.dtype.as_str() {
-            "f32" => DatabaseReader::<f32>::open_immutable(
-                &database_path.to_string_lossy(),
-                manifest.dim,
-            )?
-            .node_count(),
-            "half::binary16::f16" => DatabaseReader::<half::f16>::open_immutable(
-                &database_path.to_string_lossy(),
-                manifest.dim,
-            )?
-            .node_count(),
-            "u64" => DatabaseReader::<u64>::open_immutable(
-                &database_path.to_string_lossy(),
-                manifest.dim,
-            )?
-            .node_count(),
-            dtype => {
-                return Err(TriviumError::ImmutableArtifactInvalid {
-                    reason: format!("manifest dtype 不受支持: {dtype}"),
-                });
-            }
-        }?;
-        if actual_node_count != manifest.node_count {
-            return Err(TriviumError::ImmutableArtifactInvalid {
-                reason: format!(
-                    "manifest node_count {} 与数据库 {} 不一致",
-                    manifest.node_count, actual_node_count
-                ),
-            });
-        }
+        validate_generation_database(&database_path, generation_id)?;
         let current = CurrentGeneration {
             format_version: CURRENT_VERSION,
             generation_id: generation_id.to_string(),
@@ -206,7 +182,7 @@ impl GenerationStore {
                 reason: "current.json 版本不受支持".into(),
             });
         }
-        validate_component(&current.generation_id, "generation_id")?;
+        validate_generation_name(&current.generation_id)?;
         validate_component(&current.database_file, "database_file")?;
         Ok(current)
     }
@@ -253,7 +229,7 @@ impl GenerationStore {
     }
 
     pub fn reclaim_generation(&self, generation_id: &str) -> Result<()> {
-        validate_component(generation_id, "generation_id")?;
+        validate_generation_name(generation_id)?;
         let _management = self.lock_management_exclusive()?;
         let current = self.resolve_current()?;
         if current.generation_id == generation_id {
@@ -287,6 +263,11 @@ impl GenerationStore {
             .map_err(|_| TriviumError::GenerationBusy {
                 generation_id: generation_id.to_string(),
             })?;
+        validate_generation_database(
+            &current_directory.join(&current.database_file),
+            &current.generation_id,
+        )?;
+        validate_reclaim_target(&directory)?;
         std::fs::remove_dir_all(&directory)?;
         Ok(())
     }
@@ -353,6 +334,80 @@ impl GenerationStore {
     }
 }
 
+fn validate_generation_database(path: &Path, generation_id: &str) -> Result<()> {
+    if !path.symlink_metadata()?.file_type().is_file() {
+        return Err(TriviumError::ImmutableArtifactInvalid {
+            reason: "代际主文件须是普通文件 (Generation database must be a regular file)".into(),
+        });
+    }
+    let path = path.to_str().ok_or_else(|| {
+        TriviumError::InvalidInput(
+            "代际数据库路径须为 UTF-8 (Generation database path must be UTF-8)".into(),
+        )
+    })?;
+    let manifest = crate::storage::snapshot::validate_manifest_for_generation(path, generation_id)?;
+    let count = match manifest.dtype.as_str() {
+        "f32" => DatabaseReader::<f32>::open_immutable(path, manifest.dim)?.node_count(),
+        "half::binary16::f16" => {
+            DatabaseReader::<half::f16>::open_immutable(path, manifest.dim)?.node_count()
+        }
+        "u64" => DatabaseReader::<u64>::open_immutable(path, manifest.dim)?.node_count(),
+        dtype => Err(TriviumError::ImmutableArtifactInvalid {
+            reason: format!("代际类型不受支持 (Unsupported generation dtype): {dtype}"),
+        }),
+    }?;
+    if count != manifest.node_count {
+        return Err(TriviumError::ImmutableArtifactInvalid {
+            reason: format!(
+                "代际节点数与清单不匹配 (Generation node count does not match manifest): {count} != {}",
+                manifest.node_count
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_reclaim_target(directory: &Path) -> Result<()> {
+    let invalid = || {
+        TriviumError::ImmutableArtifactInvalid {
+        reason: "回收目标须只包含一个代际的数据库制品 (Reclamation target must contain artifacts for exactly one generation database)".into(),
+    }
+    };
+    let generation_id = directory
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(invalid)?;
+    let mut names = Vec::new();
+    let mut database_file = None;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            return Err(invalid());
+        }
+        let name = entry.file_name().into_string().map_err(|_| invalid())?;
+        if let Some(file) = name.strip_suffix(".manifest.json") {
+            validate_component(file, "database_file")?;
+            if database_file.replace(file.to_owned()).is_some() {
+                return Err(invalid());
+            }
+        }
+        names.push(name);
+    }
+    let database_file = database_file.ok_or_else(invalid)?;
+    let database_path = directory.join(&database_file);
+    let suffixes =
+        super::snapshot::generation_suffixes(database_path.to_str().ok_or_else(invalid)?);
+    if names.iter().any(|name| {
+        name.strip_prefix(&database_file).is_none_or(|suffix| {
+            !matches!(suffix, ".manifest.json" | ".lock" | ".wal")
+                && !suffixes.iter().any(|expected| expected == suffix)
+        })
+    }) {
+        return Err(invalid());
+    }
+    validate_generation_database(&database_path, generation_id)
+}
+
 pub struct GenerationReader<T: VectorType> {
     reader: DatabaseReader<T>,
     current: CurrentGeneration,
@@ -392,6 +447,19 @@ fn validate_component(value: &str, field: &str) -> Result<()> {
         return Err(TriviumError::InvalidInput(format!(
             "{field} 必须是不含路径分隔符的单一安全名称"
         )));
+    }
+    Ok(())
+}
+
+fn validate_generation_name(value: &str) -> Result<()> {
+    validate_component(value, "generation_id")?;
+    #[cfg(windows)]
+    let value = value.trim_end_matches(['.', ' ']);
+    if super::artifacts::names_equal(value, "current.json") {
+        return Err(TriviumError::InvalidInput(
+            "代际名称占用当前指针路径 (Generation name conflicts with the current pointer)".into(),
+        )
+        .at_field("generation_id"));
     }
     Ok(())
 }

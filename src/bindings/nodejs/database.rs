@@ -267,11 +267,10 @@ impl TriviumDB {
 
     /// 获取节点总数
     #[napi]
-    pub fn node_count(&self, env: Env) -> napi::Result<u32> {
-        Ok({
-            dispatch!(self, db => db.node_count().map_err(|error| to_napi_error(env, error))?)
-                as u32
-        })
+    pub fn node_count(&self, env: Env) -> napi::Result<f64> {
+        let count =
+            dispatch!(self, db => db.node_count().map_err(|error| to_napi_error(env, error))?);
+        super::arguments::count_to_js(env, count, "nodeCount")
     }
 
     /// 获取所有活跃节点 ID

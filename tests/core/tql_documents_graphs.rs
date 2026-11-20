@@ -352,7 +352,13 @@ fn 文档压缩来源共用冷热精度并在重开后保留证据与只读零�
         for precision in ["fp32", "int8", "int4"] {
             for residency in ["ssd", "hot"] {
                 db.configure_quiver(serde_json::from_value(json!({"encoding":encoding,"query_precision":precision,"residency":residency,"cache_bytes":8192,"io_depth":1,"use_for_ann":false})).unwrap()).unwrap();
-                assert_content(&json!(json_rows(db.tql(query).unwrap())), &expected);
+                let (rows, io) = triviumdb::sdk::quiver::measure_io(|| db.tql(query));
+                assert_content(&json!(json_rows(rows.unwrap())), &expected);
+                if residency == "ssd" {
+                    assert!(io.cold_read_calls + io.row_cache_hits >= 3);
+                } else {
+                    assert_eq!(io, Default::default());
+                }
                 let compressed_plan = plan(&db, query);
                 assert_eq!(
                     compressed_plan["pipeline_stages"][0]["operator"],

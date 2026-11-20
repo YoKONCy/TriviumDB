@@ -3,6 +3,7 @@
 //! 热区采用既有QuIVer快照，冷区按行独立校验。Reader持有文件句柄，发布采用同目录
 //! 独占临时文件和原子替换，旧Reader继续访问原文件；打开过程只读取头和热区。
 
+use super::quiver_io::{IoCounters, IoMeter};
 use crate::error::{Result, TriviumError, WriteErrorInfo, WriteOutcome, WritePhase};
 use crate::index::quiver::cold::{ColdLayout, RerankEncoding};
 use crate::storage::fs::{robust_rename, sync_parent_directory};
@@ -478,7 +479,7 @@ pub(crate) struct ColdFile {
     #[cfg(feature = "test-hooks")]
     path: PathBuf,
     pub counters: ReadCounters,
-    pub physical: Arc<super::quiver_io::IoCounters>,
+    pub physical: Arc<IoCounters>,
 }
 
 impl ColdFile {
@@ -588,6 +589,7 @@ impl ColdFile {
         mode: super::quiver_io::IoMode,
         depth: usize,
         runtime: &crate::ResourceRuntime,
+        admit: impl FnMut(usize) -> Result<()>,
     ) -> Result<()> {
         let reader = super::quiver_io::AsyncReader::new(
             &self.file,
@@ -595,6 +597,7 @@ impl ColdFile {
             depth,
             runtime,
             self.physical.clone(),
+            admit,
         )?;
         crate::request::check_current()?;
         self.io = Some(reader);
@@ -611,6 +614,10 @@ impl ColdFile {
         self.io.is_some()
     }
 
+    pub fn fixed_buffer_bytes(&self) -> usize {
+        self.io.as_ref().map_or(0, |io| io.fixed_buffer_bytes)
+    }
+
     pub fn io_alignment(&self) -> super::quiver_io::IoAlignment {
         self.io
             .as_ref()
@@ -624,9 +631,14 @@ impl ColdFile {
     pub fn io_workspace_bytes(&self, record_bytes: usize) -> usize {
         match &self.io {
             None => record_bytes,
-            Some(io) if io.mode == super::quiver_io::IoMode::Direct => {
-                record_bytes.saturating_mul(2).saturating_add(131072)
-            }
+            Some(io) if io.mode.is_direct() => record_bytes
+                .saturating_mul(2)
+                .saturating_add(131072)
+                .saturating_add(if io.shared_window_budget() > 0 {
+                    1024
+                } else {
+                    0
+                }),
             Some(_) => record_bytes,
         }
     }
@@ -686,6 +698,8 @@ impl ColdFile {
         &self,
         requests: &[(usize, RowIdentity)],
         center: &[f32],
+        meter: Option<&Arc<IoMeter>>,
+        ready: impl FnOnce() -> Result<()>,
     ) -> Result<Vec<Vec<u8>>> {
         let metadata = &self.header.metadata;
         if requests.len() > 64 || requests.iter().any(|&(row, _)| row >= metadata.rows) {
@@ -742,34 +756,33 @@ impl ColdFile {
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::io_result(crate::test_hooks::IoPoint::QuiverColdRead)?;
         let output = if let Some(io) = &self.io {
-            io.read_batch(inputs).map_err(|error| {
+            io.read_batch_during(inputs, meter, ready).map_err(|error| {
                 if matches!(&error, TriviumError::Io(cause) if cause.kind() == io::ErrorKind::UnexpectedEof) {
                     corrupt("SSD区段读取不足 (Short SSD section read)")
                 } else { error }
             })?
         } else {
+            ready()?;
             let mut output = Vec::with_capacity(inputs.len());
             for (offset, mut buffer) in inputs {
-                let counted = ReadCounters::default();
-                let result = read_exact_at(&self.file, &mut buffer, offset, Some(&counted));
-                self.physical
-                    .calls
-                    .fetch_add(counted.calls.load(Ordering::Relaxed), Ordering::Relaxed);
-                self.physical
-                    .bytes
-                    .fetch_add(counted.bytes.load(Ordering::Relaxed), Ordering::Relaxed);
-                result?;
+                read_exact_at(
+                    &self.file,
+                    &mut buffer,
+                    offset,
+                    Some((&self.physical, meter.map(Arc::as_ref))),
+                )?;
                 output.push(buffer);
             }
             output
         };
-        self.counters
-            .calls
-            .fetch_add(requests.len() as u64, Ordering::Relaxed);
-        self.counters.bytes.fetch_add(
-            (requests.len() * metadata.record_bytes) as u64,
-            Ordering::Relaxed,
-        );
+        let calls = requests.len() as u64;
+        let bytes = (requests.len() * metadata.record_bytes) as u64;
+        self.counters.calls.fetch_add(calls, Ordering::Relaxed);
+        self.counters.bytes.fetch_add(bytes, Ordering::Relaxed);
+        if let Some(meter) = meter {
+            meter.cold_read_calls.fetch_add(calls, Ordering::Relaxed);
+            meter.cold_read_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit_for_path(
             crate::test_hooks::ConcurrencyPoint::QuiverColdAfterRead,
@@ -779,19 +792,26 @@ impl ColdFile {
         let mut records = Vec::with_capacity(requests.len());
         for (&(row, expected), &(group, start)) in requests.iter().zip(&assignments) {
             let buffer = &output[group][start..start + metadata.record_bytes];
-            if number(buffer, 0) != expected.node_id
-                || number(buffer, 8) != expected.slot
-                || number(buffer, 16) != row as u64
-                || word(buffer, 24) != u32::from(expected.deleted)
-                || word(buffer, 28) != record_crc(buffer)
+            let validation = if number(buffer, 0) == expected.node_id
+                && number(buffer, 8) == expected.slot
+                && number(buffer, 16) == row as u64
+                && word(buffer, 24) == u32::from(expected.deleted)
+                && word(buffer, 28) == record_crc(buffer)
             {
-                return Err(corrupt(
+                self.header
+                    .layout
+                    .row(&buffer[RECORD_HEADER_BYTES..], center)
+                    .map(|_| ())
+            } else {
+                Err(corrupt(
                     "SSD记录身份或CRC无效 (Invalid SSD record identity or CRC)",
-                ));
-            }
-            self.header
-                .layout
-                .row(&buffer[RECORD_HEADER_BYTES..], center)?;
+                ))
+            };
+            validation.inspect_err(|_| {
+                if let Some(io) = &self.io {
+                    io.discard_shared_pages();
+                }
+            })?;
             let mut record = zeroed(metadata.record_bytes)?;
             record.copy_from_slice(buffer);
             records.push(record);
@@ -805,12 +825,12 @@ fn read_exact_at(
     file: &File,
     mut output: &mut [u8],
     mut offset: u64,
-    counters: Option<&ReadCounters>,
+    counters: Option<(&IoCounters, Option<&IoMeter>)>,
 ) -> Result<()> {
     while !output.is_empty() {
         crate::request::check_current()?;
-        if let Some(counters) = counters {
-            counters.calls.fetch_add(1, Ordering::Relaxed);
+        if let Some((counters, meter)) = counters {
+            counters.record_call(meter);
         }
         #[cfg(unix)]
         let read = {
@@ -830,8 +850,8 @@ fn read_exact_at(
         match read {
             Ok(0) => return Err(corrupt("SSD区段读取不足 (Short SSD section read)")),
             Ok(length) => {
-                if let Some(counters) = counters {
-                    counters.bytes.fetch_add(length as u64, Ordering::Relaxed);
+                if let Some((counters, meter)) = counters {
+                    counters.record_bytes(meter, length);
                 }
                 offset += length as u64;
                 output = &mut output[length..];

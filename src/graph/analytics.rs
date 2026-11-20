@@ -1,7 +1,7 @@
 //! 面向 TQL NodeSet 的确定性、有预算图结构分析算法。
 //!
-//! 所有算法只读取调用方给定的诱导子图；节点与邻居均按 NodeId 排序。构图阶段同时
-//! 计算边访问量和临时内存，任一预算不足都会在算法工作区分配前失败。
+//! 所有算法只读取调用方给定的诱导子图；节点与邻居均按 NodeId 排序。
+//! 构图先准入节点目录，再逐边检查扫描额度与邻接表增长。
 
 use crate::VectorType;
 use crate::error::{Result, TriviumError};
@@ -26,7 +26,14 @@ pub fn build_workspace<T: VectorType>(
     max_examined_edges: usize,
     max_bytes: usize,
 ) -> Result<GraphWorkspace> {
-    build_workspace_view(mt, nodes, label_filter, max_examined_edges, max_bytes)
+    build_workspace_view(
+        mt,
+        nodes,
+        label_filter,
+        max_examined_edges,
+        max_bytes,
+        false,
+    )
 }
 
 pub(crate) fn build_workspace_view<T: VectorType>(
@@ -35,6 +42,7 @@ pub(crate) fn build_workspace_view<T: VectorType>(
     label_filter: Option<&str>,
     max_examined_edges: usize,
     max_bytes: usize,
+    require_nonnegative_weights: bool,
 ) -> Result<GraphWorkspace> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
@@ -48,32 +56,7 @@ pub(crate) fn build_workspace_view<T: VectorType>(
         ));
     }
     let mut examined_edges = 0usize;
-    let mut retained_edges = 0usize;
-    for &source in nodes {
-        crate::graph::budget::check_control(&control)?;
-        for edge in mt.get_edges(source).unwrap_or_default() {
-            crate::graph::budget::check_control(&control)?;
-            examined_edges = examined_edges.saturating_add(1);
-            if examined_edges > max_examined_edges {
-                return Err(TriviumError::QueryExecution(
-                    "图算法超过边访问预算 (Graph algorithm exceeds edge examination budget)".into(),
-                ));
-            }
-            if nodes.contains(&edge.target_id)
-                && label_filter.is_none_or(|label| edge.label == label)
-            {
-                retained_edges = retained_edges.saturating_add(1);
-            }
-        }
-    }
-    let edge_bytes = retained_edges
-        .checked_mul(std::mem::size_of::<NodeId>() * 6)
-        .ok_or_else(|| TriviumError::QueryExecution("图算法邻接工作区大小溢出".into()))?;
-    if base_bytes.saturating_add(edge_bytes) > max_bytes {
-        return Err(TriviumError::QueryExecution(
-            "图算法邻接表超过临时内存预算 (Graph adjacency exceeds temporary memory budget)".into(),
-        ));
-    }
+    let mut bytes = base_bytes;
     let mut directed = BTreeMap::from_iter(nodes.iter().map(|&id| (id, Vec::new())));
     let mut reverse = directed.clone();
     let mut weighted = BTreeMap::from_iter(nodes.iter().map(|&id| (id, Vec::new())));
@@ -81,9 +64,19 @@ pub(crate) fn build_workspace_view<T: VectorType>(
         crate::graph::budget::check_control(&control)?;
         for edge in mt.get_edges(source).unwrap_or_default() {
             crate::graph::budget::check_control(&control)?;
+            charge_edge(&mut examined_edges, max_examined_edges)?;
             if nodes.contains(&edge.target_id)
                 && label_filter.is_none_or(|label| edge.label == label)
             {
+                bytes = bytes.saturating_add(std::mem::size_of::<NodeId>() * 6);
+                if bytes > max_bytes {
+                    return Err(TriviumError::QueryExecution(
+                        "图算法邻接表超过临时内存预算 (Graph adjacency exceeds temporary memory budget)".into(),
+                    ));
+                }
+                if require_nonnegative_weights {
+                    validate_weight(f64::from(edge.weight))?;
+                }
                 directed.entry(source).or_default().push(edge.target_id);
                 reverse.entry(edge.target_id).or_default().push(source);
                 weighted
@@ -411,6 +404,16 @@ pub fn hits(
     tolerance: f64,
     max_work: usize,
 ) -> Result<BTreeMap<NodeId, (f64, f64)>> {
+    hits_with_work(graph, max_iterations, tolerance, &mut 0, max_work)
+}
+
+pub(crate) fn hits_with_work(
+    graph: &GraphWorkspace,
+    max_iterations: usize,
+    tolerance: f64,
+    work: &mut usize,
+    max_work: usize,
+) -> Result<BTreeMap<NodeId, (f64, f64)>> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
     if max_iterations == 0 || !tolerance.is_finite() || tolerance <= 0.0 {
@@ -431,13 +434,12 @@ pub fn hits(
     let initial = 1.0 / (ids.len() as f64).sqrt();
     let mut hubs = BTreeMap::from_iter(ids.iter().map(|&id| (id, initial)));
     let mut authorities = hubs.clone();
-    let mut work = 0usize;
     for _ in 0..max_iterations {
         crate::graph::budget::check_control(&control)?;
-        work = work
+        *work = work
             .checked_add(per_iteration)
             .ok_or_else(|| TriviumError::QueryExecution("HITS 工作预算溢出".into()))?;
-        if work > max_work {
+        if *work > max_work {
             return Err(TriviumError::QueryExecution(
                 "HITS 超过迭代边预算 (HITS exceeds iterative edge budget)".into(),
             ));
@@ -532,7 +534,7 @@ fn weighted_path_to(parents: &BTreeMap<NodeId, NodeId>, mut node: NodeId) -> Vec
 fn charge_edge(work: &mut usize, max_work: usize) -> Result<()> {
     if *work >= max_work {
         return Err(TriviumError::QueryExecution(
-            "加权路径超过工作预算 (Weighted path exceeds work budget)".into(),
+            "图算法超过边访问预算 (Graph algorithm exceeds edge examination budget)".into(),
         ));
     }
     *work += 1;
@@ -610,12 +612,15 @@ fn shortest_weighted_path(
 pub(crate) fn validate_weighted_graph(graph: &GraphWorkspace) -> Result<()> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
-    if graph
-        .weighted
-        .values()
-        .flatten()
-        .any(|(_, weight)| !weight.is_finite() || *weight < 0.0)
-    {
+    for &(_, weight) in graph.weighted.values().flatten() {
+        crate::graph::budget::check_control(&control)?;
+        validate_weight(weight)?;
+    }
+    Ok(())
+}
+
+fn validate_weight(weight: f64) -> Result<()> {
+    if !weight.is_finite() || weight < 0.0 {
         return Err(TriviumError::InvalidInput(
             "加权算法要求非负有限边权 (Weighted algorithms require finite non-negative edge weights)".into(),
         ));
@@ -663,10 +668,17 @@ pub fn harmonic_centrality(
     graph: &GraphWorkspace,
     max_work: usize,
 ) -> Result<BTreeMap<NodeId, f64>> {
+    validate_weighted_graph(graph)?;
+    harmonic_centrality_with_work(graph, &mut 0, max_work)
+}
+
+pub(crate) fn harmonic_centrality_with_work(
+    graph: &GraphWorkspace,
+    work: &mut usize,
+    max_work: usize,
+) -> Result<BTreeMap<NodeId, f64>> {
     let control = crate::request::control().unwrap_or_default();
     control.check()?;
-    validate_weighted_graph(graph)?;
-    let mut work = 0usize;
     let mut output = BTreeMap::new();
     for &source in graph.weighted.keys() {
         crate::graph::budget::check_control(&control)?;
@@ -676,7 +688,7 @@ pub fn harmonic_centrality(
             None,
             &BTreeSet::new(),
             &BTreeSet::new(),
-            &mut work,
+            work,
             max_work,
         )?;
         let score = distances

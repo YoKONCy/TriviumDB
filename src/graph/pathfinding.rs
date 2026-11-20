@@ -112,7 +112,6 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
             &backward_frontier
         };
         let mut next_frontier = Vec::new();
-        let mut meeting = Vec::new();
         for &current in frontier {
             crate::graph::budget::check_control(&control)?;
             let current_depth = if expand_forward {
@@ -150,17 +149,14 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
                     neighbors.push(neighbor);
                 }
             }
-            if truncated {
-                break;
-            }
             neighbors.sort_unstable();
             neighbors.dedup();
             for neighbor in neighbors {
                 crate::graph::budget::check_control(&control)?;
-                let own = if expand_forward {
-                    &mut forward
+                let (own, other) = if expand_forward {
+                    (&mut forward, &backward)
                 } else {
-                    &mut backward
+                    (&mut backward, &forward)
                 };
                 if let std::collections::hash_map::Entry::Vacant(entry) = own.entry(neighbor) {
                     if metrics.visited_nodes >= budget.max_visited_nodes {
@@ -188,9 +184,12 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
                     next_frontier.push(neighbor);
                     metrics.peak_frontier_size = metrics.peak_frontier_size.max(next_size);
                 }
-                let other = if expand_forward { &backward } else { &forward };
-                if other.contains_key(&neighbor) {
-                    meeting.push(neighbor);
+                if let Some(&(other_depth, _)) = other.get(&neighbor) {
+                    let own_depth = own[&neighbor].0;
+                    let candidate = (own_depth + other_depth, neighbor);
+                    if best_meeting.is_none_or(|best| candidate < best) {
+                        best_meeting = Some(candidate);
+                    }
                 }
             }
             if truncated {
@@ -199,15 +198,6 @@ pub(crate) fn shortest_path_bidirectional_view<T: VectorType>(
         }
         if truncated {
             break;
-        }
-        if !meeting.is_empty() {
-            for node in meeting {
-                crate::graph::budget::check_control(&control)?;
-                let candidate = (forward[&node].0 + backward[&node].0, node);
-                if best_meeting.is_none_or(|best| candidate < best) {
-                    best_meeting = Some(candidate);
-                }
-            }
         }
         next_frontier.sort_unstable();
         next_frontier.dedup();
@@ -261,65 +251,61 @@ pub fn shortest_path<T: VectorType>(
     max_depth: usize,
     label_filter: Option<&str>,
 ) -> Option<Path> {
-    shortest_path_view(mt, src, dst, max_depth, label_filter)
+    shortest_path_checked(mt, src, dst, max_depth, label_filter, || {
+        Ok::<_, std::convert::Infallible>(())
+    })
+    .unwrap_or_else(|never| match never {})
 }
 
-pub(crate) fn shortest_path_view<T: VectorType>(
+pub(crate) fn shortest_path_checked<T: VectorType, E>(
     mt: &impl GraphRead<T>,
     src: NodeId,
     dst: NodeId,
     max_depth: usize,
     label_filter: Option<&str>,
-) -> Option<Path> {
+    check: impl Fn() -> std::result::Result<(), E>,
+) -> std::result::Result<Option<Path>, E> {
+    check()?;
     if !mt.contains(src) || !mt.contains(dst) {
-        return None;
+        return Ok(None);
     }
     if src == dst {
-        return Some(vec![src]);
+        return Ok(Some(vec![src]));
     }
-    if max_depth == 0 {
-        return None;
-    }
-
-    let mut visited: HashSet<NodeId> = HashSet::new();
-    visited.insert(src);
-
-    // BFS 队列：(当前节点, 从起点到当前节点的路径)
-    let mut queue: VecDeque<(NodeId, Vec<NodeId>)> = VecDeque::new();
-    queue.push_back((src, vec![src]));
-
-    while let Some((current, path)) = queue.pop_front() {
-        if path.len() > max_depth {
+    let mut parents = HashMap::from([(src, src)]);
+    let mut queue = VecDeque::from([(src, 0usize)]);
+    while let Some((id, depth)) = queue.pop_front() {
+        check()?;
+        if depth >= max_depth {
             break;
         }
-
-        if let Some(edges) = mt.get_edges(current) {
-            for edge in edges {
-                // 标签过滤
-                if let Some(lf) = label_filter
-                    && edge.label != lf
-                {
-                    continue;
+        for edge in mt.get_edges(id).unwrap_or_default() {
+            check()?;
+            if label_filter.is_some_and(|label| label != edge.label) {
+                continue;
+            }
+            let next = edge.target_id;
+            let std::collections::hash_map::Entry::Vacant(slot) = parents.entry(next) else {
+                continue;
+            };
+            slot.insert(id);
+            if next == dst {
+                let mut path = vec![dst];
+                let mut current = dst;
+                while current != src {
+                    check()?;
+                    current = parents[&current];
+                    path.push(current);
                 }
-
-                let next = edge.target_id;
-                if next == dst {
-                    let mut result = path.clone();
-                    result.push(dst);
-                    return Some(result);
-                }
-
-                if !visited.contains(&next) && path.len() < max_depth {
-                    visited.insert(next);
-                    let mut new_path = path.clone();
-                    new_path.push(next);
-                    queue.push_back((next, new_path));
-                }
+                path.reverse();
+                return Ok(Some(path));
+            }
+            if depth + 1 < max_depth {
+                queue.push_back((next, depth + 1));
             }
         }
     }
-
-    None
+    Ok(None)
 }
 
 /// 可变长路径遍历：找到从 src 出发、跳数在 [min_depth, max_depth] 范围内的所有可达终点
@@ -587,6 +573,10 @@ fn bounded_path_dfs<T: VectorType>(
         {
             return Ok(());
         }
+        if state.results.len() == config.max_paths {
+            state.truncated = true;
+            return Ok(());
+        }
         state.results.push(BoundedPath {
             nodes: state.nodes.clone(),
             edge_weights: state.weights.clone(),
@@ -602,9 +592,6 @@ fn bounded_path_dfs<T: VectorType>(
                 sum.into_f32(state.weights.len())
             },
         });
-        if state.results.len() >= config.max_paths {
-            state.truncated = true;
-        }
         return Ok(());
     }
     if depth >= config.max_depth
@@ -744,11 +731,10 @@ fn dfs_all_paths<T: VectorType>(
             }
 
             let next = edge.target_id;
-            if visited.contains(&next) && next != dst {
+            if visited.contains(&next) {
                 continue;
             }
 
-            // 允许到达 dst（即使 dst 可能在 visited 中不存在，因为我们不提前加入它）
             if next == dst {
                 let mut result_path = path.clone();
                 result_path.push(dst);

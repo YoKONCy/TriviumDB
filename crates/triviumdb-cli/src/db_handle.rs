@@ -8,8 +8,6 @@
 //! 展示查询使用 dtype 无关的 [`CliNode`]，数据导出通过原始 dtype 编码 JSON 数值。
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 
 use half::f16;
 use serde_json::Value;
@@ -183,11 +181,7 @@ impl DbHandle {
     pub fn open_auto(path: &str, dim: Option<usize>, dtype: DType) -> Result<Self> {
         let dim = match dim {
             Some(d) => d,
-            None => sniff_header(path).map(|h| h.dim).map_err(|_| {
-                TriviumError::InvalidInput(format!(
-                    "无法从 '{path}' 嗅探维度（文件不存在或损坏），请用 --dim 显式指定"
-                ))
-            })?,
+            None => sniff_header(path)?.dim,
         };
         Self::open(path, dim, dtype)
     }
@@ -206,6 +200,13 @@ impl DbHandle {
 
     pub fn has_persisted_quiver(&self) -> Result<bool> {
         dispatch!(self, db => db.has_persisted_quiver())
+    }
+
+    pub fn build_pelorus(
+        &mut self,
+        config: triviumdb::index::pelorus::PelorusConfig,
+    ) -> Result<()> {
+        dispatch!(self, db => db.build_pelorus_index(config))
     }
 
     /// 当前句柄的 dtype。
@@ -333,32 +334,9 @@ impl DbHandle {
     }
 }
 
-/// 从 `.tdb` 文件头嗅探维度（不挂载数据库）。
-///
-/// 文件头布局：`[0..4] MAGIC "TVDB"`, `[4..6] version (u16 LE)`,
-/// `[6..10] dim (u32 LE)`。
+/// 校验完整的当前格式文件头并取得维度。
 pub fn sniff_header(tdb_path: &str) -> Result<HeaderInfo> {
-    let mut file = File::open(tdb_path)?;
-    let mut header = [0u8; 10];
-    file.read_exact(&mut header)?;
-
-    if &header[0..4] != b"TVDB" {
-        return Err(TriviumError::CorruptedFile(format!(
-            "非法魔数: '{}' 不是 TriviumDB 文件",
-            tdb_path
-        )));
-    }
-
-    let version = u16::from_le_bytes([header[4], header[5]]);
-    if version != triviumdb::storage::file_format::CURRENT_VERSION {
-        return Err(TriviumError::UnsupportedDatabaseVersion {
-            found: version,
-            minimum_supported: triviumdb::storage::file_format::CURRENT_VERSION,
-            current: triviumdb::storage::file_format::CURRENT_VERSION,
-        });
-    }
-    let dim = u32::from_le_bytes([header[6], header[7], header[8], header[9]]) as usize;
-
+    let (version, dim) = triviumdb::storage::file_format::read_database_header(tdb_path)?;
     Ok(HeaderInfo { version, dim })
 }
 

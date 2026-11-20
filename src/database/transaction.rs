@@ -847,22 +847,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     }
                 }
                 TxOp::Insert { vector, payload } => {
-                    if vector.len() != dim {
-                        return Err(crate::error::TriviumError::DimensionMismatch {
-                            expected: dim,
-                            got: vector.len(),
-                        });
-                    }
-                    for item in vector.iter() {
-                        let f = item.to_f32();
-                        if f.is_nan() || f.is_infinite() {
-                            return Err(crate::error::TriviumError::InvalidVector {
-                                reason:
-                                    "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)"
-                                        .into(),
-                            });
-                        }
-                    }
+                    mt.validate_insert(vector)?;
                     let id = sim_next_id;
                     sim_next_id = sim_next_id.checked_add(1).ok_or_else(|| {
                         crate::error::TriviumError::InvalidInput("节点 ID 空间已耗尽".into())
@@ -885,22 +870,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     if check_exists!(id) {
                         return Err(crate::error::TriviumError::NodeAlreadyExists(*id));
                     }
-                    if vector.len() != dim {
-                        return Err(crate::error::TriviumError::DimensionMismatch {
-                            expected: dim,
-                            got: vector.len(),
-                        });
-                    }
-                    for item in vector.iter() {
-                        let f = item.to_f32();
-                        if f.is_nan() || f.is_infinite() {
-                            return Err(crate::error::TriviumError::InvalidVector {
-                                reason:
-                                    "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)"
-                                        .into(),
-                            });
-                        }
-                    }
+                    mt.validate_insert(vector)?;
                     node_states.insert(*id, true);
                     if *id >= sim_next_id {
                         sim_next_id = id.checked_add(1).ok_or_else(|| {
@@ -955,22 +925,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                     if !check_exists!(id) {
                         return Err(crate::error::TriviumError::NodeNotFound(*id));
                     }
-                    if vector.len() != dim {
-                        return Err(crate::error::TriviumError::DimensionMismatch {
-                            expected: dim,
-                            got: vector.len(),
-                        });
-                    }
-                    for item in vector.iter() {
-                        let f = item.to_f32();
-                        if f.is_nan() || f.is_infinite() {
-                            return Err(crate::error::TriviumError::InvalidVector {
-                                reason:
-                                    "向量包含 NaN 或 Infinity (Vector contains NaN or Infinity)"
-                                        .into(),
-                            });
-                        }
-                    }
+                    mt.validate_insert(vector)?;
                 }
             }
         }

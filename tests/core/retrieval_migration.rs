@@ -220,6 +220,42 @@ fn files(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 #[test]
+fn 迁移拒绝占用源库发布路径并保留文件组() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source.tdb");
+    let path = path.to_str().unwrap();
+    let mut source = Database::<f32>::open(path, 1).unwrap();
+    source
+        .insert_with_id(7, &[1.0], json!({"version":1}))
+        .unwrap();
+    let evidence = || {
+        let names = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        (
+            names,
+            std::fs::read(path).unwrap(),
+            std::fs::read(format!("{path}.wal")).unwrap(),
+        )
+    };
+    let before = evidence();
+    let artifact = format!("{path}.publish");
+    for target in [&artifact, &format!("{artifact}/nested/target.tdb")] {
+        let error = source.migrate_to(target, 2).err().unwrap();
+        assert_eq!(error.code(), "TDB_INVALID_INPUT");
+        assert_eq!(evidence(), before);
+    }
+    source
+        .insert_with_id(8, &[1.0], json!({"version":2}))
+        .unwrap();
+    source.close().unwrap();
+    let reopened = Database::<f32>::open(path, 1).unwrap();
+    assert_eq!(reopened.get_payload(7).unwrap(), Some(json!({"version":1})));
+    assert_eq!(reopened.get_payload(8).unwrap(), Some(json!({"version":2})));
+}
+
+#[test]
 fn 迁移拒绝已有或残留目标且完整保留原文件组() {
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
         let source_root = TestDir::new("migration_source");

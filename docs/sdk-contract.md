@@ -1,6 +1,6 @@
 # SDK 正式接口清单
 
-> 本文登记应用侧 SDK 的支持范围与兼容边界，作为 `1.0.0-beta.1` SDK 冻结的审查基线。当前交付版本为 `0.9.2`，完整内容见[版本说明](changes/0.9.2.md)。
+> 本文登记应用侧 SDK 的支持范围与兼容边界，作为 `1.0.0-beta.1` SDK 冻结的审查基线。当前交付版本为 `0.9.3-beta.1`，完整内容见[版本说明](changes/0.9.3-beta.1.md)。
 
 ---
 
@@ -25,7 +25,7 @@
 | Python | [`__init__.pyi`](../python/triviumdb/__init__.pyi)，wheel 内附带 `py.typed` | `import triviumdb` |
 | Node | [`triviumdb.d.ts`](../triviumdb.d.ts)，由 `package.json.types` 指向 | `require('triviumdb')` 或包名导入 |
 | TQL | [语言参考](tql-reference.md) 与 Prepared 参数类型 | 数据库查询方法 |
-| JSON 请求 | [文档](document-ingestion.md)、[命名图](named-graphs.md)、[QuIVer](quiver.md)、[嵌入控制台数据协议](embedded-console.md) | SDK 请求方法 |
+| JSON 请求 | [文档](document-ingestion.md)、[命名图](named-graphs.md)、[QuIVer](quiver.md)、[Pelorus](pelorus.md)、[嵌入控制台数据协议](embedded-console.md) | SDK 请求方法 |
 | 错误 | [`ErrorInfo`](../src/error.rs) 与 [错误契约](error-contracts.md) | Rust 错误对象、Python 异常、Node Error |
 
 > **使用提醒**：直接从源码内部路径导入的对象，需要按下文的应用范围或内核扩展范围核对支持状态。以 `_` 开头的绑定桥接与构建生成的 `index.d.ts` 供内部装配使用。
@@ -47,7 +47,7 @@
 | 文本与属性索引 | 数据库登记、重建、创建、删除、查找与统计方法；`index::text::TextIndexDocument`，这些方法签名引用的 `index::property` 配置和统计类型 | 登记正文与关键词、普通及唯一索引定义、查询结果 |
 | TQL | 数据库 `tql`、`tql_values`、`tql_nodes`、`query`、写查询与 Prepared 方法；其签名引用的 `TqlValue`、结果、`QueryControl`、Prepared 与参数类型 | 查询值、绑定、定位、计划解释、执行与取消 |
 | 图计算 | 数据库图算法方法及其配置、结果类型；根导出的 Reachability/Subgraph 类型、`GraphStats`、`GraphIntegrityReport`、`GraphRepairReport` | 遍历预算、路径、修复与图算法结果 |
-| 压缩运行时 | 数据库 QuIVer 配置、切换、关闭和统计方法；`sdk::quiver::request` 及这些方法引用的配置和结果类型 | 热内存/SSD、缓存字节预算、中心化 INT8/INT4、FP32/INT8/INT4 查询 |
+| 压缩运行时 | 数据库 QuIVer 配置、切换、关闭和统计方法；`sdk::quiver::{request, measure_io, QuiverIoStats}` 及这些方法引用的配置和结果类型 | 热内存/SSD、缓存字节预算、请求级 I/O、中心化 INT8/INT4、FP32/INT8/INT4 查询 |
 | Hook | `SearchHook`、`HookContext`、`CompositeHook`、`NoopHook`、`FfiHook` 与已声明 FFI ABI | 同步回调、错误传播、重入拒绝、动态库所有权 |
 | 资源与维护 | `ResourceRuntime`、`ResourceLimits`、`ResourceStats`、`ResourceFailure`、`ResourceBudgetDetails`；实例统计、关闭和维护状态类型 | 实例/宿主预算、后台工作、排空、关闭、内存与维护观测 |
 | 快照与代际 | 数据库快照方法；`storage::snapshot` 的 `verify_snapshot`、`restore_snapshot` 及其 runtime 变体和返回类型；根导出的 `GenerationStore`、`CurrentGeneration`、`GenerationReader` | 完整文件组、目标排他发布、Immutable 代际与读取租约 |
@@ -82,7 +82,9 @@ Node 正式运行对象和函数以 `triviumdb.d.ts` 的 `export class`、`expor
 
 TQL 的文档来源、命名图作用域、文本/向量/图算子共享 Planner 和执行器。Prepared 参数和 AST 范围按[定位契约](error-contracts.md)返回。应用依赖语义、结果、预算和来源定位；成本估计数值及内部物理算子拆分按实现与数据调整。
 
-文档、命名图与 QuIVer JSON 请求的操作名、字段和响应由 `sdk` 适配层维护。Console 数据协议的版本、字符串 ID、权限、条件写入与回执沿现有协议维护；HTML 样式和界面结构沿前端发布流程维护。
+文档、命名图、QuIVer 与 Pelorus JSON 请求的操作名、字段和响应由 `sdk` 适配层维护。Console 数据协议的版本、字符串 ID、权限、条件写入与回执沿现有协议维护；HTML 样式和界面结构沿前端发布流程维护。
+
+[Pelorus](pelorus.md) 提供独立的双曲索引配置、驻留切换、单次和批量检索。Rust 暴露类型化入口，Python 与 Node 共用 JSON 协议。TQL 保留命名图作用域及同度量重排。
 
 文档快照及片段标签统一使用结构 2。普通文档与解析文档共享这一输出结构，已有持久化结构 1 沿外部入口升级，正文、范围、节点身份、文档修订与回执保持迁移契约。
 

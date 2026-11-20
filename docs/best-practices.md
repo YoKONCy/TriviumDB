@@ -1,6 +1,6 @@
 # TriviumDB 最佳实践
 
-> 本文介绍 TriviumDB `0.9.2` 的项目集成、数据建模、检索配置和资源管理。版本记录见[变更说明](changes/0.9.2.md)。
+> 本文介绍 TriviumDB `0.9.3-beta.1` 的项目集成、数据建模、检索配置和资源管理。版本记录见[变更说明](changes/0.9.3-beta.1.md)。
 
 ---
 
@@ -38,7 +38,7 @@ NPM 包内部自带 `triviumdb.d.ts` 提供全量的 TS 类型注解，支持主
 
 ```bash
 # 推荐使用 NPM 或者 PNPM 一键提包：
-npm install triviumdb@0.9.2
+npm install triviumdb@0.9.3-beta.1
 
 # 验证安装
 node -e "console.log(require('triviumdb').TriviumDB.name)"
@@ -50,10 +50,10 @@ node -e "console.log(require('triviumdb').TriviumDB.name)"
 
 ```bash
 # 推荐使用超快速的 uv (支持 3.9 ~ 3.12)
-uv pip install "triviumdb==0.9.2"
+uv pip install "triviumdb==0.9.3b1"
 
 # 或者传统 pip
-pip install "triviumdb==0.9.2"
+pip install "triviumdb==0.9.3b1"
 
 # 验证安装
 python -c "import triviumdb; print('OK')"
@@ -64,14 +64,14 @@ python -c "import triviumdb; print('OK')"
 通过 `cargo add` 引入本文对应的公开测试版本。
 
 ```bash
-cargo add triviumdb@0.9.2
+cargo add triviumdb@0.9.3-beta.1
 ```
 
 在 `Cargo.toml` 中也会自动生成如下配置：
 
 ```toml
 [dependencies]
-triviumdb = "0.9.2"
+triviumdb = "0.9.3-beta.1"
 ```
 
 ### 30 秒入门模板

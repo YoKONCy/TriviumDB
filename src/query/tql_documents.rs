@@ -30,6 +30,8 @@ pub(crate) enum DocumentRequest<T: VectorType> {
         vector: Vec<T>,
         #[serde(default)]
         options: DocumentVectorOptions,
+        #[serde(default)]
+        pelorus: bool,
     },
     SearchHybrid {
         query: DocumentSearchQuery,
@@ -37,6 +39,8 @@ pub(crate) enum DocumentRequest<T: VectorType> {
         vector: Vec<T>,
         #[serde(default)]
         options: DocumentHybridOptions,
+        #[serde(default)]
+        pelorus: bool,
     },
 }
 
@@ -48,18 +52,26 @@ impl<T: VectorType> DocumentRequest<T> {
         match self {
             Self::Search { .. } => None,
             Self::SearchVector {
-                vector, options, ..
+                vector,
+                options,
+                pelorus,
+                ..
             } => Some(Recall {
                 vector,
                 options,
                 text_weight: None,
+                pelorus: *pelorus,
             }),
             Self::SearchHybrid {
-                vector, options, ..
+                vector,
+                options,
+                pelorus,
+                ..
             } => Some(Recall {
                 vector,
                 options: &options.vector,
                 text_weight: Some(options.text_weight),
+                pelorus: *pelorus,
             }),
         }
     }
@@ -92,8 +104,17 @@ impl<T: VectorType> DocumentRequest<T> {
         }
     }
     pub(crate) fn compressed(&self) -> bool {
-        self.vector_options()
-            .is_some_and(|options| options.rerank == DocumentVectorRerank::Compressed)
+        !self.pelorus()
+            && self
+                .vector_options()
+                .is_some_and(|options| options.rerank == DocumentVectorRerank::Compressed)
+    }
+
+    pub(crate) fn pelorus(&self) -> bool {
+        match self {
+            Self::SearchVector { pelorus, .. } | Self::SearchHybrid { pelorus, .. } => *pelorus,
+            Self::Search { .. } => false,
+        }
     }
 }
 

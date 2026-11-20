@@ -446,7 +446,11 @@ impl PayloadStore {
     }
 
     pub(crate) fn try_get_value(&self, id: NodeId) -> Result<Option<Arc<serde_json::Value>>> {
-        crate::request::record_payload_lookup();
+        crate::request::record_payload_lookup()?;
+        let raw = self.raw(id);
+        if let Some(raw) = raw {
+            crate::request::record_payload_parse(raw.len() as u64)?;
+        }
         {
             let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
             cache.lookups = cache.lookups.saturating_add(1);
@@ -457,7 +461,7 @@ impl PayloadStore {
             }
             cache.misses = cache.misses.saturating_add(1);
         }
-        let Some(raw) = self.raw(id) else {
+        let Some(raw) = raw else {
             return Ok(None);
         };
         let value = Arc::new(serde_json::from_slice(raw).map_err(|error| {
@@ -465,7 +469,6 @@ impl PayloadStore {
                 "Payload JSON 解码失败 (Payload JSON decoding failed): id={id}, {error}"
             ))
         })?);
-        crate::request::record_payload_parse(raw.len() as u64);
         {
             let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
             cache.parsed_bytes = cache.parsed_bytes.saturating_add(raw.len() as u64);

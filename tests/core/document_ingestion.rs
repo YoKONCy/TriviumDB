@@ -1107,3 +1107,91 @@ fn 单次接入块ID冲突重试不写WAL且保留已有节点() {
     assert!(!reopened.contains(10).unwrap());
     reopened.close().unwrap();
 }
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn 上传记录提交后取消响应保留回执与重开序号() {
+    use triviumdb::sdk::RequestContext;
+    use triviumdb::test_hooks::{ConcurrencyPoint, pause_at_path};
+    let dir = TestDir::new("upload_receipt");
+    let path = dir.file("data.tdb");
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut db = Database::<f32>::open(&path, 2).unwrap();
+    for (operation, next) in [
+        (begin(&id, "17", "abc", Value::Null), 0),
+        (
+            json!({"operation":"append_upload","upload_id":id,"batch":{"sequence":0,"content":"abc"}}),
+            1,
+        ),
+    ] {
+        let gate = pause_at_path(
+            ConcurrencyPoint::DocumentRecordCommitted,
+            std::fs::canonicalize(&path).unwrap().to_str().unwrap(),
+        );
+        let control = RequestContext::new("upload", Default::default(), false).unwrap();
+        let request_control = control.clone();
+        let worker = std::thread::spawn(move || {
+            let result = request_control
+                .run(|| triviumdb::sdk::documents::request(&mut db, &operation.to_string()));
+            (db, result)
+        });
+        gate.wait_until_arrived();
+        control.cancel();
+        gate.release();
+        let (mut writer, result) = worker.join().unwrap();
+        let err = result.unwrap_err().info();
+        assert_eq!(err.code, "TDB_QUERY_CANCELLED");
+        let info = err.write.unwrap();
+        assert_eq!(info.phase, triviumdb::error::WritePhase::Response);
+        assert_eq!(info.outcome, triviumdb::error::WriteOutcome::Committed);
+        writer.close().unwrap();
+        db = Database::<f32>::open(&path, 2).unwrap();
+        assert_eq!(db.document_upload_status(&id).unwrap().next_sequence, next);
+    }
+    let published = request(
+        &mut db,
+        json!({"operation":"publish_upload","upload_id":id}),
+    );
+    assert_eq!(published["content"], "abc");
+    db.close().unwrap();
+}
+
+#[test]
+fn 共享JSON入口服从实例配额且拒绝后立即可重试() {
+    let dir = TestDir::new("json_instance_admission");
+    let mut db = Database::<f32>::open_with_config(
+        &dir.file("db"),
+        Config {
+            dim: 1,
+            memory_limit: 1024 * 1024,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let padding = " ".repeat(40 * 1024);
+    for (entry, json) in [
+        ("document", r#"{"operation":"list_uploads"}"#),
+        ("quiver", r#"{"operation":"stats"}"#),
+        ("pelorus", r#"{"operation":"search_batch","vectors":[]}"#),
+    ] {
+        let mut call = |input: &str| match entry {
+            "document" => triviumdb::sdk::documents::request(&mut db, input),
+            "quiver" => triviumdb::sdk::quiver::request(&db, input),
+            _ => triviumdb::sdk::pelorus::request(&db, input),
+        };
+        let err = call(&format!("{padding}{json}")).unwrap_err();
+        assert!(matches!(
+            err.underlying(),
+            triviumdb::TriviumError::CapacityReservationRejected { .. }
+        ));
+        let answer: Value = serde_json::from_str(&call(json).unwrap()).unwrap();
+        assert_eq!(
+            answer,
+            match entry {
+                "document" => json!([]),
+                "quiver" => Value::Null,
+                _ => json!({"results":[]}),
+            }
+        );
+    }
+}

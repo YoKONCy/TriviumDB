@@ -153,7 +153,7 @@ pub(crate) fn collect_query_parameters(query: &TqlQuery, output: &mut BTreeSet<S
     if let Some(scope) = &query.graph_scope {
         collect_json_parameters(scope, output);
     }
-    if let QueryEntry::Documents { request } = &query.entry {
+    if let QueryEntry::Documents { request } | QueryEntry::Pelorus { request } = &query.entry {
         collect_json_parameters(request, output);
     }
     if let QueryEntry::Search {
@@ -235,7 +235,7 @@ fn bind_query(
     if let Some(scope) = &mut query.graph_scope {
         bind_json(scope, values)?;
     }
-    if let QueryEntry::Documents { request } = &mut query.entry {
+    if let QueryEntry::Documents { request } | QueryEntry::Pelorus { request } = &mut query.entry {
         bind_json(request, values)?;
     }
     if let QueryEntry::Search {

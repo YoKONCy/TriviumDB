@@ -230,6 +230,7 @@ pub async fn build_app_with_shutdown(
         .route("/v1/indexes", get(list_indexes).post(create_index))
         .route("/v1/indexes/delete", delete(drop_index))
         .route("/v1/indexes/quiver", get(quiver_status).post(build_quiver))
+        .route("/v1/indexes/pelorus", post(build_pelorus))
         .route("/v1/lookup/equality", post(indexed_lookup))
         .route("/v1/lookup/substring", post(substring_lookup))
         .route("/v1/import/nodes", post(import_nodes))
@@ -482,7 +483,7 @@ async fn list_indexes(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(
-        serde_json::json!({ "indexes": state.engine.index_info()? }),
+        serde_json::json!({ "indexes": state.engine.index_info(Instant::now() + state.request_timeout).await? }),
     ))
 }
 
@@ -529,6 +530,21 @@ async fn build_quiver(
         .build_quiver(Instant::now() + state.request_timeout)
         .await?;
     Ok(Json(serde_json::json!({ "published": published })))
+}
+
+async fn build_pelorus(
+    State(state): State<Arc<AppState>>,
+    request: Result<Json<triviumdb::index::pelorus::PelorusConfig>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(config) = decode_json(request)?;
+    let version = state
+        .engine
+        .build_pelorus(config, Instant::now() + state.request_timeout)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "status": "published",
+        "generation": version.global_etag(),
+    })))
 }
 
 const MAX_IMPORT_RECORDS: usize = 10_000;
@@ -872,7 +888,7 @@ fn encode_bounded_json(
 
 #[cfg(test)]
 #[test]
-fn JSON编码达到字节上限后停止遍历结果() {
+fn json_encoding_stops_at_byte_limit() {
     use serde::ser::{Serialize, SerializeSeq, Serializer};
     use std::cell::Cell;
 

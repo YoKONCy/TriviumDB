@@ -101,6 +101,10 @@ pub fn fingerprint<T: VectorType + serde::Serialize + serde::de::DeserializeOwne
     seal("documents", &mut hash);
     hash.write_all(&mt.editing.checkpoint()?)?;
     seal("receipts", &mut hash);
+    if let Some(pelorus) = &mt.pelorus {
+        record(&mut hash, &pelorus.config.curvature)?;
+        seal("pelorus_curvature", &mut hash);
+    }
     record(&mut hash, &components)?;
     Ok(FactFingerprint {
         protocol: 1,

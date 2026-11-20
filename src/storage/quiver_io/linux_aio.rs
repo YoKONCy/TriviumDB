@@ -1,4 +1,5 @@
 //! Linux内核AIO。每个工作线程独占上下文，异常路径通过io_destroy同步排空。
+use super::{IoCounters, IoMeter};
 use std::io;
 
 #[repr(C)]
@@ -49,6 +50,8 @@ impl NativeAio {
         offset: u64,
         buffer: *mut u8,
         bytes: usize,
+        counters: &IoCounters,
+        meter: Option<&IoMeter>,
     ) -> io::Result<usize> {
         if self.context == 0 {
             return Err(io::Error::other("AIO上下文已关闭 (AIO context closed)"));
@@ -64,6 +67,7 @@ impl NativeAio {
             ..Default::default()
         };
         let mut pointer = &mut control as *mut ControlBlock;
+        counters.record_call(meter);
         // SAFETY: 单个完整内核ABI控制块，操作码0表示PREAD，指针数组和对齐缓冲在完成前保持有效。
         let submitted = unsafe {
             libc::syscall(

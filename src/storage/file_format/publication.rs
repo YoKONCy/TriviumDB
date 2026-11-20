@@ -239,6 +239,7 @@ pub(super) fn commit_rom(path: &str) -> Result<()> {
     drop(output);
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::io_result(crate::test_hooks::IoPoint::PublicationCommitRename)?;
+    crate::request::check_current()?;
     robust_rename_and_sync(Path::new(&temporary), Path::new(&target))?;
     Ok(())
 }
@@ -355,6 +356,15 @@ pub(crate) fn recover<T: VectorType>(path: &str, writable: bool) -> Result<bool>
         }
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::AfterPublicationRestore);
+    }
+    if !state.rom {
+        // 提交标记仍指向上一代，日志中这一代的 Payload 属于尚未发布的候选。
+        let payload = payload_path_for_generation(path, generation);
+        match std::fs::remove_file(&payload) {
+            Ok(()) => sync_parent_directory(Path::new(&payload))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     cleanup(path)?;
     Ok(true)

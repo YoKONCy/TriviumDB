@@ -656,115 +656,7 @@ pub(crate) fn subset_betweenness_view<T: VectorType>(
     sample_size: Option<usize>,
     max_examined_edges: usize,
 ) -> Result<SubsetBetweennessResult> {
-    let control = crate::request::control().unwrap_or_default();
-    crate::graph::budget::check_control(&control)?;
-    let ids = nodes.iter().copied().collect::<Vec<_>>();
-    let source_count = sample_size.unwrap_or(ids.len()).min(ids.len());
-    if sample_size == Some(0) {
-        return Err(TriviumError::QueryExecution(
-            "中介中心性采样数必须大于 0 (Betweenness sample size must be positive)".into(),
-        ));
-    }
-    let mut adjacency = BTreeMap::<NodeId, Vec<NodeId>>::new();
-    let mut scanned_edges = 0usize;
-    for &source in &ids {
-        crate::graph::budget::check_control(&control)?;
-        let mut targets = BTreeSet::new();
-        for edge in mt.get_edges(source).unwrap_or_default() {
-            crate::graph::budget::check_control(&control)?;
-            scanned_edges = scanned_edges.saturating_add(1);
-            if nodes.contains(&edge.target_id)
-                && label_filter.is_none_or(|label| edge.label == label)
-            {
-                targets.insert(edge.target_id);
-            }
-        }
-        adjacency.insert(source, targets.into_iter().collect());
-    }
-    let mut examined = scanned_edges;
-    if examined > max_examined_edges {
-        return Err(TriviumError::QueryExecution(
-            "中介中心性超过边访问预算 (Betweenness exceeds edge examination budget)".into(),
-        ));
-    }
-    let mut centrality = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
-    for &source in ids.iter().take(source_count) {
-        crate::graph::budget::check_control(&control)?;
-        let mut stack = Vec::new();
-        let mut predecessors = BTreeMap::<NodeId, Vec<NodeId>>::new();
-        let mut sigma = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
-        let mut distance = BTreeMap::from_iter(ids.iter().map(|&id| (id, -1isize)));
-        sigma.insert(source, 1.0);
-        distance.insert(source, 0);
-        let mut queue = VecDeque::from([source]);
-        while let Some(current) = queue.pop_front() {
-            crate::graph::budget::check_control(&control)?;
-            stack.push(current);
-            for &target in &adjacency[&current] {
-                crate::graph::budget::check_control(&control)?;
-                examined = examined.saturating_add(1);
-                if examined > max_examined_edges {
-                    return Err(TriviumError::QueryExecution(
-                        "中介中心性超过边访问预算 (Betweenness exceeds edge examination budget)"
-                            .into(),
-                    ));
-                }
-                if distance[&target] < 0 {
-                    distance.insert(target, distance[&current] + 1);
-                    queue.push_back(target);
-                }
-                if distance[&target] == distance[&current] + 1 {
-                    sigma.insert(target, sigma[&target] + sigma[&current]);
-                    predecessors.entry(target).or_default().push(current);
-                }
-            }
-        }
-        let mut delta = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
-        while let Some(target) = stack.pop() {
-            crate::graph::budget::check_control(&control)?;
-            if sigma[&target] > 0.0 {
-                for &predecessor in predecessors.get(&target).unwrap_or(&Vec::new()) {
-                    crate::graph::budget::check_control(&control)?;
-                    let contribution =
-                        sigma[&predecessor] / sigma[&target] * (1.0 + delta[&target]);
-                    *delta.get_mut(&predecessor).expect("前驱属于子图") += contribution;
-                }
-            }
-            if target != source {
-                *centrality.get_mut(&target).expect("目标属于子图") += delta[&target];
-            }
-        }
-    }
-    let n = ids.len();
-    let normalization = n.saturating_sub(1).saturating_mul(n.saturating_sub(2)) as f64;
-    let sample_scale = if source_count > 0 {
-        n as f64 / source_count as f64
-    } else {
-        1.0
-    };
-    let mut scores = centrality
-        .into_iter()
-        .map(|(id, value)| {
-            let normalized = if normalization > 0.0 {
-                value / normalization
-            } else {
-                0.0
-            };
-            (id, normalized * sample_scale)
-        })
-        .collect::<Vec<_>>();
-    scores.sort_by(|left, right| {
-        right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    Ok(SubsetBetweennessResult {
-        scores,
-        sampled_sources: source_count,
-        exact: source_count == n,
-        examined_edges: examined,
-    })
+    betweenness(mt, nodes, label_filter, sample_size, max_examined_edges, 1)
 }
 
 pub fn subset_betweenness_parallel<T: VectorType>(
@@ -784,121 +676,123 @@ pub(crate) fn subset_betweenness_parallel_view<T: VectorType>(
     sample_size: Option<usize>,
     max_examined_edges: usize,
 ) -> Result<SubsetBetweennessResult> {
+    betweenness(
+        mt,
+        nodes,
+        label_filter,
+        sample_size,
+        max_examined_edges,
+        rayon::current_num_threads(),
+    )
+}
+
+fn betweenness<T: VectorType>(
+    mt: &impl GraphRead<T>,
+    nodes: &BTreeSet<NodeId>,
+    label_filter: Option<&str>,
+    sample_size: Option<usize>,
+    max_examined_edges: usize,
+    workers: usize,
+) -> Result<SubsetBetweennessResult> {
+    use super::centrality::{brandes_source, normalize};
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let control = crate::request::control().unwrap_or_default();
     crate::graph::budget::check_control(&control)?;
-    use rayon::prelude::*;
-    let ids = nodes.iter().copied().collect::<Vec<_>>();
-    let source_count = sample_size.unwrap_or(ids.len()).min(ids.len());
     if sample_size == Some(0) {
         return Err(TriviumError::QueryExecution(
             "中介中心性采样数必须大于 0 (Betweenness sample size must be positive)".into(),
         ));
     }
-    let scanned = ids
-        .par_iter()
-        .map(|&source| {
-            crate::graph::budget::check_control(&control)?;
-            let edges = mt.get_edges(source).unwrap_or_default();
-            let mut targets = edges
-                .iter()
-                .filter_map(|edge| {
-                    (nodes.contains(&edge.target_id)
-                        && label_filter.is_none_or(|label| edge.label == label))
-                    .then_some(edge.target_id)
-                })
-                .collect::<Vec<_>>();
-            targets.sort_unstable();
-            targets.dedup();
-            Ok((source, targets, edges.len()))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let adjacency = scanned
-        .iter()
-        .map(|(id, targets, _)| (*id, targets.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let scanned_edges = scanned.iter().map(|(_, _, n)| *n).sum::<usize>();
-    let per_source_edges = adjacency.values().map(Vec::len).sum::<usize>();
-    let examined = scanned_edges.saturating_add(per_source_edges.saturating_mul(source_count));
-    if examined > max_examined_edges {
-        return Err(TriviumError::QueryExecution(
-            "中介中心性超过边访问预算 (Betweenness exceeds edge examination budget)".into(),
-        ));
-    }
-    let partials = ids[..source_count]
-        .par_iter()
-        .map(|&source| {
-            let mut stack = Vec::new();
-            let mut predecessors = BTreeMap::<NodeId, Vec<NodeId>>::new();
-            let mut sigma = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
-            let mut distance = BTreeMap::from_iter(ids.iter().map(|&id| (id, -1isize)));
-            sigma.insert(source, 1.0);
-            distance.insert(source, 0);
-            let mut queue = VecDeque::from([source]);
-            while let Some(current) = queue.pop_front() {
-                crate::graph::budget::check_control(&control)?;
-                stack.push(current);
-                for &target in &adjacency[&current] {
-                    crate::graph::budget::check_control(&control)?;
-                    if distance[&target] < 0 {
-                        distance.insert(target, distance[&current] + 1);
-                        queue.push_back(target);
-                    }
-                    if distance[&target] == distance[&current] + 1 {
-                        sigma.insert(target, sigma[&target] + sigma[&current]);
-                        predecessors.entry(target).or_default().push(current);
-                    }
-                }
-            }
-            let mut delta = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
-            while let Some(target) = stack.pop() {
-                crate::graph::budget::check_control(&control)?;
-                if sigma[&target] > 0.0 {
-                    for &predecessor in predecessors.get(&target).map(Vec::as_slice).unwrap_or(&[])
-                    {
-                        let contribution =
-                            sigma[&predecessor] / sigma[&target] * (1.0 + delta[&target]);
-                        *delta.get_mut(&predecessor).expect("前驱属于子图") += contribution;
-                    }
-                }
-            }
-            delta.insert(source, 0.0);
-            Ok(delta)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut centrality = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0f64)));
-    for partial in partials {
+    let examined = AtomicUsize::new(0);
+    let admit = |edges| {
         crate::graph::budget::check_control(&control)?;
-        for (&id, &value) in &partial {
+        if edges > 0 {
+            examined
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    used.checked_add(edges)
+                        .filter(|&total| total <= max_examined_edges)
+                })
+                .map_err(|_| {
+                    TriviumError::QueryExecution(
+                        "中介中心性超过边访问预算 (Betweenness exceeds edge examination budget)"
+                            .into(),
+                    )
+                })?;
+        }
+        Ok(())
+    };
+    let sampled = sample_size.unwrap_or(nodes.len()).min(nodes.len());
+    let mut workers = workers.min(sampled).max(1);
+    let mut edge_count = 0usize;
+    for &id in nodes {
+        let count = mt.get_edges(id).map_or(0, <[_]>::len);
+        admit(count)?;
+        edge_count = edge_count.saturating_add(count);
+    }
+    let base = nodes
+        .len()
+        .saturating_mul(192)
+        .saturating_add(edge_count.saturating_mul(16));
+    let per_worker = nodes
+        .len()
+        .saturating_mul(256)
+        .saturating_add(edge_count.saturating_mul(16));
+    // 预算紧张时减少同时保留的源工作区；单源仍不足时返回原始额度错误。
+    let _workspace = loop {
+        let peak = base.saturating_add(per_worker.saturating_mul(workers));
+        match mt.facts().reserve_graph_workspace(peak) {
+            Ok(lease) => break lease,
+            Err(
+                TriviumError::CapacityReservationRejected { .. }
+                | TriviumError::ResourceBudgetExceeded { .. },
+            ) if workers > 1 => workers = workers.div_ceil(2),
+            Err(error) => return Err(error),
+        }
+    };
+    let mut adjacency = HashMap::new();
+    for &id in nodes {
+        let edges = mt.get_edges(id).unwrap_or_default();
+        let mut targets = Vec::new();
+        for edge in edges {
             crate::graph::budget::check_control(&control)?;
-            *centrality.get_mut(&id).expect("节点属于子图") += value;
+            if nodes.contains(&edge.target_id)
+                && label_filter.is_none_or(|label| edge.label == label)
+            {
+                targets.push(edge.target_id);
+            }
+        }
+        targets.sort_unstable();
+        targets.dedup();
+        adjacency.insert(id, targets);
+    }
+    let ids = nodes.iter().copied().collect::<Vec<_>>();
+    let n = ids.len();
+    let mut centrality = BTreeMap::from_iter(ids.iter().map(|&id| (id, 0.0)));
+    // 每个线程只保留一个源的可达子图，按固定源顺序归并后再处理下一批。
+    for sources in ids[..sampled].chunks(workers.max(1)) {
+        let single = |&source: &NodeId| brandes_source(&adjacency, source, admit);
+        let partials = if sources.len() == 1 {
+            vec![single(&sources[0])?]
+        } else {
+            sources.par_iter().map(single).collect::<Result<Vec<_>>>()?
+        };
+        for partial in partials {
+            for (id, value) in partial {
+                *centrality.entry(id).or_default() += value;
+            }
         }
     }
-    let n = ids.len();
-    let normalization = n.saturating_sub(1).saturating_mul(n.saturating_sub(2)) as f64;
-    let sample_scale = if source_count > 0 {
-        n as f64 / source_count as f64
-    } else {
-        1.0
-    };
     let mut scores = centrality
         .into_iter()
-        .map(|(id, value)| {
-            (
-                id,
-                if normalization > 0.0 {
-                    value / normalization * sample_scale
-                } else {
-                    0.0
-                },
-            )
-        })
+        .map(|(id, value)| (id, normalize(value, n, sampled)))
         .collect::<Vec<_>>();
-    scores.par_sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    scores.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     Ok(SubsetBetweennessResult {
         scores,
-        sampled_sources: source_count,
-        exact: source_count == n,
-        examined_edges: examined,
+        sampled_sources: sampled,
+        exact: sampled == n,
+        examined_edges: examined.into_inner(),
     })
 }
 

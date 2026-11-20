@@ -511,14 +511,18 @@ fn COV2_19_tql_return_fields() {
     let path = tmp_db("tql_fields");
     let db = seed_social_graph(&path);
 
-    let results = db
-        .tql_nodes(r#"FIND {type: "user"} RETURN name, age"#)
-        .unwrap();
-    for row in &results {
-        for node in row.values() {
-            assert!(node.payload.get("name").is_some(), "应包含 name 字段");
-            assert!(node.payload.get("age").is_some(), "应包含 age 字段");
-        }
+    use triviumdb::query::tql_executor::TqlValue;
+    for projection in ["name, age", "age, name"] {
+        let rows = db.tql(&format!(
+            "FIND {{name:'user_0'}} RETURN {projection}, _.id AS id, missing AS absent, age + 1 AS next"
+        )).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert!(matches!(&row["name"], TqlValue::String(v) if v == "user_0"));
+        assert!(matches!(row["age"], TqlValue::Int(20)));
+        assert!(matches!(row["id"], TqlValue::Int(1) | TqlValue::UInt(1)));
+        assert!(matches!(row["absent"], TqlValue::Null));
+        assert!(matches!(row["next"], TqlValue::Int(21)));
     }
 
     cleanup(&path);

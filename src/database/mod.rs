@@ -15,6 +15,7 @@ pub(crate) mod document_query;
 mod documents;
 pub(crate) mod editing;
 mod named_graphs;
+mod pelorus;
 pub(crate) mod quiver_runtime;
 pub use crate::sdk::facade;
 /// 离线工具使用的内核检查边界；应用侧 SDK 支持范围见正式接口清单。
@@ -645,6 +646,7 @@ pub struct Database<T: VectorType> {
     /// 生命周期和已进入操作计数；Closing 阻止新操作并等待现有操作退出。
     lifecycle: Arc<(Mutex<LifecycleState>, Condvar)>,
     access_mode: AccessMode,
+    missing_index_policy: MissingIndexPolicy,
 }
 
 pub(crate) struct SearchHandle<T: VectorType> {
@@ -997,9 +999,6 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         if config.access_mode == AccessMode::Immutable {
             crate::storage::snapshot::validate_manifest(path, std::any::type_name::<T>(), dim)?;
         }
-        if !std::path::Path::new(path).exists() && Wal::needs_recovery(path) {
-            return Err(TriviumError::CorruptedFile("缺少带类型的基础检查点，请用原版本恢复并导出 (Typed checkpoint missing; recover and export with the original version)".into()));
-        }
         let mut memtable = if std::path::Path::new(path).exists() {
             file_format::load_with_memory_limit(
                 path,
@@ -1021,6 +1020,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             });
         }
         memtable.set_text_memory_limit(config.memory_limit);
+        memtable.pelorus_policy = config.missing_index_policy;
         // 恢复必须从第一条记录开始使用调用方预算，避免先填充默认解析缓存再淘汰。
         memtable.begin_loading(config.memory_limit);
         memtable.attach_resources(runtime.clone(), reservation);
@@ -1034,21 +1034,43 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         if Wal::needs_recovery(path) {
             memtable.document_publications.begin_replay();
             let text_token = file_format::text_checkpoint_token(path)?;
-            if text_token.is_none() {
+            if let (Some(main), Some(text)) = (memtable.checkpoint_token, text_token)
+                && main != text
+            {
+                return Err(TriviumError::CorruptedFile(
+                    "文本与主检查点封条失配 (Text and main checkpoint seals differ)".into(),
+                ));
+            }
+            let checkpoint_token = memtable.checkpoint_token.or(text_token);
+            if checkpoint_token.is_none() {
                 // 历史索引在应用删除前完成校验，保留节点复用的歧义检测证据。
                 memtable.prepare_text_index()?;
             }
-            memtable.begin_text_replay(text_token);
+            memtable.begin_text_replay(checkpoint_token);
+            // 新检查点的封条覆盖此前全部事实。只将封条之后的已提交操作应用到当前代。
+            let mut base_seen = !checkpoint_token
+                .as_ref()
+                .is_some_and(crate::storage::wal::is_main_checkpoint);
             let mut entry_count = 0usize;
             let restored_bytes = std::cell::Cell::new(memtable.estimated_memory_bytes());
-            let valid_offset =
-                Wal::replay_for_open::<T>(path, config.memory_limit, &restored_bytes, |entry| {
+            let valid_offset = Wal::replay_for_open::<T>(
+                path,
+                config.memory_limit,
+                &restored_bytes,
+                |entry| {
+                    if !base_seen {
+                        base_seen = matches!(&entry, WalEntry::Checkpoint { token } if Some(*token) == checkpoint_token);
+                        if !base_seen {
+                            return Ok(());
+                        }
+                    }
                     transaction::replay_entry(&mut memtable, entry)?;
                     memtable.check_load_allocation(0)?;
                     restored_bytes.set(memtable.estimated_memory_bytes());
                     entry_count = entry_count.saturating_add(1);
                     Ok(())
-                })?;
+                },
+            )?;
 
             // 回放按完整提交后的事实重建唯一所有者，验证通过后再修改 WAL。
             for record in memtable.named_graphs.graphs.values() {
@@ -1121,17 +1143,24 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         }
 
         let mut wal = match config.access_mode {
-            AccessMode::ReadWrite => Wal::open_with_sync(path, config.sync_mode)?,
+            AccessMode::ReadWrite => {
+                Wal::open_bound(path, config.sync_mode, memtable.checkpoint_token)?
+            }
             AccessMode::ReadOnly | AccessMode::Immutable => Wal::disabled(path, config.sync_mode),
         };
         if config.access_mode == AccessMode::ReadWrite {
-            if memtable.text_checkpoint_token.is_none()
+            if memtable.checkpoint_token.is_none()
                 && file_format::deferred_text_metadata(path)
                     .is_some_and(|metadata| metadata.checkpoint_token.is_some())
             {
-                memtable.text_checkpoint_token = file_format::text_checkpoint_token(path)?;
+                memtable.checkpoint_token = file_format::text_checkpoint_token(path)?;
             }
-            wal.ensure_checkpoint_base(memtable.text_checkpoint_token)?;
+            wal.ensure_checkpoint_base(memtable.checkpoint_token)?;
+        } else {
+            Wal::validate_clean_base(
+                std::path::Path::new(&format!("{path}.wal")),
+                memtable.checkpoint_token,
+            )?;
         }
         let recovery_required = memtable.recovery_latch();
         Ok(Self {
@@ -1170,6 +1199,7 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 Condvar::new(),
             )),
             access_mode: config.access_mode,
+            missing_index_policy: config.missing_index_policy,
         })
     }
 
@@ -1672,6 +1702,13 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         self.read_operation(|| read_or_recover(&self.memtable).next_id_value())
     }
 
+    pub(crate) fn reserve_request_workspace(
+        &self,
+        bytes: usize,
+    ) -> Result<crate::resources::RequestWorkspace> {
+        read_or_recover(&self.memtable).reserve_request_workspace(self.memory_limit, bytes)
+    }
+
     pub(crate) fn ensure_incremental_memory_budget(&self, additional_bytes: usize) -> Result<()> {
         if self.memory_limit == 0 {
             return Ok(());
@@ -1794,20 +1831,14 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                 write.phase = WritePhase::Validation;
                 #[cfg(feature = "test-hooks")]
                 crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeCompactionSave);
-                mt.text_checkpoint_token =
-                    w.seal_checkpoint(mt.text_index_is_deferred() || !mt.text_index().is_empty())?;
-                file_format::save_with_write_info(
+                file_format::checkpoint_with_write_info(
                     &mut mt,
+                    &mut w,
                     &self.db_path,
                     self.storage_mode,
+                    false,
                     write,
                 )?;
-                #[cfg(feature = "test-hooks")]
-                crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeWalClear);
-                #[cfg(feature = "test-hooks")]
-                crate::test_hooks::io_result(crate::test_hooks::IoPoint::CheckpointWalClear)?;
-                w.clear()?;
-                mt.mark_checkpoint_clean();
                 mt.advise_cold_vectors_dontneed();
             }
 
@@ -2047,14 +2078,15 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
         label: Option<&str>,
     ) -> Result<Option<Vec<NodeId>>> {
         self.read_operation(|| {
-            crate::graph::pathfinding::shortest_path(
-                &read_or_recover(&self.memtable),
+            crate::graph::pathfinding::shortest_path_checked(
+                &*read_or_recover(&self.memtable),
                 source,
                 target,
                 max_depth,
                 label,
+                crate::request::check_current,
             )
-        })
+        })?
     }
 
     pub fn shortest_path_bidirectional(
@@ -2503,11 +2535,25 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             compute_centroids: with_centroids.unwrap_or(true),
         };
 
-        // Step 1: 快照邻接表 (短暂持锁)
-        let (snapshot, dim) = {
+        // 拓扑与向量从同一读视图采样，工作区持有到质心结果完成。
+        let (snapshot, vectors, dim, _workspace) = {
             let mt = read_or_recover(&self.memtable);
+            let nodes = mt.node_count();
+            let vector_bytes = if config.compute_centroids {
+                nodes
+                    .saturating_mul(mt.dim())
+                    .saturating_mul(2 * std::mem::size_of::<f32>())
+            } else {
+                0
+            };
+            let bytes = nodes
+                .saturating_mul(384)
+                .saturating_add(mt.edge_count().saturating_mul(192))
+                .saturating_add(vector_bytes);
+            let workspace = mt.reserve_request_workspace(self.memory_limit, bytes)?;
             let node_ids = mt.all_node_ids();
             let mut edges = std::collections::HashMap::new();
+            let mut vectors = std::collections::HashMap::new();
             for &id in &node_ids {
                 crate::request::check_current()?;
                 if let Some(e) = mt.get_edges(id) {
@@ -2516,14 +2562,19 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
                         e.iter().map(|edge| (edge.target_id, edge.weight)).collect(),
                     );
                 }
+                if config.compute_centroids
+                    && let Some(vector) = mt.get_vector(id)
+                {
+                    vectors.insert(id, vector.iter().map(|x| x.to_f32()).collect());
+                }
             }
             (
                 crate::graph::leiden::AdjacencySnapshot { edges, node_ids },
+                vectors,
                 mt.dim(),
+                workspace,
             )
         };
-
-        // Step 2: 纯计算聚类 (无锁)
         let control = crate::request::control().unwrap_or_default();
         let mut result = self
             .resource_runtime
@@ -2531,21 +2582,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             .install(|| {
                 crate::graph::leiden::run_leiden_controlled(&snapshot, &config, &control)
             })?;
-
-        // Step 3: 可选质心计算
-        if config.compute_centroids && !result.node_to_cluster.is_empty() {
-            let vectors = {
-                let mt = read_or_recover(&self.memtable);
-                let mut vecs = std::collections::HashMap::new();
-                for &node_id in result.node_to_cluster.keys() {
-                    control.check()?;
-                    if let Some(v) = mt.get_vector(node_id) {
-                        vecs.insert(node_id, v.iter().map(|x| x.to_f32()).collect::<Vec<f32>>());
-                    }
-                }
-                vecs
-            };
-            crate::graph::leiden::compute_centroids(&mut result, &vectors, dim);
+        if config.compute_centroids {
+            crate::graph::leiden::compute_centroids_checked(&mut result, &vectors, dim, &|| {
+                control.check()
+            })?;
         }
         control.check()?;
         Ok(result)
@@ -3803,6 +3843,10 @@ impl<T: VectorType + serde::Serialize + serde::de::DeserializeOwned> Database<T>
             wal.ensure_writable()?;
             write.phase = WritePhase::Validation;
             crate::storage::snapshot::validate_generation_id(generation_id)?;
+            crate::storage::artifacts::validate_destination(
+                std::path::Path::new(&self.db_path),
+                std::path::Path::new(destination),
+            )?;
             file_format::checkpoint(&mut mt, &mut wal, &self.db_path, self.storage_mode, false)?;
             crate::storage::snapshot::copy_database_snapshot(
                 &self.db_path,

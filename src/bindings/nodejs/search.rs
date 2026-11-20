@@ -10,6 +10,7 @@ use super::options::{parse_payload_filter, parse_search_config};
 use super::types::{
     JsGroupedSearchResult, JsHookContext, JsSearchHit, JsSearchWithContextResult, search_hit_to_js,
 };
+use crate::VectorType;
 use napi::bindgen_prelude::Either;
 use napi::{Env, JsUnknown};
 use napi_derive::napi;
@@ -45,7 +46,7 @@ impl TriviumDB {
             DbBackend::F16(db) => {
                 let v: Vec<half::f16> = query_vector
                     .iter()
-                    .map(|&x| half::f16::from_f64(x))
+                    .map(|&x| half::f16::from_f64_component(x))
                     .collect();
                 db.search_hybrid_with_context(q_text, Some(&v), &core_config)
             }
@@ -116,7 +117,7 @@ impl TriviumDB {
             DbBackend::F16(db) => {
                 let query: Vec<half::f16> = query_vector
                     .iter()
-                    .map(|value| half::f16::from_f64(*value))
+                    .map(|value| half::f16::from_f64_component(*value))
                     .collect();
                 db.search_graph_first(&query, &anchors, top_k, max_anchor_nodes)
             }
@@ -148,7 +149,7 @@ impl TriviumDB {
             DbBackend::F16(db) => {
                 let query: Vec<half::f16> = query_vector
                     .iter()
-                    .map(|value| half::f16::from_f64(*value))
+                    .map(|value| half::f16::from_f64_component(*value))
                     .collect();
                 db.search_exact(&query, top_k)
             }
@@ -206,7 +207,7 @@ impl TriviumDB {
             DbBackend::F16(db) => {
                 let v: Vec<half::f16> = query_vector
                     .iter()
-                    .map(|&x| half::f16::from_f64(x))
+                    .map(|&x| half::f16::from_f64_component(x))
                     .collect();
                 db.search_hybrid(None, Some(&v), &search_config)
             }
@@ -255,7 +256,7 @@ impl TriviumDB {
             DbBackend::F16(db) => {
                 let vector: Vec<half::f16> = query_vector
                     .iter()
-                    .map(|&value| half::f16::from_f64(value))
+                    .map(|&value| half::f16::from_f64_component(value))
                     .collect();
                 db.search_hybrid_grouped(None, Some(&vector), &config)
             }
@@ -300,7 +301,7 @@ impl TriviumDB {
             DbBackend::F16(db) => {
                 let v: Vec<half::f16> = query_vector
                     .iter()
-                    .map(|&x| half::f16::from_f64(x))
+                    .map(|&x| half::f16::from_f64_component(x))
                     .collect();
                 db.search_hybrid(q_text, Some(&v), &core_config)
             }
@@ -358,7 +359,7 @@ impl TriviumDB {
             DbBackend::F16(db) => {
                 let v: Vec<half::f16> = query_vector
                     .iter()
-                    .map(|&x| half::f16::from_f64(x))
+                    .map(|&x| half::f16::from_f64_component(x))
                     .collect();
                 db.search_hybrid_weighted(&query_text, &v, &core_config, alpha)
             }

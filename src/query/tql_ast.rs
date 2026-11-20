@@ -295,6 +295,8 @@ pub struct IterateStage {
 /// 查询入口类型
 #[derive(Debug, Clone)]
 pub enum QueryEntry {
+    /// 显式选择双曲度量和 Pelorus 来源。
+    Pelorus { request: TqlJson },
     /// 文档读取协议作为可组合来源，包含文本、向量和混合召回。
     Documents { request: TqlJson },
     /// MATCH (a)-[:r]->(b)

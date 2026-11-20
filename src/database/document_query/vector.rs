@@ -7,6 +7,7 @@ pub(crate) struct Recall<'a, T: VectorType> {
     pub vector: &'a [T],
     pub options: &'a DocumentVectorOptions,
     pub text_weight: Option<f32>,
+    pub pelorus: bool,
 }
 
 impl<T: VectorType> Recall<'_, T> {
@@ -46,7 +47,31 @@ impl<T: VectorType> Recall<'_, T> {
                 "向量分数阈值须为有限数值 (Vector score threshold must be finite)",
             ));
         }
-        if self.options.strategy == DocumentVectorStrategy::Ann
+        if self.pelorus {
+            let state = mt.pelorus.as_ref().ok_or_else(|| {
+                invalid(prefix, "文档双曲检索需要 Pelorus 配置 (Hyperbolic document search requires Pelorus configuration)")
+            })?;
+            crate::index::pelorus::boundary_factor(state.config.curvature, self.vector)
+                .map_err(|error| error.at_field("vector"))?;
+            if self.options.strategy == DocumentVectorStrategy::Ann && state.index.is_none() {
+                return Err(invalid(
+                    prefix,
+                    "文档双曲 ANN 需要已构建的索引 (Hyperbolic document ANN requires a built index)",
+                ));
+            }
+            if self.options.rerank == DocumentVectorRerank::Compressed
+                && (self.options.strategy == DocumentVectorStrategy::Exact
+                    || state.index.is_none()
+                    || state.config.rerank == Default::default())
+            {
+                return Err(invalid(
+                    prefix,
+                    "压缩双曲重排需要已构建的压缩 Pelorus 索引 (Compressed hyperbolic rerank requires a built compressed Pelorus index)",
+                ));
+            }
+        }
+        if !self.pelorus
+            && self.options.strategy == DocumentVectorStrategy::Ann
             && (crate::vector::is_binary_vector::<T>() || mt.quiver().is_none())
         {
             return Err(invalid(
@@ -54,7 +79,8 @@ impl<T: VectorType> Recall<'_, T> {
                 "ANN要求已就绪的浮点QuIVer索引 (ANN requires a ready floating-point QuIVer index)",
             ));
         }
-        if self.options.rerank == DocumentVectorRerank::Compressed
+        if !self.pelorus
+            && self.options.rerank == DocumentVectorRerank::Compressed
             && (self.options.strategy == DocumentVectorStrategy::Exact
                 || crate::vector::is_binary_vector::<T>()
                 || mt.quiver().is_none()
@@ -395,6 +421,11 @@ pub(super) fn recall<T: VectorType>(
     base: usize,
 ) -> Result<Output> {
     let use_ann = match recall.options.strategy {
+        DocumentVectorStrategy::Auto if recall.pelorus => work
+            .mt
+            .pelorus
+            .as_ref()
+            .is_some_and(|state| state.index.is_some()),
         DocumentVectorStrategy::Auto => {
             !crate::vector::is_binary_vector::<T>() && work.mt.quiver().is_some()
         }
@@ -413,7 +444,9 @@ pub(super) fn recall<T: VectorType>(
             },
             approximate: use_ann,
             rerank: recall.options.rerank,
-            compression: if recall.options.rerank == DocumentVectorRerank::Compressed {
+            compression: if !recall.pelorus
+                && recall.options.rerank == DocumentVectorRerank::Compressed
+            {
                 let stats = work
                     .mt
                     .quiver_ssd
@@ -439,7 +472,17 @@ pub(super) fn recall<T: VectorType>(
             stop: DocumentRecallStop::ExactComplete,
         },
     };
-    let dense = if use_ann {
+    let dense = if recall.pelorus {
+        recall_pelorus(
+            work.mt,
+            index,
+            query,
+            recall,
+            eligible,
+            use_ann,
+            &mut control,
+        )?
+    } else if use_ann {
         let (rows, state) = ann(work, index, query, recall, eligible, control, base)?;
         control = state;
         rows
@@ -495,4 +538,93 @@ pub(super) fn recall<T: VectorType>(
         components,
         info: control.info,
     })
+}
+
+fn recall_pelorus<T: VectorType>(
+    mt: &MemTable<T>,
+    index: &DocumentTextIndex,
+    query: &DocumentSearchQuery,
+    recall: &Recall<'_, T>,
+    eligible: &BTreeSet<NodeId>,
+    use_ann: bool,
+    control: &mut Control<'_>,
+) -> Result<Vec<(NodeId, f32)>> {
+    use crate::index::pelorus::{PelorusSearchOptions, SearchWork, search_bounded};
+    if eligible.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = if use_ann {
+        eligible.len().min(recall.options.candidate_limit)
+    } else {
+        eligible.len()
+    };
+    let target = query.max_documents.min(
+        eligible
+            .iter()
+            .map(|id| index.units[id].document_id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+    );
+    let mut width = if use_ann {
+        recall
+            .options
+            .initial_candidates
+            .max(query.max_documents.saturating_mul(query.hits_per_document))
+            .min(limit)
+    } else {
+        limit
+    };
+    let ledger = SearchWork::new(query.limits.max_ann_visits, query.limits.max_vector_scores);
+    loop {
+        let options = PelorusSearchOptions {
+            top_k: width,
+            ef_search: Some(recall.options.ef_search.max(width)),
+            exact: !use_ann,
+            ..Default::default()
+        };
+        let hits = search_bounded(
+            mt,
+            recall.vector,
+            &options,
+            false,
+            recall.options.rerank == DocumentVectorRerank::Compressed,
+            &ledger,
+            |id| Ok(eligible.contains(&id)),
+        )?;
+        let (visits, scored) = ledger.counts();
+        control.info.ann_visits = visits;
+        control.info.vector_scores = scored;
+        control.info.ann_rounds += usize::from(use_ann);
+        let mut output = BTreeMap::new();
+        for (id, distance) in hits {
+            let score = -distance as f32;
+            if !score.is_finite() {
+                return Err(TriviumError::QueryExecution(
+                    "Pelorus 文档分数超出 f32 有限范围 (Pelorus document score exceeds the finite f32 range)".into(),
+                ));
+            }
+            insert(&mut output, id, score, query, recall.options)?;
+        }
+        let groups = output
+            .keys()
+            .map(|id| index.units[id].document_id)
+            .collect::<BTreeSet<_>>()
+            .len();
+        let stop = if !use_ann {
+            Some(DocumentRecallStop::ExactComplete)
+        } else if groups >= target {
+            Some(DocumentRecallStop::GroupsSatisfied)
+        } else if width >= eligible.len() {
+            Some(DocumentRecallStop::IndexExhausted)
+        } else if width >= limit {
+            Some(DocumentRecallStop::CandidateLimit)
+        } else {
+            None
+        };
+        if let Some(stop) = stop {
+            control.info.stop = stop;
+            return Ok(ranked(output));
+        }
+        width = width.saturating_mul(2).min(limit);
+    }
 }

@@ -1,8 +1,10 @@
 # TriviumDB API 完整参考
 
-> 本文记录 `0.9.2` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本说明见 [0.9.2 变更](changes/0.9.2.md)，后续开发见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
+> 本文记录 `0.9.3-beta.1` 的 Rust、Python（PyO3）和 Node.js（napi-rs）公共 API。版本说明见 [0.9.3-beta.1 变更](changes/0.9.3-beta.1.md)，后续开发见[未发布变更](changes/unreleased.md)。许可为 Apache-2.0。
 
-开发版的应用支持范围见 [SDK 正式接口清单](sdk-contract.md)。历史数据库由[外部迁移入口](migration.md)转换到当前文件组；普通打开通过 `TDB_MIGRATION_REQUIRED` 提供结构化指引。
+应用支持范围见 [SDK 正式接口清单](sdk-contract.md)。历史数据库由[外部迁移入口](migration.md)转换到当前文件组。普通打开通过 `TDB_MIGRATION_REQUIRED` 提供结构化指引。
+
+普通 ANN 默认使用 QuIVer。固定曲率 Poincaré 球检索通过 Rust 的 `search_pelorus`、Python 的 `pelorus_request`、Node.js 的 `pelorusRequest` 或 TQL 的 `SEARCH PELORUS` 显式选择。构建参数、批量查询及距离与分数的约定见 [Pelorus 双曲向量索引](pelorus.md)。
 
 ---
 
@@ -245,20 +247,19 @@ assert_eq!(reader.generation_id(), "generation-42");
 ```text
 generations/
 ├── current.json
-├── current.json
 ├── generation-41/
 │   └── data.tdb...
 └── generation-42/
     └── data.tdb...
 ```
 
-`publish_current()` 使用临时文件、文件 `fsync`、原子 rename 和父目录同步，并在切换前完整验证 manifest、文件 checksum、generation ID 与实际 node count。`open_current()` 在解析 current 与获取 generation 共享租约期间持有管理共享锁，避免与切代或回收竞态。`GenerationReader` 在整个生命周期持有外部 runtime 共享租约；`reclaim_generation()` 只有取得排他租约后才删除旧代际，并且在 current 损坏时 fail closed。
+`publish_current()` 使用临时文件、文件 `fsync`、原子 rename 和父目录同步，并在切换前验证 manifest、文件校验和、代际 ID 与实际节点数。`open_current()` 在解析 current 与获取代际共享租约期间持有管理共享锁，避免与切代或回收竞态。`GenerationReader` 在整个生命周期持有外部 runtime 共享租约。`reclaim_generation()` 取得排他租约后，校验当前库可用、回收目标是有效的旧代际且只包含该代际的数据库制品，然后删除旧目录。
 
 租约写入独立 runtime 目录，generation root 保持只读。默认 runtime 位于系统临时目录的 `triviumdb-runtime/store-<hash>`，也可使用 `GenerationStore::with_runtime_dir(root, runtime_dir)` 指定可写位置。
 
 构造时固定相对根目录和运行目录的绝对位置；默认锁空间在根目录存在后按规范路径解析，根目录创建前后的 Store 共享租约。跨进程参与者使用一致的规范根路径与运行目录配置；跨容器将运行目录设为共享可写挂载，并保持根目录挂载路径一致。Reader 存活期间保持根目录位置稳定。升级时先结束旧版本 Reader 进程，再恢复旧代回收。
 
-generation ID 和数据库文件名必须是单一安全路径组件，`..`、绝对路径和路径分隔符都会被拒绝。旧 Reader 在切代后继续读取原 generation，新 Reader 读取新的 current。调用方应在 Writer 关闭并移除非制品 `.wal/.lock` 后再分发 generation。
+代际 ID 和数据库文件名必须是单一安全路径组件。`current.json` 保留为管理文件名。`prepare_generation()` 创建新的代际目录，已存在的代际返回 `TDB_GENERATION_BUSY`。旧 Reader 在切代后继续读取原代际，新 Reader 读取当前代际。调用方应在 Writer 关闭并移除非制品 `.wal/.lock` 后再分发代际。
 
 CRC32 用于检测随机损坏，不提供对抗性防篡改或来源认证。不可信分发应由外层对 manifest 使用 SHA-256/BLAKE3 并进行数字签名。
 
@@ -302,6 +303,8 @@ WAL 的完整帧发生 CRC、解码或超长字段损坏时，`open()` 返回 `C
 | `f32` | 32 位浮点 | 标准 embedding（OpenAI、BGE 等） |
 | `half::f16` | 16 位半精度浮点 | 大规模数据集省内存 |
 | `u64` | 64 位无符号整数 | SimHash / 二值化向量 |
+
+Python、Node.js 及 TQL 的双精度输入按目标 `f16` 就近舍入，恰在中点时取偶。例如 `65519.9999` 写入后为 `65504`，`65520` 舍入后越出有限范围并返回 `TDB_INVALID_VECTOR`。
 
 `f32/f16` 使用余弦相似度；普通有限幅值保留 SIMD 路径，中间范数或分母出现上溢、下溢时使用 `f64` 回退计算，零向量得分为 `0`。`u64` 使用精确汉明匹配位数，单分量得分范围为 `0..64`，保持完整位模式；普通、高级、批量和 TQL 基础检索共享该度量。QuIVer 自动构建适用于浮点向量，显式为 `u64` 构建返回 `TDB_INVALID_INPUT`。
 
@@ -1811,7 +1814,9 @@ Mmap 只读打开在采用 `.gidx` 前校验所有边块、派生目录与主文
 
 将当前数据库的所有节点 Payload、图谱边复制到一个全新的数据库文件中，向量以零向量占位（因为维度变了，旧向量无法直接复用）。
 
-目标主文件或同名前缀的数据制品已经存在时，迁移在写入前返回 `TDB_IO`，`details.io_kind` 为 `AlreadyExists`。预检按实际卷与目录的路径解析规则识别大小写别名；已有文件组在创建目标租约、暂存库或发布日志前即被拒绝。迁移在目标同盘的独占暂存目录完成构建与同步，持有目标写锁发布文件组并交接给返回实例；发布使用不覆盖既有目标的原子重命名，要求平台及文件系统支持排他原子重命名，不支持时返回 I/O 错误。源、目标目录均在提交标记前后同步；暂存主文件在目标发布后按所有权交接流程释放。提交前失败只回收本次移动的文件，目标可重试；提交后错误保留完整新库，可按新维度重新打开检查。进程被强杀后，可写打开按发布日志恢复，完整源库仍然保留。实际空闲 `.lock` 协调文件及其大小写别名可复用，支持失败后重试；符号链接和目录不作为空闲锁放行。
+目标须避开源库制品名称和文件路径。冲突返回 `TDB_INVALID_INPUT`。独立目标已有主文件或制品时返回 `TDB_IO`，`details.io_kind` 为 `AlreadyExists`。这些检查在创建目标租约、暂存库或发布日志前执行，覆盖 Windows 的 Unicode 大小写别名。
+
+迁移在目标同盘的独占暂存目录中构建并同步文件，持有目标写锁发布文件组，再将锁交给返回的实例。发布依赖平台及文件系统支持排他原子重命名。源、目标目录均在提交标记前后同步。标记发布前取消会回滚本次移动的文件，目标可重试。提交后错误保留完整新库。进程异常退出后，可写打开按发布日志恢复目标。空闲的 `.lock` 协调文件可在重试时复用，锁路径须为普通文件。
 
 **参数：**
 
@@ -2003,4 +2008,4 @@ WAL 追加、flush 或同步失败时返回原始错误并隔离该 writer。后
 - 发生向量文件替换或重映射失败时，原调用保留 I/O 错误。映射已经失效的实例及其共享句柄随后返回 `TDB_WAL_CLOSED`；释放这些实例后，重新以可写模式打开，恢复发布基础并回放 WAL。
 - TQL 字符串入口完整消费输入，语句尾部非法内容在生成写操作前返回 `TDB_QUERY_PARSE`。输入上限为 4 MiB、262,144 个 token、128 层括号嵌套和 128 个表达式运算符；已有递归预算共同约束表达式与谓词。向量及 JSON 字面量中的负号按字面量处理。
 - `memory_limit` 覆盖打开时的节点与图目录、Rom 向量堆副本、Payload 解码、派生索引恢复和 WAL 暂存。各阶段在分配前进行保守峰值准入，打开完成前核对总估算占用；预算不足返回 `TDB_CAPACITY_RESERVATION_REJECTED`，本次共享资源预留释放。原始 mmap 向量和 Payload 映射按文件映射管理，堆目录及解码工作区参与准入。
-- 打开阶段暂缓填充 Payload 解析缓存；恢复成功后，缓存上限取配置值与剩余实例堆预算中的较小值。索引反序列化的保守峰值可高于稳态估算；可提高打开预算或延期加载文本索引。WAL 截断、历史 WAL 迁移和空检查点升级在容量准入完成后执行。
+- 打开阶段暂缓填充 Payload 解析缓存。恢复成功后，缓存上限取配置值与剩余实例堆预算中的较小值。索引反序列化的峰值可高于稳态估算，可提高打开预算或延期加载文本索引。当前格式 WAL 的恢复在容量准入后修整有效前缀。历史格式通过外部工具迁移。

@@ -167,6 +167,22 @@ fn insert_with_id_重复ID报错() {
 }
 
 #[test]
+fn 恢复插入拒绝重复ID且起始分配跳过零() {
+    let mut mt = MemTable::<f32>::new_with_next_id(2, 0);
+    let id = mt.insert(&[1.0, 0.0], json!({"value":1})).unwrap();
+    assert_eq!(id, 1);
+    mt.raw_insert(2, &[0.0, 1.0], json!({"value":2})).unwrap();
+    assert!(matches!(
+        mt.raw_insert(2, &[-1.0, 0.0], json!({"value":3})),
+        Err(triviumdb::TriviumError::NodeAlreadyExists(2))
+    ));
+    assert_eq!(mt.all_node_ids(), [1, 2]);
+    assert_eq!(mt.internal_slot_count(), 2);
+    assert_eq!(mt.get_vector(2).unwrap(), [0.0, 1.0]);
+    assert_eq!(mt.get_payload(2).unwrap().as_ref(), &json!({"value":2}));
+}
+
+#[test]
 fn raw_insert_跳过NaN检查() {
     let mut mt = make_mt();
     // raw_insert 用于 WAL 恢复，不检查 NaN

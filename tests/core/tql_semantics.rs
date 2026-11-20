@@ -6,6 +6,24 @@ use triviumdb::database::{AccessMode, Config, RowOverflowPolicy, StorageMode};
 use triviumdb::query::tql_executor::{QueryControl, TqlValue};
 use triviumdb::{Database, TriviumError};
 
+#[test]
+fn 有限BM25参数保留精确排名与可表示分数() {
+    let root = TestDir::new("bm25_finite_top");
+    let mut db = Database::<f32>::open(&root.file("text.tdb"), 1).unwrap();
+    for (id, text) in [(1, "word word filler"), (2, "word word word")] {
+        db.insert_with_id(id, &[1.], json!({})).unwrap();
+        db.index_text(id, text).unwrap();
+    }
+    let rows = db.tql(r#"TEXT BM25 "word" TOP 1 K1 3e38 B 0.75 AS hit WITH hit RETURN hit.id AS id, text_score(hit) AS score"#).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(scalar(&rows[0]["id"]), json!(2));
+    // 等长文档的长度归一因子为 1。K1 远大于词频，得分舍入到 3 × ln(1.2)。
+    assert!(
+        matches!(rows[0]["score"], TqlValue::Float(score) if (score - 3. * 1.2f64.ln()).abs() < 1e-6)
+    );
+    db.close().unwrap();
+}
+
 fn config(mode: StorageMode) -> Config {
     Config {
         dim: 1,
@@ -683,14 +701,15 @@ fn set字段和完整整数向量在未检查点wal回放后保持事实() {
     for mode in [StorageMode::Rom, StorageMode::Mmap] {
         let source = root.file(&format!("{mode:?}_source.tdb"));
         let replay = root.file(&format!("{mode:?}_replay.tdb"));
-        for path in [&source, &replay] {
-            let mut db = Database::<u64>::open_with_config(path, config(mode)).unwrap();
+        {
+            let mut db = Database::<u64>::open_with_config(&source, config(mode)).unwrap();
             for id in [1, 2] {
                 db.insert_with_id(id, &[7], json!({"a":0,"b":0,"kind":"persist"}))
                     .unwrap();
             }
             db.close().unwrap();
         }
+        root.copy_checkpoint(&source, &replay);
         let mut db = Database::<u64>::open_with_config(&source, config(mode)).unwrap();
         db.tql_mut("MATCH (n) SET n.a == 1, n.b == 2").unwrap();
         db.tql_mut("MATCH (n) SET VECTOR(n) == [9007199254740993]")

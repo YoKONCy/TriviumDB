@@ -26,6 +26,7 @@ pub fn verify_snapshot_with_runtime(
     directory: &str,
     runtime: &ResourceRuntime,
 ) -> Result<GenerationManifest> {
+    crate::request::check_current()?;
     let _task = runtime.enter_maintenance_task()?;
     let _workspace = runtime.reserve_maintenance_workspace(TRANSFER_BYTES)?;
     verify(Path::new(directory))
@@ -42,12 +43,14 @@ fn regular(path: &Path) -> Result<()> {
 }
 
 fn verify(directory: &Path) -> Result<GenerationManifest> {
+    crate::request::check_current()?;
     if !std::fs::symlink_metadata(directory)?.file_type().is_dir() {
         return Err(invalid("快照必须是实际目录，不能是符号链接"));
     }
     // 在读取和校验任何制品前拒绝链接、管道和目录，同时限制可枚举文件数。
     let mut actual = std::collections::BTreeSet::new();
     for entry in std::fs::read_dir(directory)? {
+        crate::request::check_current()?;
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             return Err(invalid("快照只能包含普通文件"));
@@ -81,12 +84,7 @@ fn verify(directory: &Path) -> Result<GenerationManifest> {
     if actual != expected {
         return Err(invalid("快照包含未声明文件、WAL 或临时制品"));
     }
-    crate::storage::file_format::validate_snapshot_metadata(
-        &database.to_string_lossy(),
-        &manifest.dtype,
-        manifest.dim,
-        manifest.node_count,
-    )?;
+    crate::request::check_current()?;
     Ok(manifest)
 }
 
@@ -101,6 +99,7 @@ pub fn restore_snapshot_with_runtime(
     runtime: &ResourceRuntime,
 ) -> Result<GenerationManifest> {
     WriteErrorInfo::capture_destination(|write| {
+        crate::request::check_current()?;
         let _task = runtime.enter_maintenance_task()?;
         write.phase = WritePhase::Validation;
         let _workspace = runtime.reserve_maintenance_workspace(TRANSFER_BYTES)?;
@@ -178,6 +177,7 @@ fn copy_file(source: &Path, target: &Path, suffix: String) -> Result<GenerationF
     let mut digest = FileDigest::default();
     let mut size = 0u64;
     loop {
+        crate::request::check_current()?;
         let read = input.read(&mut buffer)?;
         if read == 0 {
             break;
@@ -280,6 +280,7 @@ impl Stage {
         }
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::hit(crate::test_hooks::ConcurrencyPoint::BeforeSnapshotPublish);
+        crate::request::check_current()?;
         write.phase = WritePhase::Publish;
         if let Err(error) = crate::storage::fs::rename_new(&self.directory, &self.target) {
             if error.kind() == std::io::ErrorKind::AlreadyExists

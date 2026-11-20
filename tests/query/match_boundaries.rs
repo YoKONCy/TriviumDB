@@ -83,7 +83,21 @@ fn 双向单跳自环只计一次且平行边分别计数() {
             ))
             .unwrap();
         assert_eq!(number(&rows[0]["total"]), 2, "{edge}");
+        let query = format!(
+            "MATCH (a {{id:1}}){edge}(b) WITH a,b WITH a AS source WHERE source.id == 1 RETURN COUNT(*) AS total"
+        );
+        let rows = db.tql(&query).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(number(&rows[0]["total"]), 2, "{query}");
     }
+    let rows = db
+        .tql("MATCH (a)-[e]->(b) WITH a,b RETURN DISTINCT a.id AS id,b.id AS target")
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((number(&rows[0]["id"]), number(&rows[0]["target"])), (1, 1));
+    let rows = db.tql("MATCH (a)-[e]->(b) WITH a INTERSECT a IDS [1] AS kept WITH kept RETURN COUNT(*) AS total").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(number(&rows[0]["total"]), 1);
     db.close().unwrap();
 }
 

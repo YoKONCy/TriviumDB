@@ -12,5 +12,6 @@ pub(crate) mod tql_documents;
 pub mod tql_executor;
 pub mod tql_lexer;
 pub mod tql_parser;
+pub(crate) mod tql_pelorus;
 pub mod tql_prepared;
 pub mod tql_source;

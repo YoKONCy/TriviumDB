@@ -108,6 +108,34 @@ fn 活跃reader阻止旧代回收释放后可以回收() {
 }
 
 #[test]
+fn 代际准备保留已发布内容并拒绝占用当前指针() {
+    let root = tempfile::tempdir().unwrap();
+    let store = GenerationStore::new(root.path());
+    #[cfg(windows)]
+    let reserved = ["current.json", "CURRENT.JSON", "current.json. "];
+    #[cfg(not(windows))]
+    let reserved = ["current.json"];
+    for name in reserved {
+        let error = store.prepare_generation(name, "data.tdb").unwrap_err();
+        assert_eq!(error.code(), "TDB_INVALID_INPUT");
+    }
+    assert!(!root.path().join("current.json").exists());
+    publish(&store, "first", 0.25);
+    store.publish_current("first", "data.tdb").unwrap();
+    let original = store.open_current::<f32>(2).unwrap();
+    for file in ["data.tdb", "alternate.tdb"] {
+        let error = store.prepare_generation("first", file).unwrap_err();
+        assert_eq!(error.code(), "TDB_GENERATION_BUSY");
+    }
+    let next = store.open_current::<f32>(2).unwrap();
+    for reader in [&original, &next] {
+        let node = reader.get(1).unwrap().unwrap();
+        assert_eq!(node.vector, [0.25, 0.75]);
+        assert_eq!(node.payload, json!({"generation":"first"}));
+    }
+}
+
+#[test]
 fn 当前代永远不能被回收() {
     let root = tmp_store("current_busy");
     std::fs::remove_dir_all(&root).ok();
@@ -119,6 +147,49 @@ fn 当前代永远不能被回收() {
         Err(TriviumError::GenerationBusy { .. })
     ));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn 回收拒绝普通目录与失效当前代并保留原文件() {
+    let root = tempfile::tempdir().unwrap();
+    let store = GenerationStore::new(root.path());
+    publish(&store, "old", 1.0);
+    publish(&store, "active", 0.0);
+    store.publish_current("active", "data.tdb").unwrap();
+    let unrelated = root.path().join("notes");
+    std::fs::create_dir(&unrelated).unwrap();
+    let note = unrelated.join("keep.txt");
+    std::fs::write(&note, b"user data").unwrap();
+    assert!(matches!(
+        store.reclaim_generation("notes"),
+        Err(TriviumError::ImmutableArtifactInvalid { .. })
+    ));
+    assert_eq!(std::fs::read(note).unwrap(), b"user data");
+
+    let unrelated_suffix = root.path().join("old").join("data.tdb.wal.notes");
+    std::fs::write(&unrelated_suffix, b"retention notes").unwrap();
+    assert!(matches!(
+        store.reclaim_generation("old"),
+        Err(TriviumError::ImmutableArtifactInvalid { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&unrelated_suffix).unwrap(),
+        b"retention notes"
+    );
+    std::fs::remove_file(unrelated_suffix).unwrap();
+
+    let current_path = root.path().join("current.json");
+    let mut current = store.resolve_current().unwrap();
+    current.database_file = "missing.tdb".into();
+    std::fs::write(current_path, serde_json::to_vec(&current).unwrap()).unwrap();
+    assert!(store.reclaim_generation("old").is_err());
+    let old = root.path().join("old").join("data.tdb");
+    let reader =
+        triviumdb::DatabaseReader::<f32>::open_immutable(old.to_str().unwrap(), 2).unwrap();
+    assert_eq!(
+        reader.get(1).unwrap().unwrap().payload,
+        json!({"generation":"old"})
+    );
 }
 
 #[test]

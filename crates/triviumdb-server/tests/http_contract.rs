@@ -1632,6 +1632,51 @@ async fn 索引管理quiver状态与ndjson导入形成完整http契约() {
 }
 
 #[tokio::test]
+async fn pelorus发布后可通过tql按双曲距离查询() {
+    let (app, _directory) = app("pelorus").await;
+    let imported = raw_request(
+        app.clone(),
+        "POST",
+        "/v1/import/nodes",
+        br#"{"id":1,"vector":[0.5,0.0],"payload":{}}
+{"id":2,"vector":[0.25,0.0],"payload":{}}
+"#
+        .to_vec(),
+        &[("content-type", "application/x-ndjson")],
+    )
+    .await;
+    assert_eq!(imported.status(), StatusCode::OK);
+    let published = request(
+        app.clone(),
+        "POST",
+        "/v1/indexes/pelorus",
+        Some(serde_json::json!({"curvature":1.0})),
+        &[],
+    )
+    .await;
+    assert_eq!(published.status(), StatusCode::OK);
+    assert_eq!(json(published).await["status"], "published");
+
+    let result = request(
+        app,
+        "POST",
+        "/v1/tql",
+        Some(serde_json::json!({
+            "query":"SEARCH PELORUS {vector:[0,0],options:{top_k:1}} RETURN _.id AS id,similarity(_) AS score"
+        })),
+        &[],
+    ).await;
+    assert_eq!(result.status(), StatusCode::OK);
+    let result = json(result).await;
+    let rows = result["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], serde_json::json!({"type":"int","value":2}));
+    assert_eq!(rows[0]["score"]["type"], "float");
+    let score = rows[0]["score"]["value"].as_f64().unwrap();
+    assert!((score + (5.0f64 / 3.0).ln()).abs() < 1e-14);
+}
+
+#[tokio::test]
 async fn 图探索端点批量返回真实节点边和路径() {
     let (app, _directory) = app("graph_exploration").await;
     let seeded = request(
@@ -2055,7 +2100,7 @@ async fn 读语句带mutation标志走读路径而不是500() {
 }
 
 #[tokio::test]
-async fn 大节点ID从详情到批量读取和查询投影保持精确() {
+async fn http_preserves_large_node_ids_across_writes_reads_and_projections() {
     let (app, _directory) = app("wide-http-id").await;
     let id = 9_007_199_254_740_993u64;
     let inserted = request(app.clone(), "POST", "/v1/transactions", Some(serde_json::json!({
@@ -2101,7 +2146,7 @@ async fn 大节点ID从详情到批量读取和查询投影保持精确() {
 }
 
 #[tokio::test]
-async fn 空投影和CRLF诊断保留原始结构() {
+async fn empty_projection_and_crlf_diagnostics_preserve_source() {
     let (app, _directory) = app("empty-columns-and-crlf").await;
     let query = serde_json::json!({"query":"FIND {x:1} RETURN x AS field"});
     let prepared = json(
@@ -2166,7 +2211,7 @@ async fn 空投影和CRLF诊断保留原始结构() {
 }
 
 #[tokio::test]
-async fn 零容量不签发Prepared句柄() {
+async fn zero_prepared_capacity_rejects_registration() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("no-prepare.tdb");
     let (app, shutdown) = triviumdb_server::build_app_with_shutdown(ServerConfig {

@@ -97,8 +97,9 @@ pub(super) fn ensure_empty(target: &str) -> Result<()> {
 }
 
 impl Destination {
-    fn new(path: &str) -> Result<Self> {
+    fn new(source: &str, path: &str) -> Result<Self> {
         let requested = Path::new(path);
+        crate::storage::artifacts::validate_destination(Path::new(source), requested)?;
         let leaf = requested.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
             TriviumError::InvalidInput("迁移目标必须有有效 UTF-8 文件名 (Migration destination requires a UTF-8 file name)".into())
         })?;
@@ -108,6 +109,7 @@ impl Destination {
             .unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         let parent = parent.canonicalize()?;
+        crate::storage::artifacts::validate_destination(Path::new(source), &parent.join(leaf))?;
         let target = parent
             .join(leaf)
             .to_str()
@@ -172,7 +174,7 @@ pub(super) fn migrate<T: VectorType + serde::Serialize + serde::de::DeserializeO
             "迁移维度必须介于 1 和 65536 (Migration dimension must be between 1 and 65536)".into(),
         ));
     }
-    let mut destination = Destination::new(path)?;
+    let mut destination = Destination::new(&source.db_path, path)?;
     let stage_path = destination
         .directory
         .join("database.tdb")
@@ -338,8 +340,13 @@ mod tests {
             std::fs::write(root.0.join(stored), "保留既有文件内容".as_bytes()).unwrap();
             // 独立查询夹具路径是否实际解析为已有条目，不假定操作系统或卷的大小写规则。
             let occupied = root.0.join(lookup).try_exists().unwrap();
+            let source = root.0.join("source.tdb");
+            std::fs::write(&source, b"source").unwrap();
             let before = root.files();
-            let result = Destination::new(root.0.join(requested).to_str().unwrap());
+            let result = Destination::new(
+                source.to_str().unwrap(),
+                root.0.join(requested).to_str().unwrap(),
+            );
             if occupied {
                 assert!(
                     matches!(result, Err(TriviumError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists),

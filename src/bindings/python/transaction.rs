@@ -1,7 +1,8 @@
 //! 事务构建、提交及事务对象的语言生命周期。
 
 use super::arguments::{
-    float_argument, float_value, integer_value, sequence_value, string_argument, string_value,
+    float_argument, float_value, half_value, integer_value, sequence_value, string_argument,
+    string_value,
 };
 use super::database::{DbBackend, PyTriviumDB, database_read, database_write};
 use super::errors::{TRANSACTION_VALIDATION, to_py_error, transaction_admission_error};
@@ -138,13 +139,12 @@ impl PyTransaction {
                 b.insert(&v, json);
             }
             TxBuilderBackend::F16(b) => {
-                let values: Vec<f32> = sequence_value(
+                let v: Vec<half::f16> = sequence_value(
                     &vector,
                     "vector",
                     Some(TRANSACTION_VALIDATION),
-                    |value, field| float_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    |value, field| half_value(value, field, Some(TRANSACTION_VALIDATION)),
                 )?;
-                let v: Vec<half::f16> = values.into_iter().map(half::f16::from_f32).collect();
                 check_transaction_control()?;
                 b.insert(&v, json);
             }
@@ -186,13 +186,12 @@ impl PyTransaction {
                 b.insert_with_id(id, &v, json);
             }
             TxBuilderBackend::F16(b) => {
-                let values: Vec<f32> = sequence_value(
+                let v: Vec<half::f16> = sequence_value(
                     &vector,
                     "vector",
                     Some(TRANSACTION_VALIDATION),
-                    |value, field| float_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    |value, field| half_value(value, field, Some(TRANSACTION_VALIDATION)),
                 )?;
-                let v: Vec<half::f16> = values.into_iter().map(half::f16::from_f32).collect();
                 check_transaction_control()?;
                 b.insert_with_id(id, &v, json);
             }
@@ -317,13 +316,12 @@ impl PyTransaction {
                 b.update_vector(id, &v);
             }
             TxBuilderBackend::F16(b) => {
-                let values: Vec<f32> = sequence_value(
+                let v: Vec<half::f16> = sequence_value(
                     &vector,
                     "vector",
                     Some(TRANSACTION_VALIDATION),
-                    |value, field| float_value(value, field, Some(TRANSACTION_VALIDATION)),
+                    |value, field| half_value(value, field, Some(TRANSACTION_VALIDATION)),
                 )?;
-                let v: Vec<half::f16> = values.into_iter().map(half::f16::from_f32).collect();
                 check_transaction_control()?;
                 b.update_vector(id, &v);
             }

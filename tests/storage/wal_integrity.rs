@@ -154,7 +154,7 @@ fn 完整坏帧在首中尾均拒绝且反复打开保留原始日志() {
             let path = root.file("data.tdb");
             let valid = sample(&path);
             let mut corrupt = valid.clone();
-            let frame = frames(&valid)[index].clone();
+            let frame = frames(&valid)[index + 1].clone();
             if bad_body {
                 // CRC 合法但枚举判别值无效，单独验证结构解码契约。
                 corrupt[frame.start + 4..frame.start + 8].fill(255);
@@ -193,11 +193,12 @@ fn 完整坏帧在首中尾均拒绝且反复打开保留原始日志() {
 #[test]
 fn 尾帧任意物理截断仅保留两条完整记录() {
     let root = TestDir::new("wal_physical_tail");
-    let original = sample(&root.file("original.tdb"));
-    let last = frames(&original)[2].clone();
+    let source = root.file("original.tdb");
+    let original = sample(&source);
+    let last = frames(&original).last().unwrap().clone();
     for length in last.start..last.end {
         let path = root.file(&format!("tail-{length}.tdb"));
-        Database::<f32>::open(&path, 2).unwrap().close().unwrap();
+        root.copy_checkpoint(&source, &path);
         crate::artifact::write(format!("{path}.wal"), &original[..length]).unwrap();
         let mut db = Database::<f32>::open(&path, 2).unwrap();
         assert_eq!(db.all_node_ids().unwrap(), [1, 2]);
@@ -220,5 +221,54 @@ fn 非法完整长度拒绝且保留已确认后缀() {
             Err(TriviumError::CorruptedFile(_))
         ));
         assert_eq!(crate::artifact::read(format!("{path}.wal")).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn 普通检查点拒绝同维度外库的空封条和已确认写入() {
+    for mode in [
+        triviumdb::database::StorageMode::Rom,
+        triviumdb::database::StorageMode::Mmap,
+    ] {
+        let dir = TestDir::new("foreign_wal");
+        let a = dir.file("a.tdb");
+        let b = dir.file("b.tdb");
+        let config = || triviumdb::database::Config {
+            dim: 2,
+            storage_mode: mode,
+            sync_mode: SyncMode::Full,
+            ..Default::default()
+        };
+        for (path, value) in [(&a, 1), (&b, 2)] {
+            let mut db = Database::<f32>::open_with_config(path, config()).unwrap();
+            db.insert_with_id(7, &[1., 0.], json!(value)).unwrap();
+            db.close().unwrap();
+        }
+        let wal = format!("{a}.wal");
+        let clean = std::fs::read(&wal).unwrap();
+        let mut other = Database::<f32>::open_with_config(&b, config()).unwrap();
+        for dirty in [false, true] {
+            if dirty {
+                other.update_payload(7, json!(3)).unwrap();
+            }
+            let foreign = std::fs::read(format!("{b}.wal")).unwrap();
+            std::fs::write(&wal, &foreign).unwrap();
+            let error = Database::<f32>::open_with_config(&a, config())
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.code(),
+                if dirty {
+                    "TDB_RECOVERY_REQUIRED"
+                } else {
+                    "TDB_CORRUPTED_FILE"
+                }
+            );
+            assert_eq!(std::fs::read(&wal).unwrap(), foreign);
+        }
+        std::fs::write(&wal, clean).unwrap();
+        let mut db = Database::<f32>::open_with_config(&a, config()).unwrap();
+        assert_eq!(db.get_payload(7).unwrap(), Some(json!(1)));
+        db.close().unwrap();
     }
 }

@@ -550,11 +550,12 @@ pub struct MemTable<T: VectorType> {
     pub(crate) document_index: std::sync::Mutex<Option<crate::index::document::DocumentTextIndex>>,
     pub(crate) document_index_bytes: std::sync::atomic::AtomicUsize,
     resource_runtime: crate::resources::ResourceRuntime,
+    request_bytes: Arc<std::sync::atomic::AtomicUsize>,
     resource_reservation: Option<crate::resources::DatabaseReservation>,
     // 未加载的 sidecar 与待合并操作分开保存，避免把“未加载”解释为“空索引”。
     deferred_text_path: Option<String>,
     deferred_text_meta: Option<crate::storage::file_format::TextIndexMetadata>,
-    pub(crate) text_checkpoint_token: Option<[u8; 16]>,
+    pub(crate) checkpoint_token: Option<[u8; 16]>,
     text_replay: bool,
     text_replay_checkpoint_seen: bool,
     pending_text_mutations: Vec<PendingTextMutation>,
@@ -616,6 +617,8 @@ pub struct MemTable<T: VectorType> {
     //    冷热分离：QuIVer 内部 BQ sigs + 图拓扑 = hot，f32 向量 = cold
     //    事务安全：事务 commit 期间暂停 QuIVer 同步，commit 后由事务层统一同步
     quiver_index: Option<QuIVer>,
+    pub(crate) pelorus: Option<crate::index::pelorus::PelorusState>,
+    pub(crate) pelorus_policy: crate::database::MissingIndexPolicy,
     pub(crate) quiver_ssd: Option<crate::database::quiver_runtime::DatabaseQuiverRuntime>,
     auto_build_quiver: bool,
     /// 事务同步暂停标记：为 true 时 insert/delete/update_vector 不触发 QuIVer 增量操作
@@ -667,10 +670,11 @@ impl<T: VectorType> MemTable<T> {
             document_index: std::sync::Mutex::new(None),
             document_index_bytes: std::sync::atomic::AtomicUsize::new(0),
             resource_runtime: crate::resources::ResourceRuntime::shared_default(),
+            request_bytes: Arc::default(),
             resource_reservation: None,
             deferred_text_path: None,
             deferred_text_meta: None,
-            text_checkpoint_token: None,
+            checkpoint_token: None,
             text_replay: false,
             text_replay_checkpoint_seen: false,
             pending_text_mutations: Vec::new(),
@@ -698,6 +702,8 @@ impl<T: VectorType> MemTable<T> {
             fast_tags: Vec::new(),
             free_slots: Vec::new(),
             quiver_index: None,
+            pelorus: None,
+            pelorus_policy: crate::database::MissingIndexPolicy::Fallback,
             quiver_ssd: None,
             auto_build_quiver: true,
             quiver_sync_paused: false,
@@ -707,7 +713,7 @@ impl<T: VectorType> MemTable<T> {
     /// 从持久化文件恢复时使用：指定起始 ID
     pub fn new_with_next_id(dim: usize, next_id: NodeId) -> Self {
         let mut mt = Self::new(dim);
-        mt.next_id = next_id;
+        mt.next_id = next_id.max(1);
         mt
     }
 
@@ -715,7 +721,7 @@ impl<T: VectorType> MemTable<T> {
     pub fn new_with_vec_pool(dim: usize, next_id: NodeId, vec_pool: VecPool<T>) -> Self {
         Self {
             dim,
-            next_id,
+            next_id: next_id.max(1),
             generation: 0,
             checkpoint_dirty: true,
             editing: Default::default(),
@@ -735,10 +741,11 @@ impl<T: VectorType> MemTable<T> {
             document_index: std::sync::Mutex::new(None),
             document_index_bytes: std::sync::atomic::AtomicUsize::new(0),
             resource_runtime: crate::resources::ResourceRuntime::shared_default(),
+            request_bytes: Arc::default(),
             resource_reservation: None,
             deferred_text_path: None,
             deferred_text_meta: None,
-            text_checkpoint_token: None,
+            checkpoint_token: None,
             text_replay: false,
             text_replay_checkpoint_seen: false,
             pending_text_mutations: Vec::new(),
@@ -766,6 +773,8 @@ impl<T: VectorType> MemTable<T> {
             fast_tags: Vec::new(),
             free_slots: Vec::new(),
             quiver_index: None,
+            pelorus: None,
+            pelorus_policy: crate::database::MissingIndexPolicy::Fallback,
             quiver_ssd: None,
             auto_build_quiver: true,
             quiver_sync_paused: false,
@@ -839,6 +848,13 @@ impl<T: VectorType> MemTable<T> {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clear();
         }
+    }
+
+    fn mark_vector_changed(&mut self, id: NodeId) {
+        if let Some(pelorus) = &mut self.pelorus {
+            pelorus.record_change(id);
+        }
+        self.mark_changed(true);
     }
 
     fn rebuild_graph_stats_state(&mut self) {
@@ -982,7 +998,12 @@ impl<T: VectorType> MemTable<T> {
         payload: serde_json::Value,
     ) -> Result<()> {
         if id == 0 || id == NodeId::MAX {
-            return Err(TriviumError::InvalidInput("节点 ID 0 为内部保留值".into()));
+            return Err(TriviumError::InvalidInput(
+                "节点 ID 0 与 u64::MAX 为保留值 (Node IDs 0 and u64::MAX are reserved)".into(),
+            ));
+        }
+        if self.ids_to_indices.contains_key(&id) {
+            return Err(TriviumError::NodeAlreadyExists(id));
         }
         if vector.len() != self.dim {
             return Err(TriviumError::DimensionMismatch {
@@ -1015,7 +1036,7 @@ impl<T: VectorType> MemTable<T> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .node_added(id);
         self.mark_graph_changed();
-        self.mark_changed(true);
+        self.mark_vector_changed(id);
         Ok(())
     }
 
@@ -1139,7 +1160,7 @@ impl<T: VectorType> MemTable<T> {
             }
         }
 
-        self.mark_changed(true);
+        self.mark_vector_changed(id);
         self.next_id = next_id;
         Ok(id)
     }
@@ -1211,7 +1232,7 @@ impl<T: VectorType> MemTable<T> {
             }
         }
 
-        self.mark_changed(true);
+        self.mark_vector_changed(id);
         Ok(())
     }
 
@@ -1222,7 +1243,15 @@ impl<T: VectorType> MemTable<T> {
                 got: vector.len(),
             });
         }
-        Self::validate_vector(vector)
+        Self::validate_vector(vector)?;
+        self.validate_pelorus_vector(vector)
+    }
+
+    pub(crate) fn validate_pelorus_vector(&self, vector: &[T]) -> Result<()> {
+        if let Some(pelorus) = &self.pelorus {
+            crate::index::pelorus::boundary_factor(pelorus.config.curvature, vector)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_insert_with_id(&self, id: NodeId, vector: &[T]) -> Result<()> {
@@ -1418,6 +1447,7 @@ impl<T: VectorType> MemTable<T> {
             });
         }
         Self::validate_vector(vector)?;
+        self.validate_pelorus_vector(vector)?;
         self.validate_delete(id)
     }
 
@@ -1519,6 +1549,13 @@ impl<T: VectorType> MemTable<T> {
         self.get_edges(src)?
             .iter()
             .find(|edge| edge.target_id == dst && edge.label == label)
+    }
+
+    pub(crate) fn edge_count(&self) -> usize {
+        self.graph_stats_state
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .edge_count
     }
 
     pub fn graph_stats(&self) -> GraphStats {
@@ -3146,7 +3183,7 @@ impl<T: VectorType> MemTable<T> {
         if !self.document_updates_paused {
             self.document_publications.delete_node(id);
         }
-        self.mark_changed(true);
+        self.mark_vector_changed(id);
 
         Ok(())
     }
@@ -3424,7 +3461,7 @@ impl<T: VectorType> MemTable<T> {
                         );
                     }
                 }
-                self.mark_changed(true);
+                self.mark_vector_changed(id);
                 Ok(())
             }
             None => Err(TriviumError::NodeNotFound(id)),
@@ -3529,11 +3566,49 @@ impl<T: VectorType> MemTable<T> {
     /// v0.4 改进：VecPool 的 mmap 部分不计入堆内存（由 OS PageCache 管理），
     /// 只计算增量层和合并缓存的实际堆分配。
     pub fn estimated_memory_bytes(&self) -> usize {
-        self.base_memory_bytes().saturating_add(
-            self.quiver_ssd
-                .as_ref()
-                .map_or(0, |active| active.reader.reserved_bytes()),
+        self.resident_memory_bytes().saturating_add(
+            self.request_bytes
+                .load(std::sync::atomic::Ordering::Acquire),
         )
+    }
+
+    pub(crate) fn reserve_request_workspace(
+        &self,
+        limit: usize,
+        bytes: usize,
+    ) -> Result<crate::resources::RequestWorkspace> {
+        crate::resources::RequestWorkspace::reserve(
+            &self.resource_runtime,
+            &self.request_bytes,
+            if limit == 0 {
+                0
+            } else {
+                self.resident_memory_bytes()
+            },
+            limit,
+            bytes,
+        )
+    }
+
+    pub(crate) fn reserve_graph_workspace(
+        &self,
+        bytes: usize,
+    ) -> Result<crate::resources::RequestWorkspace> {
+        self.reserve_request_workspace(self.text_memory_limit, bytes)
+    }
+
+    pub(crate) fn resident_memory_bytes(&self) -> usize {
+        self.base_memory_bytes()
+            .saturating_add(
+                self.quiver_ssd
+                    .as_ref()
+                    .map_or(0, |active| active.reader.reserved_bytes()),
+            )
+            .saturating_add(
+                self.pelorus
+                    .as_ref()
+                    .map_or(0, |state| state.reserved_io_bytes()),
+            )
     }
 
     pub(crate) fn base_memory_bytes(&self) -> usize {
@@ -3568,6 +3643,7 @@ impl<T: VectorType> MemTable<T> {
             + self.pending_text_mutations.capacity() * std::mem::size_of::<PendingTextMutation>()
             + self.pending_text_bytes;
         let property_index_bytes = self.property_indexes.estimated_memory_bytes();
+        let pelorus_bytes = self.pelorus.as_ref().map_or(0, |index| index.heap_bytes());
         vec_bytes
             + self.editing.memory_bytes()
             + self.named_graphs.memory_bytes()
@@ -3577,6 +3653,7 @@ impl<T: VectorType> MemTable<T> {
             + edge_bytes
             + index_bytes
             + quiver_bytes
+            + pelorus_bytes
             + text_bytes
             + property_index_bytes
     }
@@ -3654,10 +3731,10 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub(crate) fn resize_resource_reservation(&self, bytes: usize) -> Result<()> {
-        if self.resource_runtime.stats().memory_limit > 0 && bytes < self.estimated_memory_bytes() {
+        if self.resource_runtime.stats().memory_limit > 0 && bytes < self.resident_memory_bytes() {
             return Err(TriviumError::ResourceBudgetExceeded {
                 resource: "database_heap_bytes",
-                requested: self.estimated_memory_bytes(),
+                requested: self.resident_memory_bytes(),
                 used: 0,
                 limit: bytes,
             });
@@ -3839,13 +3916,13 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub(crate) fn begin_text_replay(&mut self, token: Option<[u8; 16]>) {
-        self.text_checkpoint_token = token;
+        self.checkpoint_token = token;
         self.text_replay = true;
         self.text_replay_checkpoint_seen = false;
     }
 
     pub(crate) fn replay_text_checkpoint(&mut self, token: [u8; 16]) {
-        if self.text_checkpoint_token == Some(token) {
+        if self.checkpoint_token == Some(token) {
             self.text_replay_checkpoint_seen = true;
             self.pending_text_mutations.clear();
             self.pending_text_bytes = 0;
@@ -3853,13 +3930,23 @@ impl<T: VectorType> MemTable<T> {
     }
 
     pub(crate) fn finish_text_replay(&mut self, path: &str) -> Result<()> {
-        if self.text_checkpoint_token.is_some() && !self.text_replay_checkpoint_seen {
+        if self.checkpoint_token.is_some() && !self.text_replay_checkpoint_seen {
             return Err(TriviumError::RecoveryRequired {
                 wal_path: format!("{path}.wal"),
             }
-            .at_field("text_index.recovery_boundary"));
+            .at_field(
+                if self
+                    .checkpoint_token
+                    .as_ref()
+                    .is_some_and(super::wal::is_main_checkpoint)
+                {
+                    "wal.checkpoint"
+                } else {
+                    "text_index.recovery_boundary"
+                },
+            ));
         }
-        if self.text_checkpoint_token.is_none()
+        if self.checkpoint_token.is_none()
             && self.pending_text_mutations.iter().any(|mutation| {
                 matches!(mutation, PendingTextMutation::Delete(id)
                     if self.contains(*id) && self.text_index.contains_node(*id))

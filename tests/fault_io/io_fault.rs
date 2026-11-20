@@ -472,6 +472,7 @@ fn IO_09_SyncMode_Off未flush_writer时允许WAL不可见() {
 
     {
         let mut db = open_with_sync(&path, SyncMode::Off);
+        let baseline = std::fs::read(format!("{path}.wal")).unwrap();
         for i in 0..8u32 {
             db.insert(
                 &[i as f32, 0.0, 0.0, 0.0],
@@ -479,13 +480,7 @@ fn IO_09_SyncMode_Off未flush_writer时允许WAL不可见() {
             )
             .unwrap();
         }
-        let wal_size = std::fs::metadata(format!("{}.wal", path))
-            .map(|meta| meta.len())
-            .unwrap_or(0);
-        assert_eq!(
-            wal_size, 6,
-            "SyncMode::Off 在 writer 未 drop/flush 前只应写入固定 WAL 版本头"
-        );
+        assert_eq!(std::fs::read(format!("{path}.wal")).unwrap(), baseline);
     }
 
     let db = Database::<f32>::open(&path, DIM).unwrap();

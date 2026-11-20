@@ -29,9 +29,9 @@
 
 [**中文文档**](README.md) | **English**
 
-The current stable release is **0.9.2**, with a unified `.idx` index container, external migration, exact search across all three SDKs, and hardening for snapshots, recovery, and data correctness. See the [bilingual release notes](docs/changes/0.9.2.md) for changes and upgrade steps.
+The current prerelease is **0.9.3-beta.1**. It adds opt-in Pelorus hyperbolic search and per-request QuIVer SSD I/O counters, and improves checkpoint recovery and graph query budgeting. The Python version is `0.9.3b1`, and npm uses the `beta` channel. See the [bilingual release notes](docs/changes/0.9.3-beta.1.md) for changes and upgrade steps.
 
-The development branch documents its [SDK contract inventory](docs/sdk-contract.md) and uses an [external migration tool](docs/migration.md) for database upgrades.
+The [SDK contract inventory](docs/sdk-contract.md) describes supported interfaces. The [external migration tool](docs/migration.md) upgrades historical disk formats.
 
 See [QuIVer applicability](#quiver-applicability) for vector workload selection and exact-search entry points.
 
@@ -41,7 +41,7 @@ See [QuIVer applicability](#quiver-applicability) for vector workload selection 
 
 ## What is TriviumDB?
 
-TriviumDB is an **embedded tri-model database engine** written in pure Rust, natively fusing **vector retrieval**, **property graph**, and **document-style metadata** within one storage kernel. Rom embeds vectors and Payload in the main file; default Mmap mode separates them. The development version stores indexes and registered text in `.idx`, with the file group protected by one publication protocol.
+TriviumDB is an **embedded tri-model database engine** written in pure Rust, natively fusing **vector retrieval**, **property graph**, and **document-style metadata** within one storage kernel. Rom embeds vectors and Payload in the main file; default Mmap mode separates them. The engine stores indexes and registered text in `.idx`, with the file group protected by one publication protocol.
 
 Our goal: **SQLite for AI applications.**
 
@@ -185,7 +185,23 @@ For example, 384/768 dimensions trigger at 834 nodes, 1024 at 652, 1536 at 435, 
 - ✅ **Incremental Update**: soft_delete + incremental_insert, atomic replacement
 - ✅ **Transaction-safe**: Separated timeline architecture — transaction commit cannot fail, QuIVer sync needs no rollback
 
-**Persistence and reload**: The development version stores the QuIVer graph and compact default-SM routing snapshot in the unified `.idx` container. Opening validates checkpoint identity, component checksums, and fact bindings, then loads routing and reranking data according to runtime configuration. See [storage layout](docs/storage-format.md) and [QuIVer reload](docs/quiver.md#增量维护重载与内存) for file groups, backups, and resource requirements.
+**Persistence and reload**: The engine stores the QuIVer graph and compact default-SM routing snapshot in the unified `.idx` container. Opening validates checkpoint identity, component checksums, and fact bindings, then loads routing and reranking data according to runtime configuration. See [storage layout](docs/storage-format.md) and [QuIVer reload](docs/quiver.md#增量维护重载与内存) for file groups, backups, and resource requirements.
+
+---
+
+## Pelorus hyperbolic vector index
+
+QuIVer is the default ANN index for ordinary vector queries. For models that produce coordinates in a fixed-curvature Poincaré ball, select **Pelorus** to find neighbors by hyperbolic geodesic distance. Build the index with the same curvature parameter as the model. The default navigation preserves radial information and uses a 2-bit encoding for direction.
+
+In a two-dimensional database with a Pelorus index, this TQL query explicitly selects hyperbolic search. `similarity(_)` returns the negative geodesic distance, so closer neighbors have higher scores.
+
+```sql
+SEARCH PELORUS {vector: [0.12, 0.0], options: {top_k: 5}}
+RETURN _.id AS id, similarity(_) AS score
+ORDER BY score DESC, id
+```
+
+For build instructions, exact search options and Hot, Mmap or SSD residency settings, see the [Pelorus guide](docs/pelorus.md).
 
 ---
 
@@ -213,13 +229,13 @@ maturin develop --features python
 Recommended: use the blazing-fast [uv](https://github.com/astral-sh/uv) (millisecond install):
 
 ```bash
-uv pip install "triviumdb==0.9.2"
+uv pip install "triviumdb==0.9.3b1"
 ```
 
 Or traditional pip:
 
 ```bash
-pip install "triviumdb==0.9.2"
+pip install "triviumdb==0.9.3b1"
 ```
 
 ### 🌐 Node.js / Frontend Users
@@ -227,9 +243,9 @@ pip install "triviumdb==0.9.2"
 Cross-platform package includes pre-compiled `*.node` native extensions with full TypeScript completions:
 
 ```bash
-npm install triviumdb@0.9.2
+npm install triviumdb@0.9.3-beta.1
 # or
-pnpm add triviumdb@0.9.2
+pnpm add triviumdb@0.9.3-beta.1
 ```
 
 ### 🦀 Rust Native Users
@@ -237,10 +253,10 @@ pnpm add triviumdb@0.9.2
 Use as a library dependency:
 
 ```bash
-cargo add triviumdb@0.9.2
+cargo add triviumdb@0.9.3-beta.1
 ```
 
-The API examples on this page target `0.9.2`. Upgrade existing databases through the [external migration entry point](docs/migration.md) into a current-format destination. See the [release notes](docs/changes/0.9.2.md) for complete upgrade conditions.
+The examples on this page use `0.9.3-beta.1`. Current-format 0.9.2 databases open directly. If opening returns `TDB_MIGRATION_REQUIRED`, follow the [external migration guide](docs/migration.md) to create and verify a destination database.
 
 To add a management frontend to an embedded application, follow [Console host integration](docs/embedded-console.md) to reuse the same instance and file lock. The existing HTML still needs frontend-owned transport adaptation; the resource bundle declares that requirement and its CDN dependencies.
 
